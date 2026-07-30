@@ -59,10 +59,10 @@ use aes::{Aes128, Aes256};
 use eax::aead::generic_array::GenericArray;
 use eax::aead::{AeadInPlace, KeyInit};
 use eax::Eax;
-use rand::RngCore;
+use rand::Rng;
 use rsa::pkcs8::EncodePublicKey;
 use rsa::traits::PublicKeyParts;
-use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{BoxedUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -392,8 +392,8 @@ pub(crate) async fn handshake(
     let server_e = read_bytes_max(&mut stream, server_bytes, 1024, "RA2 server exponent").await?;
 
     let server_key = RsaPublicKey::new(
-        BigUint::from_bytes_be(&server_n),
-        BigUint::from_bytes_be(&server_e),
+        BoxedUint::from_be_slice_vartime(&server_n),
+        BoxedUint::from_be_slice_vartime(&server_e),
     )
     .map_err(|e| VncError::Protocol(format!("RA2 server sent an unusable RSA key: {e}")))?;
 
@@ -438,16 +438,21 @@ pub(crate) async fn handshake(
     // --- 2. our public key -------------------------------------------------
     // RSA keygen is hundreds of milliseconds of pure CPU; keep it off the
     // reactor thread.
-    let client_key = tokio::task::spawn_blocking(|| {
-        RsaPrivateKey::new(&mut rand::thread_rng(), CLIENT_KEY_BITS)
-    })
-    .await
-    .map_err(|e| VncError::Other(format!("RSA key generation task failed: {e}")))?
-    .map_err(|e| VncError::Other(format!("could not generate an RSA key: {e}")))?;
+    let client_key =
+        tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), CLIENT_KEY_BITS))
+            .await
+            .map_err(|e| VncError::Other(format!("RSA key generation task failed: {e}")))?
+            .map_err(|e| VncError::Other(format!("could not generate an RSA key: {e}")))?;
     let client_public = client_key.to_public_key();
 
-    let client_n = left_pad(&client_public.n().to_bytes_be(), CLIENT_KEY_BYTES);
-    let client_e = left_pad(&client_public.e().to_bytes_be(), CLIENT_KEY_BYTES);
+    let client_n = left_pad(
+        &client_public.n().as_ref().to_be_bytes_trimmed_vartime(),
+        CLIENT_KEY_BYTES,
+    );
+    let client_e = left_pad(
+        &client_public.e().to_be_bytes_trimmed_vartime(),
+        CLIENT_KEY_BYTES,
+    );
 
     let mut client_public_blob = Vec::with_capacity(4 + CLIENT_KEY_BYTES * 2);
     client_public_blob.extend_from_slice(&(CLIENT_KEY_BITS as u32).to_be_bytes());
@@ -457,10 +462,10 @@ pub(crate) async fn handshake(
 
     // --- 3. exchange randoms ----------------------------------------------
     let mut client_random = [0u8; RANDOM_LEN];
-    rand::thread_rng().fill_bytes(&mut client_random);
+    rand::rng().fill_bytes(&mut client_random);
 
     let encrypted = server_key
-        .encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, &client_random)
+        .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, &client_random)
         .map_err(|e| VncError::Other(format!("RA2: could not encrypt the client random: {e}")))?;
     super::write_all(&mut stream, &encrypted).await?;
 
@@ -986,11 +991,10 @@ mod tests {
     async fn full_handshake_against_a_simulated_server() {
         // One key for the whole test: it stands in for a single server that the
         // client meets repeatedly, which is what pinning is about.
-        let server_key =
-            tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::thread_rng(), 2048))
-                .await
-                .unwrap()
-                .unwrap();
+        let server_key = tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), 2048))
+            .await
+            .unwrap()
+            .unwrap();
         let expected_fingerprint = key_fingerprint(&server_key.to_public_key()).unwrap();
 
         for (i, security_type) in [
@@ -1011,8 +1015,9 @@ mod tests {
             let server_key = server_key.clone();
             let server = tokio::spawn(async move {
                 let server_pub = server_key.to_public_key();
-                let server_n = left_pad(&server_pub.n().to_bytes_be(), 256);
-                let server_e = left_pad(&server_pub.e().to_bytes_be(), 256);
+                let server_n =
+                    left_pad(&server_pub.n().as_ref().to_be_bytes_trimmed_vartime(), 256);
+                let server_e = left_pad(&server_pub.e().to_be_bytes_trimmed_vartime(), 256);
 
                 let mut server_blob = Vec::new();
                 server_blob.extend_from_slice(&2048u32.to_be_bytes());
@@ -1024,8 +1029,8 @@ mod tests {
                 let mut client_blob = vec![0u8; 4 + 512];
                 server_side.read_exact(&mut client_blob).await.unwrap();
                 let client_pub = RsaPublicKey::new(
-                    BigUint::from_bytes_be(&client_blob[4..260]),
-                    BigUint::from_bytes_be(&client_blob[260..516]),
+                    BoxedUint::from_be_slice_vartime(&client_blob[4..260]),
+                    BoxedUint::from_be_slice_vartime(&client_blob[260..516]),
                 )
                 .unwrap();
 
@@ -1036,7 +1041,7 @@ mod tests {
 
                 let server_random = [0x5Au8; RANDOM_LEN];
                 let out = client_pub
-                    .encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, &server_random)
+                    .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, &server_random)
                     .unwrap();
                 server_side.write_all(&out).await.unwrap();
 
@@ -1144,7 +1149,11 @@ mod tests {
     fn test_key(seed: u8) -> RsaPublicKey {
         let mut n = vec![seed | 0x80; 256];
         n[255] |= 1;
-        RsaPublicKey::new(BigUint::from_bytes_be(&n), BigUint::from(65537u32)).unwrap()
+        RsaPublicKey::new(
+            BoxedUint::from_be_slice_vartime(&n),
+            BoxedUint::from(65537u32),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1224,7 +1233,8 @@ mod tests {
         let e = 65537u32;
 
         // As sent by an honest 2048-bit server.
-        let tight = RsaPublicKey::new(BigUint::from_bytes_be(&n), BigUint::from(e)).unwrap();
+        let tight =
+            RsaPublicKey::new(BoxedUint::from_be_slice_vartime(&n), BoxedUint::from(e)).unwrap();
 
         // The same key claiming 2056 bits, with a leading zero byte on the
         // modulus, and an exponent padded out to full width, which is what
@@ -1233,8 +1243,8 @@ mod tests {
         padded_n.extend_from_slice(&n);
         let padded_e = left_pad(&e.to_be_bytes(), 257);
         let loose = RsaPublicKey::new(
-            BigUint::from_bytes_be(&padded_n),
-            BigUint::from_bytes_be(&padded_e),
+            BoxedUint::from_be_slice_vartime(&padded_n),
+            BoxedUint::from_be_slice_vartime(&padded_e),
         )
         .unwrap();
 
@@ -1268,8 +1278,8 @@ mod tests {
 
         // The key an interceptor presents.
         let key = test_key(0xC3);
-        let n = left_pad(&key.n().to_bytes_be(), 256);
-        let e = left_pad(&key.e().to_bytes_be(), 256);
+        let n = left_pad(&key.n().as_ref().to_be_bytes_trimmed_vartime(), 256);
+        let e = left_pad(&key.e().to_be_bytes_trimmed_vartime(), 256);
         let mut blob = Vec::new();
         blob.extend_from_slice(&2048u32.to_be_bytes());
         blob.extend_from_slice(&n);

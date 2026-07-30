@@ -390,9 +390,22 @@ fn derive_key(
     Ok(key)
 }
 
+/// Fill `buf` with operating-system entropy.
+///
+/// This produces the vault salt and the XChaCha20-Poly1305 nonce. A predictable
+/// value here is catastrophic: reusing a nonce under the same key destroys
+/// confidentiality outright, and a predictable salt makes the Argon2 work
+/// precomputable.
+///
+/// rand 0.10 replaced the panic-on-failure `OsRng` with the fallible `SysRng`.
+/// There is no safe fallback for "the OS CSPRNG is unreachable", so this keeps
+/// the old behaviour and aborts rather than emitting weak key material.
 fn rand_fill(buf: &mut [u8]) {
-    use rand::RngCore;
-    rand::rngs::OsRng.fill_bytes(buf);
+    use rand::rngs::SysRng;
+    use rand::TryRng;
+    SysRng
+        .try_fill_bytes(buf)
+        .expect("OS CSPRNG unavailable; refusing to generate credential material");
 }
 
 // ---- keychain helpers ------------------------------------------------------
