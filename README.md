@@ -15,6 +15,19 @@ never crosses the IPC boundary.
 > IPC contract may change between minor versions. See
 > [CHANGELOG.md](CHANGELOG.md).
 
+## Installing
+
+Prebuilt binaries for macOS, Windows and Linux are on the
+[latest release](https://github.com/psmux/DeskVNC/releases/latest).
+
+The **macOS** build is signed and notarized, so it opens normally. The
+**Windows** installer is unsigned, so SmartScreen shows "Windows protected your
+PC"; continue with **More info** then **Run anyway**, or verify the published
+checksum first, or build from source. **Linux** packages are unsigned.
+
+Full details, including checksum verification and the permissions the app asks
+for, are in [docs/INSTALL.md](docs/INSTALL.md).
+
 ## Features
 
 ### Protocol
@@ -92,12 +105,10 @@ Being explicit so nobody files an issue against a feature that was never there:
 - **SSH tunnelling for the RFB connection.** Host profiles carry an `ssh_tunnel`
   field and an `ssh_passphrase` credential slot, and `vnc-files` speaks SSH for
   SFTP, but nothing routes the protocol stream through a tunnel yet.
-- **Signed Windows installers.** The release workflow produces an MSI and an
-  NSIS setup executable, but no Authenticode signing is wired up, so Windows
-  SmartScreen will warn on first run.
-- **Signed installers from CI generally.** macOS signing and notarization work
-  locally through `scripts/package-macos.sh`, which needs a Developer ID in the
-  login keychain. CI builds are unsigned.
+- **Signed Windows and Linux installers.** Windows needs an Authenticode
+  certificate, which is a paid commercial product, so SmartScreen warns on
+  first run. See [docs/INSTALL.md](docs/INSTALL.md). macOS release builds
+  *are* signed and notarized in CI.
 
 Note that `scripts/package-macos.sh` builds for the host architecture only. The
 release workflow builds a universal macOS binary covering both.

@@ -135,7 +135,17 @@ jobs:
           args: --target ${{ matrix.bundle-target }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
-          releaseBody: "See CHANGELOG.md for details."
+          releaseBody: |
+            Download the file for your platform below. Checksums and full
+            install notes are in the sections that follow once this draft is
+            edited; see docs/INSTALL.md for the current guidance.
+
+            **macOS** is signed and notarized, so it opens normally.
+            **Windows** is unsigned: SmartScreen will say "Windows protected
+            your PC", and you continue with **More info** then **Run anyway**.
+            **Linux** packages are unsigned.
+
+            Full changes in [CHANGELOG.md](https://github.com/psmux/DeskVNC/blob/main/CHANGELOG.md).
           releaseDraft: true
           prerelease: false
 
@@ -187,6 +197,13 @@ jobs:
             for f in $p; do [ -e "$f" ] && cp "$f" dist/ ; done
           done
           echo "Collected:"; ls -la dist
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum *; else shasum -a 256 *; fi \
+            | tee "SHA256SUMS-${{ matrix.artifact }}.txt"
 
       - uses: actions/upload-artifact@v4
         with:
