@@ -92,10 +92,15 @@ Being explicit so nobody files an issue against a feature that was never there:
 - **SSH tunnelling for the RFB connection.** Host profiles carry an `ssh_tunnel`
   field and an `ssh_passphrase` credential slot, and `vnc-files` speaks SSH for
   SFTP, but nothing routes the protocol stream through a tunnel yet.
-- **Universal macOS binaries.** `scripts/package-macos.sh` builds for the host
-  architecture only.
-- **Signed Windows installers.** `cargo tauri build` produces an MSI and an NSIS
-  setup executable on Windows, but no Authenticode signing is wired up.
+- **Signed Windows installers.** The release workflow produces an MSI and an
+  NSIS setup executable, but no Authenticode signing is wired up, so Windows
+  SmartScreen will warn on first run.
+- **Signed installers from CI generally.** macOS signing and notarization work
+  locally through `scripts/package-macos.sh`, which needs a Developer ID in the
+  login keychain. CI builds are unsigned.
+
+Note that `scripts/package-macos.sh` builds for the host architecture only. The
+release workflow builds a universal macOS binary covering both.
 
 ## Architecture
 
