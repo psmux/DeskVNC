@@ -49,6 +49,20 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Security
 
+- **Upgraded `russh` 0.49 to 0.62**, which fixes RUSTSEC-2026-0154 (unbounded
+  32-bit allocation) and RUSTSEC-2026-0153 (unchecked `CryptoVec` allocation),
+  both reachable from a hostile SSH peer during file transfer. Patched upstream
+  in 0.60.3. The ignore entries for these were removed rather than retained, so
+  a regression fails the build.
+- Migrated `vnc-files` to the russh 0.62 API: `Handler` now uses
+  return-position `impl Future` instead of `#[async_trait]`, authentication
+  returns `AuthResult` (which distinguishes full success from partial success)
+  rather than a bare bool, `PrivateKeyWithHashAlg::new` is infallible, and the
+  agent hands back `AgentIdentity` values that may wrap a certificate.
+- `rsa` RUSTSEC-2023-0071 (Marvin) remains accepted and documented. There is
+  still no fixed release; the only newer publication is a release candidate
+  carrying the same advisory. It is now present twice, directly for RA2 and
+  transitively through `ssh-key`.
 - Test fixtures no longer embed a real machine name captured from a developer's
   network. The mDNS packet fixture in `crates/vnc-discovery/src/dnsmsg.rs` was
   rewritten with a same-length placeholder label so all wire length fields stay

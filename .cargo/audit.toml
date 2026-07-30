@@ -4,35 +4,37 @@
 # with the reason recorded. Nothing is ignored to make CI quiet. If an entry
 # gains an upstream fix, remove it here and take the upgrade.
 #
-# Review with:  cargo audit          (honours this file)
-#               cargo audit -n       (ignores this file, shows everything)
+# Check the true state (this file is honoured by default, and `-n` only skips
+# the database fetch, it does not disable these ignores):
+#
+#     mv .cargo/audit.toml /tmp/ && cargo audit ; mv /tmp/audit.toml .cargo/
 
 [advisories]
 ignore = [
     # --- Accepted vulnerabilities --------------------------------------------
 
-    # rsa 0.9: Marvin timing side-channel. There is no patched release; the
-    # advisory lists `patched = []`. Used only by the RealVNC RA2 handshake,
-    # which performs a single private-key decryption per connection with no
-    # attacker-controlled retry, so the timing oracle a Marvin attack needs
-    # cannot practically be built. Reassessed whenever `rsa` publishes a fix.
+    # Marvin timing side-channel in `rsa`. There is still no fixed release:
+    # the advisory lists `patched = []`, and the only newer publication is
+    # 0.10.0-rc, a release candidate that carries the same advisory.
+    #
+    # Two copies are in the tree:
+    #   rsa 0.9.10        direct, used by the RealVNC RA2 handshake
+    #   rsa 0.10.0-rc.18  transitive, via russh -> ssh-key
+    #
+    # RA2 performs a single private-key decryption per connection with no
+    # attacker-controlled retry, so the repeated-measurement oracle a Marvin
+    # attack needs cannot practically be built. The ssh-key path signs during
+    # publickey auth, which is more exposed in principle, but still requires a
+    # hostile server plus a very large number of authentication attempts.
+    # Revisit when RustCrypto ships a constant-time implementation.
     # See the module comment in crates/vnc-core/src/security/ra2.rs.
     "RUSTSEC-2023-0071",
 
-    # russh 0.49 / russh-cryptovec 0.48: unbounded 32-bit allocation reachable
-    # from a hostile SSH peer. Patched in russh >= 0.60.3, which is a breaking
-    # API change across eleven minor versions. Tracked as real work, not a
-    # permanent exception: the SFTP file-transfer feature is the only consumer,
-    # and it is opt-in per host. Do not leave these ignored once the upgrade
-    # lands.
-    "RUSTSEC-2026-0154",
-    "RUSTSEC-2026-0153",
-
     # --- Unmaintained transitive dependencies --------------------------------
-    # All of the following arrive through Tauri's Linux webview stack and are
-    # not selected by this project. They are "unmaintained" notices rather than
-    # exploitable defects, and they disappear when Tauri moves off GTK3.
+    # None of these are selected by this project.
 
+    # Tauri's Linux webview stack (GTK3). These disappear when Tauri moves to
+    # GTK4 or a different webview.
     "RUSTSEC-2024-0411", # gdkwayland-sys
     "RUSTSEC-2024-0412", # gdk
     "RUSTSEC-2024-0413", # atk
@@ -44,6 +46,22 @@ ignore = [
     "RUSTSEC-2024-0419", # gtk3-macros
     "RUSTSEC-2024-0420", # gtk-sys
     "RUSTSEC-2024-0429", # glib: unsound Iterator impls, not reachable from our code
-    "RUSTSEC-2024-0436", # paste: unmaintained proc-macro, build-time only
-    "RUSTSEC-2024-0370", # proc-macro-error: unmaintained, build-time only
+
+    # Build-time proc-macro helpers.
+    "RUSTSEC-2024-0436", # paste
+    "RUSTSEC-2024-0370", # proc-macro-error
+
+    # Unicode tables reached through the russh 0.62 dependency chain.
+    "RUSTSEC-2025-0075", # unic-char-range
+    "RUSTSEC-2025-0080", # unic-common
+    "RUSTSEC-2025-0081", # unic-char-property
+    "RUSTSEC-2025-0098", # unic-ucd-version
+    "RUSTSEC-2025-0100", # unic-ucd-ident
 ]
+
+# Resolved and deliberately NOT ignored, so a regression fails the build:
+#
+#   RUSTSEC-2026-0153  russh-cryptovec  unchecked CryptoVec allocation
+#   RUSTSEC-2026-0154  russh            unbounded 32-bit allocation
+#
+# Both were fixed by upgrading russh 0.49 -> 0.62 (patched in >= 0.60.3).

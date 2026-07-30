@@ -59,8 +59,8 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 
 # tls / ssh
-russh = "0.49"
-russh-sftp = "2.0"
+russh = "0.62"
+russh-sftp = "2.3"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pki-types = "1"
