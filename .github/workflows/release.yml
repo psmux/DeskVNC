@@ -16,6 +16,11 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    # tauri-action creates the GitHub release and uploads to it. The default
+    # token is read-only for contents, which fails with "Resource not
+    # accessible by integration".
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +77,34 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
         working-directory: ui
+
+      # notarytool rejects bad credentials instantly, whereas the bundler only
+      # discovers them after compiling and signing. Fail in seconds instead.
+      - name: Preflight the notarization credentials
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_ID" ]; then
+            echo "No notarization credentials configured; skipping preflight."
+            exit 0
+          fi
+          if xcrun notarytool history --apple-id "$APPLE_ID" \
+               --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+               >/dev/null 2>/tmp/notary.err; then
+            echo "Notarization credentials accepted."
+          else
+            echo "::error::Apple rejected the notarization credentials."
+            echo "APPLE_PASSWORD must be an app-specific password from"
+            echo "account.apple.com (Sign-In & Security -> App-Specific"
+            echo "Passwords), not the Apple ID password, and APPLE_ID must be"
+            echo "the account that owns team \$APPLE_TEAM_ID."
+            sed 's/'"$APPLE_PASSWORD"'/***/g' /tmp/notary.err || true
+            exit 1
+          fi
 
       # tauri-action runs the frontend build via beforeBuildCommand, bundles
       # for the host platform, and on a tag creates a draft release.
