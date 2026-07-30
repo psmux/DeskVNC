@@ -1,0 +1,196 @@
+//! Native application menu bar.
+//!
+//! Custom items emit a `menu://action` JSON event (`{ id }`) to the focused
+//! window, which the frontend routes. Window-level actions (fullscreen) are
+//! handled natively here.
+
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+
+#[cfg(target_os = "macos")]
+use tauri::menu::AboutMetadata;
+
+/// Kept in step with `ui/src/screens/About.tsx`, which shows the same details
+/// in the in-app dialog used on every platform.
+const AUTHOR: &str = "Godwin Josh";
+const AUTHOR_EMAIL: &str = "godwin@cdtech.in";
+const PROJECT_URL: &str = "https://github.com/psmux/DeskVNC";
+
+pub fn install(app: &AppHandle) -> tauri::Result<()> {
+    let mut builder = MenuBuilder::new(app);
+
+    #[cfg(target_os = "macos")]
+    {
+        // The standard macOS About panel. Populated rather than left as
+        // AboutMetadata::default(), which shows only the bundle name.
+        let about = AboutMetadata {
+            name: Some("DeskVNCViewer".into()),
+            version: Some(app.package_info().version.to_string()),
+            authors: Some(vec![AUTHOR.into()]),
+            comments: Some("A fast, native VNC viewer.".into()),
+            copyright: Some(format!("© {AUTHOR}")),
+            license: Some("MIT OR Apache-2.0".into()),
+            website: Some(PROJECT_URL.into()),
+            website_label: Some("Project page".into()),
+            ..Default::default()
+        };
+        let app_menu = SubmenuBuilder::new(app, "DeskVNCViewer")
+            .about(Some(about))
+            .separator()
+            .item(
+                &MenuItemBuilder::with_id("menu:settings", "Settings…")
+                    .accelerator("Cmd+,")
+                    .build(app)?,
+            )
+            .separator()
+            .services()
+            .separator()
+            .hide()
+            .hide_others()
+            .show_all()
+            .separator()
+            .quit()
+            .build()?;
+        builder = builder.item(&app_menu);
+    }
+
+    let file = SubmenuBuilder::new(app, "File")
+        .item(
+            &MenuItemBuilder::with_id("menu:new-host", "New Host…")
+                .accelerator("CmdOrCtrl+N")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:quick-connect", "Connect to…")
+                .accelerator("CmdOrCtrl+T")
+                .build(app)?,
+        )
+        .separator()
+        .close_window()
+        .build()?;
+
+    let connection = SubmenuBuilder::new(app, "Connection")
+        .item(&MenuItemBuilder::with_id("menu:connect", "Connect").build(app)?)
+        .item(
+            &MenuItemBuilder::with_id("menu:disconnect", "Disconnect")
+                .accelerator("CmdOrCtrl+Shift+D")
+                .build(app)?,
+        )
+        .item(&MenuItemBuilder::with_id("menu:reconnect", "Reconnect Now").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("menu:wake", "Wake with Wake-on-LAN").build(app)?)
+        .build()?;
+
+    let view = SubmenuBuilder::new(app, "View")
+        .item(
+            &MenuItemBuilder::with_id("menu:toggle-fullscreen", "Toggle Fullscreen")
+                .accelerator("CmdOrCtrl+Ctrl+F")
+                .build(app)?,
+        )
+        .separator()
+        .item(&MenuItemBuilder::with_id("menu:scale-fit", "Fit to Window").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:scale-actual", "Actual Size").build(app)?)
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id("menu:toggle-toolbar", "Show/Hide Toolbar")
+                .accelerator("CmdOrCtrl+Shift+M")
+                .build(app)?,
+        )
+        .build()?;
+
+    let session = SubmenuBuilder::new(app, "Session")
+        .item(&MenuItemBuilder::with_id("menu:quality:auto", "Quality: Auto").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:quality:high", "Quality: High").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:quality:medium", "Quality: Medium").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:quality:low", "Quality: Low").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:quality:bw", "Quality: Black & White").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("menu:view-only", "View Only").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:refresh", "Refresh Screen").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("menu:send-cad", "Send Ctrl+Alt+Del").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:release-keys", "Release All Keys").build(app)?)
+        .build()?;
+
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
+        .build()?;
+
+    // "Help" opens the in-app dialog (routed to the frontend) rather than a
+    // URL, so it still works with no network. "Project page" is the one that
+    // deliberately leaves the app.
+    #[allow(unused_mut)] // only reassigned in the non-macOS branch below
+    let mut help_builder = SubmenuBuilder::new(app, "Help")
+        .item(&MenuItemBuilder::with_id("menu:about", "DeskVNCViewer Help").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id("menu:project", "Project Page").build(app)?)
+        .item(&MenuItemBuilder::with_id("menu:contact", "Contact Developer…").build(app)?);
+    // macOS already carries About in the application menu; everywhere else it
+    // belongs under Help.
+    #[cfg(not(target_os = "macos"))]
+    {
+        help_builder = help_builder
+            .separator()
+            .item(&MenuItemBuilder::with_id("menu:about", "About DeskVNCViewer").build(app)?);
+    }
+    let help = help_builder.build()?;
+
+    let menu = builder
+        .items(&[&file, &connection, &view, &session, &window_menu, &help])
+        .build()?;
+    app.set_menu(menu)?;
+
+    app.on_menu_event(|app, event| {
+        handle_menu_event(app, event.id().as_ref());
+    });
+    Ok(())
+}
+
+fn focused_window(app: &AppHandle) -> Option<WebviewWindow> {
+    app.webview_windows()
+        .into_values()
+        .find(|w| w.is_focused().unwrap_or(false))
+}
+
+fn handle_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "menu:toggle-fullscreen" => {
+            if let Some(window) = focused_window(app) {
+                let is_fs = window.is_fullscreen().unwrap_or(false);
+                if let Err(e) = crate::windows::set_fullscreen_on_monitor(&window, None, !is_fs) {
+                    tracing::warn!("toggle fullscreen failed: {e}");
+                }
+            }
+        }
+        "menu:project" | "menu:contact" => {
+            use tauri_plugin_opener::OpenerExt;
+            let url = if id == "menu:contact" {
+                format!("mailto:{AUTHOR_EMAIL}?subject=DeskVNCViewer")
+            } else {
+                PROJECT_URL.to_string()
+            };
+            // Opened from Rust rather than the webview: the window capability
+            // scopes the opener plugin, and this keeps that scope narrow.
+            if let Err(e) = app.opener().open_url(&url, None::<&str>) {
+                tracing::warn!("failed to open {url}: {e}");
+            }
+        }
+        custom if custom.starts_with("menu:") => {
+            // Route everything else to the frontend of the focused window
+            // (falls back to an app-wide emit when nothing is focused).
+            let payload = serde_json::json!({ "id": custom });
+            match focused_window(app) {
+                Some(window) => {
+                    let _ = app.emit_to(window.label(), "menu://action", payload);
+                }
+                None => {
+                    let _ = app.emit("menu://action", payload);
+                }
+            }
+        }
+        _ => {} // predefined items handle themselves
+    }
+}

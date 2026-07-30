@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-clipboard"
+description = "Enables the send_clipboard command without any pre-configured scope."
+commands.allow = ["send_clipboard"]
+
+[[permission]]
+identifier = "deny-send-clipboard"
+description = "Denies the send_clipboard command without any pre-configured scope."
+commands.deny = ["send_clipboard"]

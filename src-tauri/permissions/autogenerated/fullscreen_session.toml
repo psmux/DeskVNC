@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fullscreen-session"
+description = "Enables the fullscreen_session command without any pre-configured scope."
+commands.allow = ["fullscreen_session"]
+
+[[permission]]
+identifier = "deny-fullscreen-session"
+description = "Denies the fullscreen_session command without any pre-configured scope."
+commands.deny = ["fullscreen_session"]

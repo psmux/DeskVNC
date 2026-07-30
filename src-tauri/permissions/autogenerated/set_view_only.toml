@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-view-only"
+description = "Enables the set_view_only command without any pre-configured scope."
+commands.allow = ["set_view_only"]
+
+[[permission]]
+identifier = "deny-set-view-only"
+description = "Denies the set_view_only command without any pre-configured scope."
+commands.deny = ["set_view_only"]

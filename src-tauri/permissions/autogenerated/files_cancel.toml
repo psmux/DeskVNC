@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-files-cancel"
+description = "Enables the files_cancel command without any pre-configured scope."
+commands.allow = ["files_cancel"]
+
+[[permission]]
+identifier = "deny-files-cancel"
+description = "Denies the files_cancel command without any pre-configured scope."
+commands.deny = ["files_cancel"]

@@ -1,0 +1,48 @@
+[package]
+name = "vnc-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# UI-agnostic RFB/VNC protocol core. MUST NOT depend on tauri.
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flate2 = { workspace = true }
+zune-jpeg = { workspace = true }
+des = { workspace = true }
+cipher = { workspace = true }
+aes = { workspace = true }
+ecb = { workspace = true }
+eax = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+rsa = { workspace = true }
+num-bigint-dig = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+vnc-transport = { path = "../vnc-transport" }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }
+# Integration tests build real zlib/Tight/ZRLE wire data in the mock RFB server.
+flate2 = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "decode"
+harness = false

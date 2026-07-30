@@ -1,0 +1,580 @@
+//! Input and clipboard, end to end.
+//!
+//! Asserts the exact bytes that reach the server for key/pointer events, that
+//! the stuck-modifier safety net really releases every held key, and that
+//! clipboard text flows correctly in both directions.
+
+mod common;
+
+use std::time::Duration;
+
+use common::mock_server::*;
+use common::*;
+
+use vnc_core::types::{ClientCommand, Rect, SessionEvent, SessionState};
+
+const RED: Rgb = [255, 0, 0];
+
+/// Round-trip marker: a Refresh produces a non-incremental
+/// FramebufferUpdateRequest, so waiting for the Nth one proves every command
+/// queued before it has been processed.
+async fn flush(handle: &vnc_core::SessionHandle, server: &MockServer, nth: usize) {
+    send(handle, ClientCommand::Refresh).await;
+    let ok = server
+        .wait_until(DEFAULT_TIMEOUT, |r| {
+            r.messages
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        ClientMessage::FramebufferUpdateRequest {
+                            incremental: false,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                >= nth
+        })
+        .await;
+    assert!(ok, "the session stopped processing commands");
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn key_events_arrive_byte_correct() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0xffe1,
+            keycode: None,
+            down: true,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0x61,
+            keycode: None,
+            down: true,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0x61,
+            keycode: None,
+            down: false,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0xffe1,
+            keycode: None,
+            down: false,
+        },
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    let raws: Vec<Vec<u8>> = server
+        .messages()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMessage::KeyEvent { raw, .. } => Some(raw),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        raws,
+        vec![
+            vec![4, 1, 0, 0, 0x00, 0x00, 0xff, 0xe1], // Shift_L down
+            vec![4, 1, 0, 0, 0x00, 0x00, 0x00, 0x61], // 'a' down
+            vec![4, 0, 0, 0, 0x00, 0x00, 0x00, 0x61], // 'a' up
+            vec![4, 0, 0, 0, 0x00, 0x00, 0xff, 0xe1], // Shift_L up
+        ],
+        "KeyEvent (message 4) must be [4, down, pad, pad, keysym:u32] big-endian"
+    );
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn release_all_keys_sends_exactly_one_key_up_per_held_key() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    for keysym in [0xffe3u32, 0xffe9, 0x74] {
+        send(
+            &handle,
+            ClientCommand::Key {
+                keysym,
+                keycode: None,
+                down: true,
+            },
+        )
+        .await;
+    }
+    send(&handle, ClientCommand::ReleaseAllKeys).await;
+    flush(&handle, &server, 2).await;
+
+    let (downs, ups): (Vec<_>, Vec<_>) =
+        server.key_events().into_iter().partition(|(_, down)| *down);
+    assert_eq!(downs.len(), 3);
+    assert_eq!(ups.len(), 3, "exactly three key-ups, no more and no fewer");
+
+    let mut up_keys: Vec<u32> = ups.into_iter().map(|(k, _)| k).collect();
+    up_keys.sort_unstable();
+    assert_eq!(up_keys, vec![0x74, 0xffe3, 0xffe9]);
+
+    // Releasing again must be a no-op: nothing is held any more.
+    send(&handle, ClientCommand::ReleaseAllKeys).await;
+    flush(&handle, &server, 3).await;
+    assert_eq!(server.key_events().len(), 6, "no duplicate key-ups");
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn disconnecting_releases_every_held_key() {
+    // Keyboard safety (PRD/05 §6.3): a reconnect must never inherit stuck
+    // modifiers, so the run loop unwinds pressed keys on the way out.
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    for keysym in [0xffe3u32, 0xffe9] {
+        send(
+            &handle,
+            ClientCommand::Key {
+                keysym,
+                keycode: None,
+                down: true,
+            },
+        )
+        .await;
+    }
+    flush(&handle, &server, 2).await;
+    send(&handle, ClientCommand::Disconnect).await;
+
+    events
+        .wait_state(DEFAULT_TIMEOUT, "Disconnected", |s| {
+            matches!(s, SessionState::Disconnected { .. }).then_some(())
+        })
+        .await;
+
+    let released = server
+        .wait_until(DEFAULT_TIMEOUT, |r| {
+            r.messages
+                .iter()
+                .filter(|m| matches!(m, ClientMessage::KeyEvent { down: false, .. }))
+                .count()
+                == 2
+        })
+        .await;
+    let ups: Vec<u32> = server
+        .key_events()
+        .into_iter()
+        .filter(|(_, down)| !*down)
+        .map(|(k, _)| k)
+        .collect();
+    assert!(released, "both modifiers must be released: {ups:?}");
+    assert_eq!(ups.len(), 2);
+}
+
+#[tokio::test]
+async fn qemu_extended_key_events_are_used_once_the_server_advertises_them() {
+    let server = MockServer::start(MockConfig::new().update(vec![
+        RectSpec::QemuExtKeyCapable,
+        RectSpec::Raw {
+            rect: Rect::new(0, 0, 4, 4),
+            colour: RED,
+        },
+    ]))
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0xffea,
+            keycode: Some(0xb8),
+            down: true,
+        },
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    let qemu: Vec<_> = server
+        .messages()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMessage::QemuKeyEvent {
+                down,
+                keysym,
+                keycode,
+            } => Some((down, keysym, keycode)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(qemu, vec![(true, 0xffea, 0xb8)]);
+    assert!(
+        server.key_events().is_empty(),
+        "a keycode-carrying key must not also go out as a plain KeyEvent"
+    );
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Pointer
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pointer_events_arrive_byte_correct() {
+    let server = MockServer::start(MockConfig::new().size(1024, 768)).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 0x1234,
+            y: 0x0203,
+            button_mask: 1,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 0x1234,
+            y: 0x0203,
+            button_mask: 0,
+        },
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    let raws: Vec<Vec<u8>> = server
+        .messages()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMessage::PointerEvent { raw, .. } => Some(raw),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        raws,
+        vec![
+            vec![5, 0x01, 0x12, 0x34, 0x02, 0x03],
+            vec![5, 0x00, 0x12, 0x34, 0x02, 0x03],
+        ],
+        "PointerEvent (message 5) must be [5, mask:u8, x:u16, y:u16] big-endian"
+    );
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn view_only_suppresses_all_input() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let mut opts = options(server.port());
+    opts.view_only = true;
+    let (handle, mut events) = spawn_session(opts);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0x61,
+            keycode: None,
+            down: true,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 1,
+            y: 2,
+            button_mask: 1,
+        },
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    assert!(server.key_events().is_empty());
+    assert!(server.pointer_events().is_empty());
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard: client -> server
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn clipboard_text_reaches_the_server_as_a_valid_client_cut_text() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::ClipboardText("hello clipboard".into()),
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    let bodies = server.cut_text_bodies();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "exactly one ClientCutText (message type 6)"
+    );
+    let body = &bodies[0];
+    assert_eq!(&body[0..3], &[0, 0, 0], "three padding bytes");
+    let len = i32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+    assert_eq!(len, 15, "positive length = legacy Latin-1 text");
+    assert_eq!(&body[7..], b"hello clipboard");
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn clipboard_text_is_transliterated_to_latin1_on_the_legacy_path() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::ClipboardText("“smart” — dash".into()),
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    let bodies = server.cut_text_bodies();
+    assert_eq!(bodies.len(), 1);
+    let body = &bodies[0];
+    let len = i32::from_be_bytes([body[3], body[4], body[5], body[6]]) as usize;
+    let text: String = body[7..7 + len].iter().map(|&b| b as char).collect();
+    assert_eq!(text, "\"smart\" - dash");
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard: server -> client
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn server_cut_text_is_surfaced_to_the_shell() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    server.send_server_cut_text("copied on the remote side");
+    let text = events
+        .wait(
+            DEFAULT_TIMEOUT,
+            "SessionEvent::ClipboardText",
+            |e| match e {
+                SessionEvent::ClipboardText(t) => Some(t.clone()),
+                _ => None,
+            },
+        )
+        .await;
+    assert_eq!(text, "copied on the remote side");
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn server_cut_text_normalises_line_endings_and_strips_the_trailing_nul() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // Latin-1 bytes with CRLF endings and the trailing NUL some servers add.
+    let payload = b"caf\xe9\r\nline two\0";
+    let mut body = vec![0u8, 0, 0];
+    body.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+    body.extend_from_slice(payload);
+    server.send_cut_text_body(body);
+
+    let text = events
+        .wait(
+            DEFAULT_TIMEOUT,
+            "SessionEvent::ClipboardText",
+            |e| match e {
+                SessionEvent::ClipboardText(t) => Some(t.clone()),
+                _ => None,
+            },
+        )
+        .await;
+    assert_eq!(text, "café\nline two");
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn extended_clipboard_provide_delivers_utf8() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    server.send_cut_text_body(vnc_core::clipboard::encode_provide_text("émoji 😀\nsecond"));
+    let text = events
+        .wait(
+            DEFAULT_TIMEOUT,
+            "SessionEvent::ClipboardText",
+            |e| match e {
+                SessionEvent::ClipboardText(t) => Some(t.clone()),
+                _ => None,
+            },
+        )
+        .await;
+    assert_eq!(text, "émoji 😀\nsecond");
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn extended_clipboard_notify_is_surfaced() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    let flags = vnc_core::clipboard::ACTION_NOTIFY | vnc_core::clipboard::FORMAT_TEXT;
+    let mut body = vec![0u8, 0, 0];
+    body.extend_from_slice(&(-4i32).to_be_bytes());
+    body.extend_from_slice(&flags.to_be_bytes());
+    server.send_cut_text_body(body);
+
+    let formats = events
+        .wait(
+            DEFAULT_TIMEOUT,
+            "SessionEvent::ClipboardNotify",
+            |e| match e {
+                SessionEvent::ClipboardNotify { formats } => Some(*formats),
+                _ => None,
+            },
+        )
+        .await;
+    assert_eq!(formats, vnc_core::clipboard::FORMAT_TEXT);
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn an_oversized_server_cut_text_is_rejected_as_a_protocol_error() {
+    // Hostile-server hygiene: a 100 MiB claim must not be allocated.
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    let mut msg = vec![3u8, 0, 0, 0];
+    msg.extend_from_slice(&(100 * 1024 * 1024i32).to_be_bytes());
+    server.send_raw(msg);
+
+    // The session tears the connection down rather than trusting the length.
+    events
+        .wait_state(DEFAULT_TIMEOUT, "a non-connected state", |s| match s {
+            SessionState::Reconnecting { .. } | SessionState::Disconnected { .. } => Some(()),
+            _ => None,
+        })
+        .await;
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Resize requests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resize_requests_are_only_sent_once_the_server_proves_support() {
+    let server = MockServer::start(MockConfig::new().size(640, 480).update(vec![
+        RectSpec::ExtendedDesktopSize {
+            width: 640,
+            height: 480,
+            reason: 0,
+            status: 0,
+        },
+    ]))
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // Nothing has advertised ExtendedDesktopSize yet on this update pass, but
+    // by the time the pseudo rect has been processed a request must go out.
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| r
+                .messages
+                .iter()
+                .any(|m| matches!(m, ClientMessage::SetEncodings { .. })))
+            .await
+    );
+    send(
+        &handle,
+        ClientCommand::RequestResize {
+            width: 1440,
+            height: 900,
+        },
+    )
+    .await;
+
+    let got = server
+        .wait_until(DEFAULT_TIMEOUT, |r| {
+            r.messages.iter().any(|m| {
+                matches!(
+                    m,
+                    ClientMessage::SetDesktopSize {
+                        width: 1440,
+                        height: 900
+                    }
+                )
+            })
+        })
+        .await;
+    assert!(
+        got,
+        "SetDesktopSize must reach the server: {:?}",
+        server.messages()
+    );
+    handle.shutdown();
+}
+
+#[tokio::test]
+async fn resize_requests_are_dropped_when_the_server_never_advertised_support() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::RequestResize {
+            width: 1440,
+            height: 900,
+        },
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+    events.drain_for(Duration::from_millis(100)).await;
+
+    assert!(
+        !server
+            .messages()
+            .iter()
+            .any(|m| matches!(m, ClientMessage::SetDesktopSize { .. })),
+        "no SetDesktopSize without an ExtendedDesktopSize rect first"
+    );
+    handle.shutdown();
+}
