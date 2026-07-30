@@ -2,7 +2,7 @@
 
 use crate::filter::{self, LocalNetwork};
 use crate::types::{DiscoveredHost, DiscoveryEvent, DiscoverySource};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
@@ -109,7 +109,7 @@ fn handle_event(event: ServiceEvent, tx: &Sender<DiscoveryEvent>, local: Option<
         ServiceEvent::ServiceResolved(info) => {
             let Some(local) = local else {
                 tracing::debug!(
-                    service = info.get_type(),
+                    service = %info.ty_domain,
                     instance = info.get_fullname(),
                     "aux mDNS resolved (log only)"
                 );
@@ -145,12 +145,14 @@ fn handle_event(event: ServiceEvent, tx: &Sender<DiscoveryEvent>, local: Option<
 /// rest as alternates, so one machine is one row. `None` means the instance
 /// advertised nothing we could connect to, typically because it *is* this
 /// machine.
-fn host_from_info(info: &ServiceInfo, local: &LocalNetwork) -> Option<DiscoveredHost> {
-    let port = info.get_port();
-    let addrs = filter::rank_addresses(info.get_addresses().iter().copied(), local);
+fn host_from_info(info: &ResolvedService, local: &LocalNetwork) -> Option<DiscoveredHost> {
+    let port = info.port;
+    // mdns-sd 0.20 reports addresses as `ScopedIp` (carrying the interface
+    // scope for link-local v6) rather than bare `IpAddr`.
+    let addrs = filter::rank_addresses(info.addresses.iter().map(|a| a.to_ip_addr()), local);
     let Some((best, alternates)) = addrs.split_first() else {
         tracing::debug!(
-            instance = info.get_fullname(),
+            instance = %info.fullname,
             "mDNS instance has no usable address (own machine / link-local only)"
         );
         return None;
@@ -168,13 +170,13 @@ fn host_from_info(info: &ServiceInfo, local: &LocalNetwork) -> Option<Discovered
 
 /// Extract the human instance name from the fullname by stripping the service
 /// type suffix, e.g. `"iMac._rfb._tcp.local."` → `"iMac"`.
-fn instance_name(info: &ServiceInfo) -> Option<String> {
-    let fullname = info.get_fullname();
-    let suffix = format!(".{}", info.get_type());
+fn instance_name(info: &ResolvedService) -> Option<String> {
+    let fullname = info.fullname.as_str();
+    let suffix = format!(".{}", info.ty_domain);
     let name = fullname.strip_suffix(&suffix).unwrap_or(fullname).trim();
     if name.is_empty() {
         // Fall back to the resolved hostname (e.g. "imac.local.").
-        let h = info.get_hostname().trim_end_matches('.');
+        let h = info.host.trim_end_matches('.');
         if h.is_empty() {
             None
         } else {

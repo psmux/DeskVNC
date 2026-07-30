@@ -30,14 +30,14 @@ parking_lot = { workspace = true }
 # keyring 3 ships no platform store by default -- enable the native store per
 # target so the OS keychain actually works (mock store otherwise).
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
+keyring = { workspace = true, features = ["apple-native-keyring-store"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
+keyring = { workspace = true, features = ["windows-native-keyring-store"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Pure-Rust zbus path (no libdbus / OpenSSL linkage).
-keyring = { workspace = true, features = ["async-secret-service", "async-io", "crypto-rust"] }
+keyring = { workspace = true, features = ["zbus-secret-service-keyring-store"] }
 
 [dev-dependencies]
 tempfile = "3"
