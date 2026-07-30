@@ -28,7 +28,7 @@ use aes::Aes128;
 use cipher::{block_padding::NoPadding, BlockEncryptMut, KeyInit};
 use md5::{Digest, Md5};
 use num_bigint_dig::BigUint;
-use rand::RngCore;
+use rand::Rng;
 use zeroize::Zeroize;
 
 use vnc_transport::BoxedStream;
@@ -138,7 +138,7 @@ fn dh_exchange(
 
     // A private exponent the size of the modulus. `modpow` reduces it anyway.
     let mut private_bytes = vec![0u8; key_length];
-    rand::thread_rng().fill_bytes(&mut private_bytes);
+    rand::rng().fill_bytes(&mut private_bytes);
     // Clear the top bit so the exponent is comfortably below the modulus and
     // never accidentally zero.
     private_bytes[0] &= 0x7f;
@@ -171,7 +171,7 @@ fn left_pad(bytes: &[u8], width: usize) -> Vec<u8> {
 /// 64-byte UTF-8 fields.
 fn credentials_blob(username: &str, password: &str) -> [u8; CREDENTIALS_LEN] {
     let mut blob = [0u8; CREDENTIALS_LEN];
-    rand::thread_rng().fill_bytes(&mut blob);
+    rand::rng().fill_bytes(&mut blob);
     write_field(&mut blob[..FIELD_LEN], username);
     write_field(&mut blob[FIELD_LEN..], password);
     blob

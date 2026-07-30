@@ -25,7 +25,7 @@
 use cipher::{BlockEncrypt, KeyInit};
 use des::Des;
 use num_bigint_dig::BigUint;
-use rand::RngCore;
+use rand::Rng;
 use zeroize::Zeroize;
 
 use vnc_transport::BoxedStream;
@@ -76,7 +76,7 @@ pub(crate) async fn handshake(
 
     // Client key pair.
     let mut private_bytes = [0u8; DH_BYTES];
-    rand::thread_rng().fill_bytes(&mut private_bytes);
+    rand::rng().fill_bytes(&mut private_bytes);
     let private = BigUint::from_bytes_be(&private_bytes) % (&modulus - BigUint::from(1u32));
     private_bytes.zeroize();
 
@@ -117,7 +117,7 @@ fn fixed_be(v: &BigUint) -> [u8; DH_BYTES] {
 /// Build one NUL-terminated, random-padded field and DES-CBC encrypt it.
 fn encrypt_field<const N: usize>(value: &str, secret: &[u8; DH_BYTES]) -> [u8; N] {
     let mut field = [0u8; N];
-    rand::thread_rng().fill_bytes(&mut field);
+    rand::rng().fill_bytes(&mut field);
 
     let mut end = value.len().min(N - 1);
     while end > 0 && !value.is_char_boundary(end) {

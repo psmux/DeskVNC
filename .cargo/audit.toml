@@ -14,19 +14,20 @@ ignore = [
     # --- Accepted vulnerabilities --------------------------------------------
 
     # Marvin timing side-channel in `rsa`. There is still no fixed release:
-    # the advisory lists `patched = []`, and the only newer publication is
-    # 0.10.0-rc, a release candidate that carries the same advisory.
+    # the advisory lists `patched = []`, and 0.10.0-rc carries it too, so
+    # taking the newest published version does not clear this.
     #
-    # Two copies are in the tree:
-    #   rsa 0.9.10        direct, used by the RealVNC RA2 handshake
-    #   rsa 0.10.0-rc.18  transitive, via russh -> ssh-key
+    # We are on rsa 0.10.0-rc.18, a RELEASE CANDIDATE, chosen deliberately: it
+    # is the only version whose rand_core generation matches rand 0.10, and it
+    # collapses what was previously two rsa copies in the tree (0.9 for RA2,
+    # 0.10-rc via ssh-key) down to one. Weigh that against running a release
+    # candidate in a security path when deciding whether to pin back to 0.9.
     #
-    # RA2 performs a single private-key decryption per connection with no
-    # attacker-controlled retry, so the repeated-measurement oracle a Marvin
-    # attack needs cannot practically be built. The ssh-key path signs during
-    # publickey auth, which is more exposed in principle, but still requires a
-    # hostile server plus a very large number of authentication attempts.
-    # Revisit when RustCrypto ships a constant-time implementation.
+    # Exposure is unchanged: RA2 performs a single private-key decryption per
+    # connection with no attacker-controlled retry, so the repeated-measurement
+    # oracle a Marvin attack needs cannot practically be built. The ssh-key
+    # path signs during publickey auth, which is more exposed in principle but
+    # still needs a hostile server and very many attempts.
     # See the module comment in crates/vnc-core/src/security/ra2.rs.
     "RUSTSEC-2023-0071",
 
@@ -66,9 +67,7 @@ ignore = [
 #
 # Both were fixed by upgrading russh 0.49 -> 0.62 (patched in >= 0.60.3).
 
-# Version constraints worth knowing before someone tries to "just upgrade":
-#
-#   rand stays at 0.8. rand 0.9+ implements the rand_core 0.9/0.10 traits,
-#   while rsa 0.9 requires rand_core 0.6's `CryptoRngCore`. RA2 passes an RNG
-#   straight into `RsaPrivateKey::new` and `encrypt`, so the two must agree.
-#   Moving rand forward needs rsa 0.10, which is still a release candidate.
+# Note: rand 0.10 and rsa 0.10-rc must move together. rand 0.9+ implements the
+# rand_core 0.9/0.10 traits while rsa 0.9 requires rand_core 0.6, and the RA2
+# handshake passes an RNG straight into key generation and encryption. Pinning
+# either one back means pinning both.
