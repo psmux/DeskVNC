@@ -927,7 +927,13 @@ async fn connect_agent() -> Result<
         Ok(client) => Ok(client.dynamic()),
         Err(e) => {
             tracing::debug!("openssh agent pipe unavailable: {e}");
-            Ok(AgentClient::connect_pageant().await.dynamic())
+            // russh 0.62 made `connect_pageant` fallible; it used to return the
+            // client directly. Pageant is the fallback, so a failure here means
+            // neither agent is reachable.
+            let pageant = AgentClient::connect_pageant()
+                .await
+                .map_err(|e| Error::Agent(format!("no SSH agent available: {e}")))?;
+            Ok(pageant.dynamic())
         }
     }
 }
