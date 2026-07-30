@@ -39,7 +39,7 @@ serde_json = "1"
 # inflate, and zlib-rs is materially faster than the default miniz_oxide while
 # staying pure Rust (no C toolchain on any of the three platforms).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-zune-jpeg = "0.4"
+zune-jpeg = "0.5"
 
 # crypto
 des = "0.8"
@@ -64,7 +64,7 @@ russh-sftp = "2.3"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pki-types = "1"
-webpki-roots = "0.26"
+webpki-roots = "1"
 
 # discovery
 mdns-sd = "0.11"
@@ -74,11 +74,11 @@ mac_address = "1"
 # storage
 rusqlite = { version = "0.32", features = ["bundled"] }
 keyring = "3"
-directories = "5"
+directories = "6"
 
 # images
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-fast_image_resize = "5"
+fast_image_resize = "6"
 
 # misc
 socket2 = { version = "0.5", features = ["all"] }
