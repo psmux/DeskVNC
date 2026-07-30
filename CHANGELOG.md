@@ -40,6 +40,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Changed
 
+- Dependency refresh. Rust: `russh` 0.49 to 0.62 (see Security), `rusqlite`
+  0.32 to 0.40, `keyring` 3 to 4, `netdev` 0.31 to 0.45, `mdns-sd` 0.11 to
+  0.20, `directories` 5 to 6, `zune-jpeg` 0.4 to 0.5, `fast_image_resize` 5 to
+  6, `webpki-roots` 0.26 to 1.0. Frontend: React 18 to 19, Vite 6 to 8,
+  TypeScript 5 to 7, `@vitejs/plugin-react` 4 to 6.
+- CI and the documented prerequisite move to Node 22, which Vite 8 requires
+  (`^20.19.0 || >=22.12.0`).
+- `rand` stays at 0.8 on purpose. rand 0.9+ implements the rand_core 0.9/0.10
+  traits while `rsa` 0.9 requires rand_core 0.6, and the RA2 handshake passes
+  an RNG straight into `RsaPrivateKey::new`. Moving forward needs `rsa` 0.10,
+  which is still a release candidate. Recorded in `.cargo/audit.toml`.
 - The macOS About panel is populated with name, version, author, copyright,
   license, and project URL. It previously used `AboutMetadata::default()` and
   showed only the bundle name.
