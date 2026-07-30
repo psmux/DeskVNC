@@ -10,7 +10,7 @@ For security problems, do not open an issue. See [SECURITY.md](SECURITY.md).
 Prerequisites:
 
 - **Rust 1.82 or newer** (the workspace sets `rust-version = "1.82"`)
-- **Node 20 or newer**
+- **Node 22 or newer**
 - The [Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/)
   for your platform
 

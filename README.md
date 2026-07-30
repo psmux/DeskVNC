@@ -139,7 +139,7 @@ so treat them as provenance rather than links. Public technical notes live in
 
 ## Building
 
-Prerequisites: **Rust 1.82 or newer**, **Node 20 or newer**, and the
+Prerequisites: **Rust 1.82 or newer**, **Node 22 or newer**, and the
 [Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/) for
 your platform.
 
