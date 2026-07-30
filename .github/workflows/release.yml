@@ -1,0 +1,106 @@
+name: Release
+
+# Installers are slow and large, so they are not built on every push.
+#
+#   workflow_dispatch  build installers on demand and keep them as artifacts
+#   push tag v*        the same, plus a draft GitHub release with the files
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NSIS produces the setup .exe, WiX produces the .msi. `targets: all`
+          # in tauri.conf.json builds both on Windows.
+          - os: windows-latest
+            label: Windows (x64 installer)
+            rust-target: x86_64-pc-windows-msvc
+            artifact: windows-x64
+          - os: ubuntu-22.04
+            label: Linux (deb + AppImage)
+            rust-target: x86_64-unknown-linux-gnu
+            artifact: linux-x64
+          - os: macos-latest
+            label: macOS (Apple Silicon)
+            rust-target: aarch64-apple-darwin
+            artifact: macos-aarch64
+          - os: macos-13
+            label: macOS (Intel)
+            rust-target: x86_64-apple-darwin
+            artifact: macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libssl-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust-target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ui
+
+      # tauri-action runs the frontend build via beforeBuildCommand, bundles
+      # for the host platform, and on a tag creates a draft release.
+      # Unsigned: macOS builds are ad-hoc signed and Windows is unsigned, so
+      # both will warn on first launch. Signing needs secrets, see below.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --target ${{ matrix.rust-target }}
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: DeskVNCViewer ${{ github.ref_name }}
+          releaseBody: "See CHANGELOG.md for details."
+          releaseDraft: true
+          prerelease: false
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          # Copy whatever this platform produced; each pattern is optional.
+          for p in \
+            "target/${{ matrix.rust-target }}/release/bundle/nsis"/*-setup.exe \
+            "target/${{ matrix.rust-target }}/release/bundle/msi"/*.msi \
+            "target/${{ matrix.rust-target }}/release/bundle/deb"/*.deb \
+            "target/${{ matrix.rust-target }}/release/bundle/appimage"/*.AppImage \
+            "target/${{ matrix.rust-target }}/release/bundle/dmg"/*.dmg ; do
+            for f in $p; do [ -e "$f" ] && cp "$f" dist/ ; done
+          done
+          echo "Collected:"; ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskvncviewer-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

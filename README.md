@@ -154,7 +154,7 @@ These are what CI runs:
 cargo fmt --all -- --check
 cargo clippy -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store -- -D warnings
 cargo test -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store
-npx tsc --noEmit --project ui
+(cd ui && npx tsc --noEmit)
 ```
 
 Tests that touch the real OS keychain or a live VNC server are marked

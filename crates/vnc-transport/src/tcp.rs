@@ -30,6 +30,10 @@ pub const KEEPALIVE_PROBES: u32 = 3;
 fn apply_keepalive(stream: &TcpStream) {
     use socket2::{SockRef, TcpKeepalive};
 
+    // `mut` is only used by the `with_retries` branch below, which is compiled
+    // out on the targets that do not support it. Without this, clippy's
+    // `unused_mut` fires there and CI runs with `-D warnings`.
+    #[cfg_attr(any(target_os = "windows", target_os = "openbsd"), allow(unused_mut))]
     let mut ka = TcpKeepalive::new()
         .with_time(KEEPALIVE_IDLE)
         .with_interval(KEEPALIVE_INTERVAL);
