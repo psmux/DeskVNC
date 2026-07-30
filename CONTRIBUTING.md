@@ -35,7 +35,7 @@ Run what CI runs. All four must pass:
 cargo fmt --all -- --check
 cargo clippy -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store -- -D warnings
 cargo test -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store
-npx tsc --noEmit --project ui
+(cd ui && npx tsc --noEmit)
 ```
 
 Some tests are marked `#[ignore]` because they touch the real OS keychain or a

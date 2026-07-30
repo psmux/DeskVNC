@@ -1,0 +1,49 @@
+# cargo-audit configuration.
+#
+# Every entry below is an advisory we have looked at and consciously accepted,
+# with the reason recorded. Nothing is ignored to make CI quiet. If an entry
+# gains an upstream fix, remove it here and take the upgrade.
+#
+# Review with:  cargo audit          (honours this file)
+#               cargo audit -n       (ignores this file, shows everything)
+
+[advisories]
+ignore = [
+    # --- Accepted vulnerabilities --------------------------------------------
+
+    # rsa 0.9: Marvin timing side-channel. There is no patched release; the
+    # advisory lists `patched = []`. Used only by the RealVNC RA2 handshake,
+    # which performs a single private-key decryption per connection with no
+    # attacker-controlled retry, so the timing oracle a Marvin attack needs
+    # cannot practically be built. Reassessed whenever `rsa` publishes a fix.
+    # See the module comment in crates/vnc-core/src/security/ra2.rs.
+    "RUSTSEC-2023-0071",
+
+    # russh 0.49 / russh-cryptovec 0.48: unbounded 32-bit allocation reachable
+    # from a hostile SSH peer. Patched in russh >= 0.60.3, which is a breaking
+    # API change across eleven minor versions. Tracked as real work, not a
+    # permanent exception: the SFTP file-transfer feature is the only consumer,
+    # and it is opt-in per host. Do not leave these ignored once the upgrade
+    # lands.
+    "RUSTSEC-2026-0154",
+    "RUSTSEC-2026-0153",
+
+    # --- Unmaintained transitive dependencies --------------------------------
+    # All of the following arrive through Tauri's Linux webview stack and are
+    # not selected by this project. They are "unmaintained" notices rather than
+    # exploitable defects, and they disappear when Tauri moves off GTK3.
+
+    "RUSTSEC-2024-0411", # gdkwayland-sys
+    "RUSTSEC-2024-0412", # gdk
+    "RUSTSEC-2024-0413", # atk
+    "RUSTSEC-2024-0414", # gdkx11-sys
+    "RUSTSEC-2024-0415", # gtk
+    "RUSTSEC-2024-0416", # atk-sys
+    "RUSTSEC-2024-0417", # gdkx11
+    "RUSTSEC-2024-0418", # gdk-sys
+    "RUSTSEC-2024-0419", # gtk3-macros
+    "RUSTSEC-2024-0420", # gtk-sys
+    "RUSTSEC-2024-0429", # glib: unsound Iterator impls, not reachable from our code
+    "RUSTSEC-2024-0436", # paste: unmaintained proc-macro, build-time only
+    "RUSTSEC-2024-0370", # proc-macro-error: unmaintained, build-time only
+]

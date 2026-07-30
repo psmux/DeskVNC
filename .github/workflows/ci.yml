@@ -54,16 +54,30 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - run: npm ci --prefix ui || npm install --prefix ui
-      - run: npx tsc --noEmit --project ui
-      - run: npm run build --prefix ui
+      # Every step runs inside ui/. Running `npx tsc` from the repo root finds
+      # no local node_modules (deps live in ui/), so npx silently downloads the
+      # unrelated `tsc` package from the registry, which is not the TypeScript
+      # compiler and always exits 1.
+      - run: npm ci
+        working-directory: ui
+      - run: npx tsc --noEmit
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
 
   audit:
     name: Security audit
     runs-on: ubuntu-22.04
+    # The action publishes results as a check run, which the default read-only
+    # GITHUB_TOKEN cannot create ("Resource not accessible by integration").
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Accepted advisories, each with a written justification, live in
+      # .cargo/audit.toml. Anything new fails the job.
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
