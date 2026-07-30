@@ -65,3 +65,10 @@ ignore = [
 #   RUSTSEC-2026-0154  russh            unbounded 32-bit allocation
 #
 # Both were fixed by upgrading russh 0.49 -> 0.62 (patched in >= 0.60.3).
+
+# Version constraints worth knowing before someone tries to "just upgrade":
+#
+#   rand stays at 0.8. rand 0.9+ implements the rand_core 0.9/0.10 traits,
+#   while rsa 0.9 requires rand_core 0.6's `CryptoRngCore`. RA2 passes an RNG
+#   straight into `RsaPrivateKey::new` and `encrypt`, so the two must agree.
+#   Moving rand forward needs rsa 0.10, which is still a release candidate.
