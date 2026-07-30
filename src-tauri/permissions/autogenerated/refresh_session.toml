@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-refresh-session"
+description = "Enables the refresh_session command without any pre-configured scope."
+commands.allow = ["refresh_session"]
+
+[[permission]]
+identifier = "deny-refresh-session"
+description = "Denies the refresh_session command without any pre-configured scope."
+commands.deny = ["refresh_session"]

@@ -1,0 +1,43 @@
+[package]
+name = "vnc-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Persistence: SQLite host profiles/groups/tags/history, OS keychain
+# credentials with encrypted-file fallback, thumbnail cache.
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+keyring = { workspace = true }
+directories = { workspace = true }
+uuid = { workspace = true }
+image = { workspace = true }
+fast_image_resize = { workspace = true }
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+
+# keyring 3 ships no platform store by default -- enable the native store per
+# target so the OS keychain actually works (mock store otherwise).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pure-Rust zbus path (no libdbus / OpenSSL linkage).
+keyring = { workspace = true, features = ["async-secret-service", "async-io", "crypto-rust"] }
+
+[dev-dependencies]
+tempfile = "3"

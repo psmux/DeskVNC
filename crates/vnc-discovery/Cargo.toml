@@ -1,0 +1,32 @@
+[package]
+name = "vnc-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# LAN discovery: mDNS/DNS-SD browse, polite subnet scan, RFB banner
+# fingerprinting, hostname resolution, Wake-on-LAN.
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+mdns-sd = { workspace = true }
+netdev = { workspace = true }
+mac_address = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+# Unicast reverse DNS only: a thin `getaddrinfo`/`getnameinfo` wrapper, not a
+# resolver stack. The mDNS, LLMNR and NetBIOS rungs of the resolution ladder
+# are hand-rolled in `dnsmsg.rs`/`netbios.rs` precisely so that no full DNS
+# implementation has to be pulled in (PRD/04 §6).
+dns-lookup = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+# Decodes the captured certificate/packet fixtures in the unit tests.
+hex = { workspace = true }

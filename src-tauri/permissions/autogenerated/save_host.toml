@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-host"
+description = "Enables the save_host command without any pre-configured scope."
+commands.allow = ["save_host"]
+
+[[permission]]
+identifier = "deny-save-host"
+description = "Denies the save_host command without any pre-configured scope."
+commands.deny = ["save_host"]

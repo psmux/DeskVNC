@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trust-certificate"
+description = "Enables the trust_certificate command without any pre-configured scope."
+commands.allow = ["trust_certificate"]
+
+[[permission]]
+identifier = "deny-trust-certificate"
+description = "Denies the trust_certificate command without any pre-configured scope."
+commands.deny = ["trust_certificate"]

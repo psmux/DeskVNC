@@ -1,0 +1,22 @@
+[package]
+name = "vnc-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Transport layer: plain TCP, TLS (VeNCrypt X509) with TOFU pinning, SSH tunnel.
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+webpki-roots = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+socket2 = { workspace = true }

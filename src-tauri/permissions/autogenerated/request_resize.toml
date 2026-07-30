@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-resize"
+description = "Enables the request_resize command without any pre-configured scope."
+commands.allow = ["request_resize"]
+
+[[permission]]
+identifier = "deny-request-resize"
+description = "Denies the request_resize command without any pre-configured scope."
+commands.deny = ["request_resize"]

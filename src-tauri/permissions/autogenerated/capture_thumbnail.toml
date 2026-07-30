@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-capture-thumbnail"
+description = "Enables the capture_thumbnail command without any pre-configured scope."
+commands.allow = ["capture_thumbnail"]
+
+[[permission]]
+identifier = "deny-capture-thumbnail"
+description = "Denies the capture_thumbnail command without any pre-configured scope."
+commands.deny = ["capture_thumbnail"]

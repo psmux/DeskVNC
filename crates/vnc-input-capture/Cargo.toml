@@ -1,0 +1,46 @@
+[package]
+name = "vnc-input-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Native OS-level keyboard capture for shortcut pass-through (PRD/06 §3 Tier 2).
+#
+# DELIBERATELY has no `vnc-core` dependency: this crate is cross-compiled to
+# Windows/Linux for CI compile checks, and pulling in the protocol crate's
+# native TLS/SSH dependencies would make `cargo check --target …` impossible
+# from a macOS host. The XT scancode / keysym numbers it emits are instead
+# cross-checked against `vnc_core::input` by an integration test
+# (`tests/vnc_core_agreement.rs`), which only ever builds for the host target.
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+vnc-core = { path = "../vnc-core" }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", optional = true }
+
+[features]
+default = []
+x11 = ["dep:x11rb"]

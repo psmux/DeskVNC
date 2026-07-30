@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-groups"
+description = "Enables the list_groups command without any pre-configured scope."
+commands.allow = ["list_groups"]
+
+[[permission]]
+identifier = "deny-list-groups"
+description = "Denies the list_groups command without any pre-configured scope."
+commands.deny = ["list_groups"]

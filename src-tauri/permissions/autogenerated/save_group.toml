@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-group"
+description = "Enables the save_group command without any pre-configured scope."
+commands.allow = ["save_group"]
+
+[[permission]]
+identifier = "deny-save-group"
+description = "Denies the save_group command without any pre-configured scope."
+commands.deny = ["save_group"]

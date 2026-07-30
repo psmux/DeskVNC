@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-capture-status"
+description = "Enables the capture_status command without any pre-configured scope."
+commands.allow = ["capture_status"]
+
+[[permission]]
+identifier = "deny-capture-status"
+description = "Denies the capture_status command without any pre-configured scope."
+commands.deny = ["capture_status"]
