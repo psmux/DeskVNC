@@ -69,6 +69,39 @@ host profile never writes a secret into the SQLite file or its write-ahead log.
 - **Vulnerabilities in dependencies** with no exploitable path through this
   code. Report those upstream. `cargo audit` runs in CI.
 
+## Release signing
+
+Signed macOS builds are produced in CI from a Developer ID certificate stored
+in GitHub Actions secrets. What that does and does not protect:
+
+**What holds.** Secrets are encrypted at rest by GitHub and decrypted only into
+a running job. Actions masks them in logs, so an accidental `echo` prints
+`***`. GitHub does not expose secrets to workflows triggered by pull requests
+from forks, which is the usual way a public repository would leak them: a
+drive-by PR cannot read the certificate. During a build the `.p12` is imported
+into a temporary keychain that is destroyed when the runner is torn down.
+
+**What does not hold.** Repository secrets are available to any workflow on the
+default branch, so anyone who can push to `main` or merge a workflow change can
+print or exfiltrate them. Secret masking is textual, and a determined workflow
+can defeat it. In practice the certificate is only as protected as write access
+to this repository and the account that holds it.
+
+If you maintain a fork or take on collaborators, protect `main`, require review
+for changes under `.github/workflows/`, and enable two-factor authentication.
+
+**If you suspect exposure**, revoke in this order:
+
+1. The **app-specific password** at account.apple.com. Instant, free, and it
+   alone stops notarization being used in your name.
+2. The **certificate** at developer.apple.com. Note that an account is limited
+   to five Developer ID Application certificates, and revoking does not
+   invalidate software already notarized with it.
+3. Delete the secrets: `gh secret delete APPLE_CERTIFICATE` and the rest.
+
+The certificate signs software under a real identity, so treat write access to
+this repository as equivalent to holding the key.
+
 ## Supported versions
 
 Pre-1.0. Only the latest release and the `main` branch receive fixes.

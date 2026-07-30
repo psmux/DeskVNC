@@ -75,11 +75,29 @@ jobs:
 
       # tauri-action runs the frontend build via beforeBuildCommand, bundles
       # for the host platform, and on a tag creates a draft release.
-      # Unsigned: macOS builds are ad-hoc signed and Windows is unsigned, so
-      # both will warn on first launch. Signing needs secrets, see below.
+      #
+      # macOS signing: when APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD
+      # are present, the Tauri bundler imports the .p12 into a throwaway
+      # keychain, signs with hardened runtime and the entitlements named in
+      # tauri.conf.json, then notarizes and staples the .app. Stapling the app
+      # (not just the disk image) is what lets it launch offline after being
+      # dragged to /Applications.
+      #
+      # Secrets are absent on pull requests from forks, which GitHub enforces.
+      # The bundler falls back to an ad-hoc signature there instead of failing,
+      # so contributor PRs still build.
+      #
+      # Windows and Linux are intentionally unsigned. Populate the secrets with
+      # scripts/setup-github-signing-secrets.sh.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: --target ${{ matrix.bundle-target }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
@@ -87,6 +105,40 @@ jobs:
           releaseBody: "See CHANGELOG.md for details."
           releaseDraft: true
           prerelease: false
+
+      # Fail loudly rather than shipping something users cannot open. The
+      # bundler only warns when notarization credentials are missing, so
+      # without this a tag could publish an ad-hoc signed DMG that Gatekeeper
+      # rejects outright.
+      - name: Verify the macOS build is signed and notarized
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find "target/${{ matrix.bundle-target }}/release/bundle/macos" \
+                  -maxdepth 1 -name '*.app' | head -1)
+          [ -n "$APP" ] || { echo "no .app produced"; exit 1; }
+          echo "== signature =="
+          codesign -dvv "$APP" 2>&1 | grep -E '^Authority|^TeamIdentifier' || true
+
+          if [ -z "${{ secrets.APPLE_CERTIFICATE }}" ]; then
+            echo "No signing certificate configured; skipping the strict check."
+            echo "This build is ad-hoc signed and will NOT run on other Macs."
+            exit 0
+          fi
+
+          codesign --verify --strict --deep "$APP"
+          codesign -dvv "$APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
+            || { echo "not signed with a Developer ID"; exit 1; }
+          xcrun stapler validate "$APP" \
+            || { echo "no notarization ticket stapled to the .app"; exit 1; }
+          # The check that actually predicts a user's experience: a downloaded
+          # copy carries a quarantine attribute, and a plain `spctl -a` on a
+          # never-quarantined file is lenient enough to pass unsigned builds.
+          spctl -a -vv -t exec "$APP" 2>&1 | tee /tmp/spctl.txt
+          grep -q 'source=Notarized Developer ID' /tmp/spctl.txt \
+            || { echo "Gatekeeper does not see this as notarized"; exit 1; }
+          echo "macOS build is signed, notarized and stapled."
 
       - name: Collect installers
         shell: bash
