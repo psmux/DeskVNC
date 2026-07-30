@@ -159,6 +159,20 @@ mod tests {
         let err = connect("127.0.0.1", addr.port(), Duration::from_secs(2))
             .await
             .unwrap_err();
+
+        // Windows does not reliably answer a closed loopback port with
+        // WSAECONNREFUSED: the SYN is dropped and the attempt runs into our
+        // deadline instead, so Timeout is a legitimate outcome there. The
+        // mapping itself is still asserted, just with the wider set. Every
+        // other platform must produce a prompt refusal, which is what the
+        // reconnect policy keys off to decide "permanent until the user fixes
+        // the port" versus "retry".
+        #[cfg(windows)]
+        assert!(
+            matches!(err, TransportError::Refused(_) | TransportError::Timeout),
+            "expected refusal or timeout, got {err:?}"
+        );
+        #[cfg(not(windows))]
         assert!(
             matches!(err, TransportError::Refused(_)),
             "expected refusal, got {err:?}"
