@@ -39,10 +39,20 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (library crates)
-        run: cargo clippy -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store -- -D warnings
+        # Every library crate, not a subset. vnc-files was previously excluded,
+        # so its Windows-only SSH agent code was never compiled by CI and a
+        # break only surfaced during a release build.
+        run: >
+          cargo clippy
+          -p vnc-core -p vnc-transport -p vnc-discovery
+          -p vnc-store -p vnc-files -p vnc-input-capture
+          --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store
+        run: >
+          cargo test
+          -p vnc-core -p vnc-transport -p vnc-discovery
+          -p vnc-store -p vnc-files -p vnc-input-capture
 
   frontend:
     name: Frontend
