@@ -24,20 +24,25 @@ jobs:
           # in tauri.conf.json builds both on Windows.
           - os: windows-latest
             label: Windows (x64 installer)
-            rust-target: x86_64-pc-windows-msvc
+            bundle-target: x86_64-pc-windows-msvc
+            toolchain-targets: x86_64-pc-windows-msvc
             artifact: windows-x64
           - os: ubuntu-22.04
             label: Linux (deb + AppImage)
-            rust-target: x86_64-unknown-linux-gnu
+            bundle-target: x86_64-unknown-linux-gnu
+            toolchain-targets: x86_64-unknown-linux-gnu
             artifact: linux-x64
+          # One universal binary rather than two per-architecture jobs. GitHub
+          # retired the Intel macOS image, so a `macos-13` job simply never gets
+          # a runner: it sits queued until the 6 hour timeout and then reports
+          # a failure. `universal-apple-darwin` is a Tauri pseudo-target that
+          # lipo's both real targets together, so this covers Apple Silicon and
+          # Intel from a single Apple Silicon runner.
           - os: macos-latest
-            label: macOS (Apple Silicon)
-            rust-target: aarch64-apple-darwin
-            artifact: macos-aarch64
-          - os: macos-13
-            label: macOS (Intel)
-            rust-target: x86_64-apple-darwin
-            artifact: macos-x86_64
+            label: macOS (universal)
+            bundle-target: universal-apple-darwin
+            toolchain-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            artifact: macos-universal
 
     steps:
       - uses: actions/checkout@v4
@@ -52,11 +57,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust-target }}
+          targets: ${{ matrix.toolchain-targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.rust-target }}
+          key: ${{ matrix.bundle-target }}
 
       - uses: actions/setup-node@v4
         with:
@@ -76,7 +81,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --target ${{ matrix.rust-target }}
+          args: --target ${{ matrix.bundle-target }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
           releaseBody: "See CHANGELOG.md for details."
@@ -89,11 +94,11 @@ jobs:
           mkdir -p dist
           # Copy whatever this platform produced; each pattern is optional.
           for p in \
-            "target/${{ matrix.rust-target }}/release/bundle/nsis"/*-setup.exe \
-            "target/${{ matrix.rust-target }}/release/bundle/msi"/*.msi \
-            "target/${{ matrix.rust-target }}/release/bundle/deb"/*.deb \
-            "target/${{ matrix.rust-target }}/release/bundle/appimage"/*.AppImage \
-            "target/${{ matrix.rust-target }}/release/bundle/dmg"/*.dmg ; do
+            "target/${{ matrix.bundle-target }}/release/bundle/nsis"/*-setup.exe \
+            "target/${{ matrix.bundle-target }}/release/bundle/msi"/*.msi \
+            "target/${{ matrix.bundle-target }}/release/bundle/deb"/*.deb \
+            "target/${{ matrix.bundle-target }}/release/bundle/appimage"/*.AppImage \
+            "target/${{ matrix.bundle-target }}/release/bundle/dmg"/*.dmg ; do
             for f in $p; do [ -e "$f" ] && cp "$f" dist/ ; done
           done
           echo "Collected:"; ls -la dist
