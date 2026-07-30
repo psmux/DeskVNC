@@ -76,7 +76,8 @@ struct ClientHandler {
     decision: Arc<Mutex<Option<HostKeyDecision>>>,
 }
 
-#[async_trait::async_trait]
+// russh 0.62 declares `Handler` with return-position `impl Future` rather than
+// `#[async_trait]`, so a plain `async fn` in the impl is what matches now.
 impl russh::client::Handler for ClientHandler {
     type Error = russh::Error;
 
@@ -788,10 +789,14 @@ async fn authenticate_inner(
     cfg: &FileTransferConfig,
 ) -> Result<()> {
     let ok = match &cfg.auth {
+        // russh 0.62 returns `AuthResult` (which can also report "accepted but
+        // more factors required") instead of a bare bool. Only outright
+        // success counts here.
         SshAuth::Password(password) => ssh
             .authenticate_password(cfg.username.clone(), password.clone())
             .await
-            .map_err(Error::ssh)?,
+            .map_err(Error::ssh)?
+            .success(),
         SshAuth::KeyFile { path, passphrase } => {
             let path = path.clone();
             let passphrase = passphrase.clone();
@@ -839,15 +844,15 @@ async fn authenticate_with_key_inner(
         &[None]
     };
     for hash in hashes {
-        let Ok(with_hash) = PrivateKeyWithHashAlg::new(key.clone(), *hash) else {
-            continue;
-        };
+        // `PrivateKeyWithHashAlg::new` is infallible as of russh 0.62; it used
+        // to return a Result.
+        let with_hash = PrivateKeyWithHashAlg::new(key.clone(), *hash);
         match ssh
             .authenticate_publickey(username.to_string(), with_hash)
             .await
         {
-            Ok(true) => return Ok(true),
-            Ok(false) => continue,
+            Ok(result) if result.success() => return Ok(true),
+            Ok(_) => continue,
             Err(e) => return Err(Error::ssh(e)),
         }
     }
@@ -874,12 +879,19 @@ async fn authenticate_with_agent_inner(
         return Err(Error::Agent("the ssh agent holds no identities".into()));
     }
     for identity in identities {
+        // russh 0.62 hands back `AgentIdentity`, which may wrap a certificate
+        // rather than a bare key, and `authenticate_publickey_with` now takes
+        // the public key plus an explicit signature hash. `None` lets the
+        // agent pick, which is what we want for every algorithm it holds.
+        let key = identity.public_key().into_owned();
         // Boxed for the region reason documented on `BoxFuture`.
-        let attempt: BoxFuture<'_, std::result::Result<bool, russh::AgentAuthError>> =
-            Box::pin(ssh.authenticate_publickey_with(username.to_string(), identity, &mut agent));
+        let attempt: BoxFuture<
+            '_,
+            std::result::Result<russh::client::AuthResult, russh::AgentAuthError>,
+        > = Box::pin(ssh.authenticate_publickey_with(username.to_string(), key, None, &mut agent));
         match attempt.await {
-            Ok(true) => return Ok(true),
-            Ok(false) => continue,
+            Ok(result) if result.success() => return Ok(true),
+            Ok(_) => continue,
             Err(e) => {
                 tracing::debug!("agent identity rejected: {e}");
                 continue;
