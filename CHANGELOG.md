@@ -10,6 +10,61 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-31
+
+### Added
+
+- **QuickConnect address bar**, always visible under the library toolbar. Type
+  an address, press Enter, and you are connected without saving anything first.
+  The feature existed before as a dialog behind `Cmd/Ctrl+T` with no visible
+  entry point anywhere in the window, so in practice it could not be found.
+  - Suggestions as you type, drawn from saved hosts, machines found by
+    discovery, and the addresses you last quick-connected to. The last of those
+    are kept in the settings blob rather than the store's `history` table,
+    because that table is keyed by host id and a quick connect has no host.
+  - Typing an address that a saved host already covers connects through that
+    host, so its quality, view-only setting and stored password still apply.
+  - `Cmd/Ctrl+T` and File -> Connect to… now focus the bar.
+- **"Remember this password" now works on a quick connect.** Credentials are
+  keyed by host id, so a session with no host profile had nowhere to put one:
+  the tick was silently discarded and the password was asked for again on the
+  next connection. Ticking it now adopts the endpoint as a saved host, stores
+  the password against it, and the new tile appears in the Library while the
+  session is still open. A quick connect that saves nothing still leaves no
+  trace, and a repeat connect to the same endpoint reuses the host it already
+  made rather than adding a second tile.
+
+### Fixed
+
+- An IPv6 address given as a bare literal could not be connected to. `resolve`
+  joined the host and port as `{host}:{port}`, so `::1` became `::1:5900`,
+  which is not a parseable address. Bare literals are now bracketed before the
+  lookup.
+- The same fault in the SFTP sidecar: the connection label, the SSH session
+  label, and three user-visible error messages (`Connect`, `HostKeyUnknown`,
+  `HostKeyChanged`) all joined host and port the same way. Its mirror image
+  was there too: `russh::client::connect` and `TcpStream::connect` take
+  `(host, port)` as a tuple, which accepts neither a bracketed literal nor a
+  DNS name spelled that way, so a host saved as `[::1]` would connect over VNC
+  while its Files panel reported the machine unreachable. Brackets are now
+  added where a string is built and removed where a resolver is called.
+- Matching a typed address against the saved hosts now normalizes case and a
+  trailing dot on both sides, so `Studio.local`, `studio.local` and the
+  mDNS-qualified `studio.local.` are one machine rather than three. There is
+  one definition of that rule (`vnc_store::normalize_address`) instead of the
+  session layer and the store each having their own.
+- The native `Cmd/Ctrl+T` and `Cmd/Ctrl+N` menu accelerators did nothing. Both
+  emitted `menu://action` to the focused window and no window listened for
+  them. They are now routed to the library window and handled there, so they
+  also work while a session window is in front.
+- Address parsing was duplicated between the host dialog and quick connect, and
+  both copies mangled IPv6: `[::1]:5901` parsed to a host of `[` or `[::1]`
+  depending on the copy. There is now one parser (`ui/src/lib/address.ts`),
+  which also understands `host::5901`, `vnc://` links, and rejects out-of-range
+  ports instead of passing them to an IPC call that only takes a `u16`.
+- The host dialog reported "address is required" for everything. It now shows
+  the specific reason the address cannot be used.
+
 ## [0.1.1] - 2026-07-31
 
 ### Fixed
