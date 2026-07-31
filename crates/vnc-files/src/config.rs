@@ -11,6 +11,42 @@ use std::path::PathBuf;
 /// does not override it.
 pub const DEFAULT_SSH_PORT: u16 = 22;
 
+/// Join a host and port into the usual `host:port` form.
+///
+/// A bare IPv6 literal has to be bracketed first: `::1` and `22` would
+/// otherwise concatenate to `::1:22`, which is ambiguous with the address
+/// itself, so anything reading it back gets the wrong answer and a human
+/// reading it in a log cannot tell where the address ends. A DNS name can
+/// never contain a colon, so a colon means "IPv6 literal", and a leading `[`
+/// means the caller already bracketed it (users do type `[::1]`, and
+/// double-bracketing would be just as wrong).
+///
+/// Deliberately a local copy of `vnc_transport::tcp`'s rule rather than a
+/// shared helper: `vnc-files` does not otherwise depend on `vnc-transport`,
+/// and one six-line string function is not worth a crate edge.
+pub fn host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// The host as a resolver wants it, with any user-typed brackets removed.
+///
+/// `russh::client::connect` and `TcpStream::connect` take `(host, port)` as a
+/// tuple, which parses the host as an `IpAddr` and otherwise resolves it as a
+/// DNS name. `[::1]` is neither, so a bracketed literal would fail every
+/// lookup. Brackets only exist to delimit an address inside a *joined*
+/// string, so they have no business here. `vnc-transport` accepts both
+/// spellings for the VNC connection; the sidecar has to accept the same ones
+/// or a profile connects but its Files panel does not.
+pub fn resolver_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 /// How to authenticate the SSH sidecar connection.
 ///
 /// Adjacently tagged so the JS side sends `{ kind, value }`:
@@ -107,7 +143,7 @@ impl FileTransferConfig {
 
     /// `user@host:port`, for logs and window titles. Never contains secrets.
     pub fn endpoint(&self) -> String {
-        format!("{}@{}:{}", self.username, self.host, self.port)
+        format!("{}@{}", self.username, host_port(&self.host, self.port))
     }
 }
 
@@ -186,6 +222,44 @@ mod tests {
         .unwrap();
         let rendered = format!("{key:?}");
         assert!(!rendered.contains("pp"), "{rendered}");
+    }
+
+    /// Guards the one property every host+port join in this crate depends on:
+    /// the result can be read back apart again, whatever spelling of the
+    /// address the profile happens to hold.
+    #[test]
+    fn a_bare_ipv6_literal_is_bracketed_before_the_port_is_appended() {
+        assert_eq!(host_port("::1", 22), "[::1]:22");
+        assert_eq!(host_port("fe80::1", 22), "[fe80::1]:22");
+        assert_eq!(host_port("2001:db8::5", 2222), "[2001:db8::5]:2222");
+
+        // Already bracketed, IPv4 and DNS names must pass through untouched.
+        assert_eq!(host_port("[::1]", 22), "[::1]:22");
+        assert_eq!(host_port("192.0.2.10", 22), "192.0.2.10:22");
+        assert_eq!(
+            host_port("files.example.com", 2222),
+            "files.example.com:2222"
+        );
+    }
+
+    #[test]
+    fn the_endpoint_label_survives_an_ipv6_host() {
+        let mut cfg = FileTransferConfig::new("::1", "u");
+        assert_eq!(cfg.endpoint(), "u@[::1]:22");
+        cfg.host = "[fe80::1]".into();
+        assert_eq!(cfg.endpoint(), "u@[fe80::1]:22");
+    }
+
+    /// The mirror image: brackets are punctuation for a joined string, and a
+    /// resolver that is handed host and port separately must never see them.
+    #[test]
+    fn brackets_are_stripped_before_the_host_reaches_a_resolver() {
+        assert_eq!(resolver_host("[::1]"), "::1");
+        assert_eq!(resolver_host("[2001:db8::5]"), "2001:db8::5");
+
+        assert_eq!(resolver_host("::1"), "::1");
+        assert_eq!(resolver_host("192.0.2.10"), "192.0.2.10");
+        assert_eq!(resolver_host("files.example.com"), "files.example.com");
     }
 
     #[test]

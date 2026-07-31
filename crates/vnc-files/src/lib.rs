@@ -52,7 +52,7 @@ pub mod queue;
 pub mod session;
 pub mod transfer;
 
-pub use config::{FileTransferConfig, SshAuth, DEFAULT_SSH_PORT};
+pub use config::{host_port, resolver_host, FileTransferConfig, SshAuth, DEFAULT_SSH_PORT};
 pub use error::{Error, Result};
 pub use hostkey::{HostKeyDecision, HostKeyPin, HostKeyStore, HostKeyVerifier};
 pub use probe::probe_ssh;

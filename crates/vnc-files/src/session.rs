@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{FileTransferConfig, SshAuth};
+use crate::config::{host_port, resolver_host, FileTransferConfig, SshAuth};
 use crate::error::{Error, Result};
 use crate::hostkey::{HostKeyDecision, HostKeyVerifier};
 use crate::path;
@@ -124,7 +124,7 @@ impl std::fmt::Debug for SftpSession {
         f.debug_struct("SftpSession")
             .field(
                 "endpoint",
-                &format!("{}@{}:{}", self.username, self.host, self.port),
+                &format!("{}@{}", self.username, host_port(&self.host, self.port)),
             )
             .finish()
     }
@@ -162,7 +162,8 @@ impl SftpSession {
             ..Default::default()
         });
 
-        let connecting = russh::client::connect(ssh_config, (cfg.host.as_str(), cfg.port), handler);
+        let connecting =
+            russh::client::connect(ssh_config, (resolver_host(&cfg.host), cfg.port), handler);
         let mut ssh = match tokio::time::timeout(cfg.connect_timeout(), connecting).await {
             Err(_) => return Err(Error::Timeout),
             Ok(Ok(handle)) => handle,
