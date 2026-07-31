@@ -32,7 +32,10 @@ use crate::{framing, windows};
 /// Flat payloads on a `type` discriminator:
 /// `{ type: "started", sessionId, profileId, address, port }`,
 /// `{ type: "state", sessionId, state }` (`state` is only the kebab-case tag),
-/// `{ type: "ended", sessionId }`.
+/// `{ type: "ended", sessionId }`,
+/// `{ type: "host-adopted", sessionId, profileId, address, port }` (an ad-hoc
+/// session just gained a host profile, see [`adopt_session_host`]; the Library
+/// re-reads its host list on it).
 pub const SESSIONS_EVENT: &str = "sessions://event";
 
 /// App-wide per-session stats broadcast (`emit`, 1 Hz per connected session):
@@ -125,37 +128,141 @@ fn persist_credentials(
     let store = ctx.store.clone();
     let credentials = ctx.credentials.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // Merge rather than replace: a host may already have an SSH
-        // passphrase stored alongside its VNC password.
-        let existing = match credentials.load(&profile_id) {
-            Ok(existing) => existing,
-            Err(e) => {
-                tracing::warn!("could not read existing credentials before save: {e}");
-                None
-            }
-        };
-        let merged = pending.merge_into(existing);
-        if let Err(e) = credentials.save(&profile_id, &merged) {
-            tracing::warn!(profile = %profile_id, "failed to save credentials: {e}");
-            return;
+        write_credentials(&store, &credentials, &profile_id, &pending);
+    });
+}
+
+/// The blocking half of [`persist_credentials`]. Split out so the adopt-a-host
+/// path can write the profile and its credential on one blocking thread,
+/// in that order.
+fn write_credentials(
+    store: &vnc_store::Store,
+    credentials: &vnc_store::CredentialStore,
+    profile_id: &str,
+    pending: &PendingCredentialSave,
+) {
+    // Merge rather than replace: a host may already have an SSH
+    // passphrase stored alongside its VNC password.
+    let existing = match credentials.load(profile_id) {
+        Ok(existing) => existing,
+        Err(e) => {
+            tracing::warn!("could not read existing credentials before save: {e}");
+            None
         }
-        // Mirror the flag the library uses to draw the key icon. A failure
-        // here is cosmetic, the secret itself is already stored.
-        match store.get_host(&profile_id) {
-            Ok(Some(mut profile)) => {
-                if !profile.has_password {
-                    profile.has_password = true;
-                    if let Err(e) = store.save_host(&profile) {
-                        tracing::warn!(profile = %profile_id, "failed to set has_password: {e}");
-                    }
+    };
+    let merged = pending.merge_into(existing);
+    if let Err(e) = credentials.save(profile_id, &merged) {
+        tracing::warn!(profile = %profile_id, "failed to save credentials: {e}");
+        return;
+    }
+    // Mirror the flag the library uses to draw the key icon. A failure
+    // here is cosmetic, the secret itself is already stored.
+    match store.get_host(profile_id) {
+        Ok(Some(mut profile)) => {
+            if !profile.has_password {
+                profile.has_password = true;
+                if let Err(e) = store.save_host(&profile) {
+                    tracing::warn!(profile = %profile_id, "failed to set has_password: {e}");
                 }
             }
-            Ok(None) => {
-                tracing::warn!(profile = %profile_id, "profile vanished before has_password update")
-            }
-            Err(e) => tracing::warn!(profile = %profile_id, "could not load profile: {e}"),
         }
-        tracing::info!(profile = %profile_id, "saved credentials after a successful connect");
+        Ok(None) => {
+            tracing::warn!(profile = %profile_id, "profile vanished before has_password update")
+        }
+        Err(e) => tracing::warn!(profile = %profile_id, "could not load profile: {e}"),
+    }
+    tracing::info!(profile = %profile_id, "saved credentials after a successful connect");
+}
+
+/// Where a proven credential belongs.
+///
+/// Split out of [`settle_pending_credentials`] so the rule can be tested
+/// without a running app, in particular the one that is easy to break: a
+/// session that asked for nothing must reach [`CredentialHome::Nowhere`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CredentialHome {
+    /// Do nothing. Either nothing was asked for (a plain quick connect must
+    /// leave no trace in the library at all) or the session is already gone,
+    /// in which case there is no endpoint left to attribute the secret to.
+    Nowhere,
+    /// The session's saved host profile.
+    Profile(String),
+    /// An ad-hoc session that asked to be remembered. Credentials are keyed by
+    /// host id, so its endpoint has to become a host profile first.
+    AdoptEndpoint { address: String, port: u16 },
+}
+
+fn credential_home(save_requested: bool, session: Option<&SessionEntry>) -> CredentialHome {
+    let Some(entry) = session.filter(|_| save_requested) else {
+        return CredentialHome::Nowhere;
+    };
+    match &entry.profile_id {
+        Some(profile_id) => CredentialHome::Profile(profile_id.clone()),
+        None => CredentialHome::AdoptEndpoint {
+            address: entry.address.clone(),
+            port: entry.port,
+        },
+    }
+}
+
+/// Turn an ad-hoc session into a saved host so its remembered password has
+/// somewhere to live, then store the password against it.
+///
+/// Everything after the profile write is deliberately in the same blocking
+/// closure: the credential must not be written under an id the hosts table
+/// does not have yet, and the Library must not be told about a host before it
+/// can read it back.
+fn adopt_session_host(
+    app: &AppHandle,
+    ctx: &CredentialSaveCtx,
+    sessions: &Arc<Mutex<HashMap<String, SessionEntry>>>,
+    session_id: &str,
+    address: String,
+    port: u16,
+    pending: PendingCredentialSave,
+) {
+    let app = app.clone();
+    let store = ctx.store.clone();
+    let credentials = ctx.credentials.clone();
+    let sessions = sessions.clone();
+    let session_id = session_id.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile = match store.adopt_endpoint(&address, port) {
+            Ok(profile) => profile,
+            Err(e) => {
+                tracing::warn!(session = %session_id, "could not save a host for this session: {e}");
+                return;
+            }
+        };
+        // From here this is a saved-host session: thumbnail claiming, cert
+        // trust and a later credential change all read `profile_id`, and all
+        // of them should now behave as they would for a host the user had
+        // added by hand.
+        if let Some(entry) = sessions.lock().get_mut(&session_id) {
+            entry.profile_id = Some(profile.id.clone());
+        }
+        // The connection this host was born from is live, so the tile would
+        // otherwise claim the machine has never been connected to.
+        if let Err(e) = store.touch_connected(&profile.id) {
+            tracing::warn!(profile = %profile.id, "failed to record the connection: {e}");
+        }
+        write_credentials(&store, &credentials, &profile.id, &pending);
+        tracing::info!(
+            session = %session_id, profile = %profile.id,
+            "saved a host profile for an ad-hoc session that remembered its password"
+        );
+        // The Library owns no session window, so this broadcast is the only
+        // way the new host appears without the user reopening the window.
+        let _ = app.emit(
+            SESSIONS_EVENT,
+            serde_json::json!({
+                "type": "host-adopted",
+                "sessionId": session_id,
+                "profileId": profile.id,
+                "address": profile.address,
+                "port": profile.port,
+            }),
+        );
     });
 }
 
@@ -164,6 +271,7 @@ fn persist_credentials(
 /// `Connected` is the ONLY state that persists anything; every terminal state
 /// drops the intent without touching the keychain.
 fn settle_pending_credentials(
+    app: &AppHandle,
     ctx: &CredentialSaveCtx,
     sessions: &Arc<Mutex<HashMap<String, SessionEntry>>>,
     session_id: &str,
@@ -171,24 +279,21 @@ fn settle_pending_credentials(
 ) {
     match state {
         SessionState::Connected => {
-            // Ad-hoc sessions have no profile to attach a credential to. Keep
-            // the entry in memory for the life of the session (so a later
-            // reconnect of the same session still has it) and never error.
-            let profile_id = sessions
-                .lock()
-                .get(session_id)
-                .and_then(|e| e.profile_id.clone());
-            let Some(profile_id) = profile_id else {
-                tracing::debug!(
-                    session = %session_id,
-                    "credentials remembered in memory only, ad-hoc session has no host profile"
-                );
-                return;
+            let pending = ctx.pending.lock().remove(session_id);
+            let home = {
+                let sessions = sessions.lock();
+                credential_home(pending.is_some(), sessions.get(session_id))
             };
-            let Some(pending) = ctx.pending.lock().remove(session_id) else {
-                return;
-            };
-            persist_credentials(ctx, profile_id, pending);
+            match (home, pending) {
+                (CredentialHome::Profile(profile_id), Some(pending)) => {
+                    persist_credentials(ctx, profile_id, pending)
+                }
+                (CredentialHome::AdoptEndpoint { address, port }, Some(pending)) => {
+                    adopt_session_host(app, ctx, sessions, session_id, address, port, pending)
+                }
+                // Nothing asked for, or nothing left to attribute it to.
+                _ => {}
+            }
         }
         SessionState::Disconnected { .. } => {
             // Never persist a password the connection did not survive.
@@ -234,7 +339,7 @@ fn forward_events(
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             if let SessionEvent::StateChanged(state) = &event {
-                settle_pending_credentials(&creds_ctx, &sessions, &session_id, state);
+                settle_pending_credentials(&app, &creds_ctx, &sessions, &session_id, state);
                 // Any state transition means the handshake moved on, so an
                 // outstanding prompt is no longer answerable.
                 if !matches!(state, SessionState::Authenticating { .. }) {
@@ -1272,6 +1377,74 @@ mod tests {
     #[test]
     fn nothing_is_focused_when_the_machine_is_not_open() {
         assert_eq!(window_to_focus(false, false, || None), None);
+    }
+
+    /// A registry entry as `connect_session` builds it. The command receiver
+    /// is dropped: `credential_home` reads identity, never liveness.
+    fn session_entry(profile_id: Option<&str>, address: &str, port: u16) -> SessionEntry {
+        let (commands, _rx) = tokio::sync::mpsc::channel(1);
+        SessionEntry {
+            handle: vnc_core::SessionHandle {
+                id: "s1".into(),
+                commands,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+            window_label: "session-s1".into(),
+            profile_id: profile_id.map(str::to_string),
+            address: address.into(),
+            port,
+            started_at: Instant::now(),
+            thumbnails: Default::default(),
+        }
+    }
+
+    /// REGRESSION: ticking "remember" on a quick connect used to do nothing
+    /// at all, because there was no host id to key the secret by. The tick has
+    /// to reach the library instead.
+    #[test]
+    fn a_quick_connect_that_saves_its_password_asks_for_a_host_record() {
+        let entry = session_entry(None, "studio.local", 5901);
+        assert_eq!(
+            credential_home(true, Some(&entry)),
+            CredentialHome::AdoptEndpoint {
+                address: "studio.local".into(),
+                port: 5901,
+            }
+        );
+    }
+
+    /// The other half of that: a quick connect that asked for nothing must
+    /// stay ad-hoc and leave the library exactly as it found it.
+    #[test]
+    fn a_quick_connect_that_saves_nothing_leaves_no_trace_in_the_library() {
+        let adhoc = session_entry(None, "studio.local", 5901);
+        assert_eq!(
+            credential_home(false, Some(&adhoc)),
+            CredentialHome::Nowhere
+        );
+        let saved = session_entry(Some("host-a"), "studio.local", 5901);
+        assert_eq!(
+            credential_home(false, Some(&saved)),
+            CredentialHome::Nowhere
+        );
+    }
+
+    #[test]
+    fn a_saved_host_still_stores_its_password_against_its_own_profile() {
+        let entry = session_entry(Some("host-a"), "studio.local", 5901);
+        assert_eq!(
+            credential_home(true, Some(&entry)),
+            CredentialHome::Profile("host-a".into()),
+            "an existing profile is never duplicated by address"
+        );
+    }
+
+    /// The registry entry is gone by the time `Connected` is settled (the
+    /// window was closed as it connected): there is no endpoint left to
+    /// attribute the secret to, so it is dropped rather than guessed at.
+    #[test]
+    fn a_session_that_is_already_gone_persists_nothing() {
+        assert_eq!(credential_home(true, None), CredentialHome::Nowhere);
     }
 }
 

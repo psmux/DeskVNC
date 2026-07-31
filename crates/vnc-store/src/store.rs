@@ -78,6 +78,21 @@ const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
+/// The canonical form of a host address, for deciding whether two spellings
+/// mean the same machine.
+///
+/// Host names are case-insensitive and mDNS hands out fully-qualified names
+/// with a trailing dot; neither should split one machine into two. This lives
+/// here rather than in the shell because the same rule has to hold for the
+/// stored `hosts.address` column (see [`Store::find_host_by_address`]) and for
+/// the shell's live-session identity, and two copies of it would drift.
+///
+/// ASCII-only lowercasing, deliberately: it is what SQLite's `lower()` does,
+/// so the Rust and SQL sides of the comparison stay identical.
+pub fn normalize_address(address: &str) -> String {
+    address.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 /// SQLite-backed persistence. `Send + Sync`: the connection is wrapped in a
 /// `parking_lot::Mutex`, so the Tauri shell can hold one `Store` in managed
 /// state and call it from multiple tasks.
@@ -271,12 +286,27 @@ impl Store {
         Ok(())
     }
 
+    /// The saved host for an endpoint, matched on the *normalized* address
+    /// (see [`normalize_address`]).
+    ///
+    /// An exact string compare would treat `Studio.local`, `studio.local` and
+    /// the fully-qualified `studio.local.` mDNS hands out as three different
+    /// machines, which is precisely how quick connect would end up minting a
+    /// duplicate host record for a machine the user already has. The session
+    /// layer already calls those one machine, so this has to agree.
+    ///
+    /// Normalizing inside the query costs the `idx_hosts_address` index, which
+    /// is a fair trade: a personal library is tens of rows, and a duplicate
+    /// tile is visible to the user in a way a table scan never will be. The
+    /// oldest match wins so repeat lookups are stable.
     pub fn find_host_by_address(&self, address: &str, port: u16) -> Result<Option<HostProfile>> {
         let id: Option<String> = {
             let conn = self.conn.lock();
             conn.query_row(
-                "SELECT id FROM hosts WHERE address = ?1 AND port = ?2 LIMIT 1",
-                params![address, port],
+                "SELECT id FROM hosts
+                  WHERE lower(rtrim(trim(address), '.')) = ?1 AND port = ?2
+                  ORDER BY created_at, id LIMIT 1",
+                params![normalize_address(address), port],
                 |r| r.get(0),
             )
             .optional()?
@@ -285,6 +315,31 @@ impl Store {
             Some(id) => self.get_host(&id),
             None => Ok(None),
         }
+    }
+
+    /// The host profile for a bare endpoint, creating one if there is none.
+    ///
+    /// Quick connect has no profile, and credentials are keyed by host id, so
+    /// "remember this password" on an ad-hoc session has nowhere to put the
+    /// secret. Adopting the endpoint as a host is what makes that tick mean
+    /// what it says. Callers must only reach here when the user actually asked
+    /// to save something: a plain quick connect stays ad-hoc and leaves no
+    /// trace in the library.
+    ///
+    /// The address doubles as the name, it is the only thing known about the
+    /// machine at this point, and the user can rename it afterwards.
+    pub fn adopt_endpoint(&self, address: &str, port: u16) -> Result<HostProfile> {
+        if let Some(existing) = self.find_host_by_address(address, port)? {
+            return Ok(existing);
+        }
+        let profile = HostProfile {
+            friendly_name: address.trim().to_string(),
+            address: address.trim().to_string(),
+            port,
+            ..Default::default()
+        };
+        self.save_host(&profile)?;
+        Ok(profile)
     }
 
     /// Records a successful connection: bumps `last_connected` and
@@ -767,6 +822,98 @@ mod tests {
         store.delete_host(&host.id).unwrap();
         assert!(store.get_host(&host.id).unwrap().is_none());
         assert!(store.list_hosts().unwrap().is_empty());
+    }
+
+    /// Ticking "remember this password" on a quick connect has to produce a
+    /// host to key the credential by, or the tick is a lie (credentials live
+    /// under a host id, never under a bare endpoint).
+    #[test]
+    fn a_quick_connect_that_saves_its_password_gains_a_host_record() {
+        let (_dir, store) = temp_store();
+        assert!(store.list_hosts().unwrap().is_empty());
+
+        let adopted = store.adopt_endpoint("10.0.0.5", 5900).unwrap();
+        assert_eq!(adopted.address, "10.0.0.5");
+        assert_eq!(adopted.port, 5900);
+        assert_eq!(
+            adopted.friendly_name, "10.0.0.5",
+            "the address is the only name known at this point"
+        );
+        assert!(uuid::Uuid::parse_str(&adopted.id).is_ok());
+        assert!(!adopted.has_password, "the credential write sets that flag");
+
+        let hosts = store.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].id, adopted.id);
+    }
+
+    /// Quick connecting to the same machine twice must reuse its host, not
+    /// pile up a tile per connect.
+    #[test]
+    fn a_second_quick_connect_to_the_same_endpoint_reuses_its_host_record() {
+        let (_dir, store) = temp_store();
+        let first = store.adopt_endpoint("10.0.0.5", 5900).unwrap();
+        let second = store.adopt_endpoint("10.0.0.5", 5900).unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(store.list_hosts().unwrap().len(), 1);
+
+        // A host the user saved by hand is adopted too, rather than shadowed
+        // by a second record for the same endpoint.
+        let mut named = store.get_host(&first.id).unwrap().unwrap();
+        named.friendly_name = "Studio".into();
+        store.save_host(&named).unwrap();
+        let again = store.adopt_endpoint("10.0.0.5", 5900).unwrap();
+        assert_eq!(again.id, first.id);
+        assert_eq!(
+            again.friendly_name, "Studio",
+            "adopting an existing host must not rename it back to its address"
+        );
+    }
+
+    /// The session layer already treats these spellings as one machine; the
+    /// library has to agree or a re-connect mints a duplicate tile.
+    #[test]
+    fn case_and_the_mdns_trailing_dot_do_not_split_one_endpoint_in_two() {
+        let (_dir, store) = temp_store();
+        let adopted = store.adopt_endpoint("Studio.local", 5900).unwrap();
+
+        for spelling in [
+            "studio.local",
+            "STUDIO.LOCAL",
+            "studio.local.",
+            " studio.local ",
+        ] {
+            assert_eq!(
+                store.adopt_endpoint(spelling, 5900).unwrap().id,
+                adopted.id,
+                "{spelling} is the same machine"
+            );
+        }
+        assert_eq!(store.list_hosts().unwrap().len(), 1);
+
+        // …and it works the other way round: a host stored fully-qualified is
+        // found by the short spelling the user types.
+        let fq = store.adopt_endpoint("pi.local.", 5901).unwrap();
+        assert_eq!(fq.address, "pi.local.", "the stored address is left as-is");
+        assert_eq!(
+            store
+                .find_host_by_address("PI.local", 5901)
+                .unwrap()
+                .unwrap()
+                .id,
+            fq.id
+        );
+    }
+
+    /// One address, two servers: a second display on the same box is its own
+    /// machine as far as the library is concerned.
+    #[test]
+    fn the_same_address_on_another_port_is_another_host() {
+        let (_dir, store) = temp_store();
+        let a = store.adopt_endpoint("10.0.0.5", 5900).unwrap();
+        let b = store.adopt_endpoint("10.0.0.5", 5901).unwrap();
+        assert_ne!(a.id, b.id);
+        assert_eq!(store.list_hosts().unwrap().len(), 2);
     }
 
     #[test]
