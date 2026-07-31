@@ -61,6 +61,8 @@
     "allow-refresh-session",
     "allow-set-view-only",
     "allow-send-clipboard",
+    "allow-set-local-clipboard",
+    "allow-read-local-clipboard",
     "allow-reconnect-now",
     "allow-release-all-keys",
     "allow-capture-thumbnail",

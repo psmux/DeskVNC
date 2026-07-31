@@ -141,6 +141,10 @@ pub(crate) struct RunLoop {
     pf: PixelFormat,
     decoder: DecoderState,
     clipboard: ClipboardState,
+    /// Our Extended Clipboard capabilities message has gone out. The extension
+    /// requires BOTH peers to announce caps before any other extended message,
+    /// so ours is sent (once) the moment the server's arrives.
+    clipboard_caps_sent: bool,
     tuner: AutoTuner,
     applied_quality: QualitySettings,
 
@@ -208,6 +212,7 @@ impl RunLoop {
             pf,
             decoder: DecoderState::new(pf),
             clipboard: ClipboardState::new(),
+            clipboard_caps_sent: false,
             tuner: AutoTuner::new(),
             applied_quality,
             fb_width,
@@ -594,7 +599,28 @@ impl RunLoop {
                 // The server speaks Extended Clipboard.
                 self.caps.supports_extended_clipboard = true;
                 let flags = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
-                if flags & ext_clipboard::ACTION_NOTIFY != 0 {
+                // Caps first, and exclusively: an announcement sets a bit for
+                // every action the peer supports, notify among them, so testing
+                // the action bits in any other order reads a caps message as a
+                // notify and answers an offer that was never made.
+                if flags & ext_clipboard::ACTION_CAPS != 0 {
+                    // Answer the server's announcement with ours. Neither peer
+                    // may send notify/request/provide before it has both sent
+                    // and received caps, so a server that never hears from us
+                    // simply stops offering its clipboard.
+                    //
+                    // Only ever in reply: an unsolicited negative-length
+                    // ClientCutText would reach servers that do not implement
+                    // the extension and read as a huge unsigned length.
+                    if !self.clipboard_caps_sent {
+                        self.clipboard_caps_sent = true;
+                        let body = crate::clipboard::encode_caps();
+                        let mut msg = Vec::with_capacity(1 + body.len());
+                        msg.push(messages::client_msg::CLIENT_CUT_TEXT);
+                        msg.extend_from_slice(&body);
+                        self.send(&msg).await?;
+                    }
+                } else if flags & ext_clipboard::ACTION_NOTIFY != 0 {
                     emit(
                         events,
                         SessionEvent::ClipboardNotify {
@@ -602,6 +628,15 @@ impl RunLoop {
                         },
                     )
                     .await?;
+                    // A notify carries no data, it only advertises formats, and
+                    // our caps ask the server never to push data unsolicited.
+                    // Pull the text now, otherwise nothing the user copies on
+                    // the remote ever reaches this side.
+                    if flags & crate::clipboard::FORMAT_TEXT != 0 {
+                        let msg =
+                            messages::extended_clipboard_request(crate::clipboard::FORMAT_TEXT);
+                        self.send(&msg).await?;
+                    }
                 }
                 d
             }

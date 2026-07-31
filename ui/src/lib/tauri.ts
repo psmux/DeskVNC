@@ -61,6 +61,50 @@ export async function safeListen<T>(
 }
 
 // ---------------------------------------------------------------------------
+// OS clipboard
+// ---------------------------------------------------------------------------
+//
+// Both directions go through the shell rather than `navigator.clipboard`.
+// WebKit (macOS, Linux) only honours `writeText()`/`readText()` while a user
+// gesture is still active, and remote clipboard text arrives from the socket
+// with no gesture in sight, so the DOM API silently rejects. It stays as the
+// fallback for `npm run dev` in a plain browser.
+
+/** Write text into the OS clipboard. Returns false when nothing was written. */
+export async function writeClipboard(text: string): Promise<boolean> {
+  if (inTauri()) {
+    try {
+      await invoke("set_local_clipboard", { text });
+      return true;
+    } catch (err) {
+      console.warn("[clipboard] native write failed:", err);
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Read the OS clipboard. Returns null when it could not be read. */
+export async function readClipboard(): Promise<string | null> {
+  if (inTauri()) {
+    try {
+      return await invoke<string>("read_local_clipboard");
+    } catch (err) {
+      console.warn("[clipboard] native read failed:", err);
+    }
+  }
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Opening session windows
 // ---------------------------------------------------------------------------
 

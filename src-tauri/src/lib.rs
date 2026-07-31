@@ -188,6 +188,8 @@ pub fn run() {
             commands::session::refresh_session,
             commands::session::set_view_only,
             commands::session::send_clipboard,
+            commands::session::set_local_clipboard,
+            commands::session::read_local_clipboard,
             commands::session::reconnect_now,
             commands::session::release_all_keys,
             commands::session::capture_thumbnail,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-local-clipboard"
+description = "Enables the read_local_clipboard command without any pre-configured scope."
+commands.allow = ["read_local_clipboard"]
+
+[[permission]]
+identifier = "deny-read-local-clipboard"
+description = "Denies the read_local_clipboard command without any pre-configured scope."
+commands.deny = ["read_local_clipboard"]

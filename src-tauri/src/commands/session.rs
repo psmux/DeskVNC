@@ -632,6 +632,27 @@ pub async fn send_clipboard(
     send_command(&state, &session_id, ClientCommand::ClipboardText(text)).await
 }
 
+/// Write text the remote copied into the OS clipboard.
+///
+/// This deliberately does not go through `navigator.clipboard` in the webview:
+/// WebKit (macOS/Linux) only honours `writeText()` while a user gesture is
+/// still active, and remote clipboard text arrives from the socket, long after
+/// any click. The write has to happen natively or it silently does nothing.
+#[tauri::command]
+pub fn set_local_clipboard(app: AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// Read the OS clipboard for a push to the remote. Same reasoning as
+/// [`set_local_clipboard`]: `navigator.clipboard.readText()` is gesture- and
+/// permission-gated in the webview.
+#[tauri::command]
+pub fn read_local_clipboard(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().read_text().map_err(|e| e.to_string())
+}
+
 /// Reset the reconnect backoff and retry immediately.
 #[tauri::command]
 pub async fn reconnect_now(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
