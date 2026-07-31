@@ -79,12 +79,27 @@ pub async fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStre
     Err(last_err.unwrap_or_else(|| TransportError::Resolve(host.to_string())))
 }
 
+/// Join a host and port into the string `lookup_host` expects.
+///
+/// A bare IPv6 literal has to be bracketed first: `::1` and `5900` would
+/// otherwise concatenate to `::1:5900`, which is ambiguous with the address
+/// itself and so fails to parse, making every IPv6 literal unconnectable. A
+/// DNS name can never contain a colon, so a colon means "IPv6 literal", and a
+/// leading `[` means the caller already bracketed it (users do type
+/// `[::1]`, and double-bracketing would break just as badly).
+fn lookup_target(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Resolve a host:port to socket addresses, preferring IPv4 first (VNC servers
 /// on consumer networks are far more often reachable over v4, and a dead v6
 /// route otherwise burns the whole connect timeout).
 pub async fn resolve(host: &str, port: u16, timeout: Duration) -> Result<Vec<SocketAddr>> {
-    let target = format!("{host}:{port}");
-    let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host(target));
+    let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host(lookup_target(host, port)));
     let iter = match lookup.await {
         Err(_) => return Err(TransportError::Timeout),
         Ok(Err(e)) => {
@@ -147,6 +162,21 @@ fn configure(stream: &TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_ipv6_literal_is_bracketed_before_the_port_is_appended() {
+        assert_eq!(lookup_target("::1", 5900), "[::1]:5900");
+        assert_eq!(lookup_target("fe80::1", 5900), "[fe80::1]:5900");
+        assert_eq!(lookup_target("2001:db8::5", 5901), "[2001:db8::5]:5901");
+
+        // Already bracketed, IPv4 and DNS names must pass through untouched.
+        assert_eq!(lookup_target("[::1]", 5900), "[::1]:5900");
+        assert_eq!(lookup_target("192.0.2.10", 5900), "192.0.2.10:5900");
+        assert_eq!(
+            lookup_target("vnc.example.com", 5900),
+            "vnc.example.com:5900"
+        );
+    }
 
     #[tokio::test]
     async fn refused_is_distinct_from_timeout() {
