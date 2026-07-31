@@ -21,7 +21,7 @@ const BANNER_WAIT: Duration = Duration::from_millis(600);
 /// returns an error, an unreachable host is an answer, not a failure.
 pub async fn probe_ssh(host: &str, port: u16, timeout: Duration) -> bool {
     let deadline = timeout.max(Duration::from_millis(200));
-    let connect = TcpStream::connect((host, port));
+    let connect = TcpStream::connect((crate::config::resolver_host(host), port));
     let mut stream = match tokio::time::timeout(deadline, connect).await {
         Ok(Ok(stream)) => stream,
         // Refused, unreachable, DNS failure, or slower than the deadline.
@@ -81,6 +81,26 @@ mod tests {
             }
         });
         assert!(!probe_ssh("127.0.0.1", port, Duration::from_secs(2)).await);
+    }
+
+    /// A profile may hold an IPv6 literal in either spelling; the tuple form
+    /// `TcpStream::connect` takes only understands the bare one, so the
+    /// bracketed one must be unwrapped rather than resolved as a DNS name.
+    #[tokio::test]
+    async fn a_bracketed_ipv6_literal_still_reaches_the_port() {
+        // No IPv6 loopback on this machine means nothing to assert.
+        let Ok(listener) = TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let _ = socket.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").await;
+                let _ = socket.flush().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        assert!(probe_ssh("[::1]", port, Duration::from_secs(2)).await);
     }
 
     #[tokio::test]

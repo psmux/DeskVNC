@@ -1,5 +1,11 @@
 //! Crate error type. Nothing in `vnc-files` panics: every fallible path ends
 //! up here and the Tauri layer stringifies it for the webview.
+//!
+//! The endpoint in a message goes through [`host_port`] rather than a plain
+//! `{host}:{port}`, so an IPv6 host reads as `[::1]:22` and the user can see
+//! where the address stops and the port starts.
+
+use crate::config::host_port;
 
 /// Everything that can go wrong in the SFTP sidecar.
 #[derive(Debug, thiserror::Error)]
@@ -13,7 +19,7 @@ pub enum Error {
     #[error("sftp error: {0}")]
     Sftp(String),
 
-    #[error("could not connect to {host}:{port}: {reason}")]
+    #[error("could not connect to {}: {reason}", host_port(host, *port))]
     Connect {
         host: String,
         port: u16,
@@ -34,7 +40,7 @@ pub enum Error {
 
     /// First contact with this host: the UI must show a TOFU prompt and, if
     /// the user accepts, persist the pin and reconnect.
-    #[error("the ssh host key for {host}:{port} is not yet trusted")]
+    #[error("the ssh host key for {} is not yet trusted", host_port(host, *port))]
     HostKeyUnknown {
         host: String,
         port: u16,
@@ -44,8 +50,9 @@ pub enum Error {
 
     /// HARD STOP (PRD/08 §4, PRD/10 §4.3). Never retried, never promptable.
     #[error(
-        "the ssh host key for {host}:{port} CHANGED (expected {expected}, got {actual}), \
-         refusing to connect"
+        "the ssh host key for {} CHANGED (expected {expected}, got {actual}), \
+         refusing to connect",
+        host_port(host, *port)
     )]
     HostKeyChanged {
         host: String,
