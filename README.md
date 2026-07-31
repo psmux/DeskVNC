@@ -85,6 +85,10 @@ answer these queries and the result is rendered in the interface.
 
 - **Host library** on SQLite with friendly names, groups, tags, live
   thumbnails, connection history, and double-click connect.
+- **QuickConnect** address bar: type `host`, `host:1`, `host:5901`, `host::5901`,
+  `[::1]:5901`, or a `vnc://` link and press Enter. Nothing has to be saved
+  first, and typing the address of a host you did save connects through that
+  profile so its settings and password still apply.
 - **Command palette** for keyboard-driven navigation.
 - **Display modes**: fit, aspect-fit, 1:1, and custom zoom, all HiDPI correct.
 - **Input**: full mouse and keyboard, scancode mode via the QEMU extension,

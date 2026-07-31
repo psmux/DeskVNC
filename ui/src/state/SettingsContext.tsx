@@ -27,7 +27,17 @@ export interface Settings {
    * the remote one is drawn badly by the server), so it can be turned off, * input is unaffected either way.
    */
   showRemoteCursor: boolean;
+  /**
+   * Addresses reached through QuickConnect, most recent first.
+   *
+   * These live here rather than in the store's `history` table because that
+   * table is keyed by host id, and the whole point of a quick connect is that
+   * there is no host record. Kept to {@link MAX_QUICK_CONNECT_HISTORY} entries.
+   */
+  quickConnectHistory: string[];
 }
+
+export const MAX_QUICK_CONNECT_HISTORY = 8;
 
 const DEFAULTS: Settings = {
   theme: "system",
@@ -37,6 +47,7 @@ const DEFAULTS: Settings = {
   onboarded: false,
   probeOnline: true,
   showRemoteCursor: true,
+  quickConnectHistory: [],
 };
 
 const STORAGE_KEY = "deskvnc.settings.v1";
@@ -52,7 +63,11 @@ function load(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULTS;
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+    const merged = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+    // localStorage is hand-editable, and a history that is not an array would
+    // throw on every render of the QuickConnect bar rather than degrade.
+    if (!Array.isArray(merged.quickConnectHistory)) merged.quickConnectHistory = [];
+    return merged;
   } catch {
     return DEFAULTS;
   }

@@ -60,6 +60,9 @@ export const IconTag = (p: IconProps): ReactNode => (
 export const IconX = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M18 6 6 18M6 6l12 12" /></Icon>
 );
+export const IconArrowRight = (p: IconProps): ReactNode => (
+  <Icon {...p}><path d="M5 12h14M13 6l6 6-6 6" /></Icon>
+);
 export const IconChevronDown = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="m6 9 6 6 6-6" /></Icon>
 );

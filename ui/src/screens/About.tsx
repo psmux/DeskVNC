@@ -37,7 +37,8 @@ function useAppVersion(): string | null {
 const SHORTCUTS: Array<[string, string]> = [
   [`${modKeyLabel}K`, "Command palette"],
   [`${modKeyLabel}N`, "New host"],
-  [`${modKeyLabel}T`, "Connect to…"],
+  [`${modKeyLabel}T`, "Jump to the QuickConnect address bar"],
+  [`${modKeyLabel}F`, "Search the library"],
   [`${modKeyLabel},`, "Preferences"],
   [`${modKeyLabel}⇧D`, "Disconnect session"],
   [`${modKeyLabel}⇧M`, "Show/hide session toolbar"],
