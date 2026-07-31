@@ -1,6 +1,7 @@
 /** Add/Edit host dialog with progressive disclosure (PRD/11 §3.3). */
 import { useMemo, useState, type ReactNode } from "react";
 import type { HostGroup, HostProfile, HostTag, OsHint, QualityPreset, ScalingMode } from "../lib/types";
+import { parseConnectAddress } from "../lib/address";
 import { Dialog, Select } from "./primitives";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { classNames } from "../lib/util";
@@ -52,14 +53,6 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
   };
 }
 
-/** Accepts "host", "host:5901", or display-number shorthand "host:1" (-> 5901). */
-function parseAddress(input: string): { address: string; port: number | null } {
-  const m = /^(.*?):(\d+)$/.exec(input.trim());
-  if (!m) return { address: input.trim(), port: null };
-  const n = parseInt(m[2], 10);
-  return { address: m[1], port: n < 100 ? 5900 + n : n };
-}
-
 export function HostDialog({
   draft: initial,
   groups,
@@ -81,20 +74,23 @@ export function HostDialog({
 
   const set = (patch: Partial<HostDraft>): void => setD((prev) => ({ ...prev, ...patch }));
 
-  const addressError = useMemo((): string | null => {
-    if (!touched) return null;
-    if (d.address.trim().length === 0) return "An address or hostname is required";
-    if (/\s/.test(d.address.trim())) return "Addresses cannot contain spaces";
-    return null;
-  }, [d.address, touched]);
+  // The same parser the connection itself uses, so the dialog refuses exactly
+  // what would fail to connect, and says why instead of just "invalid".
+  const parsed = useMemo(() => parseConnectAddress(d.address), [d.address]);
 
-  const canSave = d.address.trim().length > 0 && !/\s/.test(d.address.trim());
+  const addressError = touched && !parsed.ok ? parsed.error : null;
+
+  const canSave = parsed.ok;
 
   const submit = (): void => {
     setTouched(true);
-    if (!canSave) return;
-    const name = d.friendlyName.trim() || d.address.trim();
-    onSave({ ...d, friendlyName: name });
+    if (!parsed.ok) return;
+    // Saving straight from the keyboard skips the blur that normalizes the
+    // address, so it is normalized here too rather than only on the way out
+    // of the field.
+    const address = parsed.endpoint.address;
+    const name = d.friendlyName.trim() || address;
+    onSave({ ...d, address, friendlyName: name });
   };
 
   return (
@@ -123,10 +119,26 @@ export function HostDialog({
               value={d.address}
               placeholder="192.168.1.42 or hostname"
               spellCheck={false}
-              onBlur={() => setTouched(true)}
+              onBlur={() => {
+                setTouched(true);
+                // Store what would actually be dialled, not what was typed:
+                // `  office  ` and `[::1]` are accepted above but would be
+                // saved verbatim and then never resolve, and an address that
+                // does not match the canonical form cannot be recognised as
+                // a saved host when it is typed into QuickConnect later.
+                if (parsed.ok) set({ address: parsed.endpoint.address });
+              }}
               onChange={(e) => {
-                const { address, port } = parseAddress(e.target.value);
-                set(port !== null ? { address, port } : { address: e.target.value });
+                const typed = parseConnectAddress(e.target.value);
+                // Only a port the user actually typed moves into the Port
+                // field; a bare hostname leaves this profile's saved port
+                // alone. Anything else stays as typed so the field stays
+                // editable while it is still half-written.
+                set(
+                  typed.ok && typed.endpoint.explicitPort
+                    ? { address: typed.endpoint.address, port: typed.endpoint.port }
+                    : { address: e.target.value },
+                );
               }}
             />
           </Field>

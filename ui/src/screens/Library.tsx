@@ -10,11 +10,11 @@ import {
 } from "react";
 import { useHosts } from "../state/HostsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
-import { useSettings, type SortKey } from "../state/SettingsContext";
+import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
 import type { DiscoveredHost, HostProfile } from "../lib/types";
 import { hostMac, resolvedOsHint } from "../lib/types";
-import { allowsMultipleSessions, inTauri, openSessionWindow, safeInvoke, forgetCertificate } from "../lib/tauri";
+import { allowsMultipleSessions, inTauri, openSessionWindow, safeInvoke, safeListen, forgetCertificate } from "../lib/tauri";
 import { seedMockThumbnails, useMockData } from "../lib/mock";
 import { useSessions } from "../state/SessionsContext";
 import { classNames, formatBps, fuzzyMatch, modKeyLabel, timeAgo } from "../lib/util";
@@ -22,6 +22,7 @@ import { Sidebar, type SidebarSelection } from "../components/Sidebar";
 import { HostTile, DiscoveredTile, osLabel } from "../components/HostTile";
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
+import { QuickConnect } from "../components/QuickConnect";
 import { ContextMenu, Dialog, EmptyState, Select, TileSkeleton, type MenuItem } from "../components/primitives";
 import {
   IconActivity,
@@ -75,13 +76,18 @@ export function Library({
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [quickConnectOpen, setQuickConnectOpen] = useState(false);
   const [hostDialog, setHostDialog] = useState<HostDraft | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
   const [activeTagIds, setActiveTagIds] = useState<Set<string>>(new Set());
   const [tagMode, setTagMode] = useState<"and" | "or">("or");
   const [namePrompt, setNamePrompt] = useState<"group" | "tag" | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const quickConnectRef = useRef<HTMLInputElement>(null);
+
+  const focusQuickConnect = useCallback((): void => {
+    quickConnectRef.current?.focus();
+    quickConnectRef.current?.select();
+  }, []);
 
   // ------------------------------------------------------------ connect
 
@@ -129,6 +135,19 @@ export function Library({
         `&name=${encodeURIComponent(address)}`;
     }
   }, [push]);
+
+  /** Most recent first, no duplicates, oldest dropped past the cap. */
+  const rememberQuickConnect = useCallback(
+    (address: string): void => {
+      update({
+        quickConnectHistory: [
+          address,
+          ...settings.quickConnectHistory.filter((a) => a !== address),
+        ].slice(0, MAX_QUICK_CONNECT_HISTORY),
+      });
+    },
+    [settings.quickConnectHistory, update],
+  );
 
   // "Connect in new window" only makes sense when the user has allowed more
   // than one window per computer; otherwise it would be a second Connect.
@@ -309,7 +328,7 @@ export function Library({
   const paletteActions = useMemo((): PaletteAction[] => {
     return [
       { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
-      { id: "quick-connect", label: "Connect to…", hint: `${modKeyLabel}T`, run: () => setQuickConnectOpen(true) },
+      { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
       { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
       {
         id: "toggle-view",
@@ -321,7 +340,7 @@ export function Library({
       { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
       { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
     ];
-  }, [settings.libraryView, update, startScan, onOpenPreferences, onOpenAbout, refresh]);
+  }, [settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -341,7 +360,7 @@ export function Library({
         setPaletteOpen((o) => !o);
       } else if (mod && e.key.toLowerCase() === "t") {
         e.preventDefault();
-        setQuickConnectOpen(true);
+        focusQuickConnect();
       } else if (mod && e.key.toLowerCase() === "f") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -353,7 +372,20 @@ export function Library({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [focusQuickConnect]);
+
+  // The same two things off the native File menu. menu.rs routes them here
+  // whichever window has focus, so they work from inside a session too.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void safeListen<{ id: string }>("menu://action", ({ id }) => {
+      if (id === "menu:quick-connect") focusQuickConnect();
+      else if (id === "menu:new-host") setHostDialog(draftFromHost(null));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [focusQuickConnect]);
 
   // ------------------------------------------------------------ context menu
 
@@ -516,6 +548,16 @@ export function Library({
         </button>
       </header>
 
+      <QuickConnect
+        hosts={hosts}
+        discovered={discovered}
+        recents={settings.quickConnectHistory}
+        inputRef={quickConnectRef}
+        onConnectHost={connectHost}
+        onConnectAddress={connectAdHoc}
+        onRemember={rememberQuickConnect}
+      />
+
       <div className="flex min-h-0 flex-1">
         <Sidebar
           hosts={hosts}
@@ -652,15 +694,6 @@ export function Library({
           onClose={() => setHostDialog(null)}
         />
       ) : null}
-      {quickConnectOpen ? (
-        <QuickConnectDialog
-          onConnect={(addr, port) => {
-            setQuickConnectOpen(false);
-            connectAdHoc(addr, port);
-          }}
-          onClose={() => setQuickConnectOpen(false)}
-        />
-      ) : null}
       {namePrompt ? (
         <NamePromptDialog
           kind={namePrompt}
@@ -781,61 +814,6 @@ function RowBandwidth({
     <span className="ml-2 whitespace-nowrap text-2xs text-tertiary [font-variant-numeric:tabular-nums]">
       ↓ {formatBps(bandwidth.rx)} ↑ {formatBps(bandwidth.tx)}
     </span>
-  );
-}
-
-// -------------------------------------------------------------- quick connect
-
-function QuickConnectDialog({
-  onConnect,
-  onClose,
-}: {
-  onConnect: (address: string, port: number) => void;
-  onClose: () => void;
-}): ReactNode {
-  const [value, setValue] = useState("");
-  const submit = (): void => {
-    const raw = value.trim();
-    if (!raw) return;
-    const m = /^(.*?):(\d+)$/.exec(raw);
-    if (m) {
-      const n = parseInt(m[2], 10);
-      onConnect(m[1], n < 100 ? 5900 + n : n);
-    } else {
-      onConnect(raw, 5900);
-    }
-  };
-  return (
-    <Dialog title="Connect to…" onClose={onClose} width={440}>
-      <form
-        className="space-y-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit();
-        }}
-      >
-        <input
-          data-autofocus
-          className="field mono"
-          placeholder="host, host:5901, or host:1"
-          spellCheck={false}
-          aria-label="Address to connect to"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-        />
-        <p className="text-xs text-tertiary">
-          Connects immediately without saving. You can save the host after the session.
-        </p>
-        <div className="flex justify-end gap-2.5">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Cancel
-          </button>
-          <button type="submit" className="btn-primary" disabled={!value.trim()}>
-            Connect
-          </button>
-        </div>
-      </form>
-    </Dialog>
   );
 }
 

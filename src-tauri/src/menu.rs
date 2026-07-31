@@ -1,8 +1,9 @@
 //! Native application menu bar.
 //!
 //! Custom items emit a `menu://action` JSON event (`{ id }`) to the focused
-//! window, which the frontend routes. Window-level actions (fullscreen) are
-//! handled natively here.
+//! window, which the frontend routes. The two File items that belong to the
+//! library go to the library window instead of the focused one. Window-level
+//! actions (fullscreen) are handled natively here.
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
@@ -176,6 +177,28 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             // scopes the opener plugin, and this keeps that scope narrow.
             if let Err(e) = app.opener().open_url(&url, None::<&str>) {
                 tracing::warn!("failed to open {url}: {e}");
+            }
+        }
+        "menu:new-host" | "menu:quick-connect" => {
+            // Library concerns, not session ones. Sent to the library window
+            // wherever the focus happens to be, because the alternative is
+            // that Cmd+T does nothing at all whenever a session is in front,
+            // which is exactly when reaching for another machine is likeliest.
+            let payload = serde_json::json!({ "id": id });
+            match app.get_webview_window("main") {
+                Some(main) => {
+                    // Same three calls the tray and the single-instance hook
+                    // use: focusing alone leaves a minimized library in the
+                    // Dock, so the address bar would take the keystroke with
+                    // nothing on screen to show for it.
+                    let _ = main.show();
+                    let _ = main.unminimize();
+                    let _ = main.set_focus();
+                    let _ = app.emit_to("main", "menu://action", payload);
+                }
+                None => {
+                    let _ = app.emit("menu://action", payload);
+                }
             }
         }
         custom if custom.starts_with("menu:") => {
