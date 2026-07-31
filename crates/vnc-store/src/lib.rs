@@ -25,7 +25,7 @@ mod thumbs;
 pub use creds::{CredentialBackend, CredentialStore, KEYRING_SERVICE, MAX_CREDENTIAL_BLOB};
 pub use error::{Error, Result};
 pub use models::{CertPin, Group, HistoryEntry, HostProfile, StoredCredentials, Tag};
-pub use store::Store;
+pub use store::{normalize_address, Store};
 
 pub(crate) fn now_ts() -> i64 {
     std::time::SystemTime::now()

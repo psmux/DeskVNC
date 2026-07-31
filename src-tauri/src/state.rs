@@ -74,8 +74,13 @@ impl MachineKey {
 
 /// Host names are case-insensitive and mDNS hands out fully-qualified names
 /// with a trailing dot; neither should split one machine into two.
+///
+/// Delegated to the store so that "the same machine" means the same thing to
+/// the live-session registry and to the host library: a quick connect that
+/// adopts its endpoint as a host (see `Store::adopt_endpoint`) is matched
+/// against saved hosts by this exact rule.
 fn normalize_address(address: &str) -> String {
-    address.trim().trim_end_matches('.').to_ascii_lowercase()
+    vnc_store::normalize_address(address)
 }
 
 /// An already-open session window that a repeat connect should focus.

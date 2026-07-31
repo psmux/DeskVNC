@@ -28,6 +28,20 @@ import {
  */
 const THUMBNAIL_EVENT = "library://thumbnail";
 
+/**
+ * Session lifecycle broadcast (`src-tauri/src/commands/session.rs`). The
+ * Library only cares about one of its payloads: `host-adopted`, sent when a
+ * quick connect that ticked "remember this password" gained a host profile,
+ * because the password had nowhere else to live. That host was created in
+ * another window's session, so this is the only way the tile appears without
+ * the user reopening the Library.
+ */
+const SESSIONS_EVENT = "sessions://event";
+
+interface SessionsEvent {
+  type?: string;
+}
+
 interface HostsContextValue {
   hosts: HostProfile[];
   groups: HostGroup[];
@@ -374,6 +388,23 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
       window.removeEventListener(MOCK_THUMBNAIL_EVENT, onMock);
     };
   }, [refreshThumbnail]);
+
+  /** A session just turned itself into a saved host: re-read the list. */
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void safeListen<SessionsEvent>(SESSIONS_EVENT, (ev) => {
+      if (cancelled || ev?.type !== "host-adopted") return;
+      void refresh();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [refresh]);
 
   // Unmount: release every blob: URL still held.
   const thumbsRef = useRef(thumbs);
