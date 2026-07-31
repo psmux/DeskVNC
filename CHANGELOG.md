@@ -10,6 +10,30 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-31
+
+### Fixed
+
+- Text copied on the remote never reached the local clipboard. Two independent
+  faults, both on that path:
+  - The Extended Clipboard handshake was half implemented. The client
+    advertised the pseudo-encoding but never answered the server's capabilities
+    message with its own, and never answered a `notify` (which carries no data)
+    with a `request`, so servers using the modern flow had no way to hand the
+    text over. A capabilities announcement also sets the notify bit, so it was
+    additionally being read as an offer of data.
+  - The delivery into the OS clipboard went through `navigator.clipboard`.
+    WebKit only honours it while a user gesture is live, and remote clipboard
+    text arrives from the socket, so the write was rejected and the rejection
+    swallowed. Both directions now go through the shell
+    (`set_local_clipboard` / `read_local_clipboard`).
+
+## [0.1.0] - 2026-07-30
+
+Everything below shipped in the `v0.1.0` build. The entries were still filed
+under "Unreleased" when that tag was cut; they are grouped here rather than
+moved into `0.1.1`, which contains only the clipboard fix above.
+
 ### Added
 
 - `#![forbid(unsafe_code)]` on `vnc-core`, `vnc-transport`, and `vnc-store`,
@@ -94,9 +118,7 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - Personal signing identifiers and an Apple ID address were removed from
   `docs/MACOS_SIGNING.md`, which now reads as generic setup instructions.
 
-## [0.1.0] - Unreleased
-
-Initial development version. Not yet released.
+### Initial implementation
 
 Core capability at this point:
 
