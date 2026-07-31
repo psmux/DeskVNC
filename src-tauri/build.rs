@@ -45,6 +45,10 @@ fn main() {
             "refresh_session",
             "set_view_only",
             "send_clipboard",
+            // OS clipboard, natively. `navigator.clipboard` is gesture-gated in
+            // the webview, so remote → local text can never land through it.
+            "set_local_clipboard",
+            "read_local_clipboard",
             "reconnect_now",
             "release_all_keys",
             "capture_thumbnail",

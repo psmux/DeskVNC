@@ -256,7 +256,9 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           setRemoteClipboard(ev.text);
           break;
         case "clipboard-notify":
-          break; // formats advertised only; we pull text on demand
+          // Formats only, no data. The session already answers a text notify
+          // with a request, so the text follows as its own `clipboard-text`.
+          break;
         case "bell":
           setBellTick((n) => n + 1);
           break;

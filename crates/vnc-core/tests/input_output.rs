@@ -472,6 +472,76 @@ async fn extended_clipboard_notify_is_surfaced() {
     handle.shutdown();
 }
 
+/// A notify carries no data, so it has to be answered with a request or the
+/// text the user copied on the remote never crosses the wire.
+#[tokio::test]
+async fn extended_clipboard_notify_is_answered_with_a_request() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    let flags = vnc_core::clipboard::ACTION_NOTIFY | vnc_core::clipboard::FORMAT_TEXT;
+    let mut body = vec![0u8, 0, 0];
+    body.extend_from_slice(&(-4i32).to_be_bytes());
+    body.extend_from_slice(&flags.to_be_bytes());
+    server.send_cut_text_body(body);
+    flush(&handle, &server, 2).await;
+
+    let bodies = server.cut_text_bodies();
+    assert_eq!(bodies.len(), 1, "exactly one ClientCutText, the request");
+    let sent = u32::from_be_bytes([bodies[0][7], bodies[0][8], bodies[0][9], bodies[0][10]]);
+    assert_eq!(
+        sent,
+        vnc_core::clipboard::ACTION_REQUEST | vnc_core::clipboard::FORMAT_TEXT
+    );
+    handle.shutdown();
+}
+
+/// Neither peer may send an extended message before it has both sent and
+/// received a caps announcement, so the server's caps must be answered.
+#[tokio::test]
+async fn server_clipboard_caps_are_answered_once_with_ours() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // A server caps message: flags word plus one size per advertised format.
+    let server_caps = || {
+        let flags = vnc_core::clipboard::ACTION_CAPS
+            | vnc_core::clipboard::ACTION_REQUEST
+            | vnc_core::clipboard::ACTION_NOTIFY
+            | vnc_core::clipboard::ACTION_PROVIDE
+            | vnc_core::clipboard::FORMAT_TEXT;
+        let mut body = vec![0u8, 0, 0];
+        body.extend_from_slice(&(-8i32).to_be_bytes());
+        body.extend_from_slice(&flags.to_be_bytes());
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body
+    };
+    server.send_cut_text_body(server_caps());
+    server.send_cut_text_body(server_caps());
+    flush(&handle, &server, 2).await;
+
+    let bodies = server.cut_text_bodies();
+    assert_eq!(bodies.len(), 1, "our caps go out once per connection");
+    let body = &bodies[0];
+    let len = i32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+    assert!(len < 0, "caps are an extended message (negative length)");
+    let flags = u32::from_be_bytes([body[7], body[8], body[9], body[10]]);
+    assert_ne!(flags & vnc_core::clipboard::ACTION_CAPS, 0);
+    assert_ne!(flags & vnc_core::clipboard::ACTION_NOTIFY, 0);
+    assert_ne!(flags & vnc_core::clipboard::FORMAT_TEXT, 0);
+
+    // Caps advertise every supported action, notify included. Reading that as
+    // an offer of data would announce a remote clipboard that does not exist.
+    events.drain_for(Duration::from_millis(50)).await;
+    assert!(
+        !events.any(|e| matches!(e, SessionEvent::ClipboardNotify { .. })),
+        "a caps announcement is not a notify"
+    );
+    handle.shutdown();
+}
+
 #[tokio::test]
 async fn an_oversized_server_cut_text_is_rejected_as_a_protocol_error() {
     // Hostile-server hygiene: a 100 MiB claim must not be allocated.

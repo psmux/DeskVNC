@@ -35,7 +35,9 @@ import {
   inTauri,
   listenCapture,
   openExternal,
+  readClipboard,
   safeInvoke,
+  writeClipboard,
   type CaptureStatus,
 } from "../lib/tauri";
 
@@ -422,10 +424,12 @@ function SessionView(): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.state]);
 
-  // Remote clipboard -> local (best effort; served as text only)
+  // Remote clipboard -> local (text only). The write is native: the webview's
+  // own clipboard API is gesture-gated and this text arrives from the socket.
   useEffect(() => {
-    if (session.remoteClipboard === null) return;
-    void navigator.clipboard?.writeText(session.remoteClipboard).catch(() => undefined);
+    const text = session.remoteClipboard;
+    if (text === null) return;
+    void writeClipboard(text);
   }, [session.remoteClipboard]);
 
   // Bell: brief visual pulse via toast
@@ -712,14 +716,14 @@ function SessionView(): ReactNode {
   }, [session.desktopName, push]);
 
   const clipboardSend = useCallback(async (): Promise<void> => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text) {
-        session.sendClipboard(text);
-        push("success", "Clipboard sent to remote");
-      }
-    } catch {
+    const text = await readClipboard();
+    if (text === null) {
       push("warning", "Could not read the local clipboard");
+      return;
+    }
+    if (text) {
+      session.sendClipboard(text);
+      push("success", "Clipboard sent to remote");
     }
   }, [session, push]);
 

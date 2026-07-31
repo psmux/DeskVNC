@@ -29,6 +29,19 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+- Text copied on the remote never reached the local clipboard. Two independent
+  faults, both on that path:
+  - The Extended Clipboard handshake was half implemented. The client
+    advertised the pseudo-encoding but never answered the server's capabilities
+    message with its own, and never answered a `notify` (which carries no data)
+    with a `request`, so servers using the modern flow had no way to hand the
+    text over. A capabilities announcement also sets the notify bit, so it was
+    additionally being read as an offer of data.
+  - The delivery into the OS clipboard went through `navigator.clipboard`.
+    WebKit only honours it while a user gesture is live, and remote clipboard
+    text arrives from the socket, so the write was rejected and the rejection
+    swallowed. Both directions now go through the shell
+    (`set_local_clipboard` / `read_local_clipboard`).
 - Native menu items were inert. `menu.rs` emitted a `menu://action` event for
   every custom item, but nothing in the frontend listened for it, so
   **Settings** and **Help** did nothing when selected. The frontend now routes
