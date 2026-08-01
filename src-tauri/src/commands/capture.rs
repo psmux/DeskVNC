@@ -42,7 +42,20 @@ pub struct CaptureState {
     controller: Mutex<CaptureController>,
     /// The session the user has pass-through switched ON for. Survives blur so
     /// capture can re-arm on focus; cleared by every real "off".
-    desired: Mutex<Option<String>>,
+    desired: Mutex<Option<Desire>>,
+}
+
+/// Who capture belongs to: a session, and the webview that asked for it.
+///
+/// The window label used to be reconstructed from the session id, every
+/// session had a window called `session-<id>`. A session shown as a tab lives
+/// in `main` next to every other tab, so there is nothing to reconstruct: the
+/// label is recorded here when pass-through is switched on, and the focus
+/// hooks below compare against it.
+#[derive(Clone)]
+struct Desire {
+    session_id: String,
+    window_label: String,
 }
 
 impl CaptureState {
@@ -81,7 +94,7 @@ impl CaptureState {
     }
 
     /// Session the user wants capture for, grabbed or not.
-    fn desired(&self) -> Option<String> {
+    fn desired(&self) -> Option<Desire> {
         self.desired.lock().clone()
     }
 }
@@ -160,12 +173,16 @@ fn status_or_error(result: Result<CaptureStatus, CaptureError>) -> Result<Captur
 #[tauri::command]
 pub async fn capture_start(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<CaptureState>>,
     session_id: String,
 ) -> Result<CaptureStatus, String> {
     validate_session_id(&session_id)?;
     let capture = state.inner().clone();
     let id = session_id.clone();
+    // Whichever webview asked is the one whose focus arms the grab, a session
+    // window of its own, or `main` when the session is a tab.
+    let window_label = window.label().to_string();
 
     // Installing a hook spawns a thread and waits briefly for it to report;
     // that must not happen on the main thread.
@@ -173,7 +190,10 @@ pub async fn capture_start(
         let mut controller = capture.controller.lock();
         let result = controller.start(&id);
         if result.is_ok() {
-            *capture.desired.lock() = Some(id.clone());
+            *capture.desired.lock() = Some(Desire {
+                session_id: id.clone(),
+                window_label,
+            });
         }
         status_or_error(result)
     })
@@ -199,7 +219,7 @@ pub async fn capture_stop(
 
     let status = tauri::async_runtime::spawn_blocking(move || {
         let mut desired = capture.desired.lock();
-        if desired.as_deref() == Some(id.as_str()) {
+        if desired.as_ref().map(|d| d.session_id.as_str()) == Some(id.as_str()) {
             *desired = None;
         }
         drop(desired);
@@ -238,49 +258,56 @@ pub fn capture_request_permission() {
 // Auto-release hooks, called from `lib.rs`
 // ---------------------------------------------------------------------------
 
-/// Session id embedded in a session window's label, if it is one.
-pub fn session_id_from_label(label: &str) -> Option<&str> {
-    label.strip_prefix("session-").filter(|id| !id.is_empty())
-}
-
 /// Disarm capture because its window lost focus, keeping the user's intent so
 /// focusing the window again re-arms it.
+///
+/// Called for *every* window, not only session windows: the label recorded
+/// when pass-through was switched on is what decides whether this blur is the
+/// one that matters, which is the only thing that still works when the session
+/// is a tab inside `main`.
 pub fn disarm_for_window(app: &AppHandle, window_label: &str) {
-    let Some(session_id) = session_id_from_label(window_label) else {
-        return;
-    };
     let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
         return;
     };
-    if capture.owner().as_deref() != Some(session_id) {
+    let Some(desire) = capture.desired() else {
+        return;
+    };
+    if desire.window_label != window_label {
+        return;
+    }
+    if capture.owner().as_deref() != Some(desire.session_id.as_str()) {
         return;
     }
     let status = capture.controller.lock().release();
-    tracing::debug!(session = %session_id, "capture disarmed (window blurred)");
-    emit_status(app, status, Some(session_id));
+    tracing::debug!(session = %desire.session_id, "capture disarmed (window blurred)");
+    emit_status(app, status, Some(&desire.session_id));
 }
 
 /// Re-arm capture when the window the user enabled pass-through for regains
 /// focus. Silent on failure, a permission revoked in the meantime shows up
 /// through the status event, not an error dialog.
+///
+/// Switching *tabs* is not a focus change, so the tab that goes to the back
+/// releases capture from the frontend (see `ui/src/screens/Session.tsx`); this
+/// hook only covers the whole window losing and regaining focus.
 pub fn rearm_for_window(app: &AppHandle, window_label: &str) {
-    let Some(session_id) = session_id_from_label(window_label) else {
-        return;
-    };
     let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
         return;
     };
-    if capture.desired().as_deref() != Some(session_id) {
+    let Some(desire) = capture.desired() else {
+        return;
+    };
+    if desire.window_label != window_label {
         return;
     }
-    let status = match capture.controller.lock().start(session_id) {
+    let status = match capture.controller.lock().start(&desire.session_id) {
         Ok(status) => status,
         Err(e) => {
-            tracing::warn!(session = %session_id, "could not re-arm capture: {e}");
+            tracing::warn!(session = %desire.session_id, "could not re-arm capture: {e}");
             CaptureStatus::Inactive
         }
     };
-    emit_status(app, status, Some(session_id));
+    emit_status(app, status, Some(&desire.session_id));
 }
 
 /// Fully release capture for a session (disconnect, window close, view-only).
@@ -289,7 +316,7 @@ pub fn release_for_session(app: &AppHandle, session_id: &str) {
         return;
     };
     let mut desired = capture.desired.lock();
-    if desired.as_deref() == Some(session_id) {
+    if desired.as_ref().map(|d| d.session_id.as_str()) == Some(session_id) {
         *desired = None;
     }
     drop(desired);
@@ -297,10 +324,19 @@ pub fn release_for_session(app: &AppHandle, session_id: &str) {
     emit_status(app, status, Some(session_id));
 }
 
-/// Fully release capture for whichever session owns it, from any window label.
+/// Fully release capture when the window that holds it goes away.
+///
+/// A window with no grab against its name is left alone, so this is safe to
+/// call for every window close and every destroy.
 pub fn release_for_window(app: &AppHandle, window_label: &str) {
-    if let Some(session_id) = session_id_from_label(window_label) {
-        release_for_session(app, session_id);
+    let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
+        return;
+    };
+    let Some(desire) = capture.desired() else {
+        return;
+    };
+    if desire.window_label == window_label {
+        release_for_session(app, &desire.session_id);
     }
 }
 
@@ -325,14 +361,6 @@ pub fn force_release(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn session_ids_are_recovered_from_window_labels() {
-        assert_eq!(session_id_from_label("session-abc123"), Some("abc123"));
-        assert_eq!(session_id_from_label("session-"), None);
-        assert_eq!(session_id_from_label("main"), None);
-        assert_eq!(session_id_from_label(""), None);
-    }
 
     #[test]
     fn permission_and_unsupported_are_states_not_errors() {
