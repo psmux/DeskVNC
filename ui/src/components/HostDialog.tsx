@@ -1,6 +1,7 @@
 /** Add/Edit host dialog with progressive disclosure (PRD/11 §3.3). */
 import { useMemo, useState, type ReactNode } from "react";
-import type { HostGroup, HostProfile, HostTag, OsHint, QualityPreset, ScalingMode } from "../lib/types";
+import type { HostGroup, HostProfile, HostTag, OsHint, QualityPreset, ScalingMode, SshTunnelSettings } from "../lib/types";
+import { blankSshTunnel, parseSshTunnel } from "../lib/types";
 import { parseConnectAddress } from "../lib/address";
 import { Dialog, Select } from "./primitives";
 import { IconChevronDown, IconChevronRight } from "./icons";
@@ -21,6 +22,14 @@ export interface HostDraft {
   scalingMode: ScalingMode;
   keyboardMode: string;
   passthrough: boolean;
+  /** Parsed `sshTunnel` blob; `null` when the host has never configured one. */
+  sshTunnel: SshTunnelSettings | null;
+  /**
+   * SSH passphrase (or key passphrase) to save. Like `password`, write-only:
+   * empty means "leave whatever is in the keychain alone", and nothing stored
+   * is ever read back into the dialog.
+   */
+  sshPassphrase: string;
   wolMac: string | null;
   /**
    * UI-only: this MAC came from discovery, not from the stored profile. Drives
@@ -46,6 +55,8 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     scalingMode: h?.scalingMode ?? "aspect-fit",
     keyboardMode: h?.keyboardMode ?? "auto",
     passthrough: h?.passthrough ?? false,
+    sshTunnel: parseSshTunnel(h?.sshTunnel),
+    sshPassphrase: "",
     // Falls through to the prefill so a MAC learned by discovery survives into
     // the draft, both for a brand-new host and for a saved one that has none.
     wolMac: h?.wolMac ?? prefill?.wolMac ?? null,
@@ -68,8 +79,12 @@ export function HostDialog({
 }): ReactNode {
   const [d, setD] = useState<HostDraft>(initial);
   // Open Advanced when the dialog arrives with a MAC the user never typed, // discovery filled it in, and a value silently folded away is one the user
-  // can neither check nor correct.
-  const [advanced, setAdvanced] = useState(() => Boolean(initial.macFromDiscovery));
+  // can neither check nor correct. An enabled SSH tunnel opens it too: it
+  // changes how every connection is made and should not be editable only for
+  // those who remember it exists.
+  const [advanced, setAdvanced] = useState(
+    () => Boolean(initial.macFromDiscovery) || Boolean(initial.sshTunnel?.enabled),
+  );
   const [touched, setTouched] = useState(false);
 
   const set = (patch: Partial<HostDraft>): void => setD((prev) => ({ ...prev, ...patch }));
@@ -324,6 +339,12 @@ export function HostDialog({
                   </span>
                 </span>
               </label>
+              <SshTunnelSection
+                tunnel={d.sshTunnel}
+                passphrase={d.sshPassphrase}
+                onChange={(sshTunnel) => set({ sshTunnel })}
+                onPassphrase={(sshPassphrase) => set({ sshPassphrase })}
+              />
             </div>
           ) : null}
         </div>
@@ -338,6 +359,122 @@ export function HostDialog({
         </div>
       </form>
     </Dialog>
+  );
+}
+
+/**
+ * The SSH tunnel editor inside Advanced. The auth secret itself never
+ * appears here: `stored` uses the passphrase saved in the keychain for this
+ * host (the same one the Files panel uses), `agent` asks the running
+ * ssh-agent, and `key-file` names a key on disk.
+ */
+function SshTunnelSection({
+  tunnel,
+  passphrase,
+  onChange,
+  onPassphrase,
+}: {
+  tunnel: SshTunnelSettings | null;
+  passphrase: string;
+  onChange: (tunnel: SshTunnelSettings) => void;
+  onPassphrase: (passphrase: string) => void;
+}): ReactNode {
+  const t = tunnel ?? blankSshTunnel();
+  const patch = (p: Partial<SshTunnelSettings>): void => onChange({ ...t, ...p });
+
+  return (
+    <div className="space-y-4 rounded-md border border-subtle p-3">
+      <label className="flex items-start gap-2.5 text-sm text-primary">
+        <input
+          type="checkbox"
+          className="mt-0.5 accent-(--accent)"
+          checked={t.enabled}
+          onChange={(e) => patch({ enabled: e.target.checked })}
+        />
+        <span>
+          Tunnel over SSH
+          <span className="block text-xs text-tertiary">
+            Runs the VNC connection through an SSH login, so it works for servers that
+            only listen on the remote computer&apos;s own loopback, and is encrypted end to end
+          </span>
+        </span>
+      </label>
+      {t.enabled ? (
+        <>
+          <div className="grid grid-cols-[1fr_120px] gap-3">
+            <Field label="SSH host" hint="Leave blank to SSH to the VNC address above">
+              <input
+                className="field mono"
+                value={t.host}
+                placeholder="Same as the VNC address"
+                spellCheck={false}
+                onChange={(e) => patch({ host: e.target.value })}
+              />
+            </Field>
+            <Field label="SSH port">
+              <input
+                className="field mono"
+                type="number"
+                min={1}
+                max={65535}
+                value={t.port}
+                onChange={(e) => patch({ port: parseInt(e.target.value, 10) || 22 })}
+              />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="User" hint="Leave blank to use your local username">
+              <input
+                className="field mono"
+                value={t.user}
+                placeholder="Same as this computer"
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(e) => patch({ user: e.target.value })}
+              />
+            </Field>
+            <Field label="Authentication" hint="Secrets stay in your keychain / agent">
+              <Select
+                value={t.auth}
+                onChange={(e) =>
+                  patch({ auth: e.target.value as SshTunnelSettings["auth"] })
+                }
+              >
+                <option value="stored">Saved passphrase (or agent)</option>
+                <option value="agent">SSH agent</option>
+                <option value="key-file">Private key file</option>
+              </Select>
+            </Field>
+          </div>
+          {t.auth === "key-file" ? (
+            <Field label="Private key path" hint="An OpenSSH private key on this computer">
+              <input
+                className="field mono"
+                value={t.keyPath ?? ""}
+                placeholder="~/.ssh/id_ed25519"
+                spellCheck={false}
+                onChange={(e) => patch({ keyPath: e.target.value || null })}
+              />
+            </Field>
+          ) : null}
+          {t.auth !== "agent" ? (
+            <Field
+              label={t.auth === "key-file" ? "Key passphrase" : "SSH password"}
+              hint="Stored in your system keychain, shared with the Files panel. Leave blank to keep what is already saved."
+            >
+              <input
+                className="field"
+                type="password"
+                value={passphrase}
+                placeholder="Optional"
+                autoComplete="off"
+                onChange={(e) => onPassphrase(e.target.value)}
+              />
+            </Field>
+          ) : null}
+        </>
+      ) : null}
+    </div>
   );
 }
 

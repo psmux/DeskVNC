@@ -103,6 +103,93 @@ export function blankHostProfile(): HostProfile {
   };
 }
 
+/**
+ * The `hosts.sshTunnel` JSON blob, camelCase, mirrors the Rust
+ * `SshTunnelSettings` in `src-tauri/src/tunnel.rs`. When `enabled`, the RFB
+ * stream runs over a `direct-tcpip` channel of an SSH connection to the
+ * gateway instead of a plain TCP socket.
+ */
+export interface SshTunnelSettings {
+  enabled: boolean;
+  /** SSH gateway host; empty means "the profile's VNC address". */
+  host: string;
+  port: number;
+  /** Remote user; empty means "same as the local user". */
+  user: string;
+  /** Same auth kinds as the Files panel; secrets stay in the keychain. */
+  auth: "stored" | "key-file" | "agent";
+  keyPath: string | null;
+}
+
+export function blankSshTunnel(): SshTunnelSettings {
+  return { enabled: false, host: "", port: 22, user: "", auth: "stored", keyPath: null };
+}
+
+/**
+ * Read a stored tunnel blob. Tolerant of missing fields (older blobs) but a
+ * blob that is not an object at all reads as "no tunnel", the Rust side is
+ * the one that must refuse to connect on a malformed blob, the editor just
+ * needs something to show.
+ */
+export function parseSshTunnel(raw: string | null | undefined): SshTunnelSettings | null {
+  if (!raw || !raw.trim() || raw.trim() === "null") return null;
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!v || typeof v !== "object") return null;
+    const o = v as Record<string, unknown>;
+    return {
+      enabled: o.enabled === true,
+      host: typeof o.host === "string" ? o.host : "",
+      port: typeof o.port === "number" && Number.isFinite(o.port) ? o.port : 22,
+      user: typeof o.user === "string" ? o.user : "",
+      auth: o.auth === "key-file" || o.auth === "agent" ? o.auth : "stored",
+      keyPath: typeof o.keyPath === "string" && o.keyPath ? o.keyPath : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Serialize for the `sshTunnel` column. A tunnel that was never enabled and
+ * never edited stores `null`, keeping the column empty for the overwhelming
+ * majority of hosts.
+ */
+export function serializeSshTunnel(t: SshTunnelSettings | null): string | null {
+  if (!t) return null;
+  const blank = blankSshTunnel();
+  const untouched =
+    !t.enabled &&
+    t.host === blank.host &&
+    t.port === blank.port &&
+    t.user === blank.user &&
+    t.auth === blank.auth &&
+    t.keyPath === blank.keyPath;
+  return untouched ? null : JSON.stringify(t);
+}
+
+/**
+ * Mirrors `SessionConnectOutcome` in `commands/session.rs` (tagged on
+ * `status`). The ssh variants only occur for a profile whose tunnel is
+ * enabled, before any session exists.
+ */
+export type SessionConnectOutcome =
+  | { status: "started"; sessionId: string }
+  | {
+      status: "ssh-host-key-prompt";
+      host: string;
+      port: number;
+      keyType: string;
+      fingerprint: string;
+    }
+  | {
+      status: "ssh-host-key-changed";
+      host: string;
+      port: number;
+      expected: string;
+      actual: string;
+    };
+
 /** Mirrors `vnc_store::Group`. */
 export interface HostGroup {
   id: string;

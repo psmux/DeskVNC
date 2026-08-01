@@ -26,6 +26,7 @@ import type {
   CredentialRequest,
   PinScheme,
   QualityPreset,
+  SessionConnectOutcome,
   SessionEventPayload,
   SessionState,
   SessionStats,
@@ -58,11 +59,30 @@ export interface SessionParams {
   name: string;
 }
 
+/**
+ * First contact (or a hard-stop change) of the SSH tunnel gateway's host key.
+ * Unlike `CertPromptState` this happens BEFORE any session exists: the
+ * shell's `connect_session` returned without spawning one, and accepting
+ * re-invokes it with the fingerprint.
+ */
+export interface SshHostKeyPromptState {
+  host: string;
+  port: number;
+  /** Present for first contact. */
+  keyType?: string;
+  fingerprint: string;
+  /** A pinned key CHANGED: never acceptable from here. */
+  changed: boolean;
+  expected?: string;
+}
+
 export interface SessionApi {
   state: SessionState;
   desktopName: string;
   stats: SessionStats | null;
   certPrompt: CertPromptState | null;
+  /** The SSH tunnel gateway needs a trust decision before connecting. */
+  sshHostKeyPrompt: SshHostKeyPromptState | null;
   /** Handshake is parked waiting for a password (PRD/10 §3.4). */
   credentialRequest: CredentialRequest | null;
   remoteClipboard: string | null;
@@ -84,6 +104,10 @@ export interface SessionApi {
   captureThumbnail: (width: number, height: number, rgba: Uint8Array) => Promise<void>;
   trustCertificate: (permanent: boolean) => void;
   dismissCertPrompt: () => void;
+  /** Pin the gateway key shown in `sshHostKeyPrompt` and connect again. */
+  acceptSshHostKey: () => void;
+  /** Dismiss the gateway prompt and abandon the connection attempt. */
+  dismissSshHostKeyPrompt: () => void;
   /**
    * Answer the credentials prompt. `username` is null for password-only
    * methods; `save` asks the shell to remember it *if* the server accepts it.
@@ -167,6 +191,7 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
   const [desktopName, setDesktopName] = useState(params.name);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
+  const [sshHostKeyPrompt, setSshHostKeyPrompt] = useState<SshHostKeyPromptState | null>(null);
   const [credentialRequest, setCredentialRequest] = useState<CredentialRequest | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<string | null>(null);
   const [bellTick, setBellTick] = useState(0);
@@ -178,6 +203,8 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
   const inputWarned = useRef(false);
   /** Set by `retryConnect({ reprompt: true })`; consumed by the next connect. */
   const repromptRef = useRef(false);
+  /** Set by `acceptSshHostKey`; consumed (and cleared) by the next connect. */
+  const acceptSshHostKeyRef = useRef<string | null>(null);
   /** Browser dev only: the synthetic handshake waiting for an answer. */
   const mockAuthRef = useRef<MockAuth | null>(null);
 
@@ -342,17 +369,56 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
       if (cancelled) return;
       setState({ state: "connecting" });
       try {
-        const sid = await invoke<string>("connect_session", {
+        const acceptSshHostKey = acceptSshHostKeyRef.current;
+        acceptSshHostKeyRef.current = null;
+        const outcome = await invoke<SessionConnectOutcome>("connect_session", {
           sessionId: params.sessionId,
           profileId: params.profileId,
           address: params.address,
           port: params.port,
           // Retrying after a rejected password must not replay it, ask.
           ignoreStoredCredentials: repromptRef.current,
+          // Answers a previous ssh-host-key-prompt outcome, once.
+          acceptSshHostKey,
           onEvent: channel,
         });
         repromptRef.current = false;
-        if (typeof sid === "string" && sid.length > 0) sessionIdRef.current = sid;
+
+        // The SSH gateway needs a trust decision before anything connects.
+        // No session was spawned; the dialog re-runs the connect on accept.
+        // State stays "connecting": the attempt is pending on the answer.
+        if (outcome.status === "ssh-host-key-prompt") {
+          if (!cancelled) {
+            setSshHostKeyPrompt({
+              host: outcome.host,
+              port: outcome.port,
+              keyType: outcome.keyType,
+              fingerprint: outcome.fingerprint,
+              changed: false,
+            });
+          }
+          return;
+        }
+        // Pinned gateway key CHANGED: hard stop, mirror of the sidecar rule.
+        if (outcome.status === "ssh-host-key-changed") {
+          if (!cancelled) {
+            setSshHostKeyPrompt({
+              host: outcome.host,
+              port: outcome.port,
+              fingerprint: outcome.actual,
+              expected: outcome.expected,
+              changed: true,
+            });
+            setState({
+              state: "disconnected",
+              reason: "The SSH gateway's host key has changed.",
+              can_retry: false,
+            });
+          }
+          return;
+        }
+
+        if (outcome.sessionId) sessionIdRef.current = outcome.sessionId;
 
         // Safety net for a prompt raised between the session starting and this
         // window being ready to hear about it. Events are fire-and-forget, so
@@ -498,6 +564,26 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     disconnect();
   }, [disconnect]);
 
+  const acceptSshHostKey = useCallback((): void => {
+    // A CHANGED key is never acceptable from here, same as the sidecar.
+    if (!sshHostKeyPrompt || sshHostKeyPrompt.changed) return;
+    acceptSshHostKeyRef.current = sshHostKeyPrompt.fingerprint;
+    setSshHostKeyPrompt(null);
+    // No session exists yet, so "accept" means "run the connect again", this
+    // time carrying the fingerprint the user just verified.
+    setState({ state: "connecting" });
+    setConnectNonce((n) => n + 1);
+  }, [sshHostKeyPrompt]);
+
+  const dismissSshHostKeyPrompt = useCallback((): void => {
+    setSshHostKeyPrompt(null);
+    setState({
+      state: "disconnected",
+      reason: "The SSH gateway's host key was not accepted.",
+      can_retry: true,
+    });
+  }, []);
+
   const submitCredentials = useCallback(
     (username: string | null, password: string, save: boolean): void => {
       // Optimistically close the dialog: the handshake resumes now, and a
@@ -537,6 +623,7 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     // Clear anything left over from the attempt that failed, so the fresh
     // connect starts from a clean screen rather than a stale prompt.
     setCertPrompt(null);
+    setSshHostKeyPrompt(null);
     setCredentialRequest(null);
     setStats(null);
     setState({ state: "connecting" });
@@ -544,10 +631,11 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
   }, []);
 
   return {
-    state, desktopName, stats, certPrompt, credentialRequest, remoteClipboard, bellTick,
+    state, desktopName, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
     sendInput, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate,
-    dismissCertPrompt, submitCredentials, dismissCredentialPrompt, retryConnect,
+    dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
+    submitCredentials, dismissCredentialPrompt, retryConnect,
   };
 }
 

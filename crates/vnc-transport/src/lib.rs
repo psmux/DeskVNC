@@ -3,10 +3,11 @@
 //! Byte-stream transports for DeskVNCViewer: plain TCP, and TLS (for VeNCrypt
 //! X509 subtypes) with trust-on-first-use certificate pinning.
 //!
-//! SSH tunnelling for the RFB connection is not implemented here yet. Host
-//! profiles already carry an `ssh_tunnel` column and an `ssh_passphrase`
-//! credential slot, and `vnc-files` speaks SSH for SFTP, but nothing routes the
-//! protocol stream through a tunnel. Adding it belongs behind [`Stream`].
+//! SSH tunnelling for the RFB connection does not live here either, it would
+//! drag an SSH stack into every consumer, but it plugs in through
+//! [`StreamConnector`]: `vnc-files` owns the SSH connection (it already speaks
+//! SSH for SFTP) and hands the protocol layer an opened channel as a
+//! [`BoxedStream`].
 //!
 //! The core protocol code is generic over [`Stream`], so upgrading a plain TCP
 //! connection to TLS mid-handshake (as VeNCrypt requires) is transparent.
@@ -27,6 +28,32 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 /// Boxed stream, used where the concrete transport varies at runtime.
 pub type BoxedStream = Pin<Box<dyn Stream>>;
+
+/// A boxed connect future, the shape [`StreamConnector`] implementations
+/// return (object-safe async without an `async_trait` dependency).
+pub type ConnectFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = Result<BoxedStream>> + Send + 'a>>;
+
+/// An alternative way of opening the byte stream a VNC session runs over.
+///
+/// The session core dials plain TCP itself; anything else, today an SSH
+/// tunnel, is injected as one of these. `host`/`port` are the VNC endpoint
+/// *as the connector should interpret it*: for an SSH tunnel that means the
+/// address is resolved by the remote SSH server, which is the whole point,
+/// `localhost:5900` names the loopback of the tunnelled machine, not ours.
+///
+/// Called once per connection attempt, so the auto-reconnect supervisor
+/// exercises it again after a drop; implementations must be prepared to
+/// re-establish whatever carrier they run over. `timeout` is the session's
+/// connect budget for the whole attempt.
+pub trait StreamConnector: Send + Sync {
+    fn connect(&self, host: &str, port: u16, timeout: std::time::Duration) -> ConnectFuture<'_>;
+
+    /// Short, secret-free label for logs and the `Connecting` state.
+    fn describe(&self) -> String {
+        "custom transport".to_string()
+    }
+}
 
 /// Outcome of verifying a server certificate against the TOFU store.
 #[derive(Debug, Clone, PartialEq, Eq)]

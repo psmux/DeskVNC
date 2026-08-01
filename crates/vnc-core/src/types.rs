@@ -481,10 +481,28 @@ impl CertPins {
 // Connection options
 // ---------------------------------------------------------------------------
 
+/// An injected transport (today: the SSH tunnel), see
+/// [`vnc_transport::StreamConnector`]. Newtype so `ConnectOptions` can keep
+/// deriving `Debug` without asking every connector to implement it.
+#[derive(Clone)]
+pub struct Connector(pub std::sync::Arc<dyn vnc_transport::StreamConnector>);
+
+impl std::fmt::Debug for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Connector")
+            .field(&self.0.describe())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
     pub host: String,
     pub port: u16,
+    /// When set, the byte stream comes from here instead of a direct TCP
+    /// connect; `host`/`port` are interpreted by the connector (for an SSH
+    /// tunnel, resolved on the far side).
+    pub connector: Option<Connector>,
     pub credentials: Credentials,
     /// None = automatic strongest-first selection.
     pub security_pref: Option<SecurityType>,
@@ -507,6 +525,7 @@ impl ConnectOptions {
         Self {
             host: host.into(),
             port,
+            connector: None,
             credentials: Credentials::default(),
             security_pref: None,
             quality: QualityPreset::Auto,

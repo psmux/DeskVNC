@@ -11,6 +11,7 @@ mod menu;
 mod state;
 mod thumbnail;
 mod tray;
+mod tunnel;
 mod windows;
 
 use std::sync::Arc;

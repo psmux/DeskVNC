@@ -39,6 +39,7 @@
 //! | [`transfer`] | events, progress throttling, resume offsets, conflict rules |
 //! | [`queue`] | concurrency limit + per-item cancellation |
 //! | [`session`] | the live SSH+SFTP connection and the transfer loops |
+//! | [`tunnel`] | SSH tunnelling for the RFB stream, `direct-tcpip` channels |
 //! | [`probe`] | "is SSH reachable?", for enabling the Files button |
 
 #![forbid(unsafe_code)]
@@ -51,6 +52,7 @@ pub mod probe;
 pub mod queue;
 pub mod session;
 pub mod transfer;
+pub mod tunnel;
 
 pub use config::{
     canonical_host, host_port, resolver_host, FileTransferConfig, SshAuth, DEFAULT_SSH_PORT,
@@ -64,3 +66,4 @@ pub use transfer::{
     eta_secs, ConflictOutcome, ConflictPolicy, Direction, TransferEvent, TransferPlan,
     LARGE_TRANSFER_WARN_BYTES, PROGRESS_EVENTS_PER_SEC,
 };
+pub use tunnel::{SshTunnel, TunnelStream};

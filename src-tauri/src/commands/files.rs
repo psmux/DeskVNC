@@ -109,6 +109,27 @@ impl FilesState {
         }
     }
 
+    /// The shared SSH host-key pin store, in the shape [`SshTunnel`] and
+    /// [`SftpSession`] verify against. One store for both features: trusting
+    /// a machine once covers its tunnel and its Files panel alike.
+    pub fn host_key_verifier(&self) -> Arc<Mutex<HostKeyStore>> {
+        self.host_keys.clone()
+    }
+
+    /// Pin a host key the user has explicitly accepted, and persist.
+    pub fn trust_host_key(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) {
+        self.host_keys
+            .lock()
+            .trust(host, port, key_type, fingerprint, now_secs());
+        self.persist_pins();
+    }
+
+    /// Refresh a pin's last-seen stamp after a verified connect, and persist.
+    pub fn touch_host_key(&self, host: &str, port: u16) {
+        self.host_keys.lock().touch(host, port, now_secs());
+        self.persist_pins();
+    }
+
     /// Cancel and forget every sidecar bound to a window (window closing).
     pub fn shutdown_for_window(&self, window_label: &str) {
         let doomed: Vec<String> = self
@@ -281,7 +302,13 @@ pub async fn files_connect(
         disconnect_entry(&state, &session_id).await;
     }
 
-    let auth = build_auth(&app, &config).await?;
+    let auth = build_auth(
+        &app,
+        config.auth,
+        config.key_path.as_deref(),
+        config.profile_id.as_deref(),
+    )
+    .await?;
     // An empty username means "same user as here", the overwhelmingly common
     // case for a personal machine, and better than making the user retype it.
     let username = if config.username.trim().is_empty() {
@@ -720,22 +747,25 @@ async fn disconnect_entry(state: &FilesState, session_id: &str) {
 }
 
 /// Build the auth method **in Rust**. The webview picks a kind; the secret
-/// comes from the keychain here and never travels back out.
-async fn build_auth(app: &AppHandle, config: &FilesConnectRequest) -> Result<SshAuth, String> {
-    match config.auth {
+/// comes from the keychain here and never travels back out. Shared with the
+/// SSH tunnel (`crate::tunnel`), which authenticates exactly like the sidecar.
+pub(crate) async fn build_auth(
+    app: &AppHandle,
+    auth: AuthKind,
+    key_path: Option<&str>,
+    profile_id: Option<&str>,
+) -> Result<SshAuth, String> {
+    match auth {
         AuthKind::Agent => Ok(SshAuth::Agent),
         AuthKind::KeyFile => {
-            let path = config
-                .key_path
-                .as_deref()
-                .ok_or("key-file authentication needs a keyPath")?;
-            let passphrase = stored_ssh_secret(app, config.profile_id.as_deref()).await;
+            let path = key_path.ok_or("key-file authentication needs a keyPath")?;
+            let passphrase = stored_ssh_secret(app, profile_id).await;
             Ok(SshAuth::KeyFile {
                 path: PathBuf::from(path),
                 passphrase,
             })
         }
-        AuthKind::Stored => match stored_ssh_secret(app, config.profile_id.as_deref()).await {
+        AuthKind::Stored => match stored_ssh_secret(app, profile_id).await {
             Some(secret) => Ok(SshAuth::Password(secret)),
             // Nothing saved: fall back to the agent rather than failing, which
             // is the common case on a developer machine.
@@ -808,7 +838,7 @@ fn guard_local_path(path: &str) -> Result<PathBuf, String> {
 
 /// The account this app is running as, used when the UI does not know which
 /// remote user to log in as.
-fn local_username() -> Result<String, String> {
+pub(crate) fn local_username() -> Result<String, String> {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .ok()
