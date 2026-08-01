@@ -14,8 +14,16 @@ use vnc_store::StoredCredentials;
 
 use crate::state::AppState;
 
-/// Store (or replace) the credentials for a host, keyed by host id, renaming
-/// a host never orphans its credential (PRD/03 §5).
+/// Store credentials for a host, keyed by host id, renaming a host never
+/// orphans its credential (PRD/03 §5).
+///
+/// MERGES field-by-field rather than replacing the blob: only the fields the
+/// caller sent (non-null) are overwritten. A host can hold a VNC password
+/// *and* an SSH passphrase (used by the Files panel and the SSH tunnel), and
+/// they are saved from different places in the UI; replacing wholesale meant
+/// saving one silently erased the other. This is the same rule the
+/// post-connect save applies (`PendingCredentialSave::merge_into`). Removing
+/// credentials is `delete_password`, which drops the whole entry.
 #[tauri::command]
 pub async fn save_password(
     state: State<'_, AppState>,
@@ -23,7 +31,25 @@ pub async fn save_password(
     creds: StoredCredentials,
 ) -> Result<(), String> {
     let credentials = state.credentials.clone();
-    super::blocking(move || credentials.save(&host_id, &creds)).await
+    super::blocking(move || {
+        let existing = match credentials.load(&host_id) {
+            Ok(existing) => existing.unwrap_or_default(),
+            Err(e) => {
+                // An unreadable (e.g. locked) store must not eat the new
+                // secret; save what was sent rather than failing the dialog.
+                tracing::warn!("could not read existing credentials before save: {e}");
+                StoredCredentials::default()
+            }
+        };
+        let merged = StoredCredentials {
+            vnc_password: creds.vnc_password.or(existing.vnc_password),
+            vencrypt_user: creds.vencrypt_user.or(existing.vencrypt_user),
+            vencrypt_pass: creds.vencrypt_pass.or(existing.vencrypt_pass),
+            ssh_passphrase: creds.ssh_passphrase.or(existing.ssh_passphrase),
+        };
+        credentials.save(&host_id, &merged)
+    })
+    .await
 }
 
 /// Whether a credential exists for this host (drives the key icon in the

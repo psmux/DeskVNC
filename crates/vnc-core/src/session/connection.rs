@@ -4,7 +4,6 @@
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -73,15 +72,29 @@ async fn with_timeout<T>(
     }
 }
 
-/// Resolve and open the TCP connection within `connect_timeout`.
-async fn open_tcp(
+/// Open the byte stream the session will run over, within `connect_timeout`:
+/// an injected transport (SSH tunnel) when the options carry one, plain TCP
+/// otherwise.
+async fn open_stream(
     options: &ConnectOptions,
     events: &mpsc::Sender<SessionEvent>,
-) -> Result<TcpStream> {
-    emit_state(events, SessionState::Resolving).await?;
+) -> Result<BoxedStream> {
     let host = options.host.clone();
     let port = options.port;
 
+    // A connector resolves the endpoint itself, for the SSH tunnel on the far
+    // side of the carrier, so local DNS resolution would be wrong as well as
+    // useless: `localhost` names the *tunnelled* machine's loopback.
+    if let Some(connector) = &options.connector {
+        emit_state(events, SessionState::Connecting).await?;
+        tracing::info!(transport = %connector.0.describe(), "opening the injected transport");
+        return Ok(connector
+            .0
+            .connect(&host, port, options.connect_timeout)
+            .await?);
+    }
+
+    emit_state(events, SessionState::Resolving).await?;
     // Resolution and connection both go through vnc-transport so we inherit
     // TCP_NODELAY, the tuned keepalive schedule (PRD/05 §6.4, essential for
     // noticing a dead peer quickly after a cable pull), IPv4-first ordering,
@@ -93,12 +106,16 @@ async fn open_tcp(
     }
 
     emit_state(events, SessionState::Connecting).await?;
-    Ok(vnc_transport::tcp::connect(&host, port, options.connect_timeout).await?)
+    let tcp = vnc_transport::tcp::connect(&host, port, options.connect_timeout).await?;
+    Ok(Box::pin(tcp))
 }
 
 /// Read the server's security-type offer. Returns the raw offered bytes in
 /// server order (for 3.3 the single unilaterally-chosen type).
-async fn read_security_offer(stream: &mut TcpStream, version: ProtocolVersion) -> Result<Vec<u8>> {
+async fn read_security_offer<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    version: ProtocolVersion,
+) -> Result<Vec<u8>> {
     match version {
         ProtocolVersion::V3_3 => {
             let ty = stream.read_u32().await.map_err(messages::map_eof)?;
@@ -125,7 +142,7 @@ async fn read_security_offer(stream: &mut TcpStream, version: ProtocolVersion) -
 }
 
 /// Read a `U32 length + text` failure reason, with a sanity cap.
-async fn read_reason_string(stream: &mut TcpStream) -> Result<String> {
+async fn read_reason_string<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
     let len = stream.read_u32().await.map_err(messages::map_eof)? as usize;
     if len > 4096 {
         return Err(VncError::Protocol(format!(
@@ -162,7 +179,7 @@ async fn establish(
     events: &mpsc::Sender<SessionEvent>,
     creds: &CredentialSource<'_>,
 ) -> Result<Established> {
-    let mut tcp = open_tcp(options, events).await?;
+    let mut tcp = open_stream(options, events).await?;
 
     // Version banner (server speaks first), bounded, a silent listener on
     // the port must not hang us forever.

@@ -92,6 +92,10 @@ Other models: `HostGroup` = `{ id, name, parentId, sort }`; `HostTag` =
 `creds` is a `StoredCredentials`:
 `{ vncPassword? vencryptUser? vencryptPass? sshPassphrase? }`.
 
+`save_password` **merges per field**: only the fields present (non-null) in
+`creds` are overwritten, so saving a VNC password never disturbs a stored SSH
+passphrase and vice versa. Clearing everything is `delete_password`.
+
 **SECURITY INVARIANT: passwords only travel JS → Rust.** There is deliberately
 no `get_password` command. Stored credentials are loaded inside
 `connect_session` on a blocking thread and never cross back into the webview.
@@ -122,7 +126,7 @@ Results stream as events; these commands do not return hosts.
 | Command | JS call | Returns |
 |---|---|---|
 | `open_session_window` | `invoke("open_session_window", { profileId })` or `{ address, port }` | `string`, the session id the new window will use |
-| `connect_session` | `invoke("connect_session", { sessionId? profileId? address, port, onEvent })` | `string`, the session id |
+| `connect_session` | `invoke("connect_session", { sessionId? profileId? address, port, acceptSshHostKey? onEvent })` | `SessionConnectOutcome`, see below |
 | `disconnect_session` | `invoke("disconnect_session", { sessionId })` | `void` |
 | `send_input` | raw body, see below | `void` |
 | `set_quality` | `invoke("set_quality", { sessionId, preset })` | `void` |
@@ -157,6 +161,29 @@ them.
 `onEvent` is a `Channel` and becomes the binary framebuffer/cursor transport
 (see `FRAME_FORMAT.md`). Control events go to the *invoking window*, so this
 must be called from the session window, not the library.
+
+Returns a `SessionConnectOutcome`, tagged on `status`:
+
+- `{ status: "started", sessionId }` — the session task is running; progress
+  arrives as events. This is the only outcome for a profile without an
+  enabled SSH tunnel.
+- `{ status: "ssh-host-key-prompt", host, port, keyType, fingerprint }` —
+  the profile's SSH tunnel gateway presented a key we have no pin for
+  (first contact). Show the fingerprint; if the user accepts, call
+  `connect_session` again with `acceptSshHostKey` set to that fingerprint.
+  No session was spawned.
+- `{ status: "ssh-host-key-changed", host, port, expected, actual }` — the
+  pinned gateway key changed. **Hard stop**: there is deliberately no way to
+  accept this from the UI; recovery is "Forget saved key" in the Files/host
+  UI, exactly as for the SFTP sidecar.
+
+The tunnel itself is configured per host in the `hosts.ssh_tunnel` JSON blob
+(`{ enabled, host, port, user, auth, keyPath }`, camelCase; `auth` is the
+Files panel's `"stored" | "key-file" | "agent"`). An empty `host` means "the
+profile's VNC address"; an empty `user` means the local username. The SSH
+host-key pin store is shared with the Files panel. Secrets never appear in
+the blob: `stored` auth reads the profile's saved SSH passphrase/password
+from the keychain in Rust.
 
 ### `set_quality`
 

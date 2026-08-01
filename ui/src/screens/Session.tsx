@@ -22,6 +22,7 @@ import { useLivePreview } from "../hooks/useLivePreview";
 import { SessionToolbar } from "../components/SessionToolbar";
 import { CertPrompt } from "../components/CertPrompt";
 import { CredentialPrompt } from "../components/CredentialPrompt";
+import { SshHostKeyPrompt } from "../components/SshHostKeyPrompt";
 import { DropOverlay, FilePanel } from "../components/FilePanel";
 import { useFiles } from "../hooks/useFiles";
 import { ToastShelf } from "../components/primitives";
@@ -590,7 +591,10 @@ function SessionView({
   // stored; the webview just offers the pixels.
 
   // A prompt on top of the canvas means the framebuffer may be a login screen, // PRD/03 §3.2 is explicit that we never store one.
-  const promptUp = session.credentialRequest !== null || session.certPrompt !== null;
+  const promptUp =
+    session.credentialRequest !== null ||
+    session.certPrompt !== null ||
+    session.sshHostKeyPrompt !== null;
   const promptUpRef = useRef(promptUp);
   promptUpRef.current = promptUp;
 
@@ -1036,6 +1040,21 @@ function SessionView({
           onConnectOnce={() => session.trustCertificate(false)}
           onCancel={session.dismissCertPrompt}
         />
+      ) : null}
+
+      {/*
+        The connect is parked on this answer while the overlay says
+        "Connecting…", so it needs the same stacking-context lift as the
+        credential prompt below.
+      */}
+      {session.sshHostKeyPrompt ? (
+        <div className="relative z-50">
+          <SshHostKeyPrompt
+            data={session.sshHostKeyPrompt}
+            onAccept={session.acceptSshHostKey}
+            onCancel={session.dismissSshHostKeyPrompt}
+          />
+        </div>
       ) : null}
 
       {/*

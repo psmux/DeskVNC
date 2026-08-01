@@ -56,6 +56,12 @@ interface HostsContextValue {
   deleteTag: (id: string) => Promise<void>;
   setHostTags: (hostId: string, tagIds: string[]) => Promise<void>;
   savePassword: (hostId: string, password: string) => Promise<void>;
+  /**
+   * Save the SSH passphrase/password used by the Files panel and the SSH
+   * tunnel. `save_password` merges per field on the Rust side, so this never
+   * disturbs a stored VNC password (nor the reverse).
+   */
+  saveSshPassphrase: (hostId: string, passphrase: string) => Promise<void>;
   deletePassword: (hostId: string) => Promise<void>;
   wakeHost: (hostId: string) => Promise<void>;
   /**
@@ -339,6 +345,16 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     [],
   );
 
+  const saveSshPassphrase = useCallback(
+    async (hostId: string, passphrase: string): Promise<void> => {
+      // Deliberately does NOT flip `hasPassword`: that flag (and the key
+      // icon) means "a VNC password is saved", and the connect flow reads it
+      // to decide whether to expect a prompt.
+      await safeInvoke("save_password", { hostId, creds: { sshPassphrase: passphrase } }, null);
+    },
+    [],
+  );
+
   const deletePassword = useCallback(
     async (hostId: string): Promise<void> => {
       await safeInvoke("delete_password", { hostId }, null);
@@ -423,12 +439,12 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
   const value = useMemo(
     () => ({
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
-      deleteGroup, saveTag, deleteTag, setHostTags, savePassword, deletePassword,
+      deleteGroup, saveTag, deleteTag, setHostTags, savePassword, saveSshPassphrase, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     }),
     [
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
-      deleteGroup, saveTag, deleteTag, setHostTags, savePassword, deletePassword,
+      deleteGroup, saveTag, deleteTag, setHostTags, savePassword, saveSshPassphrase, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     ],
   );

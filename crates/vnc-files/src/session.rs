@@ -69,7 +69,7 @@ pub struct RemoteEntry {
 // SSH handler
 // ---------------------------------------------------------------------------
 
-struct ClientHandler {
+pub(crate) struct ClientHandler {
     host: String,
     port: u16,
     verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
@@ -148,56 +148,7 @@ impl SftpSession {
         cfg: FileTransferConfig,
         verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
     ) -> Result<Self> {
-        let decision = Arc::new(Mutex::new(None));
-        let handler = ClientHandler {
-            host: cfg.host.clone(),
-            port: cfg.port,
-            verifier,
-            decision: decision.clone(),
-        };
-
-        let ssh_config = Arc::new(russh::client::Config {
-            inactivity_timeout: None,
-            keepalive_interval: Some(Duration::from_secs(30)),
-            ..Default::default()
-        });
-
-        let connecting =
-            russh::client::connect(ssh_config, (resolver_host(&cfg.host), cfg.port), handler);
-        let mut ssh = match tokio::time::timeout(cfg.connect_timeout(), connecting).await {
-            Err(_) => return Err(Error::Timeout),
-            Ok(Ok(handle)) => handle,
-            Ok(Err(e)) => {
-                // A failed connect is usually a network problem, but if the
-                // handler rejected the key we have a much better answer.
-                return Err(match decision.lock().take() {
-                    Some(HostKeyDecision::Unknown {
-                        key_type,
-                        fingerprint,
-                    }) => Error::HostKeyUnknown {
-                        host: cfg.host.clone(),
-                        port: cfg.port,
-                        key_type,
-                        fingerprint,
-                    },
-                    Some(HostKeyDecision::Changed {
-                        expected, actual, ..
-                    }) => Error::HostKeyChanged {
-                        host: cfg.host.clone(),
-                        port: cfg.port,
-                        expected,
-                        actual,
-                    },
-                    _ => Error::Connect {
-                        host: cfg.host.clone(),
-                        port: cfg.port,
-                        reason: e.to_string(),
-                    },
-                });
-            }
-        };
-
-        authenticate(&mut ssh, &cfg).await?;
+        let mut ssh = connect_and_authenticate(&cfg, verifier).await?;
 
         let sftp = open_sftp_subsystem(&mut ssh).await?;
 
@@ -749,6 +700,78 @@ impl SftpSession {
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
+
+/// Dial the SSH server, verify its host key (TOFU) and authenticate. The
+/// shared front half of both SSH consumers: the SFTP sidecar above and the
+/// RFB tunnel in [`crate::tunnel`].
+///
+/// The host-key outcomes come back as the dedicated error variants
+/// ([`Error::HostKeyUnknown`] / [`Error::HostKeyChanged`]) so the shell can
+/// prompt or hard-stop; everything else is a plain connect failure. Boxed for
+/// the region reason documented on [`BoxFuture`].
+pub(crate) fn connect_and_authenticate<'a>(
+    cfg: &'a FileTransferConfig,
+    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
+) -> BoxFuture<'a, Result<russh::client::Handle<ClientHandler>>> {
+    Box::pin(connect_and_authenticate_inner(cfg, verifier))
+}
+
+async fn connect_and_authenticate_inner(
+    cfg: &FileTransferConfig,
+    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
+) -> Result<russh::client::Handle<ClientHandler>> {
+    let decision = Arc::new(Mutex::new(None));
+    let handler = ClientHandler {
+        host: cfg.host.clone(),
+        port: cfg.port,
+        verifier,
+        decision: decision.clone(),
+    };
+
+    let ssh_config = Arc::new(russh::client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        ..Default::default()
+    });
+
+    let connecting =
+        russh::client::connect(ssh_config, (resolver_host(&cfg.host), cfg.port), handler);
+    let mut ssh = match tokio::time::timeout(cfg.connect_timeout(), connecting).await {
+        Err(_) => return Err(Error::Timeout),
+        Ok(Ok(handle)) => handle,
+        Ok(Err(e)) => {
+            // A failed connect is usually a network problem, but if the
+            // handler rejected the key we have a much better answer.
+            return Err(match decision.lock().take() {
+                Some(HostKeyDecision::Unknown {
+                    key_type,
+                    fingerprint,
+                }) => Error::HostKeyUnknown {
+                    host: cfg.host.clone(),
+                    port: cfg.port,
+                    key_type,
+                    fingerprint,
+                },
+                Some(HostKeyDecision::Changed {
+                    expected, actual, ..
+                }) => Error::HostKeyChanged {
+                    host: cfg.host.clone(),
+                    port: cfg.port,
+                    expected,
+                    actual,
+                },
+                _ => Error::Connect {
+                    host: cfg.host.clone(),
+                    port: cfg.port,
+                    reason: e.to_string(),
+                },
+            });
+        }
+    };
+
+    authenticate(&mut ssh, cfg).await?;
+    Ok(ssh)
+}
 
 /// Open an SSH channel and start the `sftp` subsystem on it.
 ///

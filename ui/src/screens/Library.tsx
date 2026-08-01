@@ -13,7 +13,7 @@ import { useDiscovery } from "../state/DiscoveryContext";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
 import type { DiscoveredHost, HostProfile } from "../lib/types";
-import { hostMac, resolvedOsHint } from "../lib/types";
+import { hostMac, resolvedOsHint, serializeSshTunnel } from "../lib/types";
 import {
   allowsMultipleSessions,
   inTauri,
@@ -85,7 +85,7 @@ export function Library({
   autoAddDiscoveredId?: string | null;
   onAutoAddHandled?: () => void;
 }): ReactNode {
-  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, savePassword, wakeHost, refresh, refreshThumbnail } = useHosts();
+  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, savePassword, saveSshPassphrase, wakeHost, refresh, refreshThumbnail } = useHosts();
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
@@ -389,6 +389,7 @@ export function Library({
         scalingMode: draft.scalingMode,
         keyboardMode: draft.keyboardMode,
         passthrough: draft.passthrough,
+        sshTunnel: serializeSshTunnel(draft.sshTunnel),
         wolMac: draft.wolMac,
         tags: draft.tagIds,
         hasPassword: draft.hasPassword,
@@ -396,12 +397,13 @@ export function Library({
       const id = saved?.id ?? draft.id;
       if (id) {
         if (draft.password) await savePassword(id, draft.password);
+        if (draft.sshPassphrase) await saveSshPassphrase(id, draft.sshPassphrase);
         await setHostTags(id, draft.tagIds);
       }
       setHostDialog(null);
       push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
     },
-    [saveHost, savePassword, setHostTags, push],
+    [saveHost, savePassword, saveSshPassphrase, setHostTags, push],
   );
 
   const paletteActions = useMemo((): PaletteAction[] => {

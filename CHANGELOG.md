@@ -10,6 +10,43 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **SSH tunnelling for the VNC connection.** A host profile can now run its
+  whole session through an SSH login (Edit Host ▸ Advanced ▸ "Tunnel over
+  SSH"): the app connects to the SSH gateway, asks *it* to reach the VNC
+  endpoint, and carries the session over that encrypted channel. This is what
+  makes the recommended hardened setup usable, a VNC server bound to the
+  remote machine's own loopback, reachable only through SSH, and it encrypts
+  and authenticates the connection even when the VNC server itself offers
+  nothing.
+  - The gateway defaults to the VNC address and the user to your local
+    username, so the common case is a single checkbox. Authentication is the
+    Files panel's: a saved passphrase/password from the keychain, your
+    ssh-agent, or a private key file.
+  - No local forwarded port is ever opened; the channel itself is the
+    session's byte stream, so no other local process can race onto the
+    tunnel. Auto-reconnect re-dials through the tunnel, re-verifying the
+    gateway against its pin.
+  - The gateway's host key is trust-on-first-use with the same pin store the
+    Files panel uses: trusting a machine once covers both. First contact
+    shows a fingerprint prompt before anything connects; a *changed* key is a
+    hard stop with no way to click through, exactly as everywhere else.
+  - The host editor grew an SSH password / key-passphrase field alongside the
+    tunnel settings, stored in the system keychain and shared with the Files
+    panel.
+- **`connect_session` now returns a tagged outcome** (`started` /
+  `ssh-host-key-prompt` / `ssh-host-key-changed`) instead of a bare session
+  id, and takes `acceptSshHostKey`; see `IPC_CONTRACT.md`. For profiles
+  without a tunnel the behaviour is unchanged.
+
+### Fixed
+
+- Saving a password no longer erases the other credentials stored for the
+  same host: `save_password` merges per field, so a host can hold a VNC
+  password and an SSH passphrase (Files panel, and now the tunnel) without
+  one save wiping the other.
+
 ## [0.2.0] - 2026-08-01
 
 ### Added
