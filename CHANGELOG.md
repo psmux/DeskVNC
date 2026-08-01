@@ -10,7 +10,40 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **Tabbed view.** Connected computers can be shown as tabs across the top of
+  the library window and switched between like browser tabs, instead of each
+  one opening a window of its own. Turn it on in Preferences ▸ Connections,
+  "Show sessions as tabs in one window"; it is off by default, so nothing
+  changes unless you ask for it.
+  - The library is the first tab and cannot be closed. Every session tab
+    carries a status dot, the name the server reports for that desktop, and a
+    close button; middle-click closes one too.
+  - `Ctrl+Tab` and `Ctrl+Shift+Tab` move between tabs, `Cmd/Ctrl+1…9` jump
+    straight to one (1 being the library), `Cmd/Ctrl+Shift+W` closes the tab in
+    front and `Cmd/Ctrl+Shift+L` returns to the library. The first two and the
+    last two are real menu items under Window, which is what makes them work
+    while shortcut pass-through is sending everything else to the remote
+    machine. The palette (`Cmd/Ctrl+K`) also lists every open session.
+  - Only the tab you are looking at draws, holds the keyboard, or answers
+    dropped files. The others stay connected and keep their picture up to date,
+    so switching back shows the desktop as it is now, not as it was.
+  - The preference decides where the *next* session goes. Sessions already
+    running stay where they are, in a window or in a tab, because a live
+    picture cannot be moved between the two without reconnecting. Connecting to
+    a machine that is already open still finds it either way and brings it
+    forward rather than starting a second session.
+  - Closing the library window with tabs open shuts those sessions down
+    cleanly, but skips the parting thumbnail refresh; closing a tab does not.
+
 ### Fixed
+
+- Keyboard capture (shortcut pass-through) is now released and re-armed based
+  on which window actually asked for it, rather than on the window's name. The
+  old rule read the session id back out of a `session-<id>` window label, which
+  meant nothing owned capture in a window hosting several sessions, and focusing
+  any window that was not a session window force-released the grab.
 
 - SSH host-key pins are keyed on one canonical spelling of the host, so `::1`,
   `[::1]`, `studio.local` and the mDNS-qualified `studio.local.` are one

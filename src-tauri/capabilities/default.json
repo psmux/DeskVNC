@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Capability of the main library window: full core defaults, the UI plugins, and every application command. Deny-by-default per PRD/01 §7, anything not listed here is unavailable to the webview.",
+  "description": "Capability of the main library window: full core defaults, the UI plugins, and every application command. Deny-by-default per PRD/01 §7, anything not listed here is unavailable to the webview. In tabbed view this window also hosts the session viewers themselves, which is why it holds the keyboard-capture commands (`capture-start`/`capture-stop`) that otherwise only a `session-*` window would need.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -93,6 +93,8 @@
     "allow-files-local-rename",
     "allow-files-local-remove",
 
+    "allow-capture-start",
+    "allow-capture-stop",
     "allow-capture-status",
     "allow-capture-permission-granted",
     "allow-capture-request-permission",

@@ -125,12 +125,38 @@ export async function allowsMultipleSessions(): Promise<boolean> {
   return raw === "true" || raw === "1";
 }
 
+/** Where a session is shown (`commands::session::SessionTarget`). */
+export type SessionTarget = "window" | "tab";
+
+/**
+ * Connection parameters for a tab the caller has to mount itself
+ * (`commands::session::SessionTabParams`).
+ *
+ * Exactly what a session window would have read out of its own query string;
+ * a tab has no URL, so the shell hands them back as data instead.
+ */
+export interface SessionTabParams {
+  profileId: string | null;
+  address: string;
+  port: number;
+  name: string;
+}
+
 /** Result of `open_session_window` (`commands::session::SessionWindowOutcome`). */
 export interface SessionWindowOutcome {
   /** The window the user is now looking at, new, or the one already open. */
   sessionId: string;
   /** True when an existing window was brought to the front (no new session). */
   reused: boolean;
+  /**
+   * Window or tab. A reuse reports where the session it found already lives,
+   * which is not necessarily where a new one would have gone: a machine opened
+   * in its own window before the preference was switched to tabs is still
+   * found, and still raised as a window.
+   */
+  target: SessionTarget;
+  /** Present only for a NEW tab: what to mount the viewer with. */
+  params?: SessionTabParams;
 }
 
 export interface OpenSessionOptions {
@@ -145,6 +171,12 @@ export interface OpenSessionOptions {
    * preference that allows several windows per computer is on.
    */
   forceNew?: boolean;
+  /**
+   * Show this session as a tab in the library window instead of giving it a
+   * window of its own. The shell still applies every other rule (profile
+   * resolution, one session per machine) and hands back `params` to mount.
+   */
+  asTab?: boolean;
 }
 
 /**
@@ -165,6 +197,7 @@ export function openSessionWindow(
       address: options.address ?? null,
       port: options.port ?? null,
       forceNew: options.forceNew ?? false,
+      asTab: options.asTab ?? false,
     },
     null,
   );

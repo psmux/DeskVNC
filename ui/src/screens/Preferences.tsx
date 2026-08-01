@@ -186,8 +186,22 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Connections" ? (
               <>
                 <Toggle
-                  label="Allow more than one window per computer"
-                  description="Normally, connecting to a computer you're already connected to brings that window back to the front instead of starting a second session. Turn this on to open a separate window every time."
+                  label="Show sessions as tabs in one window"
+                  description="Connected computers become tabs across the top of this window, switched between like browser tabs, instead of each opening a window of its own. Sessions already running stay where they are; this decides where the next one goes."
+                  value={settings.windowMode === "tabs"}
+                  onChange={(v) => update({ windowMode: v ? "tabs" : "windows" })}
+                />
+                <Toggle
+                  label={
+                    settings.windowMode === "tabs"
+                      ? "Allow more than one tab per computer"
+                      : "Allow more than one window per computer"
+                  }
+                  description={
+                    settings.windowMode === "tabs"
+                      ? "Normally, connecting to a computer you're already connected to selects the tab it is in instead of starting a second session. Turn this on to open a separate tab every time."
+                      : "Normally, connecting to a computer you're already connected to brings that window back to the front instead of starting a second session. Turn this on to open a separate window every time."
+                  }
                   value={multipleSessions}
                   onChange={setMultipleSessions}
                 />

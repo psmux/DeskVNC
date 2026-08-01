@@ -1056,6 +1056,31 @@ fn window_to_focus(
     lookup()
 }
 
+/// Where the session the user asked for is being shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionTarget {
+    /// A window of its own, label `session-<id>`, built by the shell.
+    Window,
+    /// A tab inside the main window. The shell resolves and claims the session
+    /// but builds nothing; the library webview mounts the viewer itself.
+    Tab,
+}
+
+/// Connection parameters for a session the caller has to mount itself.
+///
+/// Exactly what [`windows::SessionWindowParams`] puts in a session window's
+/// query string, handed back as data instead, because a tab has no URL of its
+/// own to read them from.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTabParams {
+    pub profile_id: Option<String>,
+    pub address: String,
+    pub port: u16,
+    pub name: String,
+}
+
 /// What [`open_session_window`] did.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1066,6 +1091,13 @@ pub struct SessionWindowOutcome {
     /// True when an already-open window was brought to the front instead of a
     /// second connection being made.
     pub reused: bool,
+    /// Window or tab. A reuse reports where the session it found already lives,
+    /// which is not necessarily where a new one would have gone.
+    pub target: SessionTarget,
+    /// Present only for a NEW tab: nothing has connected yet and the caller
+    /// needs these to mount the viewer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<SessionTabParams>,
 }
 
 /// Create (or focus) the viewer window for a session.
@@ -1088,8 +1120,17 @@ pub struct SessionWindowOutcome {
 /// turns that off; `force_new` is the per-call escape hatch behind it, used by
 /// the explicit "Connect in new window" command.
 ///
-/// Returns the session id of the window the user ends up in, and whether it
-/// was an existing one.
+/// TABBED VIEW (`as_tab`): the caller wants the session shown as a tab inside
+/// the library window rather than in a window of its own. Everything above
+/// still happens here, profile resolution, the machine key, the one-per-machine
+/// rule, claiming the session id, so both modes obey one set of rules and a
+/// machine already open in a window is still found when the preference has
+/// since been switched to tabs. The only thing that changes is the last step:
+/// no window is built, and the resolved parameters come back for the caller to
+/// mount the viewer with.
+///
+/// Returns the session id the user ends up in, whether it was an existing one,
+/// and where it is being shown.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // the invoke surface is the contract
 pub async fn open_session_window(
@@ -1101,6 +1142,7 @@ pub async fn open_session_window(
     port: Option<u16>,
     title: Option<String>,
     force_new: Option<bool>,
+    as_tab: Option<bool>,
 ) -> Result<SessionWindowOutcome, String> {
     let id = match session_id {
         Some(id) => {
@@ -1151,6 +1193,22 @@ pub async fn open_session_window(
         state.existing_window_for_machine(&key, Instant::now(), &window_exists)
     });
     if let Some(existing) = existing {
+        // A session that is already a TAB has no window of its own to raise:
+        // the library window is the one it lives in, and selecting the tab is
+        // the caller's job. Report it and let them.
+        if existing.window_label == windows::MAIN_WINDOW_LABEL {
+            windows::focus_session_window(&app, windows::MAIN_WINDOW_LABEL);
+            tracing::info!(
+                session = %existing.session_id,
+                "already connected to this machine, selecting the existing tab"
+            );
+            return Ok(SessionWindowOutcome {
+                session_id: existing.session_id,
+                reused: true,
+                target: SessionTarget::Tab,
+                params: None,
+            });
+        }
         // Only report it as reused if the window really is still there;
         // `focus_session_window` says so, and anything else falls through to a
         // normal connect rather than leaving the user with nothing.
@@ -1162,8 +1220,28 @@ pub async fn open_session_window(
             return Ok(SessionWindowOutcome {
                 session_id: existing.session_id,
                 reused: true,
+                target: SessionTarget::Window,
+                params: None,
             });
         }
+    }
+
+    // Claim the machine before anything is built: the webview will not call
+    // `connect_session` for a few hundred milliseconds, and a second connect
+    // gesture inside that gap must find this one.
+    if as_tab == Some(true) {
+        state.note_opening_window(&id, key, windows::MAIN_WINDOW_LABEL.to_string());
+        return Ok(SessionWindowOutcome {
+            session_id: id,
+            reused: false,
+            target: SessionTarget::Tab,
+            params: Some(SessionTabParams {
+                profile_id,
+                address,
+                port,
+                name,
+            }),
+        });
     }
 
     let params = windows::SessionWindowParams {
@@ -1173,9 +1251,6 @@ pub async fn open_session_window(
         port,
         name: &name,
     };
-    // Claim the machine before the window is built: the webview will not call
-    // `connect_session` for a few hundred milliseconds, and a second connect
-    // gesture inside that gap must find this one.
     state.note_opening_window(&id, key, windows::session_label(&id));
     if let Err(e) = windows::open_session_window(&app, &params, &name) {
         state.opening_windows.lock().remove(&id);
@@ -1184,6 +1259,8 @@ pub async fn open_session_window(
     Ok(SessionWindowOutcome {
         session_id: id,
         reused: false,
+        target: SessionTarget::Window,
+        params: None,
     })
 }
 
@@ -1197,9 +1274,12 @@ pub async fn fullscreen_session(
     monitor_index: Option<usize>,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
+    // A session shown as a tab has no `session-<id>` window: the window to put
+    // fullscreen is the one it is a tab in.
     let label = windows::session_label(&session_id);
     let window = app
         .get_webview_window(&label)
+        .or_else(|| app.get_webview_window(windows::MAIN_WINDOW_LABEL))
         .ok_or_else(|| format!("no window for session {session_id}"))?;
     windows::set_fullscreen_on_monitor(&window, monitor_index, fullscreen)
 }

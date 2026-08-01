@@ -43,6 +43,12 @@ const SHORTCUTS: Array<[string, string]> = [
   [`${modKeyLabel}⇧D`, "Disconnect session"],
   [`${modKeyLabel}⇧M`, "Show/hide session toolbar"],
   [`${modKeyLabel}⌃F`, "Toggle fullscreen"],
+  // Tabbed view only (Preferences → Connections). Harmless to list either
+  // way: with no tabs open there is nothing for them to switch to.
+  ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
+  [`${modKeyLabel}1…9`, "Jump to a tab (1 is the library)"],
+  [`${modKeyLabel}⇧W`, "Close the current tab"],
+  [`${modKeyLabel}⇧L`, "Back to the library"],
 ];
 
 const TROUBLESHOOTING: Array<[string, string]> = [

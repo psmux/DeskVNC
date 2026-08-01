@@ -12,7 +12,12 @@ import {
 import { WebGLRenderer } from "../render/WebGLRenderer";
 import { SessionInput } from "../render/input";
 import { KEYSYM } from "../render/keysyms";
-import { useSession, readSessionParams, type SessionBridge } from "../hooks/useSession";
+import {
+  useSession,
+  readSessionParams,
+  type SessionBridge,
+  type SessionParams,
+} from "../hooks/useSession";
 import { useLivePreview } from "../hooks/useLivePreview";
 import { SessionToolbar } from "../components/SessionToolbar";
 import { CertPrompt } from "../components/CertPrompt";
@@ -120,16 +125,62 @@ async function closeSessionWindow(sessionId: string | null): Promise<void> {
   }
 }
 
-export function Session(): ReactNode {
+/**
+ * How this viewer is being shown.
+ *
+ * With no props at all it is what it always was: the only thing in a window of
+ * its own, reading its connection parameters out of that window's query
+ * string. `embedded` is the tabbed view, where several of these are mounted
+ * side by side in the library window and only one is on screen at a time, so
+ * everything window-wide (the title, the close hold, the keyboard listeners,
+ * the toast shelf) has to belong to the shell instead.
+ */
+export interface SessionProps {
+  /** Connection parameters. Omit in a session window, where the URL has them. */
+  params?: SessionParams;
+  /** Mounted as a tab rather than owning the window it is in. */
+  embedded?: boolean;
+  /** This tab is the one on screen. Only meaningful when embedded. */
+  active?: boolean;
+  /** Embedded: take this tab off the strip. */
+  onClose?: () => void;
+  /** The server told us what this desktop is called. */
+  onDesktopName?: (name: string) => void;
+  /** Connection state changed, for the tab's status dot. */
+  onState?: (state: SessionState) => void;
+  /**
+   * First refusal on a keystroke, ahead of this view's own shortcuts and the
+   * remote desktop. The remote keyboard hook sits on `window` in the capture
+   * phase and `preventDefault`s what it forwards, so a shell-level shortcut
+   * (switch tabs, close tab) can only be seen through here.
+   */
+  onAppHotkey?: (e: KeyboardEvent) => boolean;
+}
+
+export function Session(props: SessionProps = {}): ReactNode {
   return (
-    <SessionErrorBoundary>
-      <SessionView />
+    <SessionErrorBoundary embedded={props.embedded} onClose={props.onClose}>
+      <SessionView {...props} />
     </SessionErrorBoundary>
   );
 }
 
-function SessionView(): ReactNode {
-  const params = useMemo(readSessionParams, []);
+function SessionView({
+  params: paramsProp,
+  embedded = false,
+  active = true,
+  onClose,
+  onDesktopName,
+  onState,
+  onAppHotkey,
+}: SessionProps): ReactNode {
+  const params = useMemo(() => paramsProp ?? readSessionParams(), [paramsProp]);
+  /**
+   * Is this view the one the user is looking at? A session window always is.
+   * A background tab is mounted and still connected, but must not draw, must
+   * not hold the keyboard, and must not answer file drops.
+   */
+  const visible = !embedded || active;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WebGLRenderer | null>(null);
@@ -161,6 +212,9 @@ function SessionView(): ReactNode {
   const [sshAvailable, setSshAvailable] = useState<boolean | null>(null);
   const [dropCount, setDropCount] = useState<number | null>(null);
   const wasReconnecting = useRef(false);
+  /** Flipped once the renderer and input handler exist, so the effects that
+   *  arm and disarm them have something to run against. */
+  const [viewReady, setViewReady] = useState(false);
 
   // ------------------------------------------------------------- bridge
 
@@ -209,6 +263,9 @@ function SessionView(): ReactNode {
       send: (pkt) => sessionRef.current.sendInput(pkt),
       releaseAllKeys: () => sessionRef.current.releaseAllKeys(),
       onAppHotkey: (e) => {
+        // The shell (the tab strip) gets first refusal: its shortcuts have to
+        // beat both this view's and the remote desktop's.
+        if (appHotkeyRef.current?.(e)) return true;
         const mod = e.metaKey || e.ctrlKey;
         if (mod && e.shiftKey && e.code === "KeyM") {
           setRecallSignal((n) => n + 1);
@@ -228,7 +285,11 @@ function SessionView(): ReactNode {
       },
     });
     inputRef.current = input;
-    input.attach();
+    // Attaching is NOT done here: `SessionInput` listens on `window` in the
+    // capture phase, so with several tabs mounted the background ones would
+    // swallow every keystroke meant for the tab in front. The effect below
+    // arms exactly one of them.
+    setViewReady(true);
 
     // HiDPI-correct sizing: device pixels from devicePixelContentBoxSize when available
     const applySize = (deviceW: number, deviceH: number): void => {
@@ -291,12 +352,48 @@ function SessionView(): ReactNode {
       renderer.dispose();
       rendererRef.current = null;
       inputRef.current = null;
+      setViewReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const modeRef = useRef(scalingMode);
   modeRef.current = scalingMode;
+
+  const appHotkeyRef = useRef(onAppHotkey);
+  appHotkeyRef.current = onAppHotkey;
+
+  // Only the view on screen owns the keyboard and the pointer.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!viewReady || !input || !visible) return;
+    input.attach();
+    return () => input.detach();
+  }, [viewReady, visible]);
+
+  // Coming to the front takes the focus with it. The remote keyboard hook
+  // deliberately ignores keystrokes aimed at our own inputs and dialogs, so a
+  // tab opened from the library search box would otherwise send everything
+  // typed into that box instead of to the remote desktop.
+  useEffect(() => {
+    if (!viewReady || !visible) return;
+    canvasRef.current?.focus({ preventScroll: true });
+  }, [viewReady, visible]);
+
+  // …and only the view on screen draws. Frames for a background tab still
+  // arrive and are still uploaded into its texture, so switching back shows
+  // the current desktop rather than a stale one; what stops is the per-frame
+  // GL draw, which is what would otherwise cost a full render pass per tab.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!viewReady || !renderer) return;
+    if (visible) {
+      renderer.start();
+      renderer.markDirty();
+    } else {
+      renderer.stop();
+    }
+  }, [viewReady, visible]);
 
   // ------------------------------------------------------- derived wiring
 
@@ -361,6 +458,26 @@ function SessionView(): ReactNode {
     };
   }, [params.sessionId]);
 
+  // Switching tabs is not a window blur, so none of the shell's focus hooks
+  // fire: a tab going to the back has to hand the keyboard back itself, or it
+  // would keep swallowing the shortcuts meant for the tab in front. The
+  // pass-through switch stays ON, so coming back re-arms without asking again.
+  const passthroughRef = useRef(passthrough);
+  passthroughRef.current = passthrough;
+  const captureSuspended = useRef(false);
+  useEffect(() => {
+    const sid = params.sessionId;
+    if (!embedded || !sid) return;
+    if (!active) {
+      if (!passthroughRef.current) return;
+      captureSuspended.current = true;
+      void captureStop(sid).then(setCapture);
+    } else if (captureSuspended.current) {
+      captureSuspended.current = false;
+      if (passthroughRef.current) void captureStart(sid).then(setCapture);
+    }
+  }, [embedded, active, params.sessionId]);
+
   const togglePassthrough = useCallback(
     (want: boolean): void => {
       setPassthroughState(want);
@@ -402,12 +519,31 @@ function SessionView(): ReactNode {
     rendererRef.current?.setGrayLevels(quality === "bw" ? bwLevels : 0);
   }, [quality, bwLevels]);
 
-  // Window title: name + resolution
+  // Window title: name + resolution. A tab does not own the window title,
+  // the shell sets it from whichever tab is in front.
   useEffect(() => {
+    if (embedded) return;
     document.title = remoteSize
       ? `${session.desktopName}, ${remoteSize.w}×${remoteSize.h}`
       : session.desktopName;
-  }, [session.desktopName, remoteSize]);
+  }, [embedded, session.desktopName, remoteSize]);
+
+  // Report upwards so a tab can be labelled with what the server calls itself
+  // and show the connection's state, rather than the address it was dialled at.
+  //
+  // Read through refs so these fire on a real change and nothing else: the
+  // shell re-renders whenever a tab's label changes, which would hand us fresh
+  // callbacks, which would report again, which would re-render the shell.
+  const reportRef = useRef({ onDesktopName, onState });
+  reportRef.current = { onDesktopName, onState };
+
+  useEffect(() => {
+    reportRef.current.onDesktopName?.(session.desktopName);
+  }, [session.desktopName]);
+
+  useEffect(() => {
+    reportRef.current.onState?.(session.state);
+  }, [session.state]);
 
   // Reconnected toast; keyboard safety on any non-connected transition
   useEffect(() => {
@@ -508,10 +644,19 @@ function SessionView(): ReactNode {
     if (session.state.state === "disconnected") void captureOnExit();
   }, [session.state.state, captureOnExit]);
 
-  /** The one way this window goes away, from every button and from Escape. */
+  /**
+   * The one way this view goes away, from every button and from Escape.
+   *
+   * A tab closes itself off the strip; unmounting is what disconnects it and
+   * flushes the exit thumbnail, exactly as closing the window does.
+   */
   const dismiss = useCallback((): void => {
+    if (embedded) {
+      onClose?.();
+      return;
+    }
     void closeSessionWindow(params.sessionId);
-  }, [params.sessionId]);
+  }, [embedded, onClose, params.sessionId]);
 
   // Closing the session window is the most common way a session ends, and it
   // tears the webview down before any React cleanup could finish an invoke, // so hold the close just long enough to hand over the pixels.
@@ -520,8 +665,13 @@ function SessionView(): ReactNode {
   // failed capture must never wedge the window open. `closeSessionWindow` is
   // what actually finishes the job, see the note at the top of this file for
   // why calling `win.close()` from in here was not enough.
+  //
+  // A tab installs none of this: it does not own the window, and a hold taken
+  // out per tab would fight both the other tabs and the library. Closing the
+  // library window with tabs open therefore skips the exit capture (the shell
+  // still shuts the sessions down cleanly); closing the tab itself does not.
   useEffect(() => {
-    if (!inTauri()) return;
+    if (!inTauri() || embedded) return;
     let cancelled = false;
     void import("@tauri-apps/api/window")
       .then(({ getCurrentWindow }) => {
@@ -546,7 +696,7 @@ function SessionView(): ReactNode {
       releaseCloseHold = null;
       void release?.();
     };
-  }, [params.sessionId, captureOnExit]);
+  }, [embedded, params.sessionId, captureOnExit]);
 
   // Belt-and-braces for an unmount that is not a window close (browser dev,
   // hot reload). Invoked from the renderer effect's cleanup rather than this
@@ -609,8 +759,12 @@ function SessionView(): ReactNode {
   // Drag files onto the session window -> upload (PRD/08 §3.1). Tauri owns the
   // OS drag session when `dragDropEnabled` is on, so HTML5 drag events never
   // fire for real files, this is the only path that sees them.
+  //
+  // Tauri reports a drop to the whole window, not to a part of it, so only the
+  // tab in front may listen: otherwise one dropped file would be uploaded once
+  // per open tab, to whichever machines those happen to be.
   useEffect(() => {
-    if (!inTauri() || sshAvailable !== true) return;
+    if (!inTauri() || sshAvailable !== true || !visible) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void import("@tauri-apps/api/webview")
@@ -648,7 +802,7 @@ function SessionView(): ReactNode {
       cancelled = true;
       unlisten?.();
     };
-  }, [sshAvailable, ensureFilesConnected, dropDir, push]);
+  }, [sshAvailable, visible, ensureFilesConnected, dropDir, push]);
 
   // ------------------------------------------------------------- actions
 
@@ -739,7 +893,7 @@ function SessionView(): ReactNode {
   // left to send it to once the session is over.
   const terminal = st.state === "disconnected";
   useEffect(() => {
-    if (!terminal) return;
+    if (!terminal || !visible) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== "Escape") return;
       e.preventDefault();
@@ -748,7 +902,7 @@ function SessionView(): ReactNode {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [terminal, dismiss]);
+  }, [terminal, visible, dismiss]);
 
   const showConnecting =
     st.state === "resolving" || st.state === "connecting" ||
@@ -891,7 +1045,8 @@ function SessionView(): ReactNode {
         </div>
       ) : null}
 
-      <ToastShelf />
+      {/* One shelf per window: in tabbed view the library shell owns it. */}
+      {embedded ? null : <ToastShelf />}
     </div>
   );
 }
@@ -1225,7 +1380,10 @@ function DisconnectedOverlay({
  * that into a readable panel with a working dismiss, the failure is still a
  * bug, but it stops being a trap.
  */
-class SessionErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+class SessionErrorBoundary extends Component<
+  { children: ReactNode; embedded?: boolean; onClose?: () => void },
+  { error: Error | null }
+> {
   state: { error: Error | null } = { error: null };
 
   static getDerivedStateFromError(error: Error): { error: Error } {
@@ -1239,17 +1397,18 @@ class SessionErrorBoundary extends Component<{ children: ReactNode }, { error: E
   render(): ReactNode {
     const { error } = this.state;
     if (!error) return this.props.children;
+    const { embedded, onClose } = this.props;
     const sessionId = new URLSearchParams(window.location.search).get("sessionId");
     return (
       <div className="flex h-full w-full items-center justify-center bg-canvas p-6">
         <div
           role="alertdialog"
           aria-modal="true"
-          aria-label="This session window ran into a problem"
+          aria-label="This session ran into a problem"
           className="w-[28rem] max-w-full rounded-lg border border-danger bg-raised p-5 shadow-(--shadow-pop)"
         >
           <p className="text-base font-semibold text-primary">
-            This session window ran into a problem
+            This session ran into a problem
           </p>
           <p className="mt-2 text-sm text-secondary">
             The connection has been closed. Nothing was saved from this session.
@@ -1269,9 +1428,12 @@ class SessionErrorBoundary extends Component<{ children: ReactNode }, { error: E
               type="button"
               data-autofocus
               className="btn-primary"
-              onClick={() => void closeSessionWindow(sessionId)}
+              onClick={() => {
+                if (embedded) onClose?.();
+                else void closeSessionWindow(sessionId);
+              }}
             >
-              Close window
+              {embedded ? "Close tab" : "Close window"}
             </button>
           </div>
         </div>

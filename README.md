@@ -90,6 +90,9 @@ answer these queries and the result is rendered in the interface.
   first, and typing the address of a host you did save connects through that
   profile so its settings and password still apply.
 - **Command palette** for keyboard-driven navigation.
+- **Windows or tabs**: each session opens in a window of its own, or, with
+  "Show sessions as tabs in one window" in Preferences, as a tab in the library
+  window that you switch between the way you switch browser tabs.
 - **Display modes**: fit, aspect-fit, 1:1, and custom zoom, all HiDPI correct.
 - **Input**: full mouse and keyboard, scancode mode via the QEMU extension,
   and three-tier shortcut pass-through so host and guest shortcuts coexist.
