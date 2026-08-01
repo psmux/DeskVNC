@@ -363,7 +363,9 @@ function SessionView({
   const appHotkeyRef = useRef(onAppHotkey);
   appHotkeyRef.current = onAppHotkey;
 
-  // Only the view on screen owns the keyboard and the pointer.
+  // Only the view on screen owns the keyboard and the pointer. `detach()`
+  // releases whatever was still held, so a modifier held down through the
+  // switch does not stay down on the desktop being left behind.
   useEffect(() => {
     const input = inputRef.current;
     if (!viewReady || !input || !visible) return;
@@ -647,16 +649,24 @@ function SessionView({
   /**
    * The one way this view goes away, from every button and from Escape.
    *
-   * A tab closes itself off the strip; unmounting is what disconnects it and
-   * flushes the exit thumbnail, exactly as closing the window does.
+   * A tab grabs its parting thumbnail BEFORE it comes off the strip, for the
+   * same reason the window path holds the close and `disconnectWithThumbnail`
+   * races the capture first: `capture_thumbnail` resolves which host the pixels
+   * belong to from the live session registry, and that entry goes away with the
+   * session. Unmounting does still capture, from the renderer effect's cleanup,
+   * but it runs after `useSession`'s (hooks tear down in declaration order, and
+   * that one asks for the disconnect), so it is racing the teardown rather than
+   * finishing ahead of it. The tab strip's own close button takes that path.
    */
   const dismiss = useCallback((): void => {
     if (embedded) {
-      onClose?.();
+      void Promise.race([captureOnExit(), delay(CAPTURE_CLOSE_BUDGET_MS)])
+        .catch(() => undefined)
+        .finally(() => onClose?.());
       return;
     }
     void closeSessionWindow(params.sessionId);
-  }, [embedded, onClose, params.sessionId]);
+  }, [embedded, onClose, captureOnExit, params.sessionId]);
 
   // Closing the session window is the most common way a session ends, and it
   // tears the webview down before any React cleanup could finish an invoke, // so hold the close just long enough to hand over the pixels.

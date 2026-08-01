@@ -1264,22 +1264,45 @@ pub async fn open_session_window(
     })
 }
 
+/// Give up a session id that was claimed but never connected.
+///
+/// `open_session_window` claims the machine before anything is built, so a
+/// second connect gesture in the gap before `connect_session` arrives finds the
+/// first. A session WINDOW that goes away in that gap releases the claim by
+/// ceasing to exist, which is what `find_opening_window`'s window-existence
+/// check notices. A tab has no window of its own to disappear: its claim names
+/// the library window, which is still very much there, so it would sit on the
+/// machine for the full `OPENING_GRACE` and answer the next connect with
+/// "already open". Closing a tab calls this instead.
+#[tauri::command]
+pub fn release_session_claim(state: State<'_, AppState>, session_id: String) {
+    state.opening_windows.lock().remove(&session_id);
+}
+
 /// Enter/leave fullscreen for a session window, optionally on a specific
 /// monitor (position-then-fullscreen pattern, PRD/05 §5).
 #[tauri::command]
 pub async fn fullscreen_session(
     app: AppHandle,
+    state: State<'_, AppState>,
     session_id: String,
     fullscreen: bool,
     monitor_index: Option<usize>,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
-    // A session shown as a tab has no `session-<id>` window: the window to put
-    // fullscreen is the one it is a tab in.
-    let label = windows::session_label(&session_id);
+    // A session shown as a tab has no `session-<id>` window, so the window to
+    // put fullscreen is whichever one the session actually registered itself
+    // against. Asked which window, NOT defaulted to the library: falling back
+    // to `main` unconditionally would throw the library into fullscreen with no
+    // session in it whenever this raced a session window closing.
+    let label = state
+        .sessions
+        .lock()
+        .get(&session_id)
+        .map(|entry| entry.window_label.clone())
+        .unwrap_or_else(|| windows::session_label(&session_id));
     let window = app
         .get_webview_window(&label)
-        .or_else(|| app.get_webview_window(windows::MAIN_WINDOW_LABEL))
         .ok_or_else(|| format!("no window for session {session_id}"))?;
     windows::set_fullscreen_on_monitor(&window, monitor_index, fullscreen)
 }

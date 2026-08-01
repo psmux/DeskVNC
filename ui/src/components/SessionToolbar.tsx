@@ -11,6 +11,7 @@ import {
 import type { QualityPreset, ScalingMode, SessionState, SessionStats } from "../lib/types";
 import type { CaptureStatus } from "../lib/tauri";
 import { classNames, formatBps, modKeyLabel } from "../lib/util";
+import { usePaneVisible } from "./Pane";
 import {
   IconActivity, IconCamera, IconChevronDown, IconClipboard, IconEye, IconFile,
   IconGripVertical, IconKeyboard, IconMaximize, IconMonitor, IconPin, IconPower,
@@ -104,6 +105,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   /** Latest position, for the drag handler to persist on drop. */
   const posRef = useRef(pos);
   posRef.current = pos;
+  const onScreen = usePaneVisible();
 
   // Follow the shared layout while other tabs' toolbars are mounted alongside.
   useEffect(() => {
@@ -133,7 +135,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     }, IDLE_MS);
   }, [pinned]);
 
+  // A toolbar on a background tab has nothing to auto-hide from, so it does not
+  // watch the pointer: otherwise every mouse move would reset one timer per
+  // open tab, for toolbars nobody can see.
   useEffect(() => {
+    if (!onScreen) return;
     armIdle();
     const wake = (): void => armIdle();
     window.addEventListener("pointermove", wake);
@@ -141,7 +147,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       window.removeEventListener("pointermove", wake);
       window.clearTimeout(idleTimer.current);
     };
-  }, [armIdle]);
+  }, [armIdle, onScreen]);
 
   // recall via hotkey (parent bumps recallSignal)
   useEffect(() => {
@@ -201,7 +207,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     const s: React.CSSProperties = { position: "fixed", zIndex: 30 };
     switch (pos.edge) {
       case "top":
-        s.top = 12;
+        // Measured from the top of the viewport, so in tabbed view it would
+        // land on the tab strip and take the clicks meant for it. The shell
+        // publishes how much room its own chrome takes; a session window sets
+        // nothing and the fallback keeps it exactly where it was.
+        s.top = "calc(var(--session-inset-top, 0px) + 12px)";
         s.left = `${pos.ratio * 100}%`;
         s.transform = "translateX(-50%)";
         break;
@@ -212,12 +222,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         break;
       case "left":
         s.left = 12;
-        s.top = `${pos.ratio * 100}%`;
+        s.top = `calc(var(--session-inset-top, 0px) + ${pos.ratio * 100}%)`;
         s.transform = "translateY(-50%)";
         break;
       case "right":
         s.right = 12;
-        s.top = `${pos.ratio * 100}%`;
+        s.top = `calc(var(--session-inset-top, 0px) + ${pos.ratio * 100}%)`;
         s.transform = "translateY(-50%)";
         break;
     }

@@ -39,6 +39,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+- A key held down while switching away from a session stayed down on that
+  remote desktop. Detaching the input handler unhooked its listeners without
+  releasing anything, so the keyup went elsewhere and every later keystroke in
+  that session arrived with the modifier still applied. Held mouse buttons had
+  the same problem. Releasing is now part of detaching, which also covers the
+  gesture most likely to cause it, a modifier held down while pressing the key
+  that switches tabs.
 - Keyboard capture (shortcut pass-through) is now released and re-armed based
   on which window actually asked for it, rather than on the window's name. The
   old rule read the session id back out of a `session-<id>` window label, which
