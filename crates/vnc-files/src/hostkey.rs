@@ -12,13 +12,23 @@
 //! `vnc_store::CertPin`: `(host, port)` key, the fingerprint, and first/last
 //! seen timestamps. Pins are not secrets, the shell persists them as plain
 //! JSON next to the rest of its app data.
+//!
+//! The key is the *canonical* host ([`crate::canonical_host`]) and the port,
+//! so `[::1]`, `::1`, `studio.local.` and `Studio.local` are one endpoint and
+//! not four. Both sides of every comparison are canonicalised at lookup time,
+//! never only on write, so pins already on disk in an older spelling keep
+//! matching. Without that a stale spelling would read as "no pin" for the
+//! machine that has one, which is how a second trust prompt turns into a
+//! second pin, and later a spurious [`HostKeyDecision::Changed`].
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-/// A pinned SSH host key, keyed by `(host, port)` exactly like
-/// `vnc_store::CertPin`.
+use crate::config::canonical_host;
+
+/// A pinned SSH host key, keyed by the canonical `(host, port)`, the same
+/// shape as `vnc_store::CertPin`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostKeyPin {
@@ -84,10 +94,23 @@ impl HostKeyStore {
         Self::default()
     }
 
+    /// The pin for an endpoint, comparing hosts in canonical form.
+    ///
+    /// The stored host is canonicalised here rather than trusted as written,
+    /// because pins predating this rule are still on disk spelled `[::1]` or
+    /// `studio.local.`; normalising only the lookup would leave those pins
+    /// permanently unfindable, which is a fresh prompt and a duplicate pin.
+    ///
+    /// The FIRST match wins, deliberately. Only a store written by an older
+    /// build can hold two spellings of one endpoint, and
+    /// [`HostKeyStore::collapse_duplicates`] resolves those on load; until it
+    /// runs, file order is what decides, and it has to be something stable
+    /// rather than whichever pin the iterator happens to reach.
     fn index_of(&self, host: &str, port: u16) -> Option<usize> {
+        let host = canonical_host(host);
         self.pins
             .iter()
-            .position(|p| p.host.eq_ignore_ascii_case(host) && p.port == port)
+            .position(|p| p.port == port && canonical_host(&p.host) == host)
     }
 
     pub fn get(&self, host: &str, port: u16) -> Option<&HostKeyPin> {
@@ -128,8 +151,10 @@ impl HostKeyStore {
                 pin.fingerprint = fingerprint.to_string();
                 pin.last_seen_at = now;
             }
+            // New pins are written canonical so the file shows one entry per
+            // machine; lookups do not depend on it, see `index_of`.
             None => self.pins.push(HostKeyPin {
-                host: host.to_string(),
+                host: canonical_host(host),
                 port,
                 key_type: key_type.to_string(),
                 fingerprint: fingerprint.to_string(),
@@ -144,6 +169,40 @@ impl HostKeyStore {
         if let Some(i) = self.index_of(host, port) {
             self.pins[i].last_seen_at = now;
         }
+    }
+
+    /// Fold pins that differ only in spelling into one, returning how many
+    /// were dropped. Call it once, on the store loaded from disk.
+    ///
+    /// A store written before the key was canonical can hold `studio.local`
+    /// and `studio.local.` as separate pins for one machine. Comparison-time
+    /// canonicalisation already makes those harmless to [`Self::decide`], but
+    /// not to [`Self::forget`]: forgetting one leaves the other behind, and
+    /// the shadow pin then answers the next connect, which is a `Changed`
+    /// hard stop the user cannot clear from the UI.
+    ///
+    /// TIE-BREAK: when the duplicates disagree on the fingerprint, the one
+    /// with the newest `last_seen_at` wins, ties going to the earlier entry.
+    /// Both were explicitly trusted by a human, so neither has better
+    /// provenance, but only the recently seen one describes a key the machine
+    /// actually presented; keeping the other would hard-stop a connection
+    /// that has been working. Equal fingerprints, the overwhelmingly common
+    /// case since both spellings point at one host key, make the choice moot.
+    pub fn collapse_duplicates(&mut self) -> usize {
+        let before = self.pins.len();
+        let mut kept: Vec<HostKeyPin> = Vec::with_capacity(before);
+        for pin in std::mem::take(&mut self.pins) {
+            let existing = kept.iter().position(|k| {
+                k.port == pin.port && canonical_host(&k.host) == canonical_host(&pin.host)
+            });
+            match existing {
+                Some(i) if pin.last_seen_at > kept[i].last_seen_at => kept[i] = pin,
+                Some(_) => {}
+                None => kept.push(pin),
+            }
+        }
+        self.pins = kept;
+        before - self.pins.len()
     }
 
     pub fn forget(&mut self, host: &str, port: u16) -> bool {
@@ -276,6 +335,146 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"type\":\"unknown\""), "{json}");
         assert!(json.contains("\"keyType\""), "{json}");
+    }
+
+    /// A pin written by a build that stored the host as typed must still be
+    /// found once the key is canonical, in either direction. Missing it would
+    /// re-prompt and pin the same machine twice.
+    #[test]
+    fn a_pin_stored_in_an_older_spelling_still_matches_a_canonical_lookup() {
+        for stored in ["[::1]", "::1", "STUDIO.local.", "studio.local"] {
+            let mut store = HostKeyStore::new();
+            store.pins.push(HostKeyPin {
+                host: stored.to_string(),
+                port: 22,
+                key_type: "ssh-ed25519".into(),
+                fingerprint: FP_A.into(),
+                first_trusted_at: 100,
+                last_seen_at: 100,
+            });
+            let lookups: &[&str] = if stored.contains(':') {
+                &["::1", "[::1]"]
+            } else {
+                &["studio.local", "studio.local.", "Studio.Local"]
+            };
+            for lookup in lookups {
+                assert_eq!(
+                    store.decide(lookup, 22, "ssh-ed25519", FP_A),
+                    HostKeyDecision::Trusted,
+                    "stored {stored}, looked up {lookup}"
+                );
+            }
+        }
+    }
+
+    /// The mirror image: a canonical pin has to answer a lookup that still
+    /// carries the brackets or the mDNS trailing dot the user typed.
+    #[test]
+    fn a_canonical_pin_matches_a_bracketed_or_dotted_lookup() {
+        let mut store = HostKeyStore::new();
+        store.trust("[::1]", 22, "ssh-ed25519", FP_A, 100);
+        // `trust` writes the canonical spelling for a new pin.
+        assert_eq!(store.pins[0].host, "::1");
+        assert_eq!(
+            store.decide("::1", 22, "ssh-ed25519", FP_A),
+            HostKeyDecision::Trusted
+        );
+        assert_eq!(
+            store.decide("[::1]", 22, "ssh-ed25519", FP_A),
+            HostKeyDecision::Trusted
+        );
+
+        store.trust("Studio.Local.", 22, "ssh-ed25519", FP_A, 100);
+        assert_eq!(store.pins.len(), 2);
+        assert_eq!(store.pins[1].host, "studio.local");
+        assert_eq!(
+            store.decide("studio.local.", 22, "ssh-ed25519", FP_A),
+            HostKeyDecision::Trusted
+        );
+        // Trusting the other spelling updates the existing pin, never adds one.
+        store.trust("studio.local.", 22, "ssh-ed25519", FP_A, 200);
+        assert_eq!(store.pins.len(), 2);
+        assert_eq!(store.get("STUDIO.LOCAL", 22).unwrap().last_seen_at, 200);
+        store.touch("[studio.local.]", 22, 300);
+        assert_eq!(store.get("studio.local", 22).unwrap().last_seen_at, 300);
+        assert!(store.forget("Studio.Local", 22));
+        assert_eq!(store.pins.len(), 1);
+    }
+
+    /// Canonicalisation must not blur two machines together, nor soften the
+    /// one decision in this file that can never be clicked through.
+    #[test]
+    fn canonicalisation_never_weakens_the_changed_hard_stop() {
+        let mut store = HostKeyStore::new();
+        store.pins.push(HostKeyPin {
+            host: "[::1]".into(),
+            port: 22,
+            key_type: "ssh-ed25519".into(),
+            fingerprint: FP_A.into(),
+            first_trusted_at: 100,
+            last_seen_at: 100,
+        });
+
+        // Same machine, different key: still a hard stop through the legacy
+        // spelling.
+        assert_eq!(
+            store.decide("::1", 22, "ssh-ed25519", FP_B),
+            HostKeyDecision::Changed {
+                expected: FP_A.into(),
+                actual: FP_B.into(),
+                key_type: "ssh-ed25519".into(),
+            }
+        );
+
+        // Genuinely different endpoints stay unpinned.
+        for other in ["::2", "[fe80::1]", "studio.local"] {
+            assert!(
+                matches!(
+                    store.decide(other, 22, "ssh-ed25519", FP_A),
+                    HostKeyDecision::Unknown { .. }
+                ),
+                "{other} must not match the ::1 pin"
+            );
+        }
+        assert!(matches!(
+            store.decide("::1", 2222, "ssh-ed25519", FP_A),
+            HostKeyDecision::Unknown { .. }
+        ));
+    }
+
+    /// Duplicates left by an older build collapse to the pin that was most
+    /// recently seen, and pins for different machines are left alone.
+    #[test]
+    fn collapsing_duplicates_keeps_the_most_recently_seen_pin() {
+        let pin = |host: &str, fingerprint: &str, last_seen_at: i64| HostKeyPin {
+            host: host.to_string(),
+            port: 22,
+            key_type: "ssh-ed25519".into(),
+            fingerprint: fingerprint.to_string(),
+            first_trusted_at: 100,
+            last_seen_at,
+        };
+        let mut store = HostKeyStore::new();
+        store.pins = vec![
+            pin("studio.local", FP_A, 100),
+            pin("den.local", FP_A, 100),
+            pin("studio.local.", FP_B, 300),
+            pin("STUDIO.LOCAL", FP_A, 200),
+        ];
+
+        assert_eq!(store.collapse_duplicates(), 2);
+        assert_eq!(store.pins.len(), 2);
+        assert_eq!(store.get("studio.local", 22).unwrap().fingerprint, FP_B);
+        assert_eq!(store.get("den.local", 22).unwrap().fingerprint, FP_A);
+        // Idempotent, and a store with nothing to merge is untouched.
+        assert_eq!(store.collapse_duplicates(), 0);
+
+        // Ties keep the earlier entry, so the result does not depend on the
+        // order two pins happened to be written in.
+        let mut tied = HostKeyStore::new();
+        tied.pins = vec![pin("[::1]", FP_A, 100), pin("::1", FP_B, 100)];
+        assert_eq!(tied.collapse_duplicates(), 1);
+        assert_eq!(tied.pins[0].fingerprint, FP_A);
     }
 
     #[test]

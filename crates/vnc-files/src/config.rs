@@ -47,6 +47,25 @@ pub fn resolver_host(host: &str) -> &str {
         .unwrap_or(host)
 }
 
+/// The canonical form of a host, for deciding whether two spellings mean the
+/// same machine.
+///
+/// Deliberately the same rule as `vnc_store::normalize_address` (trim, drop
+/// the trailing dot mDNS puts on a fully-qualified name, ASCII-lowercase),
+/// plus the bracket stripping this crate needs because a user-typed `[::1]`
+/// now reaches the sidecar: `host_port` re-adds the brackets wherever a joined
+/// string is wanted, so carrying them in an identity would split one machine
+/// into two. "The same machine" has to mean the same thing on both sides of
+/// the app or a profile pins its host key twice.
+///
+/// Copied rather than shared for the reason given on [`host_port`]: `vnc-files`
+/// has no other need of `vnc-store`, and one line is not worth a crate edge.
+pub fn canonical_host(host: &str) -> String {
+    resolver_host(host.trim())
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
 /// How to authenticate the SSH sidecar connection.
 ///
 /// Adjacently tagged so the JS side sends `{ kind, value }`:
@@ -260,6 +279,34 @@ mod tests {
         assert_eq!(resolver_host("::1"), "::1");
         assert_eq!(resolver_host("192.0.2.10"), "192.0.2.10");
         assert_eq!(resolver_host("files.example.com"), "files.example.com");
+    }
+
+    /// One machine, one spelling: whatever a profile or an mDNS record calls
+    /// a host, everything keyed on it has to agree they are the same box.
+    #[test]
+    fn every_spelling_of_one_machine_canonicalises_to_the_same_string() {
+        assert_eq!(canonical_host("[::1]"), "::1");
+        assert_eq!(canonical_host("::1"), "::1");
+        assert_eq!(canonical_host("[FE80::1]"), "fe80::1");
+
+        assert_eq!(canonical_host("studio.local."), "studio.local");
+        assert_eq!(canonical_host("Studio.Local"), "studio.local");
+        assert_eq!(canonical_host("  studio.local.  "), "studio.local");
+
+        // Different machines must stay different.
+        assert_ne!(canonical_host("::1"), canonical_host("::2"));
+        assert_ne!(canonical_host("studio.local"), canonical_host("den.local"));
+    }
+
+    /// The rule is `vnc_store::normalize_address` plus bracket stripping; if
+    /// the two ever drift, the VNC side and the sidecar disagree about which
+    /// machine a profile points at.
+    #[test]
+    fn canonicalisation_matches_the_store_rule_for_unbracketed_hosts() {
+        for host in ["studio.local.", "Studio.Local", " den.local ", "192.0.2.10"] {
+            let store_rule = host.trim().trim_end_matches('.').to_ascii_lowercase();
+            assert_eq!(canonical_host(host), store_rule, "{host}");
+        }
     }
 
     #[test]
