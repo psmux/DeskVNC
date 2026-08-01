@@ -104,41 +104,40 @@ pub fn run() {
             match event {
                 // Closing a session window cancels its session(s) so the socket
                 // sends a clean RFB close (PRD/01 §6).
+                // Every hook here is keyed on what the window actually OWNS,
+                // not on its label. A session used to imply a window called
+                // `session-<id>`, but in tabbed view sessions live in `main`
+                // alongside the library, so `main` closing has to tear its
+                // sessions down exactly the way a session window does. Each
+                // call is a no-op for a window that owns nothing, which is what
+                // `main` is in the one-window-per-session mode.
                 tauri::WindowEvent::CloseRequested { .. } => {
-                    if window.label().starts_with("session-") {
-                        // Release the keyboard FIRST: whatever else fails, the
-                        // user must not be left with a grab held by a window
-                        // that is going away.
-                        commands::capture::release_for_window(window.app_handle(), window.label());
-                        if let Some(state) = window.try_state::<AppState>() {
-                            state.shutdown_sessions_for_window(window.label());
-                        }
-                        // …and cancel any file transfers that window owned.
-                        if let Some(files) = window.try_state::<commands::files::FilesState>() {
-                            files.shutdown_for_window(window.label());
-                        }
+                    // Release the keyboard FIRST: whatever else fails, the user
+                    // must not be left with a grab held by a window that is
+                    // going away.
+                    commands::capture::release_for_window(window.app_handle(), window.label());
+                    if let Some(state) = window.try_state::<AppState>() {
+                        state.shutdown_sessions_for_window(window.label());
+                    }
+                    // …and cancel any file transfers that window owned.
+                    if let Some(files) = window.try_state::<commands::files::FilesState>() {
+                        files.shutdown_for_window(window.label());
                     }
                 }
-                // Capture is only ever held while its session window is
-                // focused (PRD/06 §3). Blur disarms; focus re-arms if the user
-                // still has pass-through switched on for that session.
+                // Capture is only ever held while the window that asked for it
+                // is focused (PRD/06 §3). Blur disarms; focus re-arms if the
+                // user still has pass-through switched on for that session.
+                //
+                // There is deliberately no "focus moved elsewhere, force
+                // release" branch any more: the owning window's own blur event
+                // already disarms, and with tabs the library and the session
+                // share one window, so focusing it would have released the grab
+                // the user had just asked for.
                 tauri::WindowEvent::Focused(focused) => {
-                    if window.label().starts_with("session-") {
-                        if *focused {
-                            commands::capture::rearm_for_window(
-                                window.app_handle(),
-                                window.label(),
-                            );
-                        } else {
-                            commands::capture::disarm_for_window(
-                                window.app_handle(),
-                                window.label(),
-                            );
-                        }
-                    } else if *focused {
-                        // Focus moved to a non-session window (the library, a
-                        // dialog): nothing should still be swallowing keys.
-                        commands::capture::force_release(window.app_handle());
+                    if *focused {
+                        commands::capture::rearm_for_window(window.app_handle(), window.label());
+                    } else {
+                        commands::capture::disarm_for_window(window.app_handle(), window.label());
                     }
                 }
                 // A destroyed window can never re-arm, so drop the intent too.
