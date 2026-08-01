@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
 ### Added
 
 - **Tabbed view.** Connected computers can be shown as tabs across the top of
@@ -36,6 +38,21 @@ to stored data and to the IPC contract between the Rust core and the frontend.
     forward rather than starting a second session.
   - Closing the library window with tabs open shuts those sessions down
     cleanly, but skips the parting thumbnail refresh; closing a tab does not.
+- **A windows/tabs switch in the library toolbar**, beside the grid and list
+  buttons. It is the same preference as Preferences ▸ Connections and the two
+  always agree; it is simply within reach of the moment it matters, which is
+  the moment before connecting.
+- **The session toolbar can be put away by hand.** A collapse button sits next
+  to the pin, and `Cmd/Ctrl+Shift+M` now toggles rather than only recalling, so
+  the chord that brings the toolbar back also sends it away. Previously it
+  could only be waited out, and a pinned toolbar never hid at all.
+- **The session toolbar can be dropped anywhere in the window**, not only along
+  one of the four edges. Let go within 40px of an edge and it still docks
+  flush, which keeps the tidy docked look and keeps the edge meaningful for
+  which way menus open and the collapse chevron points. Its position is
+  remembered, as before, and shared by every toolbar mounted in tabbed view.
+  The collapsed chevron is a drag handle too, so the toolbar can be moved
+  without opening it first.
 
 ### Fixed
 
@@ -61,6 +78,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   load, keeping the most recently seen pin: without that, forgetting a key
   would leave a shadow pin behind that answers the next connection, and a
   disagreeing fingerprint there is a hard stop with no way through it.
+
+- The session toolbar could be dragged almost entirely out of the window, drag
+  handle and all, leaving no way to get it back. The clamp bounded the anchor
+  point to 5–95% of the window, but the anchor was the toolbar's *centre* and
+  the box hung off it, so on a 1400px window a 614px toolbar reached
+  `left: -237px`. Placement is now computed as a clamped top-left corner, which
+  is the thing that actually has to stay on screen. A position already stored
+  off-screen is re-clamped when it loads, so a toolbar previously lost that way
+  comes back rather than staying lost.
+- Moving the pointer over the collapsed toolbar chevron reopened the toolbar,
+  so it could not be moved past or picked up without it springing open. It now
+  opens on a click, and lights up on hover instead.
 
 ## [0.1.2] - 2026-07-31
 
@@ -248,5 +277,6 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/psmux/DeskVNC/compare/v0.1.2...v0.2.0
 [0.1.0]: https://github.com/psmux/DeskVNC/releases/tag/v0.1.0
