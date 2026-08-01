@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { SettingsProvider, useSettings } from "./state/SettingsContext";
 import { ToastProvider } from "./state/ToastContext";
 import { HostsProvider } from "./state/HostsContext";
@@ -10,7 +10,8 @@ import { Session } from "./screens/Session";
 import { Preferences } from "./screens/Preferences";
 import { About } from "./screens/About";
 import { Onboarding } from "./screens/Onboarding";
-import { TabStrip } from "./components/TabStrip";
+import { TabStrip, tabPanelId } from "./components/TabStrip";
+import { Pane } from "./components/Pane";
 import { ToastShelf } from "./components/primitives";
 import { safeListen } from "./lib/tauri";
 
@@ -106,6 +107,30 @@ function MainShell(): ReactNode {
     return () => window.removeEventListener("keydown", onKey);
   }, [tabHotkey]);
 
+  // The session toolbar is positioned against the viewport, not against its
+  // pane, so it has to be told how much of the top the tab strip is using or
+  // it lands on the tabs and takes the clicks meant for them.
+  const stripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = stripRef.current;
+    const root = document.documentElement;
+    if (!el) {
+      root.style.removeProperty("--session-inset-top");
+      return;
+    }
+    const apply = (): void => {
+      root.style.setProperty("--session-inset-top", `${el.offsetHeight}px`);
+    };
+    apply();
+    // The strip grows a scrollbar, and wraps differently at narrow widths.
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty("--session-inset-top");
+    };
+  }, [tabs.length > 0]);
+
   // The window title follows whatever is in front, the way it would if that
   // session had a window of its own.
   useEffect(() => {
@@ -127,7 +152,10 @@ function MainShell(): ReactNode {
     );
   }
 
-  const libraryInFront = activeId === null;
+  // `select` already refuses an id that is not open, so this only differs from
+  // `activeId === null` for a tab closed in the same render. Belt and braces
+  // for the one state with no way out: no pane in front, and no strip either.
+  const libraryInFront = activeId === null || !tabs.some((t) => t.id === activeId);
 
   return (
     <div className="flex h-full flex-col">
@@ -137,13 +165,15 @@ function MainShell(): ReactNode {
         the sessions already running in here with no way to reach them.
       */}
       {tabs.length > 0 ? (
-        <TabStrip
-          tabs={tabs}
-          activeId={activeId}
-          onSelect={select}
-          onClose={close}
-          onSelectRelative={selectRelative}
-        />
+        <div ref={stripRef}>
+          <TabStrip
+            tabs={tabs}
+            activeId={activeId}
+            onSelect={select}
+            onClose={close}
+            onSelectRelative={selectRelative}
+          />
+        </div>
       ) : null}
 
       {/*
@@ -154,7 +184,7 @@ function MainShell(): ReactNode {
         framebuffer every time the user came back to that tab.
       */}
       <div className="relative min-h-0 flex-1">
-        <Pane visible={libraryInFront}>
+        <Pane visible={libraryInFront} id={tabPanelId(null)} label="Library">
           <Library
             onOpenPreferences={() => setPrefsOpen(true)}
             onOpenAbout={() => setAboutOpen(true)}
@@ -163,7 +193,12 @@ function MainShell(): ReactNode {
           />
         </Pane>
         {tabs.map((tab) => (
-          <Pane key={tab.id} visible={tab.id === activeId}>
+          <Pane
+            key={tab.id}
+            visible={tab.id === activeId}
+            id={tabPanelId(tab.id)}
+            label={tab.title}
+          >
             <Session
               params={tab.params}
               embedded
@@ -179,19 +214,6 @@ function MainShell(): ReactNode {
 
       {prefsOpen ? <Preferences onClose={() => setPrefsOpen(false)} /> : null}
       {aboutOpen ? <About onClose={() => setAboutOpen(false)} /> : null}
-    </div>
-  );
-}
-
-function Pane({ visible, children }: { visible: boolean; children: ReactNode }): ReactNode {
-  return (
-    <div
-      className="absolute inset-0"
-      style={{ visibility: visible ? "visible" : "hidden" }}
-      aria-hidden={visible ? undefined : true}
-      inert={visible ? undefined : true}
-    >
-      {children}
     </div>
   );
 }

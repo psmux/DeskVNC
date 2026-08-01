@@ -60,6 +60,7 @@ fn main() {
             "cancel_credentials",
             "pending_credential_request",
             "open_session_window",
+            "release_session_claim",
             "fullscreen_session",
             "list_active_sessions",
             // file transfer, SFTP sidecar (PRD/08). The fs plugin stays off;

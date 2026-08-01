@@ -9,6 +9,7 @@ import {
   type SelectHTMLAttributes,
 } from "react";
 import { useToasts, type Toast } from "../state/ToastContext";
+import { usePaneVisible } from "./Pane";
 import { classNames } from "../lib/util";
 import { IconCheck, IconAlert, IconX, IconChevronDown } from "./icons";
 
@@ -258,18 +259,23 @@ export function Dialog({
   initialFocusSelector?: string;
 }): ReactNode {
   const ref = useRef<HTMLDivElement>(null);
+  // A dialog on a background tab is not on screen, and must neither take the
+  // focus nor answer the keyboard. Both effects below listen outside this
+  // subtree, where hiding the pane does not reach them.
+  const onScreen = usePaneVisible();
 
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || !onScreen) return;
     const target = initialFocusSelector
       ? el.querySelector<HTMLElement>(initialFocusSelector)
       : el.querySelector<HTMLElement>("[data-autofocus]") ??
         el.querySelector<HTMLElement>("input, select, button");
     target?.focus();
-  }, [initialFocusSelector]);
+  }, [initialFocusSelector, onScreen]);
 
   useEffect(() => {
+    if (!onScreen) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         e.stopPropagation();
@@ -294,7 +300,7 @@ export function Dialog({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [onClose, onScreen]);
 
   const style: CSSProperties = { width, maxWidth: "calc(100vw - 32px)" };
 

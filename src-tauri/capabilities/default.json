@@ -72,6 +72,7 @@
     "allow-pending-credential-request",
     "allow-cancel-credentials",
     "allow-open-session-window",
+    "allow-release-session-claim",
     "allow-fullscreen-session",
     "allow-list-active-sessions",
 

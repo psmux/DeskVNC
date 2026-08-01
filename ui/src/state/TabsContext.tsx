@@ -27,6 +27,7 @@ import {
 } from "react";
 import type { SessionParams } from "../hooks/useSession";
 import type { SessionState } from "../lib/types";
+import { safeInvoke } from "../lib/tauri";
 
 export interface SessionTab {
   /** The session id: React key, tab identity, and what the shell knows it by. */
@@ -48,6 +49,8 @@ interface TabsContextValue {
   close: (id: string) => void;
   /** Bring a tab (or, for null, the library) to the front. */
   select: (id: string | null) => void;
+  /** Is this session open as a tab here? */
+  has: (id: string) => boolean;
   /** Move `delta` tabs along, wrapping, counting the library as the first. */
   selectRelative: (delta: number) => void;
   /** Select by position, the library being 0. Out of range does nothing. */
@@ -73,8 +76,16 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
   const activeRef = useRef(activeId);
   activeRef.current = activeId;
 
+  const has = useCallback((id: string): boolean => tabsRef.current.some((t) => t.id === id), []);
+
+  /**
+   * Selecting a tab that is not open would leave the window showing nothing at
+   * all: the library would not be in front, no pane would match, and with no
+   * tabs there would not even be a strip to click. Fall back to the library
+   * rather than trusting the caller.
+   */
   const select = useCallback((id: string | null): void => {
-    setActiveId(id);
+    setActiveId(id !== null && !tabsRef.current.some((t) => t.id === id) ? null : id);
   }, []);
 
   const open = useCallback((id: string, params: SessionParams): void => {
@@ -94,6 +105,11 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
     if (index < 0) return;
     const next = list.filter((t) => t.id !== id);
     setTabs(next);
+    // Hand the session id back to the shell. Unmounting the viewer disconnects
+    // it, but a tab closed before it ever connected leaves the shell holding a
+    // claim on that machine, and a claim naming the library window is never
+    // invalidated by the window going away.
+    void safeInvoke("release_session_claim", { sessionId: id }, null);
     // Closing the tab in front lands on its neighbour, the way a browser does,
     // rather than dumping the user back on the library every time.
     if (activeRef.current === id) {
@@ -165,13 +181,14 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
       open,
       close,
       select,
+      has,
       selectRelative,
       selectIndex,
       closeActive,
       setTitle,
       setState,
     }),
-    [tabs, activeId, open, close, select, selectRelative, selectIndex, closeActive, setTitle, setState],
+    [tabs, activeId, open, close, select, has, selectRelative, selectIndex, closeActive, setTitle, setState],
   );
 
   return <TabsContext.Provider value={value}>{children}</TabsContext.Provider>;

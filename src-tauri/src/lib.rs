@@ -198,6 +198,7 @@ pub fn run() {
             commands::session::cancel_credentials,
             commands::session::pending_credential_request,
             commands::session::open_session_window,
+            commands::session::release_session_claim,
             commands::session::fullscreen_session,
             commands::session::list_active_sessions,
             // file transfer (SFTP sidecar)

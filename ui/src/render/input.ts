@@ -131,6 +131,13 @@ export class SessionInput {
   detach(): void {
     if (!this.attached) return;
     this.attached = false;
+    // Let go of anything still held. Detaching only unhooks the listeners, so
+    // without this the keyup (or pointerup) that would have released it goes
+    // somewhere else and the remote desktop is left with the key down. `blur`
+    // used to be the only way to stop owning the keyboard mid-keystroke;
+    // switching away from a session tab is now another, and the switch gesture
+    // itself is usually a modifier plus a key.
+    this.releaseAllLocal();
     const c = this.canvas;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);

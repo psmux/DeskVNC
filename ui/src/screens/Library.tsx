@@ -87,7 +87,7 @@ export function Library({
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
-  const { tabs, open: openTab, select: selectTab, activeId: activeTabId } = useTabs();
+  const { tabs, open: openTab, select: selectTab, has: hasTab, activeId: activeTabId } = useTabs();
   /** Is the library the pane on screen, or is a session tab in front of it? */
   const inFront = activeTabId === null;
   const { push } = useToasts();
@@ -129,8 +129,19 @@ export function Library({
       label: string,
       onConnected?: () => void,
     ): Promise<void> => {
-      const outcome = await openSessionWindow({ ...options, asTab: tabbed });
+      let outcome = await openSessionWindow({ ...options, asTab: tabbed });
       if (!outcome) return;
+      // A tab the shell believes is still open, but which is not on the strip,
+      // is a session on its way out: `disconnect_session` only ASKS the session
+      // to stop, and the shell's liveness test for a tab is whether the library
+      // window still exists, which it always does. Closing a tab and
+      // reconnecting straight away would otherwise be answered with "already
+      // open" and connect nothing at all. Ask once more, saying outright that a
+      // new one is wanted.
+      if (outcome.reused && outcome.target === "tab" && !hasTab(outcome.sessionId)) {
+        outcome = await openSessionWindow({ ...options, asTab: tabbed, forceNew: true });
+        if (!outcome) return;
+      }
       if (outcome.reused) {
         if (outcome.target === "tab") selectTab(outcome.sessionId);
         push("info", `${label} is already open, brought it to the front`);
@@ -149,7 +160,7 @@ export function Library({
       }
       onConnected?.();
     },
-    [tabbed, selectTab, openTab, push],
+    [tabbed, selectTab, openTab, hasTab, push],
   );
 
   const connectHost = useCallback(

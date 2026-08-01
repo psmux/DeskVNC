@@ -11,6 +11,11 @@ import type { SessionState } from "../lib/types";
 import type { SessionTab } from "../state/TabsContext";
 import { IconGrid, IconX } from "./icons";
 
+/** DOM id of the pane a tab controls. `null` is the library. */
+export function tabPanelId(id: string | null): string {
+  return `pane-${id ?? "library"}`;
+}
+
 /** Colour of a tab's status dot, and what a screen reader hears for it. */
 function statusOf(state: SessionState): { className: string; label: string } {
   switch (state.state) {
@@ -68,6 +73,7 @@ export function TabStrip({
         ref={activeId === null ? activeRef : undefined}
         selected={activeId === null}
         onSelect={() => onSelect(null)}
+        panelId={tabPanelId(null)}
         icon={<IconGrid size={13} />}
         label="Library"
       />
@@ -81,14 +87,17 @@ export function TabStrip({
             selected={selected}
             onSelect={() => onSelect(tab.id)}
             onClose={() => onClose(tab.id)}
+            panelId={tabPanelId(tab.id)}
+            // The dot is decorative here: its meaning is already in the tab's
+            // own accessible name, and announcing it twice is just noise.
             icon={
               <span
-                role="img"
-                aria-label={status.label}
+                aria-hidden="true"
                 className={classNames("h-1.5 w-1.5 shrink-0 rounded-full", status.className)}
               />
             }
             label={tab.title}
+            status={status.label}
           />
         );
       })}
@@ -101,21 +110,30 @@ function Tab({
   selected,
   onSelect,
   onClose,
+  panelId,
   icon,
   label,
+  status,
 }: {
   ref?: Ref<HTMLDivElement>;
   selected: boolean;
   onSelect: () => void;
   onClose?: () => void;
+  panelId: string;
   icon: ReactNode;
   label: string;
+  status?: string;
 }): ReactNode {
   return (
     <div
       ref={ref}
       role="tab"
       aria-selected={selected}
+      aria-controls={panelId}
+      // Named explicitly rather than from its contents: the close button is a
+      // focusable descendant, so otherwise every tab would announce itself as
+      // "my-desktop, Close my-desktop".
+      aria-label={status ? `${label}, ${status}` : label}
       // Roving tabindex: Tab reaches the strip, then Left/Right move within it.
       tabIndex={selected ? 0 : -1}
       title={label}
