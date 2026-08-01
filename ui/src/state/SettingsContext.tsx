@@ -11,6 +11,15 @@ import {
 export type ThemeChoice = "system" | "light" | "dark";
 export type LibraryView = "grid" | "list";
 export type SortKey = "name" | "last-connected" | "frequency" | "group";
+/**
+ * Where a session is shown.
+ *
+ * `windows`, the original behaviour: every session gets its own OS window
+ * (`session-<id>`), so switching between machines means switching windows.
+ * `tabs`: sessions are mounted inside the main window and switched between
+ * with a tab strip, the way browser tabs work.
+ */
+export type WindowMode = "windows" | "tabs";
 
 export interface Settings {
   theme: ThemeChoice;
@@ -27,6 +36,15 @@ export interface Settings {
    * the remote one is drawn badly by the server), so it can be turned off, * input is unaffected either way.
    */
   showRemoteCursor: boolean;
+  /**
+   * Separate windows per session, or tabs inside the main window.
+   *
+   * Only consulted when a session *starts*: flipping it does not move sessions
+   * that are already running, because a live framebuffer lives in the WebGL
+   * texture of whichever webview opened it and there is no way to hand that to
+   * another one without reconnecting.
+   */
+  windowMode: WindowMode;
   /**
    * Addresses reached through QuickConnect, most recent first.
    *
@@ -47,6 +65,7 @@ const DEFAULTS: Settings = {
   onboarded: false,
   probeOnline: true,
   showRemoteCursor: true,
+  windowMode: "windows",
   quickConnectHistory: [],
 };
 
@@ -67,6 +86,11 @@ function load(): Settings {
     // localStorage is hand-editable, and a history that is not an array would
     // throw on every render of the QuickConnect bar rather than degrade.
     if (!Array.isArray(merged.quickConnectHistory)) merged.quickConnectHistory = [];
+    // Same reasoning: an unknown mode would put the shell in a state with no
+    // way to open anything at all.
+    if (merged.windowMode !== "windows" && merged.windowMode !== "tabs") {
+      merged.windowMode = DEFAULTS.windowMode;
+    }
     return merged;
   } catch {
     return DEFAULTS;

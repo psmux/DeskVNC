@@ -28,6 +28,39 @@ const POS_KEY = "deskvnc.toolbar.pos";
 const PIN_KEY = "deskvnc.toolbar.pin";
 const IDLE_MS = 3000;
 
+const DEFAULT_POS: ToolbarPos = { edge: "top", ratio: 0.5 };
+
+function readPos(): ToolbarPos {
+  try {
+    const raw = localStorage.getItem(POS_KEY);
+    if (raw) return JSON.parse(raw) as ToolbarPos;
+  } catch {
+    /* default below */
+  }
+  return DEFAULT_POS;
+}
+
+const readPinned = (): boolean => localStorage.getItem(PIN_KEY) === "1";
+
+/**
+ * Where the toolbar sits, and whether it stays put, is one preference for the
+ * whole app. In tabbed view several toolbars are mounted at once and each one
+ * took its own snapshot when it mounted, so dragging the toolbar in one tab
+ * left every other tab's where it was until the app restarted. A `storage`
+ * event does not fire in the document that wrote the value, so the writer has
+ * to tell its siblings itself.
+ */
+const layoutListeners = new Set<() => void>();
+
+function storeLayout(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable, the position is simply not remembered */
+  }
+  for (const notify of layoutListeners) notify();
+}
+
 export interface SessionToolbarProps {
   desktopName: string;
   state: SessionState;
@@ -66,14 +99,24 @@ export interface SessionToolbarProps {
 }
 
 export function SessionToolbar(props: SessionToolbarProps): ReactNode {
-  const [pos, setPos] = useState<ToolbarPos>(() => {
-    try {
-      const raw = localStorage.getItem(POS_KEY);
-      if (raw) return JSON.parse(raw) as ToolbarPos;
-    } catch { /* default below */ }
-    return { edge: "top", ratio: 0.5 };
-  });
-  const [pinned, setPinned] = useState<boolean>(() => localStorage.getItem(PIN_KEY) === "1");
+  const [pos, setPos] = useState<ToolbarPos>(readPos);
+  const [pinned, setPinned] = useState<boolean>(readPinned);
+  /** Latest position, for the drag handler to persist on drop. */
+  const posRef = useRef(pos);
+  posRef.current = pos;
+
+  // Follow the shared layout while other tabs' toolbars are mounted alongside.
+  useEffect(() => {
+    const sync = (): void => {
+      setPos(readPos());
+      setPinned(readPinned());
+    };
+    layoutListeners.add(sync);
+    return () => {
+      layoutListeners.delete(sync);
+    };
+  }, []);
+
   const [collapsed, setCollapsed] = useState(false);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const idleTimer = useRef(0);
@@ -145,12 +188,9 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       dragging.current = false;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      setPos((p) => {
-        try {
-          localStorage.setItem(POS_KEY, JSON.stringify(p));
-        } catch { /* ignore */ }
-        return p;
-      });
+      // Through a ref, not a `setPos` updater: an updater has to be pure, and
+      // this one now tells the other mounted toolbars about the move.
+      storeLayout(POS_KEY, JSON.stringify(posRef.current));
       armIdle();
     };
     window.addEventListener("pointermove", move);
@@ -326,9 +366,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           onClick={() => {
             const v = !pinned;
             setPinned(v);
-            try {
-              localStorage.setItem(PIN_KEY, v ? "1" : "0");
-            } catch { /* ignore */ }
+            storeLayout(PIN_KEY, v ? "1" : "0");
           }}
         >
           <IconPin size={15} />

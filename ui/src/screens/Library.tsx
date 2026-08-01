@@ -14,9 +14,18 @@ import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/S
 import { useToasts } from "../state/ToastContext";
 import type { DiscoveredHost, HostProfile } from "../lib/types";
 import { hostMac, resolvedOsHint } from "../lib/types";
-import { allowsMultipleSessions, inTauri, openSessionWindow, safeInvoke, safeListen, forgetCertificate } from "../lib/tauri";
+import {
+  allowsMultipleSessions,
+  inTauri,
+  openSessionWindow,
+  safeInvoke,
+  safeListen,
+  forgetCertificate,
+  type OpenSessionOptions,
+} from "../lib/tauri";
 import { seedMockThumbnails, useMockData } from "../lib/mock";
 import { useSessions } from "../state/SessionsContext";
+import { useTabs } from "../state/TabsContext";
 import { classNames, formatBps, fuzzyMatch, modKeyLabel, timeAgo } from "../lib/util";
 import { Sidebar, type SidebarSelection } from "../components/Sidebar";
 import { HostTile, DiscoveredTile, osLabel } from "../components/HostTile";
@@ -49,6 +58,14 @@ interface CtxMenuState {
 const TILE_MAX_WIDTH = { normal: 440, compact: 320 };
 const TILE_GAP = { normal: 16, compact: 12 };
 
+/**
+ * A session id for the browser-dev mock, where there is no shell to mint one.
+ * Unique per tab, or two mock sessions would collide on one tab.
+ */
+function devSessionId(): string {
+  return `dev-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function gridCap(count: number, compact: boolean): CSSProperties | undefined {
   if (count <= 0) return undefined;
   const density = compact ? "compact" : "normal";
@@ -70,6 +87,9 @@ export function Library({
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
+  const { tabs, open: openTab, select: selectTab, activeId: activeTabId } = useTabs();
+  /** Is the library the pane on screen, or is a session tab in front of it? */
+  const inFront = activeTabId === null;
   const { push } = useToasts();
 
   const [selection, setSelection] = useState<SidebarSelection>({ kind: "all" });
@@ -91,50 +111,96 @@ export function Library({
 
   // ------------------------------------------------------------ connect
 
+  const tabbed = settings.windowMode === "tabs";
+
   /**
-   * One window per computer (unless the preference says otherwise): the shell
-   * decides, we only report what it did. `reused` means an already-open
-   * session window was raised, nothing new was connected, so the history
-   * counter must not be bumped either.
+   * Every connect gesture, in one place.
+   *
+   * The shell still decides everything that matters, we only act on what it
+   * reports back. `reused` means an already-open session was brought forward
+   * and nothing new was connected, so the history counter must not be bumped
+   * either. `target` says where that session actually lives: a machine opened
+   * in its own window before the preference was switched to tabs is still
+   * found, and is still raised as a window rather than duplicated into a tab.
    */
+  const openSession = useCallback(
+    async (
+      options: OpenSessionOptions,
+      label: string,
+      onConnected?: () => void,
+    ): Promise<void> => {
+      const outcome = await openSessionWindow({ ...options, asTab: tabbed });
+      if (!outcome) return;
+      if (outcome.reused) {
+        if (outcome.target === "tab") selectTab(outcome.sessionId);
+        push("info", `${label} is already open, brought it to the front`);
+        return;
+      }
+      if (outcome.target === "tab" && outcome.params) {
+        // A tab has no URL to read its parameters out of, so the shell hands
+        // them back and we mount the viewer with them.
+        openTab(outcome.sessionId, {
+          sessionId: outcome.sessionId,
+          profileId: outcome.params.profileId,
+          address: outcome.params.address,
+          port: outcome.params.port,
+          name: outcome.params.name,
+        });
+      }
+      onConnected?.();
+    },
+    [tabbed, selectTab, openTab, push],
+  );
+
   const connectHost = useCallback(
     (host: HostProfile, forceNew = false): void => {
       if (inTauri()) {
-        void openSessionWindow({ profileId: host.id, forceNew }).then((outcome) => {
-          if (outcome?.reused) {
-            push("info", `${host.friendlyName} is already open, brought it to the front`);
-            return;
-          }
+        void openSession({ profileId: host.id, forceNew }, host.friendlyName, () => {
           void safeInvoke("touch_connected", { hostId: host.id }, null);
         });
-      } else {
-        // browser dev: open the session screen in-window so it stays explorable.
-        // `profileId` rides along exactly as the shell would set it, so the mock
-        // session's thumbnail capture attaches to this host.
-        window.location.search =
-          `?sessionId=dev&profileId=${encodeURIComponent(host.id)}` +
-          `&name=${encodeURIComponent(host.friendlyName)}`;
+        return;
       }
+      // Browser dev: no shell to resolve anything, so mount the mock session
+      // directly. `profileId` rides along exactly as the shell would set it,
+      // so the mock session's thumbnail capture attaches to this host.
+      if (tabbed) {
+        const id = devSessionId();
+        openTab(id, {
+          sessionId: id,
+          profileId: host.id,
+          address: host.address,
+          port: host.port,
+          name: host.friendlyName,
+        });
+        return;
+      }
+      window.location.search =
+        `?sessionId=dev&profileId=${encodeURIComponent(host.id)}` +
+        `&name=${encodeURIComponent(host.friendlyName)}`;
     },
-    [push],
+    [openSession, tabbed, openTab],
   );
 
-  const connectAdHoc = useCallback((address: string, port: number): void => {
-    if (inTauri()) {
-      void openSessionWindow({ address, port }).then((outcome) => {
-        if (outcome?.reused) {
-          push("info", `${address} is already open, brought it to the front`);
-        }
-      });
-    } else {
+  const connectAdHoc = useCallback(
+    (address: string, port: number): void => {
+      if (inTauri()) {
+        void openSession({ address, port }, address);
+        return;
+      }
       // Endpoint rides along exactly as the shell sets it: an ad-hoc session
       // is keyed by `discovered:<address>:<port>`, so without it the browser
       // dev session has nothing to attach its capture to.
+      if (tabbed) {
+        const id = devSessionId();
+        openTab(id, { sessionId: id, profileId: null, address, port, name: address });
+        return;
+      }
       window.location.search =
         `?sessionId=dev&address=${encodeURIComponent(address)}&port=${port}` +
         `&name=${encodeURIComponent(address)}`;
-    }
-  }, [push]);
+    },
+    [openSession, tabbed, openTab],
+  );
 
   /** Most recent first, no duplicates, oldest dropped past the cap. */
   const rememberQuickConnect = useCallback(
@@ -327,6 +393,15 @@ export function Library({
 
   const paletteActions = useMemo((): PaletteAction[] => {
     return [
+      // Sessions open in tabs are reachable from here as well as from the
+      // strip, so a library with a long list of machines still has one keyboard
+      // route back to the one you were working in.
+      ...tabs.map((t, i) => ({
+        id: `go-to-tab-${t.id}`,
+        label: `Go to ${t.title}`,
+        hint: i < 8 ? `${modKeyLabel}${i + 2}` : "",
+        run: () => selectTab(t.id),
+      })),
       { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
       { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
       { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
@@ -340,7 +415,7 @@ export function Library({
       { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
       { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
     ];
-  }, [settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
+  }, [tabs, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -354,6 +429,10 @@ export function Library({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      // These listen on `window`, and in tabbed view the library stays mounted
+      // behind whichever session is in front. Without this, Cmd+F would move
+      // the focus into a search box nobody can see.
+      if (!inFront) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -372,20 +451,29 @@ export function Library({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusQuickConnect]);
+  }, [inFront, focusQuickConnect]);
 
   // The same two things off the native File menu. menu.rs routes them here
-  // whichever window has focus, so they work from inside a session too.
+  // whichever window has focus, so they work from inside a session too, and in
+  // tabbed view "from inside a session" means the library is behind a tab:
+  // bring it forward first, or the dialog and the address bar would open on a
+  // pane nobody is looking at.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
-      if (id === "menu:quick-connect") focusQuickConnect();
-      else if (id === "menu:new-host") setHostDialog(draftFromHost(null));
+      if (id !== "menu:quick-connect" && id !== "menu:new-host") return;
+      selectTab(null);
+      // Focus cannot land on an element that is still hidden, so let the pane
+      // swap paint first.
+      requestAnimationFrame(() => {
+        if (id === "menu:quick-connect") focusQuickConnect();
+        else setHostDialog(draftFromHost(null));
+      });
     }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, [focusQuickConnect]);
+  }, [focusQuickConnect, selectTab]);
 
   // ------------------------------------------------------------ context menu
 
@@ -393,7 +481,12 @@ export function Library({
     (host: HostProfile): MenuItem[] => [
       { label: "Connect", onSelect: () => connectHost(host) },
       ...(allowMultiple
-        ? [{ label: "Connect in new window", onSelect: () => connectHost(host, true) }]
+        ? [
+            {
+              label: tabbed ? "Connect in new tab" : "Connect in new window",
+              onSelect: () => connectHost(host, true),
+            },
+          ]
         : []),
       {
         label: "Edit…",
@@ -456,7 +549,7 @@ export function Library({
         },
       },
     ],
-    [allowMultiple, connectHost, editHost, saveHost, deleteHost, wakeHost, refreshThumbnail, push],
+    [allowMultiple, tabbed, connectHost, editHost, saveHost, deleteHost, wakeHost, refreshThumbnail, push],
   );
 
   // ------------------------------------------------------------ render

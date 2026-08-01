@@ -4,6 +4,10 @@ use tauri::{
     AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
+/// Label of the library window, which is also the window that hosts session
+/// tabs in tabbed view.
+pub const MAIN_WINDOW_LABEL: &str = "main";
+
 /// Window label for a session id.
 pub fn session_label(session_id: &str) -> String {
     format!("session-{session_id}")

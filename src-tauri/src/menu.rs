@@ -113,7 +113,38 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .item(&MenuItemBuilder::with_id("menu:release-keys", "Release All Keys").build(app)?)
         .build()?;
 
+    // Tab navigation lives on the native menu rather than in the webview
+    // because the session's keyboard hook swallows almost everything: a menu
+    // accelerator is intercepted by the OS before the page ever sees the key,
+    // which is the only way these still work while shortcut pass-through is
+    // on. The frontend routes them by `menu://action` id like any other custom
+    // item, and ignores them when nothing is open in a tab.
+    //
+    // `CmdOrCtrl+Shift+W` for Close Tab, not the more usual `CmdOrCtrl+W`:
+    // that one belongs to the predefined Close Window item below, and two
+    // items cannot share an accelerator.
     let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(
+            &MenuItemBuilder::with_id("menu:tab:library", "Show Library")
+                .accelerator("CmdOrCtrl+Shift+L")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:tab:next", "Next Tab")
+                .accelerator("Ctrl+Tab")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:tab:prev", "Previous Tab")
+                .accelerator("Ctrl+Shift+Tab")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:tab:close", "Close Tab")
+                .accelerator("CmdOrCtrl+Shift+W")
+                .build(app)?,
+        )
+        .separator()
         .minimize()
         .maximize()
         .separator()
@@ -178,6 +209,18 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             if let Err(e) = app.opener().open_url(&url, None::<&str>) {
                 tracing::warn!("failed to open {url}: {e}");
             }
+        }
+        "menu:tab:library" | "menu:tab:next" | "menu:tab:prev" | "menu:tab:close" => {
+            // The tab strip lives in the library window, so these always go
+            // there rather than to whatever is focused: a session window in
+            // front must not swallow "next tab" into a webview that has no
+            // tabs. Deliberately WITHOUT the show/focus dance below, in the
+            // tabbed view the library window is already the focused one, and
+            // in the separate-windows view there are no tabs to switch, so
+            // raising the library over the session the user is working in
+            // would be a jump scare rather than a feature.
+            let payload = serde_json::json!({ "id": id });
+            let _ = app.emit_to("main", "menu://action", payload);
         }
         "menu:new-host" | "menu:quick-connect" => {
             // Library concerns, not session ones. Sent to the library window
