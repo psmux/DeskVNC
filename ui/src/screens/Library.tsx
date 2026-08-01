@@ -40,6 +40,8 @@ import {
   IconMonitor,
   IconPlus,
   IconSearch,
+  IconTabs,
+  IconWindows,
   IconZap,
 } from "../components/icons";
 
@@ -620,6 +622,31 @@ export function Library({
             onClick={() => update({ libraryView: "list" })}
           >
             <IconList size={15} />
+          </button>
+        </div>
+        {/* The same preference as Connections > "Show sessions as tabs", within
+            reach of the moment it matters: about to connect. It decides where
+            the NEXT session goes, so sessions already running stay put. */}
+        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label="Where sessions open">
+          <button
+            type="button"
+            aria-label="Open sessions in their own windows"
+            title="Open each session in its own window"
+            aria-pressed={!tabbed}
+            className={classNames("p-1.5", !tabbed ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
+            onClick={() => update({ windowMode: "windows" })}
+          >
+            <IconWindows size={15} />
+          </button>
+          <button
+            type="button"
+            aria-label="Open sessions as tabs in this window"
+            title="Open sessions as tabs in this window"
+            aria-pressed={tabbed}
+            className={classNames("p-1.5", tabbed ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
+            onClick={() => update({ windowMode: "tabs" })}
+          >
+            <IconTabs size={15} />
           </button>
         </div>
         <button

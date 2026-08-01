@@ -126,3 +126,11 @@ export const IconGripVertical = (p: IconProps): ReactNode => (
 export const IconCommand = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M9 9V6a3 3 0 1 0-3 3h3zm0 0v6m0-6h6m-6 6v3a3 3 0 1 1-3-3h3zm6-6h3a3 3 0 1 0-3-3v3zm0 0v6m0 0h3a3 3 0 1 1-3 3v-3z" /></Icon>
 );
+/** Two overlapping frames: one window per session. */
+export const IconWindows = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="2" y="7" width="14" height="13" rx="2" /><path d="M6 7V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1" /></Icon>
+);
+/** One frame with tabs along its top: every session in this window. */
+export const IconTabs = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="2" y="8" width="20" height="12" rx="2" /><path d="M2 8V6a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v2" /><path d="M13 8V6a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v2" /></Icon>
+);
