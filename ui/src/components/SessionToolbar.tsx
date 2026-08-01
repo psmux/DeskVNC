@@ -1,5 +1,6 @@
 /** Floating pill session toolbar (PRD/05 §2): draggable to any edge, auto-fades
- *  to a chevron after 3s idle, recalled by hover-at-edge or Ctrl/Cmd+Shift+M. */
+ *  to a chevron after 3s idle or when collapsed by hand, recalled by
+ *  hover-at-edge or Ctrl/Cmd+Shift+M, which also puts it away again. */
 import {
   useCallback,
   useEffect,
@@ -124,16 +125,50 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   const idleTimer = useRef(0);
   const dragging = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  /**
+   * Set while a hover-to-recall right after a deliberate collapse should be
+   * ignored. Collapsing puts the small chevron roughly where the pointer just
+   * clicked, and the browser recomputes what is under the pointer when the
+   * layout changes, so without this the toolbar can spring straight back open
+   * and the button reads as broken. Cleared as soon as the pointer leaves, or
+   * shortly after, in case it was never over the chevron at all.
+   */
+  const ignoreHover = useRef(false);
+  const hoverTimer = useRef(0);
+  /** Read inside callbacks that must not re-arm the hover guard needlessly. */
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
+
+  const collapse = useCallback((guardHover: boolean): void => {
+    if (collapsedRef.current) return;
+    window.clearTimeout(idleTimer.current);
+    window.clearTimeout(hoverTimer.current);
+    // Auto-hide follows three seconds of stillness, so nothing is about to
+    // cross into the chevron and the guard would only cost a dead half-second.
+    ignoreHover.current = guardHover;
+    if (guardHover) {
+      hoverTimer.current = window.setTimeout(() => {
+        ignoreHover.current = false;
+      }, 500);
+    }
+    setOpenMenu(null);
+    setCollapsed(true);
+  }, []);
+
+  const expand = useCallback((): void => {
+    window.clearTimeout(hoverTimer.current);
+    ignoreHover.current = false;
+    setCollapsed(false);
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
 
   const armIdle = useCallback((): void => {
     window.clearTimeout(idleTimer.current);
     idleTimer.current = window.setTimeout(() => {
-      if (!pinned && !dragging.current) {
-        setOpenMenu(null);
-        setCollapsed(true);
-      }
+      if (!pinned && !dragging.current) collapse(false);
     }, IDLE_MS);
-  }, [pinned]);
+  }, [pinned, collapse]);
 
   // A toolbar on a background tab has nothing to auto-hide from, so it does not
   // watch the pointer: otherwise every mouse move would reset one timer per
@@ -149,13 +184,23 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     };
   }, [armIdle, onScreen]);
 
-  // recall via hotkey (parent bumps recallSignal)
+  /**
+   * Show/hide via the hotkey (the parent bumps `recallSignal`). It toggles, so
+   * the chord that calls the toolbar back also puts it away; the effect has to
+   * act only on a genuine bump, since `armIdle` and `collapsed` change its
+   * identity too and re-running on those would flip the toolbar unbidden.
+   */
+  const lastRecall = useRef(props.recallSignal);
   useEffect(() => {
-    if (props.recallSignal > 0) {
-      setCollapsed(false);
+    if (props.recallSignal === lastRecall.current) return;
+    lastRecall.current = props.recallSignal;
+    if (collapsed) {
+      expand();
       armIdle();
+    } else {
+      collapse(true);
     }
-  }, [props.recallSignal, armIdle]);
+  }, [props.recallSignal, collapsed, expand, collapse, armIdle]);
 
   useEffect(() => {
     if (openMenu === null) return;
@@ -251,8 +296,14 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           type="button"
           aria-label={`Show session toolbar (${modKeyLabel}⇧M)`}
           className="fade-in rounded-pill border border-subtle bg-raised/90 px-3 py-0.5 text-tertiary shadow-(--shadow-tile) backdrop-blur hover:text-primary"
-          onPointerEnter={() => setCollapsed(false)}
-          onClick={() => setCollapsed(false)}
+          onPointerEnter={() => {
+            if (!ignoreHover.current) expand();
+          }}
+          onPointerLeave={() => {
+            window.clearTimeout(hoverTimer.current);
+            ignoreHover.current = false;
+          }}
+          onClick={expand}
         >
           <IconChevronDown size={14} className={pos.edge === "bottom" ? "rotate-180" : ""} />
         </button>
@@ -380,6 +431,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           }}
         >
           <IconPin size={15} />
+        </ToolButton>
+
+        {/* Auto-hide only ever arrives on its own schedule, and a pinned
+            toolbar never hides at all, so put it away by hand from here. */}
+        <ToolButton label={`Collapse toolbar (${modKeyLabel}⇧M)`} onClick={() => collapse(true)}>
+          <IconChevronDown size={15} className={pos.edge === "bottom" ? "" : "rotate-180"} />
         </ToolButton>
 
         <Divider />
