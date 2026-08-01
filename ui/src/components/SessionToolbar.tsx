@@ -1,6 +1,8 @@
-/** Floating pill session toolbar (PRD/05 §2): draggable to any edge, auto-fades
- *  to a chevron after 3s idle or when collapsed by hand, recalled by
- *  hover-at-edge or Ctrl/Cmd+Shift+M, which also puts it away again. */
+/** Floating pill session toolbar (PRD/05 §2): draggable anywhere in the window
+ *  and docking flush when dropped near an edge, never able to leave the
+ *  viewport, auto-fades to a chevron after 3s idle or when collapsed by hand,
+ *  recalled by hover-at-edge or Ctrl/Cmd+Shift+M, which also puts it away
+ *  again. Its position is remembered and shared by every mounted toolbar. */
 import {
   useCallback,
   useEffect,
@@ -22,20 +24,53 @@ import {
 type Edge = "top" | "bottom" | "left" | "right";
 
 interface ToolbarPos {
-  edge: Edge;
-  ratio: number; // 0..1 along the edge
+  /** The edge it is docked to, or null when floating free. */
+  edge: Edge | null;
+  /** Where along that edge its centre sits, 0..1. Unused while floating. */
+  ratio: number;
+  /** Top-left as a fraction of the viewport. Unused while docked. */
+  x: number;
+  y: number;
 }
 
 const POS_KEY = "deskvnc.toolbar.pos";
 const PIN_KEY = "deskvnc.toolbar.pin";
 const IDLE_MS = 3000;
+/** Gap kept between the toolbar and the edges of the window. */
+const MARGIN = 12;
+/** Drag within this many pixels of an edge and it docks there. */
+const SNAP_PX = 40;
 
-const DEFAULT_POS: ToolbarPos = { edge: "top", ratio: 0.5 };
+const DEFAULT_POS: ToolbarPos = { edge: "top", ratio: 0.5, x: 0.5, y: 0 };
 
+const clamp = (v: number, lo: number, hi: number): number =>
+  Math.min(Math.max(v, lo), hi);
+
+/**
+ * Stored positions predate free placement and carry only `{edge, ratio}`, so
+ * anything missing is filled from the default rather than trusted: a `NaN`
+ * left over from an older shape would put the toolbar nowhere at all.
+ */
 function readPos(): ToolbarPos {
   try {
     const raw = localStorage.getItem(POS_KEY);
-    if (raw) return JSON.parse(raw) as ToolbarPos;
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<ToolbarPos>;
+      const edge =
+        p.edge === "top" || p.edge === "bottom" || p.edge === "left" || p.edge === "right"
+          ? p.edge
+          : p.edge === null
+            ? null
+            : DEFAULT_POS.edge;
+      const num = (v: unknown, fallback: number): number =>
+        typeof v === "number" && Number.isFinite(v) ? v : fallback;
+      return {
+        edge,
+        ratio: num(p.ratio, DEFAULT_POS.ratio),
+        x: num(p.x, DEFAULT_POS.x),
+        y: num(p.y, DEFAULT_POS.y),
+      };
+    }
   } catch {
     /* default below */
   }
@@ -124,7 +159,6 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const idleTimer = useRef(0);
   const dragging = useRef(false);
-  const rootRef = useRef<HTMLDivElement>(null);
   /**
    * Set while a hover-to-recall right after a deliberate collapse should be
    * ignored. Collapsing puts the small chevron roughly where the pointer just
@@ -138,6 +172,52 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   /** Read inside callbacks that must not re-arm the hover guard needlessly. */
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
+
+  /**
+   * Keeping the toolbar on screen needs three numbers the CSS cannot supply:
+   * how big the window is, how big the toolbar is, and how much room the shell
+   * chrome takes at the top. Clamping the anchor point alone is not enough,
+   * because the anchor is the toolbar's centre; the box around it is what has
+   * to stay inside, and it changes width as buttons appear and disappear.
+   */
+  const [viewport, setViewport] = useState(() => ({
+    w: window.innerWidth,
+    h: window.innerHeight,
+  }));
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const [insetTop, setInsetTop] = useState(0);
+
+  useEffect(() => {
+    const measure = (): void => {
+      setViewport({ w: window.innerWidth, h: window.innerHeight });
+      const raw = getComputedStyle(document.documentElement).getPropertyValue(
+        "--session-inset-top",
+      );
+      setInsetTop(parseFloat(raw) || 0);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [onScreen]);
+
+  // The collapsed chevron is a fraction of the width of the open toolbar, and
+  // the open one grows and shrinks with the capture badge, so the box is
+  // measured as it renders rather than assumed.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const r = entry.contentRect;
+      setSize((prev) =>
+        Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5
+          ? prev
+          : { w: r.width, h: r.height },
+      );
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [collapsed]);
 
   const collapse = useCallback((guardHover: boolean): void => {
     if (collapsedRef.current) return;
@@ -213,28 +293,76 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
 
   // ------------------------------------------------------------------ drag
 
+  /**
+   * The rectangle the toolbar's top-left corner is allowed to occupy.
+   *
+   * `--session-inset-top` is how much room the shell's own chrome takes: in
+   * tabbed view the top of the viewport is the tab strip, and a toolbar placed
+   * over it would swallow the clicks meant for the tabs. A session window
+   * publishes nothing and the inset is simply zero.
+   *
+   * The `Math.max` guards a window narrower than the toolbar, where the lower
+   * bound would otherwise exceed the upper one and clamp would return the
+   * wrong end. Pinning it to the near edge at least keeps the drag handle
+   * reachable.
+   */
+  const bounds = useMemo(() => {
+    const minX = MARGIN;
+    const minY = insetTop + MARGIN;
+    return {
+      minX,
+      minY,
+      maxX: Math.max(minX, viewport.w - size.w - MARGIN),
+      maxY: Math.max(minY, viewport.h - size.h - MARGIN),
+    };
+  }, [viewport, size, insetTop]);
+
+  const boundsRef = useRef(bounds);
+  boundsRef.current = bounds;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
+
   const onGripPointerDown = (e: React.PointerEvent): void => {
     e.preventDefault();
     dragging.current = true;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    // Grab the toolbar where it was actually taken hold of, so it does not
+    // jump to centre itself under the pointer on the first move.
+    const rect = rootRef.current?.getBoundingClientRect();
+    const grabX = rect ? e.clientX - rect.left : 0;
+    const grabY = rect ? e.clientY - rect.top : 0;
+
     const move = (ev: PointerEvent): void => {
-      const W = window.innerWidth;
-      const H = window.innerHeight;
-      const dTop = ev.clientY;
-      const dBottom = H - ev.clientY;
-      const dLeft = ev.clientX;
-      const dRight = W - ev.clientX;
-      const min = Math.min(dTop, dBottom, dLeft, dRight);
+      const { w: W, h: H } = viewportRef.current;
+      const { w, h } = sizeRef.current;
+      const b = boundsRef.current;
+      const left = clamp(ev.clientX - grabX, b.minX, b.maxX);
+      const top = clamp(ev.clientY - grabY, b.minY, b.maxY);
+
+      // Distance from each edge of the window to the matching edge of the box.
+      const dTop = top - b.minY;
+      const dBottom = b.maxY - top;
+      const dLeft = left - b.minX;
+      const dRight = b.maxX - left;
+      const nearest = Math.min(dTop, dBottom, dLeft, dRight);
+
+      if (nearest > SNAP_PX) {
+        setPos({ edge: null, ratio: 0, x: left / W, y: top / H });
+        return;
+      }
       let edge: Edge = "top";
-      if (min === dBottom) edge = "bottom";
-      else if (min === dLeft) edge = "left";
-      else if (min === dRight) edge = "right";
-      const ratio =
-        edge === "top" || edge === "bottom"
-          ? Math.min(0.95, Math.max(0.05, ev.clientX / W))
-          : Math.min(0.95, Math.max(0.05, ev.clientY / H));
-      setPos({ edge, ratio });
+      if (nearest === dBottom) edge = "bottom";
+      else if (nearest === dLeft) edge = "left";
+      else if (nearest === dRight) edge = "right";
+      // Store the centre along the edge, so the dock survives a resize.
+      const span = edge === "top" || edge === "bottom" ? W : H - insetTop;
+      const centre =
+        edge === "top" || edge === "bottom" ? left + w / 2 : top + h / 2 - insetTop;
+      setPos({ edge, ratio: clamp(span > 0 ? centre / span : 0.5, 0, 1), x: left / W, y: top / H });
     };
+
     const up = (): void => {
       dragging.current = false;
       window.removeEventListener("pointermove", move);
@@ -248,38 +376,46 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     window.addEventListener("pointerup", up);
   };
 
+  /**
+   * Absolute placement, always clamped to `bounds`.
+   *
+   * Everything resolves to a plain left/top with no centring transform: the
+   * old version anchored the toolbar's *centre* and clamped that, which let
+   * half the box hang outside the window with the drag handle out of reach.
+   * Clamping the corner is what actually keeps it on screen.
+   */
   const style = useMemo((): React.CSSProperties => {
-    const s: React.CSSProperties = { position: "fixed", zIndex: 30 };
+    const { w: W, h: H } = viewport;
+    const { w, h } = size;
+    const b = bounds;
+    let left: number;
+    let top: number;
     switch (pos.edge) {
       case "top":
-        // Measured from the top of the viewport, so in tabbed view it would
-        // land on the tab strip and take the clicks meant for it. The shell
-        // publishes how much room its own chrome takes; a session window sets
-        // nothing and the fallback keeps it exactly where it was.
-        s.top = "calc(var(--session-inset-top, 0px) + 12px)";
-        s.left = `${pos.ratio * 100}%`;
-        s.transform = "translateX(-50%)";
-        break;
       case "bottom":
-        s.bottom = 12;
-        s.left = `${pos.ratio * 100}%`;
-        s.transform = "translateX(-50%)";
+        left = clamp(pos.ratio * W - w / 2, b.minX, b.maxX);
+        top = pos.edge === "top" ? b.minY : b.maxY;
         break;
       case "left":
-        s.left = 12;
-        s.top = `calc(var(--session-inset-top, 0px) + ${pos.ratio * 100}%)`;
-        s.transform = "translateY(-50%)";
-        break;
       case "right":
-        s.right = 12;
-        s.top = `calc(var(--session-inset-top, 0px) + ${pos.ratio * 100}%)`;
-        s.transform = "translateY(-50%)";
+        left = pos.edge === "left" ? b.minX : b.maxX;
+        top = clamp(insetTop + pos.ratio * (H - insetTop) - h / 2, b.minY, b.maxY);
         break;
+      default:
+        left = clamp(pos.x * W, b.minX, b.maxX);
+        top = clamp(pos.y * H, b.minY, b.maxY);
     }
-    return s;
-  }, [pos]);
+    return { position: "fixed", zIndex: 30, left, top };
+  }, [pos, viewport, size, insetTop, bounds]);
 
-  const menuBelow = pos.edge !== "bottom";
+  // Floating toolbars open their menus downwards unless they sit low enough
+  // that the menu would run off the bottom.
+  const menuBelow =
+    pos.edge === "bottom"
+      ? false
+      : pos.edge !== null || style.top === undefined
+        ? true
+        : Number(style.top) < viewport.h * 0.6;
 
   const latency = props.stats?.rtt_ms ?? null;
   const latencyColor =
@@ -291,11 +427,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     // The capture indicator survives collapse on purpose: PRD/06 §3 requires
     // the user to always be able to see that their keyboard is grabbed.
     return (
-      <div style={style} className="flex items-center gap-1.5">
+      <div ref={rootRef} style={style} className="flex items-center gap-1.5">
         <button
           type="button"
           aria-label={`Show session toolbar (${modKeyLabel}⇧M)`}
-          className="fade-in rounded-pill border border-subtle bg-raised/90 px-3 py-0.5 text-tertiary shadow-(--shadow-tile) backdrop-blur hover:text-primary"
+          className="fade-in rounded-pill border border-subtle bg-raised/90 px-3 py-0.5 text-tertiary shadow-(--shadow-tile) backdrop-blur transition-shadow duration-150 hover:text-primary hover:shadow-(--shadow-glow)"
           onPointerEnter={() => {
             if (!ignoreHover.current) expand();
           }}
@@ -305,7 +441,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           }}
           onClick={expand}
         >
-          <IconChevronDown size={14} className={pos.edge === "bottom" ? "rotate-180" : ""} />
+          <IconChevronDown size={14} className={menuBelow ? "" : "rotate-180"} />
         </button>
         {capturing ? <CaptureIndicator compact /> : null}
       </div>
@@ -317,7 +453,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       <div
         role="toolbar"
         aria-label="Session controls"
-        className="fade-in flex items-center gap-0.5 rounded-pill border border-subtle bg-raised/95 px-1.5 py-1 shadow-(--shadow-pop) backdrop-blur"
+        className="fade-in flex items-center gap-0.5 rounded-pill border border-subtle bg-raised/95 px-1.5 py-1 shadow-(--shadow-pop) backdrop-blur transition-shadow duration-150 hover:shadow-(--shadow-glow)"
       >
         <button
           type="button"
@@ -436,7 +572,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         {/* Auto-hide only ever arrives on its own schedule, and a pinned
             toolbar never hides at all, so put it away by hand from here. */}
         <ToolButton label={`Collapse toolbar (${modKeyLabel}⇧M)`} onClick={() => collapse(true)}>
-          <IconChevronDown size={15} className={pos.edge === "bottom" ? "" : "rotate-180"} />
+          <IconChevronDown size={15} className={menuBelow ? "rotate-180" : ""} />
         </ToolButton>
 
         <Divider />
