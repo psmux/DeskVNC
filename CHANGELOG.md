@@ -10,6 +10,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+- SSH host-key pins are keyed on one canonical spelling of the host, so `::1`,
+  `[::1]`, `studio.local` and the mDNS-qualified `studio.local.` are one
+  machine rather than up to four. Previously each spelling earned its own
+  trust prompt and its own pin. Both sides are normalized at lookup time
+  rather than only on write, so pins already on disk keep matching and no
+  migration is needed. A store that already holds duplicates is folded on
+  load, keeping the most recently seen pin: without that, forgetting a key
+  would leave a shadow pin behind that answers the next connection, and a
+  disagreeing fingerprint there is a hard stop with no way through it.
+
 ## [0.1.2] - 2026-07-31
 
 ### Added

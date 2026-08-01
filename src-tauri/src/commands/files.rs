@@ -64,10 +64,20 @@ impl FilesState {
     /// credential vault use.
     pub fn new(data_dir: PathBuf) -> Self {
         let pin_path = data_dir.join(PIN_FILE);
-        let host_keys = std::fs::read_to_string(&pin_path)
+        let mut host_keys = std::fs::read_to_string(&pin_path)
             .ok()
             .and_then(|raw| serde_json::from_str::<HostKeyStore>(&raw).ok())
             .unwrap_or_default();
+        // A file written before host keys were pinned on the canonical host
+        // can hold one machine twice, e.g. `studio.local` and `studio.local.`.
+        // Merging them here keeps one entry per machine, so removing a pin
+        // cannot leave a shadow copy behind to hard-stop the next connect.
+        // The merged store is written back by the next `persist_pins`, so
+        // startup stays read-only.
+        let merged = host_keys.collapse_duplicates();
+        if merged > 0 {
+            tracing::info!("merged {merged} duplicate ssh host-key pin(s)");
+        }
         Self {
             sessions: Mutex::new(HashMap::new()),
             host_keys: Arc::new(Mutex::new(host_keys)),
@@ -896,6 +906,27 @@ mod tests {
         let reloaded = FilesState::new(dir.path().to_path_buf());
         assert_eq!(reloaded.host_keys.lock().pins.len(), 1);
         assert_eq!(reloaded.host_keys.lock().pins[0].fingerprint, "SHA256:x");
+    }
+
+    /// A pin file written before host keys were keyed on the canonical host
+    /// can name one machine twice; loading it must leave a single pin.
+    #[test]
+    fn loading_merges_duplicate_spellings_of_one_host() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(PIN_FILE),
+            r#"{ "pins": [
+                   { "host": "studio.local", "port": 22, "keyType": "ssh-ed25519",
+                     "fingerprint": "SHA256:old", "firstTrustedAt": 1, "lastSeenAt": 1 },
+                   { "host": "studio.local.", "port": 22, "keyType": "ssh-ed25519",
+                     "fingerprint": "SHA256:new", "firstTrustedAt": 2, "lastSeenAt": 9 }
+                 ] }"#,
+        )
+        .unwrap();
+        let state = FilesState::new(dir.path().to_path_buf());
+        let pins = state.host_keys.lock();
+        assert_eq!(pins.pins.len(), 1);
+        assert_eq!(pins.pins[0].fingerprint, "SHA256:new");
     }
 
     #[test]
