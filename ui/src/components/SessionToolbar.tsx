@@ -40,6 +40,8 @@ const IDLE_MS = 3000;
 const MARGIN = 12;
 /** Drag within this many pixels of an edge and it docks there. */
 const SNAP_PX = 40;
+/** Travel before a press counts as a drag rather than a click. */
+const DRAG_SLOP = 4;
 
 const DEFAULT_POS: ToolbarPos = { edge: "top", ratio: 0.5, x: 0.5, y: 0 };
 
@@ -159,17 +161,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const idleTimer = useRef(0);
   const dragging = useRef(false);
-  /**
-   * Set while a hover-to-recall right after a deliberate collapse should be
-   * ignored. Collapsing puts the small chevron roughly where the pointer just
-   * clicked, and the browser recomputes what is under the pointer when the
-   * layout changes, so without this the toolbar can spring straight back open
-   * and the button reads as broken. Cleared as soon as the pointer leaves, or
-   * shortly after, in case it was never over the chevron at all.
-   */
-  const ignoreHover = useRef(false);
-  const hoverTimer = useRef(0);
-  /** Read inside callbacks that must not re-arm the hover guard needlessly. */
+  /** Read inside callbacks that must not collapse an already-collapsed bar. */
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
 
@@ -219,34 +211,19 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     return () => ro.disconnect();
   }, [collapsed]);
 
-  const collapse = useCallback((guardHover: boolean): void => {
+  const collapse = useCallback((): void => {
     if (collapsedRef.current) return;
     window.clearTimeout(idleTimer.current);
-    window.clearTimeout(hoverTimer.current);
-    // Auto-hide follows three seconds of stillness, so nothing is about to
-    // cross into the chevron and the guard would only cost a dead half-second.
-    ignoreHover.current = guardHover;
-    if (guardHover) {
-      hoverTimer.current = window.setTimeout(() => {
-        ignoreHover.current = false;
-      }, 500);
-    }
     setOpenMenu(null);
     setCollapsed(true);
   }, []);
 
-  const expand = useCallback((): void => {
-    window.clearTimeout(hoverTimer.current);
-    ignoreHover.current = false;
-    setCollapsed(false);
-  }, []);
-
-  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
+  const expand = useCallback((): void => setCollapsed(false), []);
 
   const armIdle = useCallback((): void => {
     window.clearTimeout(idleTimer.current);
     idleTimer.current = window.setTimeout(() => {
-      if (!pinned && !dragging.current) collapse(false);
+      if (!pinned && !dragging.current) collapse();
     }, IDLE_MS);
   }, [pinned, collapse]);
 
@@ -278,7 +255,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       expand();
       armIdle();
     } else {
-      collapse(true);
+      collapse();
     }
   }, [props.recallSignal, collapsed, expand, collapse, armIdle]);
 
@@ -324,17 +301,39 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
 
-  const onGripPointerDown = (e: React.PointerEvent): void => {
+  /**
+   * Drag the whole toolbar by whatever was grabbed: the grip when open, the
+   * chevron itself when collapsed.
+   *
+   * The chevron is also the button that reopens the toolbar, so a press has to
+   * mean one thing or the other. Nothing moves until the pointer has travelled
+   * `DRAG_SLOP`, and a press that never gets that far is left alone to become
+   * an ordinary click. `draggedRef` then tells that click to stand down, since
+   * the browser still fires one after a drag that begins and ends on the same
+   * element. It is cleared on a timer rather than in the click handler so a
+   * drag which ends elsewhere, firing no click at all, cannot leave the flag
+   * raised and swallow the next real one.
+   */
+  const draggedRef = useRef(false);
+
+  const beginDrag = (e: React.PointerEvent): void => {
     e.preventDefault();
     dragging.current = true;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    draggedRef.current = false;
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     // Grab the toolbar where it was actually taken hold of, so it does not
     // jump to centre itself under the pointer on the first move.
     const rect = rootRef.current?.getBoundingClientRect();
     const grabX = rect ? e.clientX - rect.left : 0;
     const grabY = rect ? e.clientY - rect.top : 0;
+    const fromX = e.clientX;
+    const fromY = e.clientY;
 
     const move = (ev: PointerEvent): void => {
+      if (!draggedRef.current) {
+        if (Math.hypot(ev.clientX - fromX, ev.clientY - fromY) < DRAG_SLOP) return;
+        draggedRef.current = true;
+      }
       const { w: W, h: H } = viewportRef.current;
       const { w, h } = sizeRef.current;
       const b = boundsRef.current;
@@ -367,9 +366,16 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       dragging.current = false;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      // Through a ref, not a `setPos` updater: an updater has to be pure, and
-      // this one now tells the other mounted toolbars about the move.
-      storeLayout(POS_KEY, JSON.stringify(posRef.current));
+      if (draggedRef.current) {
+        // Through a ref, not a `setPos` updater: an updater has to be pure,
+        // and this one now tells the other mounted toolbars about the move.
+        storeLayout(POS_KEY, JSON.stringify(posRef.current));
+        // Outlives the click the browser is about to fire, then stops being
+        // able to suppress anything.
+        window.setTimeout(() => {
+          draggedRef.current = false;
+        }, 0);
+      }
       armIdle();
     };
     window.addEventListener("pointermove", move);
@@ -430,16 +436,16 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       <div ref={rootRef} style={style} className="flex items-center gap-1.5">
         <button
           type="button"
-          aria-label={`Show session toolbar (${modKeyLabel}⇧M)`}
-          className="fade-in rounded-pill border border-subtle bg-raised/90 px-3 py-0.5 text-tertiary shadow-(--shadow-tile) backdrop-blur transition-shadow duration-150 hover:text-primary hover:shadow-(--shadow-glow)"
-          onPointerEnter={() => {
-            if (!ignoreHover.current) expand();
+          aria-label={`Show session toolbar (${modKeyLabel}⇧M), drag to move`}
+          title={`Show session toolbar (${modKeyLabel}⇧M), drag to move`}
+          className="fade-in cursor-grab touch-none rounded-pill border border-subtle bg-raised/90 px-3 py-0.5 text-tertiary shadow-(--shadow-tile) backdrop-blur transition-shadow duration-150 hover:text-primary hover:shadow-(--shadow-glow) active:cursor-grabbing"
+          onPointerDown={beginDrag}
+          onClick={() => {
+            // A drag that began here also ends in a click; only a real one
+            // reopens the toolbar. Keyboard activation fires no pointer
+            // events, so the flag is false and Enter/Space still work.
+            if (!draggedRef.current) expand();
           }}
-          onPointerLeave={() => {
-            window.clearTimeout(hoverTimer.current);
-            ignoreHover.current = false;
-          }}
-          onClick={expand}
         >
           <IconChevronDown size={14} className={menuBelow ? "" : "rotate-180"} />
         </button>
@@ -459,7 +465,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           type="button"
           aria-label="Drag to move toolbar"
           className="cursor-grab px-0.5 text-tertiary active:cursor-grabbing"
-          onPointerDown={onGripPointerDown}
+          onPointerDown={beginDrag}
         >
           <IconGripVertical size={14} />
         </button>
@@ -571,7 +577,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
 
         {/* Auto-hide only ever arrives on its own schedule, and a pinned
             toolbar never hides at all, so put it away by hand from here. */}
-        <ToolButton label={`Collapse toolbar (${modKeyLabel}⇧M)`} onClick={() => collapse(true)}>
+        <ToolButton label={`Collapse toolbar (${modKeyLabel}⇧M)`} onClick={collapse}>
           <IconChevronDown size={15} className={menuBelow ? "rotate-180" : ""} />
         </ToolButton>
 
