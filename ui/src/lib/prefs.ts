@@ -18,6 +18,15 @@ const PREFIX = "deskvnc.pref.";
 export const PREF_CLIPBOARD_AUTO = "clipboardAuto";
 /** Push the local clipboard when the session window regains focus. */
 export const PREF_CLIPBOARD_ON_FOCUS = "clipboardOnFocus";
+/** Match local scroll direction on the remote desktop ("natural" scrolling). */
+export const PREF_NATURAL_SCROLL = "naturalScroll";
+/**
+ * Keys type what they type on THIS keyboard's layout, rather than what the
+ * remote machine's layout assigns to the same physical key. Off by default:
+ * scancode mode is what makes remote shortcuts and games behave, and the two
+ * only disagree when the machines' layouts differ.
+ */
+export const PREF_MATCH_LOCAL_LAYOUT = "matchLocalKeyboardLayout";
 
 export function prefStorageKey(key: string): string {
   return `${PREFIX}${key}`;

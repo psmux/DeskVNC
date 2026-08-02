@@ -37,6 +37,10 @@ pub(crate) struct SessionSettings {
     /// other session setting, so turning it on is not silently undone by a
     /// dropped connection.
     pub always_refresh: bool,
+    /// Prefer QEMU scancodes when the server offers them ("match the remote
+    /// layout"); `false` sends layout-aware keysyms only ("match my local
+    /// layout"). See `ClientCommand::SetPreferScancodes`.
+    pub prefer_scancodes: bool,
 }
 
 impl SessionSettings {
@@ -47,6 +51,7 @@ impl SessionSettings {
             lossless_refresh: options.lossless_refresh,
             requested_size: None,
             always_refresh: false,
+            prefer_scancodes: true,
         }
     }
 }
@@ -59,11 +64,19 @@ pub(crate) enum RunOutcome {
 }
 
 /// Map a `ColorDepth` preference to the wire pixel format we request.
+///
+/// `Grayscale` (the BlackAndWhite preset) rides the SAME 8-bit palette wire
+/// format as `Palette256` (the Low preset), not full 32bpp true colour.
+/// Requesting `bgra8888` for the preset whose whole point is "survive a bad
+/// link" made it cost MORE bandwidth than Medium, the opposite of what a
+/// user picking it wants. The server sends its colour map exactly as it does
+/// for Low (`RunLoop`'s `SetColourMapEntries` handling already covers every
+/// non-true-colour format); the client-side shader still does the final
+/// black-and-white quantisation via `QualitySettings::grayscale_levels`.
 pub(crate) fn pixel_format_for(depth: ColorDepth) -> PixelFormat {
     match depth {
-        // Grayscale reduction happens client-side in the shader.
-        ColorDepth::Full | ColorDepth::Grayscale => PixelFormat::bgra8888(),
-        ColorDepth::Palette256 => PixelFormat::palette8(),
+        ColorDepth::Full => PixelFormat::bgra8888(),
+        ColorDepth::Palette256 | ColorDepth::Grayscale => PixelFormat::palette8(),
         ColorDepth::Rgb222 | ColorDepth::Rgb111 => PixelFormat::rgb222(),
     }
 }
@@ -485,4 +498,38 @@ pub(crate) async fn run_once(
         link_peak,
     );
     run_loop.run(settings, events, commands, cancel).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REGRESSION: `Grayscale` used to map to full 32bpp true colour, making
+    /// the BlackAndWhite preset the single MOST expensive one on the wire
+    /// despite being the "survive a bad link" choice. It must ride the same
+    /// 8-bit palette format as `Palette256` (Low).
+    #[test]
+    fn grayscale_rides_the_same_wire_format_as_palette256() {
+        assert_eq!(
+            pixel_format_for(ColorDepth::Grayscale),
+            pixel_format_for(ColorDepth::Palette256)
+        );
+        assert_eq!(
+            pixel_format_for(ColorDepth::Grayscale),
+            PixelFormat::palette8()
+        );
+        assert_eq!(pixel_format_for(ColorDepth::Grayscale).bits_per_pixel, 8);
+        assert!(!pixel_format_for(ColorDepth::Grayscale).true_colour);
+    }
+
+    #[test]
+    fn full_colour_still_maps_to_bgra8888() {
+        assert_eq!(pixel_format_for(ColorDepth::Full), PixelFormat::bgra8888());
+    }
+
+    #[test]
+    fn rgb_reductions_map_to_rgb222() {
+        assert_eq!(pixel_format_for(ColorDepth::Rgb222), PixelFormat::rgb222());
+        assert_eq!(pixel_format_for(ColorDepth::Rgb111), PixelFormat::rgb222());
+    }
 }

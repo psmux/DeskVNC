@@ -46,6 +46,17 @@ impl Rect {
         let y1 = (self.y + self.height).max(other.y + other.height);
         Rect::new(x0, y0, x1 - x0, y1 - y0)
     }
+    /// Overlapping region of both, or an empty rect when they are disjoint.
+    pub fn intersect(&self, other: &Rect) -> Rect {
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.width).min(other.x + other.width);
+        let y1 = (self.y + self.height).min(other.y + other.height);
+        if x1 <= x0 || y1 <= y0 {
+            return Rect::new(0, 0, 0, 0);
+        }
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,8 +390,19 @@ impl QualityPreset {
             QualityPreset::BlackAndWhite => QualitySettings {
                 jpeg_quality: 0,
                 compression: 9,
+                // Rides the SAME 8-bit palette wire format as `Low` (see
+                // `connection::pixel_format_for`): requesting full 32bpp true
+                // colour here used to make this the single MOST expensive
+                // preset on the wire, despite being the "survive a bad link"
+                // choice. The server's colour map threads through the exact
+                // path `Low` already uses; the client-side shader still does
+                // the black-and-white quantisation via `grayscale_levels`.
                 pixel_format: ColorDepth::Grayscale,
-                allow_jpeg: false, // palette/RLE compresses grayscale far better
+                // JPEG on top of an already colour-reduced, near-flat image
+                // buys nothing: zlib/ZRLE over low-entropy palette indices
+                // compresses harder than re-encoding it as a lossy
+                // photographic format would.
+                allow_jpeg: false,
                 allow_h264: false,
                 grayscale_levels: Some(2),
             },
@@ -766,6 +788,14 @@ pub enum ClientCommand {
     /// can never stay stale no matter what the server forgot to send.
     SetAlwaysRefresh(bool),
     SetViewOnly(bool),
+    /// Keyboard mode. `true` (the default) prefers QEMU scancodes when the
+    /// server supports them, so the SERVER's keymap decides what a physical
+    /// key types ("match the remote layout"). `false` suppresses scancodes
+    /// and sends only layout-aware keysyms, so keys type what they type
+    /// LOCALLY ("match my local layout"). The distinction only matters when
+    /// the two machines' layouts differ; RealVNC and TigerVNC expose the
+    /// same choice.
+    SetPreferScancodes(bool),
     /// User accepted a server key at the TOFU prompt. `scheme` is echoed back
     /// from the prompt that raised it, never inferred here.
     TrustCertificate {

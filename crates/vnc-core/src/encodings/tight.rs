@@ -217,7 +217,13 @@ fn undo_gradient(data: &[u8], pf: &PixelFormat, w: usize, h: usize, tpx: usize) 
     if w == 0 || h == 0 {
         return Vec::new();
     }
-    if tpx == 3 {
+    // `tpx == 3` alone would also match a hypothetical 24bpp (bpp==24,
+    // tpixel_size() == bytes_per_pixel() == 3) wire format with arbitrary
+    // shifts/max, wrongly routing it through the compact kernel's 8-bit
+    // identity-scaling shortcut. `is_compact_3byte()` is the real condition
+    // (32bpp/depth24/8-bit channels); 24bpp is rejected at parse today so
+    // this is currently unreachable, but pin the correct predicate now.
+    if pf.is_compact_3byte() {
         undo_gradient_compact(data, w, h)
     } else {
         undo_gradient_generic(data, pf, w, h, tpx)
@@ -675,6 +681,41 @@ mod tests {
             }
             other => panic!("expected Rgba, got {other:?}"),
         }
+    }
+
+    /// A 24bpp true-colour format has `tpixel_size() == 3` (same as compact
+    /// TPIXEL) but is NOT `is_compact_3byte()` (that requires 32bpp/depth24).
+    /// Dispatching the gradient filter on `tpx == 3` would wrongly route
+    /// this through the compact kernel, which treats the three bytes as
+    /// literal R,G,B; the generic kernel instead extracts channels via this
+    /// pf's shifts, which for this pf are reversed (byte0 -> blue channel,
+    /// byte2 -> red channel), so the two kernels disagree and this pins
+    /// which one actually ran.
+    #[test]
+    fn gradient_dispatch_uses_is_compact_3byte_not_wire_size() {
+        let pf = PixelFormat {
+            bits_per_pixel: 24,
+            depth: 24,
+            big_endian: false,
+            true_colour: true,
+            red_max: 255,
+            green_max: 255,
+            blue_max: 255,
+            red_shift: 16,
+            green_shift: 8,
+            blue_shift: 0,
+        };
+        assert_eq!(tpixel_size(&pf), 3, "test assumes tpx==3 for this pf");
+        assert!(!pf.is_compact_3byte());
+
+        // Single pixel (no prediction: left/up/upleft all zero, so residual
+        // == value verbatim).
+        let data = [10u8, 20, 30];
+        let out = undo_gradient(&data, &pf, 1, 1, 3);
+        // Generic kernel: red_shift 16 -> byte2, green_shift 8 -> byte1,
+        // blue_shift 0 -> byte0. The compact kernel would instead give
+        // [10, 20, 30, 255] (bytes taken as literal R,G,B).
+        assert_eq!(out, vec![30, 20, 10, 255]);
     }
 
     #[tokio::test]

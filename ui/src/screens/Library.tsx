@@ -36,6 +36,7 @@ import { ContextMenu, Dialog, EmptyState, Select, TileSkeleton, type MenuItem } 
 import {
   IconActivity,
   IconGrid,
+  IconHelp,
   IconList,
   IconMonitor,
   IconPlus,
@@ -44,6 +45,7 @@ import {
   IconWindows,
   IconZap,
 } from "../components/icons";
+import { emit } from "@tauri-apps/api/event";
 
 interface CtxMenuState {
   x: number;
@@ -678,6 +680,17 @@ export function Library({
         </button>
         <button type="button" className="btn-primary" onClick={() => setHostDialog(draftFromHost(null))}>
           <IconPlus size={14} /> New Host
+        </button>
+        {/* Routed through the same event the native menu's About item emits,
+            so one listener (App.tsx) owns opening the dialog everywhere. */}
+        <button
+          type="button"
+          aria-label="About and help"
+          title="About and help"
+          className="overflow-hidden rounded-sm border border-subtle p-1.5 text-secondary hover:bg-inset"
+          onClick={() => void emit("menu://action", { id: "menu:about" })}
+        >
+          <IconHelp size={15} />
         </button>
       </header>
 

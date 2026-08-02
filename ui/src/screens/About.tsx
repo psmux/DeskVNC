@@ -1,7 +1,7 @@
-/** About & Help: identity, credits, and the reference material worth having offline. */
+/** About & Help: identity, build fingerprint, and reference material worth having offline. */
 import { useEffect, useState, type ReactNode } from "react";
 import { Dialog } from "../components/primitives";
-import { openExternal } from "../lib/tauri";
+import { openExternal, safeInvoke, writeClipboard } from "../lib/tauri";
 import { classNames, modKeyLabel } from "../lib/util";
 
 export const AUTHOR_NAME = "Godwin Josh";
@@ -10,28 +10,59 @@ export const PROJECT_URL = "https://github.com/psmux/DeskVNC";
 
 type Tab = "About" | "Help";
 
+/** Mirror of the Rust `AboutInfo` struct (src-tauri/src/commands/about.rs). */
+interface AboutInfo {
+  appVersion: string;
+  gitDescribe: string;
+  gitHash: string;
+  gitHashShort: string;
+  gitBranch: string;
+  gitCommitDate: string;
+  gitDirty: string;
+  buildProfile: string;
+  rustcVersion: string;
+  tauriVersion: string;
+  os: string;
+  osVersion: string;
+  arch: string;
+  webviewVersion: string;
+}
+
 /**
- * Reads the version from the Tauri runtime so it always tracks
- * `tauri.conf.json` rather than drifting in a hardcoded string. Falls back to
- * a dash in the browser dev server, where no runtime is present.
+ * The build stamp is compiled into the Rust binary (build.rs), so it can
+ * never drift from what is actually running. Null in the plain-browser dev
+ * server, where there is no runtime to ask.
  */
-function useAppVersion(): string | null {
-  const [version, setVersion] = useState<string | null>(null);
+function useAboutInfo(): AboutInfo | null {
+  const [info, setInfo] = useState<AboutInfo | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void import("@tauri-apps/api/app")
-      .then(({ getVersion }) => getVersion())
-      .then((v) => {
-        if (!cancelled) setVersion(v);
-      })
-      .catch(() => {
-        if (!cancelled) setVersion(null);
-      });
+    void safeInvoke<AboutInfo | null>("about_info", undefined, null).then((i) => {
+      if (!cancelled) setInfo(i);
+    });
     return () => {
       cancelled = true;
     };
   }, []);
-  return version;
+  return info;
+}
+
+/**
+ * The paste-into-an-issue block. Everything support needs to check out the
+ * exact code a report came from, in the order a human scans it: what build,
+ * which commit, on what machine.
+ */
+export function buildReport(i: AboutInfo): string {
+  const dirty = i.gitDirty === "dirty" ? ", locally modified (dirty)" : "";
+  return [
+    "```",
+    `DeskVNCViewer ${i.appVersion} (${i.gitDescribe})`,
+    `Commit:  ${i.gitHash}`,
+    `         branch ${i.gitBranch}, committed ${i.gitCommitDate}${dirty}`,
+    `Build:   ${i.buildProfile} profile, tauri ${i.tauriVersion}, ${i.rustcVersion}`,
+    `System:  ${i.os} ${i.osVersion} (${i.arch}), webview ${i.webviewVersion}`,
+    "```",
+  ].join("\n");
 }
 
 const SHORTCUTS: Array<[string, string]> = [
@@ -72,7 +103,16 @@ const TROUBLESHOOTING: Array<[string, string]> = [
 
 export function About({ onClose }: { onClose: () => void }): ReactNode {
   const [tab, setTab] = useState<Tab>("About");
-  const version = useAppVersion();
+  const info = useAboutInfo();
+  const [copied, setCopied] = useState(false);
+
+  const copyReport = (): void => {
+    if (!info) return;
+    void writeClipboard(buildReport(info)).then((ok) => {
+      setCopied(ok);
+      if (ok) window.setTimeout(() => setCopied(false), 2500);
+    });
+  };
 
   return (
     <Dialog title="About DeskVNCViewer" onClose={onClose} width={560}>
@@ -103,9 +143,57 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
               A fast, native VNC viewer for macOS, Windows and Linux.
             </p>
             <p className="mt-1 text-sm text-tertiary">
-              Version {version ?? "-"}
+              Version {info ? `${info.appVersion} (${info.gitDescribe})` : "-"}
             </p>
           </div>
+
+          {info ? (
+            <section aria-label="Build details">
+              <div className="mb-1.5 flex items-baseline justify-between">
+                <h4 className="text-sm font-semibold text-primary">Build</h4>
+                <button
+                  type="button"
+                  className="text-xs text-accent hover:underline"
+                  onClick={copyReport}
+                >
+                  {copied ? "Copied" : "Copy report for a bug ticket"}
+                </button>
+              </div>
+              <dl className="space-y-1 rounded-md bg-inset/50 p-3 font-mono text-xs">
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-tertiary">Commit</dt>
+                  <dd className="text-primary break-all" title={info.gitHash}>
+                    {info.gitHashShort}
+                    {info.gitDirty === "dirty" ? " (locally modified)" : ""}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-tertiary">Branch</dt>
+                  <dd className="text-primary">
+                    {info.gitBranch}, committed {info.gitCommitDate}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-tertiary">Toolchain</dt>
+                  <dd className="text-primary">
+                    {info.buildProfile} profile, tauri {info.tauriVersion},{" "}
+                    {info.rustcVersion}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-20 shrink-0 text-tertiary">System</dt>
+                  <dd className="text-primary">
+                    {info.os} {info.osVersion} ({info.arch}), webview{" "}
+                    {info.webviewVersion}
+                  </dd>
+                </div>
+              </dl>
+              <p className="mt-1 text-xs text-tertiary">
+                Please include the copied block when reporting an issue; it
+                identifies this exact build.
+              </p>
+            </section>
+          ) : null}
 
           <dl className="space-y-2 rounded-md bg-inset/50 p-3 text-sm">
             <div className="flex gap-2">

@@ -127,17 +127,30 @@ export interface KeyIds {
   keycode: number;
 }
 
+/**
+ * X11 keysyms equal the Unicode code point below 0x100 (Latin-1); above that
+ * the "Unicode keysym" convention is 0x01000000 + the code point. Shared by
+ * the plain single-character branch below and by SessionInput's composed-
+ * character paths (AltGr/Option, dead-key composition), which need the exact
+ * same fallback for characters that never come through as a KeyboardEvent.
+ */
+export function codePointToKeysym(cp: number): number {
+  return cp < 0x100 ? cp : 0x01000000 + cp;
+}
+
 export function keyEventToIds(e: Pick<KeyboardEvent, "key" | "code">): KeyIds | null {
   const keycode = CODE_TO_XT_SCANCODE[e.code] ?? 0;
   const fromCode = CODE_TO_KEYSYM[e.code];
   if (fromCode !== undefined) return { keysym: fromCode, keycode };
   const fromKey = KEY_TO_KEYSYM[e.key];
   if (fromKey !== undefined) return { keysym: fromKey, keycode };
-  if (e.key.length === 1) {
+  // `e.key.length === 1` misses every character outside the BMP (surrogate
+  // pairs are 2 UTF-16 units but 1 grapheme), so emoji and other astral
+  // characters fell through to `null` and were silently dropped.
+  if (Array.from(e.key).length === 1) {
     const cp = e.key.codePointAt(0);
     if (cp === undefined) return null;
-    const keysym = cp < 0x100 ? cp : 0x01000000 + cp;
-    return { keysym, keycode };
+    return { keysym: codePointToKeysym(cp), keycode };
   }
   if (e.key === "Dead") return null; // dead keys: wait for the composed character
   return null;
@@ -153,3 +166,22 @@ export const KEYSYM = {
   Escape: 0xff1b,
   F4: 0xffc1,
 } as const;
+
+/**
+ * (keysym, XT scancode) pairs for the "Send key" menu combos.
+ *
+ * `sendKeyCombo` used to send keycode 0 for every key, so Ctrl+Alt+Del from
+ * the toolbar degraded to a keysym-only KeyEvent and did nothing on a server
+ * that only understands scancodes (QEMU Extended Key Event). Scancodes come
+ * straight out of `CODE_TO_XT_SCANCODE`, the same table `keyEventToIds` uses,
+ * so there is only one place that encodes a physical key's wire scancode.
+ */
+export const KEY_COMBO = {
+  Control_L: { keysym: KEYSYM.Control_L, keycode: CODE_TO_XT_SCANCODE.ControlLeft },
+  Alt_L: { keysym: KEYSYM.Alt_L, keycode: CODE_TO_XT_SCANCODE.AltLeft },
+  Delete: { keysym: KEYSYM.Delete, keycode: CODE_TO_XT_SCANCODE.Delete },
+  Super_L: { keysym: KEYSYM.Super_L, keycode: CODE_TO_XT_SCANCODE.MetaLeft },
+  Tab: { keysym: KEYSYM.Tab, keycode: CODE_TO_XT_SCANCODE.Tab },
+  Escape: { keysym: KEYSYM.Escape, keycode: CODE_TO_XT_SCANCODE.Escape },
+  F4: { keysym: KEYSYM.F4, keycode: CODE_TO_XT_SCANCODE.F4 },
+} as const satisfies Record<string, KeyIds>;

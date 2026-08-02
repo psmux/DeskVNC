@@ -2,8 +2,82 @@
 //! the app ACL manifest so that `allow-<command>`/`deny-<command>` permissions
 //! are generated and the capability files under `capabilities/` can grant them
 //! per window (deny-by-default, PRD/01 §7).
+//!
+//! Also stamps the binary with its exact provenance (commit, tag, branch,
+//! dirty state, toolchain) so the About dialog can fingerprint any build a
+//! user reports from. Everything degrades to "unknown" when git or the
+//! repository is absent (release tarballs), never to a build failure.
+
+use std::process::Command;
+
+/// Run `git <args>` in the workspace and return trimmed stdout, or None.
+fn git(args: &[&str]) -> Option<String> {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(manifest)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+fn stamp(key: &str, value: Option<String>) {
+    println!(
+        "cargo:rustc-env={key}={}",
+        value.unwrap_or_else(|| "unknown".into())
+    );
+}
+
+fn stamp_git_provenance() {
+    // Re-stamp whenever the checked-out commit or the index changes, so the
+    // hash and the dirty flag can never go stale in an incremental build.
+    if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
+        println!("cargo:rerun-if-changed={git_dir}/HEAD");
+        println!("cargo:rerun-if-changed={git_dir}/index");
+    }
+
+    stamp("DESKVNC_GIT_HASH", git(&["rev-parse", "HEAD"]));
+    stamp(
+        "DESKVNC_GIT_HASH_SHORT",
+        git(&["rev-parse", "--short=9", "HEAD"]),
+    );
+    // The single most useful fingerprint: nearest tag, commits since it,
+    // short hash, and a -dirty suffix when the tree had local edits.
+    stamp(
+        "DESKVNC_GIT_DESCRIBE",
+        git(&["describe", "--tags", "--always", "--dirty"]),
+    );
+    stamp(
+        "DESKVNC_GIT_BRANCH",
+        git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+    );
+    stamp(
+        "DESKVNC_GIT_COMMIT_DATE",
+        git(&["log", "-1", "--format=%cd", "--date=format:%Y-%m-%d"]),
+    );
+    stamp(
+        "DESKVNC_GIT_DIRTY",
+        git(&["status", "--porcelain"]).map_or_else(
+            || Some("unknown".into()),
+            |s| Some(if s.is_empty() { "clean" } else { "dirty" }.into()),
+        ),
+    );
+    stamp(
+        "DESKVNC_RUSTC_VERSION",
+        std::env::var("RUSTC")
+            .ok()
+            .and_then(|rustc| Command::new(rustc).arg("-V").output().ok())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()),
+    );
+    stamp("DESKVNC_BUILD_PROFILE", std::env::var("PROFILE").ok());
+}
 
 fn main() {
+    stamp_git_provenance();
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             // hosts / library
@@ -23,6 +97,8 @@ fn main() {
             "get_thumbnail",
             "get_app_setting",
             "set_app_setting",
+            // build/system fingerprint for the About dialog and bug reports
+            "about_info",
             // credentials (write/query only, passwords never flow back to JS)
             "save_password",
             "has_password",
@@ -44,6 +120,7 @@ fn main() {
             "request_resize",
             "refresh_session",
             "set_view_only",
+            "set_prefer_scancodes",
             "send_clipboard",
             // OS clipboard, natively. `navigator.clipboard` is gesture-gated in
             // the webview, so remote → local text can never land through it.

@@ -104,7 +104,9 @@ export function useLivePreview({
       // encode simply mark the next tick as fresh.
       const frameCount = frameCountRef.current;
       if (frameCount === lastPublishedFrame) return; // nothing new, skip
-      const frame = renderer.readFramebufferRGBA();
+      // Downscaled on the GPU already (readPreviewRGBA), so this is a few
+      // hundred KB instead of a full-desktop readPixels every 500 ms.
+      const frame = renderer.readPreviewRGBA(PREVIEW_MAX_WIDTH);
       if (!frame) return;
       busy = true;
       try {
@@ -115,18 +117,10 @@ export function useLivePreview({
           frame.width,
           frame.height,
         );
-        const bitmap = await createImageBitmap(imageData, {
-          resizeWidth: Math.min(PREVIEW_MAX_WIDTH, frame.width),
-          resizeQuality: "medium",
-        });
-        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const canvas = new OffscreenCanvas(frame.width, frame.height);
         const ctx = canvas.getContext("2d");
-        if (!ctx) {
-          bitmap.close();
-          return;
-        }
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
+        if (!ctx) return;
+        ctx.putImageData(imageData, 0, 0);
         const blob = await canvas.convertToBlob({
           type: "image/jpeg",
           quality: PREVIEW_JPEG_QUALITY,

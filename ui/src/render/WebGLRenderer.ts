@@ -120,12 +120,16 @@ export class WebGLRenderer {
   private frameTex: WebGLTexture;
   private scratchTex: WebGLTexture;
   private cursorTex: WebGLTexture;
+  /** Small downscaled render target for readPreviewRGBA (Library live previews). */
+  private previewTex: WebGLTexture;
   private readFbo: WebGLFramebuffer;
 
   private fbWidth = 0;
   private fbHeight = 0;
   private scratchW = 0;
   private scratchH = 0;
+  private previewW = 0;
+  private previewH = 0;
 
   private dirty = false;
   private running = false;
@@ -234,6 +238,7 @@ export class WebGLRenderer {
     this.frameTex = this.makeTexture();
     this.scratchTex = this.makeTexture();
     this.cursorTex = this.makeTexture();
+    this.previewTex = this.makeTexture();
     const fbo = gl.createFramebuffer();
     if (!fbo) throw new Error("createFramebuffer failed");
     this.readFbo = fbo;
@@ -270,6 +275,13 @@ export class WebGLRenderer {
     this.closeAllH264();
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    // A CopyRect scratch texture sized for the old (possibly much larger)
+    // desktop must not survive a resize; drop it and let the next CopyRect
+    // reallocate to whatever it actually needs.
+    this.scratchW = 0;
+    this.scratchH = 0;
+    gl.bindTexture(gl.TEXTURE_2D, this.scratchTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     this.markDirty();
   }
 
@@ -292,15 +304,18 @@ export class WebGLRenderer {
    * Apply one parsed channel message.
    *
    * ORDER IS LOAD-BEARING. RGBA and CopyRect apply synchronously, but JPEG has
-   * to go through `createImageBitmap`, which is async. Applying each bitmap
-   * whenever its promise happened to settle let a JPEG rect from an older
-   * update land *on top of* newer content, visible as patches of stale pixels
-   * during window drags and minimise/maximise animations, which then "healed"
-   * whenever something else repainted that region.
+   * to go through `createImageBitmap`, and H.264 through a `VideoDecoder`,
+   * both async. Applying each decode whenever it happened to settle let a
+   * rect from an older update land *on top of* newer content, visible as
+   * patches of stale pixels during window drags and minimise/maximise
+   * animations, which then "healed" whenever something else repainted that
+   * region.
    *
-   * So: kick every decode off immediately (they still run in parallel), then
-   * apply everything strictly in protocol order, and chain updates so update
-   * N is fully applied before N+1 starts.
+   * So: kick every JPEG decode off immediately (they still run in parallel;
+   * H.264 chunks are queued to their decoder in-order instead, see
+   * `decodeH264`), then apply everything strictly in protocol order, and
+   * chain updates so update N is fully applied (including every H.264 rect's
+   * frame actually uploaded) before N+1 starts.
    */
   applyFrame(msg: FrameMessage): void {
     // Start decodes now, parallelism is preserved, ordering is not sacrificed.
@@ -361,7 +376,7 @@ export class WebGLRenderer {
           this.copyRect(r.srcX, r.srcY, r.x, r.y, r.w, r.h);
           break;
         case RectFormat.H264:
-          this.decodeH264(r);
+          await this.decodeH264(r);
           break;
         default:
           break; // unknown format: skip gracefully
@@ -374,18 +389,36 @@ export class WebGLRenderer {
     this.markDirty();
   }
 
-  /** Start a JPEG decode. The buffer is reused downstream, so copy it first. */
+  /**
+   * Start a JPEG decode. `bytes` is a view into the IPC buffer (recycled as
+   * soon as this call returns), but that's safe without an explicit copy:
+   * the Blob constructor copies the bytes it's given synchronously, and it
+   * respects the view's offset/length rather than the whole backing buffer.
+   *
+   * `colorSpaceConversion`/`premultiplyAlpha: "none"` skip the browser's
+   * default colour management pass, which is both slower and can shift JPEG
+   * rect colours slightly versus the untouched RGBA rects next to them.
+   */
   private decodeJpeg(bytes: Uint8Array): Promise<ImageBitmap> {
-    const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: "image/jpeg" });
-    return createImageBitmap(blob);
+    // The view is always backed by a plain ArrayBuffer (the IPC message
+    // buffer); only the TS lib's generic ArrayBufferLike typing needs telling.
+    const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "image/jpeg" });
+    return createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
   }
 
   /** Texture-to-itself copy via a scratch texture (self-copy is undefined when overlapping). */
   private copyRect(srcX: number, srcY: number, dstX: number, dstY: number, w: number, h: number): void {
     const gl = this.gl;
-    if (this.scratchW < w || this.scratchH < h) {
-      this.scratchW = Math.max(this.scratchW, w);
-      this.scratchH = Math.max(this.scratchH, h);
+    const tooSmall = this.scratchW < w || this.scratchH < h;
+    // A single big CopyRect (e.g. a full-screen scroll on a 4K desktop)
+    // otherwise pins its scratch allocation for the rest of the session even
+    // once every later copy is tiny. Shrink back down once the live need
+    // drops under a quarter of what's allocated, instead of only ever
+    // growing to the largest CopyRect ever seen.
+    const wastefullyBig = this.scratchW > 0 && w * 4 <= this.scratchW && h * 4 <= this.scratchH;
+    if (tooSmall || wastefullyBig) {
+      this.scratchW = w;
+      this.scratchH = h;
       gl.bindTexture(gl.TEXTURE_2D, this.scratchTex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, this.scratchW, this.scratchH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
@@ -409,8 +442,19 @@ export class WebGLRenderer {
    * rebuilt (new context, server reset, or still waiting for an IDR), and
    * `h264Key` says this payload can start a decoder. An empty payload is a
    * control message: apply the flags and decode nothing.
+   *
+   * ORDERING: `decoder.decode()` is fire-and-forget; the actual pixel upload
+   * happens later in the decoder's `output` callback (see `createH264`),
+   * OUTSIDE `applyFrameOrdered`'s chain. Left alone, that let a slow decode
+   * from update N land on top of update N+1's (synchronous) rects. Awaiting
+   * `decoder.flush()` after `decode()` closes that gap: flush() resolves only
+   * once every decode() queued so far has produced its output (so `output`,
+   * and thus the texSubImage2D upload, has already run) or rejected, which is
+   * exactly the "fully applied before the next rect starts" guarantee the
+   * rest of this chain relies on. It does not require a new key frame
+   * afterwards, unlike reset().
    */
-  private decodeH264(r: WireRect): void {
+  private async decodeH264(r: WireRect): Promise<void> {
     if (this.h264Failed) return;
     if (typeof VideoDecoder === "undefined" || typeof EncodedVideoChunk === "undefined") {
       this.h264Failed = true;
@@ -451,7 +495,10 @@ export class WebGLRenderer {
           data: r.payload.slice(),
         }),
       );
+      await ctx.decoder.flush();
     } catch {
+      // Decode error, or the decoder was reset/closed (e.g. a resize raced
+      // this update) while flush() was in flight: nothing left to upload.
       this.closeH264(id);
     }
   }
@@ -804,6 +851,47 @@ export class WebGLRenderer {
     return { width, height, pixels };
   }
 
+  /**
+   * Downscaled RGBA8888 snapshot of the framebuffer, for the Library live
+   * preview poll (every 500 ms while previews are enabled). A full-res
+   * `readFramebufferRGBA` is 33 MB at 4K and runs on the main thread; instead,
+   * render `frameTex` through the existing quad program into a small FBO
+   * (preserving aspect, capped to `maxWidth`) and read pixels from that,
+   * which is a few hundred KB regardless of desktop size.
+   *
+   * Use `readFramebufferRGBA` instead where full resolution actually matters
+   * (e.g. disconnect thumbnail capture).
+   */
+  readPreviewRGBA(maxWidth: number): { width: number; height: number; pixels: Uint8Array } | null {
+    if (this.fbWidth === 0 || this.fbHeight === 0) return null;
+    const gl = this.gl;
+    const width = Math.max(1, Math.min(maxWidth, this.fbWidth));
+    const height = Math.max(1, Math.round((this.fbHeight * width) / this.fbWidth));
+
+    if (this.previewW !== width || this.previewH !== height) {
+      this.previewW = width;
+      this.previewH = height;
+      gl.bindTexture(gl.TEXTURE_2D, this.previewTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.readFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.previewTex, 0);
+    gl.viewport(0, 0, width, height);
+    gl.useProgram(this.program);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
+    gl.uniform1f(this.uLevels, 0); // preview is always full color, independent of the on-screen B&W mode
+    gl.uniform1f(this.uTexAlpha, 0);
+    gl.uniform4f(this.uRect, 0, 0, 1, 1);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    const pixels = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { width, height, pixels };
+  }
+
   /** Current frame as a PNG blob (screenshots). */
   async screenshot(): Promise<Blob | null> {
     const frame = this.readFramebufferRGBA();
@@ -826,6 +914,7 @@ export class WebGLRenderer {
     gl.deleteTexture(this.frameTex);
     gl.deleteTexture(this.scratchTex);
     gl.deleteTexture(this.cursorTex);
+    gl.deleteTexture(this.previewTex);
     gl.deleteFramebuffer(this.readFbo);
     gl.deleteProgram(this.program);
   }

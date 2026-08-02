@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-about-info"
+description = "Enables the about_info command without any pre-configured scope."
+commands.allow = ["about_info"]
+
+[[permission]]
+identifier = "deny-about-info"
+description = "Denies the about_info command without any pre-configured scope."
+commands.deny = ["about_info"]

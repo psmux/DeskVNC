@@ -5,7 +5,7 @@
 //! coalesced into a single `SessionEvent::FramebufferUpdate` with a unioned
 //! damage rect, never per-rect (PRD/02 §5).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -200,6 +200,13 @@ pub(crate) struct RunLoop {
     frames_since_tick: u32,
     rects_decoded: u64,
     decode_ms_tick: f32,
+    /// When the last stats tick actually ran, so per-second rates can divide
+    /// by the REAL elapsed time rather than assume exactly 1 s.
+    /// `MissedTickBehavior::Skip` makes the interval unbounded whenever one
+    /// update blocks the select loop past a tick, understating throughput
+    /// and fps whenever that happens (dividing a full second's worth of
+    /// bytes by an interval that was actually several seconds long).
+    last_tick_at: Option<Instant>,
     /// Highest stall-anchored burst rate (bits/sec) [`CountingReader`]
     /// measured since the last tick, or 0 if none completed. This is a lower
     /// bound on link capacity regardless of how slowly the server encoded
@@ -212,12 +219,38 @@ pub(crate) struct RunLoop {
     last_update_at: Option<Instant>,
     /// When the last lossless refresh was issued, for the cooldown.
     last_alr_at: Option<Instant>,
+    /// A lossless refresh's sharp SetEncodings + non-incremental request has
+    /// gone out and the adaptive SetEncodings is being withheld until the
+    /// ANSWERING update has been fully consumed (see `maybe_lossless_refresh`
+    /// and the end of `handle_framebuffer_update`). Sending the restore
+    /// back-to-back with the request instead let a server that processes
+    /// SetEncodings synchronously but queues the update apply the adaptive
+    /// list before it ever serviced the sharp request, so the "sharp"
+    /// refresh came back lossy and re-queued itself every ALR_COOLDOWN,
+    /// forever, on an otherwise idle screen.
+    alr_restore_pending: bool,
     current_encoding: i32,
     rtt_ms: f32,
     /// Outstanding fence RTT probe: (payload id, send time).
     probe: Option<(u64, Instant)>,
+    /// Pixel formats sent with a fence-guarded SetPixelFormat whose fence
+    /// response has not come back yet, oldest first. Decoding stays in the
+    /// old format until the server proves (by answering the fence) that it
+    /// has processed the switch; everything it sent before that answer was
+    /// encoded in the old format.
+    pending_pf: VecDeque<PixelFormat>,
+    /// Commands that arrived mid-update and cannot safely run between rects
+    /// (they change encodings, format, or session state). Serviced by the
+    /// run loop once the update has been fully consumed.
+    deferred_cmds: Vec<ClientCommand>,
+    /// A Disconnect arrived mid-update: unwind without reading further.
+    pending_outcome: Option<RunOutcome>,
     epoch: Instant,
 }
+
+/// Fence payload marking the pixel-format-switch guard, distinguishable from
+/// the 8-byte RTT probe payload by length alone.
+const PF_FENCE_PAYLOAD: &[u8] = b"pf-switch";
 
 impl RunLoop {
     // One constructor called from exactly one place (`connection::run_once`)
@@ -260,13 +293,18 @@ impl RunLoop {
             frames_since_tick: 0,
             rects_decoded: 0,
             decode_ms_tick: 0.0,
+            last_tick_at: None,
             link_peak,
             lossy_damage: Rect::new(0, 0, 0, 0),
             last_update_at: None,
             last_alr_at: None,
+            alr_restore_pending: false,
             current_encoding: encoding::RAW,
             rtt_ms: 0.0,
             probe: None,
+            pending_pf: VecDeque::new(),
+            deferred_cmds: Vec::new(),
+            pending_outcome: None,
             epoch: Instant::now(),
         }
     }
@@ -312,8 +350,20 @@ impl RunLoop {
                 }
                 Step::Message(byte) => {
                     let msg_type = byte.map_err(messages::map_eof)?;
-                    self.handle_server_message(msg_type, settings, events)
+                    self.handle_server_message(msg_type, settings, events, commands)
                         .await?;
+                    // A Disconnect that arrived mid-update aborts here, and
+                    // state-changing commands parked during the update run
+                    // now, before the channel is polled again, so ordering
+                    // relative to later commands is preserved.
+                    if let Some(outcome) = self.pending_outcome.take() {
+                        return Ok(outcome);
+                    }
+                    for cmd in std::mem::take(&mut self.deferred_cmds) {
+                        if let Some(outcome) = self.handle_command(cmd, settings, events).await? {
+                            return Ok(outcome);
+                        }
+                    }
                 }
                 Step::Command(None) => {
                     // The handle was dropped: nobody can control this session
@@ -340,11 +390,13 @@ impl RunLoop {
         msg_type: u8,
         settings: &mut SessionSettings,
         events: &mpsc::Sender<SessionEvent>,
+        commands: &mut mpsc::Receiver<ClientCommand>,
     ) -> Result<()> {
         tracing::trace!(msg_type, "server message");
         match msg_type {
             server_msg::FRAMEBUFFER_UPDATE => {
-                self.handle_framebuffer_update(settings, events).await
+                self.handle_framebuffer_update(settings, events, commands)
+                    .await
             }
             server_msg::SET_COLOUR_MAP_ENTRIES => {
                 let (first, entries) =
@@ -387,6 +439,7 @@ impl RunLoop {
         &mut self,
         settings: &mut SessionSettings,
         events: &mpsc::Sender<SessionEvent>,
+        commands: &mut mpsc::Receiver<ClientCommand>,
     ) -> Result<()> {
         let count = messages::read_framebuffer_update_header(&mut self.reader).await?;
         let primed_before = !self.priming_update_pending;
@@ -428,6 +481,12 @@ impl RunLoop {
             .saturating_mul(4)
             .max(64 * 1024 * 1024);
         let mut accumulated: u64 = 0;
+        // The byte budget alone does not bound a sentinel update: zero-area
+        // rects decode to zero bytes, so a hostile server sending 0x0 rect
+        // headers forever grows `rects` without ever touching the budget.
+        // No legitimate update can carry more rects than a non-sentinel
+        // count field could express.
+        let mut headers_read: u32 = 0;
 
         loop {
             if !sentinel {
@@ -435,6 +494,12 @@ impl RunLoop {
                     break;
                 }
                 remaining -= 1;
+            }
+            headers_read += 1;
+            if headers_read > u16::MAX as u32 {
+                return Err(VncError::Protocol(
+                    "framebuffer update exceeded 65535 rects without LastRect".into(),
+                ));
             }
             let (rect, enc) = messages::read_rect_header(&mut self.reader).await?;
 
@@ -485,6 +550,13 @@ impl RunLoop {
                 rects.push(d);
                 self.rects_decoded += 1;
             }
+
+            // Keep the remote pointer alive while a large update streams in.
+            self.drain_commands_mid_update(commands, settings).await?;
+            if self.pending_outcome.is_some() {
+                // Disconnect requested: the stream position no longer matters.
+                return Ok(());
+            }
         }
 
         // The priming update has now been fully read: resume normal pipelining.
@@ -494,20 +566,40 @@ impl RunLoop {
         }
 
         // Remember what was painted lossily so it can be re-fetched sharp once
-        // the screen settles. Only JPEG rects lose information; Tight
-        // palette/RLE and CopyRect are already exact.
-        if !rects.is_empty() && self.applied_quality.allow_jpeg {
+        // the screen settles. Both JPEG and H.264 rects lose information;
+        // Tight palette/RLE and CopyRect are already exact.
+        //
+        // An update that is itself the ANSWER to an outstanding lossless
+        // refresh must not feed this: restoring the adaptive encodings now
+        // happens after that answer (see below and `maybe_lossless_refresh`),
+        // so if the server ignored the sharp SetEncodings (or the two simply
+        // raced), the "sharp" answer can still be lossy. Unioning it back in
+        // would immediately re-queue the same region and repeat forever.
+        // Losing one region for one cycle is the accepted cost; ALR_COOLDOWN
+        // already caps how often even a well-behaved server's answer can
+        // trigger this path again.
+        if !rects.is_empty()
+            && !self.alr_restore_pending
+            && (self.applied_quality.allow_jpeg || self.applied_quality.allow_h264)
+        {
             let lossy = self.applied_quality.jpeg_quality < ALR_QUALITY_FLOOR
-                && rects
-                    .iter()
-                    .any(|r| matches!(r.payload, crate::types::RectPayload::Jpeg(_)));
+                && rects.iter().any(|r| {
+                    matches!(
+                        r.payload,
+                        crate::types::RectPayload::Jpeg(_) | crate::types::RectPayload::H264 { .. }
+                    )
+                });
             if lossy {
                 self.lossy_damage = self.lossy_damage.union(&damage);
             }
         }
-        self.last_update_at = Some(Instant::now());
 
         if !rects.is_empty() {
+            // Only a real repaint counts toward the idle timer: a
+            // pseudo-only update (cursor shape, LED state, ...) must not
+            // hold auto-lossless-refresh off forever on an otherwise static
+            // screen.
+            self.last_update_at = Some(Instant::now());
             self.frames_since_tick += 1;
             // Coverage telemetry for the consistency-refresh investigation: a
             // full repaint request that is honoured produces an update whose
@@ -515,6 +607,19 @@ impl RunLoop {
             // only slivers. Distinguishing those from the log is the whole
             // point, so this is INFO for large updates only.
             emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
+        }
+
+        // The update following an outstanding lossless-refresh request has
+        // now been fully consumed: restore the adaptive SetEncodings. See
+        // `alr_restore_pending`'s doc for why this must happen AFTER the
+        // answer rather than back-to-back with the request.
+        if self.alr_restore_pending {
+            self.alr_restore_pending = false;
+            let msg = messages::set_encodings(&crate::quality::encodings_for(
+                &self.applied_quality,
+                &self.caps,
+            ));
+            self.send(&msg).await?;
         }
         Ok(())
     }
@@ -566,7 +671,21 @@ impl RunLoop {
                     };
                     emit(events, SessionEvent::Error(format!("Resize failed: {why}"))).await?;
                 } else {
+                    let changed = (width, height) != (self.fb_width, self.fb_height);
                     self.apply_resize(width, height, events).await?;
+                    // The pipelined incremental request for the next update
+                    // was sent with the OLD full rect. After a grow, nothing
+                    // covers the new strip: if the server has no damage
+                    // inside the old rect, no update arrives, no new request
+                    // is generated, and the strip stays blank forever. An
+                    // INCREMENTAL request for the new geometry is loop-safe
+                    // (the PRD/02 §9 hazard is only about non-incremental
+                    // requests after our own SetDesktopSize); apply_resize
+                    // already re-armed continuous updates when active.
+                    if changed && !self.cu_active {
+                        let msg = messages::framebuffer_update_request(true, self.full_rect());
+                        self.send(&msg).await?;
+                    }
                 }
                 // Re-apply a stored resize request once per connection, now
                 // that the server has proven support (PRD/05 §4).
@@ -617,7 +736,20 @@ impl RunLoop {
             self.fb_height = height;
             self.caps.width = width;
             self.caps.height = height;
+            // Lossy-damage bookkeeping from the old geometry can extend past
+            // the new framebuffer after a shrink; a later lossless-refresh
+            // request for that region is out of bounds, and servers vary
+            // between clamping and erroring.
+            self.lossy_damage = self.lossy_damage.intersect(&self.full_rect());
             emit(events, SessionEvent::DesktopResize { width, height }).await?;
+            if self.cu_active {
+                // Continuous updates were enabled with the OLD full rect. The
+                // server only pushes damage inside that region, so after a
+                // grow the new strip would never update. Re-arm with the new
+                // geometry.
+                let msg = messages::enable_continuous_updates(true, self.full_rect());
+                self.send(&msg).await?;
+            }
         }
         Ok(())
     }
@@ -712,6 +844,19 @@ impl RunLoop {
             // we do not understand (PRD/02 §7.1).
             let reply = messages::client_fence(flags & fence_flags::KNOWN_RESPONSE_MASK, &payload);
             self.send(&reply).await?;
+        } else if payload == PF_FENCE_PAYLOAD {
+            // The server has processed everything up to the fence and the
+            // SetPixelFormat tied to it (BLOCK_BEFORE | SYNC_NEXT): from this
+            // byte on, rects are encoded in the new format. NOW the decoder
+            // may switch. Oldest first: responses come back in send order.
+            if let Some(new_pf) = self.pending_pf.pop_front() {
+                self.pf = new_pf;
+                self.caps.pixel_format = Some(new_pf);
+                self.decoder.set_pixel_format(new_pf);
+                tracing::debug!(?new_pf, "pixel format switch synchronised");
+            } else {
+                tracing::warn!("unmatched pixel-format fence response");
+            }
         } else {
             // A response, presumably to our RTT probe.
             if let Some((id, sent)) = self.probe {
@@ -730,6 +875,80 @@ impl RunLoop {
     // Client commands
     // -----------------------------------------------------------------------
 
+    /// The commands that may safely run BETWEEN rects of an update: they only
+    /// write input messages to the socket and touch no decoder, encoding, or
+    /// framebuffer state.
+    async fn handle_input_command(
+        &mut self,
+        cmd: ClientCommand,
+        settings: &SessionSettings,
+    ) -> Result<()> {
+        match cmd {
+            ClientCommand::Pointer { x, y, button_mask } => {
+                if !settings.view_only {
+                    let msg = crate::input::encode_pointer_event(x, y, button_mask);
+                    self.send(&msg).await?;
+                }
+            }
+            ClientCommand::Key {
+                keysym,
+                keycode,
+                down,
+            } => {
+                if !settings.view_only {
+                    self.send_key(keysym, keycode, down, settings.prefer_scancodes)
+                        .await?;
+                    if down {
+                        self.pressed.insert(keysym, keycode);
+                    } else {
+                        self.pressed.remove(&keysym);
+                    }
+                }
+            }
+            ClientCommand::ReleaseAllKeys => self.release_all_keys(settings).await?,
+            other => {
+                debug_assert!(false, "not an input command: {other:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Service commands that queued while a FramebufferUpdate is being read.
+    ///
+    /// Reading an update runs to completion before the select loop looks at
+    /// the command channel again, and on a slow link one large update takes
+    /// seconds. Without this, every pointer and key event queues for that
+    /// whole window, so the remote cursor freezes and then jumps, which is
+    /// the single most visible latency difference from a native client.
+    ///
+    /// Input goes straight to the socket (a client message is always legal
+    /// between our reads). Anything that changes protocol or session state is
+    /// parked for the run loop to service once the update is consumed, and
+    /// Disconnect aborts the update: the socket is about to close, stream
+    /// position no longer matters.
+    async fn drain_commands_mid_update(
+        &mut self,
+        commands: &mut mpsc::Receiver<ClientCommand>,
+        settings: &SessionSettings,
+    ) -> Result<()> {
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                ClientCommand::Pointer { .. }
+                | ClientCommand::Key { .. }
+                | ClientCommand::ReleaseAllKeys => {
+                    self.handle_input_command(cmd, settings).await?;
+                }
+                ClientCommand::Disconnect => {
+                    let _ = self.release_all_keys(settings).await;
+                    self.pending_outcome = Some(RunOutcome::UserDisconnect);
+                    return Ok(());
+                }
+                other => self.deferred_cmds.push(other),
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_command(
         &mut self,
         cmd: ClientCommand,
@@ -747,27 +966,11 @@ impl RunLoop {
             ClientCommand::ProvideCredentials { .. } | ClientCommand::CancelCredentials => {
                 tracing::debug!("credential command received while connected; ignoring");
             }
-            ClientCommand::Pointer { x, y, button_mask } => {
-                if !settings.view_only {
-                    let msg = crate::input::encode_pointer_event(x, y, button_mask);
-                    self.send(&msg).await?;
-                }
+            cmd @ (ClientCommand::Pointer { .. }
+            | ClientCommand::Key { .. }
+            | ClientCommand::ReleaseAllKeys) => {
+                self.handle_input_command(cmd, settings).await?;
             }
-            ClientCommand::Key {
-                keysym,
-                keycode,
-                down,
-            } => {
-                if !settings.view_only {
-                    self.send_key(keysym, keycode, down).await?;
-                    if down {
-                        self.pressed.insert(keysym, keycode);
-                    } else {
-                        self.pressed.remove(&keysym);
-                    }
-                }
-            }
-            ClientCommand::ReleaseAllKeys => self.release_all_keys(settings).await?,
             ClientCommand::ClipboardText(text) => {
                 // Extended peers are ANNOUNCED to first. The provide below is
                 // enough for a server that accepts unsolicited data, but one
@@ -803,6 +1006,12 @@ impl RunLoop {
             ClientCommand::SetQuality(preset) => {
                 settings.quality = preset;
                 let qs = preset.settings();
+                // Keep the Auto tuner's bookkeeping in sync with whatever is
+                // actually applied, manual or Auto: without this, a manual
+                // preset detour desyncs `AutoTuner::Shared::current`, and
+                // switching back to Auto does nothing until fresh
+                // measurements happen to walk the ladder back to reality.
+                self.tuner.resync(&qs);
                 self.apply_quality(qs).await?;
             }
             ClientCommand::RequestResize { width, height } => {
@@ -835,6 +1044,16 @@ impl RunLoop {
                     self.release_all_keys(settings).await?;
                 }
             }
+            ClientCommand::SetPreferScancodes(v) => {
+                // Anything currently held was pressed under the old mode;
+                // release it first so its key-up goes out the same way its
+                // key-down did, otherwise the remote can be left with a key
+                // stuck in whichever encoding it no longer listens to.
+                if settings.prefer_scancodes != v {
+                    self.release_all_keys(settings).await?;
+                    settings.prefer_scancodes = v;
+                }
+            }
             ClientCommand::TrustCertificate { .. } => {
                 // Certificate trust is resolved during the security handshake;
                 // nothing to do while connected.
@@ -847,8 +1066,19 @@ impl RunLoop {
         Ok(None)
     }
 
-    async fn send_key(&mut self, keysym: u32, keycode: Option<u32>, down: bool) -> Result<()> {
-        let use_qemu = self.caps.supports_qemu_ext_key;
+    async fn send_key(
+        &mut self,
+        keysym: u32,
+        keycode: Option<u32>,
+        down: bool,
+        prefer_scancodes: bool,
+    ) -> Result<()> {
+        // A server honouring QEMU Extended Key Event applies its OWN keymap
+        // to the scancode and ignores the keysym, so the scancode path types
+        // what the REMOTE layout says that physical key is. That is right
+        // for one keyboard-layout expectation and wrong for the other, which
+        // is why it is a setting rather than a fixed preference.
+        let use_qemu = self.caps.supports_qemu_ext_key && prefer_scancodes;
         match keycode {
             Some(kc) if use_qemu => {
                 let msg = crate::input::encode_qemu_key_event(keysym, kc, down);
@@ -863,10 +1093,11 @@ impl RunLoop {
 
     /// Send key-up for everything we believe is pressed (blur / disconnect /
     /// view-only safety, PRD/05 §6.3).
-    async fn release_all_keys(&mut self, _settings: &SessionSettings) -> Result<()> {
+    async fn release_all_keys(&mut self, settings: &SessionSettings) -> Result<()> {
         let pressed: Vec<(u32, Option<u32>)> = self.pressed.drain().collect();
         for (keysym, keycode) in pressed {
-            self.send_key(keysym, keycode, false).await?;
+            self.send_key(keysym, keycode, false, settings.prefer_scancodes)
+                .await?;
         }
         Ok(())
     }
@@ -906,7 +1137,11 @@ impl RunLoop {
         self.send(&msg).await?;
 
         let new_pf = pixel_format_for(qs.pixel_format);
-        if new_pf == self.pf {
+        // Compare against the format the connection is HEADING for, not the
+        // one still decoding: with a switch already in flight, self.pf lags
+        // until the fence response arrives.
+        let effective = self.pending_pf.back().copied().unwrap_or(self.pf);
+        if new_pf == effective {
             return Ok(());
         }
 
@@ -936,14 +1171,27 @@ impl RunLoop {
             return Ok(());
         }
 
-        let guard = messages::client_fence(fence_flags::BLOCK_BEFORE | fence_flags::SYNC_NEXT, &[]);
+        // REQUEST makes the server answer the fence, and that answer is the
+        // synchronisation point: BLOCK_BEFORE means every rect the server sent
+        // before its response was encoded in the OLD format, SYNC_NEXT ties
+        // the SetPixelFormat that follows to the fence, so everything after
+        // the response is in the NEW one. Our decoder therefore switches in
+        // `handle_server_fence`, when the response arrives, not here. The old
+        // code flipped immediately and mis-decoded every in-flight rect, and
+        // the window was widest exactly when the switch fires (a slow link is
+        // both why the tuner downgrades and why rects queue up). This is
+        // TigerVNC's pendingPFChange model.
+        let guard = messages::client_fence(
+            fence_flags::REQUEST | fence_flags::BLOCK_BEFORE | fence_flags::SYNC_NEXT,
+            PF_FENCE_PAYLOAD,
+        );
         self.send(&guard).await?;
         let msg = messages::set_pixel_format(&new_pf);
         self.send(&msg).await?;
-        self.pf = new_pf;
-        self.caps.pixel_format = Some(new_pf);
-        self.decoder.set_pixel_format(new_pf);
-        // Everything on screen is now stale, request a full redraw.
+        self.pending_pf.push_back(new_pf);
+        // Everything on screen is stale once the switch lands; the redraw
+        // request is ordered after the SetPixelFormat on the wire, so the
+        // server answers it in the new format, after the fence response.
         let msg = messages::framebuffer_update_request(false, self.full_rect());
         self.send(&msg).await?;
         Ok(())
@@ -964,6 +1212,14 @@ impl RunLoop {
         if !settings.lossless_refresh || self.lossy_damage.is_empty() {
             return Ok(());
         }
+        // Never stack a second refresh on an unanswered one: the restore this
+        // one is waiting for has not happened yet (see `alr_restore_pending`),
+        // so the adaptive encodings are still off; queuing another sharp
+        // request now would just extend how long the session stays
+        // needlessly sharp.
+        if self.alr_restore_pending {
+            return Ok(());
+        }
         let idle = self
             .last_update_at
             .map(|t| t.elapsed() >= ALR_IDLE)
@@ -979,9 +1235,12 @@ impl RunLoop {
         self.lossy_damage = Rect::new(0, 0, 0, 0);
         self.last_alr_at = Some(Instant::now());
 
-        // Ask for this region losslessly...
+        // Ask for this region losslessly: disable BOTH lossy codecs, JPEG
+        // and H.264 (see `handle_framebuffer_update`'s "painted lossily"
+        // test, which now watches for either).
         let sharp = QualitySettings {
             allow_jpeg: false,
+            allow_h264: false,
             ..self.applied_quality
         };
         let msg = messages::set_encodings(&crate::quality::encodings_for(&sharp, &self.caps));
@@ -989,14 +1248,20 @@ impl RunLoop {
         let req = messages::framebuffer_update_request(false, region);
         self.send(&req).await?;
 
-        // ...then go straight back to the adaptive setting so the NEXT change
-        // is still cheap. No pixel format is touched, so nothing can desync.
-        let msg = messages::set_encodings(&crate::quality::encodings_for(
-            &self.applied_quality,
-            &self.caps,
-        ));
-        self.send(&msg).await?;
-        tracing::debug!(w = region.width, h = region.height, "auto lossless refresh");
+        // Do NOT restore the adaptive SetEncodings here. Sent back-to-back
+        // with the request above, a server that processes SetEncodings
+        // synchronously but queues the update applies the adaptive list
+        // before it ever services the sharp request, so the "sharp" refresh
+        // comes back lossy and `handle_framebuffer_update` would immediately
+        // re-queue it, every ALR_COOLDOWN, forever, on an otherwise idle
+        // screen. Restore after the ANSWER instead, at the end of
+        // `handle_framebuffer_update`.
+        self.alr_restore_pending = true;
+        tracing::debug!(
+            w = region.width,
+            h = region.height,
+            "auto lossless refresh requested"
+        );
         Ok(())
     }
 
@@ -1017,6 +1282,18 @@ impl RunLoop {
             }
         }
 
+        // The tick timer assumes exactly 1 s between fires, but
+        // `MissedTickBehavior::Skip` (see `run`) makes the interval
+        // unbounded whenever one update blocks the select loop past a tick:
+        // dividing by the REAL elapsed time keeps throughput/fps correct
+        // instead of understating them whenever that happens.
+        let now = Instant::now();
+        let dt_s = match self.last_tick_at {
+            Some(prev) => now.saturating_duration_since(prev).as_secs_f64().max(1e-3),
+            None => 1.0,
+        };
+        self.last_tick_at = Some(now);
+
         let total = self.bytes_counter.load(Ordering::Relaxed);
         let delta = total - self.last_bytes;
         self.last_bytes = total;
@@ -1026,9 +1303,9 @@ impl RunLoop {
 
         let stats = SessionStats {
             rtt_ms: self.rtt_ms,
-            throughput_bps: delta as f64 * 8.0,
-            throughput_up_bps: delta_sent as f64 * 8.0,
-            fps: self.frames_since_tick as f32,
+            throughput_bps: delta as f64 * 8.0 / dt_s,
+            throughput_up_bps: delta_sent as f64 * 8.0 / dt_s,
+            fps: (self.frames_since_tick as f64 / dt_s) as f32,
             decode_ms: if self.frames_since_tick > 0 {
                 self.decode_ms_tick / self.frames_since_tick as f32
             } else {

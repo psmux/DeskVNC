@@ -25,8 +25,14 @@ use crate::types::{encoding, DecodedRect, PixelFormat, Rect};
 
 /// Reject any rect claiming more pixels than this before allocating anything.
 pub(crate) const MAX_RECT_AREA: usize = 64 * 1024 * 1024;
-/// Cap on any single length-prefixed payload read from the wire.
-pub(crate) const MAX_WIRE_LEN: usize = 64 * 1024 * 1024;
+/// Cap on any single length-prefixed payload read from the wire. Tied to
+/// [`MAX_RECT_AREA`] (4 bytes/pixel is the widest wire pixel we support) plus
+/// slack for framing overhead, so any rect that already passed the area
+/// check can still have its Raw payload read: a flat 64 MiB cap rejected a
+/// legitimate full-screen Raw rect on 5K/6K displays (macOS Screen Sharing
+/// sends whole-screen Raw there: 6016x3384x4 = ~81.4 MB, over the old cap
+/// even though its area is well under MAX_RECT_AREA).
+pub(crate) const MAX_WIRE_LEN: usize = MAX_RECT_AREA * 4 + 64 * 1024;
 /// Absolute cap on a single rect's decompressed size.
 pub(crate) const MAX_INFLATED_LEN: usize = 256 * 1024 * 1024;
 
@@ -196,13 +202,25 @@ impl DecoderState {
     }
 
     /// Mid-session SetPixelFormat. Deliberately does NOT touch the zlib
-    /// streams, they are connection-scoped, not format-scoped.
+    /// streams, they are connection-scoped, not format-scoped. The colour
+    /// map IS cleared: it belongs to the palette period that just ended, and
+    /// keeping it would paint rects arriving before the server's next
+    /// SetColourMapEntries with a stale (and possibly wrong-format) palette.
     pub fn set_pixel_format(&mut self, pf: PixelFormat) {
         self.pf = pf;
+        self.colour_map = None;
     }
 
     pub fn pixel_format(&self) -> PixelFormat {
         self.pf
+    }
+
+    /// Current colour map, if the server has ever sent SetColourMapEntries
+    /// since the last SetPixelFormat/reset. Used by cursor pseudo-encodings
+    /// (proto::pseudo) so indexed-palette rich cursors honour the palette
+    /// instead of falling back to a grayscale guess.
+    pub fn colour_map(&self) -> Option<&ColourMap> {
+        self.colour_map.as_ref()
     }
 
     /// Full reset for a reconnect: fresh zlib streams, colour map cleared, and
@@ -242,20 +260,36 @@ impl DecoderState {
 /// Decode one rectangle from `reader`, which is positioned at the rect
 /// payload (x/y/w/h/encoding already consumed by the caller).
 ///
-/// Returns `Ok(None)` for pseudo-encodings the caller should handle instead
-/// (the reader is left positioned at the pseudo-rect payload).
+/// The caller (session::run_loop) must route pseudo-encodings to
+/// [`crate::proto::pseudo::read_pseudo_rect`] via
+/// [`crate::proto::pseudo::is_pseudo`] *before* calling this; any encoding
+/// that reaches here and isn't one of the real data encodings below is an
+/// error, never a silent no-op (see `unknown_negative_encoding_is_unsupported`
+/// below for why: we cannot know how many bytes to skip, so ignoring it would
+/// desync every rect that follows). The `Option` is retained only for call
+/// signature stability; every successful decode returns `Some`.
 pub async fn decode_rect<R: AsyncRead + Unpin + Send>(
     state: &mut DecoderState,
     reader: &mut R,
     rect: Rect,
     encoding: i32,
 ) -> Result<Option<DecodedRect>> {
-    // Pseudo-encodings are negative, except VMware's (0x574d5664) which is a
-    // positive registered number, proto/ owns all of them.
-    if encoding < 0 || encoding == encoding::PSEUDO_VMWARE_CURSOR {
-        return Ok(None);
-    }
+    let pf = state.pf;
+    decode_rect_as(state, reader, rect, encoding, &pf).await
+}
 
+/// As [`decode_rect`] but against an explicit pixel format instead of the
+/// connection's negotiated one (`state.pf`). CursorWithAlpha's inner-encoding
+/// payload is always a fixed 32bpp/depth-32 RGBA layout per spec regardless
+/// of what the connection negotiated, so `proto::pseudo` decodes it through
+/// this entry point with that fixed format instead.
+pub(crate) async fn decode_rect_as<R: AsyncRead + Unpin + Send>(
+    state: &mut DecoderState,
+    reader: &mut R,
+    rect: Rect,
+    encoding: i32,
+    pf: &PixelFormat,
+) -> Result<Option<DecodedRect>> {
     if rect.area() > MAX_RECT_AREA {
         return Err(derr(
             "dispatch",
@@ -264,32 +298,32 @@ pub async fn decode_rect<R: AsyncRead + Unpin + Send>(
     }
 
     // Pixel-carrying encodings need a sane pixel format.
-    let pf_ok = matches!(state.pf.bits_per_pixel, 8 | 16 | 24 | 32);
+    let pf_ok = matches!(pf.bits_per_pixel, 8 | 16 | 24 | 32);
 
     let payload = match encoding {
         encoding::RAW => {
             check_pf(pf_ok, "raw")?;
-            raw::decode(reader, rect, &state.pf, state.colour_map.as_ref()).await?
+            raw::decode(reader, rect, pf, state.colour_map.as_ref()).await?
         }
         encoding::COPY_RECT => copy_rect::decode(reader).await?,
         encoding::RRE => {
             check_pf(pf_ok, "rre")?;
-            rre::decode(reader, rect, &state.pf, state.colour_map.as_ref(), false).await?
+            rre::decode(reader, rect, pf, state.colour_map.as_ref(), false).await?
         }
         encoding::CORRE => {
             check_pf(pf_ok, "corre")?;
-            rre::decode(reader, rect, &state.pf, state.colour_map.as_ref(), true).await?
+            rre::decode(reader, rect, pf, state.colour_map.as_ref(), true).await?
         }
         encoding::HEXTILE => {
             check_pf(pf_ok, "hextile")?;
-            hextile::decode(reader, rect, &state.pf, state.colour_map.as_ref()).await?
+            hextile::decode(reader, rect, pf, state.colour_map.as_ref()).await?
         }
         encoding::ZLIB => {
             check_pf(pf_ok, "zlib")?;
             zlib::decode(
                 reader,
                 rect,
-                &state.pf,
+                pf,
                 state.colour_map.as_ref(),
                 &mut state.zlib_stream,
             )
@@ -300,7 +334,7 @@ pub async fn decode_rect<R: AsyncRead + Unpin + Send>(
             tight::decode(
                 reader,
                 rect,
-                &state.pf,
+                pf,
                 state.colour_map.as_ref(),
                 &mut state.tight_streams,
             )
@@ -308,14 +342,14 @@ pub async fn decode_rect<R: AsyncRead + Unpin + Send>(
         }
         encoding::TRLE => {
             check_pf(pf_ok, "trle")?;
-            zrle::decode(reader, rect, &state.pf, state.colour_map.as_ref(), None).await?
+            zrle::decode(reader, rect, pf, state.colour_map.as_ref(), None).await?
         }
         encoding::ZRLE => {
             check_pf(pf_ok, "zrle")?;
             zrle::decode(
                 reader,
                 rect,
-                &state.pf,
+                pf,
                 state.colour_map.as_ref(),
                 Some(&mut state.zrle_stream),
             )
@@ -349,21 +383,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pseudo_encodings_return_none() {
+    async fn unknown_negative_encoding_is_unsupported() {
+        // decode_rect must never be called with an encoding
+        // proto::pseudo::is_pseudo routes elsewhere -- the caller
+        // (session::run_loop) checks that first. If one reaches here anyway
+        // (TightPng -260, QEMU pointer motion -257, PSEUDO_VMWARE_CURSOR, or
+        // a future pseudo-encoding assignment nobody taught proto::pseudo
+        // about yet) there is no way to know the payload length, so the old
+        // behaviour of silently returning Ok(None) consumed zero bytes and
+        // desynced every rect that followed. It must error instead, exactly
+        // like an unknown positive encoding.
         let mut state = DecoderState::new(pf());
         let mut data: &[u8] = &[];
-        let rect = Rect::new(0, 0, 0, 0);
+        let rect = Rect::new(0, 0, 1, 1);
         for enc in [
-            encoding::PSEUDO_CURSOR,
-            encoding::PSEUDO_DESKTOP_SIZE,
-            encoding::PSEUDO_LAST_RECT,
-            encoding::PSEUDO_VMWARE_CURSOR,
-            encoding::PSEUDO_EXTENDED_CLIPBOARD,
             encoding::TIGHT_PNG,
+            encoding::PSEUDO_QEMU_POINTER_MOTION,
+            encoding::PSEUDO_VMWARE_CURSOR,
+            encoding::PSEUDO_CURSOR,
+            encoding::PSEUDO_EXTENDED_CLIPBOARD,
         ] {
-            let out = decode_rect(&mut state, &mut data, rect, enc).await.unwrap();
-            assert!(out.is_none(), "encoding {enc} should be Ok(None)");
+            let err = decode_rect(&mut state, &mut data, rect, enc)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, VncError::UnsupportedEncoding(e) if e == enc),
+                "encoding {enc} should error as unsupported, got {err:?}"
+            );
         }
+    }
+
+    #[test]
+    fn set_pixel_format_clears_stale_colour_map() {
+        // Colour map entries belong to the palette period that ends at
+        // SetPixelFormat; a rect arriving between this SetPixelFormat and the
+        // server's next SetColourMapEntries must not be painted with the
+        // previous (and possibly wrong-format) palette.
+        let mut state = DecoderState::new(PixelFormat::palette8());
+        state.set_colour_map(0, &[[10, 20, 30]]);
+        assert!(state.colour_map().is_some());
+        state.set_pixel_format(PixelFormat::palette8());
+        assert!(state.colour_map().is_none());
     }
 
     #[tokio::test]

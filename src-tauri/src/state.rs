@@ -157,6 +157,12 @@ pub struct SessionEntry {
     /// Debounce state for `capture_thumbnail` (PRD/03 §3.1). Session-scoped,
     /// so every new connection starts with a clean budget.
     pub thumbnails: ThumbnailPolicy,
+    /// Button mask of the most recent pointer event `send_input` looked at for
+    /// this session, `-1` meaning none yet. Lets `send_input` tell a
+    /// motion-only pointer event (safe to shed under backpressure) apart from
+    /// one that changes button state (must never be dropped), see
+    /// `commands::session::send_input`.
+    pub last_pointer_mask: Arc<std::sync::atomic::AtomicI32>,
 }
 
 impl SessionEntry {
@@ -309,6 +315,26 @@ impl AppState {
             .ok_or_else(|| format!("unknown session: {session_id}"))
     }
 
+    /// Clone the command sender for a session together with its shared
+    /// last-pointer-button-mask cell (see [`SessionEntry::last_pointer_mask`]),
+    /// or a user-facing error.
+    pub fn command_channel(
+        &self,
+        session_id: &str,
+    ) -> Result<
+        (
+            tokio::sync::mpsc::Sender<vnc_core::ClientCommand>,
+            Arc<std::sync::atomic::AtomicI32>,
+        ),
+        String,
+    > {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .map(|e| (e.handle.commands.clone(), e.last_pointer_mask.clone()))
+            .ok_or_else(|| format!("unknown session: {session_id}"))
+    }
+
     /// Claim the right to store a thumbnail for a session right now, returning
     /// the host profile it belongs to.
     ///
@@ -392,6 +418,7 @@ mod tests {
                     port,
                     started_at: Instant::now(),
                     thumbnails: Default::default(),
+                    last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
                 },
             );
             self

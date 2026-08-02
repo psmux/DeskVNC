@@ -1,6 +1,7 @@
 //! Tauri commands, one module per area. Every command returns
 //! `Result<_, String>` with errors mapped to display strings, no `unwrap()`.
 
+pub mod about;
 pub mod capture;
 pub mod credentials;
 pub mod discovery;

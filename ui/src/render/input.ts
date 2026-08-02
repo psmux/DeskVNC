@@ -16,7 +16,7 @@
  *                   5=wheel-left 6=wheel-right
  */
 import type { WebGLRenderer } from "./WebGLRenderer";
-import { keyEventToIds } from "./keysyms";
+import { codePointToKeysym, keyEventToIds, type KeyIds } from "./keysyms";
 
 export type SendInput = (packet: Uint8Array) => void;
 
@@ -31,6 +31,28 @@ export interface SessionInputOptions {
 }
 
 const WHEEL_STEP = 40; // px of deltaY per click when deltaMode is pixels
+const MAX_WHEEL_CLICKS_PER_EVENT = 10; // cap a single momentum-scroll flick
+
+/** X11 keysym for AltGr/ISO Level 3 Shift, once confirmed (see handleAltGrPair). */
+const ISO_LEVEL3_SHIFT = 0xfe03;
+/** Windows fires ControlLeft then AltRight this close together for a real AltGr press. */
+const ALTGR_PAIR_WINDOW_MS = 50;
+
+/**
+ * `e.code`'s own character on a plain layout: "a".."z" for the letter row,
+ * "0".."9" for the digit row. Used to tell "Alt changed what this key
+ * produces" (AltGr / Option composing a character) apart from "Alt is simply
+ * held for an ordinary Alt+letter shortcut", which still reports the base
+ * letter in `e.key` on most layouts. Returns null for keys this can't cheaply
+ * decide (punctuation varies too much by layout to guess a baseline for).
+ */
+function baseCharForCode(code: string): string | null {
+  const key = /^Key([A-Z])$/.exec(code);
+  if (key) return key[1].toLowerCase();
+  const digit = /^Digit([0-9])$/.exec(code);
+  if (digit) return digit[1];
+  return null;
+}
 
 /**
  * Selector for "this keystroke belongs to our own UI, not the remote desktop".
@@ -67,6 +89,7 @@ export class SessionInput {
 
   private viewOnly = false;
   private passthrough = false;
+  private naturalScroll = false;
   private attached = false;
 
   private buttonMask = 0;
@@ -78,8 +101,16 @@ export class SessionInput {
   private wheelAccumY = 0;
   private panning = false;
   private spaceHeld = false;
+  private panButton = -1;
   private panLastX = 0;
   private panLastY = 0;
+
+  /** When the last ControlLeft keydown was forwarded (see handleAltGrPair). */
+  private ctrlLeftDownAt = 0;
+  /** True from a "Dead" keydown until the composed character comes back. */
+  private composing = false;
+  /** Hidden offscreen element that owns dead-key composition; see attach(). */
+  private compositionEl: HTMLTextAreaElement | null = null;
 
   private pressedKeys = new Map<string, { keysym: number; keycode: number }>();
 
@@ -113,6 +144,10 @@ export class SessionInput {
     return this.passthrough;
   }
 
+  setNaturalScroll(v: boolean): void {
+    this.naturalScroll = v;
+  }
+
   attach(): void {
     if (this.attached) return;
     this.attached = true;
@@ -126,6 +161,7 @@ export class SessionInput {
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
     window.addEventListener("blur", this.onBlur);
+    this.compositionEl = this.createCompositionOverlay();
   }
 
   detach(): void {
@@ -149,19 +185,64 @@ export class SessionInput {
     window.removeEventListener("keyup", this.onKeyUp, true);
     window.removeEventListener("blur", this.onBlur);
     cancelAnimationFrame(this.moveRaf);
+    this.compositionEl?.remove();
+    this.compositionEl = null;
+    this.composing = false;
+  }
+
+  /**
+   * Hidden, focused, 1px offscreen element that owns dead-key composition.
+   *
+   * Dead keys (e.g. "´" then "e" -> "é") only resolve if the browser gets to
+   * run its native composition on a focused editable element, and the canvas
+   * is not one. Composing directly on the canvas would also mean every OTHER
+   * keystroke (letters, Enter, arrows) lands in it instead of being forwarded,
+   * which is why this only takes focus for the duration of a dead-key
+   * sequence (see onKeyDown / finishComposition) rather than owning focus
+   * permanently: that would risk regressing normal typing.
+   */
+  private createCompositionOverlay(): HTMLTextAreaElement {
+    const el = document.createElement("textarea");
+    el.setAttribute("aria-hidden", "true");
+    el.tabIndex = -1;
+    el.style.cssText =
+      "position:fixed;left:-1px;top:-1px;width:1px;height:1px;opacity:0;padding:0;border:0;resize:none;";
+    el.addEventListener("compositionend", this.onCompositionEnd);
+    el.addEventListener("beforeinput", this.onBeforeInput);
+    el.addEventListener("blur", () => {
+      // Composition ended without compositionend firing (e.g. the sequence
+      // was abandoned); don't leave `composing` stuck true forever.
+      this.composing = false;
+    });
+    document.body.appendChild(el);
+    return el;
   }
 
   // ------------------------------------------------------------- pointer
 
-  private contentOverflows(): boolean {
-    const t = this.renderer.contentTransform();
-    const { width, height } = this.renderer.getRemoteSize();
-    return width * t.scaleX > this.canvas.width + 1 || height * t.scaleY > this.canvas.height + 1;
-  }
-
   private fbPoint(e: { clientX: number; clientY: number }): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     return this.renderer.cssPointToFramebuffer(e.clientX, e.clientY, rect);
+  }
+
+  /**
+   * Cancel any pending coalesced move and snap `lastX`/`lastY` to `e`.
+   *
+   * Without this, a pointerup's release packet went out at the current point
+   * while a move queued by the rAF coalescer in `onPointerMove` still fired
+   * afterwards carrying the OLD point, a stale `move(P_old)` arriving right
+   * after `release(P_new)`. Called from every path that resolves a pointer
+   * event without going through the normal `sendPointer` call below.
+   */
+  private syncLastPoint(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    if (this.moveDirty) {
+      cancelAnimationFrame(this.moveRaf);
+      this.moveDirty = false;
+    }
+    const p = this.fbPoint(e);
+    this.lastX = p.x;
+    this.lastY = p.y;
+    return p;
   }
 
   private sendPointer(x: number, y: number, mask: number): void {
@@ -184,37 +265,61 @@ export class SessionInput {
 
   private onPointerDown = (e: PointerEvent): void => {
     this.canvas.focus({ preventScroll: true });
-    // space-drag or middle-drag pans, but only when content overflows the viewport
-    if (this.spaceHeld || (e.button === 1 && this.contentOverflows())) {
+    // Space-drag always pans. Middle-drag pans only with Alt held: reserving
+    // plain middle-button for panning whenever the content overflowed the
+    // viewport meant a middle-click (X11 paste-from-selection) worked or not
+    // depending on zoom level; Alt+middle-drag keeps the gesture available
+    // without swallowing the plain click.
+    if (this.spaceHeld || (e.button === 1 && e.altKey)) {
       this.panning = true;
+      this.panButton = e.button;
       this.panLastX = e.clientX;
       this.panLastY = e.clientY;
       this.canvas.setPointerCapture(e.pointerId);
       e.preventDefault();
-      if (e.button === 1) return; // middle button reserved for panning gesture
+      if (e.button === 1) {
+        this.syncLastPoint(e);
+        return;
+      }
     }
-    if (this.viewOnly || this.panning) return;
+    if (this.viewOnly || this.panning) {
+      this.syncLastPoint(e);
+      return;
+    }
     this.canvas.setPointerCapture(e.pointerId);
     const bit = e.button === 0 ? 0 : e.button === 1 ? 1 : e.button === 2 ? 2 : -1;
-    if (bit < 0) return;
+    if (bit < 0) {
+      this.syncLastPoint(e);
+      return;
+    }
     this.buttonMask |= 1 << bit;
-    const p = this.fbPoint(e);
-    this.lastX = p.x;
-    this.lastY = p.y;
+    const p = this.syncLastPoint(e);
     this.sendPointer(p.x, p.y, this.buttonMask); // button transitions go immediately
     e.preventDefault();
   };
 
   private onPointerUp = (e: PointerEvent): void => {
-    if (this.panning) {
+    // Only release panning for the button that started it: onPointerUp used
+    // to early-return for ANY button while panning, so releasing the left
+    // button during a middle-drag pan never reached the mask update below and
+    // buttonMask kept bit 0 set, a permanently "stuck" left button.
+    if (this.panning && e.button === this.panButton) {
       this.panning = false;
+      this.panButton = -1;
+      this.syncLastPoint(e);
       return;
     }
-    if (this.viewOnly) return;
+    if (this.viewOnly) {
+      this.syncLastPoint(e);
+      return;
+    }
     const bit = e.button === 0 ? 0 : e.button === 1 ? 1 : e.button === 2 ? 2 : -1;
-    if (bit < 0) return;
+    if (bit < 0) {
+      this.syncLastPoint(e);
+      return;
+    }
     this.buttonMask &= ~(1 << bit);
-    const p = this.fbPoint(e);
+    const p = this.syncLastPoint(e);
     this.sendPointer(p.x, p.y, this.buttonMask);
     e.preventDefault();
   };
@@ -278,25 +383,45 @@ export class SessionInput {
       }
       return;
     }
-    const step = e.deltaMode === 1 ? 1 : WHEEL_STEP; // line vs pixel mode
-    this.wheelAccumY += e.deltaY / step;
-    this.wheelAccumX += e.deltaX / step;
+    // Line (1) and page (2) mode already report "one unit per click"; only
+    // pixel mode (0) needs dividing down by an assumed line height. Page mode
+    // used to fall into the pixel branch (WHEEL_STEP=40), so a whole page's
+    // worth of pixels was needed to register as a single click, scrolling was
+    // effectively dead for any device that reports DOM_DELTA_PAGE.
+    const step = e.deltaMode === 0 ? WHEEL_STEP : 1;
+    let dy = e.deltaY / step;
+    let dx = e.deltaX / step;
+    if (this.naturalScroll) {
+      dy = -dy;
+      dx = -dx;
+    }
+    this.wheelAccumY += dy;
+    this.wheelAccumX += dx;
     const p = this.fbPoint(e);
-    while (this.wheelAccumY <= -1) {
+    // A single trackpad "flick" can hand us a momentum delta worth hundreds
+    // of clicks at once; uncapped, that's hundreds of synchronous send_input
+    // invokes from one event. Whatever doesn't fit stays in the accumulator
+    // for the next wheel event instead of being dropped.
+    let clicks = 0;
+    while (this.wheelAccumY <= -1 && clicks < MAX_WHEEL_CLICKS_PER_EVENT) {
       this.wheelAccumY += 1;
       this.sendWheel(3, p.x, p.y); // up
+      clicks++;
     }
-    while (this.wheelAccumY >= 1) {
+    while (this.wheelAccumY >= 1 && clicks < MAX_WHEEL_CLICKS_PER_EVENT) {
       this.wheelAccumY -= 1;
       this.sendWheel(4, p.x, p.y); // down
+      clicks++;
     }
-    while (this.wheelAccumX <= -1) {
+    while (this.wheelAccumX <= -1 && clicks < MAX_WHEEL_CLICKS_PER_EVENT) {
       this.wheelAccumX += 1;
       this.sendWheel(5, p.x, p.y); // left
+      clicks++;
     }
-    while (this.wheelAccumX >= 1) {
+    while (this.wheelAccumX >= 1 && clicks < MAX_WHEEL_CLICKS_PER_EVENT) {
       this.wheelAccumX -= 1;
       this.sendWheel(6, p.x, p.y); // right
+      clicks++;
     }
   };
 
@@ -311,14 +436,16 @@ export class SessionInput {
   }
 
   /** Public: synthesize a key combo (Send menu: Ctrl+Alt+Del etc.). */
-  sendKeyCombo(keysyms: number[]): void {
+  sendKeyCombo(combo: KeyIds[]): void {
     if (this.viewOnly) return;
-    for (const ks of keysyms) this.sendKey(ks, 0, true);
-    for (let i = keysyms.length - 1; i >= 0; i--) this.sendKey(keysyms[i], 0, false);
+    for (const k of combo) this.sendKey(k.keysym, k.keycode, true);
+    for (let i = combo.length - 1; i >= 0; i--) this.sendKey(combo[i].keysym, combo[i].keycode, false);
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    // Typing in one of our own dialogs/fields: leave it alone entirely.
+    // Typing in one of our own dialogs/fields: leave it alone entirely. This
+    // also covers every keystroke of an in-progress dead-key sequence once
+    // focus has moved to the composition overlay below.
     if (isLocalUiTarget(e)) return;
     if (this.onAppHotkey(e)) {
       e.preventDefault();
@@ -328,18 +455,137 @@ export class SessionInput {
     if (!this.passthrough && (e.metaKey || (e.ctrlKey && e.altKey && e.code === "Delete"))) {
       return;
     }
+    if (e.key === "Dead") {
+      // Do NOT preventDefault: that would kill the composition outright.
+      // Hand focus to the hidden overlay so the browser composes the
+      // accented character there instead of nowhere; the result comes back
+      // via onCompositionEnd / onBeforeInput.
+      this.composing = true;
+      this.compositionEl?.focus({ preventScroll: true });
+      return;
+    }
+    if (this.handleAltGrPair(e)) return;
     e.preventDefault();
     if (this.viewOnly) return;
+    if (this.handleComposedChar(e)) return;
+    if (e.code === "ControlLeft") this.ctrlLeftDownAt = performance.now();
     const ids = keyEventToIds(e);
     if (!ids) return;
     this.pressedKeys.set(e.code, ids);
     this.sendKey(ids.keysym, ids.keycode, true);
   };
 
+  /**
+   * Windows synthesizes AltGr as ControlLeft down immediately followed
+   * (within ALTGR_PAIR_WINDOW_MS) by AltRight down, both for the same
+   * physical keypress. Forwarded literally that's Ctrl+Alt, a shortcut chord,
+   * instead of "the start of an AltGr-composed character". ControlLeft still
+   * goes out the moment it arrives, like any other key (delaying it would lag
+   * every plain Ctrl press); the moment AltRight confirms this really was
+   * AltGr, ControlLeft gets a synthetic keyup retracting it and
+   * ISO_Level3_Shift goes out for AltRight in its place.
+   */
+  private handleAltGrPair(e: KeyboardEvent): boolean {
+    if (e.code !== "AltRight") return false;
+    const ctrl = this.pressedKeys.get("ControlLeft");
+    if (!ctrl || performance.now() - this.ctrlLeftDownAt >= ALTGR_PAIR_WINDOW_MS) return false;
+    this.pressedKeys.delete("ControlLeft");
+    this.sendKey(ctrl.keysym, ctrl.keycode, false);
+    const keycode = keyEventToIds(e)?.keycode ?? 0;
+    const level3: KeyIds = { keysym: ISO_LEVEL3_SHIFT, keycode };
+    this.pressedKeys.set(e.code, level3);
+    this.sendKey(level3.keysym, level3.keycode, true);
+    e.preventDefault();
+    return true;
+  }
+
+  /**
+   * AltGr (Windows: ControlLeft+AltRight) and macOS Option both report the
+   * composed character in a perfectly ordinary keydown: `e.key` is the
+   * printable glyph ("@", "€", "é"), not the physical key's base letter, but
+   * `ctrlKey`/`altKey` are still set from the modifiers physically held.
+   * Forwarded as-is that's Ctrl+Alt+char or Alt+char, which types nothing (or
+   * the wrong thing) on the remote. Fix is the standard fake-modifier dance:
+   * lift whichever modifiers we actually forwarded a down for, send the
+   * composed character on its own, then put the modifiers back. Their
+   * eventual real keyup still finds the entry in `pressedKeys` untouched and
+   * releases normally, exactly once, no separate bookkeeping needed.
+   */
+  private handleComposedChar(e: KeyboardEvent): boolean {
+    if (!e.altKey) return false;
+    if (Array.from(e.key).length !== 1) return false; // not a single composed grapheme
+    const code = e.code;
+    // The modifier keys' own keydowns are handleAltGrPair / plain-modifier
+    // territory, never a composed character.
+    if (code === "AltLeft" || code === "AltRight" || code === "ControlLeft" || code === "ControlRight") {
+      return false;
+    }
+    // Plain Alt+letter/digit shortcuts still report the unmodified base
+    // character in `e.key` on most layouts; only a character that actually
+    // differs is AltGr/Option doing composition.
+    const base = baseCharForCode(code);
+    if (base !== null && e.key.toLowerCase() === base) return false;
+    const cp = e.key.codePointAt(0);
+    if (cp === undefined) return false;
+    const keysym = codePointToKeysym(cp);
+
+    const held = (["AltLeft", "AltRight", "ControlLeft", "ControlRight"] as const).filter((c) =>
+      this.pressedKeys.has(c),
+    );
+    for (const c of held) {
+      const ids = this.pressedKeys.get(c)!;
+      this.sendKey(ids.keysym, ids.keycode, false);
+    }
+    this.sendKey(keysym, 0, true);
+    this.sendKey(keysym, 0, false);
+    for (const c of held) {
+      const ids = this.pressedKeys.get(c)!;
+      this.sendKey(ids.keysym, ids.keycode, true);
+    }
+    return true;
+  }
+
+  /** Composition resolved (compositionend) or was resolved without ever
+   *  firing one (onBeforeInput); forward each code point of the composed
+   *  string and hand focus back to the canvas. */
+  private finishComposition(text: string): void {
+    this.composing = false;
+    if (this.compositionEl) this.compositionEl.value = "";
+    this.canvas.focus({ preventScroll: true });
+    if (!text || this.viewOnly) return;
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      if (cp === undefined) continue;
+      const keysym = codePointToKeysym(cp);
+      this.sendKey(keysym, 0, true);
+      this.sendKey(keysym, 0, false);
+    }
+  }
+
+  private onCompositionEnd = (e: CompositionEvent): void => {
+    if (!this.composing) return; // onBeforeInput already resolved this one
+    this.finishComposition(e.data ?? "");
+  };
+
+  private onBeforeInput = (e: InputEvent): void => {
+    if (!this.composing) return;
+    if (e.isComposing) return; // still mid-composition, let compositionend handle it
+    if (e.inputType !== "insertText" || !e.data) return;
+    // Some browsers resolve a simple dead-key sequence via beforeinput
+    // without ever firing compositionend; forward it here and clear
+    // `composing` so compositionend (if it still fires) has nothing left to
+    // send twice.
+    e.preventDefault();
+    this.finishComposition(e.data);
+  };
+
   private onKeyUp = (e: KeyboardEvent): void => {
-    if (isLocalUiTarget(e)) return;
     const held = this.pressedKeys.get(e.code);
-    if (!held) return; // never sent the down, don't send a stray up
+    if (!held) return; // never sent the down (or it was typed into our own UI); nothing to release
+    // A modifier held down when focus moved to one of our own dialogs must
+    // still release on the remote, or it would be stuck down forever; the
+    // isLocalUiTarget guard therefore only ever matters for keys we never
+    // forwarded a down for, handled by the `!held` case above.
     e.preventDefault();
     this.pressedKeys.delete(e.code);
     if (this.viewOnly) return;
