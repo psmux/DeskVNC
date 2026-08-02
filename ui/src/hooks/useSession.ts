@@ -96,7 +96,7 @@ export interface SessionApi {
   setAlwaysRefresh: (enabled: boolean) => void;
   refreshScreen: () => void;
   requestResize: (width: number, height: number) => void;
-  sendClipboard: (text: string) => void;
+  sendClipboard: (text: string) => Promise<void>;
   releaseAllKeys: () => void;
   /**
    * Persist a library thumbnail from raw RGBA (no-op for ad-hoc sessions).
@@ -516,9 +516,14 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     void safeInvoke("request_resize", { sessionId: sid(), width, height }, null);
   }, []);
 
-  const sendClipboard = useCallback((text: string): void => {
-    void safeInvoke("send_clipboard", { sessionId: sid(), text }, null);
-  }, []);
+  // Resolves once the backend has ENQUEUED the ClipboardText command, which
+  // is what lets a caller order a following keystroke after it (the
+  // paste-chord sync in SessionInput awaits this).
+  const sendClipboard = useCallback(
+    (text: string): Promise<void> =>
+      safeInvoke("send_clipboard", { sessionId: sid(), text }, null).then(() => undefined),
+    [],
+  );
 
   const releaseAllKeys = useCallback((): void => {
     void safeInvoke("release_all_keys", { sessionId: sid() }, null);

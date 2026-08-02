@@ -27,6 +27,17 @@ export const PREF_NATURAL_SCROLL = "naturalScroll";
  * only disagree when the machines' layouts differ.
  */
 export const PREF_MATCH_LOCAL_LAYOUT = "matchLocalKeyboardLayout";
+/**
+ * Type text that dictation and automation tools insert (rather than press
+ * keys for) into the remote desktop. Dead keys and CJK input methods are NOT
+ * behind this switch: those are the user physically typing.
+ */
+export const PREF_FORWARD_INSERTED_TEXT = "forwardInsertedText";
+/**
+ * Push the local clipboard to the remote right before a forwarded paste
+ * chord, so Cmd/Ctrl+V pastes what the clipboard holds at that moment.
+ */
+export const PREF_CLIPBOARD_ON_PASTE = "clipboardOnPaste";
 
 export function prefStorageKey(key: string): string {
   return `${PREFIX}${key}`;

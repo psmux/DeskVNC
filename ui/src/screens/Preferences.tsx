@@ -6,6 +6,8 @@ import { ALLOW_MULTIPLE_SESSIONS_KEY, safeInvoke } from "../lib/tauri";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_FOCUS,
+  PREF_CLIPBOARD_ON_PASTE,
+  PREF_FORWARD_INSERTED_TEXT,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
   readBoolPref,
@@ -81,6 +83,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [multipleSessions, setMultipleSessions] = useAppSetting(ALLOW_MULTIPLE_SESSIONS_KEY, false);
   const [clipboardAuto, setClipboardAuto] = usePref(PREF_CLIPBOARD_AUTO, true);
   const [clipboardOnFocus, setClipboardOnFocus] = usePref(PREF_CLIPBOARD_ON_FOCUS, true);
+  const [clipboardOnPaste, setClipboardOnPaste] = usePref(PREF_CLIPBOARD_ON_PASTE, true);
+  const [forwardInsertedText, setForwardInsertedText] = usePref(PREF_FORWARD_INSERTED_TEXT, true);
   const [confirmFileOverwrite, setConfirmFileOverwrite] = usePref("confirmFileOverwrite", true);
   const [strictTofu, setStrictTofu] = usePref("strictTofu", true);
   const [mdnsEnabled, setMdnsEnabled] = usePref("mdnsEnabled", true);
@@ -250,6 +254,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   onChange={setMatchLocalLayout}
                 />
                 <Toggle
+                  label="Type text inserted by dictation tools"
+                  description="Text that dictation and automation software inserts without pressing keys is typed into the remote desktop. Accents and CJK input methods work either way, those are you typing."
+                  value={forwardInsertedText}
+                  onChange={setForwardInsertedText}
+                />
+                <Toggle
                   label="Show the remote pointer"
                   description="Draw the remote machine's own mouse cursor. Turn this off if two pointers feel distracting, your input is sent either way."
                   value={settings.showRemoteCursor}
@@ -270,6 +280,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Send your local clipboard to the remote when you switch back to the session"
                   value={clipboardOnFocus}
                   onChange={setClipboardOnFocus}
+                />
+                <Toggle
+                  label="Push clipboard when pasting into the remote"
+                  description="Cmd/Ctrl+V sends your local clipboard first, so the remote pastes what you copied most recently"
+                  value={clipboardOnPaste}
+                  onChange={setClipboardOnPaste}
                 />
               </>
             ) : null}

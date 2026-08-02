@@ -32,6 +32,8 @@ import { Dialog } from "../components/primitives";
 import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
 import {
   PREF_CLIPBOARD_AUTO,
+  PREF_CLIPBOARD_ON_PASTE,
+  PREF_FORWARD_INSERTED_TEXT,
   PREF_CLIPBOARD_ON_FOCUS,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
@@ -270,6 +272,15 @@ function SessionView({
       renderer,
       send: (pkt) => sessionRef.current.sendInput(pkt),
       releaseAllKeys: () => sessionRef.current.releaseAllKeys(),
+      // A forwarded Cmd/Ctrl+V pushes the CURRENT local clipboard first, so
+      // clipboard-mode dictation (write transcript, synthesize paste) pastes
+      // the transcript and not whatever the remote heard about last. Behind
+      // both the master sync switch and its own preference: with either off,
+      // nothing leaves this machine implicitly.
+      onForwardedPaste: () =>
+        readBoolPref(PREF_CLIPBOARD_AUTO, true) && readBoolPref(PREF_CLIPBOARD_ON_PASTE, true)
+          ? pushClipboardRef.current(false)
+          : Promise.resolve("unchanged" as const),
       onAppHotkey: (e) => {
         // The shell (the tab strip) gets first refusal: its shortcuts have to
         // beat both this view's and the remote desktop's.
@@ -384,10 +395,13 @@ function SessionView({
   // Coming to the front takes the focus with it. The remote keyboard hook
   // deliberately ignores keystrokes aimed at our own inputs and dialogs, so a
   // tab opened from the library search box would otherwise send everything
-  // typed into that box instead of to the remote desktop.
+  // typed into that box instead of to the remote desktop. Focus goes to the
+  // input handler's hidden capture element (not the canvas), which is what
+  // lets IMEs and dictation deliver text to the session at all.
   useEffect(() => {
     if (!viewReady || !visible) return;
-    canvasRef.current?.focus({ preventScroll: true });
+    if (inputRef.current) inputRef.current.focus();
+    else canvasRef.current?.focus({ preventScroll: true });
   }, [viewReady, visible]);
 
   // …and only the view on screen draws. Frames for a background tab still
@@ -428,6 +442,7 @@ function SessionView({
     const sid = params.sessionId;
     const sync = (): void => {
       inputRef.current?.setNaturalScroll(readBoolPref(PREF_NATURAL_SCROLL, true));
+      inputRef.current?.setForwardInsertedText(readBoolPref(PREF_FORWARD_INSERTED_TEXT, true));
       if (sid) {
         const matchLocal = readBoolPref(PREF_MATCH_LOCAL_LAYOUT, false);
         void safeInvoke(
@@ -625,7 +640,10 @@ function SessionView({
       if (text === null) return "unreadable";
       if (!text || (!force && text === lastClipboardRef.current)) return "unchanged";
       lastClipboardRef.current = text;
-      session.sendClipboard(text);
+      // Await the enqueue: the paste-chord sync (SessionInput.deferForPaste)
+      // relies on this resolving only once the text is ordered ahead of any
+      // keystroke sent after it.
+      await session.sendClipboard(text);
       return "sent";
     },
     [session],
