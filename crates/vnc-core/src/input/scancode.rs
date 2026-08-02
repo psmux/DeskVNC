@@ -197,3 +197,64 @@ mod tests {
         assert_eq!(code_to_xt_scancode(""), None);
     }
 }
+
+#[cfg(test)]
+mod ui_table_agreement {
+    /// The webview keeps its OWN copy of this table (`ui/src/render/
+    /// keysyms.ts`), because a keystroke cannot round-trip to Rust before it
+    /// is forwarded. Two hand-maintained copies of a wire table is exactly
+    /// how they drift, and they did: the UI shipped X11 keycodes (evdev + 8)
+    /// where this table has XT scancodes, so backspace typed "u"; the repair
+    /// then encoded the extended keys as two bytes (0xe04d) where RFB wants
+    /// the high-bit form (0xcd), so every arrow key was wrong a second time.
+    ///
+    /// Rust-to-Rust drift is already guarded (`vnc_core_agreement.rs`); this
+    /// closes the same hole for the third copy. Parsing TypeScript from a
+    /// Rust test is admittedly crude, but the alternative is a build-time
+    /// generator, and this catches the exact class of mistake that has now
+    /// happened twice in one afternoon.
+    #[test]
+    fn the_webview_scancode_table_matches_this_one() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ui/src/render/keysyms.ts"
+        );
+        let Ok(src) = std::fs::read_to_string(path) else {
+            // The UI tree is not always present (published crate, sparse
+            // checkout). Absence is not a failure; disagreement is.
+            eprintln!("SKIP: {path} not found");
+            return;
+        };
+        let start = src
+            .find("const CODE_TO_XT_SCANCODE")
+            .expect("the webview must still have an XT scancode table");
+        let body = &src[start..src[start..].find("};").expect("table end") + start];
+
+        let mut checked = 0usize;
+        for entry in body.split(',') {
+            let Some((name, value)) = entry.split_once(':') else {
+                continue;
+            };
+            let name = name.trim().trim_matches('"');
+            let value = value.trim();
+            if !value.starts_with("0x") {
+                continue;
+            }
+            let Ok(ts) = u32::from_str_radix(value.trim_start_matches("0x"), 16) else {
+                continue;
+            };
+            let Some(rs) = super::code_to_xt_scancode(name) else {
+                continue; // the UI may know keys this table does not
+            };
+            assert_eq!(
+                ts, rs,
+                "{name}: webview sends 0x{ts:02x}, this table says 0x{rs:02x}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 60,
+            "only {checked} keys cross-checked; the parse probably broke rather than the table"
+        );
+    }
+}

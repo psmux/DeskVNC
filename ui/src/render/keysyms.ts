@@ -96,15 +96,26 @@ const CODE_TO_XT_SCANCODE: Record<string, number> = {
   NumpadDecimal: 0x53,
   IntlBackslash: 0x56, F11: 0x57, F12: 0x58,
 
-  // Extended (grey) keys: XT prefixes these with 0xE0, and the QEMU extended
-  // key event carries the prefix in the high byte. Sending the bare low byte
-  // would hit the numpad twin of each one (Home would become Numpad7).
-  NumpadEnter: 0xe01c, ControlRight: 0xe01d, NumpadDivide: 0xe035,
-  AltRight: 0xe038, Home: 0xe047, ArrowUp: 0xe048, PageUp: 0xe049,
-  ArrowLeft: 0xe04b, ArrowRight: 0xe04d, End: 0xe04f, ArrowDown: 0xe050,
-  PageDown: 0xe051, Insert: 0xe052, Delete: 0xe053,
-  MetaLeft: 0xe05b, MetaRight: 0xe05c, ContextMenu: 0xe05d,
-  PrintScreen: 0xe037,
+  // Extended (grey) keys. RFB does NOT carry the 0xE0 prefix as a second
+  // byte: it encodes it as bit 7 of the single scancode byte, so E0 4D
+  // (ArrowRight) goes out as 0xCD. rfbproto, QEMU Extended Key Event: "2-byte
+  // XT scancodes whose first byte is 0xe0 and second byte is less than 0x7f
+  // are encoded with the high bit of the first byte set."
+  //
+  // Sending 0xE04D instead puts two bytes in a one-byte field; a server that
+  // masks it to a byte sees 0x4D, which is Numpad4. `input/scancode.rs` on the
+  // Rust side has always had this right, so the same physical key went out
+  // differently depending on whether it came from the webview or from native
+  // capture. Pause and PrintScreen are the two the spec singles out for a
+  // form of their own.
+  NumpadEnter: 0x9c, ControlRight: 0x9d, NumpadDivide: 0xb5,
+  AltRight: 0xb8, Pause: 0xc6, Home: 0xc7, ArrowUp: 0xc8, PageUp: 0xc9,
+  ArrowLeft: 0xcb, ArrowRight: 0xcd, End: 0xcf, ArrowDown: 0xd0,
+  PageDown: 0xd1, Insert: 0xd2, Delete: 0xd3,
+  MetaLeft: 0xdb, OSLeft: 0xdb, MetaRight: 0xdc, OSRight: 0xdc,
+  ContextMenu: 0xdd,
+  PrintScreen: 0x54,
+  NumpadEqual: 0x59, IntlRo: 0x73, IntlYen: 0x7d, NumpadComma: 0x7e,
 };
 
 export interface KeyIds {

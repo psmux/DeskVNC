@@ -198,11 +198,6 @@ pub(crate) struct RunLoop {
     sent_counter: Arc<AtomicU64>,
     last_sent: u64,
     frames_since_tick: u32,
-    /// Updates that arrived in the PREVIOUS stats tick, so the settle
-    /// refresh can tell "a burst just ended" from "nothing is happening".
-    frames_prev_tick: u32,
-    /// When the last settle refresh went out (see `tick`), for its cooldown.
-    last_settle_refresh: Option<Instant>,
     rects_decoded: u64,
     decode_ms_tick: f32,
     /// Highest stall-anchored burst rate (bits/sec) [`CountingReader`]
@@ -263,8 +258,6 @@ impl RunLoop {
             sent_counter,
             last_sent: 0,
             frames_since_tick: 0,
-            frames_prev_tick: 0,
-            last_settle_refresh: None,
             rects_decoded: 0,
             decode_ms_tick: 0.0,
             link_peak,
@@ -356,7 +349,12 @@ impl RunLoop {
             server_msg::SET_COLOUR_MAP_ENTRIES => {
                 let (first, entries) =
                     messages::read_set_colour_map_entries(&mut self.reader).await?;
-                tracing::debug!(first, count = entries.len(), "SetColourMapEntries (unused)");
+                // Required for every non-true-colour format we can request: the
+                // Low preset asks for palette8, and without the map the
+                // decoders take the grayscale identity fallback and paint
+                // palette INDICES as grey levels.
+                tracing::debug!(first, count = entries.len(), "SetColourMapEntries");
+                self.decoder.set_colour_map(first, &entries);
                 Ok(())
             }
             server_msg::BELL => emit(events, SessionEvent::Bell).await,
@@ -909,27 +907,6 @@ impl RunLoop {
 
         let new_pf = pixel_format_for(qs.pixel_format);
         if new_pf == self.pf {
-            // A mid-session SetEncodings must be followed by a full
-            // non-incremental request even when nothing else changes. RealVNC
-            // drops coalesced damage while it re-configures its encoder
-            // pipeline: regions that changed around the switch are marked
-            // delivered but never sent, and they stay stale until something
-            // else happens to touch them, which the user experiences as
-            // ghosted text and blocky patches that only heal under the mouse.
-            // Measured against a real RealVNC server (fb_probe, twelve window
-            // animations): 1076 of 3600 tiles permanently wrong with this
-            // request absent, clean with a pinned preset that never switches.
-            // One full repaint per tier change is cheap, hysteresis caps
-            // changes at one per cooldown, next to a permanently wrong
-            // picture. The pixel-format path below ends with its own full
-            // request, so this one covers exactly the encodings-only switch.
-            let resync = messages::framebuffer_update_request(false, self.full_rect());
-            self.send(&resync).await?;
-            tracing::info!(
-                jpeg_quality = qs.jpeg_quality,
-                compression = qs.compression,
-                "quality switch applied; full resync requested"
-            );
             return Ok(());
         }
 
@@ -1092,37 +1069,6 @@ impl RunLoop {
         // Once the screen settles, repaint whatever was compressed lossily.
         self.maybe_lossless_refresh(settings).await?;
 
-        // Settle refresh: when a burst of activity ends, re-request the whole
-        // screen once, non-incrementally. This is the client enforcing
-        // eventual consistency instead of trusting the server's damage
-        // tracking, because that trust is misplaced: wayvnc (every Wayland
-        // Raspberry Pi) loses track of damaged regions when the client
-        // applies backpressure during window animations, and the lost
-        // regions are never sent, leaving stale ghosted content that only
-        // heals where the mouse happens to pass. Verified in the running app
-        // against a real wayvnc: corruption formed during a minimize/restore
-        // storm with NO SetEncodings in flight, so the resync-on-switch above
-        // cannot be the whole answer; only an unconditional post-activity
-        // repaint converges the picture regardless of what the server lost.
-        // One full frame per burst (~180 KiB on a 720p LAN session), never
-        // more than once per ALR_COOLDOWN.
-        let settled = settle_due(self.frames_prev_tick, self.frames_since_tick);
-        if settled
-            && !self.priming_update_pending
-            && self
-                .last_settle_refresh
-                .is_none_or(|t| t.elapsed() >= ALR_COOLDOWN)
-        {
-            self.last_settle_refresh = Some(Instant::now());
-            let msg = messages::framebuffer_update_request(false, self.full_rect());
-            self.send(&msg).await?;
-            tracing::info!(
-                burst_frames = self.frames_prev_tick,
-                "activity settled; full consistency refresh requested"
-            );
-        }
-        self.frames_prev_tick = self.frames_since_tick;
-
         // Fire the next RTT probe.
         if self.caps.supports_fence && self.probe.is_none() {
             let id = self.epoch.elapsed().as_nanos() as u64;
@@ -1137,22 +1083,6 @@ impl RunLoop {
     }
 }
 
-/// Has a burst of screen activity just settled into (near) quiet?
-///
-/// `prev` and `cur` are the update counts of the previous and current stats
-/// ticks. "Quiet" is a TRICKLE, not zero: a terminal's blinking cursor (or a
-/// taskbar clock) damages the screen once or twice every second forever, so a
-/// detector that demands a fully silent second never fires on precisely the
-/// sessions that need the refresh, the user watched a wrecked screen for two
-/// minutes with the cursor dutifully blinking away in the corner. The burst
-/// threshold is what keeps the trickle itself from ever counting as a burst,
-/// so blink-clock idle can never produce periodic refreshes on its own.
-fn settle_due(prev: u32, cur: u32) -> bool {
-    const BURST_FRAMES: u32 = 8;
-    const TRICKLE_FRAMES: u32 = 2;
-    prev >= BURST_FRAMES && cur <= TRICKLE_FRAMES
-}
-
 /// Decoded size of one rect, for the per-update accumulation budget.
 ///
 /// `CopyRect` carries no pixels of its own but does cost a full rect once the
@@ -1164,42 +1094,6 @@ fn decoded_payload_len(d: &DecodedRect) -> usize {
         RectPayload::Rgba(b) | RectPayload::Jpeg(b) => b.len(),
         RectPayload::H264 { data, .. } => data.len(),
         RectPayload::CopyRect { .. } => d.rect.area().saturating_mul(4),
-    }
-}
-
-#[cfg(test)]
-mod settle_tests {
-    use super::settle_due;
-
-    /// THE BUG this predicate replaced: requiring an absolutely quiet second.
-    /// A blinking terminal cursor damages the screen 1-2 times every second
-    /// forever, so "quiet == zero" never held and the consistency refresh
-    /// never fired; the user's screen stayed wrecked for minutes until they
-    /// hand-painted it with the mouse.
-    #[test]
-    fn a_burst_followed_by_a_cursor_blink_trickle_still_settles() {
-        assert!(settle_due(20, 0), "true quiet settles");
-        assert!(settle_due(20, 1), "a blinking cursor must not block it");
-        assert!(settle_due(8, 2), "nor a clock tick alongside it");
-    }
-
-    #[test]
-    fn steady_motion_is_not_settled() {
-        assert!(
-            !settle_due(20, 8),
-            "still busy: refresh would waste the link"
-        );
-        assert!(!settle_due(20, 3), "above trickle: not settled yet");
-    }
-
-    /// Blink-clock idle on its own must never fire periodic refreshes: the
-    /// trickle is the CURRENT tick's allowance, never a qualifying burst.
-    #[test]
-    fn a_trickle_alone_never_qualifies_as_a_burst() {
-        assert!(!settle_due(2, 0));
-        assert!(!settle_due(1, 1));
-        assert!(!settle_due(0, 0));
-        assert!(!settle_due(7, 0), "just under the burst bar");
     }
 }
 
