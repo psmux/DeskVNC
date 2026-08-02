@@ -32,7 +32,12 @@ pub mod server_msg {
     pub const BELL: u8 = 2;
     pub const SERVER_CUT_TEXT: u8 = 3;
     pub const END_OF_CONTINUOUS_UPDATES: u8 = 150;
-    pub const SERVER_FENCE: u8 = 249;
+    /// ServerFence and ClientFence share message type 248 (TigerVNC
+    /// `msgTypeServerFence`); 249 is OLIVE Call Control. This was 249, so a
+    /// real ServerFence fell through to "unknown server message type" and
+    /// tore the session down, which the mock server never caught because it
+    /// only ever emits types 0, 2 and 3.
+    pub const SERVER_FENCE: u8 = 248;
 }
 
 /// Fence flag bits (rfbproto Fence extension).

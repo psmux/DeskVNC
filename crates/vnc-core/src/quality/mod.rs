@@ -262,7 +262,15 @@ impl Tier {
                 // short of the explicit `Low`/`BlackAndWhite` presets.
                 jpeg_quality: 3,
                 compression: 9,
-                pixel_format: ColorDepth::Full,
+                // The bottom rung, and the ONLY automatic tier that reduces
+                // colour. Below ~1 Mbit/s the 4x saving of 8bpp over 32bpp is
+                // worth more than the colours, which is the trade every mature
+                // client makes down here. It was briefly removed while a
+                // quality inversion elsewhere was being misdiagnosed as
+                // format-switch corruption; the inversion was the real cause,
+                // and taking a genuine adaptation away from genuinely bad
+                // links along with it was the wrong call.
+                pixel_format: ColorDepth::Palette256,
                 allow_jpeg: true,
                 allow_h264: true,
                 grayscale_levels: None,
@@ -987,14 +995,22 @@ mod tests {
     /// patches as the user moved the mouse.
     #[test]
     fn the_automatic_ladder_never_reduces_colour_depth() {
-        for tier in [Tier::High, Tier::Medium, Tier::LowIsh, Tier::Low] {
+        // Everything except the bottom rung stays at full colour: a format
+        // switch costs a full redraw, so it is reserved for the one tier where
+        // the bandwidth saving genuinely outweighs that.
+        for tier in [Tier::High, Tier::Medium, Tier::LowIsh] {
             assert_eq!(
                 tier.settings().pixel_format,
                 ColorDepth::Full,
                 "{tier:?} must not change the pixel format"
             );
         }
-        // The explicit presets are exactly where colour reduction still lives:
+        assert_eq!(
+            Tier::Low.settings().pixel_format,
+            ColorDepth::Palette256,
+            "the sub-1 Mbit/s rung keeps its colour reduction"
+        );
+        // The explicit presets go further still:
         // choosing it is not the same as having it chosen for you.
         assert_eq!(
             QualityPreset::Low.settings().pixel_format,

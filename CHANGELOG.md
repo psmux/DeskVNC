@@ -36,6 +36,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   pinned to the literal wire constants by a test, because the old tests
   compared the buggy helper against itself and were blind to it by
   construction.
+- **Fence replies tore the session down.** `ServerFence` is message type 248
+  (249 is an unrelated registry entry), but the client dispatched on 249, so
+  a real fence reply fell through to "unknown server message type" and killed
+  the connection. Reachable on any server implementing the Fence extension,
+  which the client always advertises. Round-trip time also read as 0 for the
+  life of every session because of it.
+- **The Low preset painted grey noise.** It asks the server for a 256-colour
+  indexed format, and `SetColourMapEntries` was parsed and then discarded, so
+  the decoders fell back to their grayscale identity path and drew palette
+  *indices* as grey levels. The map is now handed to the decoder, which is
+  what makes the automatic low-bandwidth tier usable at all.
 - **Keyboard was mismapped: backspace typed "u", among others.** The client
   sent X11 keycodes (evdev + 8) where the QEMU Extended Key Event carries XT
   (PC set 1) scancodes. The two numberings differ by 8, so Backspace (X11 22 =
