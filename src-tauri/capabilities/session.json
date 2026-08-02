@@ -26,6 +26,7 @@
 
     "allow-get-host",
     "allow-get-app-setting",
+    "allow-about-info",
     "allow-touch-connected",
     "allow-save-password",
     "allow-has-password",
@@ -37,6 +38,7 @@
     "allow-request-resize",
     "allow-refresh-session",
     "allow-set-view-only",
+    "allow-set-prefer-scancodes",
     "allow-send-clipboard",
     "allow-set-local-clipboard",
     "allow-read-local-clipboard",

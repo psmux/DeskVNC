@@ -45,6 +45,9 @@ export const IconKey = (p: IconProps): ReactNode => (
 export const IconZap = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></Icon>
 );
+export const IconHelp = (p: IconProps): ReactNode => (
+  <Icon {...p}><circle cx="12" cy="12" r="9.5" /><path d="M9.2 9.2a2.8 2.8 0 0 1 5.5.7c0 1.9-2.7 2.2-2.7 3.9" /><path d="M12 17.2h.01" /></Icon>
+);
 export const IconStar = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.9L12 17.8 5.8 21l1.2-6.9-5-4.9 6.9-1L12 2z" /></Icon>
 );

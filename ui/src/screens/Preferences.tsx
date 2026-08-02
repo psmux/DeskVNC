@@ -6,6 +6,8 @@ import { ALLOW_MULTIPLE_SESSIONS_KEY, safeInvoke } from "../lib/tauri";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_FOCUS,
+  PREF_MATCH_LOCAL_LAYOUT,
+  PREF_NATURAL_SCROLL,
   readBoolPref,
   writeBoolPref,
 } from "../lib/prefs";
@@ -71,7 +73,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [reconnectForever, setReconnectForever] = usePref("reconnectForever", true);
   const [wolDuringRetry, setWolDuringRetry] = usePref("wolDuringRetry", false);
   const [captureThumbs, setCaptureThumbs] = usePref("captureThumbs", true);
-  const [naturalScroll, setNaturalScroll] = usePref("naturalScroll", true);
+  const [naturalScroll, setNaturalScroll] = usePref(PREF_NATURAL_SCROLL, true);
+  const [matchLocalLayout, setMatchLocalLayout] = usePref(PREF_MATCH_LOCAL_LAYOUT, false);
   // Store-backed (not localStorage): Rust reads these at connect time.
   const [losslessRefresh, setLosslessRefresh] = useAppSetting("lossless_refresh", true);
   const [deepNames, setDeepNames] = useAppSetting("probe_other_services", true);
@@ -239,6 +242,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Match your local scroll direction on the remote desktop"
                   value={naturalScroll}
                   onChange={setNaturalScroll}
+                />
+                <Toggle
+                  label="Match my local keyboard layout"
+                  description="Keys type what they type on this keyboard, instead of what the remote machine's layout assigns to the same physical key. Only matters when the two layouts differ."
+                  value={matchLocalLayout}
+                  onChange={setMatchLocalLayout}
                 />
                 <Toggle
                   label="Show the remote pointer"

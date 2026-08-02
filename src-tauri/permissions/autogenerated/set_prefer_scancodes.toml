@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-prefer-scancodes"
+description = "Enables the set_prefer_scancodes command without any pre-configured scope."
+commands.allow = ["set_prefer_scancodes"]
+
+[[permission]]
+identifier = "deny-set-prefer-scancodes"
+description = "Denies the set_prefer_scancodes command without any pre-configured scope."
+commands.deny = ["set_prefer_scancodes"]

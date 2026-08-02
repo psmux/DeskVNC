@@ -164,6 +164,7 @@ pub fn run() {
             commands::hosts::set_host_tags,
             commands::hosts::list_history,
             commands::hosts::get_thumbnail,
+            commands::about::about_info,
             commands::hosts::get_app_setting,
             commands::hosts::set_app_setting,
             // credentials
@@ -187,6 +188,7 @@ pub fn run() {
             commands::session::request_resize,
             commands::session::refresh_session,
             commands::session::set_view_only,
+            commands::session::set_prefer_scancodes,
             commands::session::set_always_refresh,
             commands::session::send_clipboard,
             commands::session::set_local_clipboard,

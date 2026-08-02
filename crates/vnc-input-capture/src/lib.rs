@@ -56,7 +56,7 @@ pub use keymap::{
     xt_to_code, xt_to_keysym, KEYS, MAC_KVK,
 };
 pub use noop::NoopCapture;
-pub use policy::{should_intercept, HostOs, Modifiers};
+pub use policy::{should_intercept, should_intercept_key, HeldKeys, HostOs, Modifiers};
 
 use crossbeam_channel::Sender;
 

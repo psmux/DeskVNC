@@ -238,6 +238,52 @@ async fn qemu_extended_key_events_are_used_once_the_server_advertises_them() {
     handle.shutdown();
 }
 
+#[tokio::test]
+async fn match_local_layout_suppresses_scancodes() {
+    // "Match my local layout": a server honouring QEMU Extended Key Event
+    // applies its OWN keymap to the scancode and ignores the keysym, so a
+    // German ö (code Semicolon) types ';' on an en-US server. Turning the
+    // preference off must fall back to layout-aware keysyms even though the
+    // server advertises the extension.
+    let server = MockServer::start(MockConfig::new().update(vec![
+        RectSpec::QemuExtKeyCapable,
+        RectSpec::Raw {
+            rect: Rect::new(0, 0, 4, 4),
+            colour: RED,
+        },
+    ]))
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+
+    send(&handle, ClientCommand::SetPreferScancodes(false)).await;
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0xf6, // ö
+            keycode: Some(0x27),
+            down: true,
+        },
+    )
+    .await;
+    flush(&handle, &server, 2).await;
+
+    assert_eq!(
+        server.key_events(),
+        vec![(0xf6, true)],
+        "with scancodes off the keysym must go out as a plain KeyEvent"
+    );
+    let qemu = server
+        .messages()
+        .into_iter()
+        .filter(|m| matches!(m, ClientMessage::QemuKeyEvent { .. }))
+        .count();
+    assert_eq!(qemu, 0, "no QemuKeyEvent may be sent in local-layout mode");
+    handle.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Pointer
 // ---------------------------------------------------------------------------

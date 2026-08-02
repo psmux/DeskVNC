@@ -668,6 +668,7 @@ pub async fn connect_session(
             port,
             started_at: Instant::now(),
             thumbnails: Default::default(),
+            last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
         },
     );
     // The window has stopped "opening", from here the registry entry above is
@@ -761,10 +762,17 @@ pub async fn disconnect_session(
 ///
 /// Invoke with an `ArrayBuffer` body and an `x-session-id` header:
 /// `invoke("send_input", buf, { headers: { "x-session-id": id } })`.
-/// Deliberately synchronous + `try_send`: input must never queue unboundedly
-/// behind a stalled session, dropping stale input is better than lag.
+///
+/// Never loses state-changing input. Key events, and pointer events whose
+/// button mask differs from the last one seen for this session, are awaited
+/// onto the command channel: if the 256-slot queue is momentarily full (a
+/// stalled session, exactly when a release matters most) this briefly blocks
+/// the invoke rather than dropping it, which is acceptable backpressure onto
+/// the webview. Only pointer events that merely repeat the current button
+/// mask (pure motion) are shed with `try_send` when the queue is full; that
+/// is genuine stale-motion, safe to drop.
 #[tauri::command]
-pub fn send_input(
+pub async fn send_input(
     state: State<'_, AppState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
@@ -780,12 +788,26 @@ pub fn send_input(
     };
 
     let commands = framing::decode_input(body)?;
-    let sender = state.command_sender(&session_id)?;
+    let (sender, last_pointer_mask) = state.command_channel(&session_id)?;
     for command in commands {
-        if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = sender.try_send(command) {
+        let motion_only = if let ClientCommand::Pointer { button_mask, .. } = &command {
+            let mask = *button_mask as i32;
+            last_pointer_mask.swap(mask, std::sync::atomic::Ordering::Relaxed) == mask
+        } else {
+            false
+        };
+        if motion_only {
+            // Pure motion repeating the last-seen button mask: stale, safe to
+            // shed under backpressure instead of blocking the invoke.
+            if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = sender.try_send(command)
+            {
+                return Err("session is no longer running".into());
+            }
+        } else if sender.send(command).await.is_err() {
+            // Key events, and pointer events that change the button mask, must
+            // never be lost: this awaits room in the queue instead.
             return Err("session is no longer running".into());
         }
-        // Full(_) => queue saturated; session is stalled, drop stale input.
     }
     Ok(())
 }
@@ -847,6 +869,22 @@ pub async fn set_view_only(
     view_only: bool,
 ) -> Result<(), String> {
     send_command(&state, &session_id, ClientCommand::SetViewOnly(view_only)).await
+}
+
+/// Keyboard mode: `true` prefers QEMU scancodes ("match the remote layout"),
+/// `false` sends layout-aware keysyms only ("match my local layout").
+#[tauri::command]
+pub async fn set_prefer_scancodes(
+    state: State<'_, AppState>,
+    session_id: String,
+    prefer: bool,
+) -> Result<(), String> {
+    send_command(
+        &state,
+        &session_id,
+        ClientCommand::SetPreferScancodes(prefer),
+    )
+    .await
 }
 
 /// Push local clipboard text to the remote (text is user data, sent verbatim).
@@ -1620,6 +1658,7 @@ mod tests {
             port,
             started_at: Instant::now(),
             thumbnails: Default::default(),
+            last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
         }
     }
 

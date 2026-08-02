@@ -46,7 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::keymap;
-use crate::policy::{should_intercept, HostOs, Modifiers};
+use crate::policy::{should_intercept_key, HeldKeys, HostOs, Modifiers};
 use crate::{CaptureStatus, CapturedKey, Error, KeyboardCapture, Result};
 
 const STATUS_INACTIVE: u8 = 0;
@@ -108,6 +108,11 @@ struct HookCtx {
     tx: Sender<CapturedKey>,
     running: Arc<AtomicBool>,
     mods: Arc<AtomicU32>,
+    /// Scancodes whose key-down was swallowed and forwarded, so the matching
+    /// key-up is swallowed unconditionally regardless of modifier state (see
+    /// `policy.rs`). Shared with `WindowsCapture` so `start`/`stop` can clear
+    /// it the same way `mods` is reset.
+    held: Arc<Mutex<HeldKeys>>,
 }
 
 static HOOK_CTX: Mutex<Option<HookCtx>> = Mutex::new(None);
@@ -184,9 +189,11 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     let Some(scancode) = keymap::windows_to_xt(vk_code, info.scanCode, extended) else {
         return false;
     };
-    if !should_intercept(HostOs::Windows, scancode, mods) {
+    let mut held = ctx.held.lock();
+    if !should_intercept_key(HostOs::Windows, scancode, down, mods, &mut held) {
         return false;
     }
+    drop(held);
 
     let keysym = keymap::xt_to_keysym(scancode, mods.shift).unwrap_or(0);
     let _ = ctx.tx.try_send(CapturedKey {
@@ -222,6 +229,8 @@ pub struct WindowsCapture {
     running: Arc<AtomicBool>,
     status: Arc<AtomicU8>,
     mods: Arc<AtomicU32>,
+    /// Scancodes whose key-down was swallowed and forwarded; see `HookCtx`.
+    held: Arc<Mutex<HeldKeys>>,
     /// Thread id of the message pump, for `PostThreadMessageW(WM_QUIT)`.
     thread_id: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
@@ -234,6 +243,7 @@ impl WindowsCapture {
             running: Arc::new(AtomicBool::new(false)),
             status: Arc::new(AtomicU8::new(STATUS_INACTIVE)),
             mods: Arc::new(AtomicU32::new(0)),
+            held: Arc::new(Mutex::new(HeldKeys::new())),
             thread_id: Arc::new(AtomicU32::new(0)),
             thread: None,
         }
@@ -247,11 +257,13 @@ impl KeyboardCapture for WindowsCapture {
         }
         self.running.store(true, Ordering::Relaxed);
         self.mods.store(0, Ordering::Relaxed);
+        self.held.lock().clear();
 
         let ctx = HookCtx {
             tx: self.tx.clone(),
             running: self.running.clone(),
             mods: self.mods.clone(),
+            held: self.held.clone(),
         };
         let status = self.status.clone();
         let thread_id = self.thread_id.clone();
@@ -308,6 +320,9 @@ impl KeyboardCapture for WindowsCapture {
         }
         self.status.store(STATUS_INACTIVE, Ordering::Relaxed);
         self.mods.store(0, Ordering::Relaxed);
+        // A key held from this session must never swallow a local key-up once
+        // capture is stopped or force-released.
+        self.held.lock().clear();
     }
 
     fn status(&self) -> CaptureStatus {

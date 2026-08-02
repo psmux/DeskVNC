@@ -10,6 +10,120 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **The About dialog now fingerprints the exact build.** Alongside the version
+  it shows the `git describe` stamp (nearest tag, commits since, short hash,
+  and a dirty marker for locally modified builds), the full commit, branch and
+  commit date, the build profile and toolchain (tauri, rustc), and the machine
+  it is running on (OS and version, architecture, webview engine version). A
+  "Copy report for a bug ticket" button puts the whole block on the clipboard
+  as preformatted text, so an issue report identifies the precise code it came
+  from even when the version number hasn't moved. The stamp is compiled into
+  the binary at build time and degrades to "unknown" outside a git checkout
+  rather than failing the build. A small ? button in the library toolbar opens
+  the dialog, and the macOS app menu's About item now opens it as well: the
+  native About panel is gone, so there is exactly one About surface and it is
+  the one with the fingerprint.
+- **A keyboard mode: Preferences ▸ Input ▸ "Match my local keyboard layout".**
+  Against a server that speaks the QEMU extended key extension, the client
+  prefers scancodes, which means the *server's* layout decides what a physical
+  key types; a German ö on an en-US server types `;`. The new switch suppresses
+  scancodes and sends layout-aware keysyms instead, so keys type what they type
+  locally. Off by default, because scancode mode is what makes remote shortcuts
+  and games behave, and the two only disagree when the layouts differ. Toggling
+  it mid-chord releases held keys first so nothing sticks in the old encoding.
+- **AltGr, Option-composed characters, and dead keys now work.** The webview
+  key path previously sent the composing modifier along with the character
+  (AltGr+Q arrived as Ctrl+Alt+@ and typed nothing) and discarded dead keys
+  outright, so every accented character on French, German, Spanish and Nordic
+  layouts was unreachable. Composed characters are now delivered with the
+  standard fake-modifier dance, the Windows AltGr pair is detected and sent as
+  ISO_Level3_Shift, and dead-key sequences compose through a hidden overlay and
+  arrive as the finished character.
+
+### Fixed
+
+- **A mid-session pixel-format switch could kill the session against
+  TigerVNC-family servers.** The switch was guarded by a fence that never
+  requested a response, and the decoder flipped formats immediately, so every
+  rectangle still in flight was decoded in the wrong format and the connection
+  died with "decompressed data exceeds cap", then reconnected, then died again:
+  the window is widest on slow links, which is exactly when the Auto tuner
+  triggers the switch. The fence now demands an answer and the decoder holds
+  the old format until it arrives, which is the synchronisation point the
+  protocol provides for exactly this.
+- **Input froze for the length of every large framebuffer update.** The run
+  loop read an entire update before looking at the command queue again, so on
+  a slow link the remote pointer stopped for seconds and then jumped. Pointer
+  and key events are now serviced between rectangles while an update streams
+  in. Relatedly, when the input queue filled during a stall, *all* input was
+  silently dropped, including key-ups and button releases, leaving the remote
+  with stuck keys; now only stale pointer motion is shed, and state-changing
+  events are always delivered.
+- **Growing the remote desktop left the new area permanently blank.** Neither
+  continuous updates (still scoped to the old geometry) nor the one-outstanding
+  request pipeline (already spent on the old rect) covered the newly exposed
+  strip. Continuous updates are re-armed and an update for the new geometry is
+  requested on every real resize.
+- **The automatic lossless refresh never actually sharpened anything.** The
+  adaptive encodings were restored on the wire before the server had encoded
+  the refresh, so the "sharp" repaint came back as JPEG, re-marked the region
+  as lossy, and the cycle repeated every five seconds forever, a permanent
+  bandwidth leak on idle sessions. The restore now waits until the answering
+  update has been consumed. H.264 regions now count as lossy and are refreshed
+  too, and cursor-shape-only updates no longer reset the idle clock that gates
+  the refresh.
+- **The link estimator could be fooled in both directions.** A burst left open
+  across an idle gap completed with a near-zero rate and walked a gigabit LAN
+  down to 256 colours; a kernel receive backlog (the normal case over an SSH
+  tunnel) read as multiple gigabits and pinned full quality on a 5 Mbit link.
+  Bursts must now span real wall time, stale bursts are abandoned at the
+  threshold-crossing delivery too, and implausible samples are rejected.
+- **Auto quality now behaves like a controller instead of a coin flip near a
+  boundary.** Tier thresholds gained directional hysteresis, a genuinely slow
+  fresh sample downgrades within seconds instead of waiting out a ten-second
+  window maximum, the ladder no longer switches H.264 on and off (which
+  restarted the codec and forced a keyframe every crossing), returning to Auto
+  after a manual preset detour resyncs the tuner instead of doing nothing, the
+  "client is slow" relief no longer fires on slow *links* (it read network
+  wait as decode time and lowered compression exactly where compression was
+  needed most), and the per-second stats divide by real elapsed time.
+- **Black and White was the most expensive preset on the wire.** It negotiated
+  full 32-bit colour with JPEG off and greyed the image client-side, costing
+  more bandwidth than Medium while promising the opposite. It now negotiates
+  the same 256-colour indexed format as Low.
+- **Stuck keys and buttons, four separate ways.** Global capture forgot which
+  key-downs it had swallowed, so releasing the modifier before the key left
+  the key held on the remote; a key-up targeting a just-opened dialog was
+  ignored; releasing the left button during a middle-drag pan was never sent;
+  and a release cancelled after the coalesced pointer move was sent out of
+  order. All four now release correctly.
+- **Cursor fidelity.** Cursors on the 256-colour presets rendered as grey
+  noise (the colour map was never applied), alpha cursors kept their
+  premultiplied fringe, an alpha cursor delivered through a non-Raw encoding
+  was channel-scrambled, and a hostile hotspot could push the cursor overlay
+  off-target. All fixed, with the conversion now shared with the framebuffer
+  path.
+- **Robustness against misbehaving servers.** An unknown negative encoding now
+  fails cleanly as unsupported instead of silently desynchronising the stream;
+  an endless stream of empty rects under the unknown-length sentinel is
+  bounded instead of growing memory without limit; and a full-screen Raw
+  rectangle from a 5K/6K display (macOS Screen Sharing sends these) no longer
+  trips a cap sized for 4K.
+- **Renderer correctness and cost.** H.264 frames could land out of order with
+  other rects (the one path that escaped the ordered apply chain); JPEG rects
+  were colour-managed differently from RGBA rects and could tint; library live
+  previews did a full-resolution GPU readback twice a second (now downscaled
+  on the GPU, roughly a hundredth of the traffic at 4K); and the CopyRect
+  scratch texture never shrank after a 4K session.
+- **"Natural scrolling" in Preferences now does something.** It was stored and
+  never read. It now flips wheel direction, page-mode scrolls (Firefox) are no
+  longer dead, one trackpad flick can no longer fire hundreds of wheel events,
+  a plain middle-click always reaches the remote instead of depending on zoom
+  level, and the toolbar's Ctrl+Alt+Del and friends carry scancodes so they
+  work on scancode-only hosts.
+
 ## [0.4.0] - 2026-08-02
 
 ### Added

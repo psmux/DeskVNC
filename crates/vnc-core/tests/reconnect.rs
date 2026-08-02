@@ -392,6 +392,104 @@ async fn a_server_without_fence_never_gets_a_format_switch() {
     );
 }
 
+/// With Fence support the format switch IS allowed, but the decoder must keep
+/// the OLD format until the server answers the guard fence: everything the
+/// server sent before that answer was encoded in the old format, and flipping
+/// early mis-decodes every in-flight rect (the window is widest on slow links,
+/// which is exactly when the Auto tuner downgrades).
+#[tokio::test]
+async fn a_format_switch_defers_decoding_until_the_fence_answer() {
+    let server = MockServer::start(MockConfig::new().update(vec![RectSpec::FenceCapable])).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // FenceCapable arrives in the priming update, racing the SetQuality
+    // below; only once the client sends its first fence RTT probe has fence
+    // support provably latched.
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| {
+                r.messages
+                    .iter()
+                    .any(|m| matches!(m, ClientMessage::ClientFence { .. }))
+            })
+            .await,
+        "the client should probe once it has seen FenceCapable"
+    );
+
+    // Low resolves to 8bpp palette; with Fence advertised the SetPixelFormat
+    // goes out guarded by a REQUEST fence carrying the pf-switch marker.
+    send(&handle, ClientCommand::SetQuality(QualityPreset::Low)).await;
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| {
+                r.messages.iter().any(|m| {
+                    matches!(m,
+                    ClientMessage::ClientFence { payload, .. } if payload == b"pf-switch")
+                })
+            })
+            .await,
+        "the format switch must be guarded by a pf-switch fence"
+    );
+
+    // An update in the OLD 32bpp format, as a server legitimately sends for
+    // anything already in its pipe when the SetPixelFormat arrived. The fence
+    // is deliberately NOT answered yet; the rect must decode as 32bpp.
+    let mut old = vec![0u8, 0, 0, 1]; // FramebufferUpdate, one rect
+    old.extend_from_slice(&[0, 0, 0, 0, 0, 4, 0, 4]); // 4x4 at 0,0
+    old.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    for _ in 0..16 {
+        old.extend_from_slice(&[RED[2], RED[1], RED[0], 0]); // BGRX wire pixel
+    }
+    server.send_raw(old);
+    let (rects, _) = events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    match &rects[0].payload {
+        vnc_core::types::RectPayload::Rgba(px) => {
+            assert_eq!(
+                &px[0..4],
+                &expect_rgba(RED),
+                "a rect sent before the fence answer is old-format"
+            );
+        }
+        other => panic!("expected Rgba, got {other:?}"),
+    }
+
+    // Answer the fence (flags echoed minus Request, per spec)...
+    let mut echo = vec![248u8, 0, 0, 0];
+    echo.extend_from_slice(&5u32.to_be_bytes()); // BlockBefore | SyncNext
+    echo.push(9);
+    echo.extend_from_slice(b"pf-switch");
+    server.send_raw(echo);
+
+    // ...then a palette and an 8bpp rect of index 5: the decoder must now be
+    // in the NEW format and resolve indices through the map.
+    const GREEN: Rgb = [0, 255, 0];
+    let mut map = vec![1u8, 0]; // SetColourMapEntries
+    map.extend_from_slice(&5u16.to_be_bytes()); // first
+    map.extend_from_slice(&1u16.to_be_bytes()); // count
+    for c in GREEN {
+        map.extend_from_slice(&(c as u16 * 257).to_be_bytes());
+    }
+    server.send_raw(map);
+    let mut new = vec![0u8, 0, 0, 1];
+    new.extend_from_slice(&[0, 0, 0, 0, 0, 4, 0, 4]);
+    new.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    new.extend_from_slice(&[5u8; 16]); // palette indices
+    server.send_raw(new);
+    let (rects, _) = events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    match &rects[0].payload {
+        vnc_core::types::RectPayload::Rgba(px) => {
+            assert_eq!(
+                &px[0..4],
+                &expect_rgba(GREEN),
+                "a rect sent after the fence answer decodes through the new palette"
+            );
+        }
+        other => panic!("expected Rgba, got {other:?}"),
+    }
+    handle.shutdown();
+}
+
 #[tokio::test]
 async fn a_reconnect_starts_with_fresh_decoder_state() {
     // zlib rects are decoded through a stream that lives for the whole

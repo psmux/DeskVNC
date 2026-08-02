@@ -131,7 +131,15 @@ export function parseFrameMessage(buffer: ArrayBuffer): FrameMessage | null {
   };
   let off = HEADER_LEN;
   for (let i = 0; i < rectCount; i++) {
-    if (off + RECT_HEADER_LEN > buffer.byteLength) return msg; // truncated: keep what we have
+    if (off + RECT_HEADER_LEN > buffer.byteLength) {
+      // Truncated: keep what we have rather than dropping the whole update,
+      // but say so loudly, a silent partial repaint looks like a rendering
+      // bug rather than a transport/framing one.
+      console.warn(
+        `[render] frame message truncated: parsed ${msg.rects.length}/${rectCount} rects (${buffer.byteLength}B buffer)`,
+      );
+      return msg;
+    }
     const x = dv.getUint16(off, true);
     const y = dv.getUint16(off + 2, true);
     const w = dv.getUint16(off + 4, true);
@@ -139,7 +147,12 @@ export function parseFrameMessage(buffer: ArrayBuffer): FrameMessage | null {
     const format = dv.getUint8(off + 8);
     const payloadLen = dv.getUint32(off + 10, true);
     off += RECT_HEADER_LEN;
-    if (off + payloadLen > buffer.byteLength) return msg;
+    if (off + payloadLen > buffer.byteLength) {
+      console.warn(
+        `[render] frame message truncated: parsed ${msg.rects.length}/${rectCount} rects (${buffer.byteLength}B buffer)`,
+      );
+      return msg;
+    }
     let srcX = 0;
     let srcY = 0;
     let h264Flags = 0;

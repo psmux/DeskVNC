@@ -11,7 +11,7 @@ import {
 } from "react";
 import { WebGLRenderer } from "../render/WebGLRenderer";
 import { SessionInput } from "../render/input";
-import { KEYSYM } from "../render/keysyms";
+import { KEY_COMBO } from "../render/keysyms";
 import {
   useSession,
   readSessionParams,
@@ -30,7 +30,13 @@ import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
 import { Dialog } from "../components/primitives";
 import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
-import { PREF_CLIPBOARD_AUTO, PREF_CLIPBOARD_ON_FOCUS, readBoolPref } from "../lib/prefs";
+import {
+  PREF_CLIPBOARD_AUTO,
+  PREF_CLIPBOARD_ON_FOCUS,
+  PREF_MATCH_LOCAL_LAYOUT,
+  PREF_NATURAL_SCROLL,
+  readBoolPref,
+} from "../lib/prefs";
 import {
   CAPTURE_INACTIVE,
   MACOS_ACCESSIBILITY_SETTINGS_URL,
@@ -410,6 +416,31 @@ function SessionView({
   useEffect(() => {
     inputRef.current?.setPassthrough(passthrough);
   }, [passthrough]);
+
+  // Preferences ▸ Input (localStorage-backed, no live cross-window push, same
+  // as the clipboard prefs below): read them fresh on mount and whenever the
+  // window regains focus, since Preferences may have changed them while this
+  // session wasn't the one on screen. The keyboard mode lives in the protocol
+  // core (it decides keysym vs scancode on the wire), so it is pushed to the
+  // backend rather than into the input handler.
+  useEffect(() => {
+    if (!viewReady || !visible) return;
+    const sid = params.sessionId;
+    const sync = (): void => {
+      inputRef.current?.setNaturalScroll(readBoolPref(PREF_NATURAL_SCROLL, true));
+      if (sid) {
+        const matchLocal = readBoolPref(PREF_MATCH_LOCAL_LAYOUT, false);
+        void safeInvoke(
+          "set_prefer_scancodes",
+          { sessionId: sid, prefer: !matchLocal },
+          null,
+        );
+      }
+    };
+    sync();
+    window.addEventListener("focus", sync);
+    return () => window.removeEventListener("focus", sync);
+  }, [viewReady, visible, params.sessionId]);
 
   // --------------------------------------------------- native key capture
   //
@@ -921,19 +952,19 @@ function SessionView({
       if (!input) return;
       switch (combo) {
         case "ctrl-alt-del":
-          input.sendKeyCombo([KEYSYM.Control_L, KEYSYM.Alt_L, KEYSYM.Delete]);
+          input.sendKeyCombo([KEY_COMBO.Control_L, KEY_COMBO.Alt_L, KEY_COMBO.Delete]);
           break;
         case "cmd-tab":
-          input.sendKeyCombo([KEYSYM.Alt_L, KEYSYM.Tab]);
+          input.sendKeyCombo([KEY_COMBO.Alt_L, KEY_COMBO.Tab]);
           break;
         case "win":
-          input.sendKeyCombo([KEYSYM.Super_L]);
+          input.sendKeyCombo([KEY_COMBO.Super_L]);
           break;
         case "alt-f4":
-          input.sendKeyCombo([KEYSYM.Alt_L, KEYSYM.F4]);
+          input.sendKeyCombo([KEY_COMBO.Alt_L, KEY_COMBO.F4]);
           break;
         case "escape":
-          input.sendKeyCombo([KEYSYM.Escape]);
+          input.sendKeyCombo([KEY_COMBO.Escape]);
           break;
       }
     },

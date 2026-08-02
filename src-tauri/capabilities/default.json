@@ -38,6 +38,7 @@
     "allow-list-history",
     "allow-get-thumbnail",
     "allow-get-app-setting",
+    "allow-about-info",
     "allow-set-app-setting",
 
     "allow-save-password",
@@ -60,6 +61,7 @@
     "allow-request-resize",
     "allow-refresh-session",
     "allow-set-view-only",
+    "allow-set-prefer-scancodes",
     "allow-send-clipboard",
     "allow-set-local-clipboard",
     "allow-read-local-clipboard",

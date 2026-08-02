@@ -8,12 +8,8 @@
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
-#[cfg(target_os = "macos")]
-use tauri::menu::AboutMetadata;
-
 /// Kept in step with `ui/src/screens/About.tsx`, which shows the same details
 /// in the in-app dialog used on every platform.
-const AUTHOR: &str = "Godwin Josh";
 const AUTHOR_EMAIL: &str = "godwin@cdtech.in";
 const PROJECT_URL: &str = "https://github.com/psmux/DeskVNC";
 
@@ -22,21 +18,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        // The standard macOS About panel. Populated rather than left as
-        // AboutMetadata::default(), which shows only the bundle name.
-        let about = AboutMetadata {
-            name: Some("DeskVNCViewer".into()),
-            version: Some(app.package_info().version.to_string()),
-            authors: Some(vec![AUTHOR.into()]),
-            comments: Some("A fast, native VNC viewer.".into()),
-            copyright: Some(format!("© {AUTHOR}")),
-            license: Some("MIT OR Apache-2.0".into()),
-            website: Some(PROJECT_URL.into()),
-            website_label: Some("Project page".into()),
-            ..Default::default()
-        };
+        // A custom About item routed to the in-app dialog, NOT the native
+        // AboutMetadata panel: two About surfaces drift (the native one was
+        // showing the version three different ways), and only the in-app
+        // dialog carries the build fingerprint and the copy-a-report button
+        // that bug reports need.
         let app_menu = SubmenuBuilder::new(app, "DeskVNCViewer")
-            .about(Some(about))
+            .item(&MenuItemBuilder::with_id("menu:about", "About DeskVNCViewer").build(app)?)
             .separator()
             .item(
                 &MenuItemBuilder::with_id("menu:settings", "Settings…")

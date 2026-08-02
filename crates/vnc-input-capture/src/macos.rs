@@ -46,7 +46,7 @@ use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 
 use crate::keymap;
-use crate::policy::{should_intercept, HostOs, Modifiers};
+use crate::policy::{should_intercept_key, HeldKeys, HostOs, Modifiers};
 use crate::{CaptureStatus, CapturedKey, Error, KeyboardCapture, Result};
 
 // ---------------------------------------------------------------------------
@@ -184,6 +184,10 @@ struct Shared {
     /// documented thread-safe for `CFRunLoopStop`, and core-foundation marks it
     /// `Send`/`Sync` accordingly.
     runloop: Mutex<Option<CFRunLoop>>,
+    /// Scancodes whose key-down was swallowed and forwarded, so the matching
+    /// key-up is swallowed unconditionally regardless of modifier state (see
+    /// `policy.rs`). Cleared on `stop()`.
+    held: Mutex<HeldKeys>,
 }
 
 impl Shared {
@@ -263,7 +267,11 @@ unsafe extern "C" fn tap_callback(
     };
 
     let mods = shared.modifiers();
-    if !should_intercept(HostOs::MacOs, scancode, mods) {
+    let intercept = {
+        let mut held = shared.held.lock();
+        should_intercept_key(HostOs::MacOs, scancode, down, mods, &mut held)
+    };
+    if !intercept {
         return event;
     }
 
@@ -326,6 +334,7 @@ impl MacCapture {
                 flags: AtomicUsize::new(0),
                 tap_port: AtomicUsize::new(0),
                 runloop: Mutex::new(None),
+                held: Mutex::new(HeldKeys::new()),
             }),
             thread: None,
         }
@@ -393,6 +402,9 @@ impl KeyboardCapture for MacCapture {
             let _ = handle.join();
         }
         self.shared.status.store(STATUS_INACTIVE, Ordering::Relaxed);
+        // A key held from this session must never swallow a local key-up once
+        // capture is stopped or force-released.
+        self.shared.held.lock().clear();
     }
 
     fn status(&self) -> CaptureStatus {
@@ -501,6 +513,7 @@ mod tests {
             ),
             tap_port: AtomicUsize::new(0),
             runloop: Mutex::new(None),
+            held: Mutex::new(HeldKeys::new()),
         };
         let mods = shared.modifiers();
         assert!(mods.meta && mods.shift);

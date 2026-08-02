@@ -567,3 +567,85 @@ async fn one_incremental_request_stays_outstanding() {
     );
     handle.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Resize follow-up requests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_desktop_grow_requests_an_update_for_the_new_geometry() {
+    let server = MockServer::start(MockConfig::new().size(640, 480).update(vec![
+        RectSpec::ExtendedDesktopSize {
+            width: 1280,
+            height: 800,
+            reason: 0,
+            status: 0,
+        },
+    ]))
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events
+        .wait(DEFAULT_TIMEOUT, "DesktopResize to 1280x800", |e| match e {
+            SessionEvent::DesktopResize { width: 1280, .. } => Some(()),
+            _ => None,
+        })
+        .await;
+
+    // The pipelined request preceding the resize covered the OLD rect. If the
+    // server has no damage inside that rect it sends nothing further, no new
+    // request is ever generated, and the grown strip stays blank forever, so
+    // the resize itself must request the new geometry.
+    let seen = server
+        .wait_until(DEFAULT_TIMEOUT, |r| {
+            r.messages.iter().any(|m| {
+                matches!(m,
+                    ClientMessage::FramebufferUpdateRequest { incremental: true, rect }
+                        if rect.width == 1280 && rect.height == 800)
+            })
+        })
+        .await;
+    assert!(
+        seen,
+        "no incremental request covering the grown geometry: {:?}",
+        server.messages()
+    );
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Hostile-server bounds
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_sentinel_update_with_endless_empty_rects_is_rejected() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // FramebufferUpdate with the 0xffff sentinel count, then a stream of 0x0
+    // Raw rects and never a LastRect. Zero-area rects decode to zero bytes,
+    // so the per-update BYTE budget never trips; only a bound on the header
+    // count can end this.
+    let mut flood = vec![0u8, 0, 0xff, 0xff];
+    for _ in 0..70_000u32 {
+        flood.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // x, y, w, h
+        flood.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    }
+    server.send_raw(flood);
+
+    // Protocol errors are fatal (retrying the same server won't help), so the
+    // abandonment surfaces as an error event rather than a re-dial.
+    events
+        .wait(
+            DEFAULT_TIMEOUT,
+            "protocol error for the rect flood",
+            |e| match e {
+                SessionEvent::Error(m) if m.contains("65535 rects") => Some(()),
+                _ => None,
+            },
+        )
+        .await;
+    handle.shutdown();
+}

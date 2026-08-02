@@ -5,6 +5,8 @@
 
 use crate::encodings::DecoderState;
 use crate::error::{Result, VncError};
+use crate::pixel::convert::pixel_to_rgba;
+use crate::pixel::ColourMap;
 use crate::proto::messages::{map_eof, read_exact_vec, Screen};
 use crate::types::{encoding, CursorShape, PixelFormat, Rect, RectPayload};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -124,7 +126,7 @@ where
             ))
         }
         encoding::PSEUDO_LAST_RECT => Ok(PseudoRect::LastRect),
-        encoding::PSEUDO_CURSOR => read_rich_cursor(reader, rect, pf).await,
+        encoding::PSEUDO_CURSOR => read_rich_cursor(reader, rect, pf, decoder.colour_map()).await,
         encoding::PSEUDO_X_CURSOR => read_x_cursor(reader, rect).await,
         encoding::PSEUDO_CURSOR_WITH_ALPHA => read_cursor_with_alpha(reader, rect, decoder).await,
         encoding::PSEUDO_FENCE => Ok(PseudoRect::FenceCapable),
@@ -149,40 +151,26 @@ fn check_cursor_bounds(rect: Rect) -> Result<()> {
     Ok(())
 }
 
-/// Assemble one raw pixel value honouring the wire endianness of `pf`.
-fn read_pixel_value(pf: &PixelFormat, bytes: &[u8]) -> u32 {
-    let mut v: u32 = 0;
-    if pf.big_endian {
-        for &b in bytes {
-            v = (v << 8) | b as u32;
-        }
+/// Clamp a hotspot coordinate into the cursor image bounds. RFB doesn't
+/// forbid a server sending a hotspot outside the cursor's own dimensions;
+/// letting that through would offset the cursor overlay (and therefore click
+/// coordinates) arbitrarily once the hotspot is used to position it.
+fn clamp_hotspot(hotspot: u16, dim: u16) -> u16 {
+    if dim == 0 {
+        0
     } else {
-        for &b in bytes.iter().rev() {
-            v = (v << 8) | b as u32;
-        }
-    }
-    v
-}
-
-/// Convert a raw pixel value to 8-bit RGB using the connection pixel format.
-/// Non-true-colour formats fall back to a grayscale approximation (cursor
-/// rendering without the colour map is better than no cursor).
-fn pixel_to_rgb(pf: &PixelFormat, v: u32) -> [u8; 3] {
-    if pf.true_colour && pf.red_max > 0 && pf.green_max > 0 && pf.blue_max > 0 {
-        let scale = |val: u32, max: u16| -> u8 { ((val * 255) / max as u32).min(255) as u8 };
-        let r = scale((v >> pf.red_shift) & pf.red_max as u32, pf.red_max);
-        let g = scale((v >> pf.green_shift) & pf.green_max as u32, pf.green_max);
-        let b = scale((v >> pf.blue_shift) & pf.blue_max as u32, pf.blue_max);
-        [r, g, b]
-    } else {
-        let g = (v & 0xff) as u8;
-        [g, g, g]
+        hotspot.min(dim - 1)
     }
 }
 
 /// RichCursor (-239): `w*h` pixels in the connection format followed by a
 /// 1-bit transparency bitmask, one row-padded bit per pixel.
-async fn read_rich_cursor<R>(reader: &mut R, rect: Rect, pf: &PixelFormat) -> Result<PseudoRect>
+async fn read_rich_cursor<R>(
+    reader: &mut R,
+    rect: Rect,
+    pf: &PixelFormat,
+    map: Option<&ColourMap>,
+) -> Result<PseudoRect>
 where
     R: AsyncRead + Unpin,
 {
@@ -198,8 +186,11 @@ where
     for y in 0..h {
         for x in 0..w {
             let i = y * w + x;
-            let raw = read_pixel_value(pf, &pixels[i * bpp..(i + 1) * bpp]);
-            let [r, g, b] = pixel_to_rgb(pf, raw);
+            // Reuse the framebuffer pixel-conversion helper (colour map and
+            // all) instead of a hand-rolled grayscale fallback: with the Low
+            // quality preset (palette8, true_colour false) cursors used to
+            // render as grey noise because the colour map was never applied.
+            let [r, g, b, _] = pixel_to_rgba(&pixels[i * bpp..(i + 1) * bpp], pf, map);
             let visible = (mask[y * mask_row + x / 8] >> (7 - (x % 8))) & 1 == 1;
             let o = i * 4;
             rgba[o] = r;
@@ -211,8 +202,8 @@ where
     Ok(PseudoRect::Cursor(CursorShape {
         width: rect.width,
         height: rect.height,
-        hotspot_x: rect.x,
-        hotspot_y: rect.y,
+        hotspot_x: clamp_hotspot(rect.x, rect.width),
+        hotspot_y: clamp_hotspot(rect.y, rect.height),
         pixels: rgba,
     }))
 }
@@ -229,8 +220,8 @@ where
         return Ok(PseudoRect::Cursor(CursorShape {
             width: 0,
             height: 0,
-            hotspot_x: rect.x,
-            hotspot_y: rect.y,
+            hotspot_x: clamp_hotspot(rect.x, rect.width),
+            hotspot_y: clamp_hotspot(rect.y, rect.height),
             pixels: Vec::new(),
         }));
     }
@@ -255,10 +246,49 @@ where
     Ok(PseudoRect::Cursor(CursorShape {
         width: rect.width,
         height: rect.height,
-        hotspot_x: rect.x,
-        hotspot_y: rect.y,
+        hotspot_x: clamp_hotspot(rect.x, rect.width),
+        hotspot_y: clamp_hotspot(rect.y, rect.height),
         pixels: rgba,
     }))
+}
+
+/// Fixed pixel format for CursorWithAlpha inner-encoding payloads (RFB spec):
+/// always 32bpp/depth-32 RGBA regardless of the connection's negotiated
+/// pixel format, with the alpha channel in the byte the RGB shifts leave
+/// free (shift 24). Using this instead of the connection's format matters
+/// when that format is compact-3-byte: Tight would then read 3-byte TPIXELs
+/// from what is actually a 4-byte-per-pixel stream, scrambling every channel
+/// and forcing alpha=255.
+fn cursor_alpha_pixel_format() -> PixelFormat {
+    PixelFormat {
+        bits_per_pixel: 32,
+        depth: 32,
+        big_endian: false,
+        true_colour: true,
+        red_max: 255,
+        green_max: 255,
+        blue_max: 255,
+        red_shift: 16,
+        green_shift: 8,
+        blue_shift: 0,
+    }
+}
+
+/// Un-premultiply alpha in place. The wire format is premultiplied RGBA
+/// (RFB spec); every downstream consumer composites assuming straight
+/// alpha, so antialiased cursor edges showed a dark fringe without this.
+fn unpremultiply(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        for c in px[..3].iter_mut() {
+            // `checked_div` returns `None` for alpha == 0 (fully
+            // transparent): the spec leaves RGB undefined there, so the
+            // wire byte is kept as-is rather than guessed at.
+            if let Some(v) = (*c as u32 * 255).checked_div(a) {
+                *c = v.min(255) as u8;
+            }
+        }
+    }
 }
 
 /// CursorWithAlpha (-314): an inner encoding number followed by cursor pixels
@@ -276,12 +306,21 @@ where
     let w = rect.width as usize;
     let h = rect.height as usize;
 
-    let rgba = if inner == encoding::RAW {
+    let mut rgba = if inner == encoding::RAW {
         read_exact_vec(reader, w * h * 4).await?
     } else {
-        // Decode through the shared state: the payload may share zlib streams
-        // with ordinary data rects (PRD/02 §9).
-        let decoded = crate::encodings::decode_rect(decoder, reader, rect, inner).await?;
+        // Decode through the shared state (the payload may share zlib
+        // streams with ordinary data rects, PRD/02 §9), but against the
+        // fixed pixel format the spec mandates for this payload, not the
+        // connection's negotiated one -- see `cursor_alpha_pixel_format`.
+        // Non-RAW inner encodings still end up with alpha forced to 255 (the
+        // generic pixel-conversion pipeline has no alpha channel to carry),
+        // so this only round-trips alpha faithfully for a RAW inner
+        // encoding; that's the common case in practice since cursors are
+        // tiny and servers rarely bother compressing them.
+        let alpha_pf = cursor_alpha_pixel_format();
+        let decoded =
+            crate::encodings::decode_rect_as(decoder, reader, rect, inner, &alpha_pf).await?;
         match decoded.map(|d| d.payload) {
             Some(RectPayload::Rgba(px)) => px,
             _ => {
@@ -296,11 +335,12 @@ where
             "cursor-with-alpha pixel payload has wrong size".into(),
         ));
     }
+    unpremultiply(&mut rgba);
     Ok(PseudoRect::Cursor(CursorShape {
         width: rect.width,
         height: rect.height,
-        hotspot_x: rect.x,
-        hotspot_y: rect.y,
+        hotspot_x: clamp_hotspot(rect.x, rect.width),
+        hotspot_y: clamp_hotspot(rect.y, rect.height),
         pixels: rgba,
     }))
 }
@@ -417,11 +457,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cursor_with_alpha_raw() {
+    async fn cursor_with_alpha_raw_unpremultiplies_wire_pixels() {
+        // Wire format is premultiplied RGBA; the decoded pixel must be
+        // straight alpha, not the raw wire bytes.
         let pf = PixelFormat::bgra8888();
         let mut wire = Vec::new();
         wire.extend_from_slice(&0i32.to_be_bytes()); // inner encoding: Raw
-        wire.extend_from_slice(&[1, 2, 3, 4]); // one RGBA pixel
+        wire.extend_from_slice(&[1, 2, 3, 4]); // premultiplied, alpha=4
         let mut cur = std::io::Cursor::new(wire);
         let p = read_pseudo_rect(
             &mut cur,
@@ -433,7 +475,126 @@ mod tests {
         .await
         .unwrap();
         match p {
-            PseudoRect::Cursor(c) => assert_eq!(c.pixels, vec![1, 2, 3, 4]),
+            // channel = min(255, channel*255/alpha): 1*255/4=63, 2*255/4=127,
+            // 3*255/4=191; alpha itself is untouched.
+            PseudoRect::Cursor(c) => assert_eq!(c.pixels, vec![63, 127, 191, 4]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_with_alpha_zero_alpha_keeps_rgb_untouched() {
+        let pf = PixelFormat::bgra8888();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&0i32.to_be_bytes()); // inner encoding: Raw
+        wire.extend_from_slice(&[7, 8, 9, 0]); // fully transparent
+        let mut cur = std::io::Cursor::new(wire);
+        let p = read_pseudo_rect(
+            &mut cur,
+            Rect::new(0, 0, 1, 1),
+            encoding::PSEUDO_CURSOR_WITH_ALPHA,
+            &pf,
+            &mut decoder(),
+        )
+        .await
+        .unwrap();
+        match p {
+            PseudoRect::Cursor(c) => assert_eq!(c.pixels, vec![7, 8, 9, 0]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_with_alpha_inner_tight_uses_fixed_pixel_format() {
+        // The connection's negotiated pixel format is compact-3-byte (our
+        // canonical bgra8888), but CursorWithAlpha's inner-encoding payload
+        // is always a fixed 32bpp/depth-32 RGBA format per spec. Decoding it
+        // against the connection's compact format would make Tight read
+        // 3-byte TPIXELs from what is actually a 4-byte-per-pixel stream,
+        // scrambling every channel.
+        let pf = PixelFormat::bgra8888();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&encoding::TIGHT.to_be_bytes()); // inner: Tight
+        wire.push(0x80); // Tight control byte: Fill
+        wire.extend_from_slice(&[10, 20, 30, 200]); // 4-byte TPIXEL: B,G,R,free
+        let mut cur = std::io::Cursor::new(wire);
+        let p = read_pseudo_rect(
+            &mut cur,
+            Rect::new(0, 0, 1, 1),
+            encoding::PSEUDO_CURSOR_WITH_ALPHA,
+            &pf,
+            &mut decoder(),
+        )
+        .await
+        .unwrap();
+        match p {
+            // red_shift 16 -> byte2 (30), green_shift 8 -> byte1 (20),
+            // blue_shift 0 -> byte0 (10); alpha forced opaque by the generic
+            // pixel-conversion pipeline (no scrambled 3-byte misread).
+            PseudoRect::Cursor(c) => assert_eq!(c.pixels, vec![30, 20, 10, 255]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_hotspot_clamped_to_bounds() {
+        let pf = PixelFormat::bgra8888();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&[0xff, 0xff, 0xff, 0x00]); // one white pixel
+        wire.push(0b1000_0000); // visible
+        let mut cur = std::io::Cursor::new(wire);
+        // Hotspot (rect.x/rect.y) far outside the 1x1 cursor's own bounds.
+        let p = read_pseudo_rect(
+            &mut cur,
+            Rect::new(50, 50, 1, 1),
+            encoding::PSEUDO_CURSOR,
+            &pf,
+            &mut decoder(),
+        )
+        .await
+        .unwrap();
+        match p {
+            PseudoRect::Cursor(c) => {
+                assert_eq!(c.hotspot_x, 0);
+                assert_eq!(c.hotspot_y, 0);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rich_cursor_honours_colour_map_on_palette_format() {
+        // With the Low quality preset (palette8, true_colour false) cursors
+        // used to render as grey noise: RichCursor pixels bypassed the
+        // colour map entirely.
+        let pf = PixelFormat::palette8();
+        let mut state = DecoderState::new(pf);
+        // set_colour_map takes 16-bit wire channel values and keeps the high
+        // byte (RFB SetColourMapEntries, §7.6.2).
+        state.set_colour_map(
+            0,
+            &[[10 << 8, 20 << 8, 30 << 8], [200 << 8, 150 << 8, 100 << 8]],
+        );
+        let wire = vec![
+            0u8,           // pixel 0 -> palette index 0
+            1u8,           // pixel 1 -> palette index 1
+            0b1100_0000u8, // both visible
+        ];
+        let mut cur = std::io::Cursor::new(wire);
+        let p = read_pseudo_rect(
+            &mut cur,
+            Rect::new(0, 0, 2, 1),
+            encoding::PSEUDO_CURSOR,
+            &pf,
+            &mut state,
+        )
+        .await
+        .unwrap();
+        match p {
+            PseudoRect::Cursor(c) => {
+                assert_eq!(&c.pixels[0..4], &[10, 20, 30, 255]);
+                assert_eq!(&c.pixels[4..8], &[200, 150, 100, 255]);
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
