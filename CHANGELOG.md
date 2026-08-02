@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-03
+
 ### Added
 
 - **The About dialog now fingerprints the exact build.** Alongside the version
