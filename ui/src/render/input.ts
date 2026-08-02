@@ -28,10 +28,23 @@ export interface SessionInputOptions {
   onAppHotkey: (e: KeyboardEvent) => boolean;
   /** Ctrl/Cmd+wheel zoom gesture; receives the proposed zoom factor. */
   onZoomGesture?: (zoom: number) => void;
+  /**
+   * Awaited before a forwarded paste chord is sent, so the remote pastes the
+   * CURRENT local clipboard rather than whatever it last heard about. See
+   * `deferForPaste` for the ordering contract.
+   */
+  onForwardedPaste?: () => Promise<unknown>;
 }
 
 const WHEEL_STEP = 40; // px of deltaY per click when deltaMode is pixels
 const MAX_WHEEL_CLICKS_PER_EVENT = 10; // cap a single momentum-scroll flick
+
+/**
+ * How long a paste chord may wait for the clipboard push before going out
+ * anyway. A wedged clipboard read must degrade to "pastes slightly stale
+ * text", never to "typing is frozen".
+ */
+const PASTE_SYNC_TIMEOUT_MS = 300;
 
 /** X11 keysym for AltGr/ISO Level 3 Shift, once confirmed (see handleAltGrPair). */
 const ISO_LEVEL3_SHIFT = 0xfe03;
@@ -69,7 +82,33 @@ const LOCAL_UI_SELECTOR =
 
 function isLocalUiTarget(e: KeyboardEvent): boolean {
   const el = e.target as Element | null;
-  return !!el && typeof el.closest === "function" && el.closest(LOCAL_UI_SELECTOR) !== null;
+  if (!el || typeof el.closest !== "function") return false;
+  // The session's own hidden capture element is a textarea, but keys aimed at
+  // it are precisely the ones that belong to the remote desktop.
+  if (el.closest("[data-remote-capture]") !== null) return false;
+  return el.closest(LOCAL_UI_SELECTOR) !== null;
+}
+
+/**
+ * DOM named-key values ("Enter", "ArrowLeft", "MediaPlayPause") are ASCII
+ * CamelCase identifiers. Anything else multi-character in `e.key` is not a
+ * key name at all, it is TEXT that something injected as a synthetic
+ * keystroke: dictation tools (Wispr Flow and friends post unicode-string key
+ * events carrying a word at a time), automation, password managers. Named
+ * keys we support resolved through the keysym tables before this is ever
+ * consulted, so matching the name shape here only drops the ones we could
+ * not type anyway.
+ */
+function isInjectedText(key: string): boolean {
+  return Array.from(key).length > 1 && !/^[A-Z][A-Za-z0-9]*$/.test(key);
+}
+
+/** A keydown that will make the REMOTE paste: Cmd/Ctrl+V (any extra
+ *  modifiers, so paste-without-formatting and terminal Ctrl+Shift+V count)
+ *  or the classic X11 Shift+Insert. */
+function isPasteChord(e: KeyboardEvent): boolean {
+  if (e.code === "KeyV" && (e.metaKey || e.ctrlKey)) return true;
+  return e.code === "Insert" && e.shiftKey;
 }
 
 /** Event `kind` discriminators, must match `framing::decode_input` exactly. */
@@ -86,10 +125,15 @@ export class SessionInput {
   private releaseAll: () => void;
   private onAppHotkey: (e: KeyboardEvent) => boolean;
   private onZoomGesture?: (zoom: number) => void;
+  private onForwardedPaste?: () => Promise<unknown>;
+
+  /** Packets parked behind an in-flight paste sync; null = nothing pending. */
+  private pendingSends: Uint8Array[] | null = null;
 
   private viewOnly = false;
   private passthrough = false;
   private naturalScroll = false;
+  private forwardInsertedText = true;
   private attached = false;
 
   private buttonMask = 0;
@@ -107,8 +151,6 @@ export class SessionInput {
 
   /** When the last ControlLeft keydown was forwarded (see handleAltGrPair). */
   private ctrlLeftDownAt = 0;
-  /** True from a "Dead" keydown until the composed character comes back. */
-  private composing = false;
   /** Hidden offscreen element that owns dead-key composition; see attach(). */
   private compositionEl: HTMLTextAreaElement | null = null;
 
@@ -129,6 +171,19 @@ export class SessionInput {
     this.releaseAll = opts.releaseAllKeys;
     this.onAppHotkey = opts.onAppHotkey;
     this.onZoomGesture = opts.onZoomGesture;
+    this.onForwardedPaste = opts.onForwardedPaste;
+  }
+
+  /**
+   * Send a packet, or park a COPY of it while a paste sync is in flight:
+   * nothing may overtake the paste chord it followed, or a fast synthetic
+   * paste (dictation tools post Cmd+V with the keyup milliseconds behind the
+   * keydown) would release V before pressing it. Copies because the scratch
+   * buffers are reused per event.
+   */
+  private dispatch(buf: Uint8Array): void {
+    if (this.pendingSends) this.pendingSends.push(buf.slice());
+    else this.send(buf);
   }
 
   setViewOnly(v: boolean): void {
@@ -146,6 +201,11 @@ export class SessionInput {
 
   setNaturalScroll(v: boolean): void {
     this.naturalScroll = v;
+  }
+
+  /** Preferences ▸ Input ▸ "Type text inserted by dictation tools". */
+  setForwardInsertedText(v: boolean): void {
+    this.forwardInsertedText = v;
   }
 
   attach(): void {
@@ -187,35 +247,54 @@ export class SessionInput {
     cancelAnimationFrame(this.moveRaf);
     this.compositionEl?.remove();
     this.compositionEl = null;
-    this.composing = false;
   }
 
   /**
-   * Hidden, focused, 1px offscreen element that owns dead-key composition.
+   * Hidden, 1px offscreen textarea that owns keyboard focus while the session
+   * has it, so every way an OS can produce text lands somewhere we can see:
    *
-   * Dead keys (e.g. "´" then "e" -> "é") only resolve if the browser gets to
-   * run its native composition on a focused editable element, and the canvas
-   * is not one. Composing directly on the canvas would also mean every OTHER
-   * keystroke (letters, Enter, arrows) lands in it instead of being forwarded,
-   * which is why this only takes focus for the duration of a dead-key
-   * sequence (see onKeyDown / finishComposition) rather than owning focus
-   * permanently: that would risk regressing normal typing.
+   * - Ordinary keys still arrive at the window-level capture listeners and
+   *   are forwarded from `keydown`; their `preventDefault()` keeps them out
+   *   of the textarea, so nothing is ever double-sent.
+   * - Dead keys and CJK IMEs need a focused editable element to compose in;
+   *   the finished string comes back through `compositionend`.
+   * - Dictation (macOS system dictation, Wispr Flow in its insertion mode)
+   *   and accessibility tools insert text directly into the focused element,
+   *   which surfaces as `beforeinput` here and would otherwise vanish
+   *   entirely: a canvas cannot receive inserted text.
+   *
+   * The `data-remote-capture` marker exempts it from the local-UI guard, and
+   * the autocorrect family is disabled so the webview cannot rewrite what
+   * the user actually produced before we forward it.
    */
   private createCompositionOverlay(): HTMLTextAreaElement {
     const el = document.createElement("textarea");
     el.setAttribute("aria-hidden", "true");
+    el.setAttribute("data-remote-capture", "true");
+    el.setAttribute("autocapitalize", "off");
+    el.setAttribute("autocomplete", "off");
+    el.setAttribute("autocorrect", "off");
+    el.spellcheck = false;
     el.tabIndex = -1;
     el.style.cssText =
       "position:fixed;left:-1px;top:-1px;width:1px;height:1px;opacity:0;padding:0;border:0;resize:none;";
     el.addEventListener("compositionend", this.onCompositionEnd);
     el.addEventListener("beforeinput", this.onBeforeInput);
-    el.addEventListener("blur", () => {
-      // Composition ended without compositionend firing (e.g. the sequence
-      // was abandoned); don't leave `composing` stuck true forever.
-      this.composing = false;
-    });
+    // A Cmd/Ctrl+V that is NOT being passed through to the remote used to hit
+    // the non-editable canvas and do nothing; keep that contract now that
+    // focus sits on an editable element. Remote paste has its own path
+    // (clipboard sync + the forwarded keystroke under pass-through).
+    el.addEventListener("paste", (ev) => ev.preventDefault());
     document.body.appendChild(el);
     return el;
+  }
+
+  /**
+   * Give the session the keyboard. Focus lands on the hidden capture element
+   * rather than the canvas, see `createCompositionOverlay` for why.
+   */
+  focus(): void {
+    (this.compositionEl ?? this.canvas).focus({ preventScroll: true });
   }
 
   // ------------------------------------------------------------- pointer
@@ -260,11 +339,11 @@ export class SessionInput {
     this.ptrView.setUint16(1, x, true);
     this.ptrView.setUint16(3, y, true);
     this.ptrView.setUint16(5, mask, true);
-    this.send(this.ptrBuf);
+    this.dispatch(this.ptrBuf);
   }
 
   private onPointerDown = (e: PointerEvent): void => {
-    this.canvas.focus({ preventScroll: true });
+    this.focus();
     // Space-drag always pans. Middle-drag pans only with Alt held: reserving
     // plain middle-button for panning whenever the content overflowed the
     // viewport meant a middle-click (X11 paste-from-selection) worked or not
@@ -366,7 +445,7 @@ export class SessionInput {
     v.setUint16(8, x, true);
     v.setUint16(10, y, true);
     v.setUint16(12, this.buttonMask, true);
-    this.send(this.wheelBuf);
+    this.dispatch(this.wheelBuf);
   }
 
   private onWheel = (e: WheelEvent): void => {
@@ -432,7 +511,7 @@ export class SessionInput {
     this.keyView.setUint8(1, down ? 1 : 0);
     this.keyView.setUint32(2, keysym, true);
     this.keyView.setUint32(6, keycode, true);
-    this.send(this.keyBuf);
+    this.dispatch(this.keyBuf);
   }
 
   /** Public: synthesize a key combo (Send menu: Ctrl+Alt+Del etc.). */
@@ -455,13 +534,18 @@ export class SessionInput {
     if (!this.passthrough && (e.metaKey || (e.ctrlKey && e.altKey && e.code === "Delete"))) {
       return;
     }
+    // Mid-composition keystrokes (dead-key sequences, CJK IMEs) belong to the
+    // browser's composition machinery, not the wire: forwarding them would
+    // both break the composition and double-type its pieces. The finished
+    // string arrives once, via compositionend. keyCode 229 is the legacy
+    // "IME is handling this" marker some engines still use.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Dead") {
-      // Do NOT preventDefault: that would kill the composition outright.
-      // Hand focus to the hidden overlay so the browser composes the
-      // accented character there instead of nowhere; the result comes back
-      // via onCompositionEnd / onBeforeInput.
-      this.composing = true;
-      this.compositionEl?.focus({ preventScroll: true });
+      // Do NOT preventDefault: that would kill the composition outright. The
+      // capture element already holds focus, so the browser composes the
+      // accented character there; the result comes back via
+      // onCompositionEnd / onBeforeInput.
+      this.focus();
       return;
     }
     if (this.handleAltGrPair(e)) return;
@@ -470,10 +554,72 @@ export class SessionInput {
     if (this.handleComposedChar(e)) return;
     if (e.code === "ControlLeft") this.ctrlLeftDownAt = performance.now();
     const ids = keyEventToIds(e);
-    if (!ids) return;
+    if (!ids) {
+      // A multi-character `e.key` that is not a DOM key name is text some
+      // tool injected as a synthetic keystroke (dictation apps post a word
+      // or phrase per event). One down/up per code point types it on the
+      // remote; there is no physical key to track for a matching keyup.
+      if (this.forwardInsertedText && isInjectedText(e.key)) this.forwardText(e.key);
+      return;
+    }
     this.pressedKeys.set(e.code, ids);
+    if (isPasteChord(e)) {
+      this.deferForPaste(ids);
+      return;
+    }
     this.sendKey(ids.keysym, ids.keycode, true);
   };
+
+  /**
+   * A forwarded paste should paste what the user's clipboard holds NOW.
+   *
+   * The automatic sync pushes on window focus, which covers "copy somewhere
+   * else, come back, paste", but not clipboard writes that happen without a
+   * focus change: dictation tools in clipboard mode (Wispr Flow's paste
+   * insertion writes the transcript and synthesizes Cmd+V milliseconds
+   * later), clipboard managers, and scripts. So the paste chord itself
+   * triggers a push and waits for it; the ClipboardText command and the
+   * keystrokes travel the same ordered command channel, so by the time the
+   * remote sees V go down, the text is already there. Everything produced
+   * while waiting is parked behind it (see `dispatch`), and a timeout keeps
+   * a wedged clipboard read from freezing typing.
+   */
+  private deferForPaste(ids: KeyIds): void {
+    const push = this.onForwardedPaste;
+    if (!push || this.pendingSends) {
+      this.sendKey(ids.keysym, ids.keycode, true);
+      return;
+    }
+    const queue: Uint8Array[] = [];
+    this.pendingSends = queue;
+    let flushed = false;
+    const flush = (): void => {
+      if (flushed) return;
+      flushed = true;
+      if (this.pendingSends === queue) this.pendingSends = null;
+      this.sendKey(ids.keysym, ids.keycode, true);
+      for (const p of queue) this.send(p);
+    };
+    const timer = window.setTimeout(flush, PASTE_SYNC_TIMEOUT_MS);
+    push()
+      .catch(() => undefined)
+      .finally(() => {
+        window.clearTimeout(timer);
+        flush();
+      });
+  }
+
+  /** Type a string on the remote, one keysym press+release per code point. */
+  private forwardText(text: string): void {
+    if (this.viewOnly) return;
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      if (cp === undefined) continue;
+      const keysym = codePointToKeysym(cp);
+      this.sendKey(keysym, 0, true);
+      this.sendKey(keysym, 0, false);
+    }
+  }
 
   /**
    * Windows synthesizes AltGr as ControlLeft down immediately followed
@@ -545,37 +691,39 @@ export class SessionInput {
     return true;
   }
 
-  /** Composition resolved (compositionend) or was resolved without ever
-   *  firing one (onBeforeInput); forward each code point of the composed
-   *  string and hand focus back to the canvas. */
+  /** Text arrived through the capture element (dead key, IME, dictation);
+   *  forward it and reset the element for the next round. */
   private finishComposition(text: string): void {
-    this.composing = false;
     if (this.compositionEl) this.compositionEl.value = "";
-    this.canvas.focus({ preventScroll: true });
-    if (!text || this.viewOnly) return;
-    for (const ch of text) {
-      const cp = ch.codePointAt(0);
-      if (cp === undefined) continue;
-      const keysym = codePointToKeysym(cp);
-      this.sendKey(keysym, 0, true);
-      this.sendKey(keysym, 0, false);
-    }
+    this.forwardText(text);
   }
 
   private onCompositionEnd = (e: CompositionEvent): void => {
-    if (!this.composing) return; // onBeforeInput already resolved this one
+    // Fires for every composition that resolves in the capture element: a
+    // dead-key sequence, a CJK IME commit, or engine-side dictation that
+    // routes through marked text. None of the keystrokes involved were
+    // forwarded (the isComposing guard in onKeyDown), so the whole string
+    // goes out here, exactly once.
     this.finishComposition(e.data ?? "");
   };
 
   private onBeforeInput = (e: InputEvent): void => {
-    if (!this.composing) return;
-    if (e.isComposing) return; // still mid-composition, let compositionend handle it
-    if (e.inputType !== "insertText" || !e.data) return;
-    // Some browsers resolve a simple dead-key sequence via beforeinput
-    // without ever firing compositionend; forward it here and clear
-    // `composing` so compositionend (if it still fires) has nothing left to
-    // send twice.
+    // Mid-composition updates are provisional; compositionend gets the final
+    // text. What lands here with composition NOT in progress is text some
+    // assistive layer inserted directly into the focused element, macOS
+    // dictation and dictation utilities being the ones that matter: no
+    // keystroke ever existed for it, so this is its only path to the remote.
+    if (e.isComposing || e.inputType === "insertCompositionText") return;
+    if (!e.data) return;
+    if (e.inputType !== "insertText" && e.inputType !== "insertReplacementText") return;
     e.preventDefault();
+    // Unlike composition (a user physically typing through an IME), text
+    // landing here was inserted by software, which is exactly what the
+    // preference lets people turn off.
+    if (!this.forwardInsertedText) {
+      if (this.compositionEl) this.compositionEl.value = "";
+      return;
+    }
     this.finishComposition(e.data);
   };
 
@@ -616,7 +764,7 @@ export class SessionInput {
       v.setUint16(4, this.lastY, true);
       v.setUint16(6, 0, true);
     }
-    this.send(buf);
+    this.dispatch(buf);
   }
 
   private onBlur = (): void => {

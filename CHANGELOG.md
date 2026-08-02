@@ -10,6 +10,33 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **Dictation and IME text now reaches the remote desktop.** Session keyboard
+  focus moved from the canvas to a hidden capture element, which is what
+  dictation tools (macOS dictation, Wispr Flow), CJK input methods, and
+  accessibility software need: they insert text into the focused editable
+  element rather than pressing keys, and a canvas cannot receive text at all.
+  Inserted and composed strings are forwarded keystroke by keystroke, synthetic
+  key events that carry a whole word (the other way dictation tools type) are
+  recognised and forwarded too, and ordinary typing is unaffected because
+  forwarded keys never reach the element. This also makes Chinese, Japanese,
+  and Korean input methods work in a session for the first time. Preferences ▸
+  Input ▸ "Type text inserted by dictation tools" turns the software-insertion
+  half off; accents and CJK input methods are deliberately not behind the
+  switch, since those are the user typing.
+- **A forwarded paste now carries the clipboard as it is at that moment.**
+  Pressing Cmd/Ctrl+V (or Shift+Insert) into a session first pushes the
+  current local clipboard to the remote, holding that one chord until the
+  text is ordered ahead of it on the wire, with a 300 ms ceiling so a wedged
+  clipboard read can never freeze typing. Previously the clipboard was only
+  synced when the window regained focus, so anything that wrote the clipboard
+  mid-session, dictation tools in clipboard mode, clipboard managers,
+  scripts, pasted stale text on the remote. Preferences ▸ Clipboard ▸ "Push
+  clipboard when pasting into the remote" is its own switch, and the master
+  "Sync clipboard automatically" also gates it: with either off, nothing is
+  sent implicitly.
+
 ## [0.5.0] - 2026-08-03
 
 ### Added
