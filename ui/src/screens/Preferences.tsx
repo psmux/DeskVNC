@@ -3,6 +3,12 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useSettings, type ThemeChoice } from "../state/SettingsContext";
 import { useSessions } from "../state/SessionsContext";
 import { ALLOW_MULTIPLE_SESSIONS_KEY, safeInvoke } from "../lib/tauri";
+import {
+  PREF_CLIPBOARD_AUTO,
+  PREF_CLIPBOARD_ON_FOCUS,
+  readBoolPref,
+  writeBoolPref,
+} from "../lib/prefs";
 import { classNames } from "../lib/util";
 import { IconX } from "../components/icons";
 
@@ -11,16 +17,17 @@ const TABS = [
 ] as const;
 type Tab = (typeof TABS)[number];
 
-/** localStorage-backed preference (until the backend settings store lands). */
+/**
+ * localStorage-backed preference (until the backend settings store lands).
+ *
+ * Storage goes through `lib/prefs`, which is also what the code acting on
+ * these preferences reads. Anything that writes a key here by hand is a
+ * preference nothing can consult.
+ */
 function usePref(key: string, initial: boolean): [boolean, (v: boolean) => void] {
-  const [v, setV] = useState<boolean>(() => {
-    const raw = localStorage.getItem(`deskvnc.pref.${key}`);
-    return raw === null ? initial : raw === "1";
-  });
+  const [v, setV] = useState<boolean>(() => readBoolPref(key, initial));
   useEffect(() => {
-    try {
-      localStorage.setItem(`deskvnc.pref.${key}`, v ? "1" : "0");
-    } catch { /* ignore */ }
+    writeBoolPref(key, v);
   }, [key, v]);
   return [v, setV];
 }
@@ -69,8 +76,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [losslessRefresh, setLosslessRefresh] = useAppSetting("lossless_refresh", true);
   const [deepNames, setDeepNames] = useAppSetting("probe_other_services", true);
   const [multipleSessions, setMultipleSessions] = useAppSetting(ALLOW_MULTIPLE_SESSIONS_KEY, false);
-  const [clipboardAuto, setClipboardAuto] = usePref("clipboardAuto", true);
-  const [clipboardOnFocus, setClipboardOnFocus] = usePref("clipboardOnFocus", true);
+  const [clipboardAuto, setClipboardAuto] = usePref(PREF_CLIPBOARD_AUTO, true);
+  const [clipboardOnFocus, setClipboardOnFocus] = usePref(PREF_CLIPBOARD_ON_FOCUS, true);
   const [confirmFileOverwrite, setConfirmFileOverwrite] = usePref("confirmFileOverwrite", true);
   const [strictTofu, setStrictTofu] = usePref("strictTofu", true);
   const [mdnsEnabled, setMdnsEnabled] = usePref("mdnsEnabled", true);

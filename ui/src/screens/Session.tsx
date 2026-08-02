@@ -30,6 +30,7 @@ import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
 import { Dialog } from "../components/primitives";
 import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import { PREF_CLIPBOARD_AUTO, PREF_CLIPBOARD_ON_FOCUS, readBoolPref } from "../lib/prefs";
 import {
   CAPTURE_INACTIVE,
   MACOS_ACCESSIBILITY_SETTINGS_URL,
@@ -563,13 +564,69 @@ function SessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.state]);
 
+  /**
+   * The text most recently moved in either direction, so neither automatic
+   * half of the sync repeats itself: without it, text copied on the remote is
+   * written to the local clipboard and then pushed straight back the next time
+   * this window is focused.
+   */
+  const lastClipboardRef = useRef<string | null>(null);
+
   // Remote clipboard -> local (text only). The write is native: the webview's
   // own clipboard API is gesture-gated and this text arrives from the socket.
   useEffect(() => {
     const text = session.remoteClipboard;
     if (text === null) return;
+    lastClipboardRef.current = text;
     void writeClipboard(text);
   }, [session.remoteClipboard]);
+
+  /**
+   * Local clipboard -> remote.
+   *
+   * `force` is the toolbar button: an explicit "send clipboard" re-sends even
+   * when the text has not changed. The automatic callers pass false, so an
+   * unchanged clipboard costs nothing on the wire.
+   */
+  const pushClipboard = useCallback(
+    async (force: boolean): Promise<"sent" | "unchanged" | "unreadable"> => {
+      const text = await readClipboard();
+      if (text === null) return "unreadable";
+      if (!text || (!force && text === lastClipboardRef.current)) return "unchanged";
+      lastClipboardRef.current = text;
+      session.sendClipboard(text);
+      return "sent";
+    },
+    [session],
+  );
+
+  /**
+   * Automatic local -> remote sync (Preferences ▸ Clipboard).
+   *
+   * There is no OS clipboard-change event to subscribe to, and while this
+   * session holds the keyboard every Ctrl/Cmd+C goes to the remote, so a local
+   * copy can only have been made while we were somewhere else. Arriving is
+   * therefore exactly the moment the local clipboard may have changed, which
+   * is what the preference promises: "send your local clipboard to the remote
+   * when you switch back to the session".
+   *
+   * Without this the RFB stream carried nothing until the user found the
+   * toolbar button, so pasting into the remote pasted whatever that machine
+   * had on its own clipboard.
+   */
+  useEffect(() => {
+    if (session.state.state !== "connected" || !visible) return;
+    const sync = (): void => {
+      if (!readBoolPref(PREF_CLIPBOARD_AUTO, true)) return;
+      if (!readBoolPref(PREF_CLIPBOARD_ON_FOCUS, true)) return;
+      void pushClipboard(false);
+    };
+    // Connecting, or switching to this tab, counts as arriving: whatever was
+    // copied beforehand should be there to paste.
+    sync();
+    window.addEventListener("focus", sync);
+    return () => window.removeEventListener("focus", sync);
+  }, [session.state.state, visible, pushClipboard]);
 
   // Bell: brief visual pulse via toast
   useEffect(() => {
@@ -884,16 +941,13 @@ function SessionView({
   }, [session.desktopName, push]);
 
   const clipboardSend = useCallback(async (): Promise<void> => {
-    const text = await readClipboard();
-    if (text === null) {
+    const outcome = await pushClipboard(true);
+    if (outcome === "unreadable") {
       push("warning", "Could not read the local clipboard");
       return;
     }
-    if (text) {
-      session.sendClipboard(text);
-      push("success", "Clipboard sent to remote");
-    }
-  }, [session, push]);
+    if (outcome === "sent") push("success", "Clipboard sent to remote");
+  }, [pushClipboard, push]);
 
   // ------------------------------------------------------------- render
 
