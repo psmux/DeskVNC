@@ -497,6 +497,128 @@ async fn extended_clipboard_notify_is_answered_with_a_request() {
     handle.shutdown();
 }
 
+/// The flags word of an extended (negative-length) ClientCutText body, or
+/// `None` for a legacy one.
+fn ext_flags(body: &[u8]) -> Option<u32> {
+    let len = i32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+    if len >= 0 || body.len() < 11 {
+        return None;
+    }
+    Some(u32::from_be_bytes([body[7], body[8], body[9], body[10]]))
+}
+
+/// Announce server caps, which is what puts the client into Extended
+/// Clipboard mode; `flushes` tracks the cumulative non-incremental
+/// FramebufferUpdateRequest count that [`flush`] counts up to.
+async fn negotiate_extended_clipboard(
+    handle: &vnc_core::SessionHandle,
+    server: &MockServer,
+    flushes: &mut usize,
+) {
+    let flags = vnc_core::clipboard::ACTION_CAPS
+        | vnc_core::clipboard::ACTION_REQUEST
+        | vnc_core::clipboard::ACTION_NOTIFY
+        | vnc_core::clipboard::ACTION_PROVIDE
+        | vnc_core::clipboard::FORMAT_TEXT;
+    let mut body = vec![0u8, 0, 0];
+    body.extend_from_slice(&(-8i32).to_be_bytes());
+    body.extend_from_slice(&flags.to_be_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    server.send_cut_text_body(body);
+    *flushes += 1;
+    flush(handle, server, *flushes).await;
+}
+
+/// REGRESSION: a server that advertised it accepts nothing unsolicited drops
+/// a bare `provide` and asks for the text with a `request` instead. That
+/// request was never answered, so against those servers nothing the user
+/// copied locally ever arrived, however many times they pressed paste.
+#[tokio::test]
+async fn a_server_request_is_answered_with_the_text_on_offer() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let mut flushes = 1; // the priming request sent at connect
+
+    negotiate_extended_clipboard(&handle, &server, &mut flushes).await;
+    send(
+        &handle,
+        ClientCommand::ClipboardText("from the client pc".into()),
+    )
+    .await;
+    flushes += 1;
+    flush(&handle, &server, flushes).await;
+
+    // Everything sent so far, so the assertions below can only be satisfied
+    // by a message sent in ANSWER to the request. Without this the unsolicited
+    // provide from the send above already carries the right text and the test
+    // passes whether or not requests are answered at all.
+    let before = server.cut_text_bodies().len();
+
+    // The server now asks for what we announced.
+    let flags = vnc_core::clipboard::ACTION_REQUEST | vnc_core::clipboard::FORMAT_TEXT;
+    let mut body = vec![0u8, 0, 0];
+    body.extend_from_slice(&(-4i32).to_be_bytes());
+    body.extend_from_slice(&flags.to_be_bytes());
+    server.send_cut_text_body(body);
+    flushes += 1;
+    flush(&handle, &server, flushes).await;
+
+    let bodies = server.cut_text_bodies();
+    assert!(
+        bodies.len() > before,
+        "the request went unanswered: nothing was sent after it"
+    );
+    let reply = &bodies[before];
+    assert_ne!(
+        ext_flags(reply).expect("extended") & vnc_core::clipboard::ACTION_PROVIDE,
+        0,
+        "the request must be answered with a provide"
+    );
+    // Decode it the way the server would.
+    let mut rx = vnc_core::clipboard::ClipboardState::new();
+    assert_eq!(
+        vnc_core::clipboard::handle_server_cut_text(&mut rx, reply).as_deref(),
+        Some("from the client pc"),
+        "the provide must carry the text that was on offer"
+    );
+    handle.shutdown();
+}
+
+/// The announcement is the only thing a strict server acts on, so it goes out
+/// with the data rather than only when the server happens to ask first.
+#[tokio::test]
+async fn an_extended_send_announces_the_text_as_well_as_pushing_it() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let mut flushes = 1;
+
+    negotiate_extended_clipboard(&handle, &server, &mut flushes).await;
+    let before = server.cut_text_bodies().len();
+
+    send(&handle, ClientCommand::ClipboardText("announce me".into())).await;
+    flushes += 1;
+    flush(&handle, &server, flushes).await;
+
+    let bodies = server.cut_text_bodies();
+    let sent: Vec<u32> = bodies[before..]
+        .iter()
+        .filter_map(|b| ext_flags(b))
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|f| f & vnc_core::clipboard::ACTION_NOTIFY != 0),
+        "a notify tells a server that wants no unsolicited data to ask: {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|f| f & vnc_core::clipboard::ACTION_PROVIDE != 0),
+        "the data still goes out for servers that accept it: {sent:?}"
+    );
+    handle.shutdown();
+}
+
 /// Neither peer may send an extended message before it has both sent and
 /// received a caps announcement, so the server's caps must be answered.
 #[tokio::test]

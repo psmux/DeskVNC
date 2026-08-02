@@ -145,6 +145,11 @@ pub(crate) struct RunLoop {
     /// requires BOTH peers to announce caps before any other extended message,
     /// so ours is sent (once) the moment the server's arrives.
     clipboard_caps_sent: bool,
+    /// The text most recently offered to the server, kept so a `request` can
+    /// be answered. A server that told us it wants no unsolicited data ignores
+    /// a bare `provide` and asks for the text instead; with nothing held here
+    /// there would be nothing to answer it with.
+    clipboard_offered: Option<String>,
     tuner: AutoTuner,
     applied_quality: QualitySettings,
 
@@ -213,6 +218,7 @@ impl RunLoop {
             decoder: DecoderState::new(pf),
             clipboard: ClipboardState::new(),
             clipboard_caps_sent: false,
+            clipboard_offered: None,
             tuner: AutoTuner::new(),
             applied_quality,
             fb_width,
@@ -620,6 +626,20 @@ impl RunLoop {
                         msg.extend_from_slice(&body);
                         self.send(&msg).await?;
                     }
+                } else if flags & ext_clipboard::ACTION_REQUEST != 0 {
+                    // The server is asking for the text we announced. This is
+                    // the only way data reaches a server that advertised it
+                    // accepts nothing unsolicited, so leaving it unanswered
+                    // (as this did) meant the clipboard never arrived there.
+                    if flags & crate::clipboard::FORMAT_TEXT != 0 {
+                        if let Some(text) = self.clipboard_offered.clone() {
+                            let body = crate::clipboard::encode_provide_text(&text);
+                            let mut msg = Vec::with_capacity(1 + body.len());
+                            msg.push(messages::client_msg::CLIENT_CUT_TEXT);
+                            msg.extend_from_slice(&body);
+                            self.send(&msg).await?;
+                        }
+                    }
                 } else if flags & ext_clipboard::ACTION_NOTIFY != 0 {
                     emit(
                         events,
@@ -724,6 +744,23 @@ impl RunLoop {
             }
             ClientCommand::ReleaseAllKeys => self.release_all_keys(settings).await?,
             ClientCommand::ClipboardText(text) => {
+                // Extended peers are ANNOUNCED to first. The provide below is
+                // enough for a server that accepts unsolicited data, but one
+                // that advertised it does not will drop it and wait to be
+                // told there is something to ask for; a notify costs four
+                // bytes and is what makes those servers request the text
+                // (answered in `handle_server_cut_text`).
+                if self.clipboard.extended_supported() {
+                    self.clipboard_offered = Some(text.clone());
+                    let body = crate::clipboard::encode_notify(
+                        &self.clipboard,
+                        crate::clipboard::FORMAT_TEXT,
+                    );
+                    let mut msg = Vec::with_capacity(1 + body.len());
+                    msg.push(messages::client_msg::CLIENT_CUT_TEXT);
+                    msg.extend_from_slice(&body);
+                    self.send(&msg).await?;
+                }
                 // The clipboard layer returns the message BODY; the
                 // ClientCutText (6) type byte is ours to prepend.
                 let body = crate::clipboard::encode_client_cut_text(&self.clipboard, &text);

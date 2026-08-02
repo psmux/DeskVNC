@@ -10,7 +10,24 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-02
+### Fixed
+
+- **Copying on this computer and pasting into the remote did nothing.** The
+  local clipboard was only ever sent by the toolbar's "Send clipboard to
+  remote" button, so pasting into the remote pasted whatever that machine
+  already had. Preferences ▸ Clipboard offered "Sync clipboard automatically"
+  and "Push clipboard when the window gains focus", both on by default, and
+  both were wired to nothing. They now work: the local clipboard is pushed
+  when a session connects and whenever you switch back to it, which is exactly
+  when it can have changed, since while the session has the keyboard every
+  Ctrl/Cmd+C goes to the remote. Text that just arrived *from* the remote is
+  not echoed back, and an unchanged clipboard sends nothing.
+- **Clipboard text never reached servers that ask before accepting it.** With
+  the Extended Clipboard extension negotiated, the client pushed an unsolicited
+  `provide`, which a server that advertised it wants no unsolicited data drops;
+  it then asks with a `request`, which the client ignored. The client now
+  announces with a `notify` and answers a `request` with the text, so both
+  kinds of server receive it.
 
 ### Added
 
