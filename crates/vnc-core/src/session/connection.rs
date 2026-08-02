@@ -32,6 +32,11 @@ pub(crate) struct SessionSettings {
     pub lossless_refresh: bool,
     /// Last resolution the user asked the server for (SetDesktopSize).
     pub requested_size: Option<(u16, u16)>,
+    /// Re-fetch the whole screen every tick (see
+    /// `ClientCommand::SetAlwaysRefresh`). Survives reconnects like every
+    /// other session setting, so turning it on is not silently undone by a
+    /// dropped connection.
+    pub always_refresh: bool,
 }
 
 impl SessionSettings {
@@ -41,6 +46,7 @@ impl SessionSettings {
             view_only: options.view_only,
             lossless_refresh: options.lossless_refresh,
             requested_size: None,
+            always_refresh: false,
         }
     }
 }
@@ -432,9 +438,10 @@ pub(crate) async fn run_once(
     let (read_half, write_half) = tokio::io::split(stream);
     let bytes_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let sent_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let link_peak = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let reader = BufReader::with_capacity(
         128 * 1024,
-        CountingReader::new(read_half, bytes_counter.clone()),
+        CountingReader::new(read_half, bytes_counter.clone(), link_peak.clone()),
     );
     let mut write_half = CountingWriter::new(write_half, sent_counter.clone());
 
@@ -475,6 +482,7 @@ pub(crate) async fn run_once(
         quality_settings,
         bytes_counter,
         sent_counter,
+        link_peak,
     );
     run_loop.run(settings, events, commands, cancel).await
 }

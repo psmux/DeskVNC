@@ -1,10 +1,11 @@
 //! Quality presets, SetEncodings list construction, and the adaptive Auto
 //! tuner (PRD/09).
 //!
-//! [`AutoTuner`] keeps decaying averages of throughput, RTT and decode time,
-//! walks the tier ladder in §3.2, and applies mandatory hysteresis: a tier
-//! change must be sustained for at least [`SUSTAIN`] before it is offered,
-//! and switches never happen more often than once per [`COOLDOWN`].
+//! [`AutoTuner`] keeps a windowed maximum of measured link capacity, decaying
+//! averages of RTT and decode time, walks the tier ladder in §3.2, and applies
+//! mandatory hysteresis: a tier change must be sustained for at least
+//! [`SUSTAIN`] before it is offered, and switches never happen more often than
+//! once per [`COOLDOWN`].
 
 use std::time::{Duration, Instant};
 
@@ -23,19 +24,116 @@ pub const FRAME_BUDGET_MS: f32 = 16.0;
 /// EWMA time constant. ~0.7 s gives an effective window of roughly 2 s.
 const TAU_S: f64 = 0.7;
 
-/// Token minimum so a stray byte or two cannot produce a rate.
+/// A burst must gather this many bytes before it is timed: a packet TRAIN
+/// (~11 MSS), not a pair.
 ///
-/// It is deliberately tiny. Once throughput is measured against *active
-/// transfer time*, byte volume stops being the discriminator: a 50 kbit/s link
-/// moves barely a kilobyte per window, and rejecting that would mask exactly
-/// the constrained links Auto exists to find. [`MIN_ACTIVE_S`] does the real
-/// work, an idle desktop is rejected because the link was busy for a fraction
-/// of a millisecond, not because the byte count was low.
-const MIN_SAMPLE_BYTES: usize = 256;
+/// Timing one segment measures the *last hop's* line rate, a segment coming
+/// off a gigabit NIC always reads gigabit whatever actually fed it. Requiring
+/// a train bounds the error from residual buffering to roughly `1 + gap/T`
+/// where `T = MIN_BURST_BYTES/rate`: at 1 Mbit/s, T is ~131ms so the error is
+/// a few percent; at 1 Gbit/s the bound is meaningless, but the link is
+/// already fast so it decides nothing. The slower the true link, the tighter
+/// the guarantee.
+pub(crate) const MIN_BURST_BYTES: u64 = 16 * 1024;
 
-/// Minimum *active transfer* time for the sample to mean anything. Below this
-/// the clock resolution dominates and the computed rate is noise.
-const MIN_ACTIVE_S: f64 = 0.002;
+/// Minimum elapsed time for a completed burst to be trusted. Below this we
+/// are timing syscall/wakeup overhead, not the wire.
+pub(crate) const MIN_BURST_S: f64 = 100e-6;
+
+/// Abandon a burst that has not gathered [`MIN_BURST_BYTES`] within this long,
+/// so an idle desktop can't slowly accrue traffic into a fake sample.
+const MAX_BURST_S: f64 = 4.0;
+
+/// How long a link-capacity sample stays eligible for the rotating max
+/// (see [`AutoTuner::record_link`]).
+const LINK_WINDOW: Duration = Duration::from_secs(5);
+
+/// Stall-anchored burst sampler (BBR's delivery-rate model, applied to a
+/// single TCP read side).
+///
+/// Soundness argument: if the socket was observed EMPTY at t0, and B bytes
+/// have been handed to us by t1, then all B bytes crossed the wire within
+/// `[t0, t1]`, so the link carried at least `B / (t1 - t0)`. That is a valid
+/// LOWER BOUND on capacity regardless of how slow the server's encoder is,
+/// because a slow link cannot physically deliver a fast burst.
+///
+/// There is deliberately NO stall-classification heuristic here: at 1 Mbit/s
+/// an inter-segment gap (~12 ms) and a Raspberry Pi encode stall (~30 ms) are
+/// the same order of magnitude, so no threshold reliably tells one from the
+/// other. A burst that straddles a server stall just reports a smaller
+/// number and loses to the windowed max (see [`AutoTuner::record_link`]);
+/// it is never wrong, only less tight.
+#[derive(Debug, Default)]
+pub(crate) struct LinkMeter {
+    /// The socket has been observed empty (a `Poll::Pending`) since the last
+    /// completed burst.
+    drained: bool,
+    /// When the current burst started, if one is open.
+    started: Option<Instant>,
+    /// Bytes accumulated in the current burst.
+    bytes: u64,
+}
+
+impl LinkMeter {
+    /// Record that a poll found the socket empty. Must NOT end a burst in
+    /// progress: on a genuinely slow link the socket goes empty between
+    /// every segment, so ending bursts on stall would make slow links
+    /// unmeasurable, the exact opposite of this type's purpose.
+    pub(crate) fn stalled(&mut self) {
+        self.drained = true;
+    }
+
+    /// Record `n` bytes delivered at `now`. Returns a completed sample in
+    /// bits/sec, if this delivery completed one.
+    pub(crate) fn received(&mut self, now: Instant, n: usize) -> Option<f64> {
+        if n == 0 {
+            return None;
+        }
+        if self.started.is_none() {
+            if !self.drained {
+                // No burst running and the socket was never observed empty:
+                // there is nothing to anchor a start time to.
+                return None;
+            }
+            // The bytes that just ENDED the stall are not counted: they had
+            // already queued while we were decoding, and crediting them to an
+            // interval they did not cross the wire in is exactly how a slow
+            // link reads as gigabit.
+            self.drained = false;
+            self.started = Some(now);
+            self.bytes = 0;
+            return None;
+        }
+
+        let started = self.started.expect("checked above");
+        self.bytes += n as u64;
+        if self.bytes < MIN_BURST_BYTES {
+            let elapsed = now.saturating_duration_since(started).as_secs_f64();
+            if elapsed >= MAX_BURST_S {
+                // This burst has been open too long without gathering enough
+                // to time: an idle desktop trickling bytes must not slowly
+                // accrue into a fake sample. Start over.
+                self.started = None;
+                self.bytes = 0;
+                self.drained = false;
+            }
+            return None;
+        }
+
+        let elapsed = now.saturating_duration_since(started).as_secs_f64();
+        if elapsed < MIN_BURST_S {
+            // Too little time to trust the clock: keep accumulating.
+            return None;
+        }
+
+        let bps = self.bytes as f64 * 8.0 / elapsed;
+        // Reset so the next burst also starts from a known-empty socket.
+        self.started = None;
+        self.bytes = 0;
+        self.drained = false;
+        Some(bps)
+    }
+}
 
 /// Resolve a preset to concrete protocol knobs (Auto resolves to its
 /// starting point, Medium).
@@ -98,41 +196,73 @@ enum Tier {
 }
 
 impl Tier {
-    /// `throughput_bps` must be measured over *active transfer time*, not
-    /// wall-clock, see [`AutoTuner::observe`].
+    /// `link_bps` is a LOWER BOUND on link capacity from stall-anchored burst
+    /// sampling (see [`LinkMeter`]), not achieved throughput: it is what the
+    /// link proved it could carry during a burst, never contaminated by how
+    /// slowly the server encoded between bursts.
     ///
-    /// RTT is deliberately not consulted: it is only obtainable from fence
-    /// probes, and the whole TightVNC/libvncserver family has no Fence support,
-    /// so on exactly the servers that matter it is permanently 0 and any rule
-    /// built on it silently misfires.
-    fn from_link(throughput_bps: f64, _rtt_ms: f32) -> Self {
-        if throughput_bps > 20e6 {
+    /// RTT is deliberately not consulted. RTT is not capacity: a 1 Mbit/s DSL
+    /// line has a low RTT and a 100 Mbit/s satellite link has a high one. Our
+    /// own fence reply, the only way we obtain RTT, queues behind framebuffer
+    /// data on the same TCP stream, so it measures queue depth plus server
+    /// responsiveness, which is the very confound this sampling scheme exists
+    /// to remove. A "use RTT when available" rule would also split the client
+    /// into two algorithms where the untested path is the one most deployed
+    /// servers (libvncserver, x11vnc, TightVNC, Vino) actually take.
+    fn from_link(link_bps: f64, _rtt_ms: f32) -> Self {
+        if link_bps > 20e6 {
             Tier::High
-        } else if throughput_bps > 5e6 {
+        } else if link_bps > 5e6 {
             Tier::Medium
-        } else if throughput_bps > 1e6 {
+        } else if link_bps > 1e6 {
             Tier::LowIsh
         } else {
             Tier::Low
         }
     }
 
+    /// The automatic ladder moves JPEG quality and compression ONLY, never the
+    /// pixel format.
+    ///
+    /// The lower two tiers used to drop to 256 and then 64 colours, and both
+    /// of the things that makes a machine do are ones a user reads as a broken
+    /// picture rather than as an adaptation. Posterising a photographic desktop
+    /// to 64 colours is drastic and instantly visible, and worse, changing the
+    /// format mid-session forces the full-screen redraw documented in
+    /// `run_loop::apply_quality`. On a LAN with a server that encodes slowly
+    /// (a Raspberry Pi is the standard example) the throughput estimate reads
+    /// low even though the link is idle, so the ladder walked all the way down
+    /// and the session ended up posterised AND repainting in waves, with the
+    /// user moving the mouse around to force the stale regions to redraw.
+    ///
+    /// Colour-depth reduction still exists, as the explicit `Low` and
+    /// `BlackAndWhite` presets. That is the point: it is a big enough change
+    /// to be worth choosing, and choosing it is not the same as having it
+    /// applied on your behalf by a guess about the link. JPEG quality and
+    /// compression give Auto the bandwidth range it needs and need no format
+    /// change, so nothing has to be redrawn to apply them.
     fn settings(self) -> QualitySettings {
         match self {
             Tier::High => QualityPreset::High.settings(),
             Tier::Medium => QualityPreset::Medium.settings(),
             Tier::LowIsh => QualitySettings {
                 jpeg_quality: 4,
-                compression: 5,
-                pixel_format: ColorDepth::Palette256,
+                compression: 6,
+                pixel_format: ColorDepth::Full,
                 allow_jpeg: true,
                 allow_h264: true,
                 grayscale_levels: None,
             },
             Tier::Low => QualitySettings {
-                jpeg_quality: 2,
-                compression: 8,
-                pixel_format: ColorDepth::Rgb222,
+                // TigerVNC's entire automatic range is q6-q8, precisely
+                // because its link estimator is untrustworthy. Ours is
+                // better but not perfect, and q2 is a setting a user should
+                // have to choose deliberately, the identical argument already
+                // applied above to colour depth: Auto's floor stops one notch
+                // short of the explicit `Low`/`BlackAndWhite` presets.
+                jpeg_quality: 3,
+                compression: 9,
+                pixel_format: ColorDepth::Full,
                 allow_jpeg: true,
                 allow_h264: true,
                 grayscale_levels: None,
@@ -178,7 +308,16 @@ struct Shared {
 /// is recorded, so the same switch is never returned twice.
 #[derive(Debug)]
 pub struct AutoTuner {
-    throughput_bps: f64,
+    /// Highest link-capacity sample seen in the current [`LINK_WINDOW`].
+    link_cur_bps: f64,
+    /// Highest sample from the PREVIOUS window, kept so a slow window right
+    /// after a fast one does not instantly forget the fast sample.
+    link_prev_bps: f64,
+    /// When the current window started. `None` means no sample has arrived
+    /// yet, windows rotate only when a sample ARRIVES, never on a timer, a
+    /// quiet session keeps its estimate because silence is not evidence of
+    /// slowness.
+    link_window_start: Option<Instant>,
     rtt_ms: f32,
     decode_ms: f32,
     last_observe: Option<Instant>,
@@ -199,7 +338,9 @@ impl AutoTuner {
         Self {
             // Seed inside the Medium band so we do not recommend a change
             // before real measurements arrive (Auto starts at Medium).
-            throughput_bps: 10e6,
+            link_cur_bps: 10e6,
+            link_prev_bps: 0.0,
+            link_window_start: None,
             rtt_ms: 50.0,
             decode_ms: 5.0,
             last_observe: None,
@@ -214,23 +355,50 @@ impl AutoTuner {
         }
     }
 
-    /// Record one measurement sample: bytes received since the previous
-    /// observation, current RTT estimate, and decode time of the last update.
-    /// Non-positive `rtt_ms`/`decode_ms` are treated as "no sample".
-    /// `active_s` is the time actually spent transferring during the window, /// NOT the window length. See [`AutoTuner`] for why that distinction is the
-    /// whole ballgame.
-    pub fn observe(&mut self, bytes: usize, active_s: f64, rtt_ms: f32, decode_ms: f32) {
-        self.observe_at(Instant::now(), bytes, active_s, rtt_ms, decode_ms);
+    /// The capacity estimate the ladder decides on: the larger of the current
+    /// and previous window's maxima. Every sample is a lower bound, so the
+    /// correct aggregator is MAX, the tightest bound is the largest; an
+    /// average would be biased low by construction.
+    fn capacity_bps(&self) -> f64 {
+        self.link_cur_bps.max(self.link_prev_bps)
     }
 
-    fn observe_at(
-        &mut self,
-        now: Instant,
-        bytes: usize,
-        active_s: f64,
-        rtt_ms: f32,
-        decode_ms: f32,
-    ) {
+    /// Fold one completed [`LinkMeter`] sample into the two-window rotating
+    /// max. Windows rotate only when a sample ARRIVES, never on a timer.
+    fn record_link(&mut self, now: Instant, bps: f64) {
+        match self.link_window_start {
+            None => {
+                self.link_window_start = Some(now);
+                self.link_cur_bps = bps;
+            }
+            Some(start) => {
+                let age = now.saturating_duration_since(start);
+                if age >= LINK_WINDOW * 2 {
+                    // Both windows are stale: nothing carries forward.
+                    self.link_prev_bps = 0.0;
+                    self.link_cur_bps = bps;
+                    self.link_window_start = Some(now);
+                } else if age >= LINK_WINDOW {
+                    // Rotate: the current window becomes the previous one.
+                    self.link_prev_bps = self.link_cur_bps;
+                    self.link_cur_bps = bps;
+                    self.link_window_start = Some(now);
+                } else {
+                    self.link_cur_bps = self.link_cur_bps.max(bps);
+                }
+            }
+        }
+    }
+
+    /// Record one measurement tick: a completed link-capacity sample from
+    /// [`LinkMeter`] (or `None` if nothing loaded the link this tick),
+    /// current RTT estimate, and decode time of the last update.
+    /// Non-positive `rtt_ms`/`decode_ms` are treated as "no sample".
+    pub fn observe(&mut self, link_bps: Option<f64>, rtt_ms: f32, decode_ms: f32) {
+        self.observe_at(Instant::now(), link_bps, rtt_ms, decode_ms);
+    }
+
+    fn observe_at(&mut self, now: Instant, link_bps: Option<f64>, rtt_ms: f32, decode_ms: f32) {
         match self.last_observe {
             Some(prev) => {
                 let dt = now.saturating_duration_since(prev).as_secs_f64();
@@ -242,35 +410,6 @@ impl AutoTuner {
                     }
                     if decode_ms > 0.0 {
                         self.decode_ms += (a as f32) * (decode_ms - self.decode_ms);
-                    }
-
-                    // Throughput is NOT. You can only measure a link's capacity
-                    // while you are actually loading it: a desktop that nobody
-                    // is touching sends a few hundred bytes a second, and
-                    // feeding that in as "throughput" makes an idle gigabit LAN
-                    // look like a modem. That is what previously drove Auto down
-                    // to 64 colours on a fast network, and each tier change
-                    // forced a full-screen redraw, which reads as the picture
-                    // repainting in waves.
-                    //
-                    // So: only let a sample move the estimate when enough data
-                    // moved to say anything. Otherwise keep the last real
-                    // measurement and leave the tier alone.
-                    // Capacity = bytes / time spent MOVING those bytes. Using
-                    // the window length instead is what made an idle desktop on
-                    // a fast link report ~500 kbit/s and drag quality to the
-                    // floor: the link was busy for 20 ms of every second and
-                    // idle for the other 980.
-                    if bytes >= MIN_SAMPLE_BYTES && active_s >= MIN_ACTIVE_S {
-                        let inst_bps = (bytes as f64 * 8.0) / active_s;
-                        self.throughput_bps += a * (inst_bps - self.throughput_bps);
-                        self.have_real_sample = true;
-                    } else {
-                        // Too little moved to say anything about the link.
-                        // Crucially this is NOT evidence of slowness, leave the
-                        // estimate and the ladder exactly as they were.
-                        self.last_observe = Some(now);
-                        return;
                     }
                 }
             }
@@ -286,7 +425,23 @@ impl AutoTuner {
         }
         self.last_observe = Some(now);
 
-        let target = Tier::from_link(self.throughput_bps, self.rtt_ms);
+        // A completed burst is a LOWER BOUND on capacity (see [`LinkMeter`]),
+        // so fold it into the windowed max. `None` is NOT a low reading, it
+        // means nothing loaded the link this tick, not that the link is slow,
+        // so the estimate must stand rather than decay toward zero.
+        if let Some(bps) = link_bps {
+            if bps > 0.0 {
+                self.record_link(now, bps);
+                self.have_real_sample = true;
+            }
+        }
+        if !self.have_real_sample {
+            // Never move the ladder before a real capacity sample exists:
+            // the seeded starting tier stands.
+            return;
+        }
+
+        let target = Tier::from_link(self.capacity_bps(), self.rtt_ms);
         // Client CPU-bound: sustained decode overruns ask for lower
         // compression at the same tier.
         let relief = self.decode_ms > FRAME_BUDGET_MS;
@@ -417,11 +572,6 @@ mod tests {
 
     const STEP: Duration = Duration::from_millis(200);
 
-    /// Bytes per STEP that produce `bps` bits/sec instantaneous throughput.
-    fn bytes_for(bps: f64) -> usize {
-        (bps / 8.0 * STEP.as_secs_f64()) as usize
-    }
-
     #[test]
     fn sustained_fast_link_upgrades_to_high_once() {
         let mut t = AutoTuner::new();
@@ -431,7 +581,7 @@ mod tests {
         for _ in 0..30 {
             // 6 s of 60 Mbit/s, 1 ms RTT
             now += STEP;
-            t.observe_at(now, bytes_for(60e6), STEP.as_secs_f64(), 1.0, 4.0);
+            t.observe_at(now, Some(60e6), 1.0, 4.0);
         }
         let rec = t.recommended().expect("sustained fast link must upgrade");
         assert_eq!(rec, QualityPreset::High.settings());
@@ -440,7 +590,7 @@ mod tests {
         assert_eq!(t.recommended(), None);
         // And with unchanged conditions, no new recommendation appears.
         now += STEP;
-        t.observe_at(now, bytes_for(60e6), STEP.as_secs_f64(), 1.0, 4.0);
+        t.observe_at(now, Some(60e6), 1.0, 4.0);
         assert_eq!(t.recommended(), None);
     }
 
@@ -452,11 +602,10 @@ mod tests {
         for _ in 0..30 {
             // 6 s of ~200 kbit/s
             now += STEP;
-            t.observe_at(now, bytes_for(0.2e6), STEP.as_secs_f64(), 300.0, 4.0);
+            t.observe_at(now, Some(0.2e6), 300.0, 4.0);
         }
         let rec = t.recommended().expect("sustained slow link must downgrade");
-        assert_eq!(rec.jpeg_quality, 2);
-        assert_eq!(rec.pixel_format, ColorDepth::Rgb222);
+        assert_eq!(rec.jpeg_quality, 3);
         assert!(rec.compression >= 7);
         assert_eq!(t.current_tier(), QualityPreset::Low);
     }
@@ -475,7 +624,7 @@ mod tests {
             let bps = if block % 2 == 0 { 10e6 } else { 0.05e6 };
             for _ in 0..5 {
                 now += STEP;
-                t.observe_at(now, bytes_for(bps), STEP.as_secs_f64(), 30.0, 5.0);
+                t.observe_at(now, Some(bps), 30.0, 5.0);
                 if t.recommended().is_some() {
                     recommendations += 1;
                 }
@@ -493,16 +642,23 @@ mod tests {
         // Upgrade to High.
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, bytes_for(60e6), STEP.as_secs_f64(), 1.0, 4.0);
+            t.observe_at(now, Some(60e6), 1.0, 4.0);
         }
         assert!(t.recommended().is_some());
         let switch_time = now;
 
-        // Immediately crash the link, sustained. The downgrade is warranted
-        // after 2 s of sustain but must wait for the 5 s cooldown.
+        // Immediately crash the link, sustained. A single fast sample is not
+        // forgotten the instant the link turns slow: the windowed max keeps
+        // it alive in BOTH the current and (after one rotation) the previous
+        // window, so the desired tier does not even become Low until the
+        // fast sample has aged out of both, roughly 2*LINK_WINDOW. Drive it
+        // that long (plus COOLDOWN, for headroom) while still asserting the
+        // thing this test exists to prove: no switch happens inside the 5 s
+        // cooldown from the last one.
+        let deadline = 2 * LINK_WINDOW + COOLDOWN;
         loop {
             now += STEP;
-            t.observe_at(now, bytes_for(0.05e6), STEP.as_secs_f64(), 300.0, 4.0);
+            t.observe_at(now, Some(0.05e6), 300.0, 4.0);
             let elapsed = now.duration_since(switch_time);
             if elapsed < COOLDOWN {
                 assert_eq!(
@@ -510,16 +666,20 @@ mod tests {
                     None,
                     "no switch may occur within the cooldown ({elapsed:?})"
                 );
-            } else {
+            }
+            if elapsed >= deadline {
                 break;
             }
         }
-        // Past the cooldown (and long past sustain), the downgrade arrives.
+        // Past both windows aging out (and long past sustain/cooldown), the
+        // downgrade arrives.
         now += STEP;
-        t.observe_at(now, bytes_for(0.05e6), STEP.as_secs_f64(), 300.0, 4.0);
-        let rec = t.recommended().expect("downgrade after cooldown");
+        t.observe_at(now, Some(0.05e6), 300.0, 4.0);
+        let rec = t
+            .recommended()
+            .expect("downgrade once the fast sample ages out");
         assert_eq!(t.current_tier(), QualityPreset::Low);
-        assert_eq!(rec.jpeg_quality, 2);
+        assert_eq!(rec.jpeg_quality, 3);
     }
 
     #[test]
@@ -530,7 +690,7 @@ mod tests {
         for _ in 0..30 {
             // Healthy Medium-band link, but decoding takes 30 ms per frame.
             now += STEP;
-            t.observe_at(now, bytes_for(10e6), STEP.as_secs_f64(), 30.0, 30.0);
+            t.observe_at(now, Some(10e6), 30.0, 30.0);
         }
         let rec = t.recommended().expect("CPU-bound client warrants relief");
         let medium = QualityPreset::Medium.settings();
@@ -550,19 +710,19 @@ mod tests {
     }
 
     /// The bug the user hit: a gigabit LAN showing a desktop nobody is
-    /// touching. Almost no bytes flow, and the old tuner read that as a slow
-    /// link and walked down to 64 colours, which also forced a full-screen
-    /// redraw on every step ("the picture repaints in waves").
+    /// touching. No burst ever completes, and the old tuner read wall-clock
+    /// idleness as a slow link and walked down to 64 colours, which also
+    /// forced a full-screen redraw on every step ("the picture repaints in
+    /// waves").
     #[test]
     fn an_idle_fast_link_never_downgrades() {
         let mut t = AutoTuner::new();
         let start = Instant::now();
-        // 60 seconds of a static desktop: a couple of hundred bytes a second
-        // of cursor/heartbeat traffic, sub-millisecond RTT.
+        // 60 seconds of a static desktop: nothing loads the link, so every
+        // tick observes `None` (this guards `have_real_sample`: the seeded
+        // starting tier must hold with no real sample ever seen).
         for i in 1..=60 {
-            // 300 bytes that took 0.4 ms to arrive: the link was busy for a
-            // rounding error of each second and idle for the rest.
-            t.observe_at(start + Duration::from_secs(i), 300, 0.0004, 0.4, 1.0);
+            t.observe_at(start + Duration::from_secs(i), None, 0.4, 1.0);
         }
         assert!(
             t.recommended().is_none(),
@@ -580,12 +740,287 @@ mod tests {
         // ~800 kbit/s sustained with real traffic in every window.
         for i in 1..=12 {
             // 100 KiB that genuinely took a full second to transfer: ~800 kbit/s.
-            t.observe_at(start + Duration::from_secs(i), 100 * 1024, 1.0, 90.0, 2.0);
+            let bps = (100.0 * 1024.0 * 8.0) / 1.0;
+            t.observe_at(start + Duration::from_secs(i), Some(bps), 90.0, 2.0);
         }
         let rec = t.recommended().expect("a loaded slow link must downgrade");
         assert!(
             rec.jpeg_quality <= 4,
             "expected a lower-quality tier, got {rec:?}"
+        );
+    }
+
+    /// The whole point of switching to stall-anchored burst sampling: a
+    /// server whose OWN encoder is slow (a Raspberry Pi is the standard
+    /// example) must not read as a slow link just because the socket sits
+    /// empty between rects. Every rect here opens on a real stall, then
+    /// delivers its data as a fast burst, exactly what a gigabit LAN behind
+    /// a slow encoder actually looks like on the wire.
+    #[test]
+    fn a_slow_server_on_a_fast_link_never_downgrades() {
+        let mut t = AutoTuner::new();
+        let mut meter = LinkMeter::default();
+        let mut now = Instant::now();
+
+        for _ in 0..20 {
+            let mut best: Option<f64> = None;
+            for _ in 0..5 {
+                // The Pi's encoder holds the socket empty for ~30 ms per
+                // rect: that time is the SERVER's, not the link's.
+                meter.stalled();
+                now += Duration::from_millis(30);
+                let opening = meter.received(now, 4 * 1024);
+                assert_eq!(
+                    opening, None,
+                    "the bytes that end a stall must not be timed: they \
+                     queued during the stall, not while crossing the wire"
+                );
+                // Once the queued rect starts flowing it arrives as a fast
+                // burst (gigabit LAN), which is what proves the link, not
+                // the server.
+                for _ in 0..8 {
+                    now += Duration::from_micros(30);
+                    if let Some(bps) = meter.received(now, 4 * 1024) {
+                        best = Some(best.map_or(bps, |b: f64| b.max(bps)));
+                    }
+                }
+            }
+            let sample = best.expect("a burst must complete every second");
+            assert!(
+                sample > 100e6,
+                "a burst timed on a gigabit LAN must read as fast, got {sample}"
+            );
+            t.observe_at(now, Some(sample), 1.0, 2.0);
+            now += Duration::from_millis(850);
+        }
+
+        let medium = QualityPreset::Medium.settings();
+        if let Some(rec) = t.recommended() {
+            assert!(
+                rec.jpeg_quality >= medium.jpeg_quality,
+                "must never drop below Medium's quality: {rec:?}"
+            );
+        }
+        assert_ne!(
+            t.current_tier(),
+            QualityPreset::Low,
+            "a Pi's slow encoder must never read as a slow link"
+        );
+    }
+
+    /// ...but a link that is genuinely slow, not merely fed by a slow
+    /// server, must still be caught, driven with realistic segment-sized
+    /// deliveries and a stall before every single one, which is exactly what
+    /// proves stalls-mid-burst do not truncate a sample: a truly slow link
+    /// stalls constantly (the wire itself is the bottleneck), so if a stall
+    /// ended a burst this link could never accumulate enough to be measured.
+    #[test]
+    fn a_genuinely_slow_link_still_downgrades() {
+        let mut t = AutoTuner::new();
+        let mut meter = LinkMeter::default();
+        let start = Instant::now();
+        let mut now = start;
+        const SEGMENT: usize = 1448; // one Ethernet MSS' worth of payload
+
+        while now.duration_since(start) < Duration::from_secs(20) {
+            meter.stalled();
+            now += Duration::from_millis(12); // ~965 kbit/s worth of spacing
+            if let Some(bps) = meter.received(now, SEGMENT) {
+                assert!(
+                    bps < 1.5e6,
+                    "a ~965 kbit/s link must not read as fast, got {bps}"
+                );
+                t.observe_at(now, Some(bps), 40.0, 2.0);
+            }
+        }
+
+        let rec = t
+            .recommended()
+            .expect("a genuinely slow link must downgrade");
+        assert_eq!(rec.jpeg_quality, 3, "must land on the new automatic floor");
+        assert_eq!(t.current_tier(), QualityPreset::Low);
+    }
+
+    /// A single fast burst (a fluke: a backlog flushing all at once, say)
+    /// must not pin the link estimate at high quality forever. The windowed
+    /// max keeps it alive for up to 2*LINK_WINDOW, but a link that is
+    /// genuinely slow the rest of the time still has to win once the fluke
+    /// ages out.
+    #[test]
+    fn one_fluke_burst_cannot_pin_a_slow_link_at_high_quality() {
+        let mut t = AutoTuner::new();
+        let start = Instant::now();
+        let mut now = start;
+
+        t.observe_at(now, Some(200e6), 1.0, 2.0);
+
+        while now.duration_since(start) < Duration::from_secs(20) {
+            now += Duration::from_millis(200);
+            t.observe_at(now, Some(0.4e6), 200.0, 2.0);
+        }
+
+        let rec = t
+            .recommended()
+            .expect("the outlier must age out and the link must downgrade");
+        assert_eq!(t.current_tier(), QualityPreset::Low);
+        assert_eq!(rec.jpeg_quality, 3);
+    }
+
+    /// A measured estimate must not erode just because nothing loads the
+    /// link for a while: silence is not evidence of slowness. Windows rotate
+    /// only when a sample ARRIVES (see `AutoTuner::record_link`), never on a
+    /// timer.
+    #[test]
+    fn a_quiet_spell_does_not_erode_a_measured_estimate() {
+        let mut t = AutoTuner::new();
+        let start = Instant::now();
+        let mut now = start;
+        for _ in 0..30 {
+            now += STEP;
+            t.observe_at(now, Some(60e6), 1.0, 2.0);
+        }
+        t.recommended()
+            .expect("sustained fast burst must upgrade to High");
+        assert_eq!(t.current_tier(), QualityPreset::High);
+
+        // A quiet spell: nobody moves the mouse, no burst ever completes, so
+        // every tick observes `None`.
+        for _ in 0..60 {
+            now += Duration::from_secs(1);
+            t.observe_at(now, None, 1.0, 2.0);
+        }
+        assert_eq!(
+            t.recommended(),
+            None,
+            "a quiet spell must not trigger a downgrade"
+        );
+        assert_eq!(t.current_tier(), QualityPreset::High);
+    }
+
+    // -- LinkMeter ------------------------------------------------------
+
+    /// Data that queued while the socket was empty and then all arrives at
+    /// once must not be timed as if it crossed the wire in zero time. The
+    /// burst that delivery OPENS is then timed normally.
+    #[test]
+    fn bytes_that_were_already_waiting_are_never_timed() {
+        let mut meter = LinkMeter::default();
+        let mut now = Instant::now();
+
+        meter.stalled();
+        assert_eq!(
+            meter.received(now, 64 * 1024),
+            None,
+            "data that queued during a stall must not be credited to a zero-time interval"
+        );
+
+        now += Duration::from_millis(10);
+        let bps = meter
+            .received(now, 32 * 1024)
+            .expect("the burst this opened must complete once it reaches MIN_BURST_BYTES");
+        let expected = (32.0 * 1024.0 * 8.0) / 0.010;
+        assert!(
+            (bps - expected).abs() / expected < 1e-6,
+            "got {bps}, expected {expected}"
+        );
+    }
+
+    /// A stall arriving WHILE a burst is still accumulating must not
+    /// truncate or reset it: on a genuinely slow link the socket goes empty
+    /// between every segment, so ending bursts on stall would make slow
+    /// links unmeasurable, the exact opposite of what this type is for.
+    #[test]
+    fn a_stall_inside_a_burst_does_not_end_it() {
+        let mut meter = LinkMeter::default();
+        let mut now = Instant::now();
+
+        meter.stalled();
+        assert_eq!(meter.received(now, 4096), None); // opens the burst
+
+        now += Duration::from_millis(1);
+        assert_eq!(meter.received(now, 4096), None); // 4 KiB, below the 16 KiB train
+
+        // A stall mid-burst.
+        meter.stalled();
+
+        now += Duration::from_millis(1);
+        assert_eq!(meter.received(now, 4096), None); // 8 KiB
+        now += Duration::from_millis(1);
+        assert_eq!(meter.received(now, 4096), None); // 12 KiB
+
+        now += Duration::from_millis(1);
+        let bps = meter
+            .received(now, 4096)
+            .expect("16 KiB reached: the burst completes as ONE continuous interval");
+        let expected = (16.0 * 1024.0 * 8.0) / 0.004;
+        assert!(
+            (bps - expected).abs() / expected < 1e-6,
+            "the stall in the middle must not have reset the burst: got {bps}, expected {expected}"
+        );
+    }
+
+    /// A trickle that never gathers a full packet train must never complete
+    /// a burst, or a nearly-idle link would read as an arbitrarily fast one
+    /// off a handful of bytes.
+    #[test]
+    fn an_idle_trickle_never_completes_a_burst() {
+        let mut meter = LinkMeter::default();
+        let mut now = Instant::now();
+        for _ in 0..60 {
+            meter.stalled();
+            now += Duration::from_secs(1);
+            assert_eq!(
+                meter.received(now, 300),
+                None,
+                "a 300 B/s trickle must never complete a burst"
+            );
+        }
+    }
+
+    /// REGRESSION: the automatic ladder must never change the pixel format.
+    ///
+    /// Every tier it can reach has to stay at full colour, because a format
+    /// change costs a full-screen redraw (`run_loop::apply_quality`) and
+    /// posterising to 64 colours reads as a broken picture, not as an
+    /// adaptation. This is what made a Raspberry Pi on a LAN, whose slow
+    /// encoder reads as a slow link, end up both pixelated and repainting in
+    /// patches as the user moved the mouse.
+    #[test]
+    fn the_automatic_ladder_never_reduces_colour_depth() {
+        for tier in [Tier::High, Tier::Medium, Tier::LowIsh, Tier::Low] {
+            assert_eq!(
+                tier.settings().pixel_format,
+                ColorDepth::Full,
+                "{tier:?} must not change the pixel format"
+            );
+        }
+        // The explicit presets are exactly where colour reduction still lives:
+        // choosing it is not the same as having it chosen for you.
+        assert_eq!(
+            QualityPreset::Low.settings().pixel_format,
+            ColorDepth::Palette256
+        );
+        assert_eq!(
+            QualityPreset::BlackAndWhite.settings().pixel_format,
+            ColorDepth::Grayscale
+        );
+    }
+
+    /// The ladder must still span a real bandwidth range, or Auto cannot
+    /// adapt at all once colour depth is off the table.
+    #[test]
+    fn the_ladder_still_spans_a_useful_quality_range() {
+        let q = |t: Tier| t.settings().jpeg_quality;
+        assert!(
+            q(Tier::High) > q(Tier::Medium)
+                && q(Tier::Medium) > q(Tier::LowIsh)
+                && q(Tier::LowIsh) > q(Tier::Low),
+            "each tier down must actually cost quality"
+        );
+        let c = |t: Tier| t.settings().compression;
+        assert!(
+            c(Tier::Low) > c(Tier::High),
+            "the slow end must compress harder"
         );
     }
 
@@ -597,13 +1032,8 @@ mod tests {
         // ~40 Mbit/s with sub-millisecond RTT.
         for i in 1..=12 {
             // 5 MiB in a second of actual transfer: ~40 Mbit/s.
-            t.observe_at(
-                start + Duration::from_secs(i),
-                5 * 1024 * 1024,
-                1.0,
-                0.5,
-                3.0,
-            );
+            let bps = (5.0 * 1024.0 * 1024.0 * 8.0) / 1.0;
+            t.observe_at(start + Duration::from_secs(i), Some(bps), 0.5, 3.0);
         }
         let rec = t.recommended().expect("a loaded fast link must upgrade");
         assert!(rec.jpeg_quality >= 8, "expected high quality, got {rec:?}");

@@ -57,41 +57,67 @@ const CODE_TO_KEYSYM: Record<string, number> = {
   Numpad8: 0xffb8, Numpad9: 0xffb9,
 };
 
-/** `event.code` -> X11 keycode (evdev keycode + 8), for servers that prefer scancodes. */
-const CODE_TO_X11_KEYCODE: Record<string, number> = {
-  Escape: 9,
-  Digit1: 10, Digit2: 11, Digit3: 12, Digit4: 13, Digit5: 14,
-  Digit6: 15, Digit7: 16, Digit8: 17, Digit9: 18, Digit0: 19,
-  Minus: 20, Equal: 21, Backspace: 22, Tab: 23,
-  KeyQ: 24, KeyW: 25, KeyE: 26, KeyR: 27, KeyT: 28, KeyY: 29, KeyU: 30,
-  KeyI: 31, KeyO: 32, KeyP: 33, BracketLeft: 34, BracketRight: 35, Enter: 36,
-  ControlLeft: 37,
-  KeyA: 38, KeyS: 39, KeyD: 40, KeyF: 41, KeyG: 42, KeyH: 43, KeyJ: 44,
-  KeyK: 45, KeyL: 46, Semicolon: 47, Quote: 48, Backquote: 49, ShiftLeft: 50,
-  Backslash: 51,
-  KeyZ: 52, KeyX: 53, KeyC: 54, KeyV: 55, KeyB: 56, KeyN: 57, KeyM: 58,
-  Comma: 59, Period: 60, Slash: 61, ShiftRight: 62,
-  NumpadMultiply: 63, AltLeft: 64, Space: 65, CapsLock: 66,
-  F1: 67, F2: 68, F3: 69, F4: 70, F5: 71, F6: 72, F7: 73, F8: 74, F9: 75, F10: 76,
-  NumLock: 77, ScrollLock: 78,
-  Numpad7: 79, Numpad8: 80, Numpad9: 81, NumpadSubtract: 82,
-  Numpad4: 83, Numpad5: 84, Numpad6: 85, NumpadAdd: 86,
-  Numpad1: 87, Numpad2: 88, Numpad3: 89, Numpad0: 90, NumpadDecimal: 91,
-  IntlBackslash: 94, F11: 95, F12: 96,
-  NumpadEnter: 104, ControlRight: 105, NumpadDivide: 106, PrintScreen: 107,
-  AltRight: 108, Home: 110, ArrowUp: 111, PageUp: 112, ArrowLeft: 113,
-  ArrowRight: 114, End: 115, ArrowDown: 116, PageDown: 117, Insert: 118,
-  Delete: 119, Pause: 127, ContextMenu: 135, MetaLeft: 133, MetaRight: 134,
+/**
+ * `event.code` -> XT (PC set 1) scancode, what the QEMU Extended Key Event
+ * actually carries.
+ *
+ * This used to be a table of X11 keycodes (evdev + 8) and they were sent
+ * verbatim, which silently typed the WRONG KEY on every server that
+ * negotiates the extension. The two numberings are offset by 8, so Backspace
+ * (X11 22 = 0x16) arrived as XT 0x16, which is the U key: pressing backspace
+ * typed "u". Everything in the main block was shifted the same way.
+ *
+ * evdev keycodes 1..88 were deliberately chosen to equal XT set-1 scancodes,
+ * so the main block is just `x11 - 8`; it is written out in full anyway
+ * because the extended keys are NOT (they carry an 0xE0 prefix), and a table
+ * that is half arithmetic and half exceptions is how the next person
+ * reintroduces this bug.
+ */
+const CODE_TO_XT_SCANCODE: Record<string, number> = {
+  Escape: 0x01,
+  Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05, Digit5: 0x06,
+  Digit6: 0x07, Digit7: 0x08, Digit8: 0x09, Digit9: 0x0a, Digit0: 0x0b,
+  Minus: 0x0c, Equal: 0x0d, Backspace: 0x0e, Tab: 0x0f,
+  KeyQ: 0x10, KeyW: 0x11, KeyE: 0x12, KeyR: 0x13, KeyT: 0x14, KeyY: 0x15,
+  KeyU: 0x16, KeyI: 0x17, KeyO: 0x18, KeyP: 0x19,
+  BracketLeft: 0x1a, BracketRight: 0x1b, Enter: 0x1c, ControlLeft: 0x1d,
+  KeyA: 0x1e, KeyS: 0x1f, KeyD: 0x20, KeyF: 0x21, KeyG: 0x22, KeyH: 0x23,
+  KeyJ: 0x24, KeyK: 0x25, KeyL: 0x26, Semicolon: 0x27, Quote: 0x28,
+  Backquote: 0x29, ShiftLeft: 0x2a, Backslash: 0x2b,
+  KeyZ: 0x2c, KeyX: 0x2d, KeyC: 0x2e, KeyV: 0x2f, KeyB: 0x30, KeyN: 0x31,
+  KeyM: 0x32, Comma: 0x33, Period: 0x34, Slash: 0x35, ShiftRight: 0x36,
+  NumpadMultiply: 0x37, AltLeft: 0x38, Space: 0x39, CapsLock: 0x3a,
+  F1: 0x3b, F2: 0x3c, F3: 0x3d, F4: 0x3e, F5: 0x3f,
+  F6: 0x40, F7: 0x41, F8: 0x42, F9: 0x43, F10: 0x44,
+  NumLock: 0x45, ScrollLock: 0x46,
+  Numpad7: 0x47, Numpad8: 0x48, Numpad9: 0x49, NumpadSubtract: 0x4a,
+  Numpad4: 0x4b, Numpad5: 0x4c, Numpad6: 0x4d, NumpadAdd: 0x4e,
+  Numpad1: 0x4f, Numpad2: 0x50, Numpad3: 0x51, Numpad0: 0x52,
+  NumpadDecimal: 0x53,
+  IntlBackslash: 0x56, F11: 0x57, F12: 0x58,
+
+  // Extended (grey) keys: XT prefixes these with 0xE0, and the QEMU extended
+  // key event carries the prefix in the high byte. Sending the bare low byte
+  // would hit the numpad twin of each one (Home would become Numpad7).
+  NumpadEnter: 0xe01c, ControlRight: 0xe01d, NumpadDivide: 0xe035,
+  AltRight: 0xe038, Home: 0xe047, ArrowUp: 0xe048, PageUp: 0xe049,
+  ArrowLeft: 0xe04b, ArrowRight: 0xe04d, End: 0xe04f, ArrowDown: 0xe050,
+  PageDown: 0xe051, Insert: 0xe052, Delete: 0xe053,
+  MetaLeft: 0xe05b, MetaRight: 0xe05c, ContextMenu: 0xe05d,
+  PrintScreen: 0xe037,
 };
 
 export interface KeyIds {
   keysym: number;
-  /** X11 keycode (evdev + 8); 0 when unknown */
+  /**
+   * XT (PC set 1) scancode for the QEMU Extended Key Event; 0 when unknown,
+   * which makes the session fall back to the plain keysym-only KeyEvent.
+   */
   keycode: number;
 }
 
 export function keyEventToIds(e: Pick<KeyboardEvent, "key" | "code">): KeyIds | null {
-  const keycode = CODE_TO_X11_KEYCODE[e.code] ?? 0;
+  const keycode = CODE_TO_XT_SCANCODE[e.code] ?? 0;
   const fromCode = CODE_TO_KEYSYM[e.code];
   if (fromCode !== undefined) return { keysym: fromCode, keycode };
   const fromKey = KEY_TO_KEYSYM[e.key];

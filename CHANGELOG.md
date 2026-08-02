@@ -10,7 +10,56 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **"Always request fresh frames" in the session toolbar's Quality menu.** The
+  manual override for a server whose damage tracking cannot be trusted: while
+  it is on, the client re-fetches the whole screen every second instead of
+  relying on the server to report what changed, so a picture can never stay
+  stale no matter what the server forgot to send. It costs real bandwidth,
+  which is why it is a switch rather than the default.
+- **LAN / WAN override in the session toolbar.** The Quality menu now leads
+  with a Network section: Auto (detect from the link), LAN (full quality, no
+  adaptation), and WAN (save bandwidth). LAN pins full quality and disables
+  the adaptive tuner entirely.
+
 ### Fixed
+
+- **The quality settings were inverted: "High" produced the worst picture.**
+  The JPEG-quality and compression pseudo-encodings are ascending on the wire
+  (`QualityLevel0 = -32` … `QualityLevel9 = -23`), but both were computed
+  descending, so asking for level 9 transmitted the encoding meaning level 0.
+  Choosing High, or LAN, requested the most heavily compressed image the
+  server could produce, and choosing Low requested a good one. Everything
+  built on top inherited the inversion, including the Auto ladder, which is
+  why quality appeared to *fall* as conditions improved. The formulas are now
+  pinned to the literal wire constants by a test, because the old tests
+  compared the buggy helper against itself and were blind to it by
+  construction.
+- **Keyboard was mismapped: backspace typed "u", among others.** The client
+  sent X11 keycodes (evdev + 8) where the QEMU Extended Key Event carries XT
+  (PC set 1) scancodes. The two numberings differ by 8, so Backspace (X11 22 =
+  0x16) arrived as the U key, and the whole main block was shifted the same
+  way. The table is now real XT scancodes, including the `0xE0`-prefixed
+  extended keys (arrows, Home/End, right Ctrl/Alt, Delete), which would
+  otherwise hit their numpad twins.
+- **Pixelated, ghosted picture on Raspberry Pi (wayvnc) sessions.** Window
+  animations left the screen posterised and smeared with stale content that
+  only healed under the mouse. Three causes, all fixed:
+  - wayvnc loses track of damaged regions when the client is busy rendering
+    during an animation storm, and never re-sends them. The client now
+    requests one full repaint whenever a burst of activity settles, so the
+    picture always converges to the truth within about a second of things
+    going quiet, whatever the server lost.
+  - The same damage loss happens around a mid-session quality change; every
+    encoding switch is now followed by a full repaint request too.
+  - Auto quality no longer reduces colour depth (that now belongs only to the
+    explicit Low and Black & White presets), its floor rose from JPEG q2 to
+    q3, and link speed is measured from stall-anchored bursts with a windowed
+    maximum instead of an average of time-spent-waiting, so a slow server's
+    encoder is no longer mistaken for a slow network. A Raspberry Pi on
+    gigabit ethernet used to read as ~1.5 Mbit/s and got 64 colours; it now
+    reads as a fast LAN and gets full quality.
 
 - **Copying on this computer and pasting into the remote did nothing.** The
   local clipboard was only ever sent by the toolbar's "Send clipboard to
@@ -28,6 +77,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   it then asks with a `request`, which the client ignored. The client now
   announces with a `notify` and answers a `request` with the text, so both
   kinds of server receive it.
+
+## [0.3.0] - 2026-08-02
 
 ### Added
 

@@ -92,6 +92,8 @@ export interface SessionApi {
   reconnectNow: () => void;
   setQuality: (preset: QualityPreset) => void;
   setViewOnly: (viewOnly: boolean) => void;
+  /** Re-fetch the whole screen every second (manual staleness override). */
+  setAlwaysRefresh: (enabled: boolean) => void;
   refreshScreen: () => void;
   requestResize: (width: number, height: number) => void;
   sendClipboard: (text: string) => void;
@@ -237,7 +239,14 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
       switch (messageType(data)) {
         case MSG_FRAMEBUFFER: {
           const msg = parseFrameMessage(data);
-          if (msg) bridgeRef.current.onFrame(msg);
+          // A parse failure silently discards a WHOLE update: every region it
+          // covered stays stale until something else repaints it. If this
+          // ever fires, the corruption on screen is explained right here.
+          if (!msg) {
+            console.warn(`[render] frame message failed to parse (${data.byteLength}B), update dropped`);
+            break;
+          }
+          bridgeRef.current.onFrame(msg);
           break;
         }
         case MSG_CURSOR: {
@@ -484,6 +493,17 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     void safeInvoke("set_quality", { sessionId: sid(), preset: wireQuality(preset) }, null);
   }, []);
 
+  /**
+   * Keep re-fetching the whole screen every second.
+   *
+   * The manual override for a server whose damage tracking cannot be trusted:
+   * nothing infers when the picture is stale, it is simply refetched. Costs
+   * bandwidth, hence a switch rather than a default.
+   */
+  const setAlwaysRefresh = useCallback((enabled: boolean): void => {
+    void safeInvoke("set_always_refresh", { sessionId: sid(), enabled }, null);
+  }, []);
+
   const setViewOnly = useCallback((viewOnly: boolean): void => {
     void safeInvoke("set_view_only", { sessionId: sid(), viewOnly }, null);
   }, []);
@@ -633,7 +653,7 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
   return {
     state, desktopName, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
     sendInput, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
-    requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate,
+    requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
     dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
     submitCredentials, dismissCredentialPrompt, retryConnect,
   };

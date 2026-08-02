@@ -820,6 +820,26 @@ pub async fn refresh_session(state: State<'_, AppState>, session_id: String) -> 
     send_command(&state, &session_id, ClientCommand::Refresh).await
 }
 
+/// Keep re-fetching the whole screen every second.
+///
+/// The manual override for servers whose damage tracking cannot be trusted:
+/// no inference of ours decides when the picture is stale, it is simply
+/// refetched. Costs real bandwidth, which is why it is a switch and not a
+/// default.
+#[tauri::command]
+pub async fn set_always_refresh(
+    state: State<'_, AppState>,
+    session_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    send_command(
+        &state,
+        &session_id,
+        ClientCommand::SetAlwaysRefresh(enabled),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn set_view_only(
     state: State<'_, AppState>,

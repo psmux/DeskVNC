@@ -116,6 +116,8 @@ export interface SessionToolbarProps {
   onScalingMode: (m: ScalingMode) => void;
   onZoom: (z: number) => void;
   onQuality: (q: QualityPreset) => void;
+  alwaysRefresh: boolean;
+  onAlwaysRefresh: (enabled: boolean) => void;
   onBwLevels: (levels: number) => void;
   onPassthrough: (v: boolean) => void;
   /** Open the "why we need Accessibility" explainer before any OS prompt. */
@@ -638,11 +640,46 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           ) : null}
           {openMenu === "quality" ? (
             <div>
+              {/*
+                Network mode sits above the presets because it is the choice
+                people actually want to make: Auto infers the link from
+                throughput, and a server that encodes slowly (a Raspberry Pi
+                is the usual one) looks exactly like a slow link, so on a LAN
+                it can settle far below what the network can carry. These
+                override that inference; they are the presets underneath, named
+                for the decision rather than for the setting.
+              */}
+              <p className="px-2.5 py-1 text-2xs text-tertiary">Network</p>
+              <MenuRow selected={props.quality === "auto"} onClick={() => props.onQuality("auto")}>
+                Auto — detect from the link
+              </MenuRow>
+              <MenuRow selected={props.quality === "high"} onClick={() => props.onQuality("high")}>
+                LAN — full quality, no adaptation
+              </MenuRow>
+              <MenuRow selected={props.quality === "medium"} onClick={() => props.onQuality("medium")}>
+                WAN — save bandwidth
+              </MenuRow>
+              <div className="mt-1 border-t border-subtle pt-1">
+                <p className="px-2.5 py-1 text-2xs text-tertiary">Quality</p>
+              </div>
               {(["auto", "high", "medium", "low", "bw"] as QualityPreset[]).map((q) => (
                 <MenuRow key={q} selected={props.quality === q} onClick={() => props.onQuality(q)}>
                   {q === "bw" ? "Black & White" : q[0].toUpperCase() + q.slice(1)}
                 </MenuRow>
               ))}
+              <div className="mt-1 border-t border-subtle pt-1">
+                <MenuRow
+                  selected={props.alwaysRefresh}
+                  onClick={() => props.onAlwaysRefresh(!props.alwaysRefresh)}
+                >
+                  Always request fresh frames
+                </MenuRow>
+                <p className="px-2.5 pb-1 text-2xs text-tertiary">
+                  Re-fetches the whole screen every second instead of trusting the
+                  server to report what changed. Fixes a picture that stays stale
+                  or smeared; uses more bandwidth.
+                </p>
+              </div>
               {props.quality === "bw" ? (
                 <div className="mt-1 border-t border-subtle pt-1">
                   <p className="px-2.5 py-1 text-2xs text-tertiary">Gray levels</p>

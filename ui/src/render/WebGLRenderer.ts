@@ -335,8 +335,17 @@ export class WebGLRenderer {
           let bmp: ImageBitmap | null = null;
           try {
             bmp = await p;
-          } catch {
-            break; // a corrupt rect must not stall the rest of the update
+          } catch (err) {
+            // A corrupt rect must not stall the rest of the update, but a
+            // SILENT skip leaves a permanently stale region: a full-screen
+            // refresh re-sends the same bytes, which fail the same way, so
+            // no amount of refreshing ever heals it. Say so, loudly, with
+            // enough detail to reproduce the decode failure offline.
+            console.warn(
+              `[render] jpeg decode failed at ${r.x},${r.y} ${r.w}x${r.h} (${r.payload.byteLength}B):`,
+              err,
+            );
+            break;
           }
           // A resize (new generation) invalidated the texture this was for.
           if (this.disposed || gen !== this.generation) {

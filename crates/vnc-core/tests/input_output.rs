@@ -770,3 +770,213 @@ async fn resize_requests_are_dropped_when_the_server_never_advertised_support() 
     );
     handle.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Quality switches
+// ---------------------------------------------------------------------------
+
+/// REGRESSION: a mid-session SetEncodings must be chased by a full
+/// non-incremental FramebufferUpdateRequest.
+///
+/// RealVNC drops coalesced damage while it re-configures its encoder
+/// pipeline on a SetEncodings: regions that changed around the switch are
+/// marked delivered but never sent, and they stay stale until something
+/// else touches them. Measured live (fb_probe, twelve window animations
+/// against a RealVNC server): 1076 of 3600 tiles permanently wrong without
+/// the resync, 0 with it. The user-visible form was ghosted text and blocky
+/// patches that healed only under the mouse.
+#[tokio::test]
+async fn a_quality_switch_resyncs_with_a_full_update_request() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // Everything the connect handshake sent (its own SetEncodings and the
+    // priming full request) is history; only what follows the switch counts.
+    // Two contamination hazards make the marker placement load-bearing:
+    // `flush` sends a Refresh whose own full request would satisfy the
+    // assertion, so it is not used before it; and `wait_connected` fires on
+    // the CLIENT's state before the server has necessarily READ the priming
+    // request, so the marker must wait for the handshake traffic to be
+    // recorded or the priming request itself lands after the marker. Either
+    // mistake makes this test pass with the resync deleted.
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| {
+                r.messages.iter().any(|m| {
+                    matches!(
+                        m,
+                        ClientMessage::FramebufferUpdateRequest {
+                            incremental: false,
+                            ..
+                        }
+                    )
+                }) && r
+                    .messages
+                    .iter()
+                    .any(|m| matches!(m, ClientMessage::SetEncodings { .. }))
+            })
+            .await,
+        "handshake traffic must be recorded before the marker"
+    );
+    let before = server.messages().len();
+
+    send(
+        &handle,
+        ClientCommand::SetQuality(vnc_core::types::QualityPreset::High),
+    )
+    .await;
+    let arrived = server
+        .wait_until(DEFAULT_TIMEOUT, |r| {
+            r.messages[before..].iter().any(|m| {
+                matches!(
+                    m,
+                    ClientMessage::FramebufferUpdateRequest {
+                        incremental: false,
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+    assert!(
+        arrived,
+        "SetEncodings must be chased by a non-incremental request; without it          a server that drops damage across the switch leaves stale regions"
+    );
+
+    let after: Vec<ClientMessage> = server.messages().drain(before..).collect();
+    let set_enc = after
+        .iter()
+        .position(|m| matches!(m, ClientMessage::SetEncodings { .. }))
+        .expect("a quality change must send SetEncodings");
+    let resync = after[set_enc..].iter().find_map(|m| match m {
+        ClientMessage::FramebufferUpdateRequest {
+            incremental: false,
+            rect,
+        } => Some(*rect),
+        _ => None,
+    });
+    let rect = resync.expect("the full request must come AFTER the SetEncodings");
+    assert_eq!(
+        (rect.x, rect.y, rect.width, rect.height),
+        (0, 0, 640, 480),
+        "the resync must cover the whole screen"
+    );
+    handle.shutdown();
+}
+
+/// REGRESSION: after a burst of updates goes quiet, the client must request
+/// one full non-incremental repaint on its own.
+///
+/// This is the client enforcing eventual consistency rather than trusting
+/// server damage tracking: wayvnc (every Wayland Raspberry Pi) loses track
+/// of damaged regions when the client applies backpressure during window
+/// animations, and the lost regions are never sent. Reproduced in the real
+/// app against a real wayvnc with NO SetEncodings in flight, so the
+/// switch-time resync above cannot cover it.
+///
+/// The quality preset is pinned (tuner disabled) so the ONLY thing that can
+/// produce a post-burst full request is the settle refresh; with the tuner
+/// active its own switch resync could satisfy the assertion and mask the
+/// regression.
+#[tokio::test]
+async fn a_settled_burst_is_followed_by_a_full_consistency_refresh() {
+    let rect = Rect::new(0, 0, 4, 4);
+    let mut cfg = MockConfig::new().size(8, 8);
+    for _ in 0..12 {
+        cfg = cfg.update(vec![RectSpec::Raw { rect, colour: RED }]);
+    }
+    let server = MockServer::start(cfg).await;
+
+    let mut o = options(server.port());
+    o.quality = vnc_core::types::QualityPreset::High;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // The pipeline drains the queued updates back-to-back: a burst.
+    for _ in 0..12 {
+        events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    }
+    let before = server.messages().len();
+
+    // Quiet from here. The full request must arrive unprompted.
+    let got = server
+        .wait_until(Duration::from_secs(6), |r| {
+            r.messages[before..].iter().any(|m| {
+                matches!(
+                    m,
+                    ClientMessage::FramebufferUpdateRequest {
+                        incremental: false,
+                        rect,
+                    } if rect.x == 0 && rect.y == 0 && rect.width == 8 && rect.height == 8
+                )
+            })
+        })
+        .await;
+    assert!(
+        got,
+        "a settled burst must be followed by a full consistency refresh, or \
+         regions a server lost track of stay stale forever"
+    );
+    handle.shutdown();
+}
+
+/// The manual staleness override: while it is on, the client re-fetches the
+/// WHOLE screen every tick and stops depending on the server to say what
+/// changed. This exists for servers whose damage tracking cannot be trusted,
+/// so it must be unconditional: no settle detection, no cooldown, no
+/// inference of ours may gate it.
+#[tokio::test]
+async fn always_refresh_keeps_requesting_full_updates() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(&handle, ClientCommand::SetAlwaysRefresh(true)).await;
+    let before = server.messages().len();
+
+    // FOUR full requests, unprompted, with no activity whatsoever: one per
+    // stats tick. The bar is this high deliberately. Two is reachable without
+    // the per-tick loop at all (the immediate apply-now request, plus a
+    // settle refresh), and a test satisfied by those passes with the feature
+    // deleted, which the first version of this test did.
+    let got = server
+        .wait_until(Duration::from_secs(8), |r| {
+            r.messages[before..]
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        ClientMessage::FramebufferUpdateRequest {
+                            incremental: false,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                >= 4
+        })
+        .await;
+    assert!(got, "always-refresh must keep re-fetching the whole screen");
+
+    // ...and switching it off must stop them, or the bandwidth cost would be
+    // permanent for anyone who ever tried the switch.
+    send(&handle, ClientCommand::SetAlwaysRefresh(false)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let quiet_from = server.messages().len();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let after: usize = server.messages()[quiet_from..]
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ClientMessage::FramebufferUpdateRequest {
+                    incremental: false,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(after, 0, "switching it off must stop the full re-fetches");
+    handle.shutdown();
+}

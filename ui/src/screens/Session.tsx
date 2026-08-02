@@ -614,19 +614,31 @@ function SessionView({
    * toolbar button, so pasting into the remote pasted whatever that machine
    * had on its own clipboard.
    */
+  /**
+   * Held in a ref so the effect below can depend only on the things that
+   * should actually re-arm it. `useSession` returns a fresh object every
+   * render and the stats event re-renders once a second, so depending on the
+   * callback directly re-ran the effect every second: the OS clipboard was
+   * read once per second for the life of the session, which on macOS is both
+   * a stream of warnings and repeated pasteboard access.
+   */
+  const pushClipboardRef = useRef(pushClipboard);
+  pushClipboardRef.current = pushClipboard;
+
+  const clipboardReady = session.state.state === "connected";
   useEffect(() => {
-    if (session.state.state !== "connected" || !visible) return;
+    if (!clipboardReady || !visible) return;
     const sync = (): void => {
       if (!readBoolPref(PREF_CLIPBOARD_AUTO, true)) return;
       if (!readBoolPref(PREF_CLIPBOARD_ON_FOCUS, true)) return;
-      void pushClipboard(false);
+      void pushClipboardRef.current(false);
     };
     // Connecting, or switching to this tab, counts as arriving: whatever was
     // copied beforehand should be there to paste.
     sync();
     window.addEventListener("focus", sync);
     return () => window.removeEventListener("focus", sync);
-  }, [session.state.state, visible, pushClipboard]);
+  }, [clipboardReady, visible]);
 
   // Bell: brief visual pulse via toast
   useEffect(() => {
@@ -940,6 +952,16 @@ function SessionView({
     push("success", "Screenshot saved");
   }, [session.desktopName, push]);
 
+  // Manual staleness override; off by default because it costs bandwidth.
+  const [alwaysRefresh, setAlwaysRefresh] = useState(false);
+  const toggleAlwaysRefresh = useCallback(
+    (enabled: boolean): void => {
+      setAlwaysRefresh(enabled);
+      session.setAlwaysRefresh(enabled);
+    },
+    [session],
+  );
+
   const clipboardSend = useCallback(async (): Promise<void> => {
     const outcome = await pushClipboard(true);
     if (outcome === "unreadable") {
@@ -1017,6 +1039,8 @@ function SessionView({
         onViewOnly={setViewOnlyState}
         onScreenshot={() => void screenshot()}
         onRefresh={session.refreshScreen}
+        alwaysRefresh={alwaysRefresh}
+        onAlwaysRefresh={toggleAlwaysRefresh}
         onDisconnect={disconnectWithThumbnail}
       />
 

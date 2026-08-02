@@ -187,6 +187,7 @@ pub fn run() {
             commands::session::request_resize,
             commands::session::refresh_session,
             commands::session::set_view_only,
+            commands::session::set_always_refresh,
             commands::session::send_clipboard,
             commands::session::set_local_clipboard,
             commands::session::read_local_clipboard,
