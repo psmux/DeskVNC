@@ -169,13 +169,23 @@ pub mod encoding {
     pub const PSEUDO_EXTENDED_CLIPBOARD: i32 = 0xc0a1_e5ce_u32 as i32;
     pub const PSEUDO_VMWARE_CURSOR: i32 = 0x574d_5664_u32 as i32;
 
-    /// JPEG quality level pseudo-encodings: -23 (q0) .. -32 (q9).
+    /// JPEG quality level pseudo-encodings, ASCENDING: -32 is level 0 (worst)
+    /// and -23 is level 9 (best), per `rfbEncodingQualityLevel0..9`.
+    ///
+    /// These were inverted, which is not a cosmetic slip: asking for the BEST
+    /// quality transmitted the encoding that means the WORST, so the "High"
+    /// preset produced the most heavily compressed picture the server could
+    /// make, and the "Low" preset produced a good one. Every judgement built
+    /// on top, the Auto ladder included, was therefore backwards too.
     pub const fn jpeg_quality(level: u8) -> i32 {
-        -23 - (level as i32)
+        -32 + (level as i32)
     }
-    /// Compression level pseudo-encodings: -247 (c0) .. -256 (c9).
+    /// Compression level pseudo-encodings, ASCENDING: -256 is level 0 and
+    /// -247 is level 9, per `rfbEncodingCompressLevel0..9`. Inverted for the
+    /// same reason as [`jpeg_quality`], so "less compression effort" asked the
+    /// server for more.
     pub const fn compression_level(level: u8) -> i32 {
-        -247 - (level as i32)
+        -256 + (level as i32)
     }
 }
 
@@ -748,6 +758,13 @@ pub enum ClientCommand {
     },
     /// Force a full non-incremental update.
     Refresh,
+    /// Keep forcing a full non-incremental update every stats tick.
+    ///
+    /// The escape hatch for servers whose damage tracking cannot be trusted:
+    /// it stops the client relying on the server to say what changed and
+    /// simply re-fetches the screen, at a real bandwidth cost, so a picture
+    /// can never stay stale no matter what the server forgot to send.
+    SetAlwaysRefresh(bool),
     SetViewOnly(bool),
     /// User accepted a server key at the TOFU prompt. `scheme` is echoed back
     /// from the prompt that raised it, never inferred here.
@@ -904,5 +921,36 @@ mod pin_tests {
         let one = CertPins::one(PinScheme::Ra2, "cc");
         assert_eq!(one.for_scheme(PinScheme::Ra2), Some("cc"));
         assert_eq!(one.for_scheme(PinScheme::Tls), None);
+    }
+}
+
+#[cfg(test)]
+mod pseudo_encoding_level_tests {
+    use super::encoding::{compression_level, jpeg_quality};
+
+    /// REGRESSION, and the most expensive bug in this file's history: these
+    /// two ladders were inverted, so "High quality" transmitted the encoding
+    /// meaning "worst quality" and the picture got worse the better you asked
+    /// for. Pinned against the literal `rfbproto.h` constants rather than a
+    /// formula, because a formula is exactly what was wrong.
+    #[test]
+    fn quality_and_compression_levels_match_the_wire_constants() {
+        // rfbEncodingQualityLevel0..9
+        assert_eq!(jpeg_quality(0), -32, "level 0 is the WORST quality");
+        assert_eq!(jpeg_quality(9), -23, "level 9 is the BEST quality");
+        // rfbEncodingCompressLevel0..9
+        assert_eq!(compression_level(0), -256);
+        assert_eq!(compression_level(9), -247);
+
+        // Both ladders ascend with the level; a descending one is the bug.
+        for n in 0..9u8 {
+            assert!(jpeg_quality(n) < jpeg_quality(n + 1));
+            assert!(compression_level(n) < compression_level(n + 1));
+        }
+        // And they must never collide with each other's range.
+        for n in 0..=9u8 {
+            assert!((-32..=-23).contains(&jpeg_quality(n)));
+            assert!((-256..=-247).contains(&compression_level(n)));
+        }
     }
 }

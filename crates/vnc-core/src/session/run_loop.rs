@@ -24,7 +24,7 @@ use crate::proto::messages::{
     self, ext_clipboard, fence_flags, server_msg, CutTextPayload, Screen,
 };
 use crate::proto::pseudo::{self, PseudoRect};
-use crate::quality::AutoTuner;
+use crate::quality::{AutoTuner, LinkMeter};
 use crate::types::{
     encoding, ClientCommand, DecodedRect, PixelFormat, QualityPreset, QualitySettings, Rect,
     ServerCapabilities, SessionEvent, SessionStats,
@@ -58,15 +58,29 @@ const ALR_QUALITY_FLOOR: u8 = 9;
 /// the lossy path was chosen to avoid.
 const ALR_COOLDOWN: Duration = Duration::from_secs(5);
 
-/// An `AsyncRead` wrapper that counts every byte received, for stats.
+/// An `AsyncRead` wrapper that counts every byte received, for stats, and
+/// times stall-anchored bursts for the Auto tuner's link-capacity estimate
+/// (see [`LinkMeter`]).
+///
+/// This is the ONLY place in the client that can see whether a poll found
+/// data already waiting or an empty socket. Everything above it (the run
+/// loop) sees only how long a read took, which is identical in both cases,
+/// a slow server and a slow link both make `read()` take a while.
 pub(crate) struct CountingReader<R> {
     inner: R,
     count: Arc<AtomicU64>,
+    link_peak: Arc<AtomicU64>,
+    meter: LinkMeter,
 }
 
 impl<R> CountingReader<R> {
-    pub fn new(inner: R, count: Arc<AtomicU64>) -> Self {
-        Self { inner, count }
+    pub fn new(inner: R, count: Arc<AtomicU64>, link_peak: Arc<AtomicU64>) -> Self {
+        Self {
+            inner,
+            count,
+            link_peak,
+            meter: LinkMeter::default(),
+        }
     }
 }
 
@@ -79,9 +93,16 @@ impl<R: AsyncRead + Unpin> AsyncRead for CountingReader<R> {
         let before = buf.filled().len();
         let me = &mut *self;
         let res = Pin::new(&mut me.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = res {
-            let n = buf.filled().len() - before;
-            me.count.fetch_add(n as u64, Ordering::Relaxed);
+        match res {
+            Poll::Ready(Ok(())) => {
+                let n = buf.filled().len() - before;
+                me.count.fetch_add(n as u64, Ordering::Relaxed);
+                if let Some(bps) = me.meter.received(Instant::now(), n) {
+                    me.link_peak.fetch_max(bps as u64, Ordering::Relaxed);
+                }
+            }
+            Poll::Pending => me.meter.stalled(),
+            Poll::Ready(Err(_)) => {}
         }
         res
     }
@@ -177,14 +198,18 @@ pub(crate) struct RunLoop {
     sent_counter: Arc<AtomicU64>,
     last_sent: u64,
     frames_since_tick: u32,
+    /// Updates that arrived in the PREVIOUS stats tick, so the settle
+    /// refresh can tell "a burst just ended" from "nothing is happening".
+    frames_prev_tick: u32,
+    /// When the last settle refresh went out (see `tick`), for its cooldown.
+    last_settle_refresh: Option<Instant>,
     rects_decoded: u64,
     decode_ms_tick: f32,
-    /// Wall time actually spent pulling framebuffer updates off the socket
-    /// this tick, decode time excluded. Throughput must be measured against
-    /// THIS, not the tick interval: a desktop nobody is touching leaves the
-    /// link idle almost the whole second, and dividing by wall-clock makes a
-    /// fast link look like a modem.
-    active_recv_s: f64,
+    /// Highest stall-anchored burst rate (bits/sec) [`CountingReader`]
+    /// measured since the last tick, or 0 if none completed. This is a lower
+    /// bound on link capacity regardless of how slowly the server encoded
+    /// between bursts, see `quality::LinkMeter`.
+    link_peak: Arc<AtomicU64>,
     /// Union of everything painted lossily since the last lossless refresh.
     /// Empty means the screen is already sharp.
     lossy_damage: Rect,
@@ -200,6 +225,10 @@ pub(crate) struct RunLoop {
 }
 
 impl RunLoop {
+    // One constructor called from exactly one place (`connection::run_once`)
+    // wiring up every piece of per-connection state; splitting it into a
+    // builder would be an abstraction with a single caller.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reader: Reader,
         writer: Writer,
@@ -208,6 +237,7 @@ impl RunLoop {
         applied_quality: QualitySettings,
         bytes_counter: Arc<AtomicU64>,
         sent_counter: Arc<AtomicU64>,
+        link_peak: Arc<AtomicU64>,
     ) -> Self {
         let (fb_width, fb_height) = (caps.width, caps.height);
         Self {
@@ -233,9 +263,11 @@ impl RunLoop {
             sent_counter,
             last_sent: 0,
             frames_since_tick: 0,
+            frames_prev_tick: 0,
+            last_settle_refresh: None,
             rects_decoded: 0,
             decode_ms_tick: 0.0,
-            active_recv_s: 0.0,
+            link_peak,
             lossy_damage: Rect::new(0, 0, 0, 0),
             last_update_at: None,
             last_alr_at: None,
@@ -381,8 +413,6 @@ impl RunLoop {
             tracing::trace!(rects = count, "update header (continuous updates active)");
         }
 
-        let update_started = Instant::now();
-        let decode_before = self.decode_ms_tick;
         let sentinel = count == 0xffff;
         let mut remaining = count as u32;
         let mut rects: Vec<DecodedRect> = Vec::new();
@@ -459,14 +489,6 @@ impl RunLoop {
             }
         }
 
-        // Everything between the update header and here was spent pulling this
-        // update off the socket; subtract the decode cost so what remains is
-        // transfer time. This is the denominator the throughput estimate needs
-        // (see `active_recv_s`).
-        let spent = update_started.elapsed().as_secs_f64();
-        let decoded_s = ((self.decode_ms_tick - decode_before) as f64 / 1000.0).max(0.0);
-        self.active_recv_s += (spent - decoded_s).max(0.0);
-
         // The priming update has now been fully read: resume normal pipelining.
         if !self.cu_active && !primed_before {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
@@ -489,6 +511,11 @@ impl RunLoop {
 
         if !rects.is_empty() {
             self.frames_since_tick += 1;
+            // Coverage telemetry for the consistency-refresh investigation: a
+            // full repaint request that is honoured produces an update whose
+            // damage approaches the whole screen; one that is ignored shows
+            // only slivers. Distinguishing those from the log is the whole
+            // point, so this is INFO for large updates only.
             emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
         }
         Ok(())
@@ -794,6 +821,16 @@ impl RunLoop {
                 let msg = messages::framebuffer_update_request(false, self.full_rect());
                 self.send(&msg).await?;
             }
+            ClientCommand::SetAlwaysRefresh(on) => {
+                settings.always_refresh = on;
+                tracing::info!(enabled = on, "always-refresh toggled");
+                if on {
+                    // Apply immediately: the point of the switch is to fix a
+                    // picture that is wrong RIGHT NOW.
+                    let msg = messages::framebuffer_update_request(false, self.full_rect());
+                    self.send(&msg).await?;
+                }
+            }
             ClientCommand::SetViewOnly(v) => {
                 settings.view_only = v;
                 if v {
@@ -872,6 +909,27 @@ impl RunLoop {
 
         let new_pf = pixel_format_for(qs.pixel_format);
         if new_pf == self.pf {
+            // A mid-session SetEncodings must be followed by a full
+            // non-incremental request even when nothing else changes. RealVNC
+            // drops coalesced damage while it re-configures its encoder
+            // pipeline: regions that changed around the switch are marked
+            // delivered but never sent, and they stay stale until something
+            // else happens to touch them, which the user experiences as
+            // ghosted text and blocky patches that only heal under the mouse.
+            // Measured against a real RealVNC server (fb_probe, twelve window
+            // animations): 1076 of 3600 tiles permanently wrong with this
+            // request absent, clean with a pinned preset that never switches.
+            // One full repaint per tier change is cheap, hysteresis caps
+            // changes at one per cooldown, next to a permanently wrong
+            // picture. The pixel-format path below ends with its own full
+            // request, so this one covers exactly the encodings-only switch.
+            let resync = messages::framebuffer_update_request(false, self.full_rect());
+            self.send(&resync).await?;
+            tracing::info!(
+                jpeg_quality = qs.jpeg_quality,
+                compression = qs.compression,
+                "quality switch applied; full resync requested"
+            );
             return Ok(());
         }
 
@@ -1007,21 +1065,63 @@ impl RunLoop {
         };
         emit(events, SessionEvent::Stats(stats)).await?;
 
-        self.tuner.observe(
-            delta as usize,
-            self.active_recv_s,
-            self.rtt_ms,
-            stats.decode_ms,
-        );
-        self.active_recv_s = 0.0;
+        // A peak of 0 means no burst completed this tick, NOT a slow link:
+        // nothing loaded the socket enough to time it, so the estimate must
+        // stand rather than be read as evidence of slowness.
+        let link_bps = match self.link_peak.swap(0, Ordering::Relaxed) {
+            0 => None,
+            v => Some(v as f64),
+        };
+        self.tuner.observe(link_bps, self.rtt_ms, stats.decode_ms);
         if settings.quality == QualityPreset::Auto {
             if let Some(recommended) = self.tuner.recommended() {
                 self.apply_quality(recommended).await?;
             }
         }
 
+        // Unconditional re-fetch, when the user has asked for it. Deliberately
+        // BEFORE the settle/lossless logic and subject to none of it: this
+        // switch exists precisely for servers whose damage reports cannot be
+        // trusted, so it must not be gated on any inference of ours about
+        // whether a repaint is needed.
+        if settings.always_refresh {
+            let msg = messages::framebuffer_update_request(false, self.full_rect());
+            self.send(&msg).await?;
+        }
+
         // Once the screen settles, repaint whatever was compressed lossily.
         self.maybe_lossless_refresh(settings).await?;
+
+        // Settle refresh: when a burst of activity ends, re-request the whole
+        // screen once, non-incrementally. This is the client enforcing
+        // eventual consistency instead of trusting the server's damage
+        // tracking, because that trust is misplaced: wayvnc (every Wayland
+        // Raspberry Pi) loses track of damaged regions when the client
+        // applies backpressure during window animations, and the lost
+        // regions are never sent, leaving stale ghosted content that only
+        // heals where the mouse happens to pass. Verified in the running app
+        // against a real wayvnc: corruption formed during a minimize/restore
+        // storm with NO SetEncodings in flight, so the resync-on-switch above
+        // cannot be the whole answer; only an unconditional post-activity
+        // repaint converges the picture regardless of what the server lost.
+        // One full frame per burst (~180 KiB on a 720p LAN session), never
+        // more than once per ALR_COOLDOWN.
+        let settled = settle_due(self.frames_prev_tick, self.frames_since_tick);
+        if settled
+            && !self.priming_update_pending
+            && self
+                .last_settle_refresh
+                .is_none_or(|t| t.elapsed() >= ALR_COOLDOWN)
+        {
+            self.last_settle_refresh = Some(Instant::now());
+            let msg = messages::framebuffer_update_request(false, self.full_rect());
+            self.send(&msg).await?;
+            tracing::info!(
+                burst_frames = self.frames_prev_tick,
+                "activity settled; full consistency refresh requested"
+            );
+        }
+        self.frames_prev_tick = self.frames_since_tick;
 
         // Fire the next RTT probe.
         if self.caps.supports_fence && self.probe.is_none() {
@@ -1037,6 +1137,22 @@ impl RunLoop {
     }
 }
 
+/// Has a burst of screen activity just settled into (near) quiet?
+///
+/// `prev` and `cur` are the update counts of the previous and current stats
+/// ticks. "Quiet" is a TRICKLE, not zero: a terminal's blinking cursor (or a
+/// taskbar clock) damages the screen once or twice every second forever, so a
+/// detector that demands a fully silent second never fires on precisely the
+/// sessions that need the refresh, the user watched a wrecked screen for two
+/// minutes with the cursor dutifully blinking away in the corner. The burst
+/// threshold is what keeps the trickle itself from ever counting as a burst,
+/// so blink-clock idle can never produce periodic refreshes on its own.
+fn settle_due(prev: u32, cur: u32) -> bool {
+    const BURST_FRAMES: u32 = 8;
+    const TRICKLE_FRAMES: u32 = 2;
+    prev >= BURST_FRAMES && cur <= TRICKLE_FRAMES
+}
+
 /// Decoded size of one rect, for the per-update accumulation budget.
 ///
 /// `CopyRect` carries no pixels of its own but does cost a full rect once the
@@ -1048,6 +1164,42 @@ fn decoded_payload_len(d: &DecodedRect) -> usize {
         RectPayload::Rgba(b) | RectPayload::Jpeg(b) => b.len(),
         RectPayload::H264 { data, .. } => data.len(),
         RectPayload::CopyRect { .. } => d.rect.area().saturating_mul(4),
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::settle_due;
+
+    /// THE BUG this predicate replaced: requiring an absolutely quiet second.
+    /// A blinking terminal cursor damages the screen 1-2 times every second
+    /// forever, so "quiet == zero" never held and the consistency refresh
+    /// never fired; the user's screen stayed wrecked for minutes until they
+    /// hand-painted it with the mouse.
+    #[test]
+    fn a_burst_followed_by_a_cursor_blink_trickle_still_settles() {
+        assert!(settle_due(20, 0), "true quiet settles");
+        assert!(settle_due(20, 1), "a blinking cursor must not block it");
+        assert!(settle_due(8, 2), "nor a clock tick alongside it");
+    }
+
+    #[test]
+    fn steady_motion_is_not_settled() {
+        assert!(
+            !settle_due(20, 8),
+            "still busy: refresh would waste the link"
+        );
+        assert!(!settle_due(20, 3), "above trickle: not settled yet");
+    }
+
+    /// Blink-clock idle on its own must never fire periodic refreshes: the
+    /// trickle is the CURRENT tick's allowance, never a qualifying burst.
+    #[test]
+    fn a_trickle_alone_never_qualifies_as_a_burst() {
+        assert!(!settle_due(2, 0));
+        assert!(!settle_due(1, 1));
+        assert!(!settle_due(0, 0));
+        assert!(!settle_due(7, 0), "just under the burst bar");
     }
 }
 
