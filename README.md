@@ -54,6 +54,14 @@ via VideoToolbox, D3D11, or VAAPI.
   **MS-Logon**, and Tight security negotiation.
 - **TLS through rustls** with trust-on-first-use certificate pinning. A changed
   certificate is surfaced rather than silently accepted.
+- **SSH tunnelling** for the RFB connection, per host profile. The session runs
+  over a `direct-tcpip` channel of an SSH login, which reaches servers bound to
+  the remote machine's own loopback and encrypts the session even when the VNC
+  server itself offers nothing. Authentication is a saved passphrase, your
+  ssh-agent, or a key file. Host keys are trust-on-first-use, pinned in the same
+  store the file-transfer sidecar uses, so trusting a machine once covers both.
+  No local forwarded port is opened: the channel is the session's byte stream,
+  so nothing else on your machine can reach it.
 
 VncAuth is DES based and truncates passwords to 8 characters. That is a flaw in
 the protocol, not this client. Prefer VeNCrypt or RA2 where the server offers
@@ -109,9 +117,6 @@ answer these queries and the result is rendered in the interface.
 
 Being explicit so nobody files an issue against a feature that was never there:
 
-- **SSH tunnelling for the RFB connection.** Host profiles carry an `ssh_tunnel`
-  field and an `ssh_passphrase` credential slot, and `vnc-files` speaks SSH for
-  SFTP, but nothing routes the protocol stream through a tunnel yet.
 - **Signed Windows and Linux installers.** Windows needs an Authenticode
   certificate, which is a paid commercial product, so SmartScreen warns on
   first run. See [docs/INSTALL.md](docs/INSTALL.md). macOS release builds
@@ -128,7 +133,7 @@ crates/
   vnc-transport/       TCP and TLS (rustls) with trust-on-first-use pinning
   vnc-discovery/       mDNS, subnet scan, banner fingerprint, name resolution, Wake-on-LAN
   vnc-store/           SQLite host profiles, keychain credentials, thumbnails
-  vnc-files/           SFTP file transfer (russh)
+  vnc-files/           SFTP file transfer and SSH tunnelling (russh)
   vnc-input-capture/   Platform global input capture
 src-tauri/             Tauri 2 shell: commands, framebuffer channel, windows, menus, tray
 ui/                    React, TypeScript, Tailwind v4, WebGL2 renderer
@@ -175,8 +180,10 @@ These are what CI runs:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store -- -D warnings
-cargo test -p vnc-core -p vnc-transport -p vnc-discovery -p vnc-store
+cargo clippy -p vnc-core -p vnc-transport -p vnc-discovery \
+  -p vnc-store -p vnc-files -p vnc-input-capture -- -D warnings
+cargo test -p vnc-core -p vnc-transport -p vnc-discovery \
+  -p vnc-store -p vnc-files -p vnc-input-capture
 (cd ui && npx tsc --noEmit)
 ```
 
