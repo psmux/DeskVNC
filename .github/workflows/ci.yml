@@ -72,6 +72,8 @@ jobs:
         working-directory: ui
       - run: npx tsc --noEmit
         working-directory: ui
+      - run: npm test
+        working-directory: ui
       - run: npm run build
         working-directory: ui
 

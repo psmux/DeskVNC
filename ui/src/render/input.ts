@@ -46,6 +46,15 @@ const MAX_WHEEL_CLICKS_PER_EVENT = 10; // cap a single momentum-scroll flick
  */
 const PASTE_SYNC_TIMEOUT_MS = 300;
 
+/**
+ * How long a synthesised right click waits for a real button-2 press to show
+ * up and cancel it. Long enough to cover the gap between `pointerdown` and
+ * `contextmenu` in one gesture, short enough not to be felt as lag.
+ */
+const CONTEXT_MENU_SETTLE_MS = 60;
+/** A real right button this recently means the gesture is already covered. */
+const CONTEXT_MENU_DEDUP_MS = 500;
+
 /** X11 keysym for AltGr/ISO Level 3 Shift, once confirmed (see handleAltGrPair). */
 const ISO_LEVEL3_SHIFT = 0xfe03;
 /** Windows fires ControlLeft then AltRight this close together for a real AltGr press. */
@@ -149,6 +158,8 @@ export class SessionInput {
   private panLastX = 0;
   private panLastY = 0;
 
+  /** When a real right button was last pressed (see onContextMenu). */
+  private lastRightButtonAt = Number.NEGATIVE_INFINITY;
   /** When the last ControlLeft keydown was forwarded (see handleAltGrPair). */
   private ctrlLeftDownAt = 0;
   /** Hidden offscreen element that owns dead-key composition; see attach(). */
@@ -269,25 +280,62 @@ export class SessionInput {
    */
   private createCompositionOverlay(): HTMLTextAreaElement {
     const el = document.createElement("textarea");
-    el.setAttribute("aria-hidden", "true");
+    // Deliberately NOT aria-hidden, and sized over the canvas rather than
+    // parked 1px offscreen: dictation tools decide whether there is anywhere
+    // to insert text by asking the accessibility tree about the focused
+    // element, and an element excluded from that tree (aria-hidden) or
+    // pruned as invisible reads as "not a text input", so they refuse to
+    // deliver anything. Transparent and pointer-events:none, so it is
+    // invisible and clicks fall through to the canvas, but to accessibility
+    // machinery it is an honest, focused, canvas-sized text area. This also
+    // puts IME candidate windows near the session instead of a corner.
+    el.setAttribute("aria-label", "Remote desktop keyboard input");
     el.setAttribute("data-remote-capture", "true");
     el.setAttribute("autocapitalize", "off");
     el.setAttribute("autocomplete", "off");
     el.setAttribute("autocorrect", "off");
     el.spellcheck = false;
     el.tabIndex = -1;
+    // Invisible through transparency rather than `opacity: 0`: a fully
+    // transparent element is a candidate for being treated as not rendered,
+    // and an accessibility client that filters those back out would be shown
+    // nothing again. Transparent text on a transparent background is
+    // ordinary, visible-to-the-tree content that simply cannot be seen.
     el.style.cssText =
-      "position:fixed;left:-1px;top:-1px;width:1px;height:1px;opacity:0;padding:0;border:0;resize:none;";
+      "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;" +
+      "padding:0;border:0;margin:0;outline:none;resize:none;overflow:hidden;" +
+      "background:transparent;color:transparent;caret-color:transparent;";
     el.addEventListener("compositionend", this.onCompositionEnd);
     el.addEventListener("beforeinput", this.onBeforeInput);
+    el.addEventListener("input", this.onInputFallback);
     // A Cmd/Ctrl+V that is NOT being passed through to the remote used to hit
     // the non-editable canvas and do nothing; keep that contract now that
     // focus sits on an editable element. Remote paste has its own path
     // (clipboard sync + the forwarded keystroke under pass-through).
     el.addEventListener("paste", (ev) => ev.preventDefault());
-    document.body.appendChild(el);
+    // Into the canvas's container (position:relative), so inset:0 tracks the
+    // session area with no per-frame geometry syncing.
+    (this.canvas.parentElement ?? document.body).appendChild(el);
     return el;
   }
+
+  /**
+   * Last-resort insertion catch: text that reached the element's VALUE
+   * without going through beforeinput or composition. Accessibility-API
+   * insertion (AXSetValue) can do this, and it is one of the ways dictation
+   * tools deliver a transcript. Handled paths never get here: forwarded
+   * keydowns are preventDefault'ed, handled beforeinput is
+   * preventDefault'ed, and composition clears the value in finishComposition
+   * with mid-composition updates skipped via isComposing.
+   */
+  private onInputFallback = (e: Event): void => {
+    if ((e as InputEvent).isComposing) return;
+    const el = this.compositionEl;
+    if (!el || !el.value) return;
+    const text = el.value;
+    el.value = "";
+    if (this.forwardInsertedText) this.forwardText(text);
+  };
 
   /**
    * Give the session the keyboard. Focus lands on the hidden capture element
@@ -372,6 +420,9 @@ export class SessionInput {
       return;
     }
     this.buttonMask |= 1 << bit;
+    // A real right button press cancels the contextmenu-synthesised click
+    // that would otherwise duplicate this gesture (see onContextMenu).
+    if (bit === 2) this.lastRightButtonAt = performance.now();
     const p = this.syncLastPoint(e);
     this.sendPointer(p.x, p.y, this.buttonMask); // button transitions go immediately
     e.preventDefault();
@@ -426,8 +477,38 @@ export class SessionInput {
     }
   };
 
-  private onContextMenu = (e: Event): void => {
-    e.preventDefault(); // right-click belongs to the remote desktop
+  /** Right button pressed and released at one point, as a context gesture. */
+  private sendRightClick(x: number, y: number): void {
+    const right = 1 << 2;
+    this.sendPointer(x, y, this.buttonMask | right);
+    this.sendPointer(x, y, this.buttonMask);
+  }
+
+  /**
+   * A context-menu gesture the remote never heard about.
+   *
+   * A two-finger tap on a macOS trackpad (System Settings ▸ Trackpad ▸
+   * "Secondary click") is delivered to the page as a `contextmenu` event and
+   * nothing else: there is no button-2 `pointerdown`/`pointerup` pair, which
+   * is the only thing `onPointerDown` forwards. So the gesture every Mac
+   * laptop user makes to right-click produced exactly nothing on the remote
+   * desktop, while a physical right button worked.
+   *
+   * Synthesising the click here covers the gesture whatever the OS chooses
+   * to send. The short delay is the de-duplication: a real right button
+   * fires `pointerdown` and *then* `contextmenu` in the same gesture, so
+   * waiting a moment lets that arrive and cancel this, and it also works if
+   * an engine ever sends the two in the other order.
+   */
+  private onContextMenu = (e: MouseEvent): void => {
+    e.preventDefault(); // the menu belongs to the remote desktop, not to us
+    if (this.viewOnly) return;
+    const p = this.fbPoint(e);
+    const at = performance.now();
+    window.setTimeout(() => {
+      if (this.lastRightButtonAt >= at - CONTEXT_MENU_DEDUP_MS) return;
+      this.sendRightClick(p.x, p.y);
+    }, CONTEXT_MENU_SETTLE_MS);
   };
 
   // --------------------------------------------------------------- wheel
