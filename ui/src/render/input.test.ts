@@ -49,7 +49,12 @@ function setup() {
   const renderer = {
     cssPointToFramebuffer: (x: number, y: number) => ({ x: Math.round(x), y: Math.round(y) }),
     setCursorPosition: () => {},
+    getZoom: () => 1,
+    setZoom: () => {},
+    setScalingMode: () => {},
   } as unknown as WebGLRenderer;
+
+  const zoomed: number[] = [];
 
   const input = new SessionInput(canvas, {
     renderer,
@@ -57,9 +62,10 @@ function setup() {
     send: (packet) => sent.push(packet.slice()),
     releaseAllKeys: () => {},
     onAppHotkey: () => false,
+    onZoomGesture: (z) => zoomed.push(z),
   });
   input.attach();
-  return { canvas, input, sent };
+  return { canvas, input, sent, zoomed };
 }
 
 describe("context-menu gestures", () => {
@@ -106,5 +112,40 @@ describe("context-menu gestures", () => {
     );
     vi.advanceTimersByTime(100);
     expect(pointers(sent)).toEqual([]);
+  });
+});
+
+describe("pinch to zoom", () => {
+  it("zooms the view and sends nothing to the remote", () => {
+    // A trackpad pinch arrives as a ctrl+wheel event.
+    const { canvas, sent, zoomed } = setup();
+    canvas.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: -120, ctrlKey: true, clientX: 1, clientY: 1, bubbles: true }),
+    );
+    expect(zoomed.length).toBe(1);
+    expect(pointers(sent)).toEqual([]);
+  });
+
+  it("does nothing at all once zoom is locked", () => {
+    // The gesture is easy to trigger by accident mid-scroll, so locked it
+    // must neither rescale the view nor fall through to the remote as
+    // scroll-wheel clicks.
+    const { canvas, input, sent, zoomed } = setup();
+    input.setZoomLocked(true);
+    canvas.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: -120, ctrlKey: true, clientX: 1, clientY: 1, bubbles: true }),
+    );
+    expect(zoomed).toEqual([]);
+    expect(pointers(sent)).toEqual([]);
+  });
+
+  it("leaves ordinary scrolling alone while locked", () => {
+    const { canvas, input, sent } = setup();
+    input.setZoomLocked(true);
+    canvas.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: 40, clientX: 1, clientY: 1, bubbles: true }),
+    );
+    // One wheel-down click (WHEEL_STEP px): press then release of bit 4.
+    expect(pointers(sent).map((p) => p.mask)).toEqual([1 << 4, 0]);
   });
 });

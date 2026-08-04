@@ -142,6 +142,7 @@ export class SessionInput {
   private viewOnly = false;
   private passthrough = false;
   private naturalScroll = false;
+  private zoomLocked = false;
   private forwardInsertedText = true;
   private attached = false;
 
@@ -212,6 +213,11 @@ export class SessionInput {
 
   setNaturalScroll(v: boolean): void {
     this.naturalScroll = v;
+  }
+
+  /** Toolbar ▸ Scaling ▸ "Lock zoom": ignore pinch-to-zoom gestures. */
+  setZoomLocked(v: boolean): void {
+    this.zoomLocked = v;
   }
 
   /** Preferences ▸ Input ▸ "Type text inserted by dictation tools". */
@@ -532,8 +538,15 @@ export class SessionInput {
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     if (this.viewOnly) return;
-    // Ctrl/Cmd + wheel = zoom, handled by the app layer via renderer
+    // Ctrl/Cmd + wheel = zoom, handled by the app layer via renderer.
+    // A trackpad pinch arrives exactly this way, which is why locking zoom
+    // has to be handled here: the gesture is easy to trigger by accident
+    // in the middle of a two-finger scroll, and the zoom it caused was
+    // landing on the remote desktop as an unwanted scale change. Locked, the
+    // gesture is swallowed rather than forwarded, so it neither zooms nor
+    // turns into scroll events the remote would act on.
     if (e.ctrlKey || e.metaKey) {
+      if (this.zoomLocked) return;
       const z = this.renderer.getZoom() * (e.deltaY < 0 ? 1.1 : 0.9);
       if (this.onZoomGesture) {
         this.onZoomGesture(z);

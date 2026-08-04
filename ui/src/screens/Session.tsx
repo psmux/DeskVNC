@@ -37,7 +37,9 @@ import {
   PREF_CLIPBOARD_ON_FOCUS,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
+  PREF_ZOOM_LOCKED,
   readBoolPref,
+  writeBoolPref,
 } from "../lib/prefs";
 import {
   CAPTURE_INACTIVE,
@@ -1002,6 +1004,26 @@ function SessionView({
   }, [session.desktopName, push]);
 
   // Manual staleness override; off by default because it costs bandwidth.
+  /**
+   * Pinch-to-zoom off. Persisted rather than per-session: someone who finds
+   * the gesture disruptive on their trackpad finds it disruptive every time,
+   * and a setting that forgot itself on reconnect would be worse than none.
+   */
+  const [zoomLocked, setZoomLockedState] = useState(() =>
+    readBoolPref(PREF_ZOOM_LOCKED, false),
+  );
+  const toggleZoomLocked = useCallback((locked: boolean): void => {
+    setZoomLockedState(locked);
+    writeBoolPref(PREF_ZOOM_LOCKED, locked);
+    inputRef.current?.setZoomLocked(locked);
+  }, []);
+
+  // The input handler is created after first render, so the stored value has
+  // to be pushed once it exists, not only when it changes.
+  useEffect(() => {
+    inputRef.current?.setZoomLocked(zoomLocked);
+  }, [zoomLocked, viewReady]);
+
   const [alwaysRefresh, setAlwaysRefresh] = useState(false);
   const toggleAlwaysRefresh = useCallback(
     (enabled: boolean): void => {
@@ -1073,6 +1095,8 @@ function SessionView({
           setScalingModeState("custom");
           setZoomState(z);
         }}
+        zoomLocked={zoomLocked}
+        onZoomLocked={toggleZoomLocked}
         onQuality={(q) => {
           setQualityState(q);
           session.setQuality(q);
