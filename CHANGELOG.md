@@ -10,6 +10,19 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-05
+
+### Fixed
+
+- **Two-finger tap on a Mac trackpad now right-clicks the remote desktop.**
+  The gesture every Mac laptop uses for a secondary click reaches the page as
+  a lone `contextmenu` event, with none of the button-2 press/release the
+  client was listening for, so it produced nothing at all on the remote while
+  a physical right button worked. The click is now synthesised from the
+  gesture itself, and a real right button still cancels it so one gesture can
+  never right-click twice.
+
+
 ## [0.6.0] - 2026-08-03
 
 ### Added
