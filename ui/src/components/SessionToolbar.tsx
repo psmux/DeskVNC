@@ -115,6 +115,8 @@ export interface SessionToolbarProps {
   recallSignal: number;
   onScalingMode: (m: ScalingMode) => void;
   onZoom: (z: number) => void;
+  zoomLocked: boolean;
+  onZoomLocked: (locked: boolean) => void;
   onQuality: (q: QualityPreset) => void;
   alwaysRefresh: boolean;
   onAlwaysRefresh: (enabled: boolean) => void;
@@ -627,6 +629,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
               </div>
               <MenuRow selected={props.scalingMode === "remote-resize"} onClick={() => props.onScalingMode("remote-resize")}>
                 Remote resize (match window)
+              </MenuRow>
+              <MenuRow
+                selected={props.zoomLocked}
+                onClick={() => props.onZoomLocked(!props.zoomLocked)}
+              >
+                Lock zoom (ignore pinch)
               </MenuRow>
             </div>
           ) : null}

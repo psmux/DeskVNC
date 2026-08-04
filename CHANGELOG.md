@@ -10,6 +10,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **"Lock zoom (ignore pinch)" in the session toolbar's Scaling menu.** A
+  trackpad pinch is easy to start by accident in the middle of a two-finger
+  scroll, and rescaling the view is rarely what was meant. With the lock on,
+  the gesture is swallowed: it neither rescales the view nor reaches the
+  remote as scroll clicks. The zoom controls in the same menu keep working,
+  so this stops accidents rather than taking the feature away. The setting is
+  remembered, since a gesture that gets in the way once gets in the way every
+  time.
+
+
 ## [0.6.1] - 2026-08-05
 
 ### Fixed

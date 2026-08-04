@@ -38,6 +38,12 @@ export const PREF_FORWARD_INSERTED_TEXT = "forwardInsertedText";
  * chord, so Cmd/Ctrl+V pastes what the clipboard holds at that moment.
  */
 export const PREF_CLIPBOARD_ON_PASTE = "clipboardOnPaste";
+/**
+ * Ignore pinch-to-zoom in a session. The gesture is easy to trigger by
+ * accident mid-scroll on a trackpad, and rescaling the view is rarely what
+ * was meant; the toolbar's zoom controls still work while it is on.
+ */
+export const PREF_ZOOM_LOCKED = "zoomLocked";
 
 export function prefStorageKey(key: string): string {
   return `${PREFIX}${key}`;
