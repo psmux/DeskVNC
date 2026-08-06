@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-06
+
 ### Added
 
 - **A Pointers menu in the session toolbar.** "Show the remote pointer" is
@@ -32,6 +34,35 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   remembered, since a gesture that gets in the way once gets in the way every
   time.
 
+
+### Fixed
+
+- **A server with no password could not be connected to at all** ([#1]). A
+  stock `x11vnc` started without a password offers exactly one security type,
+  "None", and the client refused it and hung up before choosing one, which is
+  why the server logged `rfbProcessClientSecurityType: client gone`. Four
+  separate places refused it, and VeNCrypt Plain was refused the same way, all
+  gated behind an "allow insecure" opt-in that **no part of the app could set**:
+  every refusal told the user to enable *"Allow an unencrypted connection" for
+  this host*, a control that never existed. The client now takes the security
+  type the server offers when it is the only one; that is not a downgrade,
+  since anything stronger is always preferred, and it matches how VncAuth has
+  been treated since the start, whose session is equally cleartext. The
+  session's unencrypted badge remains the honest signal.
+- **The failure was reported as "Incorrect password"** on a server that has no
+  password, because any message containing "auth" was matched, including "no
+  *auth*entication at all". Only messages that really mean rejected
+  credentials are reported that way now.
+- **The host editor's "Security type" setting did nothing.** It was written to
+  the database and never read when connecting, so pinning a type (including
+  "None", the workaround the old error implied) had no effect.
+
+Why the tests were green through all of this: the shared integration-test
+helper switched the insecure opt-in **on**, so the test that connects to a
+"None"-only server proved nothing about the path a real session takes. It now
+runs on the shipping defaults, which is what turned this red.
+
+[#1]: https://github.com/psmux/DeskVNC/issues/1
 
 ## [0.6.1] - 2026-08-05
 
