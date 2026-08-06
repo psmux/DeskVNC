@@ -27,8 +27,12 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// policy (no jitter) so backoff assertions are exact.
 pub fn options(port: u16) -> ConnectOptions {
     let mut o = ConnectOptions::new("127.0.0.1", port);
-    // The mock offers None / VncAuth; both need the insecure opt-in.
-    o.allow_insecure = true;
+    // Deliberately the shipping defaults. This used to set
+    // `allow_insecure = true`, which meant every integration test ran with an
+    // opt-in no real session has, and `security_none_reaches_connected`
+    // therefore proved nothing about the path a user takes: connecting to a
+    // passwordless server was broken for releases with that test green
+    // (issue #1).
     o.connect_timeout = Duration::from_secs(5);
     o.reconnect = ReconnectPolicy {
         enabled: true,

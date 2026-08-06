@@ -176,7 +176,7 @@ const ANON_TLS_MESSAGE: &str = "anonymous TLS (VeNCrypt TLS* subtypes) is not su
 /// the password on the wire in the clear.
 pub fn select_subtype(
     offered: &[VeNCryptSubtype],
-    opts: &ConnectOptions,
+    _opts: &ConnectOptions,
 ) -> Result<VeNCryptSubtype> {
     if offered.is_empty() {
         return Err(VncError::Protocol(
@@ -188,15 +188,17 @@ pub fn select_subtype(
     ranked.sort_by(|a, b| b.rank().cmp(&a.rank()).then_with(|| a.cmp(b)));
     ranked.dedup();
 
-    let usable = ranked.iter().copied().find(|s| {
-        if s.is_anonymous_tls() {
-            return false;
-        }
-        if s.is_cleartext() && !opts.allow_insecure {
-            return false;
-        }
-        true
-    });
+    // Anonymous TLS is still refused: it encrypts but authenticates nothing,
+    // so it invites a man in the middle who would otherwise be visible.
+    //
+    // Cleartext subtypes (Plain) are NOT refused. `ranked` is strongest-first,
+    // so one is only reached when the server offered nothing better, and
+    // refusing it made such a server unreachable while pointing at an
+    // "Allow an unencrypted connection" control the app never had (issue #1).
+    // The password exposure is real and is what the unencrypted session badge
+    // is for; a VncAuth server, allowed since the start, exposes the session
+    // just as plainly.
+    let usable = ranked.iter().copied().find(|s| !s.is_anonymous_tls());
 
     if let Some(s) = usable {
         return Ok(s);
@@ -204,13 +206,6 @@ pub fn select_subtype(
 
     if ranked.iter().any(|s| s.is_anonymous_tls()) {
         return Err(VncError::Tls(ANON_TLS_MESSAGE.into()));
-    }
-    if ranked.iter().any(|s| s.is_cleartext()) {
-        return Err(VncError::Other(
-            "this server only offers VeNCrypt Plain, which sends the password unencrypted; \
-             enable \"Allow an unencrypted connection\" for this host to continue"
-                .into(),
-        ));
     }
     Err(VncError::Protocol("no usable VeNCrypt subtype".into()))
 }
@@ -487,12 +482,19 @@ mod tests {
     }
 
     #[test]
-    fn plain_needs_the_insecure_optin() {
+    fn plain_is_taken_only_when_nothing_better_is_offered() {
+        // Issue #1: refused on the shipping defaults, behind an opt-in the
+        // app could not set, so such a server could not be reached.
         let offered = vec![VeNCryptSubtype::Plain];
-        assert!(select_subtype(&offered, &opts(false)).is_err());
         assert_eq!(
-            select_subtype(&offered, &opts(true)).unwrap(),
+            select_subtype(&offered, &opts(false)).unwrap(),
             VeNCryptSubtype::Plain
+        );
+        // Anything encrypted still wins.
+        let offered = vec![VeNCryptSubtype::Plain, VeNCryptSubtype::X509Vnc];
+        assert_eq!(
+            select_subtype(&offered, &opts(false)).unwrap(),
+            VeNCryptSubtype::X509Vnc
         );
     }
 

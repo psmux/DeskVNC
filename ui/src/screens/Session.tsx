@@ -1478,7 +1478,17 @@ function diagnose(reason: unknown): string {
   if (r.includes("cancel")) return "Authentication was cancelled. Reconnect to try again.";
   if (r.includes("refused")) return "Connection refused, the VNC server may not be running on this port.";
   if (r.includes("timed out") || r.includes("timeout")) return "The computer didn't respond, it may be asleep, off, or unreachable from this network.";
-  if (r.includes("auth") || r.includes("password")) return "Incorrect password, the server did not accept it.";
+  // Deliberately NOT a bare "auth" match. That caught every message merely
+  // mentioning authentication, so a server offering none at all was reported
+  // to the user as "incorrect password" for a server that has no password
+  // (issue #1). Match only what really means "the credentials were rejected".
+  if (
+    r.includes("password") ||
+    r.includes("authentication failed") ||
+    r.includes("auth failed")
+  ) {
+    return "Incorrect password, the server did not accept it.";
+  }
   if (r.includes("certificate") || r.includes("tls")) return "The secure connection could not be verified.";
   if (r.includes("reset")) return "The connection was closed by the other side.";
   return text || "The connection ended.";

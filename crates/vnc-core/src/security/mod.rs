@@ -228,34 +228,29 @@ impl AuthOutcome {
 // Selection (PRD/10 §2)
 // ---------------------------------------------------------------------------
 
-/// Security types that require the per-host "I accept an unencrypted
-/// connection" opt-in.
-///
-/// **Only `None`**, a server that asks for no credentials at all, where
-/// anyone who can reach the port owns the desktop. That genuinely deserves a
-/// deliberate decision.
-///
-/// `VncAuth` is deliberately NOT gated, despite PRD/10 §2 originally putting it
-/// behind the same toggle. Two reasons, both learned from real servers:
-///
-/// 1. **It made the client useless against most of the installed base.** The
-///    TightVNC/TigerVNC/UltraVNC/x11vnc family advertises `[VncAuth, Tight]`
-///    and nothing stronger by default. Refusing VncAuth meant a default-config
-///    connection failed outright.
-/// 2. **The gate did not even hold.** `Tight` (16) was never gated, and its
-///    inner auth *is* the same cleartext DES exchange, so blocking VncAuth
-///    only pushed the connection down the Tight path, buying no security while
-///    adding failure surface. A gate with a side door is worse than no gate,
-///    because it looks like protection.
-///
-/// VncAuth still gets the loud treatment everywhere it matters: the 8-character
-/// truncation warning in the credentials dialog, and the persistent
-/// "unencrypted" badge on the session (`SecurityType::encrypts_session`).
-/// Warning about a real risk beats refusing to connect and being replaced by a
-/// client that does.
-pub fn requires_insecure_optin(t: SecurityType) -> bool {
-    matches!(t, SecurityType::None)
-}
+// The client no longer refuses any security type the server offers, and the
+// history of that is worth keeping, because both halves were learned from
+// real servers rather than reasoned out.
+//
+// `VncAuth` was gated first, per PRD/10 §2, and it made the client useless
+// against most of the installed base: the TightVNC/TigerVNC/UltraVNC/x11vnc
+// family advertises `[VncAuth, Tight]` and nothing stronger by default. The
+// gate did not even hold, since `Tight` (16) was never gated and its inner
+// auth is the same cleartext DES exchange, so blocking VncAuth only pushed
+// the connection down the Tight path. A gate with a side door is worse than
+// no gate, because it looks like protection.
+//
+// `None` was gated for longer, and failed the same way for the same reason:
+// a stock `x11vnc` with no password offers exactly one security type, so the
+// refusal made a whole class of server unreachable while telling the user to
+// enable a control that was never built (issue #1). Taking the only type on
+// offer is not a downgrade in any case.
+//
+// Both still get the loud treatment where it matters: the 8-character
+// truncation warning in the credentials dialog, and the persistent
+// "unencrypted" badge on the session (`SecurityType::encrypts_session`).
+// Warning about a real risk beats refusing to connect and being replaced by
+// a client that does.
 
 /// True if we have an implementation for this type at all.
 pub fn is_supported(t: SecurityType) -> bool {
@@ -298,9 +293,6 @@ pub fn select_security_type(offered: &[u8], opts: &ConnectOptions) -> Result<Sec
         if !is_supported(pref) {
             return Err(VncError::UnsupportedSecurityType(pref.to_wire()));
         }
-        if requires_insecure_optin(pref) && !opts.allow_insecure {
-            return Err(insecure_refused(pref));
-        }
         return Ok(pref);
     }
 
@@ -317,27 +309,22 @@ pub fn select_security_type(offered: &[u8], opts: &ConnectOptions) -> Result<Sec
             .then_with(|| a.to_wire().cmp(&b.to_wire()))
     });
 
-    if let Some(t) = usable
-        .iter()
-        .copied()
-        .find(|t| !requires_insecure_optin(*t) || opts.allow_insecure)
-    {
-        return Ok(t);
-    }
-
-    // Everything usable was gated behind the insecure opt-in.
-    Err(insecure_refused(usable[0]))
-}
-
-fn insecure_refused(t: SecurityType) -> VncError {
-    let what = match t {
-        SecurityType::None => "no authentication at all",
-        _ => "legacy VNC authentication with an unencrypted session",
-    };
-    VncError::Other(format!(
-        "this server offers only {what}; enable \"Allow an unencrypted connection\" \
-         for this host to continue"
-    ))
+    // The strongest type the server actually offered. `None` is reached only
+    // when it is the only thing on the list, because the sort puts every
+    // other supported type ahead of it, so taking it is never a downgrade:
+    // there was nothing better to downgrade from.
+    //
+    // This used to be gated behind an `allow_insecure` opt-in, which made a
+    // passwordless server (a stock `x11vnc` with no `-passwd`, or the
+    // loopback-only server behind an SSH tunnel) impossible to reach: the
+    // refusal told the user to enable "Allow an unencrypted connection",
+    // and no such control existed anywhere in the app. The gate also did not
+    // match how VncAuth is treated a few lines up, whose session is equally
+    // cleartext and has never been refused. The session carries the
+    // unencrypted badge either way (`SecurityType::encrypts_session`), which
+    // is the honest treatment: warn about a real risk rather than refuse to
+    // connect and be replaced by a client that does not.
+    Ok(usable[0])
 }
 
 // ---------------------------------------------------------------------------
@@ -554,16 +541,21 @@ mod tests {
     }
 
     #[test]
-    fn only_no_auth_at_all_needs_the_optin() {
-        let mut o = opts();
-        // `None` means anyone who can reach the port owns the desktop.
-        assert!(select_security_type(&[1], &o).is_err());
-        o.allow_insecure = true;
+    fn no_auth_is_taken_only_when_it_is_all_there_is() {
+        let o = opts();
+        // Issue #1: a stock `x11vnc` with no password offers exactly this,
+        // and refusing it made that server unreachable while telling the
+        // user to enable a control the app never had.
         assert_eq!(select_security_type(&[1], &o).unwrap(), SecurityType::None);
-        // ...and even then it is the last resort.
+        // It is still the last resort: anything else on the list wins, so
+        // taking it is never a downgrade.
         assert_eq!(
             select_security_type(&[1, 2], &o).unwrap(),
             SecurityType::VncAuth
+        );
+        assert_eq!(
+            select_security_type(&[1, 19], &o).unwrap(),
+            SecurityType::VeNCrypt
         );
     }
 
@@ -609,11 +601,14 @@ mod tests {
         );
         // Not offered -> hard failure, no silent downgrade to VeNCrypt.
         assert!(select_security_type(&[19, 2], &o).is_err());
-        // A pinned insecure type still needs the opt-in.
+        // Pinning a type is the user's decision and is honoured as given,
+        // including "None" against a server that offers something stronger.
         o.security_pref = Some(SecurityType::None);
-        assert!(select_security_type(&[1], &o).is_err());
-        o.allow_insecure = true;
         assert_eq!(select_security_type(&[1], &o).unwrap(), SecurityType::None);
+        assert_eq!(
+            select_security_type(&[1, 2], &o).unwrap(),
+            SecurityType::None
+        );
     }
 
     #[test]
