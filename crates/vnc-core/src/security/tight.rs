@@ -100,13 +100,11 @@ pub fn select_auth_code_with(
         ));
     }
     if has(auth_code::NONE) {
-        if !opts.allow_insecure {
-            return Err(VncError::Other(
-                "this server offers no authentication at all; enable \
-                 \"Allow an unencrypted connection\" for this host to continue"
-                    .into(),
-            ));
-        }
+        // Taking the only capability on offer is not a downgrade. This used
+        // to be refused unless `allow_insecure` was set, which no UI could
+        // set, so a passwordless server was unreachable (issue #1); the
+        // session's unencrypted badge is the honest signal instead.
+        tracing::warn!("Tight server offers no authentication");
         return Ok(auth_code::NONE);
     }
     Err(VncError::NoSupportedSecurityType(
@@ -155,14 +153,8 @@ pub(crate) async fn handshake(
         )));
     }
     if auth_count == 0 {
-        // No authentication at all, the same exposure as security type 1.
-        if !opts.allow_insecure {
-            return Err(VncError::Other(
-                "this server offers no authentication at all; enable \
-                 \"Allow an unencrypted connection\" for this host to continue"
-                    .into(),
-            ));
-        }
+        // No authentication at all, the same exposure as security type 1,
+        // and allowed for the same reason: the server offered nothing else.
         tracing::warn!("Tight server requires no authentication");
         return Ok(AuthOutcome::auto(stream));
     }
@@ -239,12 +231,14 @@ mod tests {
     }
 
     #[test]
-    fn none_needs_the_optin() {
+    fn none_is_accepted_when_it_is_the_only_capability() {
+        // Issue #1: the Tight path refused a no-auth server the same way the
+        // plain security-type path did, behind an opt-in nothing could set.
         let caps = [cap(auth_code::NONE)];
-        let mut o = ConnectOptions::new("h", 5900);
-        assert!(select_auth_code(&caps, &o).is_err());
-        o.allow_insecure = true;
-        assert_eq!(select_auth_code(&caps, &o).unwrap(), auth_code::NONE);
+        assert_eq!(
+            select_auth_code(&caps, &ConnectOptions::new("h", 5900)).unwrap(),
+            auth_code::NONE
+        );
     }
 
     #[test]

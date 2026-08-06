@@ -45,6 +45,29 @@ pub const SESSIONS_STATS_EVENT: &str = "sessions://stats";
 
 /// Map a profile's `quality_pref` string (PRD/03 §5 schema) onto the core
 /// preset. Unknown values fall back to Auto.
+/// The host editor's "Security type" values (see `ui/src/components/HostDialog.tsx`
+/// and the `security_pref` column). `None` means Auto: negotiate the strongest
+/// type the server offers.
+///
+/// This was stored and written for releases without ever being read, so the
+/// dropdown did nothing at all; pinning "None" to reach a passwordless server
+/// was the workaround suggested for issue #1 and could not have worked.
+fn parse_security_pref(pref: Option<&str>) -> Option<vnc_core::types::SecurityType> {
+    use vnc_core::types::SecurityType;
+    match pref?.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(SecurityType::None),
+        "vncauth" => Some(SecurityType::VncAuth),
+        "tight" => Some(SecurityType::Tight),
+        "vencrypt" | "vencrypt-x509" => Some(SecurityType::VeNCrypt),
+        "ra2" => Some(SecurityType::Ra2),
+        "apple-dh" => Some(SecurityType::AppleDh),
+        "ms-logon" | "mslogon" => Some(SecurityType::MsLogonII),
+        // "auto", and anything a newer build wrote that this one predates:
+        // negotiate rather than guess at what was meant.
+        _ => None,
+    }
+}
+
 fn parse_quality(pref: &str) -> QualityPreset {
     match pref {
         "high" => QualityPreset::High,
@@ -564,6 +587,7 @@ pub async fn connect_session(
         if let Some(profile) = super::blocking(move || store.get_host(&lookup)).await? {
             options.quality = parse_quality(&profile.quality_pref);
             options.view_only = profile.view_only;
+            options.security_pref = parse_security_pref(profile.security_pref.as_deref());
             ssh_tunnel_raw = profile.ssh_tunnel;
         }
 

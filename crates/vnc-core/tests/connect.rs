@@ -358,19 +358,19 @@ async fn unsupported_security_stops_the_session_without_retrying() {
     handle.shutdown();
 }
 
+/// Issue #1: a server offering only "None" (a stock passwordless `x11vnc`)
+/// must connect on the shipping defaults. This used to be refused, and the
+/// refusal named a per-host "Allow an unencrypted connection" control that
+/// was never built, so the server was simply unreachable.
 #[tokio::test]
-async fn insecure_security_requires_the_opt_in() {
-    // Without `allow_insecure` the client must refuse a None-only server
-    // rather than silently connecting in the clear.
+async fn a_password_less_server_connects_on_the_defaults() {
     let server = MockServer::start(MockConfig::new().security(&[SEC_NONE])).await;
-    let mut opts = options(server.port());
-    opts.allow_insecure = false;
-    match raw_handshake(server.port(), &opts).await {
-        Err(VncError::Other(msg)) => {
-            assert!(msg.contains("unencrypted"), "unexpected message: {msg}");
-        }
-        other => panic!("expected an insecure-refusal error, got {:?}", other.err()),
-    }
+    let opts = options(server.port());
+    assert!(!opts.allow_insecure, "the defaults must carry no opt-in");
+    let caps = raw_handshake(server.port(), &opts)
+        .await
+        .expect("a None-only server should connect");
+    assert_eq!(caps.security, SecurityType::None);
 }
 
 // ---------------------------------------------------------------------------
