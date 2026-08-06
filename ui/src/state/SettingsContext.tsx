@@ -8,6 +8,8 @@ import {
   type ReactNode,
 } from "react";
 
+export type LocalCursor = "standard" | "dot" | "off";
+
 export type ThemeChoice = "system" | "light" | "dark";
 export type LibraryView = "grid" | "list";
 export type SortKey = "name" | "last-connected" | "frequency" | "group";
@@ -37,6 +39,16 @@ export interface Settings {
    */
   showRemoteCursor: boolean;
   /**
+   * How the LOCAL pointer is drawn over a session.
+   *
+   * "standard" is the system arrow. "dot" is a small ring centred on the
+   * hotspot: the arrow covers the pixels under its own tip, which is where
+   * the remote pointer sits, so with both drawn they crowd each other. "off"
+   * leaves only the remote pointer, which is the closest thing to sitting at
+   * the remote machine.
+   */
+  localCursor: LocalCursor;
+  /**
    * Separate windows per session, or tabs inside the main window.
    *
    * Only consulted when a session *starts*: flipping it does not move sessions
@@ -65,6 +77,7 @@ const DEFAULTS: Settings = {
   onboarded: false,
   probeOnline: true,
   showRemoteCursor: true,
+  localCursor: "standard",
   windowMode: "windows",
   quickConnectHistory: [],
 };

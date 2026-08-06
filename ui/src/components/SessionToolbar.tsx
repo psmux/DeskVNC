@@ -12,13 +12,14 @@ import {
   type ReactNode,
 } from "react";
 import type { QualityPreset, ScalingMode, SessionState, SessionStats } from "../lib/types";
+import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
 import { classNames, formatBps, modKeyLabel } from "../lib/util";
 import { usePaneVisible } from "./Pane";
 import {
   IconActivity, IconCamera, IconChevronDown, IconClipboard, IconEye, IconFile,
   IconGripVertical, IconKeyboard, IconMaximize, IconMonitor, IconPin, IconPower,
-  IconRefresh, IconSearch,
+  IconCursor, IconRefresh, IconSearch,
 } from "./icons";
 
 type Edge = "top" | "bottom" | "left" | "right";
@@ -117,6 +118,10 @@ export interface SessionToolbarProps {
   onZoom: (z: number) => void;
   zoomLocked: boolean;
   onZoomLocked: (locked: boolean) => void;
+  showRemoteCursor: boolean;
+  onShowRemoteCursor: (show: boolean) => void;
+  localCursor: LocalCursor;
+  onLocalCursor: (mode: LocalCursor) => void;
   onQuality: (q: QualityPreset) => void;
   alwaysRefresh: boolean;
   onAlwaysRefresh: (enabled: boolean) => void;
@@ -499,6 +504,14 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           <IconMonitor size={15} />
         </ToolButton>
 
+        <ToolButton
+          label="Pointers"
+          active={openMenu === "pointer"}
+          onClick={() => setOpenMenu(openMenu === "pointer" ? null : "pointer")}
+        >
+          <IconCursor size={15} />
+        </ToolButton>
+
         <ToolButton label="Quality" active={openMenu === "quality"} onClick={() => setOpenMenu(openMenu === "quality" ? null : "quality")}>
           <IconActivity size={15} />
           <span className="text-xs uppercase text-secondary">{props.quality === "bw" ? "B&W" : props.quality}</span>
@@ -636,6 +649,37 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
               >
                 Lock zoom (ignore pinch)
               </MenuRow>
+            </div>
+          ) : null}
+          {openMenu === "pointer" ? (
+            <div>
+              <p className="px-2.5 pt-1.5 pb-1 text-2xs uppercase tracking-wide text-tertiary">
+                Remote pointer
+              </p>
+              <MenuRow
+                selected={props.showRemoteCursor}
+                onClick={() => props.onShowRemoteCursor(!props.showRemoteCursor)}
+              >
+                Show the remote pointer
+              </MenuRow>
+              <p className="px-2.5 pt-2 pb-1 text-2xs uppercase tracking-wide text-tertiary">
+                My pointer
+              </p>
+              {(
+                [
+                  ["standard", "Standard arrow"],
+                  ["dot", "Dot"],
+                  ["off", "Hidden"],
+                ] as [LocalCursor, string][]
+              ).map(([mode, label]) => (
+                <MenuRow
+                  key={mode}
+                  selected={props.localCursor === mode}
+                  onClick={() => props.onLocalCursor(mode)}
+                >
+                  {label}
+                </MenuRow>
+              ))}
             </div>
           ) : null}
           {openMenu === "displays" ? (

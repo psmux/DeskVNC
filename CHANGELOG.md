@@ -12,6 +12,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Added
 
+- **A Pointers menu in the session toolbar.** "Show the remote pointer" is
+  now reachable while you are looking at the desktop rather than only from
+  Preferences, and it is joined by a choice of how your own pointer is drawn
+  over the session: the standard arrow, a small dot, or hidden entirely. The
+  arrow covers the pixels under its own tip, which is exactly where the
+  remote pointer sits, so with both drawn the two crowd each other; the dot
+  is a ring centred on the hotspot with a light outline, which stays legible
+  on dark and light desktops. Hidden leaves only the remote pointer, which is
+  the closest thing to sitting at the machine itself. Both settings are
+  remembered, and the remote pointer still defaults to shown.
+
 - **"Lock zoom (ignore pinch)" in the session toolbar's Scaling menu.** A
   trackpad pinch is easy to start by accident in the middle of a two-finger
   scroll, and rescaling the view is rarely what was meant. With the lock on,

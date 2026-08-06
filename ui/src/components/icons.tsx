@@ -45,6 +45,9 @@ export const IconKey = (p: IconProps): ReactNode => (
 export const IconZap = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></Icon>
 );
+export const IconCursor = (p: IconProps): ReactNode => (
+  <Icon {...p}><path d="m4 3 6.5 17 2.6-7 7-2.6L4 3z" /></Icon>
+);
 export const IconHelp = (p: IconProps): ReactNode => (
   <Icon {...p}><circle cx="12" cy="12" r="9.5" /><path d="M9.2 9.2a2.8 2.8 0 0 1 5.5.7c0 1.9-2.7 2.2-2.7 3.9" /><path d="M12 17.2h.01" /></Icon>
 );

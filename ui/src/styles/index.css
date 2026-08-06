@@ -381,6 +381,23 @@ canvas.session-canvas {
   touch-action: none;
 }
 
+/* Local pointer over the session.
+ *
+ * "dot" replaces the system arrow with a small ring: the arrow hides the
+ * pixels under its own tip, which is exactly where the remote pointer is,
+ * so with both drawn the two crowd each other. The ring is centred on the
+ * hotspot (the 8 8 offsets) and has a light outline so it survives on dark
+ * and light desktops alike. `auto` is the plain system cursor. */
+canvas.session-canvas.local-cursor-dot {
+  cursor:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='8' cy='8' r='3.5' fill='none' stroke='white' stroke-width='2.5' opacity='.9'/%3E%3Ccircle cx='8' cy='8' r='3.5' fill='none' stroke='black' stroke-width='1.2'/%3E%3C/svg%3E")
+      8 8,
+    crosshair;
+}
+canvas.session-canvas.local-cursor-hidden {
+  cursor: none;
+}
+
 /* Respect prefers-reduced-motion: kill decorative motion, keep state changes */
 @media (prefers-reduced-motion: reduce) {
   *,

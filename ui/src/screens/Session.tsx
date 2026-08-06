@@ -28,6 +28,7 @@ import { useFiles } from "../hooks/useFiles";
 import { ToastShelf } from "../components/primitives";
 import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
+import { classNames } from "../lib/util";
 import { Dialog } from "../components/primitives";
 import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
 import {
@@ -200,7 +201,7 @@ function SessionView({
   /** Last-chance thumbnail capture, run before the renderer is disposed. */
   const teardownCaptureRef = useRef<() => void>(() => undefined);
   const { push } = useToasts();
-  const { settings } = useSettings();
+  const { settings, update } = useSettings();
 
   // Honour the "show remote pointer" preference (Preferences ▸ Input). Purely
   // visual: hiding it does not change what input we send.
@@ -1073,7 +1074,11 @@ function SessionView({
     <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-canvas">
       <canvas
         ref={canvasRef}
-        className="session-canvas"
+        className={classNames(
+          "session-canvas",
+          settings.localCursor === "dot" && "local-cursor-dot",
+          settings.localCursor === "off" && "local-cursor-hidden",
+        )}
         tabIndex={0}
         aria-label={`Remote desktop: ${session.desktopName}`}
       />
@@ -1097,6 +1102,10 @@ function SessionView({
         }}
         zoomLocked={zoomLocked}
         onZoomLocked={toggleZoomLocked}
+        showRemoteCursor={settings.showRemoteCursor}
+        onShowRemoteCursor={(show) => update({ showRemoteCursor: show })}
+        localCursor={settings.localCursor}
+        onLocalCursor={(mode) => update({ localCursor: mode })}
         onQuality={(q) => {
           setQualityState(q);
           session.setQuality(q);
