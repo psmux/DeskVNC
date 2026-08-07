@@ -676,6 +676,26 @@ export class WebGLRenderer {
     return this.zoom;
   }
 
+  /**
+   * How far the view can still be panned in each direction, in device
+   * pixels: 0 means the content fits and there is nothing to reach.
+   *
+   * Used by the edge auto-scroll to know whether moving toward an edge can
+   * actually reveal anything, so it stays inert at "fit" and only comes
+   * alive when part of the desktop is genuinely off-screen.
+   */
+  panRoom(): { left: number; right: number; up: number; down: number } {
+    const t = this.contentTransform();
+    const maxX = Math.max(0, (this.fbWidth * t.scaleX - this.canvas.width) / 2);
+    const maxY = Math.max(0, (this.fbHeight * t.scaleY - this.canvas.height) / 2);
+    return {
+      left: maxX + this.panX,
+      right: maxX - this.panX,
+      up: maxY + this.panY,
+      down: maxY - this.panY,
+    };
+  }
+
   panBy(dxDevice: number, dyDevice: number): void {
     this.panX += dxDevice;
     this.panY += dyDevice;

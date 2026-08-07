@@ -55,6 +55,7 @@ import {
   openExternal,
   readClipboard,
   safeInvoke,
+  safeListen,
   writeClipboard,
   type CaptureStatus,
 } from "../lib/tauri";
@@ -218,6 +219,17 @@ function SessionView({
   const [showCaptureHelp, setShowCaptureHelp] = useState(false);
   const [viewOnly, setViewOnlyState] = useState(false);
   const [recallSignal, setRecallSignal] = useState(0);
+  /**
+   * Latest values for the native-menu listener below. It is registered once
+   * per visible view, while these callbacks are defined further down and are
+   * rebuilt on most renders; reading them through refs keeps the listener
+   * from either capturing stale values or being torn down and re-added on
+   * every keystroke.
+   */
+  const viewOnlyRef = useRef(false);
+  viewOnlyRef.current = viewOnly;
+  const sendComboRef = useRef<((c: "ctrl-alt-del") => void) | null>(null);
+  const disconnectRef = useRef<(() => void) | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ w: number; h: number } | null>(null);
   const [scrimFading, setScrimFading] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
@@ -951,6 +963,7 @@ function SessionView({
       sessionRef.current.disconnect();
     });
   }, [captureOnExit]);
+  disconnectRef.current = disconnectWithThumbnail;
 
   const toggleFullscreen = useCallback(async (): Promise<void> => {
     if (inTauri()) {
@@ -966,6 +979,63 @@ function SessionView({
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen();
   }, []);
+
+  /**
+   * Native menu items that act on the session.
+   *
+   * `menu.rs` emits every custom item as `menu://action` and expects the
+   * frontend to route it; the library window and the app shell each listen
+   * for the items they own. Nothing listened for the session's, so the whole
+   * Session and Connection menus, and the three View items that are not
+   * handled natively, silently did nothing (issue #1). Only the view in
+   * front may act: the event reaches every mounted tab.
+   */
+  useEffect(() => {
+    if (!visible) return;
+    let unlisten: (() => void) | undefined;
+    void safeListen<{ id: string }>("menu://action", ({ id }) => {
+      switch (id) {
+        case "menu:toggle-toolbar":
+          setRecallSignal((n) => n + 1);
+          break;
+        case "menu:scale-actual":
+          setScalingModeState("actual");
+          break;
+        case "menu:scale-fit":
+          setScalingModeState("fit");
+          break;
+        case "menu:view-only":
+          setViewOnlyState(!viewOnlyRef.current);
+          break;
+        case "menu:refresh":
+          session.refreshScreen();
+          break;
+        case "menu:send-cad":
+          sendComboRef.current?.("ctrl-alt-del");
+          break;
+        case "menu:release-keys":
+          session.releaseAllKeys();
+          break;
+        case "menu:reconnect":
+          session.reconnectNow();
+          break;
+        case "menu:disconnect":
+          disconnectRef.current?.();
+          break;
+        default:
+          if (id.startsWith("menu:quality:")) {
+            const preset = id.slice("menu:quality:".length);
+            const q = (preset === "bw" ? "bw" : preset) as QualityPreset;
+            setQualityState(q);
+            session.setQuality(q);
+          }
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, session.refreshScreen, session.releaseAllKeys, session.reconnectNow]);
 
   const sendCombo = useCallback(
     (combo: "ctrl-alt-del" | "cmd-tab" | "win" | "alt-f4" | "escape"): void => {
@@ -1003,6 +1073,7 @@ function SessionView({
     URL.revokeObjectURL(url);
     push("success", "Screenshot saved");
   }, [session.desktopName, push]);
+  sendComboRef.current = sendCombo;
 
   // Manual staleness override; off by default because it costs bandwidth.
   /**

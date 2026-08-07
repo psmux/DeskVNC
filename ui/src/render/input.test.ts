@@ -52,9 +52,14 @@ function setup() {
     getZoom: () => 1,
     setZoom: () => {},
     setScalingMode: () => {},
+    panRoom: () => panRoom,
+    panBy: (dx: number, dy: number) => panned.push([dx, dy]),
   } as unknown as WebGLRenderer;
 
   const zoomed: number[] = [];
+  const panned: [number, number][] = [];
+  // Room to scroll in every direction unless a test says otherwise.
+  const panRoom = { left: 500, right: 500, up: 500, down: 500 };
 
   const input = new SessionInput(canvas, {
     renderer,
@@ -65,7 +70,7 @@ function setup() {
     onZoomGesture: (z) => zoomed.push(z),
   });
   input.attach();
-  return { canvas, input, sent, zoomed };
+  return { canvas, input, sent, zoomed, panned, panRoom };
 }
 
 describe("context-menu gestures", () => {
@@ -147,5 +152,58 @@ describe("pinch to zoom", () => {
     );
     // One wheel-down click (WHEEL_STEP px): press then release of bit 4.
     expect(pointers(sent).map((p) => p.mask)).toEqual([1 << 4, 0]);
+  });
+});
+
+describe("edge auto-scroll", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  // jsdom gives every element a zero-size rect, so the canvas has to claim a
+  // real one for the edge bands to mean anything.
+  function sized(canvas: HTMLCanvasElement, w = 800, h = 600) {
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: w, bottom: h, width: w, height: h, x: 0, y: 0 }) as DOMRect;
+    Object.defineProperty(canvas, "width", { value: w, configurable: true });
+    Object.defineProperty(canvas, "height", { value: h, configurable: true });
+  }
+
+  it("scrolls toward the edge the pointer is held against", () => {
+    // Issue #1: at 1:1 on a desktop larger than the window, everything past
+    // the edge was unreachable; panning existed only as an undiscoverable
+    // space-drag.
+    const { canvas, panned } = setup();
+    sized(canvas);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 2, clientY: 300, bubbles: true }),
+    );
+    vi.advanceTimersToNextFrame();
+    expect(panned.length).toBeGreaterThan(0);
+    // Content moves right so the view travels left.
+    expect(panned[0][0]).toBeGreaterThan(0);
+  });
+
+  it("stays still in the middle of the view", () => {
+    const { canvas, panned } = setup();
+    sized(canvas);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 400, clientY: 300, bubbles: true }),
+    );
+    vi.advanceTimersToNextFrame();
+    expect(panned).toEqual([]);
+  });
+
+  it("stays still when the desktop already fits", () => {
+    const { canvas, panned, panRoom } = setup();
+    sized(canvas);
+    panRoom.left = 0;
+    panRoom.right = 0;
+    panRoom.up = 0;
+    panRoom.down = 0;
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 2, clientY: 300, bubbles: true }),
+    );
+    vi.advanceTimersToNextFrame();
+    expect(panned).toEqual([]);
   });
 });

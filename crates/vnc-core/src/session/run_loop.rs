@@ -231,6 +231,15 @@ pub(crate) struct RunLoop {
     alr_restore_pending: bool,
     current_encoding: i32,
     rtt_ms: f32,
+    /// Outstanding RTT probe for a server with no Fence support: when the
+    /// answering update arrives, the round trip is the elapsed time.
+    ///
+    /// The Fence probe below is exact but needs the extension, and the
+    /// libvncserver family (x11vnc among them) does not implement it, so
+    /// every such session reported a flat 0 ms forever. A non-incremental
+    /// request for a single pixel is the universal equivalent: every RFB
+    /// server must answer one, and one pixel costs nothing.
+    probe_request_at: Option<Instant>,
     /// Outstanding fence RTT probe: (payload id, send time).
     probe: Option<(u64, Instant)>,
     /// Pixel formats sent with a fence-guarded SetPixelFormat whose fence
@@ -302,6 +311,7 @@ impl RunLoop {
             current_encoding: encoding::RAW,
             rtt_ms: 0.0,
             probe: None,
+            probe_request_at: None,
             pending_pf: VecDeque::new(),
             deferred_cmds: Vec::new(),
             pending_outcome: None,
@@ -442,6 +452,12 @@ impl RunLoop {
         commands: &mut mpsc::Receiver<ClientCommand>,
     ) -> Result<()> {
         let count = messages::read_framebuffer_update_header(&mut self.reader).await?;
+        // An update answers any outstanding no-Fence probe. Measured at the
+        // header, before the rects are read, so the figure is the round trip
+        // rather than the time spent decoding what came back.
+        if let Some(sent) = self.probe_request_at.take() {
+            self.rtt_ms = sent.elapsed().as_secs_f32() * 1000.0;
+        }
         let primed_before = !self.priming_update_pending;
 
         // Pipelining fallback (PRD/02 §7.2): without continuous updates keep
@@ -1347,11 +1363,18 @@ impl RunLoop {
         self.maybe_lossless_refresh(settings).await?;
 
         // Fire the next RTT probe.
-        if self.caps.supports_fence && self.probe.is_none() {
-            let id = self.epoch.elapsed().as_nanos() as u64;
-            let msg = messages::client_fence(fence_flags::REQUEST, &id.to_be_bytes());
+        if self.caps.supports_fence {
+            if self.probe.is_none() {
+                let id = self.epoch.elapsed().as_nanos() as u64;
+                let msg = messages::client_fence(fence_flags::REQUEST, &id.to_be_bytes());
+                self.send(&msg).await?;
+                self.probe = Some((id, Instant::now()));
+            }
+        } else if self.probe_request_at.is_none() {
+            // No Fence: time a one-pixel non-incremental request instead.
+            let msg = messages::framebuffer_update_request(false, Rect::new(0, 0, 1, 1));
             self.send(&msg).await?;
-            self.probe = Some((id, Instant::now()));
+            self.probe_request_at = Some(Instant::now());
         }
 
         self.frames_since_tick = 0;
