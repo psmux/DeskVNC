@@ -10,6 +10,41 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-07
+
+### Added
+
+- **The view scrolls itself when you push against an edge** ([#1]). At 1:1 on
+  a desktop larger than the window, everything past the edge was simply
+  unreachable: panning existed, but only as a space-drag nobody could be
+  expected to discover. Moving the pointer into the edge of the view now
+  scrolls toward it, faster the closer you get, the way RealVNC does. It is
+  inert whenever the desktop already fits, and it only scrolls in a direction
+  that has something left to show. The remote pointer keeps up with the
+  moving view rather than lagging behind it.
+
+### Fixed
+
+- **The Session and Connection menus did nothing at all** ([#1]). Every
+  custom menu item is emitted to the frontend to be routed, and the library
+  window and app shell each handled their own, but nothing ever listened for
+  the session's. So Show/Hide Toolbar, Actual Size, Fit to Window, the
+  Quality items, View Only, Refresh Screen, Send Ctrl+Alt+Del, Release All
+  Keys, Reconnect and Disconnect were all dead from the menu bar, while the
+  same actions worked from the session toolbar. Only the view in front acts,
+  so the item does what you would expect with several tabs open.
+- **The connection status reported "0ms" on servers that cannot be
+  measured** ([#1]). Round-trip time is probed with the Fence extension,
+  which the libvncserver family (x11vnc among others) does not implement, so
+  the figure sat at its initial zero for the whole session and was displayed
+  as though it were real. Those servers are now probed with a one-pixel
+  non-incremental update request, which any RFB server must answer, and the
+  status shows "-" until a measurement actually exists rather than claiming
+  an instant connection.
+
+[#1]: https://github.com/psmux/DeskVNC/issues/1
+
+
 ## [0.7.0] - 2026-08-06
 
 ### Added
