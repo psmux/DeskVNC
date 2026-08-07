@@ -584,9 +584,13 @@ export class SessionInput {
   private stepEdgeScroll = (): void => {
     this.autoScrollRaf = 0;
     if (this.autoScrollVX === 0 && this.autoScrollVY === 0) return;
-    // `panBy` takes the movement of the CONTENT, so scrolling toward an edge
-    // moves it the other way.
-    this.renderer.panBy(-this.autoScrollVX, -this.autoScrollVY);
+    // `panBy` moves the VIEW, not the content: `contentTransform` places the
+    // content at `-panX`, and the space-drag reads the same way round. The
+    // velocities below are already in view terms (negative = look further
+    // left), so they are passed straight through. Negating them here, on the
+    // assumption that panning moved the content, sent every edge the wrong
+    // way.
+    this.renderer.panBy(this.autoScrollVX, this.autoScrollVY);
     // The same screen point is now a different framebuffer pixel, so the
     // remote pointer has to be told, or it lags behind the moving view.
     if (!this.viewOnly) {
