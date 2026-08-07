@@ -55,6 +55,18 @@ const CONTEXT_MENU_SETTLE_MS = 60;
 /** A real right button this recently means the gesture is already covered. */
 const CONTEXT_MENU_DEDUP_MS = 500;
 
+/**
+ * Edge auto-scroll, for a view larger than its window (1:1 on a big desktop).
+ *
+ * Panning already existed but only through space-drag, which nobody finds,
+ * so parts of the remote screen were simply unreachable (issue #1). Moving
+ * the pointer into this band of the edge scrolls toward it, the way RealVNC
+ * does, at a speed that grows as the pointer gets closer to the edge.
+ */
+const EDGE_SCROLL_ZONE_PX = 56;
+/** Device pixels per frame at the very edge; ~1000 px/s at 60fps. */
+const EDGE_SCROLL_MAX_SPEED = 17;
+
 /** X11 keysym for AltGr/ISO Level 3 Shift, once confirmed (see handleAltGrPair). */
 const ISO_LEVEL3_SHIFT = 0xfe03;
 /** Windows fires ControlLeft then AltRight this close together for a real AltGr press. */
@@ -159,6 +171,11 @@ export class SessionInput {
   private panLastX = 0;
   private panLastY = 0;
 
+  private autoScrollRaf = 0;
+  private autoScrollVX = 0;
+  private autoScrollVY = 0;
+  private lastClientX = 0;
+  private lastClientY = 0;
   /** When a real right button was last pressed (see onContextMenu). */
   private lastRightButtonAt = Number.NEGATIVE_INFINITY;
   /** When the last ControlLeft keydown was forwarded (see handleAltGrPair). */
@@ -235,6 +252,7 @@ export class SessionInput {
     c.addEventListener("pointercancel", this.onPointerUp);
     c.addEventListener("wheel", this.onWheel, { passive: false });
     c.addEventListener("contextmenu", this.onContextMenu);
+    c.addEventListener("pointerleave", this.onPointerLeave);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
     window.addEventListener("blur", this.onBlur);
@@ -258,10 +276,12 @@ export class SessionInput {
     c.removeEventListener("pointercancel", this.onPointerUp);
     c.removeEventListener("wheel", this.onWheel);
     c.removeEventListener("contextmenu", this.onContextMenu);
+    c.removeEventListener("pointerleave", this.onPointerLeave);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("keyup", this.onKeyUp, true);
     window.removeEventListener("blur", this.onBlur);
     cancelAnimationFrame(this.moveRaf);
+    this.stopEdgeScroll();
     this.compositionEl?.remove();
     this.compositionEl = null;
   }
@@ -370,6 +390,7 @@ export class SessionInput {
   private syncLastPoint(e: { clientX: number; clientY: number }): { x: number; y: number } {
     if (this.moveDirty) {
       cancelAnimationFrame(this.moveRaf);
+    this.stopEdgeScroll();
       this.moveDirty = false;
     }
     const p = this.fbPoint(e);
@@ -468,6 +489,9 @@ export class SessionInput {
       this.panLastY = e.clientY;
       return;
     }
+    this.lastClientX = e.clientX;
+    this.lastClientY = e.clientY;
+    this.updateEdgeScroll();
     if (this.viewOnly) return;
     const p = this.fbPoint(e);
     if (p.x === this.lastX && p.y === this.lastY) return;
@@ -506,6 +530,81 @@ export class SessionInput {
    * waiting a moment lets that arrive and cancel this, and it also works if
    * an engine ever sends the two in the other order.
    */
+  /**
+   * Set the auto-scroll velocity from where the pointer is, and run or stop
+   * the loop accordingly. Only scrolls toward an edge that still has content
+   * behind it, so it is inert whenever the desktop already fits.
+   */
+  private updateEdgeScroll(): void {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return this.stopEdgeScroll();
+    const dpr = this.canvas.width / rect.width;
+    const room = this.renderer.panRoom();
+
+    // How far into each edge band the pointer is, 0 (outside) to 1 (at it).
+    const depth = (distance: number): number =>
+      distance >= EDGE_SCROLL_ZONE_PX ? 0 : Math.min(1, (EDGE_SCROLL_ZONE_PX - distance) / EDGE_SCROLL_ZONE_PX);
+    const left = depth(this.lastClientX - rect.left);
+    const right = depth(rect.right - this.lastClientX);
+    const up = depth(this.lastClientY - rect.top);
+    const down = depth(rect.bottom - this.lastClientY);
+
+    // Inside the canvas only: a pointer that has left entirely must not keep
+    // the view sliding.
+    const inside =
+      this.lastClientX >= rect.left &&
+      this.lastClientX <= rect.right &&
+      this.lastClientY >= rect.top &&
+      this.lastClientY <= rect.bottom;
+
+    const speed = EDGE_SCROLL_MAX_SPEED * dpr;
+    let vx = 0;
+    let vy = 0;
+    if (inside) {
+      if (left > 0 && room.left > 0) vx = -left * speed;
+      else if (right > 0 && room.right > 0) vx = right * speed;
+      if (up > 0 && room.up > 0) vy = -up * speed;
+      else if (down > 0 && room.down > 0) vy = down * speed;
+    }
+    this.autoScrollVX = vx;
+    this.autoScrollVY = vy;
+    if (vx === 0 && vy === 0) this.stopEdgeScroll();
+    else if (this.autoScrollRaf === 0) this.autoScrollRaf = requestAnimationFrame(this.stepEdgeScroll);
+  }
+
+  private stopEdgeScroll(): void {
+    if (this.autoScrollRaf !== 0) {
+      cancelAnimationFrame(this.autoScrollRaf);
+      this.autoScrollRaf = 0;
+    }
+    this.autoScrollVX = 0;
+    this.autoScrollVY = 0;
+  }
+
+  private stepEdgeScroll = (): void => {
+    this.autoScrollRaf = 0;
+    if (this.autoScrollVX === 0 && this.autoScrollVY === 0) return;
+    // `panBy` takes the movement of the CONTENT, so scrolling toward an edge
+    // moves it the other way.
+    this.renderer.panBy(-this.autoScrollVX, -this.autoScrollVY);
+    // The same screen point is now a different framebuffer pixel, so the
+    // remote pointer has to be told, or it lags behind the moving view.
+    if (!this.viewOnly) {
+      const p = this.fbPoint({ clientX: this.lastClientX, clientY: this.lastClientY });
+      if (p.x !== this.lastX || p.y !== this.lastY) {
+        this.lastX = p.x;
+        this.lastY = p.y;
+        this.sendPointer(p.x, p.y, this.buttonMask);
+      }
+    }
+    // Re-evaluate: the room may have run out at the new position.
+    this.updateEdgeScroll();
+  };
+
+  private onPointerLeave = (): void => {
+    this.stopEdgeScroll();
+  };
+
   private onContextMenu = (e: MouseEvent): void => {
     e.preventDefault(); // the menu belongs to the remote desktop, not to us
     if (this.viewOnly) return;

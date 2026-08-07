@@ -432,7 +432,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         ? true
         : Number(style.top) < viewport.h * 0.6;
 
-  const latency = props.stats?.rtt_ms ?? null;
+  // Zero means "never measured", not "instant": the core leaves it at 0 until
+  // a probe completes, and a session showing a confident "0ms" while the real
+  // round trip was ~290ms is worse than showing nothing (issue #1).
+  const rtt = props.stats?.rtt_ms ?? null;
+  const latency = rtt !== null && rtt > 0 ? rtt : null;
   const latencyColor =
     latency === null ? "bg-tertiary/50" : latency < 40 ? "bg-success" : latency < 120 ? "bg-warning" : "bg-danger";
 
