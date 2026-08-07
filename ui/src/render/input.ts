@@ -155,6 +155,7 @@ export class SessionInput {
   private passthrough = false;
   private naturalScroll = false;
   private zoomLocked = false;
+  private edgePan = true;
   private forwardInsertedText = true;
   private attached = false;
 
@@ -235,6 +236,12 @@ export class SessionInput {
   /** Toolbar ▸ Scaling ▸ "Lock zoom": ignore pinch-to-zoom gestures. */
   setZoomLocked(v: boolean): void {
     this.zoomLocked = v;
+  }
+
+  /** Toolbar ▸ Scaling ▸ "Pan by moving to edges". */
+  setEdgePan(v: boolean): void {
+    this.edgePan = v;
+    if (!v) this.stopEdgeScroll();
   }
 
   /** Preferences ▸ Input ▸ "Type text inserted by dictation tools". */
@@ -536,6 +543,7 @@ export class SessionInput {
    * behind it, so it is inert whenever the desktop already fits.
    */
   private updateEdgeScroll(): void {
+    if (!this.edgePan) return this.stopEdgeScroll();
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return this.stopEdgeScroll();
     const dpr = this.canvas.width / rect.width;

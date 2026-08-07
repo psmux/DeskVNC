@@ -118,6 +118,8 @@ export interface SessionToolbarProps {
   onZoom: (z: number) => void;
   zoomLocked: boolean;
   onZoomLocked: (locked: boolean) => void;
+  edgePan: boolean;
+  onEdgePan: (on: boolean) => void;
   showRemoteCursor: boolean;
   onShowRemoteCursor: (show: boolean) => void;
   localCursor: LocalCursor;
@@ -652,6 +654,9 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                 onClick={() => props.onZoomLocked(!props.zoomLocked)}
               >
                 Lock zoom (ignore pinch)
+              </MenuRow>
+              <MenuRow selected={props.edgePan} onClick={() => props.onEdgePan(!props.edgePan)}>
+                Pan by moving to edges
               </MenuRow>
             </div>
           ) : null}

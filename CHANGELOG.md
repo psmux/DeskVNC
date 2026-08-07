@@ -21,7 +21,9 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   scrolls toward it, faster the closer you get, the way RealVNC does. It is
   inert whenever the desktop already fits, and it only scrolls in a direction
   that has something left to show. The remote pointer keeps up with the
-  moving view rather than lagging behind it.
+  moving view rather than lagging behind it. "Pan by moving to edges" in the
+  toolbar's Scaling menu turns it off, next to the pinch-zoom lock;
+  space-drag panning works either way.
 
 ### Fixed
 
