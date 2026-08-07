@@ -35,6 +35,15 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   Keys, Reconnect and Disconnect were all dead from the menu bar, while the
   same actions worked from the session toolbar. Only the view in front acts,
   so the item does what you would expect with several tabs open.
+- **The toolbar hid itself while the pointer was resting on it.** Auto-hide
+  is driven by pointer movement, so a stationary pointer over the toolbar
+  produced no events and it collapsed at exactly the moment it was being
+  used. Hovering it now holds it open, and the countdown restarts when the
+  pointer leaves.
+- **The toolbar twitched sideways once a second.** The latency readout is
+  re-measured every second and sized itself to its contents, so the whole bar
+  shifted as the figure moved between "-", "9ms" and "290ms". The field now
+  has a fixed width.
 - **The connection status reported "0ms" on servers that cannot be
   measured** ([#1]). Round-trip time is probed with the Fence extension,
   which the libvncserver family (x11vnc among others) does not implement, so
