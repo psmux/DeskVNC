@@ -10,6 +10,45 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-07
+
+### Fixed
+
+- **The latency reading was consistently too low, never too high** ([#1]). The
+  probe for servers without the Fence extension was completed by whichever
+  framebuffer update arrived first, and an unrelated update is always *earlier*
+  than the probe's own answer, which is why the error only ever ran one way: a
+  276 ms link read as 200 ms, and a loopback connection read tens of
+  milliseconds. A one-pixel probe is answered by a one-pixel update, so an
+  update carrying real damage now spoils the probe instead of completing it,
+  and the next quiet moment tries again. Note the figure is a round trip
+  through the server's update loop, not a network ping: it includes however
+  long the server takes to notice and answer, which is why even a loopback
+  connection does not read as zero.
+- **The connection detail panel still showed "0 ms" before anything had been
+  measured** ([#1]). The toolbar was fixed in 0.8.0; the panel behind it was
+  not. It now reads "-" as well.
+- **Fullscreen was bound to Ctrl+F on Windows and Linux** ([#1]). The
+  accelerator was written as `CmdOrCtrl+Ctrl+F`, which collapses to a plain
+  Ctrl+F on those platforms, quietly taking Find away from every remote
+  application. It is now F11 there, the convention on both, and stays
+  Cmd+Ctrl+F on macOS.
+- **Help ▸ About from a session window opened the dialog on the library
+  window** ([#1]), behind the session being looked at. The shell that renders
+  it is only mounted in the library window; a session window now has its own.
+
+### Removed
+
+- **Space-drag panning, which never worked** ([#1]). Nothing ever told the
+  input handler the space bar was down, so holding it simply typed a space on
+  the remote desktop. Wiring it up would have been the wrong fix: space is an
+  ordinary key that belongs to the remote, and holding it to pan would stop it
+  typing. Edge scrolling covers what it was meant for, and Alt+middle-drag
+  still pans deliberately.
+
+[#1]: https://github.com/psmux/DeskVNC/issues/1
+
+
 ## [0.8.1] - 2026-08-07
 
 ### Fixed
