@@ -44,6 +44,13 @@ export const PREF_CLIPBOARD_ON_PASTE = "clipboardOnPaste";
  * was meant; the toolbar's zoom controls still work while it is on.
  */
 export const PREF_ZOOM_LOCKED = "zoomLocked";
+/**
+ * Scroll the view when the pointer reaches an edge, for a desktop larger
+ * than the window. On by default, because without it the part of the screen
+ * past the edge cannot be reached at all; off for anyone who finds the view
+ * moving under them distracting. Space-drag panning works either way.
+ */
+export const PREF_EDGE_PAN = "edgePan";
 
 export function prefStorageKey(key: string): string {
   return `${PREFIX}${key}`;

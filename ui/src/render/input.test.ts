@@ -216,6 +216,17 @@ describe("edge auto-scroll", () => {
     expect(panned).toEqual([]);
   });
 
+  it("stays still once the user turns it off", () => {
+    const { canvas, input, panned } = setup();
+    sized(canvas);
+    input.setEdgePan(false);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 2, clientY: 300, bubbles: true }),
+    );
+    vi.advanceTimersToNextFrame();
+    expect(panned).toEqual([]);
+  });
+
   it("stays still when the desktop already fits", () => {
     const { canvas, panned, panRoom } = setup();
     sized(canvas);

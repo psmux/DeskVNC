@@ -38,6 +38,7 @@ import {
   PREF_CLIPBOARD_ON_FOCUS,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
+  PREF_EDGE_PAN,
   PREF_ZOOM_LOCKED,
   readBoolPref,
   writeBoolPref,
@@ -1090,11 +1091,21 @@ function SessionView({
     inputRef.current?.setZoomLocked(locked);
   }, []);
 
+  /** Edge auto-scroll, the counterpart of the zoom lock. On by default: the
+   *  screen past the edge is otherwise unreachable at 1:1. */
+  const [edgePan, setEdgePanState] = useState(() => readBoolPref(PREF_EDGE_PAN, true));
+  const toggleEdgePan = useCallback((on: boolean): void => {
+    setEdgePanState(on);
+    writeBoolPref(PREF_EDGE_PAN, on);
+    inputRef.current?.setEdgePan(on);
+  }, []);
+
   // The input handler is created after first render, so the stored value has
   // to be pushed once it exists, not only when it changes.
   useEffect(() => {
     inputRef.current?.setZoomLocked(zoomLocked);
-  }, [zoomLocked, viewReady]);
+    inputRef.current?.setEdgePan(edgePan);
+  }, [zoomLocked, edgePan, viewReady]);
 
   const [alwaysRefresh, setAlwaysRefresh] = useState(false);
   const toggleAlwaysRefresh = useCallback(
@@ -1173,6 +1184,8 @@ function SessionView({
         }}
         zoomLocked={zoomLocked}
         onZoomLocked={toggleZoomLocked}
+        edgePan={edgePan}
+        onEdgePan={toggleEdgePan}
         showRemoteCursor={settings.showRemoteCursor}
         onShowRemoteCursor={(show) => update({ showRemoteCursor: show })}
         localCursor={settings.localCursor}
