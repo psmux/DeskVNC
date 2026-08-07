@@ -25,6 +25,27 @@ fn git(args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// "clean" / "dirty", or None when git could not tell us.
+///
+/// Deliberately not routed through `git()`: that treats empty output as
+/// failure, and `git status --porcelain` prints nothing precisely when the
+/// tree is CLEAN. Every clean checkout, which is to say every release build,
+/// therefore stamped "unknown" and the About dialog could not tell a pristine
+/// build from an unknowable one.
+fn git_dirty() -> Option<String> {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(manifest)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let clean = out.stdout.iter().all(|b| b.is_ascii_whitespace());
+    Some(if clean { "clean" } else { "dirty" }.to_string())
+}
+
 fn stamp(key: &str, value: Option<String>) {
     println!(
         "cargo:rustc-env={key}={}",
@@ -59,13 +80,7 @@ fn stamp_git_provenance() {
         "DESKVNC_GIT_COMMIT_DATE",
         git(&["log", "-1", "--format=%cd", "--date=format:%Y-%m-%d"]),
     );
-    stamp(
-        "DESKVNC_GIT_DIRTY",
-        git(&["status", "--porcelain"]).map_or_else(
-            || Some("unknown".into()),
-            |s| Some(if s.is_empty() { "clean" } else { "dirty" }.into()),
-        ),
-    );
+    stamp("DESKVNC_GIT_DIRTY", git_dirty());
     stamp(
         "DESKVNC_RUSTC_VERSION",
         std::env::var("RUSTC")
