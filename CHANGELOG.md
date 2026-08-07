@@ -10,6 +10,31 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-07
+
+### Fixed
+
+- **The latency reading jumped between about 1 ms and 180 ms on the same
+  link** ([#1]). The round-trip probe introduced in 0.8.0 for servers without
+  the Fence extension is closed by the next framebuffer update, and on a busy
+  screen that update is somebody else's: one already in flight ends the timer
+  almost immediately, while the probe's own answer queued behind a full
+  repaint reads as hundreds of milliseconds. It now waits for a quiet moment
+  before probing, when the parked incremental request means the only update
+  that can arrive is the answer to the probe, and the figure is smoothed so a
+  single scheduling hiccup does not throw it. An unanswered probe is
+  abandoned after five seconds rather than freezing the reading.
+- **Fullscreen kept the menu bar on Windows and Linux** ([#1]), so the remote
+  desktop never actually filled the screen. There the menu belongs to the
+  window, and it is now hidden while fullscreen and restored on the way out.
+  macOS puts the menu in the system bar, which it hides for fullscreen
+  windows itself. The toolbar's fullscreen button and its shortcut both still
+  work with the menu gone; Escape is deliberately left alone, since it has to
+  reach the remote desktop.
+
+[#1]: https://github.com/psmux/DeskVNC/issues/1
+
+
 ## [0.8.0] - 2026-08-07
 
 ### Added

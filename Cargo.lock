@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "deskvncviewer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -6917,7 +6917,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vnc-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aes 0.8.4",
  "byteorder",
@@ -6952,7 +6952,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-discovery"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -6971,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-files"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -6992,7 +6992,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-input-capture"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "core-foundation",
  "core-graphics 0.24.0",
@@ -7009,7 +7009,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-store"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -7033,7 +7033,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-transport"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "hex",
  "parking_lot",
