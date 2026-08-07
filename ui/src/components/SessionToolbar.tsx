@@ -231,10 +231,19 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
 
   const expand = useCallback((): void => setCollapsed(false), []);
 
+  /**
+   * True while the pointer is over the toolbar.
+   *
+   * Auto-hide is driven by `pointermove`, so a pointer RESTING on the
+   * toolbar generates no events and the thing collapsed out from under the
+   * cursor, which is the one moment it is obviously wanted.
+   */
+  const hovering = useRef(false);
+
   const armIdle = useCallback((): void => {
     window.clearTimeout(idleTimer.current);
     idleTimer.current = window.setTimeout(() => {
-      if (!pinned && !dragging.current) collapse();
+      if (!pinned && !dragging.current && !hovering.current) collapse();
     }, IDLE_MS);
   }, [pinned, collapse]);
 
@@ -474,6 +483,14 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       <div
         role="toolbar"
         aria-label="Session controls"
+        onPointerEnter={() => {
+          hovering.current = true;
+          window.clearTimeout(idleTimer.current);
+        }}
+        onPointerLeave={() => {
+          hovering.current = false;
+          armIdle();
+        }}
         className="fade-in flex items-center gap-0.5 rounded-pill border border-subtle bg-raised/95 px-1.5 py-1 shadow-(--shadow-pop) backdrop-blur transition-shadow duration-150 hover:shadow-(--shadow-glow)"
       >
         <button
@@ -492,7 +509,10 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           onClick={() => setOpenMenu(openMenu === "status" ? null : "status")}
         >
           <span className={`h-2 w-2 rounded-full ${latencyColor}`} />
-          <span className="text-xs tabular-nums text-secondary">
+          {/* Fixed width, right-aligned: the figure changes every second, and
+              letting it size itself made the whole toolbar twitch sideways as
+              the reading moved between "-", "9ms" and "290ms". */}
+          <span className="inline-block w-[5ch] text-right text-xs tabular-nums text-secondary">
             {latency !== null ? `${Math.round(latency)}ms` : "-"}
           </span>
         </ToolButton>
