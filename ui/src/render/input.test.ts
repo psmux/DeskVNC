@@ -179,8 +179,31 @@ describe("edge auto-scroll", () => {
     );
     vi.advanceTimersToNextFrame();
     expect(panned.length).toBeGreaterThan(0);
-    // Content moves right so the view travels left.
+    // `panBy` moves the VIEW, so looking further left is negative. This
+    // assertion had the sign backwards and happily confirmed a bug that sent
+    // every edge scrolling the wrong way.
+    expect(panned[0][0]).toBeLessThan(0);
+  });
+
+  it("scrolls right at the right edge, and down at the bottom", () => {
+    const { canvas, panned } = setup();
+    sized(canvas);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 798, clientY: 598, bubbles: true }),
+    );
+    vi.advanceTimersToNextFrame();
     expect(panned[0][0]).toBeGreaterThan(0);
+    expect(panned[0][1]).toBeGreaterThan(0);
+  });
+
+  it("scrolls up at the top edge", () => {
+    const { canvas, panned } = setup();
+    sized(canvas);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { clientX: 400, clientY: 2, bubbles: true }),
+    );
+    vi.advanceTimersToNextFrame();
+    expect(panned[0][1]).toBeLessThan(0);
   });
 
   it("stays still in the middle of the view", () => {
