@@ -15,6 +15,33 @@ import { Pane } from "./components/Pane";
 import { ToastShelf } from "./components/primitives";
 import { safeListen } from "./lib/tauri";
 
+/**
+ * A session in a window of its own.
+ *
+ * It needs its own About dialog: the shell that renders one is only mounted
+ * in the library window, so Help ▸ About from a session window opened the
+ * dialog on the library window instead, behind the session the user was
+ * looking at.
+ */
+function SessionWindow(): ReactNode {
+  const [aboutOpen, setAboutOpen] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void safeListen<{ id: string }>("menu://action", ({ id }) => {
+      if (id === "menu:about") setAboutOpen(true);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+  return (
+    <>
+      <Session />
+      {aboutOpen ? <About onClose={() => setAboutOpen(false)} /> : null}
+    </>
+  );
+}
+
 export default function App(): ReactNode {
   const isSession = useMemo(
     () => new URLSearchParams(window.location.search).has("sessionId"),
@@ -25,7 +52,7 @@ export default function App(): ReactNode {
     <SettingsProvider>
       <ToastProvider>
         {isSession ? (
-          <Session />
+          <SessionWindow />
         ) : (
           <HostsProvider>
             <DiscoveryProvider>

@@ -167,7 +167,6 @@ export class SessionInput {
   private wheelAccumX = 0;
   private wheelAccumY = 0;
   private panning = false;
-  private spaceHeld = false;
   private panButton = -1;
   private panLastX = 0;
   private panLastY = 0;
@@ -431,7 +430,13 @@ export class SessionInput {
     // viewport meant a middle-click (X11 paste-from-selection) worked or not
     // depending on zoom level; Alt+middle-drag keeps the gesture available
     // without swallowing the plain click.
-    if (this.spaceHeld || (e.button === 1 && e.altKey)) {
+    // Alt+middle-drag pans deliberately. There was a space-drag here too,
+    // but nothing ever told the handler the space bar was down, so it never
+    // worked at all -- and wiring it up would have been wrong anyway: space
+    // is an ordinary key that belongs to the remote desktop, so holding it
+    // to pan would stop it typing. Edge scrolling covers the case it was
+    // meant for.
+    if (e.button === 1 && e.altKey) {
       this.panning = true;
       this.panButton = e.button;
       this.panLastX = e.clientX;
@@ -945,9 +950,6 @@ export class SessionInput {
     this.sendKey(held.keysym, held.keycode, false);
   };
 
-  setSpaceHeld(v: boolean): void {
-    this.spaceHeld = v;
-  }
 
   /**
    * Drop every key/button we believe is held. One kind-2 event covers the
