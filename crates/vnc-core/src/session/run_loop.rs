@@ -76,6 +76,10 @@ const PROBE_STALE: Duration = Duration::from_secs(5);
 /// jittery; this keeps the figure honest without it dancing every second.
 const RTT_SMOOTHING: f32 = 0.3;
 
+/// Largest update still credible as the answer to a one-pixel probe. Servers
+/// may round a request out to a small tile, so this is not exactly 1.
+const PROBE_ANSWER_MAX_AREA: usize = 16 * 16;
+
 /// An `AsyncRead` wrapper that counts every byte received, for stats, and
 /// times stall-anchored bursts for the Auto tuner's link-capacity estimate
 /// (see [`LinkMeter`]).
@@ -470,17 +474,11 @@ impl RunLoop {
         commands: &mut mpsc::Receiver<ClientCommand>,
     ) -> Result<()> {
         let count = messages::read_framebuffer_update_header(&mut self.reader).await?;
-        // An update answers any outstanding no-Fence probe. Measured at the
-        // header, before the rects are read, so the figure is the round trip
-        // rather than the time spent decoding what came back.
-        if let Some(sent) = self.probe_request_at.take() {
-            let sample = sent.elapsed().as_secs_f32() * 1000.0;
-            self.rtt_ms = if self.rtt_ms > 0.0 {
-                RTT_SMOOTHING * sample + (1.0 - RTT_SMOOTHING) * self.rtt_ms
-            } else {
-                sample
-            };
-        }
+        // Timed from the header, before any rect is read, so the figure is the
+        // round trip and not the time spent decoding what came back. Whether
+        // this update is really the probe's answer is decided once its size
+        // is known, after the rect loop below.
+        let probe_sent = self.probe_request_at.take();
         let primed_before = !self.priming_update_pending;
 
         // Pipelining fallback (PRD/02 §7.2): without continuous updates keep
@@ -630,6 +628,25 @@ impl RunLoop {
                 });
             if lossy {
                 self.lossy_damage = self.lossy_damage.union(&damage);
+            }
+        }
+
+        // A no-Fence probe asks for one pixel, so its answer is one pixel. An
+        // update carrying real damage is somebody else's and merely happened
+        // to arrive first; timing against it reads far too low, which is
+        // exactly the "always too low, never too high" that was reported.
+        // Such an update spoils the probe rather than completing it, and the
+        // next quiet moment tries again.
+        if let Some(sent) = probe_sent {
+            if damage.area() <= PROBE_ANSWER_MAX_AREA {
+                let sample = sent.elapsed().as_secs_f32() * 1000.0;
+                self.rtt_ms = if self.rtt_ms > 0.0 {
+                    RTT_SMOOTHING * sample + (1.0 - RTT_SMOOTHING) * self.rtt_ms
+                } else {
+                    sample
+                };
+            } else {
+                tracing::trace!(area = damage.area(), "rtt probe spoiled by real damage");
             }
         }
 

@@ -998,7 +998,9 @@ function StatusMenu({ stats, desktopName }: { stats: SessionStats | null; deskto
       {stats ? (
         <dl className="grid grid-cols-2 gap-y-1 text-xs">
           <dt className="text-tertiary">Latency</dt>
-          <dd className="tabular-nums text-primary">{Math.round(stats.rtt_ms)} ms</dd>
+          <dd className="tabular-nums text-primary">
+            {stats.rtt_ms > 0 ? `${Math.round(stats.rtt_ms)} ms` : "-"}
+          </dd>
           <dt className="text-tertiary">Throughput</dt>
           <dd className="tabular-nums text-primary">{formatBps(stats.throughput_bps)}</dd>
           <dt className="text-tertiary">Frame rate</dt>

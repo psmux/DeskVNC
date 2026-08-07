@@ -72,8 +72,18 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     let view = SubmenuBuilder::new(app, "View")
         .item(
+            // F11 on Windows/Linux, the convention there, and the chord this
+            // used to carry ("CmdOrCtrl+Ctrl+F") collapsed to a plain Ctrl+F
+            // on those platforms: a shortcut remote applications use for
+            // Find, quietly stolen from the desktop being viewed. macOS keeps
+            // Cmd+Ctrl+F, which is its own fullscreen convention and is not
+            // in the way of anything.
             &MenuItemBuilder::with_id("menu:toggle-fullscreen", "Toggle Fullscreen")
-                .accelerator("CmdOrCtrl+Ctrl+F")
+                .accelerator(if cfg!(target_os = "macos") {
+                    "CmdOrCtrl+Ctrl+F"
+                } else {
+                    "F11"
+                })
                 .build(app)?,
         )
         .separator()
