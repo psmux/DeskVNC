@@ -145,7 +145,9 @@ pub fn set_fullscreen_on_monitor(
     fullscreen: bool,
 ) -> Result<(), String> {
     if !fullscreen {
-        return window.set_fullscreen(false).map_err(|e| e.to_string());
+        window.set_fullscreen(false).map_err(|e| e.to_string())?;
+        set_menu_visible(window, true);
+        return Ok(());
     }
 
     let target = match monitor_index {
@@ -171,5 +173,35 @@ pub fn set_fullscreen_on_monitor(
             .set_position(PhysicalPosition::new(pos.x, pos.y))
             .map_err(|e| e.to_string())?;
     }
-    window.set_fullscreen(true).map_err(|e| e.to_string())
+    window.set_fullscreen(true).map_err(|e| e.to_string())?;
+    set_menu_visible(window, false);
+    Ok(())
+}
+
+/// Show or hide the window's menu bar.
+///
+/// On Windows and Linux the menu is part of the window, so in fullscreen it
+/// keeps a strip of the screen that the remote desktop should have had: the
+/// point of fullscreen is that the remote fills the display. macOS puts the
+/// menu in the system bar, which it hides for fullscreen windows itself, so
+/// there is nothing to do and asking would be wrong.
+///
+/// The toolbar's fullscreen button and its shortcut both remain, which is
+/// what gets you back out with the menu gone.
+fn set_menu_visible(window: &WebviewWindow, visible: bool) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let r = if visible {
+            window.show_menu()
+        } else {
+            window.hide_menu()
+        };
+        if let Err(e) = r {
+            tracing::debug!(visible, "could not change menu visibility: {e}");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (window, visible);
+    }
 }

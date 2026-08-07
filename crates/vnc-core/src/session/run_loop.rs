@@ -58,6 +58,24 @@ const ALR_QUALITY_FLOOR: u8 = 9;
 /// the lossy path was chosen to avoid.
 const ALR_COOLDOWN: Duration = Duration::from_secs(5);
 
+/// How quiet the stream must be before timing a round trip without Fence.
+///
+/// The probe is closed by the next FramebufferUpdate, and on a busy screen
+/// that is somebody else's: one already in flight ends it after a millisecond,
+/// while ours queued behind a full repaint reads as hundreds. Waiting for a
+/// gap means the parked incremental request is still parked, so the only
+/// update that can arrive is the answer to the probe.
+const PROBE_IDLE: Duration = Duration::from_millis(300);
+
+/// Abandon an unanswered no-Fence probe after this, so one lost answer does
+/// not stop the reading updating for the rest of the session.
+const PROBE_STALE: Duration = Duration::from_secs(5);
+
+/// Weight of a new sample in the reported round trip. Even a well-timed
+/// probe carries the server's own scheduling delay, so a single sample is
+/// jittery; this keeps the figure honest without it dancing every second.
+const RTT_SMOOTHING: f32 = 0.3;
+
 /// An `AsyncRead` wrapper that counts every byte received, for stats, and
 /// times stall-anchored bursts for the Auto tuner's link-capacity estimate
 /// (see [`LinkMeter`]).
@@ -456,7 +474,12 @@ impl RunLoop {
         // header, before the rects are read, so the figure is the round trip
         // rather than the time spent decoding what came back.
         if let Some(sent) = self.probe_request_at.take() {
-            self.rtt_ms = sent.elapsed().as_secs_f32() * 1000.0;
+            let sample = sent.elapsed().as_secs_f32() * 1000.0;
+            self.rtt_ms = if self.rtt_ms > 0.0 {
+                RTT_SMOOTHING * sample + (1.0 - RTT_SMOOTHING) * self.rtt_ms
+            } else {
+                sample
+            };
         }
         let primed_before = !self.priming_update_pending;
 
@@ -1370,11 +1393,22 @@ impl RunLoop {
                 self.send(&msg).await?;
                 self.probe = Some((id, Instant::now()));
             }
-        } else if self.probe_request_at.is_none() {
+        } else {
             // No Fence: time a one-pixel non-incremental request instead.
-            let msg = messages::framebuffer_update_request(false, Rect::new(0, 0, 1, 1));
-            self.send(&msg).await?;
-            self.probe_request_at = Some(Instant::now());
+            if self
+                .probe_request_at
+                .is_some_and(|t| t.elapsed() > PROBE_STALE)
+            {
+                self.probe_request_at = None;
+            }
+            let quiet = self
+                .last_update_at
+                .is_none_or(|t| t.elapsed() >= PROBE_IDLE);
+            if self.probe_request_at.is_none() && quiet {
+                let msg = messages::framebuffer_update_request(false, Rect::new(0, 0, 1, 1));
+                self.send(&msg).await?;
+                self.probe_request_at = Some(Instant::now());
+            }
         }
 
         self.frames_since_tick = 0;
