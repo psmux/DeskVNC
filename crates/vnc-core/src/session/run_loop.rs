@@ -80,6 +80,256 @@ const RTT_SMOOTHING: f32 = 0.3;
 /// may round a request out to a small tile, so this is not exactly 1.
 const PROBE_ANSWER_MAX_AREA: usize = 16 * 16;
 
+/// Longest gap between finishing one update and the arrival of the next
+/// update's header that still counts as a "busy streak", for the passive
+/// round-trip readout (see `passive_rtt`).
+///
+/// The passive sample is request-to-next-header, and that elapsed time is
+/// the server's response time PLUS however long the server sat waiting for
+/// something on the desktop to change. The idle wait is the confound: on a
+/// still screen it is unbounded, and timing against it reports seconds of
+/// "latency" that no user is experiencing.
+///
+/// A streak filters the idle wait out. If the previous update finished less
+/// than this long ago, the server already had damage queued when our request
+/// landed, so it started encoding immediately and the elapsed time is the
+/// real cost of getting the next picture. 120 ms is comfortably longer than
+/// the measured full-screen encode on the 2880x1800 TightVNC-family server
+/// (130 to 180 ms is the request cost, and back-to-back updates arrive far
+/// closer together than that), and short enough that a human pause between
+/// keystrokes breaks the streak instead of poisoning the window.
+const BUSY_STREAK_GAP: Duration = Duration::from_millis(120);
+
+/// Passive round-trip samples kept for the median.
+///
+/// The median, not a mean or an EWMA: one update that happens to carry a
+/// full-screen repaint costs an order of magnitude more than the small ones
+/// around it, and an average lets that single outlier set the reported
+/// figure. 16 samples at typical update rates is a couple of seconds of
+/// history, recent enough to follow a link that genuinely degrades.
+///
+/// The count is only half the bound. Eviction by count alone assumes samples
+/// keep arriving, and the busy-streak gate (see `BUSY_STREAK_GAP`) means they
+/// stop entirely whenever the desktop goes quiet: nine 400 ms samples from a
+/// burst of activity, ten minutes of idle, then eight 20 ms samples from
+/// light activity leaves a window whose median is a ten-minute-old number
+/// being reported as the current reading (and fed to a quality-tuner cap
+/// that can pin quality down on the strength of it). Every sample therefore
+/// carries its own instant and is dropped past `RTT_SAMPLE_FRESH`, by age as
+/// well as by count.
+const PASSIVE_RTT_WINDOW: usize = 16;
+
+/// A passive or probe sample older than this no longer speaks for the link,
+/// so a lower-priority source is allowed to take over the reading.
+const RTT_SAMPLE_FRESH: Duration = Duration::from_secs(5);
+
+/// Give up waiting for the answer to an always-refresh request after this.
+///
+/// Without an escape hatch, one lost or unrecognised answer would park the
+/// feature for the rest of the session, and the whole point of the switch is
+/// that it keeps working on servers whose reporting cannot be trusted.
+const REFRESH_ABANDON: Duration = Duration::from_secs(10);
+
+/// Fraction of the framebuffer an update must cover to count as the answer
+/// to a full-screen non-incremental refresh request.
+///
+/// Not 1.0: the damage figure is a union of the rects that arrived, and a
+/// server is free to leave out a strip it knows has not changed or to round
+/// the region out to its own tile grid. 0.9 is high enough that the small
+/// incremental updates this used to be fooled by (a few dirty tiles, well
+/// under 1% of a 2880x1800 desktop) cannot reach it.
+const REFRESH_ANSWER_COVERAGE: f64 = 0.9;
+
+/// Upper bound on the always-refresh cooldown.
+///
+/// The cooldown is proportional to how long the last refresh took to answer,
+/// so a server in trouble is asked less often. The cap keeps a pathological
+/// answer (10.1 s was the worst case measured) from silencing the feature
+/// for minutes on end.
+const REFRESH_MAX_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// Environment variable that turns the protocol trace on: `DVV_TRACE_PROTOCOL=1`.
+const TRACE_ENV: &str = "DVV_TRACE_PROTOCOL";
+
+/// Opt-in protocol instrumentation, off unless `DVV_TRACE_PROTOCOL=1`.
+///
+/// This exists because the bug that made the auto tuner drive Tight
+/// compression to 0 (and saturate the link at 9.9 MB/s) was invisible from
+/// inside the app: the stats panel showed throughput, but nothing showed
+/// what we were ASKING the server for or at what settings. Reproducing it
+/// needed an external RFB proxy. One env var should be enough.
+///
+/// The flag is read once at construction into a bool, so with the trace off
+/// the hot path costs one predictable branch per client message and nothing
+/// else: no formatting, no allocation, no `tracing` machinery.
+#[derive(Default)]
+struct ProtocolTrace {
+    enabled: bool,
+    /// Incremental FramebufferUpdateRequests sent since the last summary.
+    incr_requests: u32,
+    /// Non-incremental (full re-fetch) FramebufferUpdateRequests sent since
+    /// the last summary. This is the count that exposed the always-refresh
+    /// problem: one per second, each one a whole screen.
+    full_requests: u32,
+    /// Requested area since the last summary, counted in whole screens, so
+    /// "2.0" means we asked the server to encode twice the desktop this
+    /// second regardless of how it was split up.
+    incr_screens: f32,
+    full_screens: f32,
+    /// Most recent request of each kind, for the region readout.
+    last_incr: Option<Rect>,
+    last_full: Option<Rect>,
+    set_encodings: u32,
+    key_events: u32,
+    pointer_events: u32,
+    other_msgs: u32,
+    /// `rects_decoded` at the last summary, for the per-second rate.
+    last_rects: u64,
+}
+
+impl ProtocolTrace {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var(TRACE_ENV).as_deref() == Ok("1"),
+            ..Default::default()
+        }
+    }
+
+    /// Log and count one outbound message. Called from `RunLoop::send` with
+    /// the exact bytes about to go on the wire, so this sees the protocol as
+    /// the server sees it rather than as the call sites intended it.
+    fn record_client_message(&mut self, bytes: &[u8], fb_width: u16, fb_height: u16) {
+        let Some(&kind) = bytes.first() else {
+            return;
+        };
+        use messages::client_msg as m;
+        match kind {
+            m::FRAMEBUFFER_UPDATE_REQUEST if bytes.len() >= 10 => {
+                let incremental = bytes[1] != 0;
+                let rect = Rect::new(
+                    u16::from_be_bytes([bytes[2], bytes[3]]),
+                    u16::from_be_bytes([bytes[4], bytes[5]]),
+                    u16::from_be_bytes([bytes[6], bytes[7]]),
+                    u16::from_be_bytes([bytes[8], bytes[9]]),
+                );
+                let screen = (fb_width as f32 * fb_height as f32).max(1.0);
+                let fraction = rect.area() as f32 / screen;
+                if incremental {
+                    self.incr_requests += 1;
+                    self.incr_screens += fraction;
+                    self.last_incr = Some(rect);
+                } else {
+                    self.full_requests += 1;
+                    self.full_screens += fraction;
+                    self.last_full = Some(rect);
+                }
+                tracing::info!(
+                    incremental,
+                    x = rect.x,
+                    y = rect.y,
+                    w = rect.width,
+                    h = rect.height,
+                    screen_fraction = fraction,
+                    "TX FramebufferUpdateRequest"
+                );
+            }
+            m::SET_ENCODINGS if bytes.len() >= 4 => {
+                self.set_encodings += 1;
+                let n = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+                // The encoding list carries the JPEG-quality and
+                // compression-level pseudo-encodings, which is where the
+                // compression-to-0 bug actually lived, so print them.
+                let encodings: Vec<i32> = bytes[4..]
+                    .chunks_exact(4)
+                    .take(n)
+                    .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                tracing::info!(count = n, ?encodings, "TX SetEncodings");
+            }
+            m::SET_PIXEL_FORMAT => tracing::info!("TX SetPixelFormat"),
+            m::ENABLE_CONTINUOUS_UPDATES if bytes.len() >= 2 => {
+                tracing::info!(enable = bytes[1] != 0, "TX EnableContinuousUpdates");
+            }
+            m::CLIENT_FENCE if bytes.len() >= 8 => {
+                tracing::info!(
+                    flags = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+                    "TX ClientFence"
+                );
+            }
+            m::SET_DESKTOP_SIZE if bytes.len() >= 6 => {
+                tracing::info!(
+                    w = u16::from_be_bytes([bytes[2], bytes[3]]),
+                    h = u16::from_be_bytes([bytes[4], bytes[5]]),
+                    "TX SetDesktopSize"
+                );
+            }
+            // Input is high-rate and rarely the subject of the investigation,
+            // so it is counted at INFO and printed only at DEBUG.
+            m::KEY_EVENT | m::QEMU => {
+                self.key_events += 1;
+                tracing::debug!("TX KeyEvent");
+            }
+            m::POINTER_EVENT => {
+                self.pointer_events += 1;
+                tracing::debug!("TX PointerEvent");
+            }
+            m::CLIENT_CUT_TEXT => {
+                self.other_msgs += 1;
+                tracing::info!(len = bytes.len(), "TX ClientCutText");
+            }
+            other => {
+                self.other_msgs += 1;
+                tracing::info!(kind = other, len = bytes.len(), "TX (other)");
+            }
+        }
+    }
+
+    /// One summary line per stats tick, then reset the counters.
+    ///
+    /// `compression` is the negotiated Tight compression level, which is NOT
+    /// in `SessionStats`: it is the number that went to 0 in the bug this
+    /// trace was written for, so it is printed alongside the JPEG quality.
+    fn summarise(&mut self, dt_s: f64, stats: &SessionStats, rects_total: u64, compression: u8) {
+        let rects = rects_total.saturating_sub(self.last_rects);
+        self.last_rects = rects_total;
+        let fmt_rect = |r: Option<Rect>| match r {
+            Some(r) => format!("{}x{}+{}+{}", r.width, r.height, r.x, r.y),
+            None => "-".to_string(),
+        };
+        tracing::info!(
+            fbur_incremental = self.incr_requests,
+            fbur_full = self.full_requests,
+            incremental_screens = self.incr_screens,
+            full_screens = self.full_screens,
+            last_incremental = fmt_rect(self.last_incr),
+            last_full = fmt_rect(self.last_full),
+            set_encodings = self.set_encodings,
+            key_events = self.key_events,
+            pointer_events = self.pointer_events,
+            other_messages = self.other_msgs,
+            jpeg_quality = stats.jpeg_quality,
+            compression,
+            bytes_per_sec = stats.throughput_bps / 8.0,
+            updates_per_sec = stats.fps,
+            rects_per_sec = rects as f64 / dt_s,
+            duty_cycle = stats.server_duty_cycle,
+            rtt_ms = stats.rtt_ms,
+            rtt_source = ?stats.rtt_source,
+            "protocol trace"
+        );
+        self.incr_requests = 0;
+        self.full_requests = 0;
+        self.incr_screens = 0.0;
+        self.full_screens = 0.0;
+        self.last_incr = None;
+        self.last_full = None;
+        self.set_encodings = 0;
+        self.key_events = 0;
+        self.pointer_events = 0;
+        self.other_msgs = 0;
+    }
+}
+
 /// An `AsyncRead` wrapper that counts every byte received, for stats, and
 /// times stall-anchored bursts for the Auto tuner's link-capacity estimate
 /// (see [`LinkMeter`]).
@@ -262,8 +512,56 @@ pub(crate) struct RunLoop {
     /// request for a single pixel is the universal equivalent: every RFB
     /// server must answer one, and one pixel costs nothing.
     probe_request_at: Option<Instant>,
+    /// When the one-pixel probe last produced a sample. The probe needs a
+    /// quiet screen, so on a busy desktop its reading can be minutes old;
+    /// past `RTT_SAMPLE_FRESH` the passive readout takes over.
+    probe_sample_at: Option<Instant>,
     /// Outstanding fence RTT probe: (payload id, send time).
     probe: Option<(u64, Instant)>,
+    /// When the currently outstanding pipelined incremental
+    /// FramebufferUpdateRequest went out, for the passive round-trip readout.
+    /// Consumed by the next update header.
+    ///
+    /// Two call sites write it and they sit at opposite ends of an update:
+    /// the normal path asks for the next update as soon as the current
+    /// header arrives, the priming path waits until the priming update has
+    /// been fully consumed (asking sooner makes the server resend the whole
+    /// screen). Both go through `arm_pipelined_request`, so the field means
+    /// one thing in both cases, "the outstanding request left at this
+    /// instant", and `decode_ms_since_request` below is zeroed with it so the
+    /// decode subtraction stays correct whichever site armed it.
+    pipelined_request_at: Option<Instant>,
+    /// Our own decode time, in milliseconds, accumulated since
+    /// `pipelined_request_at` was armed.
+    ///
+    /// This is the client's own contribution to the passive sample, and it is
+    /// not small: measured at 42.7% duty at the High quality tier, roughly
+    /// 43 ms per sample at ten updates per second against the 100 ms
+    /// threshold the tuner cap uses. Worse, it is tier-correlated (heavier at
+    /// High, lighter at Medium), so leaving it in lets a slow CLIENT on a
+    /// healthy server engage a cap written for slow SERVERS. Subtracted in
+    /// `record_passive_rtt`.
+    decode_ms_since_request: f32,
+    /// When the last FramebufferUpdate finished being read and decoded. The
+    /// busy-streak test for a passive sample (see `BUSY_STREAK_GAP`).
+    last_update_done_at: Option<Instant>,
+    /// Rolling window of passive round-trip samples, oldest first, bounded by
+    /// both `PASSIVE_RTT_WINDOW` and `RTT_SAMPLE_FRESH`. The median of the
+    /// still-fresh samples is reported.
+    passive_rtt: VecDeque<PassiveSample>,
+    /// Time spent inside FramebufferUpdate handling since the last stats
+    /// tick, for `SessionStats::server_duty_cycle`.
+    update_busy_tick: Duration,
+    /// An always-refresh (or manual Refresh) full-screen non-incremental
+    /// request is outstanding, sent at this instant. See `tick`.
+    refresh_request_at: Option<Instant>,
+    /// When the last such request was answered, and how long it took. The
+    /// pair drives the cooldown that stops always-refresh monopolising the
+    /// server's shared encoder.
+    refresh_answered_at: Option<Instant>,
+    refresh_cost: Duration,
+    /// Opt-in protocol trace, `DVV_TRACE_PROTOCOL=1`.
+    trace: ProtocolTrace,
     /// Pixel formats sent with a fence-guarded SetPixelFormat whose fence
     /// response has not come back yet, oldest first. Decoding stays in the
     /// old format until the server proves (by answering the fence) that it
@@ -334,6 +632,16 @@ impl RunLoop {
             rtt_ms: 0.0,
             probe: None,
             probe_request_at: None,
+            probe_sample_at: None,
+            pipelined_request_at: None,
+            decode_ms_since_request: 0.0,
+            last_update_done_at: None,
+            passive_rtt: VecDeque::with_capacity(PASSIVE_RTT_WINDOW),
+            update_busy_tick: Duration::ZERO,
+            refresh_request_at: None,
+            refresh_answered_at: None,
+            refresh_cost: Duration::ZERO,
+            trace: ProtocolTrace::new(),
             pending_pf: VecDeque::new(),
             deferred_cmds: Vec::new(),
             pending_outcome: None,
@@ -346,6 +654,14 @@ impl RunLoop {
     }
 
     async fn send(&mut self, bytes: &[u8]) -> Result<()> {
+        // Every client message funnels through here, so this one branch is
+        // the whole client->server side of the protocol trace. With the
+        // trace off it is a predictable, never-taken branch: no formatting,
+        // no allocation, no tracing machinery.
+        if self.trace.enabled {
+            let (w, h) = (self.fb_width, self.fb_height);
+            self.trace.record_client_message(bytes, w, h);
+        }
         self.writer
             .write_all(bytes)
             .await
@@ -467,18 +783,81 @@ impl RunLoop {
         }
     }
 
+    /// Wrapper around [`Self::read_framebuffer_update`] that owns the
+    /// bookkeeping every update must contribute to no matter how it ends.
+    ///
+    /// The run loop is single-threaded and parks in `select!` when nothing is
+    /// arriving, so the time spent inside this call IS the time the client
+    /// spent receiving and decoding framebuffer data. That is what
+    /// `SessionStats::server_duty_cycle` reports: a server streaming flat out
+    /// keeps us in here permanently (duty -> 1.0), an idle desktop never
+    /// enters at all (duty -> 0.0). Charged on the error path too, since the
+    /// work happened either way.
     async fn handle_framebuffer_update(
         &mut self,
         settings: &mut SessionSettings,
         events: &mpsc::Sender<SessionEvent>,
         commands: &mut mpsc::Receiver<ClientCommand>,
     ) -> Result<()> {
+        let started = Instant::now();
+        let res = self
+            .read_framebuffer_update(settings, events, commands)
+            .await;
+        let done = Instant::now();
+        self.update_busy_tick += done.saturating_duration_since(started);
+        self.last_update_done_at = Some(done);
+
+        // An always-refresh request asks for the WHOLE framebuffer,
+        // non-incrementally, so its answer covers the whole framebuffer.
+        // Only such an update closes the clock.
+        //
+        // Closing it on the first update of any kind (which is what this did)
+        // measured the wrong thing entirely: on the non-continuous-updates
+        // pipelined path an incremental request is ALWAYS already
+        // outstanding, so on a busy desktop the server answers that one first
+        // (10 ms, a few dirty tiles) and that update recorded a 10 ms refresh
+        // cost. A 10 ms cooldown has long expired by the next 1 s tick, so
+        // the throttle reverted to exactly the once-per-second full-screen
+        // cadence it exists to prevent, on precisely the busy server it was
+        // written for.
+        //
+        // Two residual cases, both bounded. An incremental update whose
+        // damage bounding box happens to span the desktop can still be
+        // mistaken for the answer, which costs one cycle of throttling, not
+        // the feature. A server that splits its answer into several smaller
+        // updates never closes the clock at all, and `REFRESH_ABANDON`
+        // releases the slot after 10 s.
+        //
+        // The error path deliberately does not close it either: a torn
+        // update is not an answer, and charging its (short) elapsed time as
+        // the refresh cost would understate the cooldown.
+        if let (Ok(damage), Some(sent)) = (&res, self.refresh_request_at) {
+            if answers_full_refresh(*damage, self.full_rect()) {
+                self.refresh_request_at = None;
+                self.refresh_cost = done.saturating_duration_since(sent);
+                self.refresh_answered_at = Some(done);
+            }
+        }
+        res.map(|_| ())
+    }
+
+    /// Reads one FramebufferUpdate to completion, returning the union of the
+    /// damage it carried. The caller needs that union to decide whether this
+    /// update is the answer to an outstanding full-screen refresh request.
+    async fn read_framebuffer_update(
+        &mut self,
+        settings: &mut SessionSettings,
+        events: &mpsc::Sender<SessionEvent>,
+        commands: &mut mpsc::Receiver<ClientCommand>,
+    ) -> Result<Rect> {
         let count = messages::read_framebuffer_update_header(&mut self.reader).await?;
+        let header_at = Instant::now();
         // Timed from the header, before any rect is read, so the figure is the
         // round trip and not the time spent decoding what came back. Whether
         // this update is really the probe's answer is decided once its size
         // is known, after the rect loop below.
         let probe_sent = self.probe_request_at.take();
+        self.record_passive_rtt(header_at);
         let primed_before = !self.priming_update_pending;
 
         // Pipelining fallback (PRD/02 §7.2): without continuous updates keep
@@ -496,6 +875,12 @@ impl RunLoop {
         } else if !self.cu_active {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
             self.send(&msg).await?;
+            // The passive round-trip clock starts here, on the normal update
+            // path, and stops at the next update header. No probe traffic,
+            // so it works on every server including the Fence-less ones.
+            // Our decode of THIS update happens inside that window, which is
+            // why arming the clock also zeroes the decode accumulator.
+            self.arm_pipelined_request(Instant::now());
             tracing::trace!(rects = count, "update header; requested next incremental");
         } else {
             tracing::trace!(rects = count, "update header (continuous updates active)");
@@ -572,7 +957,12 @@ impl RunLoop {
             let decoded =
                 crate::encodings::decode_rect(&mut self.decoder, &mut self.reader, rect, enc)
                     .await?;
-            self.decode_ms_tick += started.elapsed().as_secs_f32() * 1000.0;
+            let decode_ms = started.elapsed().as_secs_f32() * 1000.0;
+            self.decode_ms_tick += decode_ms;
+            // Same measurement, different accounting period: this one is
+            // charged against the outstanding pipelined request so it can be
+            // taken back out of the passive round-trip sample.
+            self.decode_ms_since_request += decode_ms;
             self.current_encoding = enc;
             if let Some(d) = decoded {
                 accumulated = accumulated.saturating_add(decoded_payload_len(&d) as u64);
@@ -592,14 +982,21 @@ impl RunLoop {
             self.drain_commands_mid_update(commands, settings).await?;
             if self.pending_outcome.is_some() {
                 // Disconnect requested: the stream position no longer matters.
-                return Ok(());
+                return Ok(damage);
             }
         }
 
-        // The priming update has now been fully read: resume normal pipelining.
+        // The priming update has now been fully read: resume normal
+        // pipelining. This site arms the clock at the END of an update where
+        // the normal path arms it at the start, so the two would mean
+        // different things (one window contains our decode of the
+        // intervening update, the other does not) if they did not both zero
+        // the decode accumulator. `arm_pipelined_request` is what keeps them
+        // saying the same thing.
         if !self.cu_active && !primed_before {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
             self.send(&msg).await?;
+            self.arm_pipelined_request(Instant::now());
         }
 
         // Remember what was painted lossily so it can be re-fetched sharp once
@@ -645,6 +1042,7 @@ impl RunLoop {
                 } else {
                     sample
                 };
+                self.probe_sample_at = Some(Instant::now());
             } else {
                 tracing::trace!(area = damage.area(), "rtt probe spoiled by real damage");
             }
@@ -677,7 +1075,7 @@ impl RunLoop {
             ));
             self.send(&msg).await?;
         }
-        Ok(())
+        Ok(damage)
     }
 
     /// Returns true when the pseudo rect ends the update (LastRect).
@@ -928,6 +1326,158 @@ impl RunLoop {
     }
 
     // -----------------------------------------------------------------------
+    // Round-trip readout
+    // -----------------------------------------------------------------------
+
+    /// Close a passive round-trip sample at the arrival of an update header.
+    ///
+    /// The clock was started when the pipelined incremental request went out
+    /// (see `handle_framebuffer_update`), so the elapsed time is the server's
+    /// response PLUS however long it waited for the desktop to change. The
+    /// idle wait is the whole problem with this measurement, so a sample is
+    /// only kept during a busy streak: the previous update finished less than
+    /// `BUSY_STREAK_GAP` ago, meaning the server had damage queued when our
+    /// request arrived and started encoding straight away.
+    ///
+    /// Our own decode of the intervening update is taken back out. The window
+    /// from "request sent" to "next header" contains the server's response
+    /// plus the transfer plus however long THIS client spent decoding what it
+    /// already had, and that last term is not a rounding error: 42.7% duty at
+    /// the High quality tier is roughly 43 ms per sample at ten updates per
+    /// second, against the 100 ms threshold the tuner cap trips at. It is
+    /// also tier-correlated (heavier at High, lighter at Medium), so leaving
+    /// it in made a slow CLIENT on a healthy server engage a cap meant for
+    /// slow SERVERS, which is the wrong direction entirely.
+    ///
+    /// What is left after the subtraction still includes transfer time, and
+    /// that is correct: moving the bytes IS part of what the server costs us,
+    /// and it is the number a user feels. Time spent servicing input between
+    /// rects (`drain_commands_mid_update`) is also still in there, but that
+    /// is bounded by a handful of small writes.
+    fn record_passive_rtt(&mut self, header_at: Instant) {
+        // Taken before the early return, so decode charged while no request
+        // was outstanding (continuous updates active, or the priming update)
+        // is discarded here rather than carried into a later sample.
+        let our_decode_ms = std::mem::take(&mut self.decode_ms_since_request);
+        let Some(sent) = self.pipelined_request_at.take() else {
+            return;
+        };
+        let Some(sample) =
+            passive_sample_ms(sent, header_at, self.last_update_done_at, our_decode_ms)
+        else {
+            return;
+        };
+        push_passive_sample(&mut self.passive_rtt, header_at, sample);
+    }
+
+    /// Record that a pipelined incremental request has just gone out.
+    ///
+    /// Both writers (the normal path, at the header of the update being
+    /// answered, and the priming path, after that update has been consumed)
+    /// come through here so `pipelined_request_at` means the same thing
+    /// either way, and so the decode accumulator always covers exactly the
+    /// window the next sample will measure.
+    fn arm_pipelined_request(&mut self, at: Instant) {
+        self.pipelined_request_at = Some(at);
+        self.decode_ms_since_request = 0.0;
+    }
+
+    /// The round trip to report, and which instrument produced it.
+    ///
+    /// Order of preference: an exact Fence measurement, then the one-pixel
+    /// idle probe while its sample is still fresh, then the passive readout.
+    /// Freshness matters because the first two only produce samples under
+    /// conditions that may not recur for minutes (Fence needs the extension,
+    /// the probe needs a still screen), and a reading that old describes a
+    /// link that no longer exists. `rtt_ms` used to sit at 0.0 for entire
+    /// sessions against Fence-less servers, which is why the compression bug
+    /// went unnoticed: the one instrument that would have shown it was blank.
+    fn reported_rtt(&self) -> (f32, crate::types::RttSource) {
+        use crate::types::RttSource;
+        if self.caps.supports_fence && self.rtt_ms > 0.0 {
+            return (self.rtt_ms, RttSource::Fence);
+        }
+        let probe_fresh = self
+            .probe_sample_at
+            .is_some_and(|t| t.elapsed() < RTT_SAMPLE_FRESH);
+        if probe_fresh && self.rtt_ms > 0.0 {
+            return (self.rtt_ms, RttSource::IdleProbe);
+        }
+        // Per sample, not per window: a window whose NEWEST sample is fresh
+        // can still be mostly ancient, and its median then reports a link
+        // that stopped existing minutes ago. Only the samples that are
+        // themselves fresh get a vote.
+        if let Some(median) = fresh_median_ms(&self.passive_rtt, Instant::now()) {
+            return (median, RttSource::UpdatePipeline);
+        }
+        // Nothing fresh from either. A stale figure still beats 0.0, which
+        // the UI renders as "no measurement at all".
+        if self.rtt_ms > 0.0 {
+            return (self.rtt_ms, RttSource::IdleProbe);
+        }
+        match median_ms(&self.passive_rtt) {
+            Some(median) => (median, RttSource::UpdatePipeline),
+            None => (0.0, RttSource::None),
+        }
+    }
+
+    /// Send a full-screen non-incremental request and start the always-refresh
+    /// clock, so the answer can be timed and the next one throttled.
+    async fn send_full_refresh(&mut self) -> Result<()> {
+        let msg = messages::framebuffer_update_request(false, self.full_rect());
+        self.send(&msg).await?;
+        self.refresh_request_at = Some(Instant::now());
+        Ok(())
+    }
+
+    /// May always-refresh issue another full-screen non-incremental request?
+    ///
+    /// It used to fire unconditionally on every 1 s tick. On a 2880x1800
+    /// TightVNC-family server one such request costs the server 130 to 180 ms
+    /// of its SHARED encoder (a small-region request costs ~12 ms), and a
+    /// second client on the same server went from 3 ms to 398 ms median
+    /// typing latency, worst case 10.1 s, while this ran. The client was
+    /// effectively mounting a denial of service on the server it was
+    /// connected to.
+    ///
+    /// Two rules fix that without weakening the feature, which exists for
+    /// servers that under-report damage and so must not be gated on any
+    /// inference of ours about whether a repaint is needed:
+    ///
+    /// 1. Never more than one outstanding. Queuing the next full re-fetch
+    ///    before the last was answered is what let the requests pile up
+    ///    faster than the server could ever serve them.
+    /// 2. After an answer, wait as long again as that answer took. A healthy
+    ///    server answers in ~150 ms, so the cooldown expires long before the
+    ///    next 1 s tick and the feature keeps its once-per-second cadence
+    ///    exactly as before. A server in trouble takes seconds to answer and
+    ///    is asked correspondingly less often: the throttle is set by the
+    ///    server's own measured cost, not by a number we guessed.
+    fn always_refresh_due(&mut self) -> bool {
+        let decision = refresh_decision(
+            self.refresh_request_at.map(|t| t.elapsed()),
+            self.refresh_answered_at.map(|t| t.elapsed()),
+            self.refresh_cost,
+        );
+        match decision {
+            RefreshDecision::Send => true,
+            RefreshDecision::Wait => false,
+            RefreshDecision::Abandon => {
+                // Unanswered for a very long time: either the answer was
+                // folded into an update we did not attribute to it, or the
+                // server ignored the request. Release the slot so the feature
+                // survives, but charge the full wait as the cost, so the next
+                // attempt backs off instead of retrying hard.
+                self.refresh_request_at = None;
+                self.refresh_cost = REFRESH_ABANDON;
+                self.refresh_answered_at = Some(Instant::now());
+                tracing::debug!("always-refresh request went unanswered; backing off");
+                false
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Client commands
     // -----------------------------------------------------------------------
 
@@ -1081,17 +1631,42 @@ impl RunLoop {
                 }
             }
             ClientCommand::Refresh => {
-                let msg = messages::framebuffer_update_request(false, self.full_rect());
-                self.send(&msg).await?;
+                // Goes through the same accounting as always-refresh, and now
+                // through the same GATE. The comment here used to claim the
+                // throttle applied while the call bypassed it entirely: a
+                // user hammering the button queued a full-screen re-fetch per
+                // press, and each press also overwrote `refresh_request_at`
+                // with a fresh Instant, which suppressed the automatic
+                // always-refresh for as long as the hammering lasted and
+                // pushed the 10 s abandon out indefinitely.
+                //
+                // The gate is the one from `always_refresh_due`, so the first
+                // press on a settled session goes out immediately (nothing
+                // outstanding, no cooldown running) and feels as responsive
+                // as it ever did. Only repeats, while the server still owes
+                // us the last full screen, are dropped. Dropped rather than
+                // queued: a full re-fetch already in flight is answering the
+                // question the second press is asking.
+                if self.always_refresh_due() {
+                    self.send_full_refresh().await?;
+                } else {
+                    tracing::debug!(
+                        "manual refresh suppressed: a full-screen request is still outstanding"
+                    );
+                }
             }
             ClientCommand::SetAlwaysRefresh(on) => {
                 settings.always_refresh = on;
                 tracing::info!(enabled = on, "always-refresh toggled");
-                if on {
+                if on && self.always_refresh_due() {
                     // Apply immediately: the point of the switch is to fix a
-                    // picture that is wrong RIGHT NOW.
-                    let msg = messages::framebuffer_update_request(false, self.full_rect());
-                    self.send(&msg).await?;
+                    // picture that is wrong RIGHT NOW. Gated for the same
+                    // reason as the manual arm above, and with the same
+                    // outcome in practice: a session with nothing
+                    // outstanding sends it on the spot, and a session that
+                    // already has a full screen in flight is about to get
+                    // one anyway.
+                    self.send_full_refresh().await?;
                 }
             }
             ClientCommand::SetViewOnly(v) => {
@@ -1357,8 +1932,18 @@ impl RunLoop {
         let delta_sent = total_sent - self.last_sent;
         self.last_sent = total_sent;
 
+        // Fraction of the tick spent inside FramebufferUpdate handling. The
+        // clamp guards the one case where the accounting can exceed the
+        // window: `MissedTickBehavior::Skip` means a single update longer
+        // than a tick pushes its whole cost into the next one.
+        let duty = (self.update_busy_tick.as_secs_f64() / dt_s).clamp(0.0, 1.0) as f32;
+        self.update_busy_tick = Duration::ZERO;
+        let (rtt_ms, rtt_source) = self.reported_rtt();
+
         let stats = SessionStats {
-            rtt_ms: self.rtt_ms,
+            rtt_ms,
+            rtt_source,
+            server_duty_cycle: duty,
             throughput_bps: delta as f64 * 8.0 / dt_s,
             throughput_up_bps: delta_sent as f64 * 8.0 / dt_s,
             fps: (self.frames_since_tick as f64 / dt_s) as f32,
@@ -1375,6 +1960,11 @@ impl RunLoop {
         };
         emit(events, SessionEvent::Stats(stats)).await?;
 
+        if self.trace.enabled {
+            let (rects, compression) = (self.rects_decoded, self.applied_quality.compression);
+            self.trace.summarise(dt_s, &stats, rects, compression);
+        }
+
         // A peak of 0 means no burst completed this tick, NOT a slow link:
         // nothing loaded the socket enough to time it, so the estimate must
         // stand rather than be read as evidence of slowness.
@@ -1382,21 +1972,63 @@ impl RunLoop {
             0 => None,
             v => Some(v as f64),
         };
-        self.tuner.observe(link_bps, self.rtt_ms, stats.decode_ms);
+        // Two different latencies, passed separately on purpose.
+        //
+        // `self.rtt_ms` stays the tuner's network round trip: the passive
+        // readout backing `stats.rtt_ms` on Fence-less servers is dominated by
+        // the server's encode time during a busy streak, so feeding it in as
+        // RTT would have Auto read every burst of activity as a degraded LINK.
+        //
+        // But that same encode-dominated number is exactly the right input to
+        // the server-bound cap, which asks a different question: not "how fast
+        // is the wire" but "is the server keeping up with what we are asking
+        // for". Measured on a real server, the High tier sat at 426 to 434 ms
+        // here while Medium sat at 18 to 20 ms, for only twice the bandwidth,
+        // so the cap has a wide and unambiguous margin to act on. Passing 0.0
+        // when nothing has been measured leaves the cap disengaged.
+        // ONLY the update-pipeline source may drive the cap, and this
+        // restriction is load-bearing rather than cautious.
+        //
+        // `reported_rtt` has three sources and they are not interchangeable.
+        // Fence and the 1x1 idle probe both measure a NETWORK round trip: they
+        // carry propagation delay and say nothing about whether the server is
+        // keeping up. Feeding either to the cap would pin any link with more
+        // than 100 ms of propagation to Medium for the whole session, on a
+        // 100 Mbit/s transcontinental or satellite link that genuinely
+        // warrants High, and the release threshold of 60 ms is not reachable
+        // at the speed of light. That is exactly the "RTT is not capacity"
+        // error `Tier::from_link` documents at length, smuggled back in
+        // through a different door.
+        //
+        // The passive update-pipeline figure is the one the cap was designed
+        // around, because it is dominated by how long the SERVER took to
+        // produce the next update. That is the question the cap asks.
+        let server_latency_ms = if stats.rtt_source == crate::types::RttSource::UpdatePipeline {
+            stats.rtt_ms
+        } else {
+            0.0
+        };
+        self.tuner
+            .observe(link_bps, self.rtt_ms, stats.decode_ms, server_latency_ms);
         if settings.quality == QualityPreset::Auto {
             if let Some(recommended) = self.tuner.recommended() {
                 self.apply_quality(recommended).await?;
             }
         }
 
-        // Unconditional re-fetch, when the user has asked for it. Deliberately
-        // BEFORE the settle/lossless logic and subject to none of it: this
-        // switch exists precisely for servers whose damage reports cannot be
-        // trusted, so it must not be gated on any inference of ours about
-        // whether a repaint is needed.
-        if settings.always_refresh {
-            let msg = messages::framebuffer_update_request(false, self.full_rect());
-            self.send(&msg).await?;
+        // Periodic full re-fetch, when the user has asked for it.
+        // Deliberately BEFORE the settle/lossless logic and subject to none
+        // of it: this switch exists precisely for servers whose damage
+        // reports cannot be trusted, so it must not be gated on any inference
+        // of ours about whether a repaint is needed.
+        //
+        // It IS gated on the server keeping up, which is a different thing
+        // entirely: see `always_refresh_due` for the measurements (398 ms
+        // median typing latency inflicted on another client of the same
+        // server, 10.1 s worst case) that made the unconditional version
+        // untenable.
+        if settings.always_refresh && self.always_refresh_due() {
+            self.send_full_refresh().await?;
         }
 
         // Once the screen settles, repaint whatever was compressed lossily.
@@ -1434,6 +2066,149 @@ impl RunLoop {
     }
 }
 
+/// One passive round-trip sample, with its own timestamp so the window can be
+/// bounded by age as well as by count (see `PASSIVE_RTT_WINDOW`).
+#[derive(Debug, Clone, Copy)]
+struct PassiveSample {
+    at: Instant,
+    ms: f32,
+}
+
+/// One passive round-trip sample in milliseconds, or `None` when the busy
+/// streak test rejects it (see [`RunLoop::record_passive_rtt`]).
+///
+/// `sent` is when the pipelined incremental request went out, `header_at`
+/// when the next update header arrived, `last_done` when the previous update
+/// finished being read. A sample only counts if the server was demonstrably
+/// not idling between the two.
+///
+/// `our_decode_ms` is this client's own decode time inside that window, and
+/// it comes straight back out again: what the caller wants is the server's
+/// cost, not ours. Clamped at zero, since the two clocks are read at
+/// different points and a pathologically short window could otherwise go
+/// negative.
+fn passive_sample_ms(
+    sent: Instant,
+    header_at: Instant,
+    last_done: Option<Instant>,
+    our_decode_ms: f32,
+) -> Option<f32> {
+    let done = last_done?;
+    if header_at.saturating_duration_since(done) >= BUSY_STREAK_GAP {
+        return None;
+    }
+    let elapsed_ms = header_at.saturating_duration_since(sent).as_secs_f32() * 1000.0;
+    Some((elapsed_ms - our_decode_ms).max(0.0))
+}
+
+/// Add one sample to the passive window, dropping whatever the window may no
+/// longer speak for: samples past `RTT_SAMPLE_FRESH` first, then the oldest
+/// survivors if `PASSIVE_RTT_WINDOW` is still full.
+///
+/// The age pass is the one that matters. Eviction by count alone cannot
+/// rotate stale samples out on a desktop that goes quiet, because the
+/// busy-streak gate stops producing samples at exactly the same moment (see
+/// `PASSIVE_RTT_WINDOW` for the nine-old-plus-eight-fresh case that reported
+/// a ten-minute-old 400 ms figure as the current link).
+fn push_passive_sample(window: &mut VecDeque<PassiveSample>, at: Instant, ms: f32) {
+    while window
+        .front()
+        .is_some_and(|s| at.saturating_duration_since(s.at) >= RTT_SAMPLE_FRESH)
+    {
+        window.pop_front();
+    }
+    while window.len() >= PASSIVE_RTT_WINDOW {
+        window.pop_front();
+    }
+    window.push_back(PassiveSample { at, ms });
+}
+
+/// Does this update's damage plausibly answer a full-screen non-incremental
+/// refresh request? See the attribution comment in
+/// [`RunLoop::handle_framebuffer_update`] for why anything less is not
+/// treated as the answer.
+///
+/// Coverage rather than an exact match: servers round requests out to tile
+/// boundaries and may trim a strip they know is unchanged, so the test is
+/// "most of the framebuffer" rather than "every last pixel".
+fn answers_full_refresh(damage: Rect, framebuffer: Rect) -> bool {
+    let screen = framebuffer.area();
+    if screen == 0 {
+        return false;
+    }
+    damage.area() as f64 >= screen as f64 * REFRESH_ANSWER_COVERAGE
+}
+
+/// What to do about always-refresh on this tick.
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshDecision {
+    /// No request outstanding and the cooldown has expired.
+    Send,
+    /// A request is still in flight, or the cooldown has not expired.
+    Wait,
+    /// A request has been outstanding so long it must be written off.
+    Abandon,
+}
+
+/// The always-refresh throttle, as a pure function of elapsed times so the
+/// rules can be tested without a socket. See [`RunLoop::always_refresh_due`]
+/// for the measurements behind them.
+fn refresh_decision(
+    outstanding_for: Option<Duration>,
+    since_answer: Option<Duration>,
+    last_cost: Duration,
+) -> RefreshDecision {
+    if let Some(waiting) = outstanding_for {
+        return if waiting < REFRESH_ABANDON {
+            RefreshDecision::Wait
+        } else {
+            RefreshDecision::Abandon
+        };
+    }
+    match since_answer {
+        Some(idle) if idle < last_cost.min(REFRESH_MAX_COOLDOWN) => RefreshDecision::Wait,
+        _ => RefreshDecision::Send,
+    }
+}
+
+/// Median of the whole passive round-trip window regardless of age, `None` if
+/// it is empty. This is the last-resort readout: a stale figure still beats
+/// 0.0, which the UI renders as "no measurement at all".
+///
+/// The median rather than the mean: the window mixes small incremental
+/// updates with the occasional full repaint, and one 180 ms outlier among
+/// fifteen 15 ms samples drags an average to 26 ms while the median stays at
+/// 15 ms, which is what the link is actually doing. For an even count this
+/// takes the upper of the two middle samples rather than interpolating; with
+/// 16 noisy samples the difference is not worth the arithmetic.
+fn median_ms(samples: &VecDeque<PassiveSample>) -> Option<f32> {
+    median_of(samples.iter().map(|s| s.ms).collect())
+}
+
+/// Median of the samples that are still fresh at `now`, `None` when none are.
+///
+/// This is what the reported round trip uses. Filtering here as well as on
+/// insertion is not belt and braces: insertion only happens when a sample
+/// arrives, so a window that stops receiving them would otherwise keep
+/// answering with whatever it last held.
+fn fresh_median_ms(samples: &VecDeque<PassiveSample>, now: Instant) -> Option<f32> {
+    median_of(
+        samples
+            .iter()
+            .filter(|s| now.saturating_duration_since(s.at) < RTT_SAMPLE_FRESH)
+            .map(|s| s.ms)
+            .collect(),
+    )
+}
+
+fn median_of(mut values: Vec<f32>) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(values[values.len() / 2])
+}
+
 /// Decoded size of one rect, for the per-update accumulation budget.
 ///
 /// `CopyRect` carries no pixels of its own but does cost a full rect once the
@@ -1445,6 +2220,354 @@ fn decoded_payload_len(d: &DecodedRect) -> usize {
         RectPayload::Rgba(b) | RectPayload::Jpeg(b) => b.len(),
         RectPayload::H264 { data, .. } => data.len(),
         RectPayload::CopyRect { .. } => d.rect.area().saturating_mul(4),
+    }
+}
+
+#[cfg(test)]
+mod rtt_readout_tests {
+    use super::*;
+
+    /// A window whose samples all carry the same instant, for the tests that
+    /// only care about the median arithmetic.
+    fn window(samples: &[f32]) -> VecDeque<PassiveSample> {
+        let at = Instant::now();
+        samples.iter().map(|&ms| PassiveSample { at, ms }).collect()
+    }
+
+    #[test]
+    fn median_ignores_a_single_full_screen_outlier() {
+        // Fifteen small updates and one full repaint: the mean would be
+        // dragged to ~26 ms, the median must stay with the small ones.
+        let mut s = vec![15.0f32; 15];
+        s.push(180.0);
+        let median = median_ms(&window(&s)).expect("non-empty");
+        assert_eq!(median, 15.0);
+    }
+
+    #[test]
+    fn median_of_an_empty_window_is_none() {
+        assert!(median_ms(&window(&[])).is_none());
+    }
+
+    #[test]
+    fn median_sorts_rather_than_taking_the_middle_arrival() {
+        // Arrival order must not matter: unsorted middle here is 5.0.
+        let median = median_ms(&window(&[100.0, 5.0, 20.0])).expect("non-empty");
+        assert_eq!(median, 20.0);
+    }
+
+    #[test]
+    fn a_sample_during_a_busy_streak_is_kept() {
+        let sent = Instant::now();
+        let done = sent + Duration::from_millis(20);
+        // 10 ms after the previous update finished: the server clearly had
+        // damage queued, so this is a real measurement.
+        let header = done + Duration::from_millis(10);
+        let sample = passive_sample_ms(sent, header, Some(done), 0.0).expect("busy streak");
+        assert!((sample - 30.0).abs() < 1.0, "got {sample}");
+    }
+
+    #[test]
+    fn a_sample_after_an_idle_gap_is_rejected() {
+        // This is the whole point of the streak test: an 8 s wait for the
+        // user to move the mouse is not 8 s of latency.
+        let sent = Instant::now();
+        let done = sent + Duration::from_millis(20);
+        let header = done + Duration::from_secs(8);
+        assert!(passive_sample_ms(sent, header, Some(done), 0.0).is_none());
+    }
+
+    #[test]
+    fn the_gap_boundary_rejects_rather_than_accepts() {
+        let sent = Instant::now();
+        let done = sent + Duration::from_millis(5);
+        let header = done + BUSY_STREAK_GAP;
+        assert!(passive_sample_ms(sent, header, Some(done), 0.0).is_none());
+    }
+
+    #[test]
+    fn the_first_update_of_a_session_has_no_streak_to_join() {
+        let sent = Instant::now();
+        let header = sent + Duration::from_millis(10);
+        assert!(passive_sample_ms(sent, header, None, 0.0).is_none());
+    }
+
+    #[test]
+    fn our_own_decode_of_the_intervening_update_is_not_charged_to_the_server() {
+        // The measured client cost: 42.7% duty at the High tier, so at ten
+        // updates per second roughly 43 ms of a 100 ms window is us, not the
+        // server. Leaving it in put a healthy server (57.3 ms) over the
+        // 100 ms threshold the tuner cap trips at.
+        let sent = Instant::now();
+        let done = sent + Duration::from_millis(10);
+        let header = sent + Duration::from_millis(100);
+        let sample = passive_sample_ms(sent, header, Some(done), 42.7).expect("busy streak");
+        assert!((sample - 57.3).abs() < 1.0, "got {sample}");
+    }
+
+    #[test]
+    fn a_decode_longer_than_the_window_clamps_to_zero_rather_than_going_negative() {
+        // The two clocks are read at different points, so the subtraction can
+        // overshoot. A negative "round trip" would sort below every real
+        // sample and drag the median with it.
+        let sent = Instant::now();
+        let done = sent + Duration::from_millis(1);
+        let header = sent + Duration::from_millis(20);
+        let sample = passive_sample_ms(sent, header, Some(done), 500.0).expect("busy streak");
+        assert_eq!(sample, 0.0);
+    }
+
+    #[test]
+    fn a_stale_sample_loses_its_vote_even_while_the_window_looks_fresh() {
+        // The reported failure: a burst leaves nine 400 ms samples, the
+        // desktop idles for ten minutes (the busy-streak gate rejects
+        // everything, so nothing rotates out by count), then light activity
+        // adds eight 20 ms samples. The newest sample is fresh, so the window
+        // as a whole looks fresh, and the median is the ten-minute-old
+        // number, which then feeds the tuner cap.
+        let now = Instant::now();
+        let mut w: VecDeque<PassiveSample> = VecDeque::new();
+        let long_ago = now - Duration::from_secs(600);
+        for _ in 0..9 {
+            push_passive_sample(&mut w, long_ago, 400.0);
+        }
+        for i in 0..8 {
+            push_passive_sample(&mut w, now - Duration::from_millis(8 - i), 20.0);
+        }
+        let median = fresh_median_ms(&w, now).expect("fresh samples exist");
+        assert_eq!(median, 20.0, "window: {w:?}");
+    }
+
+    #[test]
+    fn insertion_evicts_by_age_not_only_by_count() {
+        // The count bound alone leaves the old samples sitting there: the
+        // window is 16 and only 12 samples are involved here.
+        let now = Instant::now();
+        let mut w: VecDeque<PassiveSample> = VecDeque::new();
+        for _ in 0..10 {
+            push_passive_sample(&mut w, now - RTT_SAMPLE_FRESH, 400.0);
+        }
+        push_passive_sample(&mut w, now, 20.0);
+        push_passive_sample(&mut w, now, 20.0);
+        assert_eq!(w.len(), 2, "stale samples must be dropped on insertion");
+    }
+
+    #[test]
+    fn a_window_that_stops_receiving_samples_stops_answering() {
+        // Nothing arrives to trigger the insertion-time pruning, so the read
+        // path has to do it: five seconds after the last update the passive
+        // readout has nothing to say and a lower-priority source takes over.
+        let now = Instant::now();
+        let mut w: VecDeque<PassiveSample> = VecDeque::new();
+        push_passive_sample(&mut w, now - Duration::from_secs(30), 42.0);
+        assert!(fresh_median_ms(&w, now).is_none());
+        // The stale figure is still available to the last-resort readout,
+        // which prefers it to reporting 0.0.
+        assert_eq!(median_ms(&w), Some(42.0));
+    }
+
+    #[test]
+    fn the_window_is_still_bounded_by_count_when_every_sample_is_fresh() {
+        let now = Instant::now();
+        let mut w: VecDeque<PassiveSample> = VecDeque::new();
+        for i in 0..(PASSIVE_RTT_WINDOW * 3) {
+            push_passive_sample(&mut w, now, i as f32);
+        }
+        assert_eq!(w.len(), PASSIVE_RTT_WINDOW);
+    }
+}
+
+#[cfg(test)]
+mod always_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_refresh_goes_out_immediately() {
+        assert_eq!(
+            refresh_decision(None, None, Duration::ZERO),
+            RefreshDecision::Send
+        );
+    }
+
+    #[test]
+    fn never_two_outstanding_at_once() {
+        // The bug: a full-screen non-incremental request every second
+        // regardless of whether the server had answered the last one.
+        assert_eq!(
+            refresh_decision(Some(Duration::from_secs(3)), None, Duration::ZERO),
+            RefreshDecision::Wait
+        );
+    }
+
+    #[test]
+    fn a_healthy_server_keeps_the_one_second_cadence() {
+        // 150 ms is the measured full-screen answer on the 2880x1800
+        // TightVNC-family server, so by the next 1 s tick the cooldown is
+        // long gone and the feature behaves exactly as it always did.
+        let cost = Duration::from_millis(150);
+        assert_eq!(
+            refresh_decision(None, Some(Duration::from_secs(1)), cost),
+            RefreshDecision::Send
+        );
+        assert_eq!(
+            refresh_decision(None, Some(Duration::from_millis(100)), cost),
+            RefreshDecision::Wait
+        );
+    }
+
+    #[test]
+    fn a_struggling_server_is_asked_less_often() {
+        // A 4 s answer buys the server 4 s of quiet before we ask again,
+        // instead of another full-screen request one second later.
+        let cost = Duration::from_secs(4);
+        assert_eq!(
+            refresh_decision(None, Some(Duration::from_secs(1)), cost),
+            RefreshDecision::Wait
+        );
+        assert_eq!(
+            refresh_decision(None, Some(Duration::from_secs(4)), cost),
+            RefreshDecision::Send
+        );
+    }
+
+    #[test]
+    fn the_cooldown_is_capped_so_the_feature_never_dies() {
+        // Even the 10.1 s worst case measured must not silence the switch
+        // for more than REFRESH_MAX_COOLDOWN.
+        let cost = Duration::from_secs(30);
+        assert_eq!(
+            refresh_decision(None, Some(REFRESH_MAX_COOLDOWN), cost),
+            RefreshDecision::Send
+        );
+    }
+
+    #[test]
+    fn an_unanswered_request_is_eventually_written_off() {
+        assert_eq!(
+            refresh_decision(Some(REFRESH_ABANDON), None, Duration::ZERO),
+            RefreshDecision::Abandon
+        );
+    }
+
+    /// The 2880x1800 desktop every measurement in this module was taken on.
+    fn desktop() -> Rect {
+        Rect::new(0, 0, 2880, 1800)
+    }
+
+    #[test]
+    fn a_few_dirty_tiles_are_not_the_answer_to_a_full_screen_request() {
+        // The bug: on the pipelined path an incremental request is always
+        // already outstanding, so on a busy desktop the server answers THAT
+        // one first, in about 10 ms, and that update used to close the
+        // refresh clock. A 10 ms cooldown has expired by the next 1 s tick,
+        // so the throttle silently reverted to the once-per-second
+        // full-screen cadence it was written to prevent.
+        assert!(!answers_full_refresh(
+            Rect::new(100, 100, 64, 64),
+            desktop()
+        ));
+        // Even a fairly large partial repaint (a maximised window's client
+        // area, half the screen) is not a whole-framebuffer answer.
+        assert!(!answers_full_refresh(Rect::new(0, 0, 2880, 900), desktop()));
+    }
+
+    #[test]
+    fn a_whole_screen_update_is_the_answer() {
+        assert!(answers_full_refresh(desktop(), desktop()));
+        // Servers round to their own tile grid and may trim an edge strip,
+        // so coverage rather than an exact match: 98% still counts.
+        assert!(answers_full_refresh(Rect::new(0, 0, 2880, 1764), desktop()));
+    }
+
+    #[test]
+    fn an_empty_update_is_never_the_answer() {
+        // A pseudo-rect-only update (cursor shape, LED state) carries no
+        // damage at all, and a zero-sized framebuffer must not make the
+        // coverage test vacuously true.
+        assert!(!answers_full_refresh(Rect::new(0, 0, 0, 0), desktop()));
+        assert!(!answers_full_refresh(
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 0, 0)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod protocol_trace_tests {
+    use super::*;
+
+    fn trace() -> ProtocolTrace {
+        ProtocolTrace {
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn requests_are_split_incremental_from_full() {
+        let mut t = trace();
+        let full = messages::framebuffer_update_request(false, Rect::new(0, 0, 2880, 1800));
+        let incr = messages::framebuffer_update_request(true, Rect::new(0, 0, 2880, 1800));
+        t.record_client_message(&full, 2880, 1800);
+        t.record_client_message(&incr, 2880, 1800);
+        t.record_client_message(&incr, 2880, 1800);
+        assert_eq!(t.full_requests, 1);
+        assert_eq!(t.incr_requests, 2);
+        assert_eq!(t.last_full, Some(Rect::new(0, 0, 2880, 1800)));
+    }
+
+    #[test]
+    fn requested_area_is_counted_in_whole_screens() {
+        let mut t = trace();
+        // Half the desktop, twice: one screen's worth of encoding asked for.
+        let half = messages::framebuffer_update_request(false, Rect::new(0, 0, 1440, 1800));
+        t.record_client_message(&half, 2880, 1800);
+        t.record_client_message(&half, 2880, 1800);
+        assert!(
+            (t.full_screens - 1.0).abs() < 1e-3,
+            "got {}",
+            t.full_screens
+        );
+    }
+
+    #[test]
+    fn a_zero_sized_framebuffer_does_not_divide_by_zero() {
+        let mut t = trace();
+        let req = messages::framebuffer_update_request(true, Rect::new(0, 0, 16, 16));
+        t.record_client_message(&req, 0, 0);
+        assert!(t.incr_screens.is_finite());
+    }
+
+    #[test]
+    fn input_is_counted_but_not_confused_with_requests() {
+        let mut t = trace();
+        t.record_client_message(&crate::input::encode_pointer_event(1, 2, 0), 100, 100);
+        t.record_client_message(&crate::input::encode_key_event(0x61, true), 100, 100);
+        assert_eq!(t.pointer_events, 1);
+        assert_eq!(t.key_events, 1);
+        assert_eq!(t.incr_requests, 0);
+        assert_eq!(t.full_requests, 0);
+    }
+
+    #[test]
+    fn a_truncated_message_is_ignored_rather_than_panicking() {
+        let mut t = trace();
+        // Never happens from our own encoders, but the parser reads by index
+        // and must not be the thing that takes the session down.
+        t.record_client_message(
+            &[messages::client_msg::FRAMEBUFFER_UPDATE_REQUEST, 1],
+            10,
+            10,
+        );
+        t.record_client_message(&[], 10, 10);
+        assert_eq!(t.incr_requests, 0);
+    }
+
+    #[test]
+    fn the_trace_is_off_unless_the_env_var_says_otherwise() {
+        // Guards the zero-cost promise: nothing but an explicit "1" arms it.
+        // (The process running the test suite does not set the variable.)
+        assert!(!ProtocolTrace::new().enabled || std::env::var(TRACE_ENV).as_deref() == Ok("1"));
     }
 }
 

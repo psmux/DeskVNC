@@ -94,6 +94,86 @@ const RELIEF_MIN_CAPACITY_BPS: f64 = HIGH_BPS;
 /// off every sample.
 const RELIEF_OFF_RATIO: f32 = 0.75;
 
+/// Floor for the compression level the automatic ladder may ask for.
+///
+/// Tight compression level 0 does not mean "a bit less zlib", it means **no
+/// zlib at all**: the server ships the basic-compression sub-encodings raw.
+/// Measured against TightVNC on a 2880x1800 desktop that is a 5-10x increase
+/// in payload, which is never a trade worth making to save the small amount of
+/// client CPU that inflate costs.
+///
+/// Without this floor, relief on the High tier computed
+/// `1u8.saturating_sub(2) == 0` and latched there permanently, via a feedback
+/// loop that is easy to miss: relief triggers on `decode_ms`, `decode_rect`
+/// awaits socket reads (see [`RELIEF_MIN_CAPACITY_BPS`]), and uncompressed
+/// rects take LONGER to read off the wire. So the relief that was supposed to
+/// bring `decode_ms` down pushed it up, which kept relief engaged, which kept
+/// compression at 0. Observed end state on a 82 Mbit/s link: a steady
+/// 9.9 MB/s per session, saturating both the link and the server's encoder,
+/// which starves every other client connected to that server.
+const MIN_AUTO_COMPRESSION: u8 = 1;
+
+/// Above this server response time, the SERVER is the constraint and the
+/// ladder must stop climbing, whatever the link can carry.
+///
+/// [`Tier::from_link`] chooses purely on measured link capacity, and its doc
+/// comment argues correctly that RTT is not capacity. That reasoning holds for
+/// ESTIMATING capacity and is incomplete as a control loop: it has no term for
+/// what the chosen tier costs, so on a fast link in front of a slow server it
+/// climbs to High and stays there while interactivity collapses.
+///
+/// Paired measurement against a real TightVNC-family server at 2880x1800 on an
+/// 82 Mbit/s link, alternating 30 s arms so remote screen activity could not
+/// drift between them, four rounds:
+///
+/// | tier   | duty cycle | throughput   | server response |
+/// |--------|-----------|--------------|-----------------|
+/// | High   | 42.7-43.2% | 36.3-36.5 Mbit/s | 426-434 ms  |
+/// | Medium | 17.7-28.4% | 10.5-17.1 Mbit/s | 18-20 ms (quiet rounds) |
+///
+/// High buys about twice the bandwidth and costs about twenty times the round
+/// trip. No user wants that trade, so cap the ladder once the server is
+/// visibly struggling. 100 ms is chosen to sit far above Medium's healthy
+/// 18-20 ms (so a well-behaved server is never capped) and far below High's
+/// 426 ms (so a struggling one always is).
+const SERVER_LATENCY_BUDGET_MS: f32 = 100.0;
+
+/// Release threshold for the cap, well under [`SERVER_LATENCY_BUDGET_MS`] so a
+/// server hovering near the budget does not toggle the cap every tick. Same
+/// asymmetric-hysteresis reasoning as [`RELIEF_OFF_RATIO`].
+const SERVER_LATENCY_RELEASE_MS: f32 = 60.0;
+
+/// How long a tier stays penalised after it provoked the latency cap.
+///
+/// Without this the cap limit-cycles, because the release criterion is
+/// measured in the state the cap itself created. Measured operating points on
+/// the server that motivated the cap: 426 to 434 ms at High, 18 to 20 ms at
+/// Medium. So the moment the cap drops the ladder to Medium the very next
+/// sample reads 19 ms, the cap releases, `from_link` sees a fast link and
+/// climbs straight back to High, and latency returns to 430 ms. With
+/// `SUSTAIN` at 2 s and `COOLDOWN` at 5 s that is a visible quality flap every
+/// 12 to 16 seconds, forever.
+///
+/// No hysteresis BAND can fix this: the two operating points are 19 ms and
+/// 430 ms, and any threshold between them is stable under one tier and
+/// unstable under the other, which is the definition of a limit cycle. What is
+/// needed is a memory of "we tried that and it was bad" that survives the
+/// improvement its own remedy produced.
+///
+/// Two minutes is chosen so the bad state is a small fraction of the time
+/// (roughly 7 s to re-probe against 120 s of good behaviour, about 5%) while
+/// still re-checking often enough to pick up a genuine improvement, for
+/// instance the remote user closing whatever was repainting the screen.
+const LATENCY_PENALTY: Duration = Duration::from_secs(120);
+
+/// The best tier the ladder may choose while the latency cap is engaged.
+///
+/// Medium, not lower: the measurement above shows Medium already restores an
+/// 18-20 ms round trip on the server that provoked the cap, so dropping
+/// further would sacrifice picture quality for latency that has already been
+/// recovered.
+const LATENCY_CAP_TIER: Tier = Tier::Medium;
+
 /// Stall-anchored burst sampler (BBR's delivery-rate model, applied to a
 /// single TCP read side).
 ///
@@ -353,6 +433,29 @@ impl Tier {
         }
     }
 
+    /// Rank on the ladder, 0 being the best picture. Only used for `cap_at`;
+    /// the enum deliberately does not derive `Ord`, because "greater tier" is
+    /// ambiguous when the variants are ordered best-first.
+    fn rank(self) -> u8 {
+        match self {
+            Tier::High => 0,
+            Tier::Medium => 1,
+            Tier::LowIsh => 2,
+            Tier::Low => 3,
+        }
+    }
+
+    /// This tier, or `limit` if this one is better than `limit` allows.
+    /// Never RAISES the tier: a link that already warrants Low stays at Low
+    /// when the server-latency cap says "no better than Medium".
+    fn cap_at(self, limit: Tier) -> Tier {
+        if self.rank() < limit.rank() {
+            limit
+        } else {
+            self
+        }
+    }
+
     /// The automatic ladder moves JPEG quality and compression ONLY, never the
     /// pixel format.
     ///
@@ -453,6 +556,14 @@ struct Shared {
     last_switch: Option<Instant>,
     /// Switch that passed hysteresis and awaits `recommended()`.
     ready: Option<Desired>,
+    /// Whether the server-latency cap is currently holding the ladder down.
+    /// See [`SERVER_LATENCY_BUDGET_MS`].
+    latency_capped: bool,
+    /// Until when the ladder stays capped REGARDLESS of the current reading,
+    /// because a better tier already provoked the cap once. See
+    /// [`LATENCY_PENALTY`]. This is what stops the cap limit-cycling on its
+    /// own success.
+    latency_penalty_until: Option<Instant>,
 }
 
 /// Adaptive quality tuner for the Auto preset (PRD/09 §3).
@@ -505,6 +616,8 @@ impl AutoTuner {
                 candidate: None,
                 last_switch: None,
                 ready: None,
+                latency_capped: false,
+                latency_penalty_until: None,
             }),
         }
     }
@@ -548,11 +661,36 @@ impl AutoTuner {
     /// [`LinkMeter`] (or `None` if nothing loaded the link this tick),
     /// current RTT estimate, and decode time of the last update.
     /// Non-positive `rtt_ms`/`decode_ms` are treated as "no sample".
-    pub fn observe(&mut self, link_bps: Option<f64>, rtt_ms: f32, decode_ms: f32) {
-        self.observe_at(Instant::now(), link_bps, rtt_ms, decode_ms);
+    ///
+    /// `server_latency_ms` is how long the SERVER is taking to answer, which
+    /// is a different quantity from `rtt_ms` and is used for a different
+    /// purpose: not to estimate capacity (see [`Tier::from_link`]) but to stop
+    /// the ladder climbing past what the server can actually serve. Pass 0.0
+    /// when no measurement is available, which disables the cap.
+    pub fn observe(
+        &mut self,
+        link_bps: Option<f64>,
+        rtt_ms: f32,
+        decode_ms: f32,
+        server_latency_ms: f32,
+    ) {
+        self.observe_at(
+            Instant::now(),
+            link_bps,
+            rtt_ms,
+            decode_ms,
+            server_latency_ms,
+        );
     }
 
-    fn observe_at(&mut self, now: Instant, link_bps: Option<f64>, rtt_ms: f32, decode_ms: f32) {
+    fn observe_at(
+        &mut self,
+        now: Instant,
+        link_bps: Option<f64>,
+        rtt_ms: f32,
+        decode_ms: f32,
+        server_latency_ms: f32,
+    ) {
         match self.last_observe {
             Some(prev) => {
                 let dt = now.saturating_duration_since(prev).as_secs_f64();
@@ -618,7 +756,43 @@ impl AutoTuner {
             _ => windowed,
         };
 
-        let target = Tier::from_link(capacity, sh.current);
+        let mut target = Tier::from_link(capacity, sh.current);
+
+        // Server-bound cap. `from_link` answers "what can the WIRE carry",
+        // which on a fast link in front of a slow server is the wrong question
+        // to decide alone: measured, High bought 2x the bandwidth of Medium
+        // and cost 20x the response time (see `SERVER_LATENCY_BUDGET_MS`).
+        // A measurement of 0.0 means "no sample", so leave the cap untouched
+        // rather than reading it as a perfectly fast server.
+        if server_latency_ms > 0.0 {
+            let capped_now = if sh.latency_capped {
+                server_latency_ms > SERVER_LATENCY_RELEASE_MS
+            } else {
+                server_latency_ms > SERVER_LATENCY_BUDGET_MS
+            };
+            // Arm the penalty on the RISING edge, and only when the tier we
+            // were actually running is better than the cap allows. That is the
+            // case where we have just learned something: "at this tier, this
+            // server cannot keep up". Engaging while already at or below the
+            // cap teaches nothing, so it must not extend the penalty, or a
+            // permanently slow server would hold the penalty forever and never
+            // re-probe.
+            if capped_now && !sh.latency_capped && sh.current.rank() < LATENCY_CAP_TIER.rank() {
+                sh.latency_penalty_until = Some(now + LATENCY_PENALTY);
+            }
+            sh.latency_capped = capped_now;
+        }
+        // The penalty outlives the reading that caused it. Without it the cap
+        // releases the instant the tier it forced makes latency look healthy
+        // again, which is every single time, and the ladder flaps forever.
+        let penalised = sh.latency_penalty_until.is_some_and(|until| now < until);
+        if !penalised {
+            sh.latency_penalty_until = None;
+        }
+        let cap_active = penalised || sh.latency_capped;
+        if cap_active {
+            target = target.cap_at(LATENCY_CAP_TIER);
+        }
 
         // Client CPU-bound: sustained decode overruns ask for lower
         // compression at the same tier. Gated on a demonstrably fast link
@@ -628,8 +802,22 @@ impl AutoTuner {
         // afford it. Asymmetric on/off thresholds (`FRAME_BUDGET_MS` vs
         // `RELIEF_OFF_RATIO` of it) stop decode time hovering at the budget
         // from flickering relief on and off every sample.
+        // Relief lowers the compression LEVEL, which means the server spends
+        // less CPU and puts more bytes on the wire. When the latency cap is
+        // engaged the server is already the bottleneck, so handing it a larger
+        // payload is precisely backwards: measured with the cap engaged but
+        // relief still free to act, the tuner held JPEG quality at 6 (correct)
+        // but pulled compression 3 down to 1, and throughput stayed at
+        // 4.5 MB/s instead of the 620 KB/s a plain Medium session uses.
+        //
+        // Worth recording why the lever is weak in general: zlib DEcompression
+        // cost barely depends on the level the encoder chose, so lowering it
+        // does not measurably speed the client's inflate. What it does do is
+        // add bytes, and `decode_ms` (relief's own trigger) includes socket
+        // reads, so relief tends to worsen the number it is reacting to.
         let fast_link = capacity > RELIEF_MIN_CAPACITY_BPS;
         let relief = fast_link
+            && !cap_active
             && if sh.relief_applied {
                 self.decode_ms > FRAME_BUDGET_MS * RELIEF_OFF_RATIO
             } else {
@@ -673,7 +861,7 @@ impl AutoTuner {
         sh.last_switch = self.last_observe.or_else(|| Some(Instant::now()));
         let mut s = tier.settings();
         if relief {
-            s.compression = s.compression.saturating_sub(2);
+            s.compression = s.compression.saturating_sub(2).max(MIN_AUTO_COMPRESSION);
         }
         Some(s)
     }
@@ -681,6 +869,13 @@ impl AutoTuner {
     /// The tier the tuner currently considers active (as a preset).
     pub fn current_tier(&self) -> QualityPreset {
         self.shared.lock().current.preset()
+    }
+
+    /// The raw ladder rung, for tests that need to tell `Tier::High` from
+    /// `Tier::Medium` without going through the lossy `preset()` mapping.
+    #[cfg(test)]
+    fn current_tier_raw(&self) -> Tier {
+        self.shared.lock().current
     }
 
     /// Align the tuner's internal bookkeeping to settings applied from
@@ -800,7 +995,7 @@ mod tests {
         for _ in 0..30 {
             // 6 s of 60 Mbit/s, 1 ms RTT
             now += STEP;
-            t.observe_at(now, Some(60e6), 1.0, 4.0);
+            t.observe_at(now, Some(60e6), 1.0, 4.0, 0.0);
         }
         let rec = t.recommended().expect("sustained fast link must upgrade");
         // NOT `QualityPreset::High.settings()`: Auto's High tier keeps
@@ -819,7 +1014,7 @@ mod tests {
         assert_eq!(t.recommended(), None);
         // And with unchanged conditions, no new recommendation appears.
         now += STEP;
-        t.observe_at(now, Some(60e6), 1.0, 4.0);
+        t.observe_at(now, Some(60e6), 1.0, 4.0, 0.0);
         assert_eq!(t.recommended(), None);
     }
 
@@ -831,7 +1026,7 @@ mod tests {
         for _ in 0..30 {
             // 6 s of ~200 kbit/s
             now += STEP;
-            t.observe_at(now, Some(0.2e6), 300.0, 4.0);
+            t.observe_at(now, Some(0.2e6), 300.0, 4.0, 0.0);
         }
         let rec = t.recommended().expect("sustained slow link must downgrade");
         assert_eq!(rec.jpeg_quality, 3);
@@ -853,7 +1048,7 @@ mod tests {
             let bps = if block % 2 == 0 { 10e6 } else { 0.05e6 };
             for _ in 0..5 {
                 now += STEP;
-                t.observe_at(now, Some(bps), 30.0, 5.0);
+                t.observe_at(now, Some(bps), 30.0, 5.0, 0.0);
                 if t.recommended().is_some() {
                     recommendations += 1;
                 }
@@ -871,7 +1066,7 @@ mod tests {
         // Upgrade to High.
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 1.0, 4.0);
+            t.observe_at(now, Some(60e6), 1.0, 4.0, 0.0);
         }
         assert!(t.recommended().is_some());
         let switch_time = now;
@@ -887,7 +1082,7 @@ mod tests {
         let deadline = 2 * LINK_WINDOW + COOLDOWN;
         loop {
             now += STEP;
-            t.observe_at(now, Some(0.05e6), 300.0, 4.0);
+            t.observe_at(now, Some(0.05e6), 300.0, 4.0, 0.0);
             let elapsed = now.duration_since(switch_time);
             if elapsed < COOLDOWN {
                 assert_eq!(
@@ -903,7 +1098,7 @@ mod tests {
         // Past both windows aging out (and long past sustain/cooldown), the
         // downgrade arrives.
         now += STEP;
-        t.observe_at(now, Some(0.05e6), 300.0, 4.0);
+        t.observe_at(now, Some(0.05e6), 300.0, 4.0, 0.0);
         let rec = t
             .recommended()
             .expect("downgrade once the fast sample ages out");
@@ -912,7 +1107,20 @@ mod tests {
     }
 
     #[test]
-    fn sustained_decode_overrun_reduces_compression() {
+    fn sustained_decode_overrun_holds_the_compression_floor() {
+        // This test used to assert relief drove compression BELOW the High
+        // tier's level of 1, i.e. to 0. That was the bug, see
+        // `MIN_AUTO_COMPRESSION` and `relief_never_disables_compression_entirely`.
+        //
+        // The lever was mis-specified in the first place: zlib decompression
+        // cost barely depends on the level the ENCODER used, so lowering the
+        // compression level does not speed the client's decode. It lowers the
+        // SERVER's CPU and raises the byte count. Since relief only engages
+        // above `RELIEF_MIN_CAPACITY_BPS`, and any link that fast selects
+        // `Tier::High`, whose compression is already at the floor, the
+        // compression lever is now inert. Left in place rather than deleted
+        // because the tier ladder may grow a rung between High and Medium
+        // where it would have room to act.
         let mut t = AutoTuner::new();
         let base = Instant::now();
         let mut now = base;
@@ -922,7 +1130,7 @@ mod tests {
             // (see `RELIEF_MIN_CAPACITY_BPS`): 60 Mbit/s, comfortably above
             // the High tier's 20 Mbit/s floor, decoding 30 ms per frame.
             now += STEP;
-            t.observe_at(now, Some(60e6), 5.0, 30.0);
+            t.observe_at(now, Some(60e6), 5.0, 30.0, 0.0);
         }
         let rec = t
             .recommended()
@@ -930,9 +1138,231 @@ mod tests {
         let high = QualityPreset::High.settings();
         assert_eq!(t.current_tier(), QualityPreset::High, "tier: High");
         assert_eq!(rec.jpeg_quality, high.jpeg_quality);
+        assert_eq!(
+            rec.compression, 1,
+            "relief must never disable zlib. Asserting the literal 1 on purpose: \
+             `>= MIN_AUTO_COMPRESSION` is unconditionally true for a u8 and \
+             would still pass with the floor deleted."
+        );
+    }
+
+    /// Drive the tuner to a settled tier under a given link and server latency.
+    fn settle(link_bps: f64, server_latency_ms: f32) -> Tier {
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        for _ in 0..200 {
+            now += STEP;
+            t.observe_at(now, Some(link_bps), 5.0, 4.0, server_latency_ms);
+            let _ = t.recommended();
+        }
+        t.current_tier_raw()
+    }
+
+    #[test]
+    fn server_latency_caps_the_ladder_below_high() {
+        // 80 Mbit/s says High on capacity alone. But measured against a real
+        // server, High sat at 426 to 434 ms response while Medium sat at 18 to
+        // 20 ms for only half the bandwidth. A link that fast in front of a
+        // server that slow must not climb.
+        assert_eq!(
+            settle(80e6, 430.0),
+            Tier::Medium,
+            "a server answering in 430 ms must cap the ladder at Medium"
+        );
+        // Same link, healthy server: nothing to cap, High is correct.
+        assert_eq!(
+            settle(80e6, 19.0),
+            Tier::High,
+            "a fast link in front of a responsive server should still reach High"
+        );
+    }
+
+    #[test]
+    fn latency_cap_also_suppresses_compression_relief() {
+        // Relief trades compression level for bytes. A server that is already
+        // too slow must not be handed a bigger payload, so the cap suppresses
+        // relief as well as pinning the tier.
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        // Fast link, heavy decode (relief's trigger), slow server (the cap's).
+        for _ in 0..200 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 40.0, 430.0);
+            if let Some(rec) = t.recommended() {
+                assert_eq!(
+                    rec.compression,
+                    Tier::Medium.settings().compression,
+                    "relief must not lower compression while the server is the bottleneck"
+                );
+            }
+        }
+        assert_eq!(t.current_tier_raw(), Tier::Medium);
+    }
+
+    #[test]
+    fn no_latency_sample_leaves_the_cap_disengaged() {
+        // 0.0 means "not measured", which is what every server without a
+        // usable round-trip source reports. It must not read as "instant".
+        assert_eq!(settle(80e6, 0.0), Tier::High);
+    }
+
+    #[test]
+    fn latency_cap_never_raises_a_tier() {
+        // A genuinely slow link belongs at the bottom. The cap limits how GOOD
+        // a tier may be chosen; it must never drag a bad link upward.
+        assert_eq!(settle(0.2e6, 500.0), Tier::Low);
+    }
+
+    #[test]
+    fn latency_cap_does_not_limit_cycle_when_the_remedy_looks_healthy() {
+        // The failure this guards: the cap's release criterion is measured in
+        // the state the cap created. Measured, High reads 430 ms and Medium
+        // reads 19 ms, so a naive cap drops to Medium, immediately sees 19 ms,
+        // releases, climbs back to High, and flaps every 12 to 16 seconds.
+        //
+        // Model that feedback explicitly: latency is a FUNCTION of the tier the
+        // tuner has chosen, which is exactly what the earlier test with its
+        // constant 25 ms could not express.
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        let mut switches = 0;
+        let mut at_high_ticks = 0;
+        for _ in 0..900 {
+            now += STEP;
+            let latency = match t.current_tier_raw() {
+                Tier::High => 430.0,
+                _ => 19.0,
+            };
+            if t.current_tier_raw() == Tier::High {
+                at_high_ticks += 1;
+            }
+            t.observe_at(now, Some(80e6), 5.0, 4.0, latency);
+            if t.recommended().is_some() {
+                switches += 1;
+            }
+        }
+        // Without the penalty this cycles continuously. STEP is 1 s, so 900
+        // ticks is 15 minutes; at a 120 s penalty that is at most about 8
+        // re-probes, each costing a pair of switches.
         assert!(
-            rec.compression < high.compression,
-            "compression must drop when decode exceeds the frame budget"
+            switches <= 20,
+            "ladder flapped {switches} times in 900 ticks: the cap is limit-cycling"
+        );
+        // And it must spend most of its time in the good state, not oscillate
+        // evenly between them.
+        assert!(
+            at_high_ticks < 200,
+            "spent {at_high_ticks} of 900 ticks at High, which the server cannot serve"
+        );
+    }
+
+    #[test]
+    fn latency_cap_ignores_propagation_delay() {
+        // A fast link with a genuinely high NETWORK round trip (satellite,
+        // transcontinental) must still reach High. The cap is about the server
+        // failing to keep up, not about distance. In the real system this is
+        // enforced upstream, in `run_loop`, by only passing the
+        // update-pipeline source through; here we assert the tuner's own
+        // contract: a caller that has no server-latency measurement passes
+        // 0.0, and 0.0 must never be read as "capped".
+        //
+        // Regression for a real defect: the first version of this cap was fed
+        // `stats.rtt_ms` whatever its source, so a 130 ms Fence measurement on
+        // an 80 Mbit/s WAN link pinned the session to Medium for its entire
+        // life, with no way back because 60 ms is not reachable at the speed of
+        // light.
+        assert_eq!(
+            settle(80e6, 0.0),
+            Tier::High,
+            "no server-latency sample must leave the ladder free"
+        );
+        // A high RTT passed as the tuner's RTT argument (not as server
+        // latency) must also leave the ladder free.
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        for _ in 0..200 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 130.0, 4.0, 0.0);
+            let _ = t.recommended();
+        }
+        assert_eq!(
+            t.current_tier_raw(),
+            Tier::High,
+            "130 ms of propagation on an 80 Mbit/s link is still a High-tier link"
+        );
+    }
+
+    #[test]
+    fn latency_cap_releases_with_hysteresis() {
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        // Engage the cap.
+        for _ in 0..120 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 4.0, 430.0);
+            let _ = t.recommended();
+        }
+        assert_eq!(t.current_tier_raw(), Tier::Medium, "cap should be engaged");
+
+        // Between the release threshold (60 ms) and the budget (100 ms): a
+        // server hovering here must NOT flip the cap off, or the ladder
+        // oscillates every tick.
+        for _ in 0..120 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 4.0, 80.0);
+            let _ = t.recommended();
+        }
+        assert_eq!(
+            t.current_tier_raw(),
+            Tier::Medium,
+            "80 ms is under the budget but over the release threshold: stay capped"
+        );
+
+        // Comfortably recovered: the cap releases and High becomes reachable.
+        for _ in 0..200 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 4.0, 25.0);
+            let _ = t.recommended();
+        }
+        assert_eq!(
+            t.current_tier_raw(),
+            Tier::High,
+            "a recovered server should let the ladder climb again"
+        );
+    }
+
+    #[test]
+    fn relief_never_disables_compression_entirely() {
+        // Regression: the High tier's compression is 1, and relief used a bare
+        // `saturating_sub(2)`, so a CPU-bound client on a fast link landed on
+        // compression 0. That is not "less zlib", it is NO zlib, and it grew
+        // payloads 5-10x. Worse, it latched: relief keys off `decode_ms`,
+        // `decode_rect` awaits socket reads, and uncompressed rects take
+        // longer to read, so the relief meant to lower `decode_ms` raised it
+        // and kept itself engaged. Measured end state against a real server:
+        // a steady 9.9 MB/s, saturating the link and the server's encoder and
+        // starving every other client on it.
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        // Fast link + heavy decode: the exact conditions that engage relief,
+        // driven well past SUSTAIN/COOLDOWN so the ladder settles.
+        let mut last = None;
+        for _ in 0..200 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 40.0, 0.0);
+            if let Some(rec) = t.recommended() {
+                assert!(
+                    rec.compression >= 1,
+                    "auto ladder asked for compression {}, which disables zlib",
+                    rec.compression
+                );
+                last = Some(rec);
+            }
+        }
+        let rec = last.expect("relief should have engaged at least once");
+        assert_eq!(
+            rec.compression, 1,
+            "settled compression must be exactly the High tier's 1, not 0"
         );
     }
 
@@ -948,7 +1378,7 @@ mod tests {
             // Medium-band link (well under the 20 Mbit/s relief floor) with
             // an "overrun" decode time that is really queueing time.
             now += STEP;
-            t.observe_at(now, Some(10e6), 90.0, 30.0);
+            t.observe_at(now, Some(10e6), 90.0, 30.0, 0.0);
         }
         assert_eq!(
             t.recommended(),
@@ -971,7 +1401,7 @@ mod tests {
         // Engage relief on a fast link with a sustained decode overrun.
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 2.0, 30.0);
+            t.observe_at(now, Some(60e6), 2.0, 30.0, 0.0);
         }
         t.recommended().expect("relief should engage");
 
@@ -979,7 +1409,7 @@ mod tests {
         // above the 12 ms (0.75x) OFF threshold. Relief must hold.
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 2.0, 14.0);
+            t.observe_at(now, Some(60e6), 2.0, 14.0, 0.0);
         }
         assert_eq!(
             t.recommended(),
@@ -991,7 +1421,7 @@ mod tests {
         // relief release.
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 2.0, 8.0);
+            t.observe_at(now, Some(60e6), 2.0, 8.0, 0.0);
         }
         let rec = t
             .recommended()
@@ -1023,7 +1453,7 @@ mod tests {
         // tick observes `None` (this guards `have_real_sample`: the seeded
         // starting tier must hold with no real sample ever seen).
         for i in 1..=60 {
-            t.observe_at(start + Duration::from_secs(i), None, 0.4, 1.0);
+            t.observe_at(start + Duration::from_secs(i), None, 0.4, 1.0, 0.0);
         }
         assert!(
             t.recommended().is_none(),
@@ -1042,7 +1472,7 @@ mod tests {
         for i in 1..=12 {
             // 100 KiB that genuinely took a full second to transfer: ~800 kbit/s.
             let bps = (100.0 * 1024.0 * 8.0) / 1.0;
-            t.observe_at(start + Duration::from_secs(i), Some(bps), 90.0, 2.0);
+            t.observe_at(start + Duration::from_secs(i), Some(bps), 90.0, 2.0, 0.0);
         }
         let rec = t.recommended().expect("a loaded slow link must downgrade");
         assert!(
@@ -1095,7 +1525,7 @@ mod tests {
                 sample > 100e6,
                 "a burst timed on a gigabit LAN must read as fast, got {sample}"
             );
-            t.observe_at(now, Some(sample), 1.0, 2.0);
+            t.observe_at(now, Some(sample), 1.0, 2.0, 0.0);
             now += Duration::from_millis(850);
         }
 
@@ -1135,7 +1565,7 @@ mod tests {
                     bps < 1.5e6,
                     "a ~965 kbit/s link must not read as fast, got {bps}"
                 );
-                t.observe_at(now, Some(bps), 40.0, 2.0);
+                t.observe_at(now, Some(bps), 40.0, 2.0, 0.0);
             }
         }
 
@@ -1157,11 +1587,11 @@ mod tests {
         let start = Instant::now();
         let mut now = start;
 
-        t.observe_at(now, Some(200e6), 1.0, 2.0);
+        t.observe_at(now, Some(200e6), 1.0, 2.0, 0.0);
 
         while now.duration_since(start) < Duration::from_secs(20) {
             now += Duration::from_millis(200);
-            t.observe_at(now, Some(0.4e6), 200.0, 2.0);
+            t.observe_at(now, Some(0.4e6), 200.0, 2.0, 0.0);
         }
 
         let rec = t
@@ -1182,7 +1612,7 @@ mod tests {
         let mut now = start;
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 1.0, 2.0);
+            t.observe_at(now, Some(60e6), 1.0, 2.0, 0.0);
         }
         t.recommended()
             .expect("sustained fast burst must upgrade to High");
@@ -1192,7 +1622,7 @@ mod tests {
         // every tick observes `None`.
         for _ in 0..60 {
             now += Duration::from_secs(1);
-            t.observe_at(now, None, 1.0, 2.0);
+            t.observe_at(now, None, 1.0, 2.0, 0.0);
         }
         assert_eq!(
             t.recommended(),
@@ -1428,7 +1858,7 @@ mod tests {
         for i in 1..=12 {
             // 5 MiB in a second of actual transfer: ~40 Mbit/s.
             let bps = (5.0 * 1024.0 * 1024.0 * 8.0) / 1.0;
-            t.observe_at(start + Duration::from_secs(i), Some(bps), 0.5, 3.0);
+            t.observe_at(start + Duration::from_secs(i), Some(bps), 0.5, 3.0, 0.0);
         }
         let rec = t.recommended().expect("a loaded fast link must upgrade");
         assert!(rec.jpeg_quality >= 8, "expected high quality, got {rec:?}");
@@ -1472,7 +1902,7 @@ mod tests {
             let bps = if cycle % 2 == 0 { 21e6 } else { 19e6 };
             for _ in 0..7 {
                 now += STEP; // ~1.4 s per half-period
-                t.observe_at(now, Some(bps), 2.0, 3.0);
+                t.observe_at(now, Some(bps), 2.0, 3.0, 0.0);
                 if t.recommended().is_some() {
                     recommendations += 1;
                 }
@@ -1498,7 +1928,7 @@ mod tests {
         let mut now = base;
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 1.0, 2.0);
+            t.observe_at(now, Some(60e6), 1.0, 2.0, 0.0);
         }
         t.recommended().expect("must upgrade to High");
         assert_eq!(t.current_tier(), QualityPreset::High);
@@ -1510,7 +1940,7 @@ mod tests {
         let deadline = 2 * LINK_WINDOW + Duration::from_secs(2);
         while now.duration_since(switch_time) < deadline {
             now += STEP;
-            t.observe_at(now, Some(19e6), 2.0, 3.0);
+            t.observe_at(now, Some(19e6), 2.0, 3.0, 0.0);
             assert_eq!(
                 t.recommended(),
                 None,
@@ -1532,7 +1962,7 @@ mod tests {
         let mut now = base;
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 1.0, 4.0);
+            t.observe_at(now, Some(60e6), 1.0, 4.0, 0.0);
         }
         assert!(t.recommended().is_some(), "must upgrade to High first");
         assert_eq!(t.current_tier(), QualityPreset::High);
@@ -1544,7 +1974,7 @@ mod tests {
         let mut rec = None;
         while now.duration_since(switch_time) < SUSTAIN + COOLDOWN + Duration::from_secs(1) {
             now += STEP;
-            t.observe_at(now, Some(2e6), 100.0, 4.0);
+            t.observe_at(now, Some(2e6), 100.0, 4.0, 0.0);
             if let Some(r) = t.recommended() {
                 rec = Some(r);
                 break;
@@ -1574,7 +2004,7 @@ mod tests {
         // Establish Auto at High with real measurements.
         for _ in 0..30 {
             now += STEP;
-            t.observe_at(now, Some(60e6), 1.0, 4.0);
+            t.observe_at(now, Some(60e6), 1.0, 4.0, 0.0);
         }
         t.recommended().expect("must upgrade to High");
         assert_eq!(t.current_tier(), QualityPreset::High);
@@ -1592,7 +2022,7 @@ mod tests {
         // must not instantly flip back: resync must also have cleared any
         // stale candidate, so a fresh sustain period is required.
         now += STEP;
-        t.observe_at(now, Some(60e6), 1.0, 4.0);
+        t.observe_at(now, Some(60e6), 1.0, 4.0, 0.0);
         assert_eq!(
             t.recommended(),
             None,
