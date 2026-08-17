@@ -962,6 +962,30 @@ export class WebGLRenderer {
   }
 
   /**
+   * `rowCount` evenly spaced full-width RGBA rows of the framebuffer at full
+   * resolution, packed row-major. For the monitor-seam detector: a seam is
+   * one column wide, so the preview path's downscale would smear it away,
+   * while reading the whole frame costs tens of MB for rows it never looks
+   * at. Row reads only sync the pipeline once, so this stays cheap enough
+   * to run on demand.
+   */
+  readSampledRowsRGBA(rowCount: number): { width: number; rows: number; pixels: Uint8Array } | null {
+    if (this.fbWidth === 0 || this.fbHeight === 0 || rowCount <= 0) return null;
+    const gl = this.gl;
+    const w = this.fbWidth;
+    const n = Math.min(rowCount, this.fbHeight);
+    const pixels = new Uint8Array(w * n * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.readFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.frameTex, 0);
+    for (let i = 0; i < n; i++) {
+      const y = Math.floor(((i + 0.5) / n) * this.fbHeight);
+      gl.readPixels(0, y, w, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels.subarray(i * w * 4, (i + 1) * w * 4));
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { width: w, rows: n, pixels };
+  }
+
+  /**
    * Downscaled RGBA8888 snapshot of the framebuffer, for the Library live
    * preview poll (every 500 ms while previews are enabled). A full-res
    * `readFramebufferRGBA` is 33 MB at 4K and runs on the main thread; instead,
