@@ -127,6 +127,8 @@ export interface SessionToolbarProps {
   /** Selected option id, or null for the whole desktop. */
   displayId: number | null;
   onDisplay: (id: number | null) => void;
+  /** Re-run the monitor-seam detector (only offered when the layout is guessed). */
+  onDetectDisplays: () => void;
   showRemoteCursor: boolean;
   onShowRemoteCursor: (show: boolean) => void;
   localCursor: LocalCursor;
@@ -756,11 +758,14 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                 </MenuRow>
               ))}
               {!props.layoutKnown ? (
-                <p className="px-2.5 py-1 text-2xs text-tertiary">
-                  {orderedScreens.length > 0
-                    ? "This server does not say where its monitors meet, so these cuts are guesses by width."
-                    : "This server has not described its monitors, so the whole desktop is one display."}
-                </p>
+                <>
+                  <MenuRow onClick={props.onDetectDisplays}>Detect displays again</MenuRow>
+                  <p className="px-2.5 py-1 text-2xs text-tertiary">
+                    {orderedScreens.length > 0
+                      ? "This server does not say where its monitors meet: detection reads the picture, the other cuts are guesses by width."
+                      : "This server has not described its monitors, so the whole desktop is one display."}
+                  </p>
+                </>
               ) : null}
             </div>
           ) : null}

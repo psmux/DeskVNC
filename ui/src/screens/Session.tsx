@@ -30,6 +30,7 @@ import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
 import { classNames } from "../lib/util";
 import { Dialog } from "../components/primitives";
+import { candidateSeams, detectVerticalSeam } from "../render/seams";
 import type { DisplayOption, QualityPreset, ScalingMode, SessionState } from "../lib/types";
 import {
   PREF_CLIPBOARD_AUTO,
@@ -626,16 +627,58 @@ function SessionView({
   }, [zoom]);
 
   /**
-   * What the Displays menu offers: the server's own monitor layout when it
-   * sent one, else synthetic width splits of the one big framebuffer, so a
-   * TightVNC-style multi-head desktop is still separable by hand.
+   * Seam detection: when the server sends no layout, look for the column
+   * where two side by side monitors visibly meet (see render/seams.ts).
+   *
+   * Runs once the desktop has settled after connect (windows restored,
+   * wallpaper painted), again on every desktop resize, and on demand from
+   * the menu's "Detect again", because a window straddling the seam at
+   * sampling time hides it. Stored per remote width so a resize can never
+   * leave a seam from the old geometry standing.
    */
+  const [detectedSeam, setDetectedSeam] = useState<{ x: number; forWidth: number } | null>(null);
+  const detectDisplays = useCallback((): void => {
+    const r = rendererRef.current;
+    if (!r || !r.hasFrame()) return;
+    const { width } = r.getRemoteSize();
+    if (width < 1280) return;
+    const band = r.readSampledRowsRGBA(96);
+    if (!band) return;
+    const guess = detectVerticalSeam(band.pixels, band.width, band.rows, candidateSeams(band.width));
+    setDetectedSeam(guess ? { x: guess.x, forWidth: band.width } : null);
+  }, []);
+
   const layoutKnown = session.screens.length >= 2;
+  useEffect(() => {
+    if (layoutKnown || session.state.state !== "connected") return;
+    const t = window.setTimeout(detectDisplays, THUMBNAIL_SETTLE_MS);
+    return () => window.clearTimeout(t);
+  }, [layoutKnown, session.state.state, remoteSize, detectDisplays]);
+
+  /**
+   * What the Displays menu offers: the server's own monitor layout when it
+   * sent one; else the detected pair when the seam detector found one, on
+   * top of synthetic width splits, so a TightVNC-style multi-head desktop
+   * is still separable by hand when detection has nothing to see.
+   */
   const displayOptions = useMemo((): DisplayOption[] => {
     if (layoutKnown) return session.screens;
     if (!remoteSize) return [];
-    return syntheticSplits(remoteSize.w, remoteSize.h);
-  }, [layoutKnown, session.screens, remoteSize]);
+    const opts: DisplayOption[] = [];
+    const seam = detectedSeam && detectedSeam.forWidth === remoteSize.w ? detectedSeam.x : null;
+    if (seam !== null && seam > 0 && seam < remoteSize.w) {
+      opts.push(
+        { id: -101, x: 0, y: 0, width: seam, height: remoteSize.h, label: `Display 1 (detected, ${seam}×${remoteSize.h})` },
+        { id: -102, x: seam, y: 0, width: remoteSize.w - seam, height: remoteSize.h, label: `Display 2 (detected, ${remoteSize.w - seam}×${remoteSize.h})` },
+      );
+    }
+    // Manual cuts that duplicate the detected pair would read as a choice
+    // where there is none; drop them.
+    for (const s of syntheticSplits(remoteSize.w, remoteSize.h)) {
+      if (!opts.some((o) => o.x === s.x && o.width === s.width)) opts.push(s);
+    }
+    return opts;
+  }, [layoutKnown, session.screens, remoteSize, detectedSeam]);
 
   // A selection whose id vanished from the options (server rearranged its
   // monitors, desktop resized under a synthetic split, reconnect to a
@@ -1267,6 +1310,7 @@ function SessionView({
         layoutKnown={layoutKnown}
         displayId={displayId}
         onDisplay={setDisplayId}
+        onDetectDisplays={detectDisplays}
         showRemoteCursor={settings.showRemoteCursor}
         onShowRemoteCursor={(show) => update({ showRemoteCursor: show })}
         localCursor={settings.localCursor}
