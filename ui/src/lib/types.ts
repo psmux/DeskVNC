@@ -338,9 +338,29 @@ export type SessionState =
   | { state: "reconnecting"; attempt: number; next_retry_ms: number; reason: string }
   | { state: "disconnected"; reason: string; can_retry: boolean };
 
+/**
+ * `vnc_core::RttSource`, serde `rename_all = "kebab-case"`. Says which
+ * instrument produced `SessionStats.rtt_ms`, because the three are not
+ * comparable: `fence` is an exact round trip, `idle-probe` is a one-pixel
+ * request timed into a quiet screen, and `update-pipeline` is the passive
+ * readout taken on the normal update path (always available, including on
+ * the Fence-less TightVNC family, but it includes this client's own decode
+ * of the previous update, so it reads high). `none` means nothing has been
+ * measured yet and `rtt_ms` is 0.
+ */
+export type RttSource = "none" | "fence" | "idle-probe" | "update-pipeline";
+
 /** `vnc_core::SessionStats`, no rename_all, so these stay snake_case. */
 export interface SessionStats {
   rtt_ms: number;
+  /** Which instrument produced `rtt_ms`; `#[serde(default)]` in Rust. */
+  rtt_source: RttSource;
+  /**
+   * 0 to 1: fraction of the last stats tick the client spent receiving and
+   * decoding framebuffer updates. Approaches 1 when the server is streaming
+   * flat out, approaches 0 on an idle desktop. `#[serde(default)]` in Rust.
+   */
+  server_duty_cycle: number;
   throughput_bps: number;
   /** TX bits/sec over the 1 s stats tick, mirroring the RX `throughput_bps`. */
   throughput_up_bps: number;

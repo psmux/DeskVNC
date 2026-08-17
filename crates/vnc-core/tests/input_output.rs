@@ -15,24 +15,29 @@ use vnc_core::types::{ClientCommand, Rect, SessionEvent, SessionState};
 
 const RED: Rgb = [255, 0, 0];
 
-/// Round-trip marker: a Refresh produces a non-incremental
-/// FramebufferUpdateRequest, so waiting for the Nth one proves every command
-/// queued before it has been processed.
+/// Round-trip marker: a quality change produces a SetEncodings, so waiting
+/// for the Nth one proves every command queued before it has been processed.
+/// One goes out during the handshake, so the first marker is the 2nd.
+///
+/// This used to send a Refresh and count non-incremental
+/// FramebufferUpdateRequests. That stopped being a barrier when the manual
+/// Refresh was put behind the always-refresh throttle: a second press while
+/// the server still owes us the last full screen is now deliberately dropped,
+/// so the count would never reach the 3rd marker. Quality is the one lever
+/// nothing in this file asserts on, and `nth` alternates the preset because
+/// `apply_quality` sends nothing when the settings already match.
 async fn flush(handle: &vnc_core::SessionHandle, server: &MockServer, nth: usize) {
-    send(handle, ClientCommand::Refresh).await;
+    let preset = if nth % 2 == 0 {
+        vnc_core::types::QualityPreset::High
+    } else {
+        vnc_core::types::QualityPreset::Medium
+    };
+    send(handle, ClientCommand::SetQuality(preset)).await;
     let ok = server
         .wait_until(DEFAULT_TIMEOUT, |r| {
             r.messages
                 .iter()
-                .filter(|m| {
-                    matches!(
-                        m,
-                        ClientMessage::FramebufferUpdateRequest {
-                            incremental: false,
-                            ..
-                        }
-                    )
-                })
+                .filter(|m| matches!(m, ClientMessage::SetEncodings { .. }))
                 .count()
                 >= nth
         })
@@ -554,8 +559,8 @@ fn ext_flags(body: &[u8]) -> Option<u32> {
 }
 
 /// Announce server caps, which is what puts the client into Extended
-/// Clipboard mode; `flushes` tracks the cumulative non-incremental
-/// FramebufferUpdateRequest count that [`flush`] counts up to.
+/// Clipboard mode; `flushes` tracks the cumulative SetEncodings count that
+/// [`flush`] counts up to.
 async fn negotiate_extended_clipboard(
     handle: &vnc_core::SessionHandle,
     server: &MockServer,
@@ -584,7 +589,7 @@ async fn a_server_request_is_answered_with_the_text_on_offer() {
     let server = MockServer::start(MockConfig::new()).await;
     let (handle, mut events) = spawn_session(options(server.port()));
     events.wait_connected(DEFAULT_TIMEOUT).await;
-    let mut flushes = 1; // the priming request sent at connect
+    let mut flushes = 1; // the SetEncodings sent during the handshake
 
     negotiate_extended_clipboard(&handle, &server, &mut flushes).await;
     send(
@@ -878,5 +883,140 @@ async fn always_refresh_keeps_requesting_full_updates() {
         })
         .count();
     assert_eq!(after, 0, "switching it off must stop the full re-fetches");
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Full-screen refresh throttle
+// ---------------------------------------------------------------------------
+
+/// The mock desktop, which is what a full-screen re-fetch asks for.
+const MOCK_SCREEN: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 640,
+    height: 480,
+};
+
+/// Non-incremental requests for the WHOLE desktop.
+///
+/// The rect test is not decoration: the Fence-less round-trip probe asks for
+/// a single pixel non-incrementally once a tick, so counting on the
+/// incremental flag alone counts probes as re-fetches.
+fn full_screen_refreshes(msgs: &[ClientMessage]) -> usize {
+    msgs.iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ClientMessage::FramebufferUpdateRequest {
+                    incremental: false,
+                    rect,
+                } if *rect == MOCK_SCREEN
+            )
+        })
+        .count()
+}
+
+/// A one-rect Raw FramebufferUpdate, built by hand so a test can push an
+/// update at a moment of its choosing rather than in answer to a request.
+fn raw_update(rect: Rect, colour: Rgb) -> Vec<u8> {
+    let mut out = vec![0u8, 0u8]; // FramebufferUpdate, padding
+    out.extend_from_slice(&1u16.to_be_bytes()); // one rect
+    out.extend_from_slice(&rect.x.to_be_bytes());
+    out.extend_from_slice(&rect.y.to_be_bytes());
+    out.extend_from_slice(&rect.width.to_be_bytes());
+    out.extend_from_slice(&rect.height.to_be_bytes());
+    out.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    for _ in 0..rect.area() {
+        out.extend_from_slice(&[colour[2], colour[1], colour[0], 0]);
+    }
+    out
+}
+
+/// REGRESSION: the manual Refresh arm called `send_full_refresh` directly
+/// while its comment claimed it went through the always-refresh accounting.
+/// A user leaning on the button queued one whole-screen re-fetch per press
+/// (130 to 180 ms of the server's SHARED encoder each, which is what took
+/// another client of the same server from 3 ms to 398 ms median typing
+/// latency), and every press also overwrote the outstanding-request clock,
+/// which suppressed the automatic always-refresh and deferred the 10 s
+/// abandon for as long as the pressing went on.
+#[tokio::test]
+async fn hammering_the_refresh_button_does_not_queue_a_re_fetch_per_press() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    // The priming request, so the baseline below is not racing it.
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| full_screen_refreshes(&r.messages) >= 1)
+            .await
+    );
+    let before = full_screen_refreshes(&server.messages());
+
+    for _ in 0..5 {
+        send(&handle, ClientCommand::Refresh).await;
+    }
+    // Proves all five presses have been processed, so the count below is
+    // final rather than merely early.
+    flush(&handle, &server, 2).await;
+
+    let sent = full_screen_refreshes(&server.messages()) - before;
+    assert_eq!(
+        sent, 1,
+        "the first press goes out, the rest wait for the server to answer it"
+    );
+    handle.shutdown();
+}
+
+/// REGRESSION: the outstanding-refresh clock was closed by whatever update
+/// arrived first. On the pipelined path an incremental request is ALWAYS
+/// already outstanding, so on a busy desktop the server answers that one
+/// first (a few dirty tiles, ~10 ms) and that update was recorded as the
+/// answer to the full-screen request, with a 10 ms cost. A 10 ms cooldown is
+/// long expired by the next tick, so the throttle degraded back to the
+/// once-per-second full-screen cadence it exists to prevent, on exactly the
+/// busy server it was written for.
+#[tokio::test]
+async fn a_few_dirty_tiles_do_not_close_the_full_refresh_clock() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| full_screen_refreshes(&r.messages) >= 1)
+            .await
+    );
+    let before = full_screen_refreshes(&server.messages());
+
+    send(&handle, ClientCommand::Refresh).await;
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| full_screen_refreshes(&r.messages)
+                > before)
+            .await,
+        "the first press must go out"
+    );
+
+    // Something else entirely comes back: 16x16 of damage, 0.08% of the
+    // desktop, nothing like the answer to a whole-screen non-incremental
+    // request.
+    server.send_raw(raw_update(Rect::new(8, 8, 16, 16), RED));
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+
+    // Long enough that a cooldown started by mis-attributing that update
+    // would have expired (it would have been charged at the few milliseconds
+    // between the request and the update), and far short of the 10 s at which
+    // a genuinely unanswered request is written off.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    send(&handle, ClientCommand::Refresh).await;
+    flush(&handle, &server, 2).await;
+
+    let sent = full_screen_refreshes(&server.messages()) - before;
+    assert_eq!(
+        sent, 1,
+        "the server still owes us the whole screen, so nothing new may go out"
+    );
     handle.shutdown();
 }
