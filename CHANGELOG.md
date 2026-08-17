@@ -10,6 +10,23 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-17
+
+### Added
+
+- **The seam between two monitors is now detected from the picture.** When
+  the server describes no layout, the desktop is sampled at full resolution
+  shortly after the connection settles and the one column where two side by
+  side monitors visibly disagree (different wallpapers, a taskbar stopping
+  dead, a letterbox band) is searched for, but only at positions where a
+  monitor boundary could plausibly sit: the midpoint, or a common panel
+  width from either edge. A find appears in the Displays menu as "Display 1
+  / Display 2 (detected)" above the manual cuts; a miss (mirrored
+  wallpapers, a window straddling the seam) keeps the manual cuts, and a
+  "Detect displays again" entry re-runs the search once the seam is
+  uncovered. Detection re-runs on every desktop resize and never crosses a
+  server-described layout.
+
 ## [0.9.1] - 2026-08-17
 
 ### Fixed
@@ -31,8 +48,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - **Pick a single monitor of a multi-head desktop.** The toolbar's Displays
   menu is now real: it lists every monitor the server advertises through
   ExtendedDesktopSize, in left to right order with resolutions, and selecting
-  one shows just that monitor. Every scaling mode, edge panning, the space
-  drag and pointer mapping work against the selection, and the pointer cannot
+  one shows just that monitor. Every scaling mode, edge panning, the drag
+  pan and pointer mapping work against the selection, and the pointer cannot
   leave the selected monitor. Thumbnails, live previews and screenshots still
   capture the whole desktop. Servers that never describe their monitors keep
   the whole desktop view, and the menu says so.
@@ -786,7 +803,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/psmux/DeskVNC/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/psmux/DeskVNC/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/psmux/DeskVNC/compare/v0.8.2...v0.9.0
 [0.2.0]: https://github.com/psmux/DeskVNC/compare/v0.1.2...v0.2.0
