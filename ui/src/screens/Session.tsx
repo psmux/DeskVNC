@@ -30,7 +30,7 @@ import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
 import { classNames } from "../lib/util";
 import { Dialog } from "../components/primitives";
-import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import type { DisplayOption, QualityPreset, ScalingMode, SessionState } from "../lib/types";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
@@ -74,6 +74,47 @@ const CAPTURE_CLOSE_BUDGET_MS = 700;
 
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, ms));
+
+/**
+ * Candidate ways to cut a desktop the server never described into monitors.
+ *
+ * TightVNC-family servers serve a multi-head desktop as one wide framebuffer
+ * and say nothing about where the seams are, so the only honest offer is a
+ * short list of plausible cuts: equal halves, and one common monitor width
+ * (the widest of 2560/1920/1440 that leaves a usable remainder) on either
+ * side, both ways round because nothing says which side the big monitor is
+ * on. Ids are negative so they can never collide with a wire screen id.
+ */
+function syntheticSplits(w: number, h: number): DisplayOption[] {
+  const out: DisplayOption[] = [];
+  let id = -1;
+  const add = (x: number, width: number, label: string): void => {
+    out.push({ id: id--, x, y: 0, width, height: h, label });
+  };
+  if (w < 1280) return out;
+  const half = Math.floor(w / 2);
+  add(0, half, `Left half (${half}×${h})`);
+  add(half, w - half, `Right half (${w - half}×${h})`);
+  for (const mw of [2560, 1920, 1440]) {
+    const rest = w - mw;
+    if (rest >= 320 && mw !== half) {
+      add(0, mw, `Left ${mw}×${h}`);
+      add(mw, rest, `Right ${rest}×${h}`);
+      if (rest !== mw) {
+        add(0, rest, `Left ${rest}×${h}`);
+        add(rest, mw, `Right ${mw}×${h}`);
+      }
+      break; // one width is a menu; three is a wall
+    }
+  }
+  if (w >= 3 * 1024) {
+    const t = Math.floor(w / 3);
+    add(0, t, `Left third (${t}×${h})`);
+    add(t, t, `Middle third (${t}×${h})`);
+    add(2 * t, w - 2 * t, `Right third (${w - 2 * t}×${h})`);
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------- closing
 //
@@ -584,13 +625,26 @@ function SessionView({
     rendererRef.current?.setZoom(zoom);
   }, [zoom]);
 
-  // A selection whose screen id vanished from the layout (server rearranged
-  // its monitors, reconnect to a different machine) falls back to everything.
+  /**
+   * What the Displays menu offers: the server's own monitor layout when it
+   * sent one, else synthetic width splits of the one big framebuffer, so a
+   * TightVNC-style multi-head desktop is still separable by hand.
+   */
+  const layoutKnown = session.screens.length >= 2;
+  const displayOptions = useMemo((): DisplayOption[] => {
+    if (layoutKnown) return session.screens;
+    if (!remoteSize) return [];
+    return syntheticSplits(remoteSize.w, remoteSize.h);
+  }, [layoutKnown, session.screens, remoteSize]);
+
+  // A selection whose id vanished from the options (server rearranged its
+  // monitors, desktop resized under a synthetic split, reconnect to a
+  // different machine) falls back to everything.
   useEffect(() => {
-    if (displayId !== null && !session.screens.some((s) => s.id === displayId)) {
+    if (displayId !== null && !displayOptions.some((s) => s.id === displayId)) {
       setDisplayId(null);
     }
-  }, [session.screens, displayId]);
+  }, [displayOptions, displayId]);
 
   // Push the monitor view into the renderer. `remoteSize` is a dependency on
   // purpose: a desktop resize clears the renderer's view rect (the old
@@ -599,10 +653,10 @@ function SessionView({
   useEffect(() => {
     const r = rendererRef.current;
     if (!viewReady || !r) return;
-    const screen = displayId !== null ? session.screens.find((s) => s.id === displayId) : undefined;
+    const screen = displayId !== null ? displayOptions.find((s) => s.id === displayId) : undefined;
     if (screen) r.setViewRect(screen.x, screen.y, screen.width, screen.height);
     else r.clearViewRect();
-  }, [viewReady, displayId, session.screens, remoteSize]);
+  }, [viewReady, displayId, displayOptions, remoteSize]);
 
   useEffect(() => {
     rendererRef.current?.setGrayLevels(quality === "bw" ? bwLevels : 0);
@@ -1209,7 +1263,8 @@ function SessionView({
         onZoomLocked={toggleZoomLocked}
         edgePan={edgePan}
         onEdgePan={toggleEdgePan}
-        screens={session.screens}
+        screens={displayOptions}
+        layoutKnown={layoutKnown}
         displayId={displayId}
         onDisplay={setDisplayId}
         showRemoteCursor={settings.showRemoteCursor}

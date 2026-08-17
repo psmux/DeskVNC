@@ -411,6 +411,16 @@ export interface RemoteScreen {
 }
 
 /**
+ * One row of the Displays menu: a real monitor from the server's layout, or
+ * a synthetic split offered when the server never describes its monitors
+ * (synthetic ids are negative, so they can never collide with wire ids).
+ * `label` is set on synthetic entries; real monitors are labelled by index.
+ */
+export interface DisplayOption extends RemoteScreen {
+  label?: string;
+}
+
+/**
  * JSON payload of `session://event`. The discriminator and `sessionId` are on
  * the SAME object, the payload is flat, there is no nested `event` field.
  * Cursor SHAPES are not here: they arrive as binary msg_type 2 on the channel.

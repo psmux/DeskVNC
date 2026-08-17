@@ -11,7 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { QualityPreset, RemoteScreen, ScalingMode, SessionState, SessionStats } from "../lib/types";
+import type { DisplayOption, QualityPreset, ScalingMode, SessionState, SessionStats } from "../lib/types";
 import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
 import { classNames, formatBps, modKeyLabel } from "../lib/util";
@@ -120,9 +120,11 @@ export interface SessionToolbarProps {
   onZoomLocked: (locked: boolean) => void;
   edgePan: boolean;
   onEdgePan: (on: boolean) => void;
-  /** The server's monitor layout; empty when it never described one. */
-  screens: RemoteScreen[];
-  /** Selected screen id, or null for the whole desktop. */
+  /** Rows for the Displays menu: real monitors, or synthetic splits. */
+  screens: DisplayOption[];
+  /** True when `screens` is the server's own layout rather than guesses. */
+  layoutKnown: boolean;
+  /** Selected option id, or null for the whole desktop. */
   displayId: number | null;
   onDisplay: (id: number | null) => void;
   showRemoteCursor: boolean;
@@ -155,12 +157,17 @@ export interface SessionToolbarProps {
 
 export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   /**
-   * Monitors in reading order (left to right, top to bottom), so "Display 1"
-   * is the leftmost one rather than whichever id the server listed first.
+   * A real layout goes in reading order (left to right, top to bottom), so
+   * "Display 1" is the leftmost monitor rather than whichever id the server
+   * listed first. Synthetic splits keep their authored order: sorting them
+   * by x would interleave every "Left ..." variant ahead of every "Right".
    */
   const orderedScreens = useMemo(
-    () => [...props.screens].sort((a, b) => a.x - b.x || a.y - b.y),
-    [props.screens],
+    () =>
+      props.layoutKnown
+        ? [...props.screens].sort((a, b) => a.x - b.x || a.y - b.y)
+        : props.screens,
+    [props.layoutKnown, props.screens],
   );
   const [pos, setPos] = useState<ToolbarPos>(readPos);
   const [pinned, setPinned] = useState<boolean>(readPinned);
@@ -734,18 +741,25 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
               <MenuRow selected={props.displayId === null} onClick={() => props.onDisplay(null)}>
                 All displays
               </MenuRow>
+              {!props.layoutKnown && orderedScreens.length > 0 ? (
+                <p className="px-2.5 pt-2 pb-1 text-2xs uppercase tracking-wide text-tertiary">
+                  Split this desktop
+                </p>
+              ) : null}
               {orderedScreens.map((s, i) => (
                 <MenuRow
                   key={s.id}
                   selected={props.displayId === s.id}
                   onClick={() => props.onDisplay(s.id)}
                 >
-                  {`Display ${i + 1} (${s.width}×${s.height})`}
+                  {s.label ?? `Display ${i + 1} (${s.width}×${s.height})`}
                 </MenuRow>
               ))}
-              {orderedScreens.length === 0 ? (
+              {!props.layoutKnown ? (
                 <p className="px-2.5 py-1 text-2xs text-tertiary">
-                  This server has not described its monitors, so the whole desktop is one display.
+                  {orderedScreens.length > 0
+                    ? "This server does not say where its monitors meet, so these cuts are guesses by width."
+                    : "This server has not described its monitors, so the whole desktop is one display."}
                 </p>
               ) : null}
             </div>
