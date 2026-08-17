@@ -1113,6 +1113,7 @@ impl RunLoop {
             } => {
                 let first = !self.caps.supports_extended_desktop_size;
                 self.caps.supports_extended_desktop_size = true;
+                let layout_changed = self.screens != screens;
                 self.screens = screens;
                 if reason == 1 && status != 0 {
                     // Our own SetDesktopSize was refused; geometry unchanged.
@@ -1140,6 +1141,18 @@ impl RunLoop {
                         let msg = messages::framebuffer_update_request(true, self.full_rect());
                         self.send(&msg).await?;
                     }
+                }
+                // AFTER the resize: the UI applies a per-monitor view against
+                // the framebuffer it already has, so the new geometry must
+                // land first.
+                if layout_changed {
+                    emit(
+                        events,
+                        SessionEvent::ScreenLayout {
+                            screens: self.screens.clone(),
+                        },
+                    )
+                    .await?;
                 }
                 // Re-apply a stored resize request once per connection, now
                 // that the server has proven support (PRD/05 §4).

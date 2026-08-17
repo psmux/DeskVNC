@@ -397,6 +397,20 @@ export interface CredentialRequest {
 }
 
 /**
+ * One monitor of a multi-head remote desktop, in framebuffer coordinates
+ * (`vnc_core::proto::messages::Screen`, minus the spec's unused `flags`).
+ * Only servers speaking ExtendedDesktopSize describe their monitors; an
+ * empty list means the layout is unknown and the framebuffer is one display.
+ */
+export interface RemoteScreen {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
  * JSON payload of `session://event`. The discriminator and `sessionId` are on
  * the SAME object, the payload is flat, there is no nested `event` field.
  * Cursor SHAPES are not here: they arrive as binary msg_type 2 on the channel.
@@ -405,6 +419,7 @@ export type SessionEvent =
   | { type: "state-changed"; state: SessionState }
   | { type: "desktop-resize"; width: number; height: number }
   | { type: "desktop-name"; name: string }
+  | { type: "screen-layout"; screens: RemoteScreen[] }
   | { type: "cursor-position"; x: number; y: number }
   | { type: "clipboard-text"; text: string }
   | { type: "clipboard-notify"; formats: number }

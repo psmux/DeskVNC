@@ -232,6 +232,9 @@ function SessionView({
   const sendComboRef = useRef<((c: "ctrl-alt-del") => void) | null>(null);
   const disconnectRef = useRef<(() => void) | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ w: number; h: number } | null>(null);
+  /** Which monitor is on display: a screen id from the server's layout, or
+   *  null for the whole desktop. Per-session, deliberately not persisted. */
+  const [displayId, setDisplayId] = useState<number | null>(null);
   const [scrimFading, setScrimFading] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   /** null while the SSH probe runs; false disables the Files button. */
@@ -580,6 +583,26 @@ function SessionView({
   useEffect(() => {
     rendererRef.current?.setZoom(zoom);
   }, [zoom]);
+
+  // A selection whose screen id vanished from the layout (server rearranged
+  // its monitors, reconnect to a different machine) falls back to everything.
+  useEffect(() => {
+    if (displayId !== null && !session.screens.some((s) => s.id === displayId)) {
+      setDisplayId(null);
+    }
+  }, [session.screens, displayId]);
+
+  // Push the monitor view into the renderer. `remoteSize` is a dependency on
+  // purpose: a desktop resize clears the renderer's view rect (the old
+  // geometry is gone), and the resize event lands before the fresh layout
+  // does, so the selection has to be re-applied against whichever arrives.
+  useEffect(() => {
+    const r = rendererRef.current;
+    if (!viewReady || !r) return;
+    const screen = displayId !== null ? session.screens.find((s) => s.id === displayId) : undefined;
+    if (screen) r.setViewRect(screen.x, screen.y, screen.width, screen.height);
+    else r.clearViewRect();
+  }, [viewReady, displayId, session.screens, remoteSize]);
 
   useEffect(() => {
     rendererRef.current?.setGrayLevels(quality === "bw" ? bwLevels : 0);
@@ -1186,6 +1209,9 @@ function SessionView({
         onZoomLocked={toggleZoomLocked}
         edgePan={edgePan}
         onEdgePan={toggleEdgePan}
+        screens={session.screens}
+        displayId={displayId}
+        onDisplay={setDisplayId}
         showRemoteCursor={settings.showRemoteCursor}
         onShowRemoteCursor={(show) => update({ showRemoteCursor: show })}
         localCursor={settings.localCursor}

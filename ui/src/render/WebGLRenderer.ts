@@ -36,9 +36,10 @@ export interface ContentTransform {
 const VS = `#version 300 es
 layout(location = 0) in vec2 a_pos;      // unit quad [0,1]^2
 uniform vec4 u_rect;                     // x, y, w, h in NDC (y = top, h negative-down handled here)
+uniform vec4 u_uv;                       // texture subrect: offset xy, scale zw (0,0,1,1 = whole texture)
 out vec2 v_uv;
 void main() {
-  v_uv = a_pos;
+  v_uv = u_uv.xy + a_pos * u_uv.zw;
   vec2 p = u_rect.xy + a_pos * u_rect.zw;
   gl_Position = vec4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
 }`;
@@ -115,6 +116,7 @@ export class WebGLRenderer {
   private canvas: HTMLCanvasElement;
   private program: WebGLProgram;
   private uRect: WebGLUniformLocation;
+  private uUv: WebGLUniformLocation;
   private uLevels: WebGLUniformLocation;
   private uTexAlpha: WebGLUniformLocation;
   private frameTex: WebGLTexture;
@@ -145,6 +147,16 @@ export class WebGLRenderer {
   private zoom = 1;
   private panX = 0;
   private panY = 0;
+  /**
+   * Per-monitor view: the framebuffer subrect on display, in framebuffer
+   * pixels. Zero width/height means "the whole desktop", which is also the
+   * state on every resize (the geometry the rect was cut from is gone; the
+   * session view re-applies its selection against the new layout).
+   */
+  private viewX = 0;
+  private viewY = 0;
+  private viewW = 0;
+  private viewH = 0;
 
   // cursor
   /** User preference: draw the remote pointer at all (Preferences ▸ Input). */
@@ -216,10 +228,12 @@ export class WebGLRenderer {
     this.program = program;
     gl.useProgram(program);
     const uRect = gl.getUniformLocation(program, "u_rect");
+    const uUv = gl.getUniformLocation(program, "u_uv");
     const uLevels = gl.getUniformLocation(program, "u_levels");
     const uTexAlpha = gl.getUniformLocation(program, "u_texAlpha");
-    if (!uRect || !uLevels || !uTexAlpha) throw new Error("uniform lookup failed");
+    if (!uRect || !uUv || !uLevels || !uTexAlpha) throw new Error("uniform lookup failed");
     this.uRect = uRect;
+    this.uUv = uUv;
     this.uLevels = uLevels;
     this.uTexAlpha = uTexAlpha;
     gl.uniform1i(gl.getUniformLocation(program, "u_tex"), 0);
@@ -271,6 +285,8 @@ export class WebGLRenderer {
     this.fbHeight = height;
     this.generation++;
     this.sawFrame = false;
+    // A monitor rect cut from the old geometry means nothing in the new one.
+    this.clearViewRect();
     // Every decoder's target geometry just became meaningless.
     this.closeAllH264();
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
@@ -677,6 +693,53 @@ export class WebGLRenderer {
   }
 
   /**
+   * Show only this framebuffer subrect (one monitor of a multi-head
+   * desktop), in framebuffer pixels. Everything downstream, scaling, edge
+   * pan, pointer mapping, the cursor sprite, works against the subrect, so
+   * callers do not change. The pan resets: a position held over from another
+   * monitor points at nothing.
+   */
+  setViewRect(x: number, y: number, w: number, h: number): void {
+    this.viewX = x;
+    this.viewY = y;
+    this.viewW = w;
+    this.viewH = h;
+    this.panX = 0;
+    this.panY = 0;
+    this.markDirty();
+  }
+
+  /** Back to the whole desktop. */
+  clearViewRect(): void {
+    if (this.viewW === 0 && this.viewH === 0) return;
+    this.viewW = 0;
+    this.viewH = 0;
+    this.panX = 0;
+    this.panY = 0;
+    this.markDirty();
+  }
+
+  /**
+   * The framebuffer subrect actually on display, clamped inside the current
+   * framebuffer: the stored rect may predate a resize by a beat (the layout
+   * event follows the resize event), and a stale rect must degrade to a
+   * clipped view, never to sampling outside the texture.
+   */
+  private viewRect(): { x: number; y: number; w: number; h: number } {
+    const fw = Math.max(1, this.fbWidth);
+    const fh = Math.max(1, this.fbHeight);
+    if (this.viewW <= 0 || this.viewH <= 0) return { x: 0, y: 0, w: fw, h: fh };
+    const x = Math.max(0, Math.min(this.viewX, fw - 1));
+    const y = Math.max(0, Math.min(this.viewY, fh - 1));
+    return {
+      x,
+      y,
+      w: Math.max(1, Math.min(this.viewW, fw - x)),
+      h: Math.max(1, Math.min(this.viewH, fh - y)),
+    };
+  }
+
+  /**
    * How far the view can still be panned in each direction, in device
    * pixels: 0 means the content fits and there is nothing to reach.
    *
@@ -686,8 +749,9 @@ export class WebGLRenderer {
    */
   panRoom(): { left: number; right: number; up: number; down: number } {
     const t = this.contentTransform();
-    const maxX = Math.max(0, (this.fbWidth * t.scaleX - this.canvas.width) / 2);
-    const maxY = Math.max(0, (this.fbHeight * t.scaleY - this.canvas.height) / 2);
+    const v = this.viewRect();
+    const maxX = Math.max(0, (v.w * t.scaleX - this.canvas.width) / 2);
+    const maxY = Math.max(0, (v.h * t.scaleY - this.canvas.height) / 2);
     return {
       left: maxX + this.panX,
       right: maxX - this.panX,
@@ -705,8 +769,9 @@ export class WebGLRenderer {
 
   private clampPan(): void {
     const t = this.contentTransform();
-    const cw = this.fbWidth * t.scaleX;
-    const ch = this.fbHeight * t.scaleY;
+    const v = this.viewRect();
+    const cw = v.w * t.scaleX;
+    const ch = v.h * t.scaleY;
     const W = this.canvas.width;
     const H = this.canvas.height;
     const maxX = Math.max(0, (cw - W) / 2);
@@ -715,21 +780,24 @@ export class WebGLRenderer {
     this.panY = Math.min(maxY, Math.max(-maxY, this.panY));
   }
 
-  /** Content placement in device pixels for the current mode/zoom/pan. */
+  /**
+   * Content placement in device pixels for the current mode/zoom/pan.
+   * `x`/`y` locate the top-left of the VISIBLE subrect (the whole desktop
+   * unless a monitor view is set).
+   */
   contentTransform(): ContentTransform {
     const W = this.canvas.width;
     const H = this.canvas.height;
-    const fw = Math.max(1, this.fbWidth);
-    const fh = Math.max(1, this.fbHeight);
+    const v = this.viewRect();
     let sx: number;
     let sy: number;
     switch (this.mode) {
       case "fit":
-        sx = W / fw;
-        sy = H / fh;
+        sx = W / v.w;
+        sy = H / v.h;
         break;
       case "aspect-fit": {
-        const s = Math.min(W / fw, H / fh);
+        const s = Math.min(W / v.w, H / v.h);
         sx = s;
         sy = s;
         break;
@@ -743,8 +811,8 @@ export class WebGLRenderer {
         sy = this.zoom;
         break;
     }
-    const cw = fw * sx;
-    const ch = fh * sy;
+    const cw = v.w * sx;
+    const ch = v.h * sy;
     return {
       x: (W - cw) / 2 - this.panX,
       y: (H - ch) / 2 - this.panY,
@@ -755,7 +823,8 @@ export class WebGLRenderer {
 
   /**
    * Map a point in canvas CSS pixels to framebuffer pixels.
-   * `rect` is the canvas getBoundingClientRect; clamped to the framebuffer.
+   * `rect` is the canvas getBoundingClientRect; clamped to the visible
+   * subrect, so with a monitor view up the pointer cannot leave that monitor.
    */
   cssPointToFramebuffer(
     cssX: number,
@@ -767,11 +836,12 @@ export class WebGLRenderer {
     const dx = (cssX - rect.left) * dprX;
     const dy = (cssY - rect.top) * dprY;
     const t = this.contentTransform();
-    const fx = (dx - t.x) / t.scaleX;
-    const fy = (dy - t.y) / t.scaleY;
+    const v = this.viewRect();
+    const fx = v.x + (dx - t.x) / t.scaleX;
+    const fy = v.y + (dy - t.y) / t.scaleY;
     return {
-      x: Math.max(0, Math.min(this.fbWidth - 1, Math.round(fx))),
-      y: Math.max(0, Math.min(this.fbHeight - 1, Math.round(fy))),
+      x: Math.max(v.x, Math.min(v.x + v.w - 1, Math.round(fx))),
+      y: Math.max(v.y, Math.min(v.y + v.h - 1, Math.round(fy))),
     };
   }
 
@@ -817,29 +887,48 @@ export class WebGLRenderer {
     if (this.fbWidth === 0 || W === 0) return;
 
     const t = this.contentTransform();
+    const v = this.viewRect();
+    const fw = Math.max(1, this.fbWidth);
+    const fh = Math.max(1, this.fbHeight);
     gl.useProgram(this.program);
 
-    // main frame quad
+    // main frame quad: only the visible subrect of the texture (the whole
+    // texture unless a monitor view is set)
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.uniform1f(this.uLevels, this.grayLevels);
     gl.uniform1f(this.uTexAlpha, 0); // framebuffer is opaque
+    gl.uniform4f(this.uUv, v.x / fw, v.y / fh, v.w / fw, v.h / fh);
     gl.uniform4f(
       this.uRect,
       t.x / W,
       t.y / H,
-      (this.fbWidth * t.scaleX) / W,
-      (this.fbHeight * t.scaleY) / H,
+      (v.w * t.scaleX) / W,
+      (v.h * t.scaleY) / H,
     );
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     // cursor sprite, scaled with content
     if (this.cursorEnabled && this.cursorHasShape && this.cursorW > 0) {
-      const cx = t.x + (this.cursorX - this.cursorHotX) * t.scaleX;
-      const cy = t.y + (this.cursorY - this.cursorHotY) * t.scaleY;
+      // With a monitor view up, a pointer parked on ANOTHER monitor must not
+      // float over the letterbox: clip the sprite to the content area.
+      // (scissor origin is bottom-left, hence the H flip)
+      const cropped = v.w < fw || v.h < fh;
+      if (cropped) {
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(
+          Math.max(0, Math.floor(t.x)),
+          Math.max(0, Math.floor(H - (t.y + v.h * t.scaleY))),
+          Math.max(0, Math.ceil(v.w * t.scaleX)),
+          Math.max(0, Math.ceil(v.h * t.scaleY)),
+        );
+      }
+      const cx = t.x + (this.cursorX - v.x - this.cursorHotX) * t.scaleX;
+      const cy = t.y + (this.cursorY - v.y - this.cursorHotY) * t.scaleY;
       gl.bindTexture(gl.TEXTURE_2D, this.cursorTex);
       gl.uniform1f(this.uLevels, 0);
       gl.uniform1f(this.uTexAlpha, 1); // masked sprite, keep transparency
+      gl.uniform4f(this.uUv, 0, 0, 1, 1);
       gl.uniform4f(
         this.uRect,
         cx / W,
@@ -848,6 +937,7 @@ export class WebGLRenderer {
         (this.cursorH * t.scaleY) / H,
       );
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (cropped) gl.disable(gl.SCISSOR_TEST);
     }
   }
 
@@ -903,6 +993,7 @@ export class WebGLRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.uniform1f(this.uLevels, 0); // preview is always full color, independent of the on-screen B&W mode
     gl.uniform1f(this.uTexAlpha, 0);
+    gl.uniform4f(this.uUv, 0, 0, 1, 1); // the whole desktop, whatever monitor view is up
     gl.uniform4f(this.uRect, 0, 0, 1, 1);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 

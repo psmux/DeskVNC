@@ -26,6 +26,7 @@ import type {
   CredentialRequest,
   PinScheme,
   QualityPreset,
+  RemoteScreen,
   SessionConnectOutcome,
   SessionEventPayload,
   SessionState,
@@ -79,6 +80,12 @@ export interface SshHostKeyPromptState {
 export interface SessionApi {
   state: SessionState;
   desktopName: string;
+  /**
+   * The server's monitor layout, empty until (and unless) it sends an
+   * ExtendedDesktopSize rectangle describing one. Low-frequency, so it is
+   * React state rather than a bridge callback.
+   */
+  screens: RemoteScreen[];
   stats: SessionStats | null;
   certPrompt: CertPromptState | null;
   /** The SSH tunnel gateway needs a trust decision before connecting. */
@@ -191,6 +198,7 @@ export function readSessionParams(): SessionParams {
 export function useSession(params: SessionParams, bridge: SessionBridge): SessionApi {
   const [state, setState] = useState<SessionState>({ state: "connecting" });
   const [desktopName, setDesktopName] = useState(params.name);
+  const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
   const [sshHostKeyPrompt, setSshHostKeyPrompt] = useState<SshHostKeyPromptState | null>(null);
@@ -225,9 +233,10 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           setState,
           setDesktopName,
           setCredentialRequest,
+          setScreens,
         });
       }
-      const stop = runMockSession(bridgeRef, setState, setDesktopName);
+      const stop = runMockSession(bridgeRef, setState, setDesktopName, setScreens);
       return stop;
     }
 
@@ -284,6 +293,9 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           break;
         case "desktop-name":
           setDesktopName(ev.name);
+          break;
+        case "screen-layout":
+          setScreens(Array.isArray(ev.screens) ? ev.screens : []);
           break;
         case "cursor-position":
           bridgeRef.current.onCursorPosition(ev.x, ev.y);
@@ -651,12 +663,13 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     setSshHostKeyPrompt(null);
     setCredentialRequest(null);
     setStats(null);
+    setScreens([]);
     setState({ state: "connecting" });
     setConnectNonce((n) => n + 1);
   }, []);
 
   return {
-    state, desktopName, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
+    state, desktopName, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
     sendInput, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
     dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
@@ -692,6 +705,7 @@ function runMockAuth(
     setState: (s: SessionState) => void;
     setDesktopName: (n: string) => void;
     setCredentialRequest: (r: CredentialRequest | null) => void;
+    setScreens: (s: RemoteScreen[]) => void;
   },
 ): () => void {
   const expected = new URLSearchParams(window.location.search).get("mockPassword");
@@ -706,7 +720,7 @@ function runMockAuth(
       if (expected !== null && password === expected) {
         ref.current = null;
         set.setCredentialRequest(null);
-        stopSession = runMockSession(bridgeRef, set.setState, set.setDesktopName);
+        stopSession = runMockSession(bridgeRef, set.setState, set.setDesktopName, set.setScreens);
         return;
       }
       attempt += 1;
@@ -741,6 +755,7 @@ function runMockSession(
   bridgeRef: { current: SessionBridge },
   setState: (s: SessionState) => void,
   setDesktopName: (n: string) => void,
+  setScreens: (s: RemoteScreen[]) => void,
 ): () => void {
   const W = 1280;
   const H = 800;
@@ -750,6 +765,12 @@ function runMockSession(
     setDesktopName("Demo desktop (no backend)");
     setState({ state: "connected" });
     bridgeRef.current.onDesktopResize(W, H);
+    // Two side-by-side "monitors", so the Displays menu is drivable without
+    // a multi-head VNC server.
+    setScreens([
+      { id: 1, x: 0, y: 0, width: W / 2, height: H },
+      { id: 2, x: W / 2, y: 0, width: W / 2, height: H },
+    ]);
     // full-frame gradient
     const px = new Uint8Array(W * H * 4);
     for (let y = 0; y < H; y++) {
