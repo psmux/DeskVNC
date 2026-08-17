@@ -191,6 +191,13 @@ pub enum RectSpec {
         reason: u16,
         status: u16,
     },
+    /// ExtendedDesktopSize (-308) advertising a specific monitor layout,
+    /// for the multi-head tests. `screens` is (id, x, y, width, height).
+    ExtendedDesktopSizeScreens {
+        width: u16,
+        height: u16,
+        screens: Vec<(u32, u16, u16, u16, u16)>,
+    },
     /// DesktopName (-307).
     DesktopName(String),
     /// RichCursor (-239), fully opaque, solid colour.
@@ -458,6 +465,23 @@ fn encode_rect(enc: &mut Encoders, spec: &RectSpec, out: &mut Vec<u8>) {
             out.extend_from_slice(&width.to_be_bytes());
             out.extend_from_slice(&height.to_be_bytes());
             out.extend_from_slice(&0u32.to_be_bytes()); // flags
+        }
+        RectSpec::ExtendedDesktopSizeScreens {
+            width,
+            height,
+            screens,
+        } => {
+            rect_header(out, 0, 0, *width, *height, -308);
+            out.push(screens.len() as u8);
+            out.extend_from_slice(&[0, 0, 0]); // padding
+            for (id, x, y, w, h) in screens {
+                out.extend_from_slice(&id.to_be_bytes());
+                out.extend_from_slice(&x.to_be_bytes());
+                out.extend_from_slice(&y.to_be_bytes());
+                out.extend_from_slice(&w.to_be_bytes());
+                out.extend_from_slice(&h.to_be_bytes());
+                out.extend_from_slice(&0u32.to_be_bytes()); // flags
+            }
         }
         RectSpec::DesktopName(name) => {
             rect_header(out, 0, 0, 0, 0, -307);

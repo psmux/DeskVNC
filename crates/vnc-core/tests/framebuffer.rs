@@ -459,6 +459,56 @@ async fn extended_desktop_size_emits_a_desktop_resize() {
 }
 
 #[tokio::test]
+async fn a_multi_monitor_layout_is_reported_once_per_change() {
+    let screens = vec![(1u32, 0u16, 0u16, 640u16, 800u16), (2, 640, 0, 640, 800)];
+    let server = MockServer::start(
+        MockConfig::new()
+            .size(1280, 800)
+            .update(vec![RectSpec::ExtendedDesktopSizeScreens {
+                width: 1280,
+                height: 800,
+                screens: screens.clone(),
+            }])
+            // The same layout again: not a change, must not be re-reported.
+            .update(vec![RectSpec::ExtendedDesktopSizeScreens {
+                width: 1280,
+                height: 800,
+                screens: screens.clone(),
+            }])
+            // Sentinel: once this lands, both EDS rects have been processed.
+            .update(vec![RectSpec::DesktopName("sentinel".into())]),
+    )
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    let layout = events
+        .wait(DEFAULT_TIMEOUT, "ScreenLayout", |e| match e {
+            SessionEvent::ScreenLayout { screens } => Some(screens.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(layout.len(), 2);
+    assert_eq!((layout[0].id, layout[0].x, layout[0].width), (1, 0, 640));
+    assert_eq!((layout[1].id, layout[1].x, layout[1].width), (2, 640, 640));
+
+    events
+        .wait(DEFAULT_TIMEOUT, "sentinel rename", |e| match e {
+            SessionEvent::DesktopName(n) if n == "sentinel" => Some(()),
+            _ => None,
+        })
+        .await;
+    let reports = events
+        .seen
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::ScreenLayout { .. }))
+        .count();
+    assert_eq!(reports, 1, "an unchanged layout was re-reported");
+    handle.shutdown();
+}
+
+#[tokio::test]
 async fn desktop_name_pseudo_rect_emits_a_rename() {
     let server = MockServer::start(
         MockConfig::new()

@@ -11,7 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { QualityPreset, ScalingMode, SessionState, SessionStats } from "../lib/types";
+import type { QualityPreset, RemoteScreen, ScalingMode, SessionState, SessionStats } from "../lib/types";
 import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
 import { classNames, formatBps, modKeyLabel } from "../lib/util";
@@ -120,6 +120,11 @@ export interface SessionToolbarProps {
   onZoomLocked: (locked: boolean) => void;
   edgePan: boolean;
   onEdgePan: (on: boolean) => void;
+  /** The server's monitor layout; empty when it never described one. */
+  screens: RemoteScreen[];
+  /** Selected screen id, or null for the whole desktop. */
+  displayId: number | null;
+  onDisplay: (id: number | null) => void;
   showRemoteCursor: boolean;
   onShowRemoteCursor: (show: boolean) => void;
   localCursor: LocalCursor;
@@ -149,6 +154,14 @@ export interface SessionToolbarProps {
 }
 
 export function SessionToolbar(props: SessionToolbarProps): ReactNode {
+  /**
+   * Monitors in reading order (left to right, top to bottom), so "Display 1"
+   * is the leftmost one rather than whichever id the server listed first.
+   */
+  const orderedScreens = useMemo(
+    () => [...props.screens].sort((a, b) => a.x - b.x || a.y - b.y),
+    [props.screens],
+  );
   const [pos, setPos] = useState<ToolbarPos>(readPos);
   const [pinned, setPinned] = useState<boolean>(readPinned);
   /** Latest position, for the drag handler to persist on drop. */
@@ -528,6 +541,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
 
         <ToolButton label="Displays" active={openMenu === "displays"} onClick={() => setOpenMenu(openMenu === "displays" ? null : "displays")}>
           <IconMonitor size={15} />
+          {props.displayId !== null ? (
+            <span className="text-xs text-secondary">
+              {orderedScreens.findIndex((s) => s.id === props.displayId) + 1}/{orderedScreens.length}
+            </span>
+          ) : null}
         </ToolButton>
 
         <ToolButton
@@ -713,10 +731,23 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           ) : null}
           {openMenu === "displays" ? (
             <div>
-              <MenuRow selected onClick={() => undefined}>Display 1</MenuRow>
-              <MenuRow disabled onClick={() => undefined}>All displays</MenuRow>
-              <MenuRow disabled onClick={() => undefined}>Displays in separate windows</MenuRow>
-              <p className="px-2.5 py-1 text-2xs text-tertiary">Multi-display info arrives from the server</p>
+              <MenuRow selected={props.displayId === null} onClick={() => props.onDisplay(null)}>
+                All displays
+              </MenuRow>
+              {orderedScreens.map((s, i) => (
+                <MenuRow
+                  key={s.id}
+                  selected={props.displayId === s.id}
+                  onClick={() => props.onDisplay(s.id)}
+                >
+                  {`Display ${i + 1} (${s.width}×${s.height})`}
+                </MenuRow>
+              ))}
+              {orderedScreens.length === 0 ? (
+                <p className="px-2.5 py-1 text-2xs text-tertiary">
+                  This server has not described its monitors, so the whole desktop is one display.
+                </p>
+              ) : null}
             </div>
           ) : null}
           {openMenu === "quality" ? (

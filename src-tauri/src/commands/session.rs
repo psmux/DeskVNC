@@ -91,6 +91,13 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
             json!({ "type": "desktop-resize", "width": width, "height": height })
         }
         SessionEvent::DesktopName(name) => json!({ "type": "desktop-name", "name": name }),
+        SessionEvent::ScreenLayout { screens } => json!({
+            "type": "screen-layout",
+            // `flags` stays behind: the RFB spec assigns it no meaning yet.
+            "screens": screens.iter().map(|s| json!({
+                "id": s.id, "x": s.x, "y": s.y, "width": s.width, "height": s.height,
+            })).collect::<Vec<_>>(),
+        }),
         SessionEvent::CursorPosition { x, y } => {
             json!({ "type": "cursor-position", "x": x, "y": y })
         }

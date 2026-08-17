@@ -703,6 +703,14 @@ pub enum SessionEvent {
         height: u16,
     },
     DesktopName(String),
+    /// The server's monitor layout, from an ExtendedDesktopSize rectangle.
+    /// Emitted whenever the advertised screen list changes, so the UI can
+    /// offer per-monitor views of a multi-head desktop. Servers without
+    /// ExtendedDesktopSize never produce one; the UI treats the whole
+    /// framebuffer as a single display.
+    ScreenLayout {
+        screens: Vec<crate::proto::messages::Screen>,
+    },
     CursorUpdate(CursorShape),
     CursorPosition {
         x: u16,
