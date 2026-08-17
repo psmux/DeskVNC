@@ -10,6 +10,59 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-17
+
+### Added
+
+- **Pick a single monitor of a multi-head desktop.** The toolbar's Displays
+  menu is now real: it lists every monitor the server advertises through
+  ExtendedDesktopSize, in left to right order with resolutions, and selecting
+  one shows just that monitor. Every scaling mode, edge panning, the space
+  drag and pointer mapping work against the selection, and the pointer cannot
+  leave the selected monitor. Thumbnails, live previews and screenshots still
+  capture the whole desktop. Servers that never describe their monitors keep
+  the whole desktop view, and the menu says so.
+- **A diagnostics toolkit for "the picture is slow"** (`docs/DIAGNOSTICS.md`).
+  The interesting failures are attribution problems: the network, the server's
+  encoder, our protocol behaviour, our decoder and the webview all look the
+  same from inside the app. So there is now a set of small probes that stand
+  outside it and measure one thing each (`tools/limbs`), plus a headless
+  client (the `stall_probe` example) that runs the real vnc-core stack with no
+  UI and reports the update gap distribution.
+- **Connection stats say where the latency figure came from** (a fence, an
+  idle probe, or the passive update pipeline readout) **and how hard the
+  server is working for us** (the fraction of time spent inside framebuffer
+  updates), because the sources are not comparable and a reader that treats
+  them as one number draws the wrong conclusion.
+
+### Fixed
+
+- **The automatic quality tuner could saturate the link and never notice.**
+  Compression relief on the High tier could drive Tight compression to 0,
+  which does not mean "a bit less zlib", it means no zlib at all: measured
+  against TightVNC on a 2880x1800 desktop, a steady 9.9 MB/s of raw
+  sub-encodings on an 82 Mbit/s link. It was also self-sustaining, because
+  uncompressed rects take longer to read off the wire, which kept the relief
+  that caused them engaged. The ladder never asks for less than compression
+  level 1 now.
+- **A fast link in front of a slow server pinned quality at High while
+  interactivity collapsed.** The tier choice had no term for what the chosen
+  tier costs the server. Measured at 2880x1800: High bought about twice
+  Medium's bandwidth and cost about twenty times its response time, 430 ms
+  against 19 ms. The ladder is now capped while the server's measured
+  response stays over budget, with a two minute penalty so the cap cannot
+  limit cycle through the improvement its own remedy produces.
+- **Latency now reads on servers without the Fence extension even when the
+  screen never goes quiet.** The idle probe only samples a still screen, so a
+  busy desktop could go minutes without a reading. A passive readout now
+  times request to next header during busy streaks, takes the median so one
+  full screen repaint cannot set the figure, and expires stale samples so an
+  idle stretch cannot leave a ten minute old number standing.
+- **"Always refresh" could be parked for the rest of the session by one lost
+  answer.** A refresh is now recognised by damage coverage rather than exact
+  size, abandoned after ten seconds, and asked less often of a server that
+  answers slowly.
+
 ## [0.8.2] - 2026-08-07
 
 ### Fixed
@@ -719,6 +772,7 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/psmux/DeskVNC/compare/v0.8.2...v0.9.0
 [0.2.0]: https://github.com/psmux/DeskVNC/compare/v0.1.2...v0.2.0
 [0.1.0]: https://github.com/psmux/DeskVNC/releases/tag/v0.1.0
