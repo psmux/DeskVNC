@@ -10,6 +10,20 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-17
+
+### Fixed
+
+- **Monitor selection did nothing against the servers that need it most.**
+  The TightVNC family serves a multi-head desktop as one wide framebuffer and
+  never says where the seams are, so 0.9.0's Displays menu could only shrug
+  at exactly the "two monitors squeezed into one view" complaint it was built
+  for. When the server describes no layout, the menu now offers manual cuts
+  of the desktop instead: equal halves, one common monitor width (2560, 1920
+  or 1440) on either side for unequal pairs, and thirds when the desktop is
+  wide enough, labelled as the guesses they are. Selecting one crops the
+  view exactly as a server-described monitor would.
+
 ## [0.9.0] - 2026-08-17
 
 ### Added
@@ -772,7 +786,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/psmux/DeskVNC/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/psmux/DeskVNC/compare/v0.8.2...v0.9.0
 [0.2.0]: https://github.com/psmux/DeskVNC/compare/v0.1.2...v0.2.0
 [0.1.0]: https://github.com/psmux/DeskVNC/releases/tag/v0.1.0
