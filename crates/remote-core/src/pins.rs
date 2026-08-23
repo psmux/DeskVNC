@@ -27,18 +27,27 @@ pub enum PinScheme {
     Tls,
     /// RealVNC RSA-AES (RA2 / RA2ne / RA2_256 / RA2ne_256) server RSA key.
     Ra2,
+    /// RDP's own TLS certificate SPKI.
+    ///
+    /// Separate from [`PinScheme::Tls`] even though both pin an X.509 SPKI,
+    /// because one host can serve VNC over VeNCrypt and RDP on 3389 with two
+    /// unrelated certificates. Sharing one row would mean a certificate
+    /// approved for one protocol silently vouching for the other
+    /// (PRDRDP/02 §2.1, PRDRDP/08 §2).
+    RdpTls,
 }
 
 impl PinScheme {
     /// Every scheme, for callers that must handle all of them (loading pins
     /// before a security type is negotiated, forgetting an endpoint).
-    pub const ALL: [PinScheme; 2] = [PinScheme::Tls, PinScheme::Ra2];
+    pub const ALL: [PinScheme; 3] = [PinScheme::Tls, PinScheme::Ra2, PinScheme::RdpTls];
 
     /// The wire/database spelling. Matches the serde representation.
     pub const fn as_str(self) -> &'static str {
         match self {
             PinScheme::Tls => "tls",
             PinScheme::Ra2 => "ra2",
+            PinScheme::RdpTls => "rdp-tls",
         }
     }
 
@@ -48,6 +57,7 @@ impl PinScheme {
         match s.trim().to_ascii_lowercase().as_str() {
             "tls" => Some(PinScheme::Tls),
             "ra2" => Some(PinScheme::Ra2),
+            "rdp-tls" => Some(PinScheme::RdpTls),
             _ => None,
         }
     }
@@ -71,6 +81,8 @@ pub struct CertPins {
     pub tls: Option<String>,
     /// SHA-256 SPKI of the pinned RA2 server RSA key (hex).
     pub ra2: Option<String>,
+    /// SHA-256 SPKI of the pinned RDP TLS certificate (hex).
+    pub rdp_tls: Option<String>,
 }
 
 impl CertPins {
@@ -79,6 +91,7 @@ impl CertPins {
         match scheme {
             PinScheme::Tls => self.tls.as_deref(),
             PinScheme::Ra2 => self.ra2.as_deref(),
+            PinScheme::RdpTls => self.rdp_tls.as_deref(),
         }
     }
 
@@ -86,6 +99,7 @@ impl CertPins {
         match scheme {
             PinScheme::Tls => self.tls = pin,
             PinScheme::Ra2 => self.ra2 = pin,
+            PinScheme::RdpTls => self.rdp_tls = pin,
         }
     }
 
@@ -97,7 +111,7 @@ impl CertPins {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tls.is_none() && self.ra2.is_none()
+        self.tls.is_none() && self.ra2.is_none() && self.rdp_tls.is_none()
     }
 }
 
