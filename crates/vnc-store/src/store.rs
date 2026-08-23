@@ -5,6 +5,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
+use remote_core::ProtocolKind;
+
 use crate::{now_ts, CertPin, Error, Group, HistoryEntry, HostProfile, Result, Tag};
 
 /// Numbered migrations, applied in order. `PRAGMA user_version` records how
@@ -75,6 +77,45 @@ const MIGRATIONS: &[&str] = &[
              first_trusted_at, last_seen_at, security_type
       FROM cert_pins_v1;
     DROP TABLE cert_pins_v1;
+    "#,
+    // v3, a host profile names the protocol it speaks (PRDRDP/00 D8).
+    //
+    // Every row that exists at this point was created by a build that spoke
+    // only RFB, so 'vnc' is the only value those rows could ever have meant,
+    // which makes the backfill a statement of fact rather than a guess. Port
+    // 5900 stays whatever it was; nothing about an existing profile changes
+    // except that it now says out loud what it always was.
+    //
+    // rdp_settings holds the RDP-only options as JSON, the same way ssh_tunnel
+    // holds the SSH gateway options. It is NULL for a VNC profile and must
+    // stay NULL rather than becoming '{}', so "no RDP settings" and "RDP
+    // settings that happen to be empty" cannot be confused.
+    //
+    // SQLite allows ADD COLUMN with NOT NULL only when a non-null default is
+    // supplied, which is satisfied here, and allows it inside the transaction
+    // `Store::migrate` opens for every migration. So unlike v2 this is three
+    // statements and no table rebuild, which is why every existing row keeps
+    // its rowid, its created_at and its pins untouched.
+    //
+    // No new index. The obvious candidate, hosts(protocol, address, port),
+    // would be dead weight: the only address lookup normalizes the address
+    // inside the query and therefore cannot use an index on `address` at all
+    // (see `find_host_by_address`). If profile counts ever grow enough to
+    // matter, the fix is a stored generated column holding the normalized
+    // address, which repays both lookups at once, and it is a separate change
+    // with its own migration.
+    //
+    // history.protocol has no writer yet and neither does the table, but the
+    // column is added now: adding it later means a second migration for the
+    // same feature, and a history row that does not say which protocol it
+    // recorded is ambiguous the moment RDP ships. The alternative considered
+    // was namespacing the security_type strings instead ("rdp/tls+credssp"),
+    // rejected because it invites the UI to parse meaning out of a display
+    // string.
+    r#"
+    ALTER TABLE hosts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'vnc';
+    ALTER TABLE hosts ADD COLUMN rdp_settings TEXT;
+    ALTER TABLE history ADD COLUMN protocol TEXT NOT NULL DEFAULT 'vnc';
     "#,
 ];
 
@@ -204,9 +245,9 @@ impl Store {
                 security_pref, quality_pref, color_depth, scaling_mode, keyboard_mode,
                 passthrough, view_only, ssh_tunnel, wol_mac, wol_broadcast, network_id,
                 cert_pin, has_password, thumbnail_at, last_connected, connect_count,
-                created_at, updated_at
+                created_at, updated_at, protocol, rdp_settings
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                       ?19,?20,?21,?22,?23,?24,?25)
+                       ?19,?20,?21,?22,?23,?24,?25,?26,?27)
              ON CONFLICT(id) DO UPDATE SET
                 friendly_name=excluded.friendly_name, address=excluded.address,
                 port=excluded.port, group_id=excluded.group_id, os_hint=excluded.os_hint,
@@ -218,7 +259,8 @@ impl Store {
                 wol_broadcast=excluded.wol_broadcast, network_id=excluded.network_id,
                 cert_pin=excluded.cert_pin, has_password=excluded.has_password,
                 thumbnail_at=excluded.thumbnail_at, last_connected=excluded.last_connected,
-                connect_count=excluded.connect_count, updated_at=excluded.updated_at",
+                connect_count=excluded.connect_count, updated_at=excluded.updated_at,
+                protocol=excluded.protocol, rdp_settings=excluded.rdp_settings",
             params![
                 profile.id,
                 profile.friendly_name,
@@ -249,6 +291,8 @@ impl Store {
                     now
                 },
                 now,
+                profile.protocol,
+                profile.rdp_settings,
             ],
         )?;
         tx.execute("DELETE FROM host_tags WHERE host_id = ?1", [&profile.id])?;
@@ -299,14 +343,29 @@ impl Store {
     /// is a fair trade: a personal library is tens of rows, and a duplicate
     /// tile is visible to the user in a way a table scan never will be. The
     /// oldest match wins so repeat lookups are stable.
-    pub fn find_host_by_address(&self, address: &str, port: u16) -> Result<Option<HostProfile>> {
+    ///
+    /// The protocol is part of the match and is never inferred from the port.
+    /// Two profiles for one address and port under different protocols are
+    /// allowed to exist, and this is what makes them addressable separately:
+    /// one TCP port carries one service, so in practice only one of them ever
+    /// works, and refusing to store the pair would mean a user who mistyped a
+    /// port once cannot fix it by adding the right profile. The library is a
+    /// list of what the user asked for, not a model of the network
+    /// (PRDRDP/08 §2.6).
+    pub fn find_host_by_address(
+        &self,
+        protocol: ProtocolKind,
+        address: &str,
+        port: u16,
+    ) -> Result<Option<HostProfile>> {
         let id: Option<String> = {
             let conn = self.conn.lock();
             conn.query_row(
                 "SELECT id FROM hosts
                   WHERE lower(rtrim(trim(address), '.')) = ?1 AND port = ?2
+                    AND protocol = ?3
                   ORDER BY created_at, id LIMIT 1",
-                params![normalize_address(address), port],
+                params![normalize_address(address), port, protocol.as_str()],
                 |r| r.get(0),
             )
             .optional()?
@@ -328,18 +387,41 @@ impl Store {
     ///
     /// The address doubles as the name, it is the only thing known about the
     /// machine at this point, and the user can rename it afterwards.
-    pub fn adopt_endpoint(&self, address: &str, port: u16) -> Result<HostProfile> {
-        if let Some(existing) = self.find_host_by_address(address, port)? {
+    ///
+    /// The protocol comes from the caller and is never inferred. Without it
+    /// this is a real bug rather than a theoretical one: the profile is built
+    /// from [`HostProfile::default`], whose protocol is `"vnc"`, so quick
+    /// connecting `rdp://10.0.0.5` and saving the password would mint a VNC
+    /// profile pointing at port 3389, which fails on every later connect from
+    /// the tile (PRDRDP/08 §2.6).
+    pub fn adopt_endpoint_for(
+        &self,
+        protocol: ProtocolKind,
+        address: &str,
+        port: u16,
+    ) -> Result<HostProfile> {
+        if let Some(existing) = self.find_host_by_address(protocol, address, port)? {
             return Ok(existing);
         }
         let profile = HostProfile {
             friendly_name: address.trim().to_string(),
             address: address.trim().to_string(),
             port,
+            protocol: protocol.as_str().to_string(),
             ..Default::default()
         };
         self.save_host(&profile)?;
         Ok(profile)
+    }
+
+    /// [`Store::adopt_endpoint_for`] under [`ProtocolKind::Vnc`].
+    ///
+    /// The two argument spelling `src-tauri/src/commands/session.rs:247` still
+    /// calls. It stays until the shell lane passes the session's protocol,
+    /// because a VNC-only build could not have meant anything else, and it is
+    /// deleted in the same commit that changes that call site.
+    pub fn adopt_endpoint(&self, address: &str, port: u16) -> Result<HostProfile> {
+        self.adopt_endpoint_for(ProtocolKind::Vnc, address, port)
     }
 
     /// Records a successful connection: bumps `last_connected` and
@@ -552,14 +634,15 @@ impl Store {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO history (host_id, connected_at, duration_s, security_type,
-                                  disconnect_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                                  disconnect_reason, protocol)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 e.host_id,
                 e.connected_at,
                 e.duration_s,
                 e.security_type,
-                e.disconnect_reason
+                e.disconnect_reason,
+                e.protocol
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -576,13 +659,19 @@ impl Store {
                 duration_s: r.get(3)?,
                 security_type: r.get(4)?,
                 disconnect_reason: r.get(5)?,
+                // Defensive `Option` on a NOT NULL column, matching
+                // `host_from_row`: it keeps the mapper total if a future
+                // migration ever rebuilds the table.
+                protocol: r
+                    .get::<_, Option<String>>(6)?
+                    .unwrap_or_else(|| ProtocolKind::Vnc.as_str().to_string()),
             })
         };
         let entries = match host_id {
             Some(hid) => {
                 let mut stmt = conn.prepare(
                     "SELECT id, host_id, connected_at, duration_s, security_type,
-                            disconnect_reason
+                            disconnect_reason, protocol
                      FROM history WHERE host_id = ?1
                      ORDER BY connected_at DESC, id DESC LIMIT ?2",
                 )?;
@@ -594,7 +683,7 @@ impl Store {
             None => {
                 let mut stmt = conn.prepare(
                     "SELECT id, host_id, connected_at, duration_s, security_type,
-                            disconnect_reason
+                            disconnect_reason, protocol
                      FROM history ORDER BY connected_at DESC, id DESC LIMIT ?1",
                 )?;
                 let entries = stmt
@@ -782,6 +871,15 @@ fn host_from_row(row: &Row<'_>) -> rusqlite::Result<HostProfile> {
         tags: Vec::new(),
         created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
         updated_at: row.get::<_, Option<i64>>("updated_at")?.unwrap_or(0),
+        // The `Option` plus `unwrap_or_else` is not dead code even though the
+        // column is NOT NULL. It matches the defensive style of every other
+        // text column above and keeps the mapper total if a future migration
+        // ever rebuilds the table. An unrecognised value is preserved
+        // verbatim, never mapped onto a protocol we do know.
+        protocol: row
+            .get::<_, Option<String>>("protocol")?
+            .unwrap_or_else(|| ProtocolKind::Vnc.as_str().to_string()),
+        rdp_settings: row.get("rdp_settings")?,
     })
 }
 
@@ -848,6 +946,25 @@ mod tests {
                     .unwrap();
                 assert_eq!(n, 1, "missing table {table}");
             }
+            // Migration v3's columns, checked by name rather than by
+            // `MIGRATIONS.len()` alone: a migration that ran and did nothing
+            // would still bump the pragma.
+            for (table, column) in [
+                ("hosts", "protocol"),
+                ("hosts", "rdp_settings"),
+                ("history", "protocol"),
+            ] {
+                let found: i64 = conn
+                    .query_row(
+                        &format!(
+                            "SELECT count(*) FROM pragma_table_info('{table}') WHERE name = ?1"
+                        ),
+                        [column],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(found, 1, "missing column {table}.{column}");
+            }
         }
         // Re-opening must not fail or re-run migrations.
         let store = Store::open(Some(dir.path().to_path_buf())).unwrap();
@@ -894,14 +1011,21 @@ mod tests {
 
         // find_host_by_address
         let found = store
-            .find_host_by_address("192.168.1.42", 5901)
+            .find_host_by_address(ProtocolKind::Vnc, "192.168.1.42", 5901)
             .unwrap()
             .unwrap();
         assert_eq!(found.id, host.id);
         assert!(store
-            .find_host_by_address("192.168.1.42", 5900)
+            .find_host_by_address(ProtocolKind::Vnc, "192.168.1.42", 5900)
             .unwrap()
             .is_none());
+        assert!(
+            store
+                .find_host_by_address(ProtocolKind::Rdp, "192.168.1.42", 5901)
+                .unwrap()
+                .is_none(),
+            "a VNC profile must never answer an RDP lookup"
+        );
 
         // touch_connected
         store.touch_connected(&host.id).unwrap();
@@ -989,7 +1113,7 @@ mod tests {
         assert_eq!(fq.address, "pi.local.", "the stored address is left as-is");
         assert_eq!(
             store
-                .find_host_by_address("PI.local", 5901)
+                .find_host_by_address(ProtocolKind::Vnc, "PI.local", 5901)
                 .unwrap()
                 .unwrap()
                 .id,
@@ -1222,6 +1346,7 @@ mod tests {
                     duration_s: Some(60 * i),
                     security_type: Some("VeNCrypt/X509Plain".into()),
                     disconnect_reason: if i == 4 { Some("user".into()) } else { None },
+                    protocol: "vnc".into(),
                 })
                 .unwrap();
             assert!(id > 0);
@@ -1232,8 +1357,11 @@ mod tests {
                 host_id: "other-host".into(),
                 connected_at: 2000,
                 duration_s: None,
-                security_type: None,
+                // The RDP vocabulary for this column, PRDRDP/00 R12: the
+                // authentication method, not a display string.
+                security_type: Some("nla-ntlm".into()),
                 disconnect_reason: None,
+                protocol: "rdp".into(),
             })
             .unwrap();
 
@@ -1241,10 +1369,14 @@ mod tests {
         assert_eq!(all.len(), 6);
         assert_eq!(all[0].connected_at, 2000, "most recent first");
 
+        assert_eq!(all[0].protocol, "rdp");
+        assert_eq!(all[0].security_type.as_deref(), Some("nla-ntlm"));
+
         let for_host = store.list_history(Some(&host.id), 3).unwrap();
         assert_eq!(for_host.len(), 3);
         assert_eq!(for_host[0].connected_at, 1004);
         assert!(for_host.iter().all(|e| e.host_id == host.id));
+        assert!(for_host.iter().all(|e| e.protocol == "vnc"));
     }
 
     #[test]
@@ -1459,16 +1591,145 @@ mod tests {
         );
     }
 
+    /// A database written by v0.10.0 is at `user_version = 2`. Opening it
+    /// must leave every host row exactly as it was, and say out loud that it
+    /// is a VNC profile.
+    ///
+    /// This is the test that stands between migration v3 and somebody losing
+    /// their saved hosts, so it asserts the whole row rather than the two new
+    /// columns: an `ALTER TABLE` that SQLite chose to implement as a rebuild
+    /// would be visible here as a changed `created_at` or a lost port.
+    #[test]
+    fn migrating_a_v2_database_gives_every_host_the_vnc_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("deskvnc.db");
+
+        // Build a v2 database by hand: the v1 and v2 schemas, one host row
+        // with the column list v1 had, user_version 2.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute_batch(MIGRATIONS[1]).unwrap();
+            conn.execute(
+                "INSERT INTO hosts (id, friendly_name, address, port, quality_pref,
+                                    scaling_mode, keyboard_mode, passthrough, view_only,
+                                    ssh_tunnel, cert_pin, has_password, connect_count,
+                                    created_at, updated_at)
+                 VALUES ('host-uuid-1', 'Studio iMac', 'studio.local', 5902, 'high',
+                         'aspect-fit', 'unicode', 1, 0,
+                         '{\"enabled\":true,\"host\":\"jump\"}', 'ab12', 1, 7,
+                         1000, 1001)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO history (host_id, connected_at, duration_s, security_type,
+                                      disconnect_reason)
+                 VALUES ('host-uuid-1', 500, 60, 'VeNCrypt/X509Plain', 'user')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2i64).unwrap();
+        }
+
+        let store = Store::open(Some(dir.path().to_path_buf())).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .lock()
+                .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap() as usize,
+            MIGRATIONS.len(),
+            "the database must be fully migrated"
+        );
+        assert_eq!(MIGRATIONS.len(), 3);
+
+        let got = store
+            .get_host("host-uuid-1")
+            .unwrap()
+            .expect("a host saved before the migration must survive it");
+        assert_eq!(got.friendly_name, "Studio iMac");
+        assert_eq!(got.address, "studio.local");
+        assert_eq!(got.port, 5902, "the port is not rewritten to 5900");
+        assert_eq!(got.quality_pref, "high");
+        assert_eq!(got.scaling_mode, "aspect-fit");
+        assert_eq!(got.keyboard_mode, "unicode");
+        assert!(got.passthrough);
+        assert!(got.has_password);
+        assert_eq!(got.connect_count, 7);
+        assert_eq!(got.created_at, 1000, "the created date is not reset");
+        assert_eq!(got.cert_pin.as_deref(), Some("ab12"));
+        assert!(got.ssh_tunnel.is_some());
+
+        assert_eq!(got.protocol, "vnc", "every pre-RDP row was a VNC profile");
+        assert_eq!(got.protocol_kind(), Some(ProtocolKind::Vnc));
+        assert!(
+            got.rdp_settings.is_none(),
+            "a VNC profile has no RDP settings, and NULL is not '{{}}'"
+        );
+
+        // The row is still found by the lookups, and by the VNC one only.
+        assert_eq!(
+            store
+                .find_host_by_address(ProtocolKind::Vnc, "STUDIO.local.", 5902)
+                .unwrap()
+                .unwrap()
+                .id,
+            "host-uuid-1"
+        );
+        assert!(store
+            .find_host_by_address(ProtocolKind::Rdp, "studio.local", 5902)
+            .unwrap()
+            .is_none());
+
+        // And it is still writable through the new column list.
+        let mut edited = got.clone();
+        edited.friendly_name = "Studio".into();
+        store.save_host(&edited).unwrap();
+        let again = store.get_host("host-uuid-1").unwrap().unwrap();
+        assert_eq!(again.friendly_name, "Studio");
+        assert_eq!(again.created_at, 1000);
+        assert_eq!(again.protocol, "vnc");
+
+        // The history row backfills the same way.
+        let history = store.list_history(Some("host-uuid-1"), 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].protocol, "vnc");
+        assert_eq!(
+            history[0].security_type.as_deref(),
+            Some("VeNCrypt/X509Plain")
+        );
+    }
+
     /// CRITICAL invariant: saving a profile must never write any secret to
     /// the DB file (or its WAL).
     #[test]
     fn no_secrets_in_db_file() {
-        let secret = "sup3r-s3cret-hunter2-passw0rd";
+        // Seven sentinels, one per credential field. The RDP domain and
+        // username are not secrets in the way a password is, and they are
+        // treated as secrets here anyway: a domain name in a SQLite file is an
+        // organisational disclosure, and `StoredCredentials` is the one place
+        // any of it belongs.
+        let sentinels = [
+            "sup3r-s3cret-hunter2-passw0rd",
+            "vencrypt-user-sentinel",
+            "vencrypt-pass-sentinel",
+            "ssh-passphrase-sentinel",
+            "rdp-user-sentinel",
+            "rdp-domain-sentinel",
+            "rdp-pass-sentinel",
+        ];
+        let secret = sentinels[0];
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(Some(dir.path().to_path_buf())).unwrap();
 
         let mut host = sample_host("Secret Host", "10.9.9.9");
         host.has_password = true;
+        // A profile that carries an RDP blob, so the blob's own bytes are in
+        // the file the sentinels are searched for. The domain inside it looks
+        // plausible and is not one of the sentinels.
+        host.protocol = "rdp".into();
+        host.rdp_settings = Some(r#"{"v":1,"domain":"CORP.EXAMPLE","nla":"required"}"#.into());
         store.save_host(&host).unwrap();
 
         // Store a real credential through the encrypted-file fallback in the
@@ -1480,8 +1741,13 @@ mod tests {
             .save(
                 &host.id,
                 &crate::StoredCredentials {
-                    vnc_password: Some(secret.to_string()),
-                    ..Default::default()
+                    vnc_password: Some(sentinels[0].to_string()),
+                    vencrypt_user: Some(sentinels[1].to_string()),
+                    vencrypt_pass: Some(sentinels[2].to_string()),
+                    ssh_passphrase: Some(sentinels[3].to_string()),
+                    rdp_user: Some(sentinels[4].to_string()),
+                    rdp_domain: Some(sentinels[5].to_string()),
+                    rdp_password: Some(sentinels[6].to_string()),
                 },
             )
             .unwrap();
@@ -1499,11 +1765,19 @@ mod tests {
             }
         }
         assert!(!blob.is_empty());
-        let needle = secret.as_bytes();
-        let found = blob.windows(needle.len()).any(|w| w == needle);
-        assert!(
-            !found,
-            "secret bytes must never appear in the DB or credential file"
-        );
+        for sentinel in sentinels {
+            let needle = sentinel.as_bytes();
+            let found = blob.windows(needle.len()).any(|w| w == needle);
+            assert!(
+                !found,
+                "{sentinel} must never appear in the DB or credential file"
+            );
+        }
+        // The profile's own RDP blob is in there, which is what proves the
+        // search above is looking at the right bytes.
+        assert!(blob
+            .windows(b"CORP.EXAMPLE".len())
+            .any(|w| w == b"CORP.EXAMPLE"));
+        let _ = secret;
     }
 }

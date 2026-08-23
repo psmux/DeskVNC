@@ -8,6 +8,15 @@
 //! never writes anything back. Only the on-demand [`Discovery::deep_probe`]
 //! completes the version handshake to read the security-type list, and it
 //! closes before authenticating.
+//!
+//! RDP servers are found the same way, by an X.224 negotiation on 3389 that
+//! writes nineteen bytes and reads the answer (PRDRDP/08 §4). **Nothing here
+//! authenticates, for either protocol.** The RDP probe never sends an MCS
+//! Connect Initial, so no client name, no capability set and no credential
+//! ever leaves this process, and the promise is held by the dependency graph
+//! as well as by this comment: this crate depends on `rdp-pdu` for the wire
+//! format and on none of the crates that know how to authenticate
+//! (PRDRDP/00 R44).
 
 #![forbid(unsafe_code)]
 
@@ -19,6 +28,7 @@ mod mdns;
 mod msrpc;
 mod netbios;
 mod probe;
+mod rdpnego;
 mod registry;
 pub mod resolve;
 mod scan;
@@ -33,11 +43,20 @@ pub use filter::{
     address_rank, classify, is_listable, pick_best_address, rank_addresses, AddressVerdict,
     LocalNetwork,
 };
+pub use rdpnego::{caps_from_confirm, MAX_NEGO_READ};
 pub use registry::HostRegistry;
-pub use resolve::{resolve_host, NameSource, Resolved, RESOLVE_BUDGET};
+pub use resolve::{
+    looks_like_a_windows_computer_name, resolve_host, NameSource, Resolved, RESOLVE_BUDGET,
+};
 pub use subnet::{local_subnets, HostIter, Subnet, MIN_SCAN_PREFIX};
-pub use types::{DiscoveredHost, DiscoveryEvent, DiscoverySource, ScanOptions};
+pub use types::{
+    DiscoveredHost, DiscoveryEvent, DiscoverySource, RdpCaps, RdpServerKind, ScanOptions,
+};
 pub use wol::{magic_packet, parse_mac, wake_and_wait, wake_on_lan};
+
+/// Which protocol a discovered row's port speaks, re-exported so a caller
+/// naming [`DiscoveredHost::protocol`] needs no second dependency line.
+pub use remote_core::ProtocolKind;
 
 use std::net::SocketAddr;
 use tokio::sync::mpsc::Sender;
@@ -75,6 +94,20 @@ impl Discovery {
     /// then close **without** authenticating.
     pub async fn deep_probe(addr: SocketAddr) -> Result<Vec<u8>> {
         probe::deep_probe(addr).await
+    }
+
+    /// Deep probe an RDP host: what the sweep learned, plus whether NLA is
+    /// required. Two X.224 exchanges, no credential, no MCS.
+    pub async fn rdp_deep_probe(addr: SocketAddr) -> Result<RdpCaps> {
+        probe::rdp_deep_probe(addr).await
+    }
+
+    /// One X.224 negotiation with `addr`, the bulk sweep's RDP probe.
+    pub async fn rdp_fingerprint(
+        addr: SocketAddr,
+        connect_timeout: std::time::Duration,
+    ) -> Option<RdpCaps> {
+        probe::rdp_fingerprint(addr, connect_timeout).await
     }
 }
 
@@ -129,6 +162,10 @@ mod integration_tests {
             resolve_names: false,
             resolve_budget: RESOLVE_BUDGET,
             probe_other_services: false,
+            // This test is about the RFB probe. `scan_finds_a_fake_rdp_server`
+            // in tests/rdp_probe.rs is the other half.
+            probe_rdp: false,
+            rdp_ports: Vec::new(),
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);

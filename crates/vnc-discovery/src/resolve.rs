@@ -93,7 +93,7 @@ impl NameSource {
 
     /// True when answering this rung at all identifies the host as Windows.
     ///
-    /// This is evidence, not a guess. All three are Windows-only *services*, so
+    /// This is evidence, not a guess. Both are Windows-only *services*, so
     /// the OS is settled by the fact that the answer arrived, independently of
     /// what the VNC server on top of it calls itself, which is what makes a
     /// Windows box running TigerVNC classifiable at all:
@@ -103,23 +103,45 @@ impl NameSource {
     ///   and a Samba host is a file server pretending to be Windows on purpose.
     /// * `msrpc-epm`, the MSRPC endpoint mapper on TCP 135. Nothing else
     ///   ships it; the reply we parse is a `\\MACHINE` named-pipe binding.
-    /// * `rdp-cert`, the self-signed RDP certificate on TCP 3389 whose `CN`
-    ///   is the machine name. xrdp exists on Linux but does not present the
-    ///   Windows machine-name certificate this rung reads.
     ///
     /// Deliberately **not** included:
     ///
+    /// * `rdp-cert`, the self-signed RDP certificate on TCP 3389. It used to
+    ///   be here, and it was safe only for as long as nothing brought Linux
+    ///   hosts on 3389 into the list. Now that the scan probes 3389 on every
+    ///   address, an xrdp box answers this rung, and answering it is no longer
+    ///   evidence of anything: xrdp serves a certificate too. What still
+    ///   proves Windows is the *shape* of the name in it, which depends on the
+    ///   value rather than on which rung replied, so it is
+    ///   [`DiscoveredHost::implies_windows`] that answers it and
+    ///   [`looks_like_a_windows_computer_name`] that decides. A `CN` that
+    ///   fails those tests still supplies a name; what it no longer supplies
+    ///   is the claim that the host runs Windows.
     /// * `mdns-ptr`, Avahi answers reverse mDNS on every Linux desktop and on
     ///   Raspberry Pi OS, so it is no evidence of macOS (this LAN's
     ///   `raspberrypi` resolves exactly this way).
     /// * `llmnr`, implemented by `systemd-resolved` on Linux too.
     /// * `reverse-dns`, says something about the DHCP server, not the host.
     pub fn implies_windows(self) -> bool {
-        matches!(
-            self,
-            NameSource::NetBios | NameSource::MsrpcEndpoint | NameSource::RdpCertificate
-        )
+        matches!(self, NameSource::NetBios | NameSource::MsrpcEndpoint)
     }
+}
+
+/// True when a certificate `CN` looks like a Windows computer name.
+///
+/// Windows generates its RDP certificate with `CN` = the NetBIOS computer
+/// name: at most 15 characters, no dots, letters, digits and hyphens only.
+/// xrdp's packaged certificate carries a domain-shaped `CN` instead, which
+/// fails every one of those tests.
+///
+/// This is a display decision and never a trust one. A hostile server can put
+/// any string in its `CN`, which is why nothing reachable from here decides
+/// what to connect to or what to send.
+pub fn looks_like_a_windows_computer_name(cn: &str) -> bool {
+    !cn.is_empty()
+        && cn.len() <= 15
+        && !cn.contains('.')
+        && cn.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Serialized as its [`NameSource::as_str`] tag, so the wire form has one
@@ -170,6 +192,28 @@ pub async fn resolve_host_with(
     budget: Duration,
     probe_other_services: bool,
 ) -> Resolved {
+    resolve_host_sharing(ip, budget, probe_other_services, None).await
+}
+
+/// As [`resolve_host_with`], with the certificate rung's answer supplied.
+///
+/// The 3389 probe already opened a connection to this address and, when the
+/// server selected TLS, already read the subject `CN` off it. Handing that in
+/// is what stops the ladder dialling 3389 a second time during one scan: the
+/// probe result reaches the resolver as an input rather than the resolver
+/// opening its own socket (PRDRDP/08 §4.6).
+///
+/// `rdp_cert_name` is `None` when the probe found nothing, which is also the
+/// case where the raw path is still worth trying: `tlsname` speaks TLS on 3389
+/// without the X.224 negotiation and demonstrably works against at least one
+/// real Windows host, so a host that is nameable today does not become
+/// unnameable. Try the negotiated path first, fall back to the raw one.
+pub async fn resolve_host_sharing(
+    ip: Ipv4Addr,
+    budget: Duration,
+    probe_other_services: bool,
+    rdp_cert_name: Option<String>,
+) -> Resolved {
     let deadline = Instant::now() + budget;
 
     let mdns = mdns_reverse_ptr(ip, deadline);
@@ -183,11 +227,14 @@ pub async fn resolve_host_with(
             None
         }
     };
+    let shared_name = rdp_cert_name.and_then(|cn| sanitize_hostname(&cn, ip));
     let rdp = async {
-        if probe_other_services {
-            rdp_certificate_name(ip, deadline).await
-        } else {
-            None
+        match shared_name {
+            // The probe read it on the connection it already had open, so
+            // this rung costs nothing at all.
+            Some(name) => Some(name),
+            None if probe_other_services => rdp_certificate_name(ip, deadline).await,
+            None => None,
         }
     };
 
@@ -227,7 +274,7 @@ pub async fn resolve_host_with(
 /// Drops the trailing root dot and the `.local` mDNS suffix (so a scan-derived
 /// name reads like the mDNS instance name next to it), rejects anything that is
 /// not printable ASCII, over-long, or merely the address written back at us.
-fn sanitize_hostname(raw: &str, ip: Ipv4Addr) -> Option<String> {
+pub(crate) fn sanitize_hostname(raw: &str, ip: Ipv4Addr) -> Option<String> {
     let name = raw.trim().trim_end_matches('.').trim();
     let name = name.strip_suffix(".local").unwrap_or(name);
     if name.is_empty() || name.len() > MAX_HOSTNAME_LEN {

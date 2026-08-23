@@ -9,6 +9,22 @@ license.workspace = true
 # fingerprinting, hostname resolution, Wake-on-LAN.
 
 [dependencies]
+# The X.224 Connection Request encoder and the Connection Confirm parser for
+# the 3389 probe. PRDRDP/00 R44 grants this one edge out of the VNC set into
+# the RDP set and forbids `rdp-auth`, `rdp-codecs` and `rdp-core` by name, so
+# that hostile input meets one fuzzed parser rather than two and the nineteen
+# bytes we claim to speak have one definition. `rdp-pdu` has no tokio, no
+# async and no I/O, so this crate stays hermetic and stays fast; the crate
+# that could authenticate is deliberately not linked, which is what keeps this
+# crate's promise that discovery never authenticates.
+# Held by crates/rdp-pdu/tests/workspace_rules.rs.
+rdp-pdu = { path = "../rdp-pdu" }
+# Types only: `ProtocolKind`, so "vnc" and "rdp" have one spelling across the
+# store, the shell, discovery and the IPC contract (PRDRDP/08 sec 4.8). A local
+# enum here would need a conversion at the shell boundary, and that conversion
+# is where a third spelling appears.
+remote-core = { path = "../remote-core" }
+
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }

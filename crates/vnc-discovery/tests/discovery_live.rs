@@ -125,6 +125,10 @@ async fn live_scan_finds_and_labels_the_local_server() {
         // its own live test below.
         resolve_names: false,
         resolve_budget: Duration::from_millis(500),
+        // This test points at one VNC server. Probing 3389 as well would open
+        // a connection this test has nothing to say about.
+        probe_rdp: false,
+        rdp_ports: Vec::new(),
     };
     let (tx, rx) = mpsc::channel(64);
     let collector = tokio::spawn(drain(rx));
@@ -203,6 +207,8 @@ async fn live_scan_of_a_dead_port_finds_nothing() {
         include_local: true,
         resolve_names: false,
         resolve_budget: Duration::from_millis(500),
+        probe_rdp: false,
+        rdp_ports: Vec::new(),
     };
     let (tx, rx) = mpsc::channel(16);
     let collector = tokio::spawn(drain(rx));

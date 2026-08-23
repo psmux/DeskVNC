@@ -1,7 +1,19 @@
-//! Connect-time RFB fingerprinting and the on-demand deep probe.
+//! Connect-time fingerprinting and the on-demand deep probe, for both
+//! protocols.
+//!
+//! The RFB pair is [`fingerprint`] and [`deep_probe`]; the RDP pair is
+//! [`rdp_fingerprint`] and [`rdp_deep_probe`], and they are the same shape for
+//! the same reason. The bulk sweep learns what a host is with the smallest
+//! exchange that answers the question, and the on-demand probe spends a second
+//! connection on the one host the user asked about.
+//!
+//! Neither RDP function parses a byte itself: the request and the parser are
+//! `rdp-pdu`'s and the mapping is [`crate::rdpnego`]'s.
 
 use crate::banner::{parse_banner, Banner};
 use crate::error::{Error, Result};
+use crate::rdpnego;
+use crate::types::RdpCaps;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -109,6 +121,51 @@ pub async fn deep_probe(addr: SocketAddr) -> Result<Vec<u8>> {
     // Close immediately, never authenticate.
     let _ = stream.shutdown().await;
     Ok(types)
+}
+
+/// Connect to `addr`, negotiate X.224, and return what the server said.
+///
+/// This is the bulk sweep's RDP probe, and it is the counterpart of
+/// [`fingerprint`]: one write, one read, then the socket is dropped. It
+/// advertises TLS and NLA, never standard RDP security, and it sends no
+/// cookie, so nothing that could identify a user reaches the server's event
+/// log (MS-RDPBCGR 2.2.1.1).
+///
+/// When the server selects TLS or NLA the probe reads the certificate subject
+/// on the *same* connection, which is the name the resolution ladder's last
+/// rung would otherwise open a second connection to 3389 to read.
+///
+/// `None` for anything that is not an RDP server. On a subnet with no RDP
+/// hosts that is a refused connect, which costs a rate limiter slot and about
+/// a millisecond, and no VNC result ever waits on it.
+pub async fn rdp_fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<RdpCaps> {
+    rdpnego::probe(addr, connect_timeout, rdpnego::SWEEP_PROTOCOLS, true).await
+}
+
+/// Deep probe an RDP host: everything [`rdp_fingerprint`] learns, plus whether
+/// NLA is *required*.
+///
+/// The second answer needs a second connection advertising `PROTOCOL_SSL`
+/// alone, because a server that permits both selects the stronger one and so
+/// never reveals whether it would have refused TLS by itself. That doubles the
+/// connections to one host, which is why it is on demand: the user asked about
+/// this host, and that is the right place to spend them.
+///
+/// Still never authenticates. The second exchange is the same nineteen bytes
+/// with one flag changed.
+pub async fn rdp_deep_probe(addr: SocketAddr) -> Result<RdpCaps> {
+    let connect_to = Duration::from_millis(1500);
+    let mut caps = rdpnego::probe(addr, connect_to, rdpnego::SWEEP_PROTOCOLS, true)
+        .await
+        .ok_or_else(|| Error::Probe {
+            addr,
+            reason: "not an RDP server, or it refused the negotiation".into(),
+        })?;
+    // The certificate is already in hand from the first exchange, so the
+    // second one asks only the question it exists to answer.
+    let ssl_only = rdpnego::probe(addr, connect_to, rdpnego::SSL_ONLY_PROTOCOLS, false).await;
+    rdpnego::apply_ssl_only_answer(&mut caps, ssl_only.as_ref());
+    Ok(caps)
 }
 
 /// Read exactly `buf.len()` bytes with the probe timeout, mapping errors.

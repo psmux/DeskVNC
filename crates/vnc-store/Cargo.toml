@@ -9,6 +9,12 @@ license.workspace = true
 # credentials with encrypted-file fallback, thumbnail cache.
 
 [dependencies]
+# Types only: `ProtocolKind` for the `hosts.protocol` column and `RdpOptions`
+# for the typed form of the `hosts.rdp_settings` blob (PRDRDP/08 sec 2.4).
+# One definition of those shapes is read by this crate, by `src-tauri` and by
+# `rdp-core`; three copies of a struct drift.
+remote-core = { path = "../remote-core" }
+
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -40,6 +40,16 @@ pub enum Error {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    #[error(
+        "this profile's RDP settings are version {found}, and this build \
+         understands up to version {max}: the profile was written by a newer \
+         version of the app"
+    )]
+    RdpSettingsTooNew { found: u32, max: u32 },
+
+    #[error("this .rdp file cannot be imported: {0}")]
+    RdpFileRefused(String),
+
     #[error("could not determine the application data directory")]
     NoDataDir,
 }

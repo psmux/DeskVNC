@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use parking_lot::Mutex;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{Error, Result, StoredCredentials};
 
@@ -136,7 +136,13 @@ impl CredentialStore {
 
     /// Saves (or replaces) the credentials for a host profile.
     pub fn save(&self, host_id: &str, creds: &StoredCredentials) -> Result<()> {
-        let json = serde_json::to_string(creds)?;
+        // The serialized blob holds every password in cleartext on its way to
+        // the keychain, so it is wiped when it goes out of scope. `Zeroizing`
+        // wipes the buffer the `String` owns at that moment; `serde_json`
+        // grew that buffer while it wrote, and the earlier, smaller
+        // allocations holding prefixes of the same JSON were freed unwiped.
+        // This narrows the window rather than closing it (PRDRDP/08 §3.6).
+        let json = Zeroizing::new(serde_json::to_string(creds)?);
         if json.len() > MAX_CREDENTIAL_BLOB {
             return Err(Error::CredentialTooLarge {
                 size: json.len(),
@@ -174,6 +180,7 @@ impl CredentialStore {
             }
             match keychain_get(host_id) {
                 Ok(Some(json)) => {
+                    let json = Zeroizing::new(json);
                     let creds: StoredCredentials = serde_json::from_str(&json)?;
                     inner.cache.insert(host_id.to_string(), creds.clone());
                     return Ok(Some(creds));
@@ -195,7 +202,11 @@ impl CredentialStore {
     pub fn delete(&self, host_id: &str) -> Result<()> {
         let mut inner = self.inner.lock();
         self.resolve_backend(&mut inner);
-        inner.cache.remove(host_id);
+        // Evicting the cache entry frees a decrypted credential, so wipe it
+        // on the way out rather than leaving it in freed heap.
+        if let Some(mut evicted) = inner.cache.remove(host_id) {
+            evicted.zeroize();
+        }
         if inner.backend == Backend::Keychain {
             match keychain_delete(host_id) {
                 Ok(()) => return Ok(()),
@@ -252,8 +263,22 @@ impl CredentialStore {
     /// decrypted entries from memory. No-op when the keychain is in use.
     pub fn lock(&self) {
         let mut inner = self.inner.lock();
-        // Vault::key is Zeroizing, dropping wipes the derived key.
+        // `Vault::key` is `Zeroizing`, so dropping wipes the derived key. The
+        // entries are not: dropping the map alone would leave every decrypted
+        // password in freed heap, which is the one thing "lock" must not do.
+        if let Some(vault) = inner.vault.as_mut() {
+            for creds in vault.entries.values_mut() {
+                creds.zeroize();
+            }
+        }
         inner.vault = None;
+        // The keychain cache is the same kind of plaintext and is wiped for
+        // the same reason. It is empty on the file backend, so this costs
+        // nothing there.
+        for creds in inner.cache.values_mut() {
+            creds.zeroize();
+        }
+        inner.cache.clear();
     }
 
     fn resolve_backend(&self, inner: &mut Inner) {
@@ -467,6 +492,9 @@ mod tests {
             vencrypt_user: Some("alice".into()),
             vencrypt_pass: Some("tls-pass-456".into()),
             ssh_passphrase: Some("ssh-pass-789".into()),
+            rdp_user: Some("rdp-user-sentinel".into()),
+            rdp_domain: Some("corp.example".into()),
+            rdp_password: Some("rdp-pass-sentinel".into()),
         }
     }
 
@@ -508,6 +536,9 @@ mod tests {
         assert_eq!(got.vencrypt_user.as_deref(), Some("alice"));
         assert_eq!(got.vencrypt_pass.as_deref(), Some("tls-pass-456"));
         assert_eq!(got.ssh_passphrase.as_deref(), Some("ssh-pass-789"));
+        assert_eq!(got.rdp_user.as_deref(), Some("rdp-user-sentinel"));
+        assert_eq!(got.rdp_domain.as_deref(), Some("corp.example"));
+        assert_eq!(got.rdp_password.as_deref(), Some("rdp-pass-sentinel"));
         assert!(store.load("unknown-host").unwrap().is_none());
 
         // A fresh store instance (new process) can also unlock and read.
@@ -521,6 +552,54 @@ mod tests {
         let store3 = file_store(dir.path());
         store3.unlock("correct horse battery staple").unwrap();
         assert!(store3.load("host-1").unwrap().is_none());
+    }
+
+    /// Locking must wipe the decrypted entries, not merely drop the map.
+    ///
+    /// Safe Rust cannot read freed memory, so "the heap is clean" is not a
+    /// testable claim and this does not pretend to make it. What it asserts is
+    /// the structural half: `lock` reached every entry and called `Zeroize` on
+    /// it (PRDRDP/08 §3.6). The counter lives on the model and is `cfg(test)`
+    /// only, so a release build pays nothing for it.
+    #[test]
+    fn locking_zeroizes_every_decrypted_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        store.unlock("pw").unwrap();
+        store.save("host-1", &sample_creds()).unwrap();
+        store.save("host-2", &sample_creds()).unwrap();
+
+        let before = crate::models::zeroize_calls();
+        store.lock();
+        let wiped = crate::models::zeroize_calls() - before;
+        assert_eq!(wiped, 2, "one wipe per decrypted entry, not one per vault");
+
+        // And the credentials are still on disk, so the wipe is of memory
+        // rather than of the file.
+        store.unlock("pw").unwrap();
+        assert!(store.load("host-1").unwrap().is_some());
+    }
+
+    /// Deleting a credential evicts a decrypted copy from the cache, so that
+    /// copy is wiped rather than dropped.
+    #[test]
+    fn deleting_wipes_the_cached_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        store.unlock("pw").unwrap();
+        store.save("host-1", &sample_creds()).unwrap();
+        // The file backend keeps no cache, so seed one the way the keychain
+        // path does, to prove `delete` reaches it.
+        store
+            .inner
+            .lock()
+            .cache
+            .insert("host-1".to_string(), sample_creds());
+
+        let before = crate::models::zeroize_calls();
+        store.delete("host-1").unwrap();
+        assert_eq!(crate::models::zeroize_calls() - before, 1);
+        assert!(store.load("host-1").unwrap().is_none());
     }
 
     #[test]
@@ -596,6 +675,9 @@ mod tests {
             "ssh-pass-789",
             "alice",
             "host-1",
+            "rdp-user-sentinel",
+            "corp.example",
+            "rdp-pass-sentinel",
         ] {
             let needle = secret.as_bytes();
             assert!(
