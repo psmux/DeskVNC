@@ -26,15 +26,20 @@
 //! the whole attempt and the whole stream with it. Nobody should later wrap
 //! it in a `select!` without changing the writes first (PRDRDP/12 §5.4).
 //!
-//! # What is reachable today
+//! # The phases, and where each lives
 //!
-//! Phases 1 through 4, which is as far as the wire layer goes: `rdp-pdu` has
-//! `x224`, `mcs` and `gcc` and its `rdp/` module is being written now
-//! (`crates/rdp-pdu/src/lib.rs:36`). At the Client Info PDU [`connect`]
-//! returns [`RdpError::NotImplemented`] naming
-//! [`ConnectStage::SendClientInfo`] and its specification section, rather
-//! than pretending to be connected or panicking.
+//! | Phases | File |
+//! |---|---|
+//! | 1, the X.224 negotiation | [`negotiate`] |
+//! | 2, the TLS upgrade and CredSSP | [`crate::transport`], [`nla`] |
+//! | 3 and 4, the Basic Settings Exchange and Channel Connection | [`mcs`] |
+//! | 6 to 10, Client Info to the Font Map | [`activate`] |
+//!
+//! Phase 5, RDP Security Commencement, is skipped by construction: it exists
+//! only for standard RDP security, which this client never negotiates
+//! (PRDRDP/03 §2.6, D6).
 
+pub mod activate;
 pub mod mcs;
 pub mod negotiate;
 pub mod nla;
@@ -46,9 +51,10 @@ use vnc_transport::{BoxedStream, TrustDecision};
 
 use crate::error::{ConnectStage, RdpError, Result};
 use crate::options::ResolvedOptions;
-use crate::transport::framer::Framer;
+use crate::transport::framer::{Framed, Framer};
 use crate::transport::{self, TlsUpgrade};
 
+pub use activate::Activated;
 pub use mcs::{ChannelMap, McsConnected};
 pub use negotiate::SecurityProtocol;
 pub use nla::ServerIdentity;
@@ -65,6 +71,15 @@ pub struct Connected {
     pub method: &'static str,
     /// What the trust on first use verifier decided about the server key.
     pub trust: TrustDecision,
+    /// The share id, the desktop size and the server's input capabilities.
+    pub activation: Activated,
+    /// Fast path updates that overtook the end of the sequence.
+    ///
+    /// A server is allowed to start drawing before the Font Map arrives, and a
+    /// pointer or bitmap update that reaches the connection sequence belongs
+    /// to the pump rather than to the bin. Dropping them is a stale region
+    /// nobody can explain (PRDRDP/06 §2.2.1).
+    pub pending: Vec<Framed>,
 }
 
 /// Run the X.224 negotiation, then hand the stream back for the TLS upgrade.
@@ -102,12 +117,11 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Everything after the TLS upgrade: CredSSP when the negotiation asked for
-/// it, then the MCS phases.
+/// it, then the MCS phases and the rest of the sequence.
 ///
 /// # Errors
 ///
-/// As [`nla::authenticate_in_session`] and [`mcs::connect`], plus
-/// [`RdpError::NotImplemented`] at the Client Info PDU.
+/// As [`nla::authenticate`], [`mcs::connect`] and [`activate::activate`].
 pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     framer: &mut Framer<S>,
     opts: &ResolvedOptions,
@@ -130,12 +144,17 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
         .await?;
 
         let attempt = match identity {
-            Some(identity) => {
-                nla::authenticate_in_session(framer, opts, creds, selected, identity).await
-            }
-            None => Err(RdpError::NotImplemented {
-                stage: ConnectStage::SecurityUpgrade,
-            }),
+            Some(identity) => nla::authenticate(framer, opts, creds, selected, identity).await,
+            // A caller that upgraded the stream has an identity, because the
+            // upgrade returns the certificate with it (PRDRDP/00 R47). `None`
+            // reaches here only from a test driving the phases over a plain
+            // socket, and a CredSSP exchange bound to nothing is not one we
+            // will start.
+            None => Err(RdpError::Tls(
+                "there is no server certificate to bind the credentials to \
+                 (MS-CSSP 3.1.5)"
+                    .to_owned(),
+            )),
         };
         match attempt {
             Ok(outcome) => {
@@ -175,13 +194,25 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
         "mcs channel connection complete"
     );
 
-    // Phase 6 onwards. `rdp-pdu`'s `rdp/` module holds the Client Info PDU
-    // and everything after it and is being written now
-    // (`crates/rdp-pdu/src/lib.rs:41`). A `todo!()` here would abort a
-    // session that is holding a socket and a credential, so the phase names
-    // itself instead.
-    Err(RdpError::NotImplemented {
-        stage: ConnectStage::SendClientInfo,
+    // Phases 6 to 10.
+    let mut pending = Vec::new();
+    let activation = activate::activate(
+        framer,
+        opts,
+        creds,
+        &connected.channels,
+        events,
+        &mut pending,
+    )
+    .await?;
+
+    Ok(Connected {
+        channels: connected.channels,
+        selected,
+        method,
+        trust,
+        activation,
+        pending,
     })
 }
 
@@ -209,14 +240,12 @@ pub async fn connect(
     // buffer was checked as empty above, which is why nothing is lost here.
     let (stream, _empty) = framer.into_inner();
     let upgrade = transport::upgrade_tls(stream, &opts.server_name, pins, opts.legacy_tls).await?;
-    let trust = upgrade.trust.clone();
+    let trust = upgrade.decision.clone();
+    // The prompt gates CredSSP, so it happens before the identity is built and
+    // long before a credential is encrypted under the server's key
+    // (PRDRDP/00 R13, PRDRDP/03 §5.4).
     check_trust(&trust)?;
-
-    let identity = match ServerIdentity::from_upgrade(&upgrade) {
-        Ok(identity) => Some(identity),
-        Err(RdpError::NotImplemented { .. }) => None,
-        Err(e) => return Err(e),
-    };
+    let identity = ServerIdentity::from_upgrade(&upgrade)?;
 
     let TlsUpgrade { stream, .. } = upgrade;
     let mut framer = Framer::new(stream, received);
@@ -225,7 +254,7 @@ pub async fn connect(
         opts,
         creds,
         selected,
-        identity.as_ref(),
+        Some(&identity),
         trust,
         events,
     )
@@ -246,7 +275,12 @@ pub async fn connect(
 ///
 /// The prompt itself is not wired up in this pass: an unknown key is refused
 /// rather than shown, so nothing is ever sent to a server the user has not
-/// approved. The report names it.
+/// approved. Emitting the prompt means parking the sequence on a
+/// [`remote_core::ClientCommand::TrustCertificate`] answer, which needs the
+/// command channel threaded down here from the session task, and that is the
+/// piece that is missing rather than the pin scheme, which now exists. The
+/// report names it, and the message names it too so a user is not left
+/// guessing why a self signed host is refused.
 ///
 /// # Errors
 ///
@@ -262,12 +296,12 @@ fn check_trust(trust: &TrustDecision) -> Result<()> {
         }),
         TrustDecision::Unknown { fingerprint, .. } => {
             // The prompt is `SessionEvent::CertificatePrompt { scheme:
-            // PinScheme::RdpTls }` and a park on the answer. `PinScheme` has
-            // no `RdpTls` variant yet (`crates/remote-core/src/pins.rs:4`
-            // says phase 1 adds it), and until it does an RDP prompt would
-            // store its answer against the VeNCrypt pin for the same host.
-            // Refusing is the conservative half of that gap.
-            let _ = PinScheme::Tls;
+            // PinScheme::RdpTls }` and a park on the answer, and the pin is
+            // already looked up under that scheme
+            // (`crate::transport::upgrade_tls`), so an approval would be
+            // stored against the RDP key rather than against the VeNCrypt one
+            // for the same host (PRDRDP/02 §2.1).
+            debug_assert_eq!(PinScheme::RdpTls.as_str(), "rdp-tls");
             Err(RdpError::CertificateUntrusted(format!(
                 "{fingerprint} has not been approved, and the trust prompt is not wired up yet"
             )))
@@ -305,18 +339,20 @@ mod tests {
         assert!(err.needs_user_action());
     }
 
-    /// The sequence stops at the first phase with no wire layer behind it,
-    /// and says which phase that is. This is the assertion that has to change
-    /// when the Client Info PDU lands, which is the point.
+    /// Every stage of the sequence now has code behind it, so nothing in this
+    /// module returns [`RdpError::NotImplemented`] any more. What is left of
+    /// the variant is the run loop's fast path arms as they land; this test
+    /// pins the message shape, because a phase that names itself is the whole
+    /// reason the variant exists rather than a panic.
     #[test]
-    fn the_sequence_stops_at_the_first_unimplemented_phase() {
+    fn an_unimplemented_phase_names_itself_rather_than_panicking() {
         let e = RdpError::NotImplemented {
-            stage: ConnectStage::SendClientInfo,
+            stage: ConnectStage::MultitransportBootstrap,
         };
-        assert!(e.to_string().contains("client-info"), "{e}");
-        assert!(e.to_string().contains("MS-RDPBCGR 2.2.1.11"), "{e}");
-        // Not transient: the same PDU will be missing on the next attempt,
-        // and a backoff ladder against our own gap is a loop.
+        assert!(e.to_string().contains("multitransport"), "{e}");
+        assert!(e.to_string().contains("MS-RDPBCGR 2.2.15"), "{e}");
+        // Not transient: the same gap will be there on the next attempt, and a
+        // backoff ladder against our own gap is a loop.
         assert!(!e.is_transient());
     }
 }

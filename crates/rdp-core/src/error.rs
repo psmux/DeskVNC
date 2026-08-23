@@ -8,11 +8,13 @@
 //! methods the reconnect supervisor reads.
 //!
 //! What is here and not in PRDRDP/03's list is [`RdpError::NotImplemented`].
-//! The wire layer stops at the end of MCS channel connection today
-//! (`crates/rdp-pdu/src/lib.rs:36`), and a session that parses remote bytes
-//! may not answer that with a `todo!()`. It answers with a typed error naming
-//! the [`ConnectStage`] that has no code behind it yet, so a log line and a
-//! bug report both say which phase to look at.
+//! Every phase of the connection sequence now has code behind it, so nothing
+//! in this crate constructs the variant today; it stays because the rule it
+//! exists for has not changed. A session that parses remote bytes may not
+//! answer an unwritten phase with a `todo!()`, and the next feature that lands
+//! half written (the virtual channels, the surface commands) answers with a
+//! typed error naming its [`ConnectStage`] instead, so a log line and a bug
+//! report both say which phase to look at.
 
 use rdp_pdu::PduError;
 

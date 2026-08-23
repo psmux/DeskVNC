@@ -28,6 +28,15 @@
 //! functions; what is skipped is the handshake between them, which needs a
 //! committed test key pair (PRDRDP/12 §3.14 `tests/common/certs.rs`) that
 //! does not exist yet.
+//!
+//! # What it does after the joins
+//!
+//! Phases 6 to 10 and then a live session: it reads the Client Info PDU,
+//! answers licensing, sends a Demand Active, reads the Confirm Active and the
+//! four finalisation PDUs, sends its own four, and then draws one bitmap
+//! update on the fast path and reads whatever input comes back. That is what
+//! makes `tests/connect.rs` able to assert a decoded pixel and an input event
+//! round trip rather than only the shape of the handshake.
 
 #![allow(dead_code)]
 
@@ -37,8 +46,20 @@ use std::sync::{Arc, Mutex};
 use rdp_pdu::gcc::server::{
     ServerCoreData, ServerMessageChannelData, ServerNetworkData, ServerSecurityData,
 };
-use rdp_pdu::io::{Decode, Encode, Writer};
+use rdp_pdu::io::{Decode, Encode, Payload, Writer};
 use rdp_pdu::mcs::{result_code, DomainMcsPdu};
+use rdp_pdu::rdp::capabilities::InputCapabilitySet;
+use rdp_pdu::rdp::license::{
+    blob_type, message_type, preamble_flags, LicenseBinaryBlob, LicenseErrorMessage,
+    LicenseMessage, LicensePdu, LicensePreamble, LICENSE_PREAMBLE_LEN,
+};
+use rdp_pdu::rdp::{
+    CapabilitySets, ClientInfoPdu, ControlPdu, DemandActivePdu, FontMapPdu, ShareDataPdu, SharePdu,
+    SynchronizePdu,
+};
+use rdp_pdu::update::fastpath::{encode_fastpath_update, update_code, FpUpdate, FpUpdateHeader};
+use rdp_pdu::update::slowpath::GraphicsUpdate;
+use rdp_pdu::update::{BitmapData, BitmapUpdate, RectInclusive};
 use rdp_pdu::x224::{
     self, security_protocol, NegotiationFailure, NegotiationResponse, X224ConnectionConfirm,
     X224ConnectionRequest, X224Negotiation,
@@ -61,6 +82,34 @@ pub const MESSAGE_CHANNEL_ID: u16 = 1005;
 /// The first static virtual channel id, incremented per requested channel.
 pub const FIRST_VIRTUAL_CHANNEL_ID: u16 = 1010;
 
+/// The `PDUSource` the mock puts on every Share Control PDU it sends, which is
+/// what the client's Synchronize PDU has to name back
+/// (MS-RDPBCGR 2.2.1.14.1).
+pub const SERVER_PDU_SOURCE: u16 = 0x03ea;
+
+/// The `shareId` the Demand Active hands out. Every Share Data PDU the client
+/// sends afterwards has to echo it.
+pub const SHARE_ID: u32 = 0x0010_3ea9;
+
+/// The desktop size the mock's Bitmap capability set announces.
+///
+/// Deliberately not the 1024 by 768 the client asks for in `TS_UD_CS_CORE`, so
+/// a test can prove the client adopts the server's answer rather than its own
+/// request (MS-RDPBCGR 2.2.7.1.2).
+pub const SERVER_DESKTOP: (u16, u16) = (800, 600);
+
+/// Where the mock draws its one bitmap.
+pub const BITMAP_AT: (u16, u16) = (10, 20);
+
+/// Two rows of two pixels at 24 bits per pixel, bottom row first, which is
+/// what a Windows DIB body is: the first wire row is the BOTTOM row of the
+/// picture. Blue underneath and red on top, so a client that forgets the flip
+/// fails rather than passing on a symmetric fixture (PRDRDP/04 §2.3).
+pub const BITMAP_ROWS: &[u8] = &[
+    0xff, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, // bottom row: blue
+    0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff, 0x00, // top row: red
+];
+
 /// How the mock answers the X.224 Connection Request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Negotiation {
@@ -72,6 +121,24 @@ pub enum Negotiation {
     /// the server does not understand negotiation and has chosen standard RDP
     /// security. A real case, not a theoretical one.
     NoStructure,
+}
+
+/// What the mock does after the channel joins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionBehaviour {
+    /// Nothing. The old behaviour, for the tests that only care about the MCS
+    /// phases.
+    StopAfterJoins,
+    /// The whole of phases 6 to 10, then one bitmap update and an input read.
+    Serve,
+    /// The same, but with no licensing PDU at all: straight from the Client
+    /// Info PDU to the Demand Active. A real case on some non Microsoft
+    /// servers, and the one that catches a client which assumes a security
+    /// header is there.
+    ServeWithoutLicensing,
+    /// Answer licensing with `ERR_NO_LICENSE_SERVER`, which is a refusal the
+    /// client must report as a sentence rather than carry on through.
+    RefuseLicence,
 }
 
 /// How the mock answers the MCS Connect Initial.
@@ -108,17 +175,21 @@ pub struct MockConfig {
     pub skip_channel_join: bool,
     /// Whether to offer a message channel.
     pub message_channel: bool,
+    /// What to do after the joins.
+    pub session: SessionBehaviour,
 }
 
 impl Default for MockConfig {
     /// A server that does what a Windows host with NLA turned off does: TLS
-    /// only, every channel allocated, every join confirmed.
+    /// only, every channel allocated, every join confirmed, licensing answered
+    /// with "no licence required", and then a live session.
     fn default() -> Self {
         Self {
             negotiation: Negotiation::Select(security_protocol::SSL),
             mcs: McsBehaviour::Normal,
             skip_channel_join: false,
             message_channel: true,
+            session: SessionBehaviour::Serve,
         }
     }
 }
@@ -141,6 +212,17 @@ pub struct Recorded {
     pub joins: Vec<u16>,
     /// The reason code of a Disconnect Provider Ultimatum from the client.
     pub client_disconnect: Option<u8>,
+    /// The `TS_INFO_PACKET` from the Client Info PDU, decoded.
+    pub client_info: Option<ClientInfoPdu>,
+    /// The `shareId` the client echoed in its Confirm Active.
+    pub confirmed_share_id: Option<u32>,
+    /// The `capabilitySetType` of every set the client confirmed, in order.
+    pub confirmed_capabilities: Vec<u16>,
+    /// The `pduType2` of every Share Data PDU the client sent after the
+    /// Confirm Active, in order.
+    pub finalization: Vec<u8>,
+    /// Every fast path input event the client sent, in order.
+    pub input_events: Vec<rdp_pdu::input::fastpath::FastPathInputEvent>,
 }
 
 /// A running mock. Dropping it leaves the accept task to finish on its own.
@@ -174,6 +256,25 @@ impl MockRdpServer {
     /// What the client has sent so far.
     pub fn recorded(&self) -> Recorded {
         self.recorded.lock().expect("not poisoned").clone()
+    }
+
+    /// Wait until `ready` says the mock has seen what a test is about to
+    /// assert on.
+    ///
+    /// The mock runs in its own task, so bytes the client has finished writing
+    /// have not necessarily been read yet: asserting straight after the client
+    /// hangs up is a race that passes on a quiet machine and fails on a loaded
+    /// CI box. This is the same wait the RFB integration tests use, with the
+    /// same budget.
+    pub async fn wait_until(&self, ready: impl Fn(&Recorded) -> bool) -> Recorded {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let recorded = self.recorded();
+            if ready(&recorded) || std::time::Instant::now() > deadline {
+                return recorded;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
     }
 }
 
@@ -407,20 +508,254 @@ async fn serve(
     }
     stream.flush().await?;
 
-    // The client's next PDU would be the Client Info (MS-RDPBCGR 2.2.1.11).
-    // It has none, so it hangs up, and whatever arrives here is recorded so a
-    // test can assert the teardown was ordered.
-    while let Ok(frame) = read_tpkt(&mut stream).await {
-        let mut r = Reader::new(&frame);
-        if let Ok(mut body) = x224::read_data_tpdu(&mut r) {
-            if let Ok(DomainMcsPdu::DisconnectProviderUltimatum { reason }) =
-                DomainMcsPdu::decode(&mut body)
-            {
-                recorded.lock().expect("not poisoned").client_disconnect = Some(reason);
+    if config.session == SessionBehaviour::StopAfterJoins {
+        // The client's next PDU is the Client Info (MS-RDPBCGR 2.2.1.11) and
+        // this scenario does not answer it, so the client hangs up. Whatever
+        // arrives is recorded so a test can assert the teardown was ordered.
+        return drain(&mut stream, &recorded).await;
+    }
+
+    // ---- Phase 6: the Client Info PDU -----------------------------------
+    let frame = read_tpkt(&mut stream).await?;
+    let payload = expect_io_payload(&frame)?;
+    let info = ClientInfoPdu::decode(&mut Reader::new(&payload)).map_err(std::io::Error::other)?;
+    recorded.lock().expect("not poisoned").client_info = Some(info);
+
+    // ---- Phase 7: licensing ---------------------------------------------
+    match config.session {
+        SessionBehaviour::ServeWithoutLicensing => {}
+        SessionBehaviour::RefuseLicence => {
+            let bye = license_alert(
+                rdp_pdu::codes::LicenseError::NoLicenseServer,
+                rdp_pdu::codes::LicenseStateTransition::TotalAbort,
+            );
+            stream.write_all(&io_frame(&bye)).await?;
+            stream.flush().await?;
+            return drain(&mut stream, &recorded).await;
+        }
+        _ => {
+            // The one licensing answer a TLS session actually sees: "no
+            // licence is required, carry on" (MS-RDPBCGR 2.2.1.12.1.3).
+            let ok = license_alert(
+                rdp_pdu::codes::LicenseError::StatusValidClient,
+                rdp_pdu::codes::LicenseStateTransition::NoTransition,
+            );
+            stream.write_all(&io_frame(&ok)).await?;
+            stream.flush().await?;
+        }
+    }
+
+    // ---- Phase 9: the capability exchange -------------------------------
+    let capabilities = CapabilitySets::client_defaults(
+        SERVER_DESKTOP.0,
+        SERVER_DESKTOP.1,
+        SERVER_PDU_SOURCE,
+        InputCapabilitySet::client(0x0409, 4, 0, 12),
+        false,
+    );
+    let demand = SharePdu::DemandActive {
+        pdu_source: SERVER_PDU_SOURCE,
+        pdu: Box::new(DemandActivePdu {
+            share_id: SHARE_ID,
+            source_descriptor: b"RDP\0".to_vec(),
+            capabilities,
+            session_id: Some(1),
+        }),
+    };
+    stream.write_all(&io_frame(&encoded(&demand))).await?;
+    stream.flush().await?;
+
+    // The client answers with the Confirm Active and its four finalisation
+    // PDUs in one write, which may arrive in one read or in five.
+    for _ in 0..5 {
+        let frame = read_tpkt(&mut stream).await?;
+        let payload = expect_io_payload(&frame)?;
+        let share = SharePdu::decode(&mut Reader::new(&payload)).map_err(std::io::Error::other)?;
+        let mut rec = recorded.lock().expect("not poisoned");
+        match share {
+            SharePdu::ConfirmActive { pdu, .. } => {
+                rec.confirmed_share_id = Some(pdu.share_id);
+                rec.confirmed_capabilities = pdu
+                    .capabilities
+                    .sets
+                    .iter()
+                    .map(|set| set.capability_set_type())
+                    .collect();
+            }
+            SharePdu::Data { pdu, .. } => rec.finalization.push(pdu.pdu_type2()),
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "expected a confirm active or a share data pdu, got {other:?}"
+                )))
             }
         }
     }
-    Ok(())
+
+    // ---- Phase 10: the server's four, the Font Map last -----------------
+    for pdu in [
+        ShareDataPdu::Synchronize(SynchronizePdu::client(USER_CHANNEL_ID)),
+        ShareDataPdu::Control(ControlPdu::cooperate()),
+        ShareDataPdu::Control(ControlPdu {
+            action: rdp_pdu::rdp::finalize::control_action::GRANTED_CONTROL,
+            grant_id: USER_CHANNEL_ID,
+            control_id: u32::from(SERVER_PDU_SOURCE),
+        }),
+        ShareDataPdu::FontMap(FontMapPdu::server()),
+    ] {
+        let share = SharePdu::data(SERVER_PDU_SOURCE, SHARE_ID, pdu);
+        stream.write_all(&io_frame(&encoded(&share))).await?;
+    }
+    stream.flush().await?;
+
+    // ---- The live session: one bitmap update on the fast path -----------
+    let bitmap = BitmapUpdate {
+        rectangles: vec![BitmapData {
+            dest: RectInclusive {
+                left: BITMAP_AT.0,
+                top: BITMAP_AT.1,
+                right: BITMAP_AT.0 + 1,
+                bottom: BITMAP_AT.1 + 1,
+            },
+            width: 2,
+            height: 2,
+            bits_per_pixel: 24,
+            flags: 0,
+            compression_header: None,
+            data: Payload::new(BITMAP_ROWS),
+        }],
+    };
+    let mut body = Vec::new();
+    GraphicsUpdate::Bitmap(bitmap)
+        .encode_body(&mut Writer::new(&mut body))
+        .expect("the mock encodes what the client parses");
+    let mut wire = Vec::new();
+    encode_fastpath_update(
+        &mut Writer::new(&mut wire),
+        &[FpUpdate {
+            header: FpUpdateHeader::single(update_code::BITMAP),
+            data: Payload::new(&body),
+        }],
+    )
+    .expect("the mock encodes what the client parses");
+    stream.write_all(&wire).await?;
+    stream.flush().await?;
+
+    drain(&mut stream, &recorded).await
+}
+
+/// Read until the client hangs up, recording the input events and the
+/// disconnect ultimatum.
+///
+/// The mock's own framer for the two framings, deliberately naive and
+/// deliberately not shared with the client's: TPKT's first byte is version 3
+/// and a fast path header's low two bits are the action code, which is how
+/// MS-RDPBCGR 2.2.9.1.2 arranges for them to be told apart.
+async fn drain(stream: &mut TcpStream, recorded: &Arc<Mutex<Recorded>>) -> std::io::Result<()> {
+    use rdp_pdu::input::fastpath::FastPathInputPdu;
+
+    loop {
+        let mut first = [0u8; 1];
+        if stream.read_exact(&mut first).await.is_err() {
+            return Ok(());
+        }
+        if first[0] & 0x03 == 0x03 {
+            let mut rest = [0u8; 3];
+            stream.read_exact(&mut rest).await?;
+            let header = [first[0], rest[0], rest[1], rest[2]];
+            let total = x224::peek_tpkt_length(&header)
+                .map_err(std::io::Error::other)?
+                .ok_or_else(|| std::io::Error::other("short TPKT header"))?;
+            let mut frame = header.to_vec();
+            frame.resize(total, 0);
+            stream
+                .read_exact(&mut frame[x224::TPKT_HEADER_LEN..])
+                .await?;
+            let mut r = Reader::new(&frame);
+            if let Ok(mut body) = x224::read_data_tpdu(&mut r) {
+                if let Ok(DomainMcsPdu::DisconnectProviderUltimatum { reason }) =
+                    DomainMcsPdu::decode(&mut body)
+                {
+                    recorded.lock().expect("not poisoned").client_disconnect = Some(reason);
+                }
+            }
+            continue;
+        }
+
+        // A fast path input PDU. Its length field is one or two bytes and the
+        // top bit of the first says which (MS-RDPBCGR 2.2.8.1.2).
+        let mut len1 = [0u8; 1];
+        stream.read_exact(&mut len1).await?;
+        let total = if len1[0] & 0x80 == 0 {
+            usize::from(len1[0])
+        } else {
+            let mut len2 = [0u8; 1];
+            stream.read_exact(&mut len2).await?;
+            (usize::from(len1[0] & 0x7f) << 8) | usize::from(len2[0])
+        };
+        let header_len = if len1[0] & 0x80 == 0 { 2 } else { 3 };
+        let mut frame = vec![0u8; total];
+        frame[0] = first[0];
+        frame[1] = len1[0];
+        if header_len == 3 {
+            // The second length byte was already consumed above.
+            frame[2] = (total & 0xff) as u8;
+        }
+        stream.read_exact(&mut frame[header_len..]).await?;
+        let pdu =
+            FastPathInputPdu::decode(&mut Reader::new(&frame)).map_err(std::io::Error::other)?;
+        recorded
+            .lock()
+            .expect("not poisoned")
+            .input_events
+            .extend(pdu.events);
+    }
+}
+
+/// A server licensing `ERROR_ALERT` (MS-RDPBCGR 2.2.1.12.1.3).
+fn license_alert(
+    error_code: rdp_pdu::codes::LicenseError,
+    state_transition: rdp_pdu::codes::LicenseStateTransition,
+) -> Vec<u8> {
+    let message = LicenseErrorMessage {
+        error_code,
+        state_transition,
+        error_info: LicenseBinaryBlob::empty(blob_type::ANY),
+    };
+    let pdu = LicensePdu {
+        preamble: LicensePreamble {
+            msg_type: message_type::ERROR_ALERT,
+            flags: preamble_flags::VERSION_3_0,
+            msg_size: (LICENSE_PREAMBLE_LEN + message.size()) as u16,
+        },
+        message: LicenseMessage::ErrorAlert(message),
+    };
+    encoded(&pdu)
+}
+
+/// Wrap an encoded slow path PDU for the I/O channel, the way a server does.
+fn io_frame(body: &[u8]) -> Vec<u8> {
+    domain_frame(&DomainMcsPdu::SendDataIndication {
+        initiator: SERVER_PDU_SOURCE,
+        channel_id: IO_CHANNEL_ID,
+        payload: Payload::new(body),
+    })
+}
+
+/// The payload of a client Send Data Request on the I/O channel.
+fn expect_io_payload(frame: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut r = Reader::new(frame);
+    let mut body = x224::read_data_tpdu(&mut r).map_err(std::io::Error::other)?;
+    match DomainMcsPdu::decode(&mut body).map_err(std::io::Error::other)? {
+        DomainMcsPdu::SendDataRequest {
+            channel_id,
+            payload,
+            ..
+        } if channel_id == IO_CHANNEL_ID => Ok(payload.as_slice().to_vec()),
+        other => Err(std::io::Error::other(format!(
+            "expected a send data request on the I/O channel, got choice {}",
+            other.choice_index()
+        ))),
+    }
 }
 
 /// Record an Erect Domain Request or an Attach User Request.

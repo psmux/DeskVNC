@@ -45,23 +45,34 @@
 //!
 //! ## What works today
 //!
-//! The wire layer under this crate carries a client from the first byte on
-//! the socket to the end of MCS channel connection
-//! (`crates/rdp-pdu/src/lib.rs:36`), and this crate goes exactly that far:
-//! X.224 negotiation, the TLS upgrade, CredSSP through
-//! [`rdp_auth::CredSspClient`], the MCS Connect Initial with its GCC blocks,
-//! the Connect Response, Erect Domain, Attach User and the channel joins. At
-//! the Client Info PDU it stops with [`RdpError::NotImplemented`] naming
-//! [`ConnectStage::SendClientInfo`] and its specification section.
+//! The whole connection sequence of MS-RDPBCGR 1.3.1.1: X.224 negotiation, the
+//! TLS upgrade, CredSSP through [`rdp_auth::CredSspClient`], the MCS Connect
+//! Initial with its GCC blocks, the Connect Response, Erect Domain, Attach
+//! User and the channel joins, the Client Info PDU, licensing, the capability
+//! exchange and the connection finalisation. The session reaches
+//! [`remote_core::SessionState::Connected`] when the Font Map arrives.
 //!
-//! Three things it stops for that are somebody else's to provide, each
-//! reported as a typed error naming its phase rather than as a panic:
+//! After that the pump decodes legacy bitmap updates on both the fast path and
+//! the slow path into dirty rectangles, turns pointer updates into cursor
+//! shapes and positions, and sends fast path input. A Deactivate All and the
+//! Demand Active that follows it are answered from inside the pump, so a
+//! resolution change on the server does not end the session.
 //!
-//! * The TLS upgrade does not hand back the server's leaf certificate, so
-//!   CredSSP has no public key to bind to. PRDRDP/03 §4.3 owns the additive
-//!   `vnc_transport::tls::upgrade_with_identity` change.
-//! * `remote_core::PinScheme` has no `RdpTls` variant, so an unknown server
-//!   key is refused rather than prompted for.
+//! What is still missing, each reported as a typed error naming its phase
+//! rather than as a panic:
+//!
+//! * The trust on first use prompt. An unknown server key is refused rather
+//!   than shown, because emitting `SessionEvent::CertificatePrompt` means
+//!   parking the sequence on the answer, and the command channel does not
+//!   reach the connection sequence yet. The pin scheme itself is settled:
+//!   [`remote_core::PinScheme::RdpTls`].
+//! * The virtual channels. `cliprdr` and `drdynvc` are asked for and joined,
+//!   and data on them is ignored with a reason, so there is no clipboard, no
+//!   EGFX, no display control and no audio.
+//! * Surface commands, EGFX and every codec past interleaved RLE and planar.
+//!   The Surface Commands capability set is deliberately not advertised, so a
+//!   server falls back to Bitmap Updates rather than drawing into a surface we
+//!   cannot decode.
 //! * `remote_core::reconnect::supervise` and its `ConnectOnce` trait do not
 //!   exist, so a failed attempt reports and stops rather than retrying.
 //!

@@ -24,6 +24,12 @@ pub mod tls;
 #[cfg(feature = "legacy-tls")]
 pub mod tls_legacy;
 
+// The TLS handshake's result type and the backend selector are re-exported at
+// the crate root because both are part of this crate's contract with
+// `rdp-core` rather than details of the rustls module (PRDRDP/03 §4.7.1,
+// PRDRDP/12 §3.8).
+pub use tls::{TlsBackend, TlsUpgrade};
+
 /// Any bidirectional byte stream a VNC session can run over.
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
