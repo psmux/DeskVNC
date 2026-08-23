@@ -14,6 +14,18 @@ import { TabStrip, tabPanelId } from "./components/TabStrip";
 import { Pane } from "./components/Pane";
 import { ToastShelf } from "./components/primitives";
 import { safeListen } from "./lib/tauri";
+import { syncSessionMenu } from "./lib/menuSync";
+import { PREF_HIDE_TOOLBAR, readBoolPref, writeBoolPref } from "./lib/prefs";
+
+/**
+ * Tell the native menu that nothing is connected in the window in front.
+ *
+ * The toolbar preference is global and still applies, so it goes along; the
+ * session half of the menu greys out.
+ */
+function syncMenuState(): void {
+  syncSessionMenu(readBoolPref(PREF_HIDE_TOOLBAR, false), null);
+}
 
 /**
  * A session in a window of its own.
@@ -27,12 +39,17 @@ function SessionWindow(): ReactNode {
   const [aboutOpen, setAboutOpen] = useState(false);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
       if (id === "menu:about") setAboutOpen(true);
     }).then((fn) => {
-      unlisten = fn;
+      if (cancelled) fn();
+      else unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
   return (
     <>
@@ -88,11 +105,20 @@ function MainShell(): ReactNode {
     setState,
   } = useTabs();
 
+  // `select` already refuses an id that is not open, so this only differs from
+  // `activeId === null` for a tab closed in the same render. Belt and braces
+  // for the one state with no way out: no pane in front, and no strip either.
+  const libraryInFront = activeId === null || !tabs.some((t) => t.id === activeId);
+  // Read inside the menu listener, which is registered once.
+  const libraryInFrontRef = useRef(libraryInFront);
+  libraryInFrontRef.current = libraryInFront;
+
   // menu.rs emits `menu://action` for every custom item and expects the
   // frontend to route it. Items handled natively there (fullscreen, the Help
   // URL) never reach this listener.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
       if (id === "menu:about") setAboutOpen(true);
       else if (id === "menu:settings") setPrefsOpen(true);
@@ -100,11 +126,42 @@ function MainShell(): ReactNode {
       else if (id === "menu:tab:prev") selectRelative(-1);
       else if (id === "menu:tab:close") closeActive();
       else if (id === "menu:tab:library") select(null);
+      else if (id === "menu:hide-toolbar" && libraryInFrontRef.current) {
+        // A session mounted in a tab lives in THIS window and hears the same
+        // event, so only one of us may act on it: with a session in front it
+        // is that session's, and toggling here as well would land back on the
+        // value it started from.
+        writeBoolPref(PREF_HIDE_TOOLBAR, !readBoolPref(PREF_HIDE_TOOLBAR, false));
+        syncMenuState();
+      }
     }).then((fn) => {
-      unlisten = fn;
+      // `safeListen` resolves a turn later than the effect that started it, so
+      // a cleanup that has already run left `unlisten` to be assigned after
+      // the fact and the listener stayed registered for good. Every re-run
+      // then added another, and each one acted on the same event: harmless
+      // for "open the About dialog", but it made a toggle like
+      // `menu:hide-toolbar` fire twice and land back where it started.
+      if (cancelled) fn();
+      else unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [selectRelative, closeActive, select]);
+
+  /**
+   * With the library in front there is no session for the View and Session
+   * menus to act on, so they are greyed out rather than left showing the ticks
+   * of whichever session was last looked at. A session pushes its own state
+   * over this the moment it takes the focus.
+   */
+  useEffect(() => {
+    if (!libraryInFront) return;
+    syncMenuState();
+    window.addEventListener("focus", syncMenuState);
+    return () => window.removeEventListener("focus", syncMenuState);
+  }, [libraryInFront]);
 
   /**
    * Cmd/Ctrl+1…9 selects a tab by position, 1 being the library.
@@ -178,11 +235,6 @@ function MainShell(): ReactNode {
       />
     );
   }
-
-  // `select` already refuses an id that is not open, so this only differs from
-  // `activeId === null` for a tab closed in the same render. Belt and braces
-  // for the one state with no way out: no pane in front, and no strip either.
-  const libraryInFront = activeId === null || !tabs.some((t) => t.id === activeId);
 
   return (
     <div className="flex h-full flex-col">

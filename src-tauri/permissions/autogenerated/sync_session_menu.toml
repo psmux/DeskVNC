@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sync-session-menu"
+description = "Enables the sync_session_menu command without any pre-configured scope."
+commands.allow = ["sync_session_menu"]
+
+[[permission]]
+identifier = "deny-sync-session-menu"
+description = "Denies the sync_session_menu command without any pre-configured scope."
+commands.deny = ["sync_session_menu"]

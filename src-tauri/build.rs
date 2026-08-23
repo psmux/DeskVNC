@@ -114,6 +114,9 @@ fn main() {
             "set_app_setting",
             // build/system fingerprint for the About dialog and bug reports
             "about_info",
+            // the native menu mirrors the session toolbar, so the webview has
+            // to push it the state that toolbar would have shown
+            "sync_session_menu",
             // credentials (write/query only, passwords never flow back to JS)
             "save_password",
             "has_password",
@@ -135,6 +138,7 @@ fn main() {
             "request_resize",
             "refresh_session",
             "set_view_only",
+            "set_always_refresh",
             "set_prefer_scancodes",
             "send_clipboard",
             // OS clipboard, natively. `navigator.clipboard` is gesture-gated in

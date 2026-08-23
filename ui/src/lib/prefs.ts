@@ -51,6 +51,15 @@ export const PREF_ZOOM_LOCKED = "zoomLocked";
  * moving under them distracting. Space-drag panning works either way.
  */
 export const PREF_EDGE_PAN = "edgePan";
+/**
+ * Take the floating toolbar out of the session view altogether.
+ *
+ * Everything it offers is also on the View and Session menus, which is what
+ * makes switching it off a real choice rather than a loss: some people would
+ * rather have nothing at all over the remote desktop, and a bar that fades to
+ * a chevron still leaves the chevron. Off by default.
+ */
+export const PREF_HIDE_TOOLBAR = "hideToolbar";
 
 export function prefStorageKey(key: string): string {
   return `${PREFIX}${key}`;

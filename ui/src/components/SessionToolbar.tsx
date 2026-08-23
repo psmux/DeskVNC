@@ -12,6 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import type { DisplayOption, QualityPreset, ScalingMode, SessionState, SessionStats } from "../lib/types";
+import { displayLabel } from "../lib/displays";
 import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
 import { classNames, formatBps, modKeyLabel } from "../lib/util";
@@ -120,7 +121,11 @@ export interface SessionToolbarProps {
   onZoomLocked: (locked: boolean) => void;
   edgePan: boolean;
   onEdgePan: (on: boolean) => void;
-  /** Rows for the Displays menu: real monitors, or synthetic splits. */
+  /**
+   * Rows for the Displays menu: real monitors, or synthetic splits, already
+   * in the order to show them. Ordered by the caller so this menu and the
+   * native View ▸ Displays submenu number the monitors the same way.
+   */
   screens: DisplayOption[];
   /** True when `screens` is the server's own layout rather than guesses. */
   layoutKnown: boolean;
@@ -158,19 +163,6 @@ export interface SessionToolbarProps {
 }
 
 export function SessionToolbar(props: SessionToolbarProps): ReactNode {
-  /**
-   * A real layout goes in reading order (left to right, top to bottom), so
-   * "Display 1" is the leftmost monitor rather than whichever id the server
-   * listed first. Synthetic splits keep their authored order: sorting them
-   * by x would interleave every "Left ..." variant ahead of every "Right".
-   */
-  const orderedScreens = useMemo(
-    () =>
-      props.layoutKnown
-        ? [...props.screens].sort((a, b) => a.x - b.x || a.y - b.y)
-        : props.screens,
-    [props.layoutKnown, props.screens],
-  );
   const [pos, setPos] = useState<ToolbarPos>(readPos);
   const [pinned, setPinned] = useState<boolean>(readPinned);
   /** Latest position, for the drag handler to persist on drop. */
@@ -552,7 +544,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           <IconMonitor size={15} />
           {props.displayId !== null ? (
             <span className="text-xs text-secondary">
-              {orderedScreens.findIndex((s) => s.id === props.displayId) + 1}/{orderedScreens.length}
+              {props.screens.findIndex((s) => s.id === props.displayId) + 1}/{props.screens.length}
             </span>
           ) : null}
         </ToolButton>
@@ -667,7 +659,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           )}
           role="menu"
         >
-          {openMenu === "status" ? <StatusMenu stats={props.stats} desktopName={props.desktopName} /> : null}
+          {openMenu === "status" ? (
+            <div className="w-60 px-2.5 py-1.5">
+              <SessionStatusDetails stats={props.stats} desktopName={props.desktopName} />
+            </div>
+          ) : null}
           {openMenu === "scale" ? (
             <div>
               {(["fit", "aspect-fit", "actual"] as ScalingMode[]).map((m) => (
@@ -743,25 +739,25 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
               <MenuRow selected={props.displayId === null} onClick={() => props.onDisplay(null)}>
                 All displays
               </MenuRow>
-              {!props.layoutKnown && orderedScreens.length > 0 ? (
+              {!props.layoutKnown && props.screens.length > 0 ? (
                 <p className="px-2.5 pt-2 pb-1 text-2xs uppercase tracking-wide text-tertiary">
                   Split this desktop
                 </p>
               ) : null}
-              {orderedScreens.map((s, i) => (
+              {props.screens.map((s, i) => (
                 <MenuRow
                   key={s.id}
                   selected={props.displayId === s.id}
                   onClick={() => props.onDisplay(s.id)}
                 >
-                  {s.label ?? `Display ${i + 1} (${s.width}×${s.height})`}
+                  {displayLabel(s, i)}
                 </MenuRow>
               ))}
               {!props.layoutKnown ? (
                 <>
                   <MenuRow onClick={props.onDetectDisplays}>Detect displays again</MenuRow>
                   <p className="px-2.5 py-1 text-2xs text-tertiary">
-                    {orderedScreens.length > 0
+                    {props.screens.length > 0
                       ? "This server does not say where its monitors meet: detection reads the picture, the other cuts are guesses by width."
                       : "This server has not described its monitors, so the whole desktop is one display."}
                   </p>
@@ -1041,9 +1037,21 @@ function MenuRow({
   );
 }
 
-function StatusMenu({ stats, desktopName }: { stats: SessionStats | null; desktopName: string }): ReactNode {
+/**
+ * What the connection is doing. Exported because Session ▸ Connection Info
+ * shows the same figures in a dialog: with the toolbar hidden there is no
+ * status button to open, and the latency reading is the first thing anyone
+ * looks for when a session feels slow.
+ */
+export function SessionStatusDetails({
+  stats,
+  desktopName,
+}: {
+  stats: SessionStats | null;
+  desktopName: string;
+}): ReactNode {
   return (
-    <div className="w-60 px-2.5 py-1.5 text-sm">
+    <div className="text-sm">
       <p className="mb-2 truncate font-medium text-primary">{desktopName}</p>
       {stats ? (
         <dl className="grid grid-cols-2 gap-y-1 text-xs">

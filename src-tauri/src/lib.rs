@@ -167,6 +167,8 @@ pub fn run() {
             commands::about::about_info,
             commands::hosts::get_app_setting,
             commands::hosts::set_app_setting,
+            // native menu
+            commands::menu::sync_session_menu,
             // credentials
             commands::credentials::save_password,
             commands::credentials::has_password,

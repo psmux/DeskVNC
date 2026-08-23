@@ -1,23 +1,28 @@
 /** Preferences: sidebar-tabbed, every setting with a one-line description (PRD/11 §3.4). */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useSettings, type ThemeChoice } from "../state/SettingsContext";
+import { useSettings, type LocalCursor, type ThemeChoice } from "../state/SettingsContext";
 import { useSessions } from "../state/SessionsContext";
 import { ALLOW_MULTIPLE_SESSIONS_KEY, safeInvoke } from "../lib/tauri";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_FOCUS,
   PREF_CLIPBOARD_ON_PASTE,
+  PREF_EDGE_PAN,
   PREF_FORWARD_INSERTED_TEXT,
+  PREF_HIDE_TOOLBAR,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
+  PREF_ZOOM_LOCKED,
   readBoolPref,
   writeBoolPref,
 } from "../lib/prefs";
+import { readViewDefaults, writeViewDefaults, type ViewPrefs } from "../lib/viewPrefs";
+import type { QualityPreset, ScalingMode } from "../lib/types";
 import { classNames } from "../lib/util";
 import { IconX } from "../components/icons";
 
 const TABS = [
-  "General", "Appearance", "Connections", "Input", "Clipboard", "Files", "Security", "Network",
+  "General", "Appearance", "Connections", "Session", "Input", "Clipboard", "Files", "Security", "Network",
 ] as const;
 type Tab = (typeof TABS)[number];
 
@@ -36,6 +41,22 @@ function usePref(key: string, initial: boolean): [boolean, (v: boolean) => void]
   return [v, setV];
 }
 
+
+/**
+ * The starting point for a computer nothing has been adjusted on.
+ *
+ * These are not live settings: changing one here reaches the computers you
+ * have never touched these options on, and leaves alone the ones you have,
+ * because a choice made while looking at a particular desktop is about that
+ * desktop. See `lib/viewPrefs`.
+ */
+function useViewDefaults(): [ViewPrefs, (patch: Partial<ViewPrefs>) => void] {
+  const [value, setValue] = useState<ViewPrefs>(readViewDefaults);
+  const set = useCallback((patch: Partial<ViewPrefs>) => {
+    setValue(writeViewDefaults(patch));
+  }, []);
+  return [value, set];
+}
 
 /**
  * A preference that lives in the Rust store rather than localStorage, because
@@ -88,6 +109,10 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [confirmFileOverwrite, setConfirmFileOverwrite] = usePref("confirmFileOverwrite", true);
   const [strictTofu, setStrictTofu] = usePref("strictTofu", true);
   const [mdnsEnabled, setMdnsEnabled] = usePref("mdnsEnabled", true);
+  const [hideToolbar, setHideToolbar] = usePref(PREF_HIDE_TOOLBAR, false);
+  const [zoomLocked, setZoomLocked] = usePref(PREF_ZOOM_LOCKED, false);
+  const [edgePan, setEdgePan] = usePref(PREF_EDGE_PAN, true);
+  const [viewDefaults, setViewDefaults] = useViewDefaults();
 
   useEffect(() => {
     void safeInvoke<string | null>("credential_backend", undefined, null).then(setCredBackend);
@@ -239,6 +264,101 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                 />
               </>
             ) : null}
+            {tab === "Session" ? (
+              <>
+                <Toggle
+                  label="Hide the floating toolbar"
+                  description="Leave nothing on top of the remote desktop. Everything the toolbar does stays available from the View and Session menus, which show what each session is set to."
+                  value={hideToolbar}
+                  onChange={setHideToolbar}
+                />
+                <Toggle
+                  label="Lock zoom"
+                  description="Ignore pinch-to-zoom, which is easy to trigger by accident mid-scroll on a trackpad. The zoom controls still work."
+                  value={zoomLocked}
+                  onChange={setZoomLocked}
+                />
+                <Toggle
+                  label="Pan by moving to the edges"
+                  description="Scroll the view when the pointer reaches an edge, for a desktop larger than the window. With this off, the part of the screen past the edge can only be reached by space-dragging."
+                  value={edgePan}
+                  onChange={setEdgePan}
+                />
+
+                <div className="border-t border-subtle pt-5">
+                  <p className="text-sm font-medium text-primary">Defaults for new computers</p>
+                  <p className="mt-0.5 text-xs text-tertiary">
+                    Where a computer starts before you have adjusted anything on it. Change one of
+                    these while connected, from the toolbar or the menus, and it is remembered
+                    against that computer from then on, including which monitor you picked.
+                  </p>
+                </div>
+
+                <Choice
+                  label="Scaling"
+                  description="How the remote desktop is fitted into the window"
+                  value={viewDefaults.scalingMode}
+                  options={
+                    [
+                      ["aspect-fit", "Aspect fit"],
+                      ["fit", "Fit"],
+                      ["actual", "1:1"],
+                      ["remote-resize", "Remote"],
+                    ] as [ScalingMode, string][]
+                  }
+                  onChange={(scalingMode) => setViewDefaults({ scalingMode })}
+                />
+                <Choice
+                  label="Quality"
+                  description="Auto infers the link from throughput; the others say what the link is and stop it adapting"
+                  value={viewDefaults.quality}
+                  options={
+                    [
+                      ["auto", "Auto"],
+                      ["high", "High"],
+                      ["medium", "Medium"],
+                      ["low", "Low"],
+                      ["bw", "B&W"],
+                    ] as [QualityPreset, string][]
+                  }
+                  onChange={(quality) => setViewDefaults({ quality })}
+                />
+                {viewDefaults.quality === "bw" ? (
+                  <Choice
+                    label="Gray levels"
+                    description="How many shades the black-and-white preset keeps"
+                    value={String(viewDefaults.bwLevels)}
+                    options={[
+                      ["256", "256"],
+                      ["16", "16"],
+                      ["8", "8"],
+                      ["4", "4"],
+                      ["2", "2"],
+                      ["1", "1-bit"],
+                    ]}
+                    onChange={(v) => setViewDefaults({ bwLevels: Number(v) })}
+                  />
+                ) : null}
+                <Toggle
+                  label="Start in view only"
+                  description="Watch without sending any input. Nothing you type or click reaches the remote computer until you turn it off."
+                  value={viewDefaults.viewOnly}
+                  onChange={(viewOnly) => setViewDefaults({ viewOnly })}
+                />
+                <Toggle
+                  label="Always request fresh frames"
+                  description="Re-fetch the whole screen every second instead of trusting the server to report what changed. Fixes a picture that stays stale or smeared; uses more bandwidth."
+                  value={viewDefaults.alwaysRefresh}
+                  onChange={(alwaysRefresh) => setViewDefaults({ alwaysRefresh })}
+                />
+                <Toggle
+                  label="Pass system shortcuts to the remote"
+                  description="Send Cmd/Alt+Tab, Cmd+Space and the Windows key to the remote computer instead of this one. Needs Accessibility permission on macOS, and grabs your keyboard while a session is focused; release it at any time with Ctrl+Alt+Shift+Esc."
+                  value={viewDefaults.passthrough}
+                  onChange={(passthrough) => setViewDefaults({ passthrough })}
+                />
+              </>
+            ) : null}
             {tab === "Input" ? (
               <>
                 <Toggle
@@ -264,6 +384,19 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Draw the remote machine's own mouse cursor. Turn this off if two pointers feel distracting, your input is sent either way."
                   value={settings.showRemoteCursor}
                   onChange={(v) => update({ showRemoteCursor: v })}
+                />
+                <Choice
+                  label="My pointer"
+                  description="The system arrow covers the pixels under its own tip, which is where the remote pointer sits, so with both drawn they crowd each other. Dot is a ring centred on the hotspot; Hidden leaves only the remote pointer."
+                  value={settings.localCursor}
+                  options={
+                    [
+                      ["standard", "Standard arrow"],
+                      ["dot", "Dot"],
+                      ["off", "Hidden"],
+                    ] as [LocalCursor, string][]
+                  }
+                  onChange={(localCursor) => update({ localCursor })}
                 />
               </>
             ) : null}
@@ -341,6 +474,53 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             ) : null}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One of several, laid out like the theme picker.
+ *
+ * Buttons rather than a `<select>`: the lists here are short and the whole
+ * point of a defaults page is being able to see what the choices are without
+ * opening anything.
+ */
+function Choice<T extends string>({
+  label,
+  description,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: T;
+  options: [T, string][];
+  onChange: (value: T) => void;
+}): ReactNode {
+  return (
+    <div>
+      <p className="text-sm font-medium text-primary">{label}</p>
+      <p className="mb-2 text-xs text-tertiary">{description}</p>
+      <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={label}>
+        {options.map(([key, text]) => (
+          <button
+            key={key}
+            type="button"
+            role="radio"
+            aria-checked={value === key}
+            className={classNames(
+              "rounded-md border px-3.5 py-1.5 text-sm",
+              value === key
+                ? "border-accent bg-accent/10 font-medium text-primary"
+                : "border-subtle text-secondary hover:border-strong",
+            )}
+            onClick={() => onChange(key)}
+          >
+            {text}
+          </button>
+        ))}
       </div>
     </div>
   );

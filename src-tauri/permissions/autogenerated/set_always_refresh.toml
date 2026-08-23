@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-always-refresh"
+description = "Enables the set_always_refresh command without any pre-configured scope."
+commands.allow = ["set_always_refresh"]
+
+[[permission]]
+identifier = "deny-set-always-refresh"
+description = "Denies the set_always_refresh command without any pre-configured scope."
+commands.deny = ["set_always_refresh"]
