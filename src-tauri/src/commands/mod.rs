@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod discovery;
 pub mod files;
 pub mod hosts;
+pub mod menu;
 pub mod session;
 
 /// Run a blocking storage/keychain closure off the async runtime and flatten

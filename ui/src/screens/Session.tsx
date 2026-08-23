@@ -19,7 +19,7 @@ import {
   type SessionParams,
 } from "../hooks/useSession";
 import { useLivePreview } from "../hooks/useLivePreview";
-import { SessionToolbar } from "../components/SessionToolbar";
+import { SessionStatusDetails, SessionToolbar } from "../components/SessionToolbar";
 import { CertPrompt } from "../components/CertPrompt";
 import { CredentialPrompt } from "../components/CredentialPrompt";
 import { SshHostKeyPrompt } from "../components/SshHostKeyPrompt";
@@ -31,12 +31,29 @@ import { useSettings } from "../state/SettingsContext";
 import { classNames } from "../lib/util";
 import { Dialog } from "../components/primitives";
 import { candidateSeams, detectVerticalSeam } from "../render/seams";
-import type { DisplayOption, QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import {
+  buildDisplayOptions,
+  displayLabel,
+  matchDisplay,
+  orderDisplays,
+  toChoice,
+  type DisplayChoice,
+} from "../lib/displays";
+import {
+  readViewPrefs,
+  sameViewPrefs,
+  viewPrefsKey,
+  writeViewPrefs,
+  type ViewPrefs,
+} from "../lib/viewPrefs";
+import { syncSessionMenu, type SessionMenuState } from "../lib/menuSync";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
   PREF_FORWARD_INSERTED_TEXT,
   PREF_CLIPBOARD_ON_FOCUS,
+  PREF_HIDE_TOOLBAR,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
   PREF_EDGE_PAN,
@@ -76,46 +93,8 @@ const CAPTURE_CLOSE_BUDGET_MS = 700;
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, ms));
 
-/**
- * Candidate ways to cut a desktop the server never described into monitors.
- *
- * TightVNC-family servers serve a multi-head desktop as one wide framebuffer
- * and say nothing about where the seams are, so the only honest offer is a
- * short list of plausible cuts: equal halves, and one common monitor width
- * (the widest of 2560/1920/1440 that leaves a usable remainder) on either
- * side, both ways round because nothing says which side the big monitor is
- * on. Ids are negative so they can never collide with a wire screen id.
- */
-function syntheticSplits(w: number, h: number): DisplayOption[] {
-  const out: DisplayOption[] = [];
-  let id = -1;
-  const add = (x: number, width: number, label: string): void => {
-    out.push({ id: id--, x, y: 0, width, height: h, label });
-  };
-  if (w < 1280) return out;
-  const half = Math.floor(w / 2);
-  add(0, half, `Left half (${half}×${h})`);
-  add(half, w - half, `Right half (${w - half}×${h})`);
-  for (const mw of [2560, 1920, 1440]) {
-    const rest = w - mw;
-    if (rest >= 320 && mw !== half) {
-      add(0, mw, `Left ${mw}×${h}`);
-      add(mw, rest, `Right ${rest}×${h}`);
-      if (rest !== mw) {
-        add(0, rest, `Left ${rest}×${h}`);
-        add(rest, mw, `Right ${mw}×${h}`);
-      }
-      break; // one width is a menu; three is a wall
-    }
-  }
-  if (w >= 3 * 1024) {
-    const t = Math.floor(w / 3);
-    add(0, t, `Left third (${t}×${h})`);
-    add(t, t, `Middle third (${t}×${h})`);
-    add(2 * t, w - 2 * t, `Right third (${w - 2 * t}×${h})`);
-  }
-  return out;
-}
+/** How long a settings change is left to settle before it is written out. */
+const SETTINGS_WRITE_MS = 400;
 
 // ---------------------------------------------------------------- closing
 //
@@ -253,15 +232,45 @@ function SessionView({
     rendererRef.current?.setCursorVisible(settings.showRemoteCursor);
   }, [settings.showRemoteCursor]);
 
-  const [scalingMode, setScalingModeState] = useState<ScalingMode>("aspect-fit");
-  const [zoom, setZoomState] = useState(1);
-  const [quality, setQualityState] = useState<QualityPreset>("auto");
-  const [bwLevels, setBwLevelsState] = useState(16);
-  const [passthrough, setPassthroughState] = useState(false);
+  /**
+   * What this computer is set to (Preferences ▸ Session supplies the defaults
+   * for one nothing has been changed on). Read once: `params` is fixed for the
+   * life of the view, and every later change goes out through the write effect
+   * below rather than coming back in through here.
+   */
+  const prefsKey = useMemo(() => viewPrefsKey(params), [params]);
+  const [stored] = useState(() => readViewPrefs(prefsKey));
+
+  const [scalingMode, setScalingModeState] = useState<ScalingMode>(stored.scalingMode);
+  const [zoom, setZoomState] = useState(stored.zoom);
+  const [quality, setQualityState] = useState<QualityPreset>(stored.quality);
+  const [bwLevels, setBwLevelsState] = useState(stored.bwLevels);
+  /**
+   * The switch, not the grab. It comes back on from the stored settings, but
+   * capture itself is only armed once there is a session to arm it for, by the
+   * reapply effect further down.
+   */
+  const [passthrough, setPassthroughState] = useState(stored.passthrough);
   const [capture, setCapture] = useState<CaptureStatus>(CAPTURE_INACTIVE);
   const [showCaptureHelp, setShowCaptureHelp] = useState(false);
-  const [viewOnly, setViewOnlyState] = useState(false);
+  const [viewOnly, setViewOnlyState] = useState(stored.viewOnly);
+  /** Manual staleness override; off by default because it costs bandwidth. */
+  const [alwaysRefresh, setAlwaysRefresh] = useState(stored.alwaysRefresh);
   const [recallSignal, setRecallSignal] = useState(0);
+  const [connectionInfoOpen, setConnectionInfoOpen] = useState(false);
+  /**
+   * Bumped by every native-menu action, so the menu's state is re-asserted
+   * after the render even when the action changed nothing. See the note where
+   * it is bumped.
+   */
+  const [menuNonce, setMenuNonce] = useState(0);
+  /**
+   * Preferences ▸ Session can take the floating toolbar away entirely, in
+   * which case the View and Session menus are the only way to any of it. Read
+   * on mount and re-read on focus, the same way the input preferences are: the
+   * window that changed it is not this one.
+   */
+  const [hideToolbar, setHideToolbar] = useState(() => readBoolPref(PREF_HIDE_TOOLBAR, false));
   /**
    * Latest values for the native-menu listener below. It is registered once
    * per visible view, while these callbacks are defined further down and are
@@ -274,9 +283,19 @@ function SessionView({
   const sendComboRef = useRef<((c: "ctrl-alt-del") => void) | null>(null);
   const disconnectRef = useRef<(() => void) | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ w: number; h: number } | null>(null);
-  /** Which monitor is on display: a screen id from the server's layout, or
-   *  null for the whole desktop. Per-session, deliberately not persisted. */
-  const [displayId, setDisplayId] = useState<number | null>(null);
+  /**
+   * The monitor the user asked for, remembered against this computer, or null
+   * for the whole desktop.
+   *
+   * This is the INTENT, not the applied selection: it survives a layout that
+   * goes away and comes back (a reconnect arrives with an empty screen list
+   * before the server describes itself again, and the seam detector only runs
+   * a second after the desktop has settled), where an applied id could only be
+   * dropped on the floor. What is showing right now is `activeDisplay` below,
+   * derived by matching this against whatever the session is currently
+   * offering.
+   */
+  const [desiredDisplay, setDesiredDisplay] = useState<DisplayChoice | null>(stored.display);
   const [scrimFading, setScrimFading] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   /** null while the SSH probe runs; false disables the Files button. */
@@ -504,6 +523,7 @@ function SessionView({
     const sync = (): void => {
       inputRef.current?.setNaturalScroll(readBoolPref(PREF_NATURAL_SCROLL, true));
       inputRef.current?.setForwardInsertedText(readBoolPref(PREF_FORWARD_INSERTED_TEXT, true));
+      setHideToolbar(readBoolPref(PREF_HIDE_TOOLBAR, false));
       if (sid) {
         const matchLocal = readBoolPref(PREF_MATCH_LOCAL_LAYOUT, false);
         void safeInvoke(
@@ -552,13 +572,17 @@ function SessionView({
   }, [params.sessionId]);
 
   // Release the grab when the session ends, whatever ended it.
+  //
+  // The GRAB, not the switch. The switch is what this computer remembers about
+  // pass-through, and a session ending is not the user saying they want it
+  // off: clearing it here wrote "off" back to the stored settings on every
+  // disconnect, so the preference could never survive one. Reconnecting re-arms
+  // from it (see the reapply effect), and the force-release below does still
+  // clear it, because that one IS the user asking for their keyboard back.
   useEffect(() => {
     const sid = params.sessionId;
     if (!sid) return;
-    if (session.state.state === "disconnected") {
-      setPassthroughState(false);
-      void captureStop(sid);
-    }
+    if (session.state.state === "disconnected") void captureStop(sid);
   }, [session.state.state, params.sessionId]);
 
   // …and on unmount, belt-and-braces alongside the shell's window hooks.
@@ -655,39 +679,43 @@ function SessionView({
     return () => window.clearTimeout(t);
   }, [layoutKnown, session.state.state, remoteSize, detectDisplays]);
 
-  /**
-   * What the Displays menu offers: the server's own monitor layout when it
-   * sent one; else the detected pair when the seam detector found one, on
-   * top of synthetic width splits, so a TightVNC-style multi-head desktop
-   * is still separable by hand when detection has nothing to see.
-   */
-  const displayOptions = useMemo((): DisplayOption[] => {
-    if (layoutKnown) return session.screens;
-    if (!remoteSize) return [];
-    const opts: DisplayOption[] = [];
-    const seam = detectedSeam && detectedSeam.forWidth === remoteSize.w ? detectedSeam.x : null;
-    if (seam !== null && seam > 0 && seam < remoteSize.w) {
-      opts.push(
-        { id: -101, x: 0, y: 0, width: seam, height: remoteSize.h, label: `Display 1 (detected, ${seam}×${remoteSize.h})` },
-        { id: -102, x: seam, y: 0, width: remoteSize.w - seam, height: remoteSize.h, label: `Display 2 (detected, ${remoteSize.w - seam}×${remoteSize.h})` },
-      );
-    }
-    // Manual cuts that duplicate the detected pair would read as a choice
-    // where there is none; drop them.
-    for (const s of syntheticSplits(remoteSize.w, remoteSize.h)) {
-      if (!opts.some((o) => o.x === s.x && o.width === s.width)) opts.push(s);
-    }
-    return opts;
-  }, [layoutKnown, session.screens, remoteSize, detectedSeam]);
+  /** What the Displays menus offer (see `lib/displays`). */
+  const displayOptions = useMemo(
+    () =>
+      buildDisplayOptions(
+        session.screens,
+        remoteSize,
+        detectedSeam && detectedSeam.forWidth === remoteSize?.w ? detectedSeam.x : null,
+      ),
+    [session.screens, remoteSize, detectedSeam],
+  );
 
-  // A selection whose id vanished from the options (server rearranged its
-  // monitors, desktop resized under a synthetic split, reconnect to a
-  // different machine) falls back to everything.
-  useEffect(() => {
-    if (displayId !== null && !displayOptions.some((s) => s.id === displayId)) {
-      setDisplayId(null);
-    }
-  }, [displayOptions, displayId]);
+  /**
+   * The monitor actually on display: the remembered choice resolved against
+   * what is on offer right now, or null when nothing matches it any more.
+   *
+   * Derived rather than stored, which is what makes the choice stick. A
+   * reconnect, a desktop resize and the seam detector each rebuild the list,
+   * and the old code cleared the selection whenever its id was momentarily
+   * missing from it, so the monitor was lost on every one of those. Here a
+   * list that no longer matches simply shows the whole desktop until one does
+   * again; the intent is never destroyed by anything except the user changing
+   * it.
+   */
+  const activeDisplay = useMemo(
+    () => matchDisplay(desiredDisplay, displayOptions),
+    [desiredDisplay, displayOptions],
+  );
+  const displayId = activeDisplay?.id ?? null;
+
+  const chooseDisplay = useCallback(
+    (id: number | null): void => {
+      setDesiredDisplay(
+        id === null ? null : toChoice(displayOptions.find((o) => o.id === id)),
+      );
+    },
+    [displayOptions],
+  );
 
   // Push the monitor view into the renderer. `remoteSize` is a dependency on
   // purpose: a desktop resize clears the renderer's view rect (the old
@@ -696,14 +724,88 @@ function SessionView({
   useEffect(() => {
     const r = rendererRef.current;
     if (!viewReady || !r) return;
-    const screen = displayId !== null ? displayOptions.find((s) => s.id === displayId) : undefined;
-    if (screen) r.setViewRect(screen.x, screen.y, screen.width, screen.height);
-    else r.clearViewRect();
-  }, [viewReady, displayId, displayOptions, remoteSize]);
+    if (activeDisplay) {
+      r.setViewRect(activeDisplay.x, activeDisplay.y, activeDisplay.width, activeDisplay.height);
+    } else {
+      r.clearViewRect();
+    }
+  }, [viewReady, activeDisplay, remoteSize]);
 
   useEffect(() => {
     rendererRef.current?.setGrayLevels(quality === "bw" ? bwLevels : 0);
   }, [quality, bwLevels]);
+
+  // ------------------------------------------------------ remembered settings
+
+  /**
+   * Write what the toolbar changed back against this computer.
+   *
+   * One effect for the lot rather than a write inside each setter, so a new
+   * setting cannot be added and quietly forgotten. Debounced because `zoom`
+   * moves continuously under a pinch gesture and under the toolbar's slider,
+   * and a `localStorage` write per frame for the length of a gesture is a
+   * write per frame nobody asked for; the timer coalesces them into one.
+   */
+  useEffect(() => {
+    const next: ViewPrefs = {
+      scalingMode,
+      zoom,
+      quality,
+      bwLevels,
+      alwaysRefresh,
+      viewOnly,
+      passthrough,
+      display: desiredDisplay,
+    };
+    // Nothing has been adjusted on this computer yet, so leave it with none of
+    // its own: writing the blob out here would pin today's Preferences
+    // defaults against it, and a later change to those defaults would then
+    // never reach a machine merely because it had once been connected to.
+    if (sameViewPrefs(next, stored)) return;
+    const t = window.setTimeout(() => writeViewPrefs(prefsKey, next), SETTINGS_WRITE_MS);
+    return () => window.clearTimeout(t);
+  }, [
+    stored,
+    prefsKey,
+    scalingMode,
+    zoom,
+    quality,
+    bwLevels,
+    alwaysRefresh,
+    viewOnly,
+    passthrough,
+    desiredDisplay,
+  ]);
+
+  /**
+   * Put the remembered settings back once there is a session to put them to.
+   *
+   * Three of them are not the view's to apply on its own: quality and view-only
+   * are connection state in the protocol core, and pass-through is a keyboard
+   * grab in the shell. They are re-asserted on every arrival at `connected`,
+   * not only the first, because an automatic reconnect builds a fresh
+   * connection underneath a view that never unmounted.
+   *
+   * Read through a ref so the effect fires on the connection state and nothing
+   * else: depending on the values themselves would re-push all of them every
+   * time any one of them changed, and `useSession` hands back a new object on
+   * every stats tick.
+   */
+  const restoreRef = useRef({ quality, viewOnly, alwaysRefresh, passthrough });
+  restoreRef.current = { quality, viewOnly, alwaysRefresh, passthrough };
+  useEffect(() => {
+    if (session.state.state !== "connected") return;
+    const want = restoreRef.current;
+    const api = sessionRef.current;
+    api.setQuality(want.quality);
+    api.setViewOnly(want.viewOnly);
+    api.setAlwaysRefresh(want.alwaysRefresh);
+    // Quietly: the Accessibility explainer is a response to the user asking
+    // for pass-through, not something to raise on its own on every connect.
+    // A refusal leaves the badge and the menu showing what really happened.
+    const sid = params.sessionId;
+    if (want.passthrough && sid) void captureStart(sid).then(setCapture);
+  }, [session.state.state, params.sessionId]);
 
   // Window title: name + resolution. A tab does not own the window title,
   // the shell sets it from whichever tab is in front.
@@ -1110,53 +1212,33 @@ function SessionView({
    * Session and Connection menus, and the three View items that are not
    * handled natively, silently did nothing (issue #1). Only the view in
    * front may act: the event reaches every mounted tab.
+   *
+   * The table itself is built further down (`menuActionsRef`), once every
+   * callback it reaches for exists. Through a ref rather than in the
+   * dependency list because the menu now covers the whole toolbar: listing
+   * two dozen callbacks here would tear the listener down and re-register it
+   * on most renders, and leaving them out is how a switch quietly acts on a
+   * stale value.
    */
+  const menuActionsRef = useRef<(id: string) => void>(() => undefined);
   useEffect(() => {
     if (!visible) return;
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
-      switch (id) {
-        case "menu:toggle-toolbar":
-          setRecallSignal((n) => n + 1);
-          break;
-        case "menu:scale-actual":
-          setScalingModeState("actual");
-          break;
-        case "menu:scale-fit":
-          setScalingModeState("fit");
-          break;
-        case "menu:view-only":
-          setViewOnlyState(!viewOnlyRef.current);
-          break;
-        case "menu:refresh":
-          session.refreshScreen();
-          break;
-        case "menu:send-cad":
-          sendComboRef.current?.("ctrl-alt-del");
-          break;
-        case "menu:release-keys":
-          session.releaseAllKeys();
-          break;
-        case "menu:reconnect":
-          session.reconnectNow();
-          break;
-        case "menu:disconnect":
-          disconnectRef.current?.();
-          break;
-        default:
-          if (id.startsWith("menu:quality:")) {
-            const preset = id.slice("menu:quality:".length);
-            const q = (preset === "bw" ? "bw" : preset) as QualityPreset;
-            setQualityState(q);
-            session.setQuality(q);
-          }
-      }
+      menuActionsRef.current(id);
     }).then((fn) => {
-      unlisten = fn;
+      // Registered late, after a cleanup that could not cancel it yet: hand it
+      // straight back, or this view keeps answering menu items forever and a
+      // toggle picked once is applied twice.
+      if (cancelled) fn();
+      else unlisten = fn;
     });
-    return () => unlisten?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, session.refreshScreen, session.releaseAllKeys, session.reconnectNow]);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [visible]);
 
   const sendCombo = useCallback(
     (combo: "ctrl-alt-del" | "cmd-tab" | "win" | "alt-f4" | "escape"): void => {
@@ -1227,7 +1309,6 @@ function SessionView({
     inputRef.current?.setEdgePan(edgePan);
   }, [zoomLocked, edgePan, viewReady]);
 
-  const [alwaysRefresh, setAlwaysRefresh] = useState(false);
   const toggleAlwaysRefresh = useCallback(
     (enabled: boolean): void => {
       setAlwaysRefresh(enabled);
@@ -1244,6 +1325,220 @@ function SessionView({
     }
     if (outcome === "sent") push("success", "Clipboard sent to remote");
   }, [pushClipboard, push]);
+
+  const changeQuality = useCallback((q: QualityPreset): void => {
+    setQualityState(q);
+    sessionRef.current.setQuality(q);
+  }, []);
+
+  /** Step the zoom, for the menu, which has no slider to drag. */
+  const zoomBy = useCallback((factor: number): void => {
+    setScalingModeState("custom");
+    setZoomState((z) => Math.min(Math.max(z * factor, 0.25), 4));
+  }, []);
+
+  // ------------------------------------------------------------- native menu
+
+  /** The rows both Displays menus show, in the order both of them show them. */
+  const orderedDisplays = useMemo(
+    () => orderDisplays(displayOptions, layoutKnown),
+    [displayOptions, layoutKnown],
+  );
+
+  /**
+   * Everything the View and Session menus can ask of this view.
+   *
+   * Assigned on every render rather than memoised: it is only ever reached
+   * through `menuActionsRef` when the user picks something, so a fresh closure
+   * costs nothing and can never be reading a stale value.
+   */
+  menuActionsRef.current = (id: string): void => {
+    // muda ticks a check item itself the moment it is clicked, which is a
+    // guess at the new state rather than the truth. A guess that turns out
+    // right is corrected by the push that the state change below triggers,
+    // but picking the option ALREADY in force changes nothing and re-renders
+    // nothing, so the tick would be left sitting next to the option it had
+    // just been taken off.
+    //
+    // Bumping a counter the push effect watches covers both cases with one
+    // push, after the render: a timer instead of this raced that render and
+    // sometimes asserted the state the action had just replaced.
+    setMenuNonce((n) => n + 1);
+    switch (id) {
+      // View
+      case "menu:toggle-toolbar":
+        setRecallSignal((n) => n + 1);
+        break;
+      case "menu:hide-toolbar": {
+        // Read back rather than flipping the local copy: this is a global
+        // preference and another window may have changed it since.
+        const next = !readBoolPref(PREF_HIDE_TOOLBAR, false);
+        writeBoolPref(PREF_HIDE_TOOLBAR, next);
+        setHideToolbar(next);
+        break;
+      }
+      case "menu:scale-fit":
+        setScalingModeState("fit");
+        break;
+      case "menu:scale-aspect":
+        setScalingModeState("aspect-fit");
+        break;
+      case "menu:scale-actual":
+        setScalingModeState("actual");
+        break;
+      case "menu:scale-remote":
+        setScalingModeState("remote-resize");
+        break;
+      case "menu:zoom-in":
+        zoomBy(1.25);
+        break;
+      case "menu:zoom-out":
+        zoomBy(1 / 1.25);
+        break;
+      case "menu:zoom-reset":
+        setScalingModeState("custom");
+        setZoomState(1);
+        break;
+      case "menu:lock-zoom":
+        toggleZoomLocked(!zoomLocked);
+        break;
+      case "menu:edge-pan":
+        toggleEdgePan(!edgePan);
+        break;
+      case "menu:display:all":
+        chooseDisplay(null);
+        break;
+      case "menu:detect-displays":
+        detectDisplays();
+        break;
+      case "menu:remote-cursor":
+        update({ showRemoteCursor: !settings.showRemoteCursor });
+        break;
+      case "menu:cursor:standard":
+        update({ localCursor: "standard" });
+        break;
+      case "menu:cursor:dot":
+        update({ localCursor: "dot" });
+        break;
+      case "menu:cursor:off":
+        update({ localCursor: "off" });
+        break;
+
+      // Session
+      case "menu:connection-info":
+        setConnectionInfoOpen(true);
+        break;
+      case "menu:view-only":
+        setViewOnlyState(!viewOnlyRef.current);
+        break;
+      case "menu:always-refresh":
+        toggleAlwaysRefresh(!alwaysRefresh);
+        break;
+      case "menu:refresh":
+        sessionRef.current.refreshScreen();
+        break;
+      case "menu:passthrough":
+        togglePassthrough(!passthrough);
+        break;
+      case "menu:send-cad":
+        sendComboRef.current?.("ctrl-alt-del");
+        break;
+      case "menu:send-cmd-tab":
+        sendCombo("cmd-tab");
+        break;
+      case "menu:send-win":
+        sendCombo("win");
+        break;
+      case "menu:send-alt-f4":
+        sendCombo("alt-f4");
+        break;
+      case "menu:send-escape":
+        sendCombo("escape");
+        break;
+      case "menu:release-keys":
+        sessionRef.current.releaseAllKeys();
+        break;
+      case "menu:clipboard-send":
+        void clipboardSend();
+        break;
+      case "menu:files":
+        if (sshAvailable === true) setFilesOpen(true);
+        break;
+      case "menu:screenshot":
+        void screenshot();
+        break;
+
+      // Connection
+      case "menu:reconnect":
+        sessionRef.current.reconnectNow();
+        break;
+      case "menu:disconnect":
+        disconnectRef.current?.();
+        break;
+
+      default:
+        if (id.startsWith("menu:quality:")) {
+          changeQuality(id.slice("menu:quality:".length) as QualityPreset);
+        } else if (id.startsWith("menu:gray:")) {
+          setBwLevelsState(Number(id.slice("menu:gray:".length)));
+        } else if (id.startsWith("menu:display:")) {
+          chooseDisplay(Number(id.slice("menu:display:".length)));
+        }
+    }
+  };
+
+  /**
+   * Keep the native menu showing what is actually in force.
+   *
+   * Pushed again on focus because the menu bar is one object shared by every
+   * window: whichever session the user brings to the front has to re-assert
+   * its own state over whatever the last one left there.
+   */
+  const menuState = useMemo(
+    (): SessionMenuState => ({
+      scalingMode,
+      quality,
+      grayLevels: bwLevels,
+      localCursor: settings.localCursor,
+      showRemoteCursor: settings.showRemoteCursor,
+      viewOnly,
+      passthrough,
+      alwaysRefresh,
+      zoomLocked,
+      edgePan,
+      filesAvailable: sshAvailable === true,
+      layoutKnown,
+      displays: orderedDisplays.map((o, i) => ({ id: o.id, label: displayLabel(o, i) })),
+      displayId,
+    }),
+    [
+      scalingMode,
+      quality,
+      bwLevels,
+      settings.localCursor,
+      settings.showRemoteCursor,
+      viewOnly,
+      passthrough,
+      alwaysRefresh,
+      zoomLocked,
+      edgePan,
+      sshAvailable,
+      layoutKnown,
+      orderedDisplays,
+      displayId,
+    ],
+  );
+
+  const pushMenuRef = useRef<() => void>(() => undefined);
+  pushMenuRef.current = () => syncSessionMenu(hideToolbar, menuState);
+
+  useEffect(() => {
+    if (!visible) return;
+    const push = (): void => pushMenuRef.current();
+    push();
+    window.addEventListener("focus", push);
+    return () => window.removeEventListener("focus", push);
+  }, [visible, hideToolbar, menuState, menuNonce]);
 
   // ------------------------------------------------------------- render
 
@@ -1285,55 +1580,78 @@ function SessionView({
         aria-label={`Remote desktop: ${session.desktopName}`}
       />
 
-      <SessionToolbar
-        desktopName={session.desktopName}
-        state={st}
-        stats={session.stats}
-        scalingMode={scalingMode}
-        zoom={zoom}
-        quality={quality}
-        bwLevels={bwLevels}
-        passthrough={passthrough}
-        captureStatus={capture}
-        viewOnly={viewOnly}
-        recallSignal={recallSignal}
-        onScalingMode={setScalingModeState}
-        onZoom={(z) => {
-          setScalingModeState("custom");
-          setZoomState(z);
-        }}
-        zoomLocked={zoomLocked}
-        onZoomLocked={toggleZoomLocked}
-        edgePan={edgePan}
-        onEdgePan={toggleEdgePan}
-        screens={displayOptions}
-        layoutKnown={layoutKnown}
-        displayId={displayId}
-        onDisplay={setDisplayId}
-        onDetectDisplays={detectDisplays}
-        showRemoteCursor={settings.showRemoteCursor}
-        onShowRemoteCursor={(show) => update({ showRemoteCursor: show })}
-        localCursor={settings.localCursor}
-        onLocalCursor={(mode) => update({ localCursor: mode })}
-        onQuality={(q) => {
-          setQualityState(q);
-          session.setQuality(q);
-        }}
-        onBwLevels={setBwLevelsState}
-        onPassthrough={togglePassthrough}
-        onCapturePermission={() => setShowCaptureHelp(true)}
-        onSendCombo={sendCombo}
-        onClipboardSend={() => void clipboardSend()}
-        onFiles={() => setFilesOpen(true)}
-        filesAvailable={sshAvailable}
-        onFullscreen={() => void toggleFullscreen()}
-        onViewOnly={setViewOnlyState}
-        onScreenshot={() => void screenshot()}
-        onRefresh={session.refreshScreen}
-        alwaysRefresh={alwaysRefresh}
-        onAlwaysRefresh={toggleAlwaysRefresh}
-        onDisconnect={disconnectWithThumbnail}
-      />
+      {/* Preferences ▸ Session can take the bar away; the View and Session
+          menus carry the same options either way. */}
+      {hideToolbar ? null : (
+        <SessionToolbar
+          desktopName={session.desktopName}
+          state={st}
+          stats={session.stats}
+          scalingMode={scalingMode}
+          zoom={zoom}
+          quality={quality}
+          bwLevels={bwLevels}
+          passthrough={passthrough}
+          captureStatus={capture}
+          viewOnly={viewOnly}
+          recallSignal={recallSignal}
+          onScalingMode={setScalingModeState}
+          onZoom={(z) => {
+            setScalingModeState("custom");
+            setZoomState(z);
+          }}
+          zoomLocked={zoomLocked}
+          onZoomLocked={toggleZoomLocked}
+          edgePan={edgePan}
+          onEdgePan={toggleEdgePan}
+          screens={orderedDisplays}
+          layoutKnown={layoutKnown}
+          displayId={displayId}
+          onDisplay={chooseDisplay}
+          onDetectDisplays={detectDisplays}
+          showRemoteCursor={settings.showRemoteCursor}
+          onShowRemoteCursor={(show) => update({ showRemoteCursor: show })}
+          localCursor={settings.localCursor}
+          onLocalCursor={(mode) => update({ localCursor: mode })}
+          onQuality={changeQuality}
+          onBwLevels={setBwLevelsState}
+          onPassthrough={togglePassthrough}
+          onCapturePermission={() => setShowCaptureHelp(true)}
+          onSendCombo={sendCombo}
+          onClipboardSend={() => void clipboardSend()}
+          onFiles={() => setFilesOpen(true)}
+          filesAvailable={sshAvailable}
+          onFullscreen={() => void toggleFullscreen()}
+          onViewOnly={setViewOnlyState}
+          onScreenshot={() => void screenshot()}
+          onRefresh={session.refreshScreen}
+          alwaysRefresh={alwaysRefresh}
+          onAlwaysRefresh={toggleAlwaysRefresh}
+          onDisconnect={disconnectWithThumbnail}
+        />
+      )}
+
+      {/* The toolbar's status button as a dialog, for Session ▸ Connection
+          Info: with the bar hidden the latency reading has nowhere else to
+          live, and it is the first thing anyone asks for when a session feels
+          slow. */}
+      {connectionInfoOpen ? (
+        <Dialog title="Connection info" onClose={() => setConnectionInfoOpen(false)} width={360}>
+          <div className="p-4">
+            <SessionStatusDetails stats={session.stats} desktopName={session.desktopName} />
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                data-autofocus
+                className="btn-primary"
+                onClick={() => setConnectionInfoOpen(false)}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </Dialog>
+      ) : null}
 
       {showConnecting ? <ConnectingOverlay state={st} name={session.desktopName} /> : null}
 
