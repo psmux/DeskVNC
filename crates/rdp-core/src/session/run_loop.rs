@@ -46,6 +46,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::channels::{ChannelCtx, Outbox, StaticChannels};
 use crate::connection::activate::{self, Activated};
 use crate::connection::ChannelMap;
 use crate::error::{RdpError, Result};
@@ -81,6 +82,21 @@ pub struct RunLoop<R> {
     framer: Framer<R>,
     outbound: mpsc::Sender<Outbound>,
     channels: ChannelMap,
+    /// The static virtual channels and everything under them: drdynvc, the
+    /// graphics pipeline and the clipboard (`crate::channels`).
+    ///
+    /// The pump knows two things about this field. Data that is not on the
+    /// I/O channel goes into it, and a clipboard command goes into it. Adding
+    /// a channel does not change this file, which is the whole point of the
+    /// registry.
+    vc: StaticChannels,
+    /// Events the shell had not drained at the last dispatch.
+    ///
+    /// Read off the event channel once per pass rather than per PDU, and
+    /// handed to the channel handlers so the EGFX frame acknowledgement can
+    /// report a real `queueDepth` (MS-RDPEGFX 2.2.2.13). See
+    /// [`crate::channels::egfx::Egfx::frame_acknowledge`].
+    event_backlog: u32,
     /// The options, kept because a Deactivate All can restart the capability
     /// exchange from inside this loop and the Confirm Active is built from
     /// them (MS-RDPBCGR 1.3.1.3, PRDRDP/06 §6.1).
@@ -124,6 +140,8 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         sent: Arc<AtomicU64>,
     ) -> Self {
         Self {
+            vc: StaticChannels::new(&channels),
+            event_backlog: 0,
             framer,
             outbound,
             channels,
@@ -188,6 +206,11 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         stats_tick.reset(); // do not fire immediately
 
         loop {
+            // Sampled once per pass rather than per PDU: it is the only
+            // observable measure of how far behind the renderer is, and it is
+            // what the graphics channel reports back as `queueDepth`.
+            self.event_backlog = backlog(events);
+
             let step = tokio::select! {
                 biased;
                 () = cancel.cancelled() => Step::Cancelled,
@@ -252,6 +275,22 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                 // for must not sit behind a slow webview draining the event
                 // channel.
                 if let Some(bytes) = reply {
+                    self.send(Outbound::Frame(bytes)).await?;
+                }
+                for event in produced {
+                    remote_core::emit(events, event).await?;
+                }
+            }
+            SessionSignal::Channel {
+                events: produced,
+                frames,
+            } => {
+                // Same ordering rule as `Output`: what the server is waiting
+                // for goes out before a slow webview gets a say. A cliprdr
+                // format list response that sits behind the renderer hangs
+                // copy and paste on the server for every application
+                // (MS-RDPECLIP 3.1.5.2.4).
+                for bytes in frames {
                     self.send(Outbound::Frame(bytes)).await?;
                 }
                 for event in produced {
@@ -393,13 +432,22 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     )));
                 }
                 if channel_id != self.channels.io_channel_id {
-                    // The message channel carries auto detect and the
-                    // heartbeat, and the static virtual channels carry the
-                    // clipboard and the dynamic channel multiplexer. Neither
-                    // is wired up yet, and both are length prefixed, so
-                    // skipping cannot desync (PRDRDP/05 §5.1).
+                    if self.vc.handles(channel_id) {
+                        let ctx = self.channel_ctx();
+                        let mut out = Outbox::new();
+                        self.vc
+                            .deliver(channel_id, payload.as_slice(), ctx, &mut out)?;
+                        return Ok(SessionSignal::Channel {
+                            events: out.events,
+                            frames: out.frames,
+                        });
+                    }
+                    // What is left is the message channel, which carries
+                    // connect time auto detect and the heartbeat. Neither is
+                    // acted on, and both are length prefixed, so skipping
+                    // cannot desync (MS-RDPBCGR 2.2.1.4.5, PRDRDP/05 §5.1).
                     return Ok(SessionSignal::Ignored(
-                        "a pdu off the I/O channel: virtual channels are not wired up yet",
+                        "a pdu on the message channel, which this build does not act on",
                     ));
                 }
                 self.dispatch_io(payload.as_slice())
@@ -472,8 +520,10 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             SharePdu::DeactivateAll { .. } => {
                 // The share is being torn down. A partial fragment sequence
                 // belongs to the old share and must not be glued onto the new
-                // one (MS-RDPBCGR 2.2.3.1).
+                // one (MS-RDPBCGR 2.2.3.1), and the same is true one layer
+                // out on every virtual channel (PRDRDP/05 §5.1 rule 6).
                 self.reassembler.reset();
+                self.vc.reset();
                 tracing::info!("the server deactivated the share");
             }
             SharePdu::Data { pdu, .. } => {
@@ -606,14 +656,52 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                 self.send(Outbound::Frame(bytes)).await?;
                 Ok(None)
             }
-            // Clipboard, quality and resize arrive with the channels that
-            // carry them (PRDRDP/05 §4, §5.4). Dropping one silently would be
-            // a command the shell believes it sent, so each says so once.
+            ClientCommand::ClipboardText(text) => {
+                let ctx = self.channel_ctx();
+                let mut out = Outbox::new();
+                self.vc.clipboard_text(&text, ctx, &mut out)?;
+                self.flush_channel(out).await?;
+                Ok(None)
+            }
+            // The format bits are ignored: this build offers and asks for
+            // text and nothing else, which is what the RFB path supports too
+            // (`crates/vnc-core/src/clipboard/mod.rs`).
+            ClientCommand::ClipboardRequest { .. } => {
+                let ctx = self.channel_ctx();
+                let mut out = Outbox::new();
+                self.vc.clipboard_request(ctx, &mut out)?;
+                self.flush_channel(out).await?;
+                Ok(None)
+            }
+            // Quality and resize arrive with the channels that carry them
+            // (PRDRDP/05 §5.4). Dropping one silently would be a command the
+            // shell believes it sent, so each says so once.
             other => {
                 tracing::debug!(?other, "command has no wire path yet");
                 Ok(None)
             }
         }
+    }
+
+    /// What a channel handler needs to answer one PDU.
+    fn channel_ctx(&self) -> ChannelCtx {
+        ChannelCtx {
+            user_channel_id: self.channels.user_channel_id,
+            desktop: self.activated.desktop,
+            event_backlog: self.event_backlog,
+        }
+    }
+
+    /// Queue everything a channel handler produced from a command.
+    ///
+    /// Only the frames: a command cannot produce an event, because nothing on
+    /// the outbound side of a channel has news for the shell.
+    async fn flush_channel(&mut self, out: Outbox) -> Result<()> {
+        debug_assert!(out.events.is_empty(), "an outbound channel call emitted");
+        for bytes in out.frames {
+            self.send(Outbound::Frame(bytes)).await?;
+        }
+        Ok(())
     }
 
     /// Queue a batch of fast path input events, chunked so one PDU never
@@ -714,6 +802,20 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         x224::write_data_tpdu_with(&mut Writer::new(&mut out), pdu.size(), |w| pdu.encode(w))?;
         Ok(Bytes::from(out))
     }
+}
+
+/// Events the shell has not taken off the channel yet.
+///
+/// `max_capacity` is the channel's size and `capacity` is how many slots are
+/// free, so the difference is what is queued. tokio makes both cheap: they
+/// are a load off the semaphore, not a lock (PRDRDP/04 §3.6).
+///
+/// This is the client's display backlog as well as anything can measure it,
+/// and it is what the EGFX frame acknowledgement reports as `queueDepth`
+/// (MS-RDPEGFX 2.2.2.13).
+fn backlog(events: &mpsc::Sender<SessionEvent>) -> u32 {
+    let queued = events.max_capacity().saturating_sub(events.capacity());
+    u32::try_from(queued).unwrap_or(u32::MAX)
 }
 
 /// Turn the rectangles collected so far into one `FramebufferUpdate`.
@@ -900,13 +1002,18 @@ mod tests {
         }
     }
 
+    /// Three rows, and the difference between them is the design.
+    ///
     /// A channel id we never joined means the server is confused about the
-    /// session, which is not something to carry on through. A joined channel
-    /// that is not the I/O channel is ignored with a reason, because the
-    /// virtual channel layer is not wired up. These two rows are a pair and
-    /// the difference between them is the design decision.
+    /// session and is not something to carry on through. A joined channel
+    /// with a handler reaches [`crate::channels`], which is what a virtual
+    /// channel PDU is now for. A joined channel with no handler, which is the
+    /// message channel and the user channel, is still ignored with a reason.
     #[test]
-    fn an_unjoined_channel_ends_the_session_and_a_joined_one_does_not() {
+    fn an_unjoined_channel_ends_the_session_and_a_joined_one_reaches_its_handler() {
+        use rdp_pdu::io::Encode as _;
+        use rdp_pdu::vc::static_vc::{channel_flags, ChannelPduHeader};
+
         let mut rl = loop_over(&[]);
 
         let stray = framed(&DomainMcsPdu::SendDataIndication {
@@ -917,16 +1024,43 @@ mod tests {
         let err = rl.dispatch(&stray).expect_err("never joined");
         assert!(err.to_string().contains("4321"), "{err}");
 
-        for id in [1004u16, 1005, 1006, 1007] {
+        // The message channel and the user channel have no handler, so they
+        // are skipped with a reason. Both are length prefixed, so skipping
+        // cannot desynchronise the stream.
+        for id in [1005u16, 1007] {
             let known = framed(&DomainMcsPdu::SendDataIndication {
                 initiator: 1002,
                 channel_id: id,
                 payload: Payload::new(&[0u8; 8]),
             });
             match rl.dispatch(&known).expect("a joined channel") {
-                SessionSignal::Ignored(why) => assert!(!why.is_empty()),
+                SessionSignal::Ignored(why) => assert!(why.contains("message channel")),
                 other => panic!("expected an ignore for {id}, got {other:?}"),
             }
+        }
+
+        // `drdynvc` and `cliprdr` now go to their handlers. A chunk with no
+        // `CHANNEL_FLAG_FIRST` is refused by the reassembler, which proves
+        // the PDU reached the channel layer rather than the bin.
+        let mut orphan = Vec::new();
+        ChannelPduHeader {
+            length: 16,
+            flags: channel_flags::LAST,
+        }
+        .encode(&mut Writer::new(&mut orphan))
+        .expect("encodes");
+        orphan.extend_from_slice(&[0u8; 16]);
+        for id in [1004u16, 1006] {
+            let known = framed(&DomainMcsPdu::SendDataIndication {
+                initiator: 1002,
+                channel_id: id,
+                payload: Payload::new(&orphan),
+            });
+            let err = rl.dispatch(&known).expect_err("no preceding first chunk");
+            assert!(
+                err.to_string().contains("CHANNEL_FLAG_FIRST"),
+                "{id}: {err}"
+            );
         }
     }
 

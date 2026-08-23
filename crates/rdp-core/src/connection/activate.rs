@@ -39,7 +39,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use rdp_pdu::io::{Decode, Encode, Payload, Writer};
 use rdp_pdu::mcs::DomainMcsPdu;
-use rdp_pdu::rdp::capabilities::{capability_set_type, InputCapabilitySet};
+use rdp_pdu::rdp::capabilities::{
+    capability_set_type, ClientCapabilitySupport, InputCapabilitySet,
+};
 use rdp_pdu::rdp::client_info::{address_family, ExtendedInfoPacket, InfoPacket, SecretString};
 use rdp_pdu::rdp::security::security_flags;
 use rdp_pdu::rdp::{
@@ -344,21 +346,28 @@ pub fn client_info(opts: &ResolvedOptions, creds: &Credentials) -> ClientInfoPdu
 /// MS-RDPBCGR 2.2.7.2.4 asks a client for; the server puts its own channel id
 /// there.
 ///
-/// **The Surface Commands set is removed.** `CapabilitySets::client_defaults`
-/// advertises `CMDTYPE_SET_SURFACE_BITS` (MS-RDPBCGR 2.2.7.2.9), and a server
-/// that reads it draws with Surface Bits commands instead of Bitmap Updates.
-/// This build decodes Bitmap Updates and does not decode a surface command
-/// (PRDRDP/04 §2.8 is unwritten), so advertising the capability would mean
-/// asking for pixels we then throw away. PRDRDP/04 §9.3 is the rule being
-/// applied: the codec allow list is enforced at negotiation and not only at
-/// dispatch. Removing the set here rather than sending it with `cmdFlags = 0`
-/// is deliberate: absence is the specification's way of saying "not
-/// supported", and a zero flag word is a set some servers read as a client
-/// that supports the frame marker.
+/// **The Surface Commands set is left out, and wiring up EGFX did not change
+/// that.** The two are easy to confuse and they are different negotiations.
+/// `CAPSETTYPE_SURFACE_COMMANDS` (MS-RDPBCGR 2.2.7.2.9) governs the *legacy*
+/// Surface Bits command on the fast path, `TS_SURFCMD_SET_SURF_BITS`
+/// (MS-RDPBCGR 2.2.9.2.1), which this build still does not decode: the pump's
+/// `FastPathUpdate::SurfaceCommands` arm refuses one
+/// (`crate::session::run_loop`). The graphics pipeline is negotiated
+/// somewhere else entirely, on the `drdynvc` channel with its own capability
+/// advertisement (MS-RDPEGFX 2.2.2.18, [`crate::channels::egfx`]), and having
+/// it does not make a Surface Bits command decodable.
+///
+/// So the rule PRDRDP/04 §9.3 states is unchanged: the codec allow list is
+/// enforced at negotiation and not only at dispatch, and asking for pixels we
+/// would then throw away is the thing it forbids. Absence is the
+/// specification's way of saying "not supported"; a set with `cmdFlags = 0` is
+/// read by some servers as a client that supports the frame marker, which is
+/// why [`ClientCapabilitySupport::surface_commands`] removes the set rather
+/// than zeroing it.
 #[must_use]
 pub fn client_capabilities(opts: &ResolvedOptions, desktop: (u16, u16)) -> CapabilitySets<'static> {
     let (width, height) = desktop;
-    let mut sets = CapabilitySets::client_defaults(
+    CapabilitySets::client(
         width,
         height,
         0,
@@ -367,14 +376,12 @@ pub fn client_capabilities(opts: &ResolvedOptions, desktop: (u16, u16)) -> Capab
         // disagreement, which is a support call nobody can explain.
         // 4 is `IBM_101_102_KEYS` and 12 function keys is the usual pair.
         InputCapabilitySet::client(opts.keyboard_layout, 4, 0, 12),
-        // Desktop composition is an aero glass effect, and enabling it costs
-        // bandwidth for a translucency the user cannot interact with
-        // (PRDRDP/04 §9.2 turns it on only for the High preset).
-        matches!(opts.quality, remote_core::QualityPreset::High),
-    );
-    sets.sets
-        .retain(|set| set.capability_set_type() != capability_set_type::SURFACE_COMMANDS);
-    sets
+        ClientCapabilitySupport::minimal()
+            // Desktop composition is an aero glass effect, and enabling it
+            // costs bandwidth for a translucency the user cannot interact
+            // with (PRDRDP/04 §9.2 turns it on only for the High preset).
+            .with_desktop_composition(matches!(opts.quality, remote_core::QualityPreset::High)),
+    )
 }
 
 // ---------------------------------------------------------------------------

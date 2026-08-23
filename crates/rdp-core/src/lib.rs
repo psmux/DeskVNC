@@ -17,6 +17,7 @@
 //! | [`error`]      | [`RdpError`], [`ConnectStage`], the retry classification |
 //! | [`transport`]  | Opening the stream, TLS, the framer, the writer task     |
 //! | [`connection`] | The connection sequence, X.224 to `Connected`            |
+//! | [`channels`]   | The virtual channels: drdynvc, EGFX, the clipboard       |
 //! | [`session`]    | The session task, the run loop, the settings             |
 //!
 //! ## Concurrency
@@ -58,21 +59,29 @@
 //! Demand Active that follows it are answered from inside the pump, so a
 //! resolution change on the server does not end the session.
 //!
+//! An unpinned server key, which is what nearly every RDP host serves on first
+//! contact, raises `SessionEvent::CertificatePrompt` and parks the sequence on
+//! the answer. The prompt completes before CredSSP starts, so nothing that
+//! depends on the server's identity leaves the client until the user has
+//! approved that identity ([`connection::trust`]).
+//!
+//! The virtual channels are wired up ([`channels`]): `drdynvc` multiplexes the
+//! dynamic channels, the graphics pipeline decodes EGFX into surfaces and
+//! acknowledges frames, and `cliprdr` moves text both ways.
+//!
 //! What is still missing, each reported as a typed error naming its phase
 //! rather than as a panic:
 //!
-//! * The trust on first use prompt. An unknown server key is refused rather
-//!   than shown, because emitting `SessionEvent::CertificatePrompt` means
-//!   parking the sequence on the answer, and the command channel does not
-//!   reach the connection sequence yet. The pin scheme itself is settled:
-//!   [`remote_core::PinScheme::RdpTls`].
-//! * The virtual channels. `cliprdr` and `drdynvc` are asked for and joined,
-//!   and data on them is ignored with a reason, so there is no clipboard, no
-//!   EGFX, no display control and no audio.
-//! * Surface commands, EGFX and every codec past interleaved RLE and planar.
-//!   The Surface Commands capability set is deliberately not advertised, so a
-//!   server falls back to Bitmap Updates rather than drawing into a surface we
-//!   cannot decode.
+//! * The legacy Surface Bits path (MS-RDPBCGR 2.2.9.2.1). The Surface Commands
+//!   capability set is still deliberately not advertised, so a server falls
+//!   back to Bitmap Updates rather than drawing into a surface we cannot
+//!   decode. EGFX is a different negotiation and having it does not change
+//!   this ([`connection::activate::client_capabilities`]).
+//! * H.264 and RemoteFX Progressive. The graphics channel advertises
+//!   capability set versions 8 and 8.1, which have no H.264 in them, and a
+//!   progressive rectangle is refused by name because `rdp-codecs` has no
+//!   progressive decoder in a default build.
+//! * Audio, display control and file clipboard transfer.
 //! * `remote_core::reconnect::supervise` and its `ConnectOnce` trait do not
 //!   exist, so a failed attempt reports and stops rather than retrying.
 //!
@@ -86,6 +95,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod channels;
 pub mod connection;
 pub mod error;
 pub mod options;

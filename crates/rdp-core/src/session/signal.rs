@@ -81,6 +81,26 @@ pub enum SessionSignal {
         reply: Option<Bytes>,
     },
 
+    /// What a virtual channel handler produced: events for the shell and
+    /// whole encoded PDUs for the writer task, in the order it produced them.
+    ///
+    /// Separate from [`SessionSignal::Output`] rather than widening that
+    /// variant's `reply`, and the reason is the count. One channel PDU can
+    /// produce several frames: a `CB_MONITOR_READY` is answered with a
+    /// capability set and a format list, and a graphics channel open is
+    /// answered with a creation status and a capability advertisement. The
+    /// I/O channel never does, so `Output`'s single optional reply stays
+    /// exactly as documented above.
+    ///
+    /// Produced by [`crate::channels::StaticChannels::deliver`]
+    /// (MS-RDPBCGR 2.2.6.1).
+    Channel {
+        /// Events to emit, in order.
+        events: Vec<remote_core::SessionEvent>,
+        /// Whole encoded PDUs to queue for the writer task, in order.
+        frames: Vec<bytes::Bytes>,
+    },
+
     /// A PDU we deliberately ignore, with a reason for the trace.
     ///
     /// The specification has PDUs we do not implement, servers send them, and
