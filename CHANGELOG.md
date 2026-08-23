@@ -10,6 +10,51 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **The groundwork for a second protocol, and the first working pieces of an
+  RDP stack written here rather than borrowed.** Nothing user visible changes
+  yet: no RDP connection can be made, and the VNC side behaves exactly as it
+  did. What lands is the shape everything after it needs.
+- Six new crates. `remote-core` holds the session contract that was never
+  about RFB (options, events, commands, stats, credentials, and the
+  `ProtocolDriver` trait), and `remote-pixel` holds pixel conversion with an
+  empty dependency table, which is what lets a codec crate use it without
+  dragging in an async runtime. `rdp-pdu` is the wire layer, `rdp-codecs` the
+  bitmap decoders, `rdp-auth` the authentication, and `rdp-core` the session
+  that will tie them together.
+- The RDP wire layer covers X.224 and TPKT, the MCS connect envelope and its
+  domain PDUs over BER, and every GCC user data block in both directions over
+  aligned PER. Every read is bounds checked by construction and returns a
+  result; no parser indexes a slice anywhere.
+- Bitmap decoding for uncompressed data, interleaved RLE at four colour
+  depths, and the planar codec with its RLE planes, delta pass and inverse
+  YCoCg transform. All of it beats its performance budget by at least 1.8x at
+  both 1080p and 4K, with no `unsafe` in any of it.
+- NTLMv2, built message by message and checked against the published MS-NLMP
+  test vectors at every intermediate step, from the one way functions through
+  to the signing and sealing keys.
+- A `legacy-tls` build feature carrying a vendored OpenSSL, off by default and
+  with its handshake still stubbed. It exists now so that a toolchain problem
+  surfaces while nothing depends on it.
+
+### Changed
+
+- `ConnectOptions` splits into a shared half and a per protocol half, and the
+  shell now finds a session driver in a registry instead of calling into the
+  VNC session directly. Stored profiles and the IPC contract are unchanged.
+
+### Security
+
+- No cryptography is implemented in this workspace. Every cipher, hash, MAC and
+  key derivation in the new code is a call into a vetted library, and three
+  tests enforce that mechanically instead of leaving it to review. A further
+  test refuses any third party RDP, CredSSP, NTLM or Kerberos implementation
+  from the lockfile up.
+- Every new decoder is fed bytes controlled by a remote peer, so every one has
+  a test asserting that a truncated input returns an error rather than
+  panicking, for every possible prefix.
+
 ## [0.12.0] - 2026-08-23
 
 ### Added
