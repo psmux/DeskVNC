@@ -7217,6 +7217,7 @@ dependencies = [
  "openssl",
  "openssl-src",
  "parking_lot",
+ "rdp-pdu",
  "rustls",
  "rustls-pki-types",
  "serde",

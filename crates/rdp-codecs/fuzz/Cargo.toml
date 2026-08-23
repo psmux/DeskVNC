@@ -1,0 +1,61 @@
+[package]
+name = "rdp-codecs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Its own workspace, deliberately. AGENT_BRIEF D11 requires cargo-fuzz targets
+# on every crate that parses remote bytes, and PRDRDP/00 R40 with PRDRDP/11
+# §3.3 requires `libfuzzer-sys` and `arbitrary` to live nowhere except a
+# fuzz manifest. The root Cargo.toml lists this directory under `exclude`, so
+# a plain `cargo build` never sees either crate and the shipped dependency
+# tree does not grow.
+#
+# Note for the reviewer holding R40's wording next to this file: R40 says the
+# two "never appear in a `[dependencies]` table", which cannot be met
+# literally, because a `[dependencies]` table in `fuzz/Cargo.toml` is the only
+# place cargo-fuzz will look. The rule as implemented is that they never
+# appear in a table belonging to a workspace member.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+
+[dependencies.rdp-codecs]
+path = ".."
+
+# `cargo fuzz build` is a CI step (PRDRDP/09 §7.2), so these must keep
+# compiling. Optimised, because an unoptimised decoder makes the fuzzer's
+# executions per second an order of magnitude worse, and debug assertions on,
+# because `DstView::row` carries one and it names a caller bug that a release
+# build would turn into a silent wrong pixel.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "fuzz_uncompressed"
+path = "fuzz_targets/fuzz_uncompressed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_interleaved"
+path = "fuzz_targets/fuzz_interleaved.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_planar"
+path = "fuzz_targets/fuzz_planar.rs"
+test = false
+doc = false
+bench = false

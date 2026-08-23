@@ -8,6 +8,15 @@ license.workspace = true
 # Transport layer: plain TCP, TLS (VeNCrypt X509) with TOFU pinning, SSH tunnel.
 
 [dependencies]
+# The DER walker only (`rdp_pdu::asn1::der`). PRDRDP/13 §3.5 moved this
+# crate's hand written X.509 walk into `rdp-pdu` so CredSSP and the trust on
+# first use certificate path share one X.690 implementation instead of two
+# that drift. PRDRDP/00 R45 is the ruling that permits this one edge out of
+# the VNC set into the RDP set, and crates/rdp-pdu/tests/workspace_rules.rs
+# enforces that it stays the only one. `rdp-pdu` carries no tokio and no I/O,
+# so the cost is a few seconds of a clean build and nothing at runtime.
+rdp-pdu = { path = "../rdp-pdu" }
+
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
