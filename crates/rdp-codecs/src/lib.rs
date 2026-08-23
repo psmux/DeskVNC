@@ -16,8 +16,21 @@
 //! Uncompressed legacy bitmaps ([`uncompressed`]), interleaved RLE at 8, 15,
 //! 16 and 24 bits per pixel ([`rle`]) and the planar codec with its RLE planes
 //! and delta encoding ([`planar`]). Those three put the first pixels on screen
-//! (PRDRDP/10 §3.6). RemoteFX, ClearCodec, NSCodec, progressive, AVC420 and
-//! MPPC are stubs carrying their spec citations until phase 1b and phase 2.
+//! (PRDRDP/10 §3.6).
+//!
+//! ## What phase 2 added
+//!
+//! [`remotefx`], the wavelet codec, split into the four stages PRDRDP/04
+//! §11.2 budgets separately: [`remotefx::rlgr`], [`remotefx::quant`],
+//! [`remotefx::dwt`] and [`remotefx::ycbcr`]. [`nscodec`], the planar YCoCg
+//! codec ClearCodec's subcodec layer carries. [`clear`], with its glyph cache
+//! and its two VBar caches. And [`zgfx`], the RDP 8.0 bulk decompressor every
+//! EGFX byte arrives inside, which is why it goes first of the four
+//! (PRDRDP/04 §4.12).
+//!
+//! Progressive RemoteFX ([`progressive`], phase 3), MPPC ([`mppc`]) and the
+//! AVC420 metablock parser ([`avc420`]) are still stubs carrying their spec
+//! citations.
 //!
 //! ## The five crate rules (PRDRDP/04 §4.1)
 //!
@@ -51,6 +64,7 @@ pub mod nscodec;
 #[cfg(feature = "progressive")]
 pub mod progressive;
 pub mod remotefx;
+pub mod zgfx;
 
 #[cfg(any(test, feature = "encode"))]
 pub mod encode;

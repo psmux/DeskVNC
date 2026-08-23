@@ -59,3 +59,31 @@ path = "fuzz_targets/fuzz_planar.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_remotefx"
+path = "fuzz_targets/fuzz_remotefx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_nscodec"
+path = "fuzz_targets/fuzz_nscodec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_clear"
+path = "fuzz_targets/fuzz_clear.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_zgfx"
+path = "fuzz_targets/fuzz_zgfx.rs"
+test = false
+doc = false
+bench = false

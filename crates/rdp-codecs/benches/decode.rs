@@ -28,8 +28,10 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
+use rdp_codecs::remotefx::{dwt, quant, rlgr, ycbcr, Entropy, RfxContext, RfxScratch, TILE};
 use rdp_codecs::{
-    encode, planar, rle, uncompressed, DstView, OutFormat, Palette, PixelFormat, RowOrder,
+    clear, encode, nscodec, planar, remotefx, rle, uncompressed, zgfx, DstView, OutFormat, Palette,
+    PixelFormat, RowOrder,
 };
 
 const SIZES: [(usize, usize, &str); 2] = [(1920, 1080, "1080p"), (3840, 2160, "4k")];
@@ -379,11 +381,386 @@ fn bench_before_after(c: &mut Criterion) {
     g.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2 fixtures: RemoteFX, NSCodec, ClearCodec and ZGFX
+// ---------------------------------------------------------------------------
+
+/// The synthetic desktop as B, G, R triples, which is what every phase 2
+/// codec takes.
+fn rgb_image(w: usize, h: usize) -> Vec<[u8; 3]> {
+    let ch = planes(w, h);
+    (0..w * h).map(|i| [ch[0][i], ch[1][i], ch[2][i]]).collect()
+}
+
+/// Photographic content: smooth gradients with a little grain.
+///
+/// This is the fixture RemoteFX is measured on, and the choice is a
+/// decision rather than a convenience. A server picks RemoteFX for the
+/// photographic parts of the screen and planar for the text
+/// (PRDRDP/04 §4.5), so measuring the wavelet codec on the text-like image
+/// the legacy benches use would measure content it is never sent. The
+/// difference is not small: the same tile through the same encoder is three
+/// kilobytes of entropy coded coefficients as text and a few hundred bytes
+/// as a gradient, so the fixture decides the number more than the code does.
+/// `remotefx_text` below carries the pessimistic case so both are on record.
+fn photo_image(w: usize, h: usize) -> Vec<[u8; 3]> {
+    let mut out = vec![[0u8; 3]; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            // Two overlapping gradients plus a low amplitude grain, which is
+            // what a photograph or a blurred desktop wallpaper looks like to
+            // a wavelet.
+            let grain = (((x * 31 + y * 17) % 11) as i32) - 5;
+            let r = (40 + x * 180 / w) as i32 + grain;
+            let g = (20 + y * 200 / h) as i32 + grain;
+            let b = (200 - (x + y) * 120 / (w + h)) as i32 + grain;
+            out[y * w + x] = [
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+            ];
+        }
+    }
+    out
+}
+
+/// Cut one 64 by 64 tile out of the image, replicating the edges when the
+/// tile hangs off the right or the bottom, which is what a server does.
+fn tile_at(img: &[[u8; 3]], w: usize, h: usize, tx: usize, ty: usize) -> Vec<[u8; 3]> {
+    let mut out = vec![[0u8; 3]; TILE * TILE];
+    for y in 0..TILE {
+        for x in 0..TILE {
+            let sx = (tx * TILE + x).min(w - 1);
+            let sy = (ty * TILE + y).min(h - 1);
+            out[y * TILE + x] = img[sy * w + sx];
+        }
+    }
+    out
+}
+
+/// A whole frame of RemoteFX tiles, which is 510 of them at 1080p.
+fn rfx_frame(mode: Entropy, w: usize, h: usize, photo: bool) -> Vec<u8> {
+    let img = if photo {
+        photo_image(w, h)
+    } else {
+        rgb_image(w, h)
+    };
+    let mut tiles = Vec::new();
+    for ty in 0..h.div_ceil(TILE) {
+        for tx in 0..w.div_ceil(TILE) {
+            tiles.push((tx as u16, ty as u16, tile_at(&img, w, h, tx, ty)));
+        }
+    }
+    // The typical table rather than the fine one the correctness tests use.
+    // A uniform table leaves most level 1 coefficients non zero, which is not
+    // what a server sends and which measures the fixture rather than the
+    // codec (`encode::RFX_QUANT_TYPICAL`).
+    encode::rfx_message_quant(mode, &tiles, w as u16, h as u16, &encode::RFX_QUANT_TYPICAL)
+}
+
+/// One component's quantized coefficients and its RLGR bitstream, which is
+/// what the entropy stage bench measures on its own.
+///
+/// It is the **luma** component, and that is not a shortcut. The three
+/// components of a tile do not cost the same and are not close: the chroma of
+/// this fixture is nearly free, because the grain is added equally to all
+/// three channels and MS-RDPRFX 3.1.8.1.3's Cb and Cr rows sum to zero, so it
+/// cancels there and passes through the luma row untouched. Real content
+/// behaves the same way for the same reason, which is why a codec puts its
+/// bits in the luma. So this number is the expensive third of a tile and the
+/// whole codec bench above is what the §11.1 target is actually about.
+/// The tile the stage benches use, cut out of a full 1080p image rather than
+/// synthesised at 64 by 64.
+///
+/// Synthesising the fixture at tile size looks equivalent and is not: a
+/// gradient that spans its whole range across 64 pixels is forty times
+/// steeper than the same gradient across 1920, so it lands far more energy in
+/// the level 1 bands and the entropy stage measures three times slower. The
+/// stage numbers have to add up to the whole codec number or neither is worth
+/// reading, so both are cut from the same image.
+fn rfx_component(mode: Entropy, photo: bool) -> (Vec<u8>, Vec<i16>) {
+    let (fw, fh) = (1920usize, 1080usize);
+    let full = if photo {
+        photo_image(fw, fh)
+    } else {
+        rgb_image(fw, fh)
+    };
+    // A tile from the middle, so it is representative rather than an edge.
+    let img = tile_at(&full, fw, fh, 15, 8);
+    let mut tile = vec![0i16; 4096];
+    for (i, p) in img.iter().enumerate() {
+        // The luma of MS-RDPRFX 3.1.8.1.3, at the five fractional bit scale
+        // the wavelet stage works in.
+        let y = 0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
+        tile[i] = (y * 32.0 - 4096.0).round() as i16;
+    }
+    let mut coef = vec![0i16; 4096];
+    dwt::forward::forward_2d(&tile, &mut coef);
+    for (off, n, qi) in quant::BANDS {
+        let shift = u32::from(encode::RFX_QUANT_TYPICAL[qi] - 1);
+        for v in coef[off..off + n].iter_mut() {
+            *v >>= shift;
+        }
+    }
+    (encode::rlgr(mode, &coef), coef)
+}
+
+fn bench_phase2_decode(c: &mut Criterion) {
+    let (w, h) = (1920usize, 1080usize);
+    let n = (w * h) as u64;
+    let img = rgb_image(w, h);
+    let mut out = vec![0u8; uncompressed::dst_len(w as u16, h as u16)];
+
+    let mut g = c.benchmark_group("rdp_decode");
+    g.throughput(Throughput::Elements(n));
+
+    // RemoteFX, whole codec through its real entry point, both entropy
+    // variants. PRDRDP/04 §11.1 asks for 400 MPix/s, which is 5.2 ms.
+    for (mode, photo, id) in [
+        (Entropy::Rlgr1, true, "remotefx_rlgr1"),
+        (Entropy::Rlgr3, true, "remotefx_rlgr3"),
+        (Entropy::Rlgr3, false, "remotefx_text"),
+    ] {
+        let msg = rfx_frame(mode, w, h, photo);
+        let mut ctx = RfxContext::new();
+        let mut scratch = RfxScratch::with_capacity();
+        g.bench_function(BenchmarkId::new(id, "1080p"), |b| {
+            b.iter(|| {
+                let mut v = DstView::packed(
+                    &mut out,
+                    w as u16,
+                    h as u16,
+                    OutFormat::Bgra,
+                    RowOrder::TopDown,
+                )
+                .unwrap();
+                remotefx::decode_message(&msg, &mut ctx, &mut scratch, &mut v).unwrap()
+            })
+        });
+    }
+
+    // NSCodec, both with and without chroma subsampling. §11.1 asks for
+    // 400 MPix/s.
+    for (css, id) in [(false, "nscodec"), (true, "nscodec_subsampled")] {
+        let src = encode::nscodec(&img, w, h, 1, css, true);
+        let mut scratch = nscodec::NscScratch::with_capacity(w as u16, h as u16);
+        g.bench_function(BenchmarkId::new(id, "1080p"), |b| {
+            b.iter(|| {
+                let mut v = DstView::packed(
+                    &mut out,
+                    w as u16,
+                    h as u16,
+                    OutFormat::Bgra,
+                    RowOrder::TopDown,
+                )
+                .unwrap();
+                nscodec::decode(&src, &mut scratch, &mut v).unwrap()
+            })
+        });
+    }
+
+    // ClearCodec through the residual layer, which is the layer that has to
+    // cover a whole bitmap. §11.1 asks for 300 MPix/s.
+    let src = encode::clear::residual_only(&img, w as u16, h as u16);
+    let mut dec = clear::ClearDecoder::new();
+    g.bench_function(BenchmarkId::new("clearcodec_residual", "1080p"), |b| {
+        b.iter(|| {
+            let mut v = DstView::packed(
+                &mut out,
+                w as u16,
+                h as u16,
+                OutFormat::Bgra,
+                RowOrder::TopDown,
+            )
+            .unwrap();
+            // A fresh sequence every iteration, because the decoder enforces
+            // the increment and the bench must not be measuring an error
+            // path.
+            dec.reset();
+            dec.decode(&src, &mut v).unwrap()
+        })
+    });
+    g.finish();
+}
+
+fn bench_phase2_stage(c: &mut Criterion) {
+    let mut g = c.benchmark_group("rdp_stage");
+
+    // The four RemoteFX stages of PRDRDP/04 §11.2, each reported in
+    // coefficients per second so the table's Mcoef/s numbers read directly.
+    // A 1080p frame is 1530 components of 4096, so the budget per component
+    // is the table's millisecond figure divided by 1530.
+    g.throughput(Throughput::Elements(4096));
+    for (mode, photo, id) in [
+        (Entropy::Rlgr1, true, "rfx_rlgr1"),
+        (Entropy::Rlgr3, true, "rfx_rlgr3"),
+        (Entropy::Rlgr1, false, "rfx_rlgr1_text"),
+        (Entropy::Rlgr3, false, "rfx_rlgr3_text"),
+    ] {
+        let (bits, _) = rfx_component(mode, photo);
+        let mut dst = vec![0i16; 4096];
+        g.bench_function(BenchmarkId::new(id, "tile"), |b| {
+            b.iter(|| rlgr::decode(mode, &bits, &mut dst))
+        });
+    }
+
+    let (_, coef) = rfx_component(Entropy::Rlgr3, true);
+    let q = [6u8; 10];
+    let mut buf = coef.clone();
+    g.bench_function(BenchmarkId::new("rfx_quant", "tile"), |b| {
+        b.iter(|| {
+            quant::differential_ll3(&mut buf);
+            quant::dequantize(&mut buf, &q).unwrap()
+        })
+    });
+
+    let mut buf = coef.clone();
+    let mut tmp = vec![0i16; 4096];
+    g.bench_function(BenchmarkId::new("rfx_dwt", "tile"), |b| {
+        b.iter(|| dwt::inverse_2d(&mut buf, &mut tmp))
+    });
+
+    let (y, cb, cr) = (coef.clone(), coef.clone(), coef.clone());
+    let mut px = vec![0u8; 4096 * 4];
+    g.bench_function(BenchmarkId::new("rfx_ycbcr", "tile"), |b| {
+        b.iter(|| {
+            for row in 0..TILE {
+                ycbcr::row::<true>(
+                    &y[row * TILE..][..TILE],
+                    &cb[row * TILE..][..TILE],
+                    &cr[row * TILE..][..TILE],
+                    &mut px[row * TILE * 4..][..TILE * 4],
+                );
+            }
+        })
+    });
+
+    // NSCodec and ClearCodec, split the way §11.2's second table splits them.
+    let (w, h) = (1920usize, 1080usize);
+    let img = rgb_image(w, h);
+    let mut out = vec![0u8; uncompressed::dst_len(w as u16, h as u16)];
+    g.throughput(Throughput::Elements((w * h) as u64));
+
+    let src = encode::nscodec(&img, w, h, 1, false, true);
+    let raw = encode::nscodec(&img, w, h, 1, false, false);
+    let mut scratch = nscodec::NscScratch::with_capacity(w as u16, h as u16);
+    for (data, id) in [(&src, "nsc_plane_rle"), (&raw, "nsc_plane_raw")] {
+        g.bench_function(BenchmarkId::new(id, "1080p"), |b| {
+            b.iter(|| {
+                let mut v = DstView::packed(
+                    &mut out,
+                    w as u16,
+                    h as u16,
+                    OutFormat::Bgra,
+                    RowOrder::TopDown,
+                )
+                .unwrap();
+                nscodec::decode(data, &mut scratch, &mut v).unwrap()
+            })
+        });
+    }
+
+    // ClearCodec bands: one band covering the whole bitmap, every column a
+    // short VBar cache miss, which is the worst case for that layer because
+    // every column is inserted into both caches.
+    let cols: Vec<(usize, Vec<[u8; 3]>)> = (0..w)
+        .map(|x| {
+            (
+                x % 200,
+                (0..63u8).map(|i| [i, i.wrapping_add(60), 200]).collect(),
+            )
+        })
+        .collect();
+    let bands = encode::clear::band_short_miss(w as u16, h as u16, &[8, 16, 24], &cols);
+    let mut dec = clear::ClearDecoder::new();
+    g.bench_function(BenchmarkId::new("clear_bands", "1080p"), |b| {
+        b.iter(|| {
+            let mut v = DstView::packed(
+                &mut out,
+                w as u16,
+                h as u16,
+                OutFormat::Bgra,
+                RowOrder::TopDown,
+            )
+            .unwrap();
+            dec.reset();
+            dec.decode(&bands, &mut v).unwrap()
+        })
+    });
+
+    // ClearCodec subcodec: a flat residual layer, which costs one run, plus
+    // one subcodec rectangle covering the whole bitmap. So the number is the
+    // subcodec layer with a rounding error of a residual run on top.
+    let flat = vec![[0u8, 0, 0]; w * h];
+    for (id, sub) in [("clear_subcodec_raw", 0u8), ("clear_subcodec_rlex", 2)] {
+        let rect: Vec<[u8; 3]> = if sub == 2 {
+            // RLEX carries at most 127 palette entries, so the rectangle it
+            // is measured on is quantized to that many colours. A real
+            // encoder picks RLEX for exactly that kind of content.
+            img.iter()
+                .map(|p| [p[0] & 0xE0, p[1] & 0xE0, p[2] & 0xC0])
+                .collect()
+        } else {
+            img.clone()
+        };
+        let src = encode::clear::residual_plus_subcodec(
+            &flat, w as u16, h as u16, 0, 0, w as u16, h as u16, sub, &rect,
+        );
+        g.bench_function(BenchmarkId::new(id, "1080p"), |b| {
+            b.iter(|| {
+                let mut v = DstView::packed(
+                    &mut out,
+                    w as u16,
+                    h as u16,
+                    OutFormat::Bgra,
+                    RowOrder::TopDown,
+                )
+                .unwrap();
+                dec.reset();
+                dec.decode(&src, &mut v).unwrap()
+            })
+        });
+    }
+    g.finish();
+
+    // ZGFX is measured in output bytes rather than pixels, because it wraps
+    // every EGFX codec rather than producing pixels of its own
+    // (PRDRDP/04 §11.2). The target is 400 MB/s of output.
+    let mut g = c.benchmark_group("rdp_stage");
+    let payload: Vec<u8> = {
+        // EGFX traffic is PDU headers and codec payloads, so a mix of highly
+        // repetitive structure and incompressible bitstream is the honest
+        // fixture. Random noise alone would measure only the literal path.
+        let mut v = Vec::with_capacity(1 << 20);
+        while v.len() < (1 << 20) {
+            v.extend_from_slice(&[0x0E, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]);
+            v.extend_from_slice(&img[v.len() % img.len()][..]);
+            v.extend_from_slice(&[0u8; 24]);
+        }
+        v.truncate(1 << 20);
+        v
+    };
+    let compressed = encode::zgfx::single_compressed(&payload);
+    g.throughput(Throughput::Bytes(payload.len() as u64));
+    let mut zd = zgfx::Rdp8Decompressor::new();
+    let mut zout = Vec::with_capacity(payload.len());
+    g.bench_function(BenchmarkId::new("zgfx", "1MiB"), |b| {
+        b.iter(|| zd.decompress(&compressed, &mut zout).unwrap())
+    });
+    let uncompressed_seg = encode::zgfx::single_uncompressed(&payload);
+    g.bench_function(BenchmarkId::new("zgfx_uncompressed", "1MiB"), |b| {
+        b.iter(|| zd.decompress(&uncompressed_seg, &mut zout).unwrap())
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode,
     bench_stage,
     bench_convert,
-    bench_before_after
+    bench_before_after,
+    bench_phase2_decode,
+    bench_phase2_stage
 );
 criterion_main!(benches);
