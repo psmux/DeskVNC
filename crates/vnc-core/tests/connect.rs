@@ -9,7 +9,6 @@ mod common;
 
 use std::time::Duration;
 
-use common::mock_server::*;
 use common::*;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

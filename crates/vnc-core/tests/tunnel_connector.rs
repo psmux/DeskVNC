@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::mock_server::*;
 use common::*;
 
 use vnc_core::types::{Connector, Rect, SessionState};

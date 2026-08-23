@@ -115,9 +115,7 @@ impl H264Contexts {
     /// whether it can start a decoder.
     pub fn track(&mut self, rect: Rect, flags: u32, data: &[u8]) -> H264Meta {
         if flags & FLAG_RESET_ALL_CONTEXTS != 0 {
-            for slot in &mut self.slots {
-                *slot = None;
-            }
+            self.slots.fill(None);
         }
         let key = ContextKey::from(rect);
         if flags & FLAG_RESET_CONTEXT != 0 {

@@ -9,7 +9,6 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::mock_server::*;
 use common::*;
 
 use vnc_core::types::{ClientCommand, QualityPreset, Rect, SessionEvent, SessionState};

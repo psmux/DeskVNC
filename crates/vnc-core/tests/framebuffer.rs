@@ -9,7 +9,6 @@ mod common;
 
 use std::time::Duration;
 
-use common::mock_server::*;
 use common::*;
 
 use vnc_core::types::{DecodedRect, Rect, RectPayload, SessionEvent};
