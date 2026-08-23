@@ -98,6 +98,42 @@ pub async fn set_host_tags(
     super::blocking(move || store.set_host_tags(&host_id, &tag_ids)).await
 }
 
+/// Move a multi-selection of hosts into a group in one atomic call, or out of
+/// every group when `group_id` is `None`. See `Store::set_hosts_group`.
+#[tauri::command]
+pub async fn set_hosts_group(
+    state: State<'_, AppState>,
+    host_ids: Vec<String>,
+    group_id: Option<String>,
+) -> Result<(), String> {
+    let store = state.store.clone();
+    super::blocking(move || store.set_hosts_group(&host_ids, group_id.as_deref())).await
+}
+
+/// Add one tag to a multi-selection of hosts without disturbing their other
+/// tags. See `Store::add_tag_to_hosts`.
+#[tauri::command]
+pub async fn add_tag_to_hosts(
+    state: State<'_, AppState>,
+    host_ids: Vec<String>,
+    tag_id: String,
+) -> Result<(), String> {
+    let store = state.store.clone();
+    super::blocking(move || store.add_tag_to_hosts(&host_ids, &tag_id)).await
+}
+
+/// Remove one tag from a multi-selection of hosts without disturbing their
+/// other tags. See `Store::remove_tag_from_hosts`.
+#[tauri::command]
+pub async fn remove_tag_from_hosts(
+    state: State<'_, AppState>,
+    host_ids: Vec<String>,
+    tag_id: String,
+) -> Result<(), String> {
+    let store = state.store.clone();
+    super::blocking(move || store.remove_tag_from_hosts(&host_ids, &tag_id)).await
+}
+
 /// Connection history, newest first. `host_id = None` means all hosts.
 #[tauri::command]
 pub async fn list_history(

@@ -10,6 +10,32 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **Hosts can be selected in bulk and dropped onto a group or a tag.** Click a
+  tile, Cmd/Ctrl-click to add one, Shift-click for a run of them, or sweep a
+  marquee across empty space the way you would over files. Cmd/Ctrl+A selects
+  everything on screen, Escape clears it. Dragging the selection onto a group
+  in the sidebar moves the whole lot; dropping it on a tag adds that tag and
+  leaves the tags those hosts already carried alone; dropping it on All Hosts
+  takes them out of their group. The same two moves are in a bar above the
+  grid and in the right-click menu, for anyone who would rather not drag, and
+  every one of them can be undone from the toast it raises. The gesture is
+  built on pointer events rather than HTML5 drag and drop, which the file-drop
+  handler the session window needs would have blocked on Windows.
+- Three new IPC commands behind it, `set_hosts_group`, `add_tag_to_hosts` and
+  `remove_tag_from_hosts`, each writing the whole selection in one
+  transaction.
+
+### Fixed
+
+- **New groups and new tags are created again.** The Library sent only the
+  name it had just asked for, but the shell deserializes a complete record, so
+  every creation was rejected before it reached the database. The failure was
+  then swallowed into a console warning: the dialog closed, the sidebar did
+  not change, and nothing said why. The payload is now complete, and a
+  creation that does fail says so in a toast.
+
 ## [0.11.0] - 2026-08-23
 
 ### Added

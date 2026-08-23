@@ -452,6 +452,98 @@ impl Store {
         Ok(())
     }
 
+    /// Moves every host in `host_ids` into `group_id` in one transaction, or
+    /// out of every group when `group_id` is `None`.
+    ///
+    /// A drag onto a group tile drops a whole selection at once, and a
+    /// failure partway through must not leave half the selection moved, so
+    /// this runs as one transaction rather than one `save_host` per host.
+    ///
+    /// `hosts.group_id` references `groups(id)` with foreign keys on, so a
+    /// `group_id` that does not exist fails the update and rolls back,
+    /// instead of silently leaving hosts pointed at nothing.
+    pub fn set_hosts_group(&self, host_ids: &[String], group_id: Option<&str>) -> Result<()> {
+        if host_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let now = now_ts();
+        for host_id in host_ids {
+            tx.execute(
+                "UPDATE hosts SET group_id = ?1, updated_at = ?2 WHERE id = ?3",
+                params![group_id, now, host_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds one tag to every host in `host_ids`, in one transaction.
+    ///
+    /// This is per-tag, not a whole-set replace like [`Store::set_host_tags`].
+    /// A multi-select drag drops one tag onto hosts that likely already carry
+    /// different tags of their own, and replacing each host's whole set would
+    /// clobber whatever the other hosts in the selection already had.
+    /// Re-adding a tag a host already has is a no-op, not an error.
+    pub fn add_tag_to_hosts(&self, host_ids: &[String], tag_id: &str) -> Result<()> {
+        if host_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        // `host_tags` predates foreign keys and has none, so nothing in the
+        // schema stops a row naming a tag that no longer exists. That row is
+        // invisible in the interface (the tag it names cannot be looked up)
+        // yet it silently filters the host out of a tag search, so refuse it
+        // here rather than write it.
+        let known: i64 =
+            tx.query_row("SELECT count(*) FROM tags WHERE id = ?1", [tag_id], |r| {
+                r.get(0)
+            })?;
+        if known == 0 {
+            return Err(crate::Error::InvalidData(format!("no such tag: {tag_id}")));
+        }
+        let now = now_ts();
+        for host_id in host_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO host_tags (host_id, tag_id) VALUES (?1, ?2)",
+                params![host_id, tag_id],
+            )?;
+            tx.execute(
+                "UPDATE hosts SET updated_at = ?1 WHERE id = ?2",
+                params![now, host_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes one tag from every host in `host_ids`, in one transaction.
+    ///
+    /// See [`Store::add_tag_to_hosts`] for why this is per-tag rather than a
+    /// whole-set replace: it must leave every other tag on each host alone.
+    pub fn remove_tag_from_hosts(&self, host_ids: &[String], tag_id: &str) -> Result<()> {
+        if host_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let now = now_ts();
+        for host_id in host_ids {
+            tx.execute(
+                "DELETE FROM host_tags WHERE host_id = ?1 AND tag_id = ?2",
+                params![host_id, tag_id],
+            )?;
+            tx.execute(
+                "UPDATE hosts SET updated_at = ?1 WHERE id = ?2",
+                params![now, host_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---- history -------------------------------------------------------
 
     /// Inserts a history record; the entry's `id` is ignored and the newly
@@ -993,6 +1085,127 @@ mod tests {
             store.get_host(&host.id).unwrap().unwrap().tags,
             vec!["t1".to_string()]
         );
+    }
+
+    #[test]
+    fn set_hosts_group_moves_a_selection_in_and_out_of_a_group() {
+        let (_dir, store) = temp_store();
+        store
+            .save_group(&Group {
+                id: "g1".into(),
+                name: "Home".into(),
+                parent_id: None,
+                sort: 0,
+            })
+            .unwrap();
+        let a = sample_host("A", "10.0.0.10");
+        let b = sample_host("B", "10.0.0.11");
+        store.save_host(&a).unwrap();
+        store.save_host(&b).unwrap();
+        let ids = vec![a.id.clone(), b.id.clone()];
+
+        store.set_hosts_group(&ids, Some("g1")).unwrap();
+        assert_eq!(
+            store.get_host(&a.id).unwrap().unwrap().group_id,
+            Some("g1".to_string())
+        );
+        assert_eq!(
+            store.get_host(&b.id).unwrap().unwrap().group_id,
+            Some("g1".to_string())
+        );
+        for host in store.list_hosts().unwrap() {
+            assert_eq!(host.group_id, Some("g1".to_string()));
+        }
+
+        // Moving back out (None) clears the group on every id in the selection.
+        store.set_hosts_group(&ids, None).unwrap();
+        assert_eq!(store.get_host(&a.id).unwrap().unwrap().group_id, None);
+        assert_eq!(store.get_host(&b.id).unwrap().unwrap().group_id, None);
+    }
+
+    #[test]
+    fn set_hosts_group_into_an_unknown_group_errors_and_touches_nothing() {
+        let (_dir, store) = temp_store();
+        let a = sample_host("A", "10.0.0.12");
+        store.save_host(&a).unwrap();
+        let before = store.get_host(&a.id).unwrap().unwrap();
+
+        assert!(
+            store
+                .set_hosts_group(std::slice::from_ref(&a.id), Some("does-not-exist"))
+                .is_err(),
+            "a nonexistent group id must surface as an error"
+        );
+        let after = store.get_host(&a.id).unwrap().unwrap();
+        assert_eq!(after.group_id, before.group_id);
+    }
+
+    #[test]
+    fn add_and_remove_tag_from_hosts_leaves_other_tags_alone() {
+        let (_dir, store) = temp_store();
+        for t in ["prod", "lab", "shared"] {
+            store
+                .save_tag(&Tag {
+                    id: t.into(),
+                    name: t.into(),
+                    color: "#000000".into(),
+                })
+                .unwrap();
+        }
+        let a = sample_host("A", "10.0.0.20");
+        let b = sample_host("B", "10.0.0.21");
+        store.save_host(&a).unwrap();
+        store.save_host(&b).unwrap();
+        // A already carries a tag the bulk add must not clobber.
+        store.set_host_tags(&a.id, &["prod".into()]).unwrap();
+        let ids = vec![a.id.clone(), b.id.clone()];
+
+        store.add_tag_to_hosts(&ids, "shared").unwrap();
+        let got_a = store.get_host(&a.id).unwrap().unwrap();
+        let got_b = store.get_host(&b.id).unwrap().unwrap();
+        assert_eq!(got_a.tags, vec!["prod".to_string(), "shared".to_string()]);
+        assert_eq!(got_b.tags, vec!["shared".to_string()]);
+
+        // Adding a tag a host already has is a no-op, not an error or a duplicate.
+        store.add_tag_to_hosts(&ids, "shared").unwrap();
+        assert_eq!(
+            store.get_host(&a.id).unwrap().unwrap().tags,
+            vec!["prod".to_string(), "shared".to_string()]
+        );
+
+        // Removing it drops only that tag.
+        store.remove_tag_from_hosts(&ids, "shared").unwrap();
+        assert_eq!(
+            store.get_host(&a.id).unwrap().unwrap().tags,
+            vec!["prod".to_string()]
+        );
+        assert!(store.get_host(&b.id).unwrap().unwrap().tags.is_empty());
+    }
+
+    #[test]
+    fn bulk_group_and_tag_ops_on_an_empty_selection_are_a_no_op() {
+        let (_dir, store) = temp_store();
+        store.set_hosts_group(&[], Some("whatever")).unwrap();
+        store.add_tag_to_hosts(&[], "whatever").unwrap();
+        store.remove_tag_from_hosts(&[], "whatever").unwrap();
+        assert!(store.list_hosts().unwrap().is_empty());
+    }
+
+    /// `host_tags` has no foreign keys, so this check is the only thing
+    /// standing between a deleted tag and a row nothing can ever show.
+    #[test]
+    fn add_tag_to_hosts_refuses_a_tag_that_does_not_exist() {
+        let (_dir, store) = temp_store();
+        let a = sample_host("A", "10.0.0.30");
+        store.save_host(&a).unwrap();
+
+        assert!(
+            store
+                .add_tag_to_hosts(std::slice::from_ref(&a.id), "deleted-in-another-window")
+                .is_err(),
+            "an unknown tag id must not be written as an orphan row"
+        );
+        assert!(store.get_host(&a.id).unwrap().unwrap().tags.is_empty());
     }
 
     #[test]

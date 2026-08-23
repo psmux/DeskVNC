@@ -203,6 +203,40 @@ mod tests {
         assert_ne!(p.id, q.id, "each default profile gets a fresh uuid");
     }
 
+    /// The webview builds these payloads by hand (`save_group` / `save_tag`
+    /// take a whole record), so the contract is asserted here rather than
+    /// discovered at runtime.
+    ///
+    /// This is the regression test for "new groups and tags are never
+    /// created": the Library used to send `{"name":"Office"}`, serde rejected
+    /// the whole call for the missing fields, and the failure was swallowed on
+    /// the way back, so nothing appeared and nothing was reported.
+    #[test]
+    fn group_and_tag_need_every_field_the_ui_now_sends() {
+        let g: Group =
+            serde_json::from_str(r#"{"id":"8f14e45f","name":"Office","parentId":null,"sort":2}"#)
+                .expect("the payload the Library sends must deserialize");
+        assert_eq!(g.name, "Office");
+        assert_eq!(g.parent_id, None);
+        assert_eq!(g.sort, 2);
+
+        // r##"..."## throughout: the colours are `#rrggbb`, and `"#` would
+        // close an ordinary raw string.
+        let t: Tag = serde_json::from_str(r##"{"id":"c9f0f895","name":"prod","color":"#e5544b"}"##)
+            .expect("the payload the Library sends must deserialize");
+        assert_eq!(t.name, "prod");
+        assert_eq!(t.color, "#e5544b");
+
+        assert!(
+            serde_json::from_str::<Group>(r#"{"name":"Office"}"#).is_err(),
+            "a name-only group must still be rejected, that is what broke"
+        );
+        assert!(
+            serde_json::from_str::<Tag>(r##"{"name":"prod","color":"#e5544b"}"##).is_err(),
+            "a tag without an id must still be rejected"
+        );
+    }
+
     #[test]
     fn credentials_debug_is_redacted() {
         let c = StoredCredentials {

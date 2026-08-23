@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { blankHostProfile, type HostGroup, type HostProfile, type HostTag } from "../lib/types";
-import { inTauri, safeInvoke, safeListen } from "../lib/tauri";
+import { inTauri, mustInvoke, safeInvoke, safeListen } from "../lib/tauri";
 import {
   MOCK_GROUPS,
   MOCK_HOSTS,
@@ -50,11 +50,16 @@ interface HostsContextValue {
   refresh: () => Promise<void>;
   saveHost: (host: Partial<HostProfile> & { id?: string }) => Promise<HostProfile | null>;
   deleteHost: (id: string) => Promise<void>;
-  saveGroup: (group: Partial<HostGroup> & { name: string }) => Promise<void>;
+  saveGroup: (group: Partial<HostGroup> & { name: string }) => Promise<HostGroup>;
   deleteGroup: (id: string) => Promise<void>;
-  saveTag: (tag: Partial<HostTag> & { name: string }) => Promise<void>;
+  saveTag: (tag: Partial<HostTag> & { name: string }) => Promise<HostTag>;
   deleteTag: (id: string) => Promise<void>;
   setHostTags: (hostId: string, tagIds: string[]) => Promise<void>;
+  /** Move a set of hosts into a group, or out of every group with `null`. */
+  setHostsGroup: (hostIds: string[], groupId: string | null) => Promise<void>;
+  /** Add one tag to a set of hosts, leaving their other tags alone. */
+  addTagToHosts: (hostIds: string[], tagId: string) => Promise<void>;
+  removeTagFromHosts: (hostIds: string[], tagId: string) => Promise<void>;
   savePassword: (hostId: string, password: string) => Promise<void>;
   /**
    * Save the SSH passphrase/password used by the Files panel and the SSH
@@ -279,59 +284,167 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     [mock, refresh, forgetThumbnail],
   );
 
+  /** Latest group/tag lists, for the `sort` of a group being created. */
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+
   const saveGroup = useCallback(
-    async (group: Partial<HostGroup> & { name: string }): Promise<void> => {
-      if (mock) {
-        setGroups((prev) => [
-          ...prev,
-          { id: `g-${Date.now()}`, name: group.name, parentId: group.parentId ?? null, sort: prev.length },
-        ]);
-        return;
+    async (group: Partial<HostGroup> & { name: string }): Promise<HostGroup> => {
+      // `save_group` deserializes a COMPLETE vnc_store::Group: `id`, `name`,
+      // `parentId` and `sort` are all required, and serde rejects the whole
+      // payload when one is missing. Sending `{ name }` alone is why a new
+      // group silently never appeared: the command failed on the Rust side
+      // and the reply was thrown away.
+      const parentId = group.parentId ?? null;
+      const siblings = groupsRef.current.filter((g) => g.parentId === parentId);
+      const full: HostGroup = {
+        id: group.id || crypto.randomUUID(),
+        name: group.name,
+        parentId,
+        sort: group.sort ?? siblings.reduce((max, g) => Math.max(max, g.sort + 1), 0),
+      };
+      if (mock || !inTauri()) {
+        setGroups((prev) => {
+          const i = prev.findIndex((g) => g.id === full.id);
+          if (i < 0) return [...prev, full];
+          const next = prev.slice();
+          next[i] = full;
+          return next;
+        });
+        return full;
       }
-      await safeInvoke("save_group", { group }, null);
+      // mustInvoke, not safeInvoke: a group the user asked for and did not get
+      // has to be reported, not swallowed into a console warning.
+      await mustInvoke("save_group", { group: full });
       await refresh();
+      return full;
     },
     [mock, refresh],
   );
 
   const deleteGroup = useCallback(
     async (id: string): Promise<void> => {
+      // The browser-dev branch matters here as much as in `saveGroup`: a group
+      // created in the dev build has to be deletable there too, or it is
+      // stuck on screen for the rest of the session.
+      if (mock || !inTauri()) {
+        setGroups((prev) => prev.filter((g) => g.id !== id));
+        setHosts((prev) => prev.map((h) => (h.groupId === id ? { ...h, groupId: null } : h)));
+        return;
+      }
       await safeInvoke("delete_group", { groupId: id }, null);
       await refresh();
     },
-    [refresh],
+    [mock, refresh],
   );
 
   const saveTag = useCallback(
-    async (tag: Partial<HostTag> & { name: string }): Promise<void> => {
-      if (mock) {
-        setTags((prev) => [
-          ...prev,
-          { id: `t-${Date.now()}`, name: tag.name, color: tag.color ?? "#4f8ef7" },
-        ]);
-        return;
+    async (tag: Partial<HostTag> & { name: string }): Promise<HostTag> => {
+      // Same contract as save_group above: vnc_store::Tag needs `id`, `name`
+      // and `color` together, so a `{ name, color }` payload never created
+      // anything.
+      const full: HostTag = {
+        id: tag.id || crypto.randomUUID(),
+        name: tag.name,
+        color: tag.color ?? "#4f8ef7",
+      };
+      if (mock || !inTauri()) {
+        setTags((prev) => {
+          const i = prev.findIndex((t) => t.id === full.id);
+          if (i < 0) return [...prev, full];
+          const next = prev.slice();
+          next[i] = full;
+          return next;
+        });
+        return full;
       }
-      await safeInvoke("save_tag", { tag }, null);
+      await mustInvoke("save_tag", { tag: full });
       await refresh();
+      return full;
     },
     [mock, refresh],
   );
 
   const deleteTag = useCallback(
     async (id: string): Promise<void> => {
+      if (mock || !inTauri()) {
+        setTags((prev) => prev.filter((t) => t.id !== id));
+        setHosts((prev) => prev.map((h) => ({ ...h, tags: h.tags.filter((t) => t !== id) })));
+        return;
+      }
       await safeInvoke("delete_tag", { tagId: id }, null);
       await refresh();
     },
-    [refresh],
+    [mock, refresh],
   );
 
   const setHostTags = useCallback(
     async (hostId: string, tagIds: string[]): Promise<void> => {
-      if (mock) {
+      if (mock || !inTauri()) {
         setHosts((prev) => prev.map((h) => (h.id === hostId ? { ...h, tags: tagIds } : h)));
         return;
       }
       await safeInvoke("set_host_tags", { hostId, tagIds }, null);
+      await refresh();
+    },
+    [mock, refresh],
+  );
+
+  /**
+   * Move a selection of hosts into a group in one call.
+   *
+   * Deliberately not a loop over `saveHost`: that upserts every column of a
+   * whole profile per host and re-reads the library each time, so a ten-host
+   * drag would be ten full writes racing ten refreshes.
+   */
+  const setHostsGroup = useCallback(
+    async (hostIds: string[], groupId: string | null): Promise<void> => {
+      if (hostIds.length === 0) return;
+      const ids = new Set(hostIds);
+      if (mock || !inTauri()) {
+        setHosts((prev) => prev.map((h) => (ids.has(h.id) ? { ...h, groupId } : h)));
+        return;
+      }
+      await mustInvoke("set_hosts_group", { hostIds, groupId });
+      await refresh();
+    },
+    [mock, refresh],
+  );
+
+  /**
+   * Add one tag across a selection, leaving each host's other tags alone.
+   * `set_host_tags` replaces a host's whole set, which is the wrong shape for
+   * "drop these five onto prod": it would strip every other tag they carry.
+   */
+  const addTagToHosts = useCallback(
+    async (hostIds: string[], tagId: string): Promise<void> => {
+      if (hostIds.length === 0) return;
+      const ids = new Set(hostIds);
+      if (mock || !inTauri()) {
+        setHosts((prev) =>
+          prev.map((h) =>
+            ids.has(h.id) && !h.tags.includes(tagId) ? { ...h, tags: [...h.tags, tagId] } : h,
+          ),
+        );
+        return;
+      }
+      await mustInvoke("add_tag_to_hosts", { hostIds, tagId });
+      await refresh();
+    },
+    [mock, refresh],
+  );
+
+  const removeTagFromHosts = useCallback(
+    async (hostIds: string[], tagId: string): Promise<void> => {
+      if (hostIds.length === 0) return;
+      const ids = new Set(hostIds);
+      if (mock || !inTauri()) {
+        setHosts((prev) =>
+          prev.map((h) => (ids.has(h.id) ? { ...h, tags: h.tags.filter((t) => t !== tagId) } : h)),
+        );
+        return;
+      }
+      await mustInvoke("remove_tag_from_hosts", { hostIds, tagId });
       await refresh();
     },
     [mock, refresh],
@@ -439,12 +552,14 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
   const value = useMemo(
     () => ({
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
-      deleteGroup, saveTag, deleteTag, setHostTags, savePassword, saveSshPassphrase, deletePassword,
+      deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
+      removeTagFromHosts, savePassword, saveSshPassphrase, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     }),
     [
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
-      deleteGroup, saveTag, deleteTag, setHostTags, savePassword, saveSshPassphrase, deletePassword,
+      deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
+      removeTagFromHosts, savePassword, saveSshPassphrase, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     ],
   );

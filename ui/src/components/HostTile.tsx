@@ -186,7 +186,6 @@ export function HostTile({
   onConnect,
   onEdit,
   onWake,
-  onSelect,
   onContextMenu,
 }: {
   host: HostProfile;
@@ -195,7 +194,6 @@ export function HostTile({
   onConnect: () => void;
   onEdit: () => void;
   onWake: () => void;
-  onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }): ReactNode {
   const { thumbnailUrl, requestThumbnail } = useHosts();
@@ -217,11 +215,15 @@ export function HostTile({
 
   return (
     <div
+      // The Library's pointer pipeline reads this to know which tile a press,
+      // a marquee sweep or a drag is about (see useHostDragSelect), so it must
+      // stay on the outermost element of the tile.
+      data-host-id={host.id}
       role="button"
       tabIndex={0}
       aria-label={`${host.friendlyName}, ${osLabel(host.osHint)}, ${host.address}. Press Enter to connect.`}
       className={classNames(
-        "group relative cursor-default overflow-hidden rounded-md border bg-surface text-left outline-none",
+        "group relative cursor-default select-none overflow-hidden rounded-md border bg-surface text-left outline-none",
         "transition-[transform,box-shadow,border-color] duration-120 motion-reduce:transition-none",
         selected ? "border-accent ring-2 ring-accent/40" : "border-subtle",
         hover && "-translate-y-0.5 shadow-(--shadow-tile-lift)",
@@ -230,7 +232,6 @@ export function HostTile({
       )}
       onPointerEnter={() => setHover(true)}
       onPointerLeave={() => setHover(false)}
-      onClick={onSelect}
       onDoubleClick={onConnect}
       onContextMenu={onContextMenu}
       onKeyDown={(e) => {

@@ -92,7 +92,10 @@ answer these queries and the result is rendered in the interface.
 ### Session and interface
 
 - **Host library** on SQLite with friendly names, groups, tags, live
-  thumbnails, connection history, and double-click connect.
+  thumbnails, connection history, and double-click connect. Computers are
+  selected the way files are, with Cmd/Ctrl-click, Shift for a run, or a
+  marquee sweep, and a selection can be dragged onto a group or a tag in the
+  sidebar to file the whole lot at once.
 - **QuickConnect** address bar: type `host`, `host:1`, `host:5901`, `host::5901`,
   `[::1]:5901`, or a `vnc://` link and press Enter. Nothing has to be saved
   first, and typing the address of a host you did save connects through that

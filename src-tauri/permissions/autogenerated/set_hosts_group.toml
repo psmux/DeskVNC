@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-hosts-group"
+description = "Enables the set_hosts_group command without any pre-configured scope."
+commands.allow = ["set_hosts_group"]
+
+[[permission]]
+identifier = "deny-set-hosts-group"
+description = "Denies the set_hosts_group command without any pre-configured scope."
+commands.deny = ["set_hosts_group"]

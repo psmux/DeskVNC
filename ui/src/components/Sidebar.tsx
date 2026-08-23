@@ -36,6 +36,8 @@ export function Sidebar({
   onNewGroup,
   onNewTag,
   onOpenPreferences,
+  dragging = false,
+  dropOverKey = null,
 }: {
   hosts: HostProfile[];
   groups: HostGroup[];
@@ -50,6 +52,14 @@ export function Sidebar({
   onNewGroup: () => void;
   onNewTag: () => void;
   onOpenPreferences: () => void;
+  /**
+   * Hosts are being dragged over the library right now. Groups and tags are
+   * drop targets, so they light up to say so; the Library owns the gesture
+   * (see `useHostDragSelect`) and hit-tests the `data-drop` attributes below.
+   */
+  dragging?: boolean;
+  /** The `data-drop` key currently under the pointer, if any. */
+  dropOverKey?: string | null;
 }): ReactNode {
   const groupCount = (gid: string): number => {
     const childIds = groups.filter((g) => g.parentId === gid).map((g) => g.id);
@@ -70,12 +80,17 @@ export function Sidebar({
         active={selection.kind === "nearby"}
         onClick={() => onSelect({ kind: "nearby" })}
       />
+      {/* Also the "take these out of their group" target: dropping a
+          selection on the unfiltered list is the natural way to say it. */}
       <SidebarRow
         icon={<IconMonitor size={16} />}
         label="All Hosts"
         count={hosts.length}
         active={selection.kind === "all"}
         onClick={() => onSelect({ kind: "all" })}
+        dropKey="ungroup"
+        dropActive={dropOverKey === "ungroup"}
+        dropHint={dragging ? "Drop here to remove these hosts from their group" : undefined}
       />
       <SidebarRow
         icon={<IconStar size={16} />}
@@ -93,7 +108,9 @@ export function Sidebar({
 
       <Section title="Groups" onAdd={onNewGroup} addLabel="New group">
         {rootGroups.length === 0 ? (
-          <p className="px-2 py-1 text-xs text-tertiary">No groups yet</p>
+          <p className="px-2 py-1 text-xs text-tertiary">
+            {dragging ? "Make a group first, then drop hosts on it" : "No groups yet"}
+          </p>
         ) : (
           rootGroups.map((g) => (
             <GroupRow
@@ -104,6 +121,8 @@ export function Sidebar({
               count={groupCount}
               selection={selection}
               onSelect={onSelect}
+              dragging={dragging}
+              dropOverKey={dropOverKey}
             />
           ))
         )}
@@ -128,21 +147,27 @@ export function Sidebar({
         }
       >
         {tags.length === 0 ? (
-          <p className="px-2 py-1 text-xs text-tertiary">No tags yet</p>
+          <p className="px-2 py-1 text-xs text-tertiary">
+            {dragging ? "Make a tag first, then drop hosts on it" : "No tags yet"}
+          </p>
         ) : (
           <div className="flex flex-wrap gap-1.5 px-2 py-1">
             {tags.map((t) => {
               const active = activeTagIds.has(t.id);
+              const over = dropOverKey === `tag:${t.id}`;
               return (
                 <button
                   key={t.id}
                   type="button"
                   aria-pressed={active}
+                  data-drop={`tag:${t.id}`}
+                  title={dragging ? `Drop here to tag with ${t.name}` : undefined}
                   className={classNames(
                     "flex items-center gap-1.5 rounded-pill border px-2 py-0.5 text-xs",
                     active
                       ? "border-transparent font-medium text-white"
                       : "border-subtle text-secondary hover:border-strong",
+                    over && "ring-2 ring-accent ring-offset-1 ring-offset-surface",
                   )}
                   style={active ? { background: t.color } : undefined}
                   onClick={() => onToggleTag(t.id)}
@@ -177,20 +202,29 @@ function SidebarRow({
   count,
   active,
   onClick,
+  dropKey,
+  dropActive,
+  dropHint,
 }: {
   icon: ReactNode;
   label: string;
   count?: number;
   active: boolean;
   onClick: () => void;
+  dropKey?: string;
+  dropActive?: boolean;
+  dropHint?: string;
 }): ReactNode {
   return (
     <button
       type="button"
       aria-current={active ? "true" : undefined}
+      data-drop={dropKey}
+      title={dropHint}
       className={classNames(
         "flex w-full items-center gap-2.5 rounded-sm px-2 py-1.5 text-sm",
         active ? "bg-accent/15 font-medium text-primary" : "text-secondary hover:bg-inset hover:text-primary",
+        dropActive && "ring-2 ring-accent",
       )}
       onClick={onClick}
     >
@@ -254,6 +288,8 @@ function GroupRow({
   count,
   selection,
   onSelect,
+  dragging,
+  dropOverKey,
 }: {
   group: HostGroup;
   depth: number;
@@ -261,17 +297,23 @@ function GroupRow({
   count: (gid: string) => number;
   selection: SidebarSelection;
   onSelect: (s: SidebarSelection) => void;
+  dragging?: boolean;
+  dropOverKey?: string | null;
 }): ReactNode {
   const children = groups.filter((g) => g.parentId === group.id).sort((a, b) => a.sort - b.sort);
   const active = selection.kind === "group" && selection.id === group.id;
+  const over = dropOverKey === `group:${group.id}`;
   return (
     <div>
       <button
         type="button"
         aria-current={active ? "true" : undefined}
+        data-drop={`group:${group.id}`}
+        title={dragging ? `Drop here to move these hosts into ${group.name}` : undefined}
         className={classNames(
           "flex w-full items-center gap-2 rounded-sm py-1.5 pr-2 text-sm",
           active ? "bg-accent/15 font-medium text-primary" : "text-secondary hover:bg-inset hover:text-primary",
+          over && "ring-2 ring-accent",
         )}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => onSelect({ kind: "group", id: group.id })}
@@ -289,6 +331,8 @@ function GroupRow({
           count={count}
           selection={selection}
           onSelect={onSelect}
+          dragging={dragging}
+          dropOverKey={dropOverKey}
         />
       ))}
     </div>
