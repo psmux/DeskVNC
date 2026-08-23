@@ -28,7 +28,7 @@ use super::{system_pointer, PointerKind, PointerUpdate};
 use crate::input::fastpath::{
     action, fastpath_frame, header_flags, read_fastpath_length, write_fastpath_length,
 };
-use crate::io::limits::MAX_VC_REASSEMBLED;
+use crate::io::limits::MAX_FASTPATH_REASSEMBLED;
 use crate::io::{Decode, Encode, Payload, PduError, PduResult, Reader, Writer};
 
 /// `updateCode`, the low nibble of `updateHeader` (MS-RDPBCGR 2.2.9.1.2.1).
@@ -386,11 +386,10 @@ pub struct CompleteUpdate<'a> {
 /// Reassembles fragmented fast path updates.
 ///
 /// This is the only type in `rdp-pdu` that carries state between PDUs
-/// (PRDRDP/13 §5.5). It holds at most
-/// [`MAX_VC_REASSEMBLED`] bytes and
-/// errors past it, which is the cap §5.5 names; a fast path specific constant
-/// beside it in [`crate::io::limits`] would read better and is a change for
-/// whoever owns that file next.
+/// (PRDRDP/13 §5.5). It holds at most [`MAX_FASTPATH_REASSEMBLED`] bytes and
+/// errors past it. That constant is also what the Multifragment Update
+/// capability set advertises as `MaxRequestSize` (MS-RDPBCGR 2.2.7.2.6), so
+/// the budget we ask for and the budget we accept cannot drift apart.
 ///
 /// Decompression of a compressed fragment happens in `rdp-codecs` between
 /// [`FastPathReassembler::push`] calls, which is why `push` takes a slice
@@ -520,14 +519,14 @@ impl FastPathReassembler {
     /// walk the buffer up to the address space.
     fn reserve(&mut self, data: &[u8]) -> PduResult<()> {
         let total = self.buf.len() + data.len();
-        if total > MAX_VC_REASSEMBLED {
+        if total > MAX_FASTPATH_REASSEMBLED {
             // The reassembler has no reader, so the offset reported is how
             // far into the reassembled update the overflow happened.
             return Err(PduError::CapExceeded {
                 context: Self::NAME,
                 declared: total,
-                cap: MAX_VC_REASSEMBLED,
-                limit_name: "MAX_VC_REASSEMBLED",
+                cap: MAX_FASTPATH_REASSEMBLED,
+                limit_name: "MAX_FASTPATH_REASSEMBLED",
                 offset: self.buf.len(),
             });
         }
@@ -940,14 +939,14 @@ mod tests {
             match reassembler.push(next, &chunk) {
                 Ok(_) => pushed += 1,
                 Err(PduError::CapExceeded {
-                    limit_name: "MAX_VC_REASSEMBLED",
+                    limit_name: "MAX_FASTPATH_REASSEMBLED",
                     ..
                 }) => break,
                 Err(other) => panic!("{other}"),
             }
             assert!(pushed < 64, "the cap never fired");
         }
-        assert_eq!(pushed, MAX_VC_REASSEMBLED >> 20);
+        assert_eq!(pushed, MAX_FASTPATH_REASSEMBLED >> 20);
     }
 
     #[test]

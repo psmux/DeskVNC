@@ -26,18 +26,14 @@ pub mod slowpath;
 
 use crate::io::{PduError, PduResult};
 
-/// The most events this crate will put in, or take out of, one input PDU.
+/// The most events this crate will put in, or take out of, one input PDU
+/// (MS-RDPBCGR 2.2.8.1.2).
 ///
-/// The fast path count is a byte, so 255 is the wire's own bound
-/// (MS-RDPBCGR 2.2.8.1.2, PRDRDP/05 §2.3: "holds 1 to 255 events"). The slow
-/// path field is a `u16` and the same cap is applied to it, because the
-/// client is the only sender of input and it never batches more than a
-/// pointer move plus a handful of edges. It bounds the decoder's `Vec`
-/// (PRDRDP/13 §10.1 statement 2).
-///
-/// This belongs in [`crate::io::limits`] beside the other caps. It is here
-/// because that file has another author while this lane is being written.
-pub const MAX_INPUT_EVENTS: usize = 255;
+/// The cap itself now lives in [`crate::io::limits`] with every other cap;
+/// this name stays because `rdp-core`'s input batcher spells it
+/// `rdp_pdu::input::MAX_INPUT_EVENTS`, and a batch size belongs next to the
+/// PDU it bounds when read from outside the crate.
+pub use crate::io::limits::MAX_INPUT_EVENTS;
 
 /// `toggleFlags` of the slow path synchronize event and `eventFlags` of the
 /// fast path one (MS-RDPBCGR 2.2.8.1.1.3.1.1.5, 2.2.8.1.2.2.5).

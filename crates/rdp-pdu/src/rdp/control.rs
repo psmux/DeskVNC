@@ -12,6 +12,7 @@
 //! security header with their own flag (PRDRDP/13 §5.2) and never inside a
 //! share header at all.
 
+use super::security::{security_flags, BasicSecurityHeader, BASIC_SECURITY_HEADER_LEN};
 use super::share::pdu_type2;
 use crate::codes::{ErrInfo, LogonErrorData, LogonErrorType};
 use crate::gcc::client::MonitorDef;
@@ -1152,6 +1153,132 @@ impl Encode for AutoDetectPdu<'_> {
     }
 }
 
+/// A Client-to-Server network characteristics detection response
+/// (MS-RDPBCGR 2.2.14.2), complete with the basic security header it rides
+/// behind.
+///
+/// # Why this is a second type
+///
+/// [`AutoDetectPdu`] deliberately starts at `headerLength`: by the time it
+/// decodes, [`decode_io_pdu`](super::decode_io_pdu) has already read the
+/// security header, and the same type serves both directions. Sending one
+/// needs the header back. Every other client to server PDU in this crate
+/// writes its own ([`LicensePdu`](super::LicensePdu) is the pattern), so the
+/// response gets a type that does the same rather than a flag on the shared
+/// one, and the session cannot forget the `SEC_AUTODETECT_RSP` that makes a
+/// server recognise the answer at all (PRDRDP/13 §5.2).
+///
+/// # What the client actually sends
+///
+/// Three of them, all of 2.2.14.2. [`AutoDetectResponse::rtt`] answers an RTT
+/// Measure Request and is the whole of connect time detection for a client
+/// that measures nothing; [`AutoDetectResponse::bandwidth_results`] answers a
+/// Bandwidth Measure Stop; [`AutoDetectResponse::network_characteristics_sync`]
+/// is sent once on a reconnect. What to put in the two measured ones is
+/// PRDRDP/05 §6.1's arithmetic and the session's to decide, which is why the
+/// numbers are parameters and there is no constructor that measures anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoDetectResponse<'a> {
+    /// The detection PDU, whose `headerTypeId` is
+    /// [`autodetect::TYPE_ID_RESPONSE`].
+    pub pdu: AutoDetectPdu<'a>,
+}
+
+impl<'a> AutoDetectResponse<'a> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "RDP_NETWORK_DETECTION_RESPONSE";
+
+    /// RTT Measure Response (MS-RDPBCGR 2.2.14.2.1), header only.
+    ///
+    /// `sequence_number` is echoed from the request; a server matches the
+    /// answer to its request by that number and by nothing else.
+    #[must_use]
+    pub const fn rtt(sequence_number: u16) -> Self {
+        Self {
+            pdu: AutoDetectPdu::rtt_response(sequence_number),
+        }
+    }
+
+    /// Bandwidth Measure Results (MS-RDPBCGR 2.2.14.2.2).
+    ///
+    /// `time_delta` is the milliseconds between the Bandwidth Measure Start
+    /// and the Bandwidth Measure Stop, and `byte_count` is what arrived in
+    /// between.
+    #[must_use]
+    pub const fn bandwidth_results(sequence_number: u16, time_delta: u32, byte_count: u32) -> Self {
+        Self {
+            pdu: AutoDetectPdu {
+                header_type_id: autodetect::TYPE_ID_RESPONSE,
+                sequence_number,
+                request_type: autodetect::BANDWIDTH_RESULTS,
+                body: AutoDetectBody::Results {
+                    time_delta,
+                    byte_count,
+                },
+            },
+        }
+    }
+
+    /// Network Characteristics Sync (MS-RDPBCGR 2.2.14.2.3), the client
+    /// telling a server what the previous connection measured.
+    #[must_use]
+    pub const fn network_characteristics_sync(
+        sequence_number: u16,
+        bandwidth: u32,
+        rtt: u32,
+    ) -> Self {
+        Self {
+            pdu: AutoDetectPdu {
+                header_type_id: autodetect::TYPE_ID_RESPONSE,
+                sequence_number,
+                request_type: autodetect::NETCHAR_SYNC,
+                body: AutoDetectBody::Sync { bandwidth, rtt },
+            },
+        }
+    }
+}
+
+impl Encode for AutoDetectResponse<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        BASIC_SECURITY_HEADER_LEN + self.pdu.size()
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        if self.pdu.header_type_id != autodetect::TYPE_ID_RESPONSE {
+            // A response with a request's type id is one a server ignores,
+            // and it is a much better error here than a silent timeout.
+            return Err(PduError::Encode {
+                context: Self::NAME,
+                reason: "headerTypeId is not TYPE_ID_AUTODETECT_RESPONSE",
+            });
+        }
+        BasicSecurityHeader::new(security_flags::AUTODETECT_RSP).encode(w)?;
+        self.pdu.encode(w)
+    }
+}
+
+impl<'a> Decode<'a> for AutoDetectResponse<'a> {
+    const NAME: &'static str = Self::NAME;
+
+    fn decode(r: &mut Reader<'a>) -> PduResult<Self> {
+        let at = r.offset();
+        let header = BasicSecurityHeader::decode(r)?;
+        if !header.has(security_flags::AUTODETECT_RSP) {
+            return Err(PduError::InvalidField {
+                context: Self::NAME,
+                field: "flags (SEC_AUTODETECT_RSP)",
+                value: u64::from(header.flags),
+                offset: at,
+            });
+        }
+        Ok(Self {
+            pdu: AutoDetectPdu::read(r)?,
+        })
+    }
+}
+
 /// The Heartbeat PDU (MS-RDPBCGR 2.2.16.1), four bytes, server to client.
 ///
 /// Behind a basic security header with `SEC_HEARTBEAT`, and only when
@@ -1537,6 +1664,79 @@ mod tests {
                 .classify(),
             (AutoDetectKind::RttMeasure, AutoDetectPhase::ConnectTime)
         );
+    }
+
+    /// The whole of the client's side of MS-RDPBCGR 2.2.14.2, header
+    /// included.
+    ///
+    /// The RTT Measure Response is hand computed. `SEC_AUTODETECT_RSP` is
+    /// 0x2000, so `flags` is `00 20` and `flagsHi` is `00 00`. Then
+    /// `headerLength` 0x06, `headerTypeId` 0x01
+    /// (`TYPE_ID_AUTODETECT_RESPONSE`), `sequenceNumber` 0x0001 as `01 00`,
+    /// `responseType` 0x0000 as `00 00`. Four plus six is ten bytes.
+    #[test]
+    fn an_auto_detect_response_carries_its_own_security_header() {
+        let response = AutoDetectResponse::rtt(1);
+        let bytes = encode(&response);
+        assert_eq!(
+            bytes,
+            [0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x01, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(bytes.len(), 4 + 6);
+        assert_eq!(
+            AutoDetectResponse::decode(&mut Reader::new(&bytes)).unwrap(),
+            response
+        );
+        assert_eq!(
+            response.pdu.classify(),
+            (AutoDetectKind::RttMeasure, AutoDetectPhase::ConnectTime)
+        );
+    }
+
+    #[test]
+    fn every_measured_response_round_trips_through_its_header() {
+        for response in [
+            AutoDetectResponse::rtt(7),
+            AutoDetectResponse::bandwidth_results(8, 40, 1_048_576),
+            AutoDetectResponse::network_characteristics_sync(9, 100_000, 14),
+        ] {
+            let bytes = encode(&response);
+            assert_eq!(
+                AutoDetectResponse::decode(&mut Reader::new(&bytes)).unwrap(),
+                response
+            );
+            for cut in 0..bytes.len() {
+                assert!(
+                    AutoDetectResponse::decode(&mut Reader::new(&bytes[..cut])).is_err(),
+                    "a {cut} byte prefix decoded"
+                );
+            }
+        }
+    }
+
+    /// A response the server would ignore is refused at the encoder, where
+    /// the mistake is visible, rather than at the timeout twenty seconds
+    /// later.
+    #[test]
+    fn a_response_with_a_requests_type_id_is_refused() {
+        let mut wrong = AutoDetectResponse::rtt(1);
+        wrong.pdu.header_type_id = autodetect::TYPE_ID_REQUEST;
+        let mut buf = Vec::new();
+        assert!(matches!(
+            wrong.encode(&mut Writer::new(&mut buf)).unwrap_err(),
+            PduError::Encode { .. }
+        ));
+
+        // And one without the flag is refused at the decoder.
+        let mut bytes = encode(&AutoDetectResponse::rtt(1));
+        bytes[1] = 0x10;
+        assert!(matches!(
+            AutoDetectResponse::decode(&mut Reader::new(&bytes)).unwrap_err(),
+            PduError::InvalidField {
+                field: "flags (SEC_AUTODETECT_RSP)",
+                ..
+            }
+        ));
     }
 
     #[test]

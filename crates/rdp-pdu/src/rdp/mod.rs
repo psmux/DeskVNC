@@ -35,24 +35,32 @@ pub mod client_info;
 pub mod control;
 pub mod finalize;
 pub mod license;
+pub mod multitransport;
+pub mod redirection;
 pub mod security;
 pub mod share;
 
 pub use activation::{ConfirmActivePdu, DemandActivePdu, ORIGINATOR_ID};
-pub use capabilities::{CapabilitySet, CapabilitySets};
+pub use capabilities::{CapabilitySet, CapabilitySets, ClientCapabilitySupport};
 pub use client_info::{
     ArcClientPrivatePacket, ArcServerPrivatePacket, ClientInfoPdu, ExtendedInfoPacket, InfoPacket,
     SecretString, SystemTime, TimeZoneInfo,
 };
 pub use control::{
-    AutoDetectBody, AutoDetectKind, AutoDetectPdu, AutoDetectPhase, DeactivateAllPdu, HeartbeatPdu,
-    LogonInfo, LogonInfoExtended, LogonInfoVersion2, MonitorLayoutPdu, Rectangle16, RefreshRectPdu,
-    SaveSessionInfoPdu, SetErrorInfoPdu, SuppressOutputPdu,
+    AutoDetectBody, AutoDetectKind, AutoDetectPdu, AutoDetectPhase, AutoDetectResponse,
+    DeactivateAllPdu, HeartbeatPdu, LogonInfo, LogonInfoExtended, LogonInfoVersion2,
+    MonitorLayoutPdu, Rectangle16, RefreshRectPdu, SaveSessionInfoPdu, SetErrorInfoPdu,
+    SuppressOutputPdu,
 };
 pub use finalize::{ControlPdu, FontListPdu, FontMapPdu, PersistentKeyListPdu, SynchronizePdu};
 pub use license::{LicenseErrorMessage, LicenseMessage, LicensePdu, LicensePreamble};
+pub use multitransport::{
+    ClientInitiateMultitransportResponse, ServerInitiateMultitransportRequest,
+};
+pub use redirection::{SecretBytes, ServerRedirectionPacket};
 pub use security::{
-    BasicSecurityHeader, IoPduContext, SecurityHeader, SecurityHeaderKind, SlowPathClass,
+    BasicSecurityHeader, ClientSecurityExchange, IoPduContext, SecurityHeader, SecurityHeaderKind,
+    SlowPathClass,
 };
 pub use share::{
     read_share_control, write_share_control_with, write_share_data_pdu, ShareControl,
@@ -249,8 +257,15 @@ pub enum SharePdu<'a> {
         pdu: ShareDataPdu<'a>,
     },
     /// `PDUTYPE_SERVER_REDIR_PKT`, the standard Server Redirection PDU
-    /// (MS-RDPBCGR 2.2.13.2), carried whole. Decoding
-    /// `RDP_SERVER_REDIRECTION_PACKET` is phase 2 and is not written yet.
+    /// (MS-RDPBCGR 2.2.13.2), carried whole.
+    ///
+    /// Read the packet out of `body` with
+    /// [`ServerRedirectionPacket::read_standard`](redirection::ServerRedirectionPacket::read_standard),
+    /// which skips the `pad2Octets` this variant's bytes begin with. The
+    /// enhanced form (2.2.13.3) arrives as [`IoPdu::Other`] instead and its
+    /// body decodes with the plain
+    /// [`ServerRedirectionPacket`](redirection::ServerRedirectionPacket)
+    /// [`Decode`] implementation.
     ServerRedirection {
         /// `PDUSource`.
         pdu_source: u16,
@@ -714,5 +729,3 @@ mod tests {
         }
     }
 }
-
-pub mod redirection;

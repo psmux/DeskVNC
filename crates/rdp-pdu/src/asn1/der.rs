@@ -226,6 +226,32 @@ pub fn subject_public_key(cert: &[u8]) -> Option<&[u8]> {
     Some(bits)
 }
 
+/// The OID of `Certificate.signatureAlgorithm`, as its DER content octets.
+///
+/// ```text
+/// Certificate         ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+/// AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER, parameters ANY OPTIONAL }
+/// ```
+///
+/// RFC 5280 §4.1. Three TLV reads over the walker this module already owns,
+/// so it adds no second X.690 implementation (PRDRDP/00 R45).
+///
+/// This is the hash choice input of RFC 5929 §4.1 and nothing else. Reading
+/// the wrong element produces a channel binding that a Windows host with
+/// Extended Protection set to "Require" rejects, and the failure reads to the
+/// user as a wrong password (PRDRDP/03 §4.3). It is named
+/// `signature_algorithm_oid` rather than `certificate_signature_algorithm`
+/// because everything in this module takes a certificate, so the prefix would
+/// carry nothing (PRDRDP/00 R62).
+#[must_use]
+pub fn signature_algorithm_oid(cert: &[u8]) -> Option<&[u8]> {
+    let (certificate, _) = expect_tag(cert, tag::SEQUENCE)?;
+    let (_tbs, rest) = read_tlv(certificate)?;
+    let (algorithm_identifier, _) = expect_tag(rest, tag::SEQUENCE)?;
+    let (oid, _) = expect_tag(algorithm_identifier, tag::OBJECT_IDENTIFIER)?;
+    Some(oid)
+}
+
 /// The subject `CN=` value, for display in the trust prompt. Untrusted text:
 /// the caller must render it as plain text, never as markup.
 #[must_use]
@@ -406,6 +432,43 @@ bb93370b6d21abd621dc5122cf599bff084ff2d8b16df21bf62a96fcbd59975a"
             subject_common_name(&der).as_deref(),
             Some("vnc.example.test")
         );
+    }
+
+    /// The fixture is signed `ecdsa-with-SHA256`, OID 1.2.840.10045.4.3.2.
+    /// Its DER content octets are the arithmetic of X.690 §8.19: the first
+    /// two arcs collapse to `40 * 1 + 2 = 42 = 0x2a`, then 840 is
+    /// `0x86 0x48` (`0x06 << 7 | 0x48 = 840`), then 10045 is
+    /// `0xce 0x3d` (`0x4e << 7 | 0x3d = 10045`), then 4, 3 and 2 one byte
+    /// each. That is `2a 86 48 ce 3d 04 03 02`, eight bytes.
+    #[test]
+    fn reads_the_signature_algorithm_oid_and_not_the_subject_key() {
+        let der = test_cert();
+        assert_eq!(
+            signature_algorithm_oid(&der),
+            Some(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02][..])
+        );
+        // The two values a certificate yields are different things and must
+        // not collapse into one another by a later refactor: the pin is
+        // taken over the whole SPKI element and the CredSSP binding input is
+        // the inner subjectPublicKey contents (PRDRDP/03 §4.3).
+        let spki = extract_spki(&der).unwrap();
+        let key = subject_public_key(&der).unwrap();
+        assert_ne!(spki, key);
+        assert!(spki.len() > key.len());
+        assert_ne!(signature_algorithm_oid(&der), Some(key));
+    }
+
+    /// Truncation and rubbish are `None`, never a panic and never a partial
+    /// OID: this walks bytes a remote peer chose.
+    #[test]
+    fn a_malformed_certificate_yields_no_signature_algorithm_oid() {
+        let der = test_cert();
+        for cut in 0..der.len() {
+            let _ = signature_algorithm_oid(&der[..cut]);
+        }
+        assert_eq!(signature_algorithm_oid(&[]), None);
+        assert_eq!(signature_algorithm_oid(&[0x30, 0x00]), None);
+        assert_eq!(signature_algorithm_oid(&[0x02, 0x01, 0x00]), None);
     }
 
     /// Truncating a real certificate anywhere must fail cleanly, never panic.

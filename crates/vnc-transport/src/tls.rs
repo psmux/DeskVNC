@@ -145,25 +145,6 @@ impl std::fmt::Debug for TlsUpgrade {
 /// RFC 5280 §4.1. Three TLV reads over the walker `rdp-pdu` already owns
 /// (PRDRDP/00 R45), so this adds no second X.690 implementation.
 ///
-/// **Seam.** PRDRDP/00 R62 puts this function in `rdp_pdu::asn1::der` under
-/// this name. It is not there yet (`crates/rdp-pdu/src/asn1/der.rs` publishes
-/// `read_tlv`, `expect_tag`, `extract_spki`, `subject_public_key` and
-/// `subject_common_name` and no more), and that crate has another author this
-/// week, so it lives here and moves when the name appears.
-#[must_use]
-pub fn signature_algorithm_oid(cert: &[u8]) -> Option<&[u8]> {
-    /// `SEQUENCE`, constructed, universal (X.690 §8.1.2).
-    const SEQUENCE: u8 = 0x30;
-    /// `OBJECT IDENTIFIER`, primitive, universal.
-    const OID: u8 = 0x06;
-
-    let (certificate, _) = der::expect_tag(cert, SEQUENCE)?;
-    let (_tbs, rest) = der::read_tlv(certificate)?;
-    let (algorithm_identifier, _) = der::expect_tag(rest, SEQUENCE)?;
-    let (oid, _) = der::expect_tag(algorithm_identifier, OID)?;
-    Some(oid)
-}
-
 /// Upgrade an established byte stream to TLS.
 ///
 /// `server_name` is used both for SNI and for CA hostname verification;
@@ -261,7 +242,9 @@ async fn upgrade_rustls<S: Stream + 'static>(
     let server_certificate = verifier
         .certificate()
         .ok_or_else(|| TransportError::Tls("the server sent no certificate".into()))?;
-    let signature_algorithm_oid = signature_algorithm_oid(&server_certificate)
+    // R62 puts this in `rdp_pdu::asn1::der`, and it is there now, so the copy
+    // that lived here while that crate was being written is gone.
+    let signature_algorithm_oid = der::signature_algorithm_oid(&server_certificate)
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
 
@@ -488,7 +471,7 @@ f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e16
     fn reads_the_signature_algorithm_oid_and_not_the_subject_key() {
         let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
         assert_eq!(
-            signature_algorithm_oid(&der_bytes),
+            der::signature_algorithm_oid(&der_bytes),
             Some(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02][..])
         );
         // The two values a certificate yields are different things and must
@@ -507,11 +490,11 @@ f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e16
     fn a_malformed_certificate_yields_no_oid() {
         let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
         for cut in 0..64 {
-            let _ = signature_algorithm_oid(&der_bytes[..cut]);
+            let _ = der::signature_algorithm_oid(&der_bytes[..cut]);
         }
-        assert_eq!(signature_algorithm_oid(&[]), None);
-        assert_eq!(signature_algorithm_oid(&[0x30, 0x00]), None);
-        assert_eq!(signature_algorithm_oid(&[0x02, 0x01, 0x00]), None);
+        assert_eq!(der::signature_algorithm_oid(&[]), None);
+        assert_eq!(der::signature_algorithm_oid(&[0x30, 0x00]), None);
+        assert_eq!(der::signature_algorithm_oid(&[0x02, 0x01, 0x00]), None);
     }
 
     /// The subject CN is what the TOFU prompt shows, so this crate keeps a

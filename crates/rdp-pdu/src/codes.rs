@@ -506,6 +506,24 @@ code_enum! {
 }
 
 code_enum! {
+    /// `Server Initiate Multitransport Request.requestedProtocol`
+    /// (MS-RDPBCGR 2.2.15.1).
+    ///
+    /// Two values, both UDP, and this client asks for neither: the Client
+    /// Multitransport Channel Data block goes out with `flags = 0`, which
+    /// says the client understands multitransport bootstrapping and wants no
+    /// side channel (PRDRDP/03 §2.9). The table is here so that a server
+    /// which sends a request anyway is refused by name in a log line rather
+    /// than by a bare number, which is the whole point of this file.
+    MultitransportProtocol: u16, from_u16, to_u16, "INITIATE_REQUEST_PROTOCOL_UNKNOWN" {
+        UdpFecR = 0x0001, "INITIATE_REQUEST_PROTOCOL_UDPFECR",
+            "A reliable UDP transport, for the graphics channel.";
+        UdpFecL = 0x0002, "INITIATE_REQUEST_PROTOCOL_UDPFECL",
+            "A lossy UDP transport, for audio and input.";
+    }
+}
+
+code_enum! {
     /// The compression type in the low four bits of any compression flags
     /// field (MS-RDPBCGR 3.1.8, PRDRDP/13 §7).
     ///
@@ -559,6 +577,9 @@ mod tests {
         }
         for code in CompressionType::ALL {
             assert_eq!(CompressionType::from_u8(code.to_u8()), *code);
+        }
+        for code in MultitransportProtocol::ALL {
+            assert_eq!(MultitransportProtocol::from_u16(code.to_u16()), *code);
         }
     }
 
