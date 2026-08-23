@@ -28,10 +28,11 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
+use rdp_codecs::mppc::{MppcDecompressor, Variant, PACKET_AT_FRONT, PACKET_COMPRESSED};
 use rdp_codecs::remotefx::{dwt, quant, rlgr, ycbcr, Entropy, RfxContext, RfxScratch, TILE};
 use rdp_codecs::{
-    clear, encode, nscodec, planar, remotefx, rle, uncompressed, zgfx, DstView, OutFormat, Palette,
-    PixelFormat, RowOrder,
+    avc420, clear, encode, mppc, nscodec, planar, remotefx, rle, uncompressed, zgfx, DstView,
+    OutFormat, Palette, PixelFormat, RowOrder,
 };
 
 const SIZES: [(usize, usize, &str); 2] = [(1920, 1080, "1080p"), (3840, 2160, "4k")];
@@ -754,6 +755,207 @@ fn bench_phase2_stage(c: &mut Criterion) {
     g.finish();
 }
 
+// ---------------------------------------------------------------------------
+// AVC420 and MPPC
+// ---------------------------------------------------------------------------
+
+/// A synthetic H.264 Annex B access unit of roughly `bytes` bytes.
+///
+/// Entropy coded video is close to uniform over the byte values, except that
+/// emulation prevention keeps `00 00 0x` out of the payload, so the fixture
+/// carries isolated zeros and no pair of them. That distribution is what
+/// decides how often the word at a time start code scan has to fall back to a
+/// byte scan, so getting it wrong would flatter the number.
+fn access_unit(bytes: usize, idr: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(bytes + 32);
+    v.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1F]); // SPS
+    v.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xEB, 0xE3, 0xCB]); // PPS
+    v.extend_from_slice(&[0, 0, 0, 1, if idr { 0x65 } else { 0x41 }]);
+    let mut x = 0x1234_5678u32;
+    let mut last_zero = false;
+    while v.len() < bytes {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let b = (x >> 24) as u8;
+        // Never two zeros in a row, which is what emulation prevention
+        // guarantees a real encoder produces.
+        let b = if b == 0 && last_zero { 0x03 } else { b };
+        last_zero = b == 0;
+        v.push(b);
+    }
+    v
+}
+
+/// A metablock naming `count` region rectangles, followed by `unit`.
+fn avc420_stream(count: usize, unit: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + count * 10 + unit.len());
+    v.extend_from_slice(&(count as u32).to_le_bytes());
+    for i in 0..count {
+        let x = ((i % 120) * 16) as u16;
+        let y = ((i / 120) * 16) as u16;
+        v.extend_from_slice(&x.to_le_bytes());
+        v.extend_from_slice(&y.to_le_bytes());
+        v.extend_from_slice(&(x + 16).to_le_bytes());
+        v.extend_from_slice(&(y + 16).to_le_bytes());
+    }
+    for _ in 0..count {
+        v.extend_from_slice(&[0x96, 100]);
+    }
+    v.extend_from_slice(unit);
+    v
+}
+
+/// AVC420 and MPPC, the last two phase 2 modules.
+///
+/// AVC420 is reported two ways because it has two costs with different shapes.
+/// The metablock parse is per region rectangle and is nothing; the IDR scan is
+/// per byte of access unit and is the only part that can miss the 50
+/// microsecond per frame budget of PRDRDP/04 §11.1. `avc420_frame` is the
+/// whole Rust side of one frame together, which is the number that budget is
+/// actually about.
+///
+/// MPPC is reported in output bytes per second, like ZGFX, because it produces
+/// bytes rather than pixels. One packet is at most one history buffer, so the
+/// RDP 4.0 fixture is 8 KiB and the RDP 5.0 one is 64 KiB, which is also the
+/// largest packet either can legally produce.
+fn bench_phase2_bulk(c: &mut Criterion) {
+    let mut g = c.benchmark_group("rdp_stage");
+
+    // The delta frame is the case that matters, because an access unit with no
+    // IDR in it is scanned all the way to the end. Reported per byte.
+    let delta = access_unit(48 * 1024, false);
+    g.throughput(Throughput::Bytes(delta.len() as u64));
+    g.bench_function(BenchmarkId::new("avc420_delta_scan", "1080p"), |b| {
+        b.iter(|| avc420::contains_idr(&delta))
+    });
+
+    // The IDR case is reported per frame and not per byte, because the scan
+    // stops at the IDR: a real access unit carries SPS, PPS and then the IDR
+    // slice at the front, so the answer is known after twenty odd bytes of a
+    // quarter megabyte frame and a bytes per second figure for it would be
+    // both enormous and meaningless.
+    let idr = access_unit(256 * 1024, true);
+    g.throughput(Throughput::Elements(1));
+    g.bench_function(BenchmarkId::new("avc420_idr_scan", "1080p"), |b| {
+        b.iter(|| avc420::contains_idr(&idr))
+    });
+
+    // The metablock parse on its own, per region rectangle. 135 regions is one
+    // per macroblock row of a 4K frame, which is more than a real server sends.
+    let unit = access_unit(48 * 1024, false);
+    for count in [8usize, 135] {
+        let src = avc420_stream(count, &unit);
+        g.throughput(Throughput::Elements(count as u64));
+        g.bench_function(BenchmarkId::new("avc420_metablock", count), |b| {
+            b.iter(|| {
+                let s = avc420::parse(&src).unwrap();
+                s.bounds()
+            })
+        });
+    }
+
+    // Everything the Rust side does for one AVC420 frame: parse the metablock,
+    // union the regions into a damage rectangle, and scan the access unit for
+    // an IDR. Reported per frame rather than per byte, against the 50
+    // microsecond budget.
+    let src = avc420_stream(135, &unit);
+    g.throughput(Throughput::Elements(1));
+    g.bench_function(BenchmarkId::new("avc420_frame", "1080p_delta"), |b| {
+        b.iter(|| {
+            let s = avc420::parse(&src).unwrap();
+            let d = s.bounds();
+            (d, avc420::contains_idr(s.bitstream))
+        })
+    });
+
+    // MPPC. The legacy path's traffic is uncompressed bitmaps and channel
+    // data, so the fixture is structure and pixels rather than noise: noise
+    // would measure only the literal path, which is the fast one.
+    for (v, id) in [(Variant::Rdp4, "mppc_8k"), (Variant::Rdp5, "mppc_64k")] {
+        let size = v.history_size();
+        let mut payload = Vec::with_capacity(size);
+        let mut i = 0u32;
+        while payload.len() < size {
+            payload.extend_from_slice(b"\x00\x00\xff\xff clipboard/text; charset=utf-8; item=");
+            payload.extend_from_slice(format!("{i:06}\n").as_bytes());
+            payload.extend_from_slice(&[0x20, 0x20, 0x20, 0x20, 0xC3, 0xA9, 0x00, 0x00]);
+            i += 1;
+        }
+        payload.truncate(size);
+        let body = encode::mppc::compressed(v, &payload);
+        let flags = PACKET_COMPRESSED | PACKET_AT_FRONT | v.compression_type();
+        let mut d = MppcDecompressor::new(v);
+        g.throughput(Throughput::Bytes(payload.len() as u64));
+        g.bench_function(BenchmarkId::new(id, payload.len()), |b| {
+            b.iter(|| d.decompress(flags, &body).unwrap().len())
+        });
+    }
+
+    // The pathological case for the copy loop: one long run, which is the
+    // shape that forces the byte at a time overlapping copy for its whole
+    // length and is what a repainted flat background compresses to.
+    let payload = vec![0x1Fu8; mppc::HISTORY_64K];
+    let body = encode::mppc::compressed(Variant::Rdp5, &payload);
+    let flags = PACKET_COMPRESSED | PACKET_AT_FRONT | Variant::Rdp5.compression_type();
+    let mut d = MppcDecompressor::new(Variant::Rdp5);
+    g.throughput(Throughput::Bytes(payload.len() as u64));
+    g.bench_function(BenchmarkId::new("mppc_64k_run", payload.len()), |b| {
+        b.iter(|| d.decompress(flags, &body).unwrap().len())
+    });
+
+    g.finish();
+
+    // The start code scan, against the byte at a time form it replaced.
+    //
+    // `vnc_core::encodings::h264::contains_idr` walks one byte and three
+    // comparisons at a time. That is the "before". The "after" skips eight
+    // bytes whenever the word holds no zero byte, which on entropy coded video
+    // is almost every word. Both are in this process on the same fixture, so
+    // the ratio is a measurement and not an argument (PRDRDP/04 §11.4).
+    let mut g = c.benchmark_group("before_after");
+    let delta = access_unit(48 * 1024, false);
+    g.throughput(Throughput::Bytes(delta.len() as u64));
+    g.bench_function("annexb_idr_scan/byte_at_a_time", |b| {
+        b.iter(|| contains_idr_byte_at_a_time(&delta))
+    });
+    g.bench_function("annexb_idr_scan/current", |b| {
+        b.iter(|| avc420::contains_idr(&delta))
+    });
+    g.finish();
+}
+
+/// The pre optimisation start code scan, kept here and nowhere else so the
+/// number above is a comparison rather than a claim.
+///
+/// This is `vnc_core::encodings::h264::nal_types` reduced to the question
+/// `contains_idr` asks: one byte and three comparisons per position.
+fn contains_idr_byte_at_a_time(data: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        let three = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1;
+        let four = i + 4 <= data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1;
+        if four {
+            i += 4;
+        } else if three {
+            i += 3;
+        } else {
+            i += 1;
+            continue;
+        }
+        if i < data.len() {
+            let header = data[i];
+            i += 1;
+            if header & 0x80 == 0 && header & 0x1F == 5 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 criterion_group!(
     benches,
     bench_decode,
@@ -761,6 +963,7 @@ criterion_group!(
     bench_convert,
     bench_before_after,
     bench_phase2_decode,
-    bench_phase2_stage
+    bench_phase2_stage,
+    bench_phase2_bulk
 );
 criterion_main!(benches);

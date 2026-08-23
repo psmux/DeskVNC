@@ -1262,6 +1262,182 @@ pub mod zgfx {
     }
 }
 
+/// Reference MPPC encoder (MS-RDPBCGR 3.1.8.4.1, 3.1.8.4.2).
+///
+/// A greedy LZ77 over a hash chain, emitting the two literal forms, all three
+/// or four copy offset forms and the whole length of match ladder. It encodes
+/// against an **empty** history, so every match it emits reaches back inside
+/// `data` itself, which is what a decompressor starting from `new` expects.
+///
+/// It is not a compressor. It never looks for a better parse, it never emits
+/// `PACKET_AT_FRONT`, and it will happily produce a body longer than its
+/// input on incompressible data, which a real compressor would refuse to do.
+pub mod mppc {
+    use super::BitWriter;
+    use crate::mppc::Variant;
+
+    /// Bits of the three byte hash the match search chains on.
+    const HASH_BITS: u32 = 15;
+    /// Chain positions examined per byte. Enough to find the matches our
+    /// fixtures contain and short enough that encoding a 64 KiB body is
+    /// instant.
+    const CHAIN_LIMIT: usize = 64;
+
+    const EMPTY: u32 = u32::MAX;
+
+    fn hash3(d: &[u8], i: usize) -> usize {
+        let h = (u32::from(d[i]) << 10) ^ (u32::from(d[i + 1]) << 5) ^ u32::from(d[i + 2]);
+        (h & ((1 << HASH_BITS) - 1)) as usize
+    }
+
+    /// The largest copy offset and length each variant can express.
+    fn limits(v: Variant) -> (usize, usize) {
+        match v {
+            Variant::Rdp4 => (320 + (1 << 13) - 1, 511),
+            Variant::Rdp5 => (2368 + (1 << 16) - 1, 65535),
+        }
+    }
+
+    /// The copy offset prefix code, mirroring `mppc::MppcDecompressor::copy_offset`.
+    ///
+    /// # Panics
+    ///
+    /// On an offset the variant cannot express.
+    pub(crate) fn put_offset(w: &mut BitWriter, v: Variant, offset: u32) {
+        match v {
+            Variant::Rdp4 => {
+                if offset < 64 {
+                    w.put(0b1111, 4);
+                    w.put(offset, 6);
+                } else if offset < 320 {
+                    w.put(0b1110, 4);
+                    w.put(offset - 64, 8);
+                } else {
+                    assert!(offset < 320 + (1 << 13), "offset {offset} is past RDP 4.0");
+                    w.put(0b110, 3);
+                    w.put(offset - 320, 13);
+                }
+            }
+            Variant::Rdp5 => {
+                if offset < 64 {
+                    w.put(0b11111, 5);
+                    w.put(offset, 6);
+                } else if offset < 320 {
+                    w.put(0b11110, 5);
+                    w.put(offset - 64, 8);
+                } else if offset < 2368 {
+                    w.put(0b1110, 4);
+                    w.put(offset - 320, 11);
+                } else {
+                    assert!(offset < 2368 + (1 << 16), "offset {offset} is past RDP 5.0");
+                    w.put(0b110, 3);
+                    w.put(offset - 2368, 16);
+                }
+            }
+        }
+    }
+
+    /// The length of match code: three is one zero bit, and everything else is
+    /// `k` ones, a zero, and `k + 1` value bits added to `1 << (k + 1)`.
+    ///
+    /// # Panics
+    ///
+    /// On a length below three.
+    pub(crate) fn put_length(w: &mut BitWriter, length: usize) {
+        assert!(length >= 3, "a copy is at least three bytes");
+        if length == 3 {
+            w.put(0, 1);
+            return;
+        }
+        let mut k = 1u32;
+        while (1usize << (k + 2)) <= length {
+            k += 1;
+        }
+        for _ in 0..k {
+            w.put(1, 1);
+        }
+        w.put(0, 1);
+        w.put((length - (1usize << (k + 1))) as u32, k + 1);
+    }
+
+    fn put_literal(w: &mut BitWriter, b: u8) {
+        if b < 0x80 {
+            w.put(0, 1);
+            w.put(u32::from(b), 7);
+        } else {
+            w.put(0b10, 2);
+            w.put(u32::from(b & 0x7F), 7);
+        }
+    }
+
+    /// One compressed packet body for `data`, against an empty history.
+    pub fn compressed(v: Variant, data: &[u8]) -> Vec<u8> {
+        let (max_offset, max_length) = limits(v);
+        let mut w = BitWriter::new();
+        let mut head = vec![EMPTY; 1 << HASH_BITS];
+        let mut prev = vec![EMPTY; data.len()];
+
+        let mut i = 0usize;
+        while i < data.len() {
+            let mut best = (0usize, 0usize); // (length, offset)
+            if i + 3 <= data.len() {
+                let mut cand = head[hash3(data, i)];
+                let mut seen = 0usize;
+                while cand != EMPTY && seen < CHAIN_LIMIT {
+                    let c = cand as usize;
+                    let offset = i - c;
+                    if offset > max_offset || offset > i {
+                        break;
+                    }
+                    let mut n = 0usize;
+                    // An overlapping match is legal and is how a run is coded,
+                    // so the comparison walks the source forward past `i`.
+                    while i + n < data.len() && n < max_length && data[c + n] == data[i + n] {
+                        n += 1;
+                    }
+                    if n >= 3 && n > best.0 {
+                        best = (n, offset);
+                    }
+                    cand = prev[c];
+                    seen += 1;
+                }
+            }
+
+            let advance = if best.0 >= 3 {
+                put_offset(&mut w, v, best.1 as u32);
+                put_length(&mut w, best.0);
+                best.0
+            } else {
+                put_literal(&mut w, data[i]);
+                1
+            };
+            // Every position the match covered is inserted into the chain,
+            // not just the one we started from, or a later match cannot find
+            // the middle of a run.
+            let mut j = i;
+            while j < i + advance {
+                if j + 3 <= data.len() {
+                    let h = hash3(data, j);
+                    prev[j] = head[h];
+                    head[h] = j as u32;
+                }
+                j += 1;
+            }
+            i += advance;
+        }
+        w.finish()
+    }
+
+    /// One compressed packet body holding exactly one copy, for the tests that
+    /// reach back into a history an earlier packet left behind.
+    pub fn copy_only(v: Variant, offset: u32, length: usize) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        put_offset(&mut w, v, offset);
+        put_length(&mut w, length);
+        w.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

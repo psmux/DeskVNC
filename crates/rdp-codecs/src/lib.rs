@@ -28,9 +28,25 @@
 //! EGFX byte arrives inside, which is why it goes first of the four
 //! (PRDRDP/04 §4.12).
 //!
-//! Progressive RemoteFX ([`progressive`], phase 3), MPPC ([`mppc`]) and the
-//! AVC420 metablock parser ([`avc420`]) are still stubs carrying their spec
-//! citations.
+//! ## What this commit added
+//!
+//! [`avc420`] and [`mppc`], the two remaining phase 2 modules.
+//!
+//! [`avc420`] is the smallest module in the crate and the reason is the point
+//! of it: `RFX_AVC420_BITMAP_STREAM` is a metablock and an H.264 Annex B
+//! access unit, and **the access unit is not decoded here**. It goes to the
+//! webview's WebCodecs decoder over the rect format `src-tauri/FRAME_FORMAT.md`
+//! has carried since the VNC side shipped Open H.264 (PRDRDP/04 §5.2,
+//! `AGENT_BRIEF` D4). So the module parses four fields into borrowed slices,
+//! allocates nothing, and scans the access unit once for an IDR.
+//!
+//! [`mppc`] is the legacy path's bulk decompressor: RDP 4.0 at 8 KiB of
+//! history and RDP 5.0 at 64 KiB, a real bit level decoder over a linear
+//! history whose output is the history. RDP 6.0 and RDP 6.1 are a different
+//! scheme entirely (MS-RDPEGDI 3.1.8.1 and 3.1.8.2) and are refused by name
+//! rather than guessed at; the module comment says why.
+//!
+//! Progressive RemoteFX ([`progressive`], phase 3) is the one stub left.
 //!
 //! ## The five crate rules (PRDRDP/04 §4.1)
 //!
@@ -55,8 +71,9 @@ pub mod planar;
 pub mod rle;
 pub mod uncompressed;
 
-// Phase 1b and phase 2 stubs. They exist so the shape of the crate is visible
-// and so the module a later commit fills in is already named and cited.
+// Phase 1b and phase 2. `progressive` is the only stub left, and it exists so
+// the shape of the crate is visible and so the module a later commit fills in
+// is already named and cited.
 pub mod avc420;
 pub mod clear;
 pub mod mppc;
