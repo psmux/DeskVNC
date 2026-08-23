@@ -80,7 +80,8 @@ fn debug_never_prints_a_secret() {
 
 #[test]
 fn no_error_from_any_failure_path_carries_remote_bytes() {
-    // Every `AuthError` variant is a unit variant or carries a `&'static str`,
+    // Every `AuthError` variant is a unit variant, carries a `&'static str`,
+    // or carries the four byte NTSTATUS from `TSRequest.errorCode`,
     // so a token cannot ride along into a log file (PRDRDP/00 R63).
     // Driving the real failure paths is what proves it rather than reading the
     // type: an error built by hand would prove nothing about the call sites.
@@ -258,6 +259,34 @@ fn the_mac_comparison_goes_through_subtle() {
         assert!(
             !src.contains(shape),
             "ntlm/seal.rs compares a MAC with `{shape}` instead of `ct_eq`"
+        );
+    }
+}
+
+#[test]
+fn the_public_key_binding_comparison_goes_through_subtle() {
+    // The other half of PRDRDP/14 §8.1's grep. The server's `pubKeyAuth` is
+    // derived from a key an attacker is trying to forge, so a byte at a time
+    // oracle on this comparison is a forgery oracle.
+    let binding = fs::read_to_string(src_dir().join("credssp").join("binding.rs"))
+        .expect("credssp/binding.rs is readable");
+    let src = production_code(&binding);
+    assert!(
+        src.contains("ct_eq"),
+        "credssp/binding.rs does not compare in constant time"
+    );
+    for shape in [
+        "want ==",
+        "== want",
+        "got ==",
+        "== got",
+        "expected ==",
+        "== expected",
+        "assert_eq!",
+    ] {
+        assert!(
+            !src.contains(shape),
+            "credssp/binding.rs compares a binding with `{shape}` instead of `ct_eq`"
         );
     }
 }

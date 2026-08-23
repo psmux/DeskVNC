@@ -7,17 +7,30 @@
 //!
 //! ## No variant carries remote bytes
 //!
-//! Every variant is either a unit variant or carries a `&'static str`. That is
+//! Every variant is a unit variant, carries a `&'static str`, or carries the
+//! four byte NTSTATUS the server put in `TSRequest.errorCode`. That is
 //! deliberate and PRDRDP/00 R63 settles it as a rule rather than advice: an
 //! error variant that carries "the token we could not parse" for debugging
 //! will happily carry an `authInfo` blob into a log file (PRDRDP/14 §8.3). A
 //! `&'static str` is a literal in this source file and cannot hold a secret.
 //! Offsets, lengths and hex go in the `tracing` event beside the failure.
+//!
+//! The one exception is [`AuthError::ServerStatus`], and it is an exception
+//! for a stated reason: MS-CSSP 3.1.5 says the client "MUST immediately fail
+//! with the provided status code", the table in `credssp::nstatus` covers
+//! seventeen values and Windows has hundreds, so a code we do not recognise
+//! still has to reach the user as a hex number. Four bytes of status cannot
+//! hold a token, a key or a password, which is the property R63 exists to
+//! preserve.
 
 /// The four way error class of PRDRDP/06 §4.3 (R32).
 ///
-/// An authentication failure is never `Transient` (R46), so the session
-/// supervisor stops rather than retrying a stale password into a lockout.
+/// No failure that says anything about an account is ever `Transient` (R46),
+/// so the session supervisor stops rather than retrying a stale password into
+/// a lockout. The one `Transient` outcome in the crate is
+/// `STATUS_NO_LOGON_SERVERS` reaching us through
+/// [`AuthError::ServerStatus`]: no domain controller answered, so no password
+/// was checked and no lockout counter moved (PRDRDP/14 §3.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     /// Worth retrying on its own. No authentication outcome is ever this.
@@ -76,6 +89,42 @@ pub enum AuthError {
     /// rather than restarting.
     #[error("the authentication exchange already failed")]
     AlreadyFailed,
+
+    /// `TSRequest.errorCode`, MS-CSSP 2.2.1 and MS-ERREF 2.3. An unsuccessful
+    /// NTSTATUS, kept verbatim. The table is `credssp::nstatus`
+    /// (PRDRDP/14 §3.10).
+    #[error("the remote computer refused the sign in with status {0:#010x}")]
+    ServerStatus(u32),
+
+    /// The server's `pubKeyAuth` did not match what we computed
+    /// (MS-CSSP 3.1.5 step 5). An interception indicator, and a different
+    /// thing from an authentication failure.
+    ///
+    /// A unit variant with no offset and no payload: an offset that exists
+    /// only for a log line is a forgery oracle's other half
+    /// (PRDRDP/00 R63, PRDRDP/14 §8.1).
+    #[error("the remote computer did not prove it holds the certificate's private key")]
+    PublicKeyMismatch,
+
+    /// The remote computer rejected the sign in and said nothing else: no
+    /// `pubKeyAuth`, no `errorCode` (PRDRDP/14 §3.11).
+    #[error("the remote computer rejected the sign in without saying why")]
+    AuthFailed,
+
+    /// The server's CredSSP version is below the lowest we will complete
+    /// against, which is 2 (PRDRDP/14 §8.7).
+    #[error("the remote computer's authentication is too old to be used safely")]
+    UnsupportedCredSspVersion,
+
+    /// The server refused every mechanism we offered, or picked one we did
+    /// not offer (RFC 4178 §4.2.2, PRDRDP/14 §4.4).
+    #[error("the remote computer refused every authentication mechanism we offered")]
+    NoCommonMechanism,
+
+    /// More negotiation rounds than any real mechanism needs
+    /// (PRDRDP/14 §3.13).
+    #[error("the authentication exchange did not finish")]
+    TooManyRounds,
 }
 
 impl AuthError {
@@ -83,14 +132,28 @@ impl AuthError {
     #[must_use]
     pub fn class(self) -> Class {
         match self {
-            AuthError::NoUserName => Class::User,
+            // The overwhelmingly likely cause of a bare rejection is a wrong
+            // password, and we want the credential prompt back rather than a
+            // red banner (PRDRDP/14 §3.11).
+            AuthError::NoUserName | AuthError::AuthFailed => Class::User,
+            // The one place a class comes from the wire. Every row of the
+            // table is `User` or `Fatal` except `STATUS_NO_LOGON_SERVERS`,
+            // which is `Transient` because no domain controller answered, so
+            // nothing checked the password and no lockout counter moved.
+            AuthError::ServerStatus(code) => {
+                crate::credssp::nstatus::classify(code).map_or(Class::Fatal, |row| row.class)
+            }
             AuthError::MalformedMessage(_)
             | AuthError::LegacyServerRefused
             | AuthError::UnexpectedToken
             | AuthError::ContextNotEstablished
             | AuthError::MessageOutOfSequence
             | AuthError::SignatureMismatch
-            | AuthError::AlreadyFailed => Class::Fatal,
+            | AuthError::AlreadyFailed
+            | AuthError::PublicKeyMismatch
+            | AuthError::UnsupportedCredSspVersion
+            | AuthError::NoCommonMechanism
+            | AuthError::TooManyRounds => Class::Fatal,
         }
     }
 
@@ -112,6 +175,32 @@ impl AuthError {
                  be intercepted."
                     .to_owned()
             }
+            AuthError::PublicKeyMismatch => {
+                "The remote computer could not prove it is the computer its certificate names. \
+                 The connection may be intercepted."
+                    .to_owned()
+            }
+            AuthError::AuthFailed => {
+                "The remote computer rejected the sign in and did not say why. The user name or \
+                 password is probably wrong."
+                    .to_owned()
+            }
+            AuthError::UnsupportedCredSspVersion => {
+                "The remote computer's authentication is too old to be used safely.".to_owned()
+            }
+            AuthError::NoCommonMechanism => {
+                "The remote computer refused every way this client can sign in.".to_owned()
+            }
+            AuthError::TooManyRounds => {
+                "The remote computer did not finish the sign in.".to_owned()
+            }
+            // The hex code is appended for a status we do not recognise, so a
+            // support ticket carries something searchable. The symbol never
+            // appears here; it goes in the log line (PRDRDP/14 §8.4).
+            AuthError::ServerStatus(code) => crate::credssp::nstatus::classify(code).map_or_else(
+                || format!("The remote computer refused the sign in ({code:#010x})."),
+                |row| row.message.to_owned(),
+            ),
             AuthError::MalformedMessage(_)
             | AuthError::UnexpectedToken
             | AuthError::ContextNotEstablished
@@ -124,12 +213,18 @@ impl AuthError {
 
     /// The NTSTATUS symbol behind this failure, for the log line only.
     ///
-    /// Always `None` in phase 1a. The values come from the CredSSP
-    /// `errorCode` field and the table lives in `credssp::nstatus`
-    /// (MS-CSSP 2.2.1, PRDRDP/14 §3.10), which is not written yet.
+    /// `None` for everything except [`AuthError::ServerStatus`], and `None`
+    /// for a status the table in `credssp::nstatus` does not carry
+    /// (MS-CSSP 2.2.1, PRDRDP/14 §3.10). The symbol never reaches a user
+    /// message (§8.4).
     #[must_use]
     pub fn nt_status_symbol(self) -> Option<&'static str> {
-        None
+        match self {
+            AuthError::ServerStatus(code) => {
+                crate::credssp::nstatus::classify(code).map(|row| row.symbol)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -140,6 +235,8 @@ mod tests {
     #[test]
     fn no_authentication_failure_is_transient() {
         // R46: the supervisor must never retry a stale password into a lockout.
+        // `ServerStatus` is excluded and tested by `credssp::nstatus`, which
+        // owns the one Transient row and the reason it is safe.
         for e in [
             AuthError::MalformedMessage("field"),
             AuthError::LegacyServerRefused,

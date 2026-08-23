@@ -6,8 +6,12 @@
 //!
 //! Phase 1a is NTLMv2 only. [`ntlm`] is complete: the three messages, every key
 //! derivation, the MIC, the sealing handles and the channel binding AV pair.
-//! [`credssp`] and [`spnego`] are stubs with their specification citations,
-//! because the CredSSP TSRequest is DER and the DER codec lives in `rdp-pdu`.
+//! [`credssp`] wraps it in the TSRequest exchange that turns it into Network
+//! Level Authentication: the DER, the public key binding of MS-CSSP 3.1.5 in
+//! both of its constructions, and the delivery of the password afterwards.
+//! [`spnego`] is written and is not sent in phase 1: with one mechanism there
+//! is nothing to negotiate, and PRDRDP/14 §4.8 puts a raw NTLM token in
+//! `negoTokens` until Kerberos arrives.
 //!
 //! ## No hand written cryptography
 //!
@@ -64,10 +68,12 @@ pub mod ntlm;
 pub mod spnego;
 
 pub use bindings::{gss_channel_bindings_struct, ChannelBindings, EndPointHash};
+pub use credssp::{CredSspClient, CredSspConfig, MechanismId, MechanismSet};
 pub use error::{AuthError, Class};
 pub use gss::{GssMechanism, GssStep};
 pub use identity::{service_principal_name, split_qualified_username, Identity};
 pub use ntlm::{NtlmClient, NtlmConfig, NtlmSession};
+pub use spnego::SpnegoClient;
 
 /// What the caller must do next (PRDRDP/14 §2.5).
 ///
