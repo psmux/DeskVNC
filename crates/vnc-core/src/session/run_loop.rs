@@ -24,7 +24,7 @@ use crate::proto::messages::{
     self, ext_clipboard, fence_flags, server_msg, CutTextPayload, Screen,
 };
 use crate::proto::pseudo::{self, PseudoRect};
-use crate::quality::{AutoTuner, LinkMeter};
+use crate::quality::{AutoTuner, LinkMeter, QualityResolve};
 use crate::types::{
     encoding, ClientCommand, DecodedRect, PixelFormat, QualityPreset, QualitySettings, Rect,
     ServerCapabilities, SessionEvent, SessionStats,
@@ -757,7 +757,7 @@ impl RunLoop {
                 self.decoder.set_colour_map(first, &entries);
                 Ok(())
             }
-            server_msg::BELL => emit(events, SessionEvent::Bell).await,
+            server_msg::BELL => Ok(emit(events, SessionEvent::Bell).await?),
             server_msg::SERVER_CUT_TEXT => self.handle_server_cut_text(events).await,
             server_msg::END_OF_CONTINUOUS_UPDATES => {
                 self.caps.supports_continuous_updates = true;
@@ -1765,6 +1765,7 @@ impl RunLoop {
                 width,
                 height,
                 flags: 0,
+                primary: false,
             },
         };
         let msg = messages::set_desktop_size(width, height, &[screen]);

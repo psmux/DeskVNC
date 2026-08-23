@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
-use vnc_core::SessionHandle;
+use vnc_core::{ProtocolDriver, ProtocolKind, SessionHandle, VncDriver};
 
 use crate::thumbnail::ThumbnailPolicy;
 
@@ -38,6 +38,9 @@ pub struct AppState {
     /// would each see an empty registry and open a window. This records the
     /// intent the moment the window is built, so the second gesture finds it.
     pub opening_windows: Arc<Mutex<HashMap<String, PendingWindow>>>,
+    /// The protocols this build can speak. `connect_session` dispatches
+    /// through it rather than calling one protocol's spawn directly.
+    pub protocols: Arc<ProtocolRegistry>,
 }
 
 /// A session window that exists but has not registered a session yet.
@@ -138,6 +141,34 @@ impl PendingCredentialSave {
             _ => creds.vnc_password = Some(self.password.clone()),
         }
         creds
+    }
+}
+
+/// The protocols this build can speak, one driver each.
+///
+/// Adding a protocol is one line in [`ProtocolRegistry::new`] plus the crate
+/// that implements [`ProtocolDriver`] (PRDRDP/02 §4.4). A lookup for a
+/// protocol that is not built in returns `None`, so the caller reports it
+/// rather than panicking.
+pub struct ProtocolRegistry {
+    drivers: Vec<Arc<dyn ProtocolDriver>>,
+}
+
+impl ProtocolRegistry {
+    pub fn new() -> Self {
+        Self {
+            drivers: vec![Arc::new(VncDriver::new())],
+        }
+    }
+
+    pub fn get(&self, kind: ProtocolKind) -> Option<&Arc<dyn ProtocolDriver>> {
+        self.drivers.iter().find(|d| d.kind() == kind)
+    }
+}
+
+impl Default for ProtocolRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -261,6 +292,7 @@ impl AppState {
             pending_credentials: Arc::new(Mutex::new(HashMap::new())),
             pending_prompts: Arc::new(Mutex::new(HashMap::new())),
             opening_windows: Arc::new(Mutex::new(HashMap::new())),
+            protocols: Arc::new(ProtocolRegistry::new()),
         }
     }
 
@@ -382,6 +414,41 @@ impl AppState {
 }
 
 #[cfg(test)]
+mod protocol_registry_tests {
+    use super::*;
+
+    #[test]
+    fn the_vnc_driver_is_registered_and_answers_on_5900() {
+        let registry = ProtocolRegistry::new();
+        let driver = registry
+            .get(ProtocolKind::Vnc)
+            .expect("this build speaks VNC");
+        assert_eq!(driver.kind(), ProtocolKind::Vnc);
+        assert_eq!(driver.default_port(), 5900);
+    }
+
+    /// A protocol this build cannot speak is a `None`, never a panic: the
+    /// caller turns it into a message the user can read.
+    #[test]
+    fn an_unbuilt_protocol_is_absent_rather_than_fatal() {
+        assert!(ProtocolRegistry::new().get(ProtocolKind::Rdp).is_none());
+    }
+
+    /// The registry is what a second protocol changes, so pin its size: a
+    /// driver added without a decision here fails this test.
+    #[test]
+    fn one_protocol_is_registered_today() {
+        let registry = ProtocolRegistry::new();
+        let built: Vec<_> = ProtocolKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| registry.get(*k).is_some())
+            .collect();
+        assert_eq!(built, vec![ProtocolKind::Vnc]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -409,6 +476,7 @@ mod tests {
                 SessionEntry {
                     handle: SessionHandle {
                         id: id.to_string(),
+                        kind: ProtocolKind::Vnc,
                         commands: tx,
                         cancel: tokio_util::sync::CancellationToken::new(),
                     },

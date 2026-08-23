@@ -3,10 +3,16 @@
 //! Handles 8/16/24/32 bpp, true-colour with arbitrary max/shift values, both
 //! endiannesses, and indexed-colour (colour map) mode.
 
-use crate::types::PixelFormat;
+use crate::format::PixelFormat;
 
 /// Server colour map (SetColourMapEntries, RFB §7.6.2), used when the pixel
 /// format is not true-colour.
+//
+// Note on visibility: `raw_pixel_value`, `scale_channel`, `value_to_rgba`,
+// `pixel_to_rgba` and `cpixel_to_rgba` were `pub(crate)` while this file lived
+// inside vnc-core. The RFB decoders in `vnc-core/src/encodings/` call them
+// directly, so crossing a crate boundary makes them `pub`. They are the only
+// widening in the move.
 #[derive(Debug, Clone)]
 pub struct ColourMap {
     entries: [[u8; 3]; 256],
@@ -46,7 +52,7 @@ impl ColourMap {
 
 /// Assemble a raw pixel value from `len` bytes honouring endianness.
 #[inline]
-pub(crate) fn raw_pixel_value(bytes: &[u8], big_endian: bool) -> u32 {
+pub fn raw_pixel_value(bytes: &[u8], big_endian: bool) -> u32 {
     let mut v: u32 = 0;
     if big_endian {
         for &b in bytes {
@@ -62,7 +68,7 @@ pub(crate) fn raw_pixel_value(bytes: &[u8], big_endian: bool) -> u32 {
 
 /// Scale a channel value in `0..=max` to `0..=255` with rounding.
 #[inline]
-pub(crate) fn scale_channel(c: u32, max: u16) -> u8 {
+pub fn scale_channel(c: u32, max: u16) -> u8 {
     if max == 0 {
         0
     } else {
@@ -72,7 +78,7 @@ pub(crate) fn scale_channel(c: u32, max: u16) -> u8 {
 
 /// Convert one raw pixel value (already endian-assembled) to RGBA.
 #[inline]
-pub(crate) fn value_to_rgba(v: u32, pf: &PixelFormat, map: Option<&ColourMap>) -> [u8; 4] {
+pub fn value_to_rgba(v: u32, pf: &PixelFormat, map: Option<&ColourMap>) -> [u8; 4] {
     if pf.true_colour {
         let r = scale_channel((v >> pf.red_shift) & pf.red_max as u32, pf.red_max);
         let g = scale_channel((v >> pf.green_shift) & pf.green_max as u32, pf.green_max);
@@ -90,7 +96,7 @@ pub(crate) fn value_to_rgba(v: u32, pf: &PixelFormat, map: Option<&ColourMap>) -
 
 /// Convert one raw wire pixel (`pf.bytes_per_pixel()` bytes) to RGBA.
 #[inline]
-pub(crate) fn pixel_to_rgba(bytes: &[u8], pf: &PixelFormat, map: Option<&ColourMap>) -> [u8; 4] {
+pub fn pixel_to_rgba(bytes: &[u8], pf: &PixelFormat, map: Option<&ColourMap>) -> [u8; 4] {
     value_to_rgba(raw_pixel_value(bytes, pf.big_endian), pf, map)
 }
 
@@ -99,7 +105,7 @@ pub(crate) fn pixel_to_rgba(bytes: &[u8], pf: &PixelFormat, map: Option<&ColourM
 /// The three bytes are the bytes of the 4-byte pixel that actually contain
 /// colour data, in the pixel format's byte order (RFB ZRLE spec).
 #[inline]
-pub(crate) fn cpixel_to_rgba(bytes: &[u8; 3], pf: &PixelFormat) -> [u8; 4] {
+pub fn cpixel_to_rgba(bytes: &[u8; 3], pf: &PixelFormat) -> [u8; 4] {
     // Do the colour bits live in the least significant 3 bytes?
     let fits_low = pf.red_shift <= 16 && pf.green_shift <= 16 && pf.blue_shift <= 16;
     let [b0, b1, b2] = bytes.map(|b| b as u32);

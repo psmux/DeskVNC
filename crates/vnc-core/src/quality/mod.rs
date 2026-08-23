@@ -295,6 +295,67 @@ impl LinkMeter {
     }
 }
 
+/// Resolve a protocol neutral preset into the RFB knobs it means.
+///
+/// An extension trait because [`QualityPreset`] now lives in `remote-core`
+/// while [`QualitySettings`] stays here, so an inherent method cannot span the
+/// two (PRDRDP/02 §2.2.1). Every call site keeps its old spelling,
+/// `preset.settings()`, by importing this.
+pub trait QualityResolve {
+    fn settings(&self) -> QualitySettings;
+}
+
+impl QualityResolve for QualityPreset {
+    fn settings(&self) -> QualitySettings {
+        match self {
+            // Auto starts at Medium and adapts (see quality::AutoTuner).
+            QualityPreset::Auto | QualityPreset::Medium => QualitySettings {
+                jpeg_quality: 6,
+                compression: 3,
+                pixel_format: ColorDepth::Full,
+                allow_jpeg: true,
+                allow_h264: true,
+                grayscale_levels: None,
+            },
+            QualityPreset::High => QualitySettings {
+                jpeg_quality: 9,
+                compression: 1,
+                pixel_format: ColorDepth::Full,
+                allow_jpeg: true,
+                allow_h264: false,
+                grayscale_levels: None,
+            },
+            QualityPreset::Low => QualitySettings {
+                jpeg_quality: 2,
+                compression: 7,
+                pixel_format: ColorDepth::Palette256,
+                allow_jpeg: true,
+                allow_h264: true,
+                grayscale_levels: None,
+            },
+            QualityPreset::BlackAndWhite => QualitySettings {
+                jpeg_quality: 0,
+                compression: 9,
+                // Rides the SAME 8-bit palette wire format as `Low` (see
+                // `connection::pixel_format_for`): requesting full 32bpp true
+                // colour here used to make this the single MOST expensive
+                // preset on the wire, despite being the "survive a bad link"
+                // choice. The server's colour map threads through the exact
+                // path `Low` already uses; the client-side shader still does
+                // the black-and-white quantisation via `grayscale_levels`.
+                pixel_format: ColorDepth::Grayscale,
+                // JPEG on top of an already colour-reduced, near-flat image
+                // buys nothing: zlib/ZRLE over low-entropy palette indices
+                // compresses harder than re-encoding it as a lossy
+                // photographic format would.
+                allow_jpeg: false,
+                allow_h264: false,
+                grayscale_levels: Some(2),
+            },
+        }
+    }
+}
+
 /// Resolve a preset to concrete protocol knobs (Auto resolves to its
 /// starting point, Medium).
 pub fn settings_for(preset: QualityPreset) -> QualitySettings {

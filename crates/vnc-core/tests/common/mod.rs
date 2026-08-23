@@ -26,7 +26,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Options pointed at a mock server, with a fast, deterministic reconnect
 /// policy (no jitter) so backoff assertions are exact.
 pub fn options(port: u16) -> ConnectOptions {
-    let mut o = ConnectOptions::new("127.0.0.1", port);
+    let mut o = ConnectOptions::vnc("127.0.0.1", port);
     // Deliberately the shipping defaults. This used to set
     // `allow_insecure = true`, which meant every integration test ran with an
     // opt-in no real session has, and `security_none_reaches_connected`

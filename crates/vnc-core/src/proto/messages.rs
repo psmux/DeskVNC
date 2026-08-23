@@ -70,25 +70,24 @@ const MAX_CUT_TEXT: usize = 16 * 1024 * 1024;
 // One screen in an ExtendedDesktopSize / SetDesktopSize SCREEN list
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Screen {
-    pub id: u32,
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
-    pub flags: u32,
-}
+/// The protocol neutral screen type carries this list now, so `SessionEvent`
+/// can live in `remote-core` without naming an RFB wire type
+/// (PRDRDP/02 §2.2.2). The alias keeps the RFB spelling where RFB code reads
+/// better for it; the wire format below is unchanged.
+pub type Screen = crate::types::ScreenInfo;
 
-impl Screen {
-    pub fn encode_into(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.id.to_be_bytes());
-        out.extend_from_slice(&self.x.to_be_bytes());
-        out.extend_from_slice(&self.y.to_be_bytes());
-        out.extend_from_slice(&self.width.to_be_bytes());
-        out.extend_from_slice(&self.height.to_be_bytes());
-        out.extend_from_slice(&self.flags.to_be_bytes());
-    }
+/// The 16 byte SCREEN entry of an ExtendedDesktopSize / SetDesktopSize list.
+///
+/// A free function rather than an inherent method, because the type is no
+/// longer defined in this crate. `primary` is not on the wire: RFB has no
+/// field for it.
+pub fn encode_screen_into(s: &Screen, out: &mut Vec<u8>) {
+    out.extend_from_slice(&s.id.to_be_bytes());
+    out.extend_from_slice(&s.x.to_be_bytes());
+    out.extend_from_slice(&s.y.to_be_bytes());
+    out.extend_from_slice(&s.width.to_be_bytes());
+    out.extend_from_slice(&s.height.to_be_bytes());
+    out.extend_from_slice(&s.flags.to_be_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +247,7 @@ pub fn set_desktop_size(width: u16, height: u16, screens: &[Screen]) -> Vec<u8> 
     out.push(n as u8);
     out.push(0); // padding
     for s in &screens[..n] {
-        s.encode_into(&mut out);
+        encode_screen_into(s, &mut out);
     }
     out
 }
@@ -464,6 +463,7 @@ mod tests {
             width: 1920,
             height: 1080,
             flags: 3,
+            primary: false,
         };
         let b = set_desktop_size(1920, 1080, &[s]);
         assert_eq!(b[0], 251);

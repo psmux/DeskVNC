@@ -15,7 +15,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use flate2::{Compress, Compression, FlushCompress};
 
 use vnc_core::encodings::{decode_rect, DecoderState};
-use vnc_core::pixel::{convert_to_rgba, convert_to_rgba_mapped, downscale_rgba, ColourMap};
+use vnc_core::pixel::{convert_to_rgba, downscale_rgba};
 use vnc_core::types::{encoding, DecodedRect, PixelFormat, Rect, RectPayload};
 
 // ---------------------------------------------------------------------------
@@ -581,72 +581,6 @@ fn bench_decoders(c: &mut Criterion) {
     }
 }
 
-fn bench_convert(c: &mut Criterion) {
-    // A non-canonical true-colour layout: 32bpp big-endian with 10-bit
-    // channels, nothing about it hits a fast path.
-    let exotic = PixelFormat {
-        bits_per_pixel: 32,
-        depth: 30,
-        big_endian: true,
-        true_colour: true,
-        red_max: 1023,
-        green_max: 1023,
-        blue_max: 1023,
-        red_shift: 20,
-        green_shift: 10,
-        blue_shift: 0,
-    };
-    let rgb565 = PixelFormat {
-        bits_per_pixel: 16,
-        depth: 16,
-        big_endian: false,
-        true_colour: true,
-        red_max: 31,
-        green_max: 63,
-        blue_max: 31,
-        red_shift: 11,
-        green_shift: 5,
-        blue_shift: 0,
-    };
-    let map = ColourMap::new();
-
-    for (w, h, label) in SIZES {
-        let n = w * h;
-        let mut g = c.benchmark_group("convert");
-        g.throughput(Throughput::Elements(n as u64));
-        g.sample_size(30);
-        g.measurement_time(std::time::Duration::from_secs(4));
-        g.warm_up_time(std::time::Duration::from_secs(1));
-
-        let src32 = synth_desktop(w, h);
-        let src16: Vec<u8> = (0..n * 2).map(|i| (i * 37) as u8).collect();
-        let src8: Vec<u8> = (0..n).map(|i| (i * 37) as u8).collect();
-
-        g.bench_with_input(BenchmarkId::new("bgra8888_fast", label), &src32, |b, s| {
-            b.iter(|| std::hint::black_box(convert_to_rgba(s, &pf(), n)))
-        });
-        g.bench_with_input(BenchmarkId::new("rgb565_16bpp", label), &src16, |b, s| {
-            b.iter(|| std::hint::black_box(convert_to_rgba(s, &rgb565, n)))
-        });
-        g.bench_with_input(BenchmarkId::new("palette_8bpp", label), &src8, |b, s| {
-            b.iter(|| {
-                std::hint::black_box(convert_to_rgba_mapped(
-                    s,
-                    &PixelFormat::palette8(),
-                    n,
-                    Some(&map),
-                ))
-            })
-        });
-        g.bench_with_input(
-            BenchmarkId::new("generic_shift_max", label),
-            &src32,
-            |b, s| b.iter(|| std::hint::black_box(convert_to_rgba(s, &exotic, n))),
-        );
-        g.finish();
-    }
-}
-
 fn bench_framebuffer(c: &mut Criterion) {
     for (w, h, label) in SIZES {
         let mut g = c.benchmark_group("framebuffer");
@@ -1058,7 +992,6 @@ fn bench_before_after(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_decoders,
-    bench_convert,
     bench_framebuffer,
     bench_thumbnail,
     bench_damage_union,

@@ -103,6 +103,8 @@ where
                     width,
                     height,
                     flags,
+                    // RFB never says which screen is primary.
+                    primary: false,
                 });
             }
             Ok(PseudoRect::ExtendedDesktopSize {

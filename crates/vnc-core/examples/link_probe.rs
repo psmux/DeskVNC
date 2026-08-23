@@ -30,10 +30,11 @@ async fn main() {
     let user = std::env::var("DVV_USER").ok();
     let pass = std::env::var("DVV_PASS").unwrap_or_default();
 
-    let mut options = ConnectOptions::new(host, port);
+    let mut options = ConnectOptions::vnc(host, port);
     options.credentials = Credentials {
         username: user,
         password: Some(pass),
+        domain: None,
     };
     options.connect_timeout = Duration::from_secs(10);
     // DVV_PIN=<sha256 spki fingerprint> exercises the trust-on-first-use pin:
@@ -50,10 +51,10 @@ async fn main() {
     options.reconnect.enabled = false;
     // DVV_SEC=tight|vncauth|vencrypt forces a security type, to see which one
     // a given server actually authenticates against.
-    options.security_pref = match std::env::var("DVV_SEC").as_deref() {
-        Ok("tight") => Some(vnc_core::SecurityType::Tight),
-        Ok("vncauth") => Some(vnc_core::SecurityType::VncAuth),
-        Ok("vencrypt") => Some(vnc_core::SecurityType::VeNCrypt),
+    options.vnc_mut().security_pref = match std::env::var("DVV_SEC").as_deref() {
+        Ok("tight") => Some("tight".to_string()),
+        Ok("vncauth") => Some("vncauth".to_string()),
+        Ok("vencrypt") => Some("vencrypt".to_string()),
         _ => None,
     };
 

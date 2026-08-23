@@ -214,8 +214,8 @@ async fn live_security_offer_and_selection() {
     eprintln!("LIVE {}: security types offered: {named:?}", target());
 
     // --- what we would choose, without sending anything ---------------------
-    let mut opts = ConnectOptions::new("127.0.0.1", target().port());
-    opts.allow_insecure = false;
+    let mut opts = ConnectOptions::vnc("127.0.0.1", target().port());
+    opts.vnc_mut().allow_insecure = false;
     let chosen = select_security_type(&offered, &opts).expect("a usable security type");
     eprintln!("LIVE {}: select_security_type -> {chosen:?}", target());
 
@@ -285,8 +285,8 @@ async fn live_connection_closes_cleanly_without_authenticating() {
 #[test]
 fn apple_offer_selection_is_pinned() {
     let offered = [30u8, 33, 36, 2, 35];
-    let opts = ConnectOptions::new("mac.local", 5900);
-    assert!(!opts.allow_insecure);
+    let opts = ConnectOptions::vnc("mac.local", 5900);
+    assert!(!opts.vnc_options().unwrap().allow_insecure);
     assert_eq!(
         select_security_type(&offered, &opts).expect("Apple DH is usable"),
         SecurityType::AppleDh

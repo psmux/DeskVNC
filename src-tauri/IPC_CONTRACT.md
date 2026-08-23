@@ -23,6 +23,18 @@ commit.**
    argument object.
 5. **Errors.** Every command returns `Result<_, String>`; a rejection surfaces
    as a thrown string in JS. `safeInvoke` swallows these, `mustInvoke` does not.
+6. **Where the types live.** The protocol agnostic half of the contract
+   (`SessionState`, `SessionEvent`, `SessionStats`, `ClientCommand`,
+   `CredentialRequest`, `QualityPreset`, `PinScheme`, `Rect`) moved from
+   `vnc-core` into the `remote-core` crate, and pixel conversion moved into
+   `remote-pixel`, so a second protocol can share them. Both are re-exported
+   at their old `vnc_core::` paths, so every name in this document still
+   resolves where it did. **Nothing on the wire changed**: the same JSON keys,
+   the same kebab-case tags, the same snake_case `SessionStats`. The shell now
+   spawns a session through `ProtocolRegistry` in `src-tauri/src/state.rs`
+   rather than calling `Session::spawn` directly; a lookup for a protocol this
+   build does not implement returns `None` and `connect_session` rejects with
+   a message.
 
 ---
 

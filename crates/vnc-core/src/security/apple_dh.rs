@@ -264,7 +264,7 @@ mod tests {
         let (client, mut server) = tokio::io::duplex(64);
         server.write_all(&[0, 2]).await.unwrap(); // generator 2
         server.write_all(&[0xff, 0xff]).await.unwrap(); // 65535-byte key
-        let mut o = ConnectOptions::new("mac", 5900);
+        let mut o = ConnectOptions::vnc("mac", 5900);
         o.credentials = crate::types::Credentials::user_pass("alice", "pw");
         let s: BoxedStream = Box::pin(client);
         assert!(matches!(
@@ -276,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn demands_a_username() {
         let (client, _server) = tokio::io::duplex(64);
-        let mut o = ConnectOptions::new("mac", 5900);
+        let mut o = ConnectOptions::vnc("mac", 5900);
         o.credentials = crate::types::Credentials::password("pw");
         let s: BoxedStream = Box::pin(client);
         assert!(matches!(

@@ -80,6 +80,24 @@ pub enum VncError {
     Other(String),
 }
 
+/// A closed event sink means the shell went away, which unwinds the session
+/// through the same path a cancellation does. This `From` is what keeps the
+/// forty `emit(..).await?` call sites in `connection.rs` and `run_loop.rs` a
+/// zero line diff across the remote-core extraction (PRDRDP/02 §11.1).
+impl From<remote_core::EventSinkClosed> for VncError {
+    fn from(_: remote_core::EventSinkClosed) -> Self {
+        VncError::Cancelled
+    }
+}
+
+/// The session task is gone. `SessionHandle::send` used to report this as
+/// `ConnectionClosed`, so it still does.
+impl From<remote_core::SessionGone> for VncError {
+    fn from(_: remote_core::SessionGone) -> Self {
+        VncError::ConnectionClosed
+    }
+}
+
 impl VncError {
     /// Whether the auto-reconnect loop should retry after this error.
     ///

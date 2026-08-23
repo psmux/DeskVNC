@@ -218,7 +218,7 @@ mod tests {
         let challenge = [0x42u8; 16];
         server.write_all(&challenge).await.unwrap();
 
-        let mut o = ConnectOptions::new("h", 5900);
+        let mut o = ConnectOptions::vnc("h", 5900);
         o.credentials = crate::types::Credentials::password("hunter2");
         let s: BoxedStream = Box::pin(client);
         let out = handshake(s, &o, &CredentialSource::none()).await.unwrap();
@@ -232,7 +232,7 @@ mod tests {
     #[tokio::test]
     async fn missing_password_asks_for_one() {
         let (client, _server) = tokio::io::duplex(64);
-        let o = ConnectOptions::new("h", 5900);
+        let o = ConnectOptions::vnc("h", 5900);
         let s: BoxedStream = Box::pin(client);
         assert!(matches!(
             handshake(s, &o, &CredentialSource::none()).await,

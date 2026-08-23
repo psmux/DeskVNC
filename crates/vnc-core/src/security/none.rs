@@ -25,7 +25,7 @@ mod tests {
     use super::*;
 
     fn opts() -> ConnectOptions {
-        ConnectOptions::new("h", 5900)
+        ConnectOptions::vnc("h", 5900)
     }
 
     /// Issue #1: this refused the handshake unless `allow_insecure` was set,

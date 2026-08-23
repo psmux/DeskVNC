@@ -394,8 +394,8 @@ mod tests {
     use super::*;
 
     fn opts(allow_insecure: bool) -> ConnectOptions {
-        let mut o = ConnectOptions::new("h", 5900);
-        o.allow_insecure = allow_insecure;
+        let mut o = ConnectOptions::vnc("h", 5900);
+        o.vnc_mut().allow_insecure = allow_insecure;
         o
     }
 

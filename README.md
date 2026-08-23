@@ -132,6 +132,8 @@ release workflow builds a universal macOS binary covering both.
 
 ```
 crates/
+  remote-core/         Protocol agnostic session contract: options, events, commands, state
+  remote-pixel/        Pixel format conversion, no dependencies at all
   vnc-core/            RFB protocol, encodings, security, input, clipboard, session, reconnect
   vnc-transport/       TCP and TLS (rustls) with trust-on-first-use pinning
   vnc-discovery/       mDNS, subnet scan, banner fingerprint, name resolution, Wake-on-LAN
@@ -153,9 +155,14 @@ it the fastest place to work.
 dirty-rect messages over a Tauri channel and are uploaded into a single WebGL2
 texture.
 
+`remote-core` holds everything in the session contract that is not RFB, so a
+second protocol can implement `remote_core::ProtocolDriver` and reach the same
+shell. `vnc-core` re-exports it, so `vnc_core::Rect` and the rest still resolve
+where they always did, and the wire contract with the webview is unchanged.
+
 Every crate that parses bytes from a remote peer declares
-`#![forbid(unsafe_code)]`: `vnc-core`, `vnc-transport`, `vnc-discovery`,
-`vnc-store`, and `vnc-files`. `unsafe` appears only in `vnc-input-capture`,
+`#![forbid(unsafe_code)]`: `remote-core`, `remote-pixel`, `vnc-core`,
+`vnc-transport`, `vnc-discovery`, `vnc-store`, and `vnc-files`. `unsafe` appears only in `vnc-input-capture`,
 which wraps platform input APIs and sees no network data.
 
 Source comments cite an internal specification as `PRD/NN §S`. Those documents
@@ -183,10 +190,10 @@ These are what CI runs:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -p vnc-core -p vnc-transport -p vnc-discovery \
-  -p vnc-store -p vnc-files -p vnc-input-capture -- -D warnings
-cargo test -p vnc-core -p vnc-transport -p vnc-discovery \
-  -p vnc-store -p vnc-files -p vnc-input-capture
+cargo clippy -p remote-core -p remote-pixel -p vnc-core -p vnc-transport \
+  -p vnc-discovery -p vnc-store -p vnc-files -p vnc-input-capture -- -D warnings
+cargo test -p remote-core -p remote-pixel -p vnc-core -p vnc-transport \
+  -p vnc-discovery -p vnc-store -p vnc-files -p vnc-input-capture
 (cd ui && npx tsc --noEmit)
 ```
 
