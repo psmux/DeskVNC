@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-23
+
 ### Added
 
 - **Hosts can be selected in bulk and dropped onto a group or a tag.** Click a
@@ -890,7 +892,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/psmux/DeskVNC/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/psmux/DeskVNC/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/psmux/DeskVNC/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/psmux/DeskVNC/compare/v0.9.0...v0.9.1
