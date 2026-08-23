@@ -80,6 +80,7 @@ pub mod io;
 pub mod mcs;
 pub mod rdp;
 pub mod update;
+pub mod vc;
 pub mod x224;
 
 pub use gcc::{
@@ -96,6 +97,13 @@ pub use x224::{X224ConnectionConfirm, X224ConnectionRequest, X224Negotiation};
 // The session PDUs, at the crate root so `rdp-core` does not have to spell the
 // module path for the types it touches on every connection.
 pub use codes::ErrInfo;
+// The virtual channel layer, at the crate root for the same reason: the
+// session touches these on every EGFX frame.
+pub use vc::dvc::{DvcPdu, DvcReassembler};
+pub use vc::egfx::{Capset, EgfxPdu};
+pub use vc::segment::{CompressedSegment, Segmented};
+pub use vc::static_vc::{chunk_channel_pdu, ChannelPduHeader, ChannelReassembler};
+
 pub use rdp::{
     decode_io_pdu, CapabilitySets, ClientInfoPdu, ConfirmActivePdu, DemandActivePdu, IoPdu,
     IoPduContext, LicensePdu, ShareDataPdu, SharePdu, SlowPathClass,

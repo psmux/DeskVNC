@@ -114,6 +114,45 @@ pub const MAX_BITMAP_CODECS: usize = 32;
 /// that decode. Each entry is eight bytes.
 pub const MAX_PERSISTENT_KEYS: usize = 16384;
 
+/// `CHANNEL_DEF.name` is eight bytes and a dynamic channel name is not
+/// bounded by the specification at all (MS-RDPEDYC 2.2.2.1). PRDRDP/05 §5.2
+/// fixes the rule we enforce: a name longer than this, or one with no
+/// terminator, is a protocol error. The name is NUL terminated inside the
+/// PDU, so this bounds the search and the `String` it produces.
+pub const MAX_DVC_CHANNEL_NAME: usize = 255;
+
+/// `RDPGFX_SOLIDFILL.rectCount`, `RDPGFX_SURFACE_TO_SURFACE.destPtsCount` and
+/// `RDPGFX_CACHE_TO_SURFACE.destPtsCount` are each a `u16` (MS-RDPEGFX
+/// 2.2.2.4, 2.2.2.5, 2.2.2.7). Four thousand rectangles in one command is
+/// already more than a 4K desktop of 64 by 64 tiles, so this bounds the `Vec`
+/// without bounding any real server. Same number and same reasoning as
+/// [`MAX_BITMAP_RECTS`].
+pub const MAX_EGFX_RECTS: usize = 4096;
+
+/// `RDPGFX_CAPS_ADVERTISE_PDU.capsSetCount` (MS-RDPEGFX 2.2.2.18). Eleven
+/// capability versions are defined (2.2.3.1 to 2.2.3.11) and we advertise
+/// two, so thirty two leaves room for a newer server's list and bounds the
+/// loop.
+pub const MAX_EGFX_CAPSETS: usize = 32;
+
+/// One `RDPGFX_CAPSET.capsDataLength` (MS-RDPEGFX 2.2.1.6). Every defined
+/// body is four bytes of flags except version 10.1's sixteen reserved bytes
+/// (2.2.3.4), so this is ours and is generous by two orders of magnitude.
+pub const MAX_EGFX_CAPSET_LEN: usize = 1024;
+
+/// `RDPGFX_CACHE_IMPORT_OFFER_PDU.cacheEntriesCount` and
+/// `RDPGFX_CACHE_IMPORT_REPLY_PDU.importedEntriesCount` (MS-RDPEGFX 2.2.2.16,
+/// 2.2.2.17). The specification states 5462 for the offer, which is what fits
+/// a 65535 byte PDU at twelve bytes an entry, and the reply is bounded by the
+/// offer it answers.
+pub const MAX_CACHE_IMPORT_ENTRIES: usize = 5462;
+
+/// `RFX_AVC420_METABLOCK.numRegionRects` (MS-RDPEGFX 2.2.4.4). The field is a
+/// `u32` and the specification states no bound; the metablock is followed by
+/// an H.264 stream and one region rectangle per macroblock row of a 4K frame
+/// is far under this, so the number is ours.
+pub const MAX_AVC420_REGION_RECTS: usize = 4096;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
@@ -141,5 +180,7 @@ mod tests {
         const { assert!(MAX_BITMAP_DATA <= MAX_UNCOMPRESSED_SIZE) };
         const { assert!(MAX_CAPSET_LEN <= MAX_GCC_USER_DATA) };
         const { assert!(MAX_SOURCE_DESCRIPTOR < MAX_CAPSET_LEN) };
+        const { assert!(MAX_DVC_PDU <= MAX_EGFX_PDU) };
+        const { assert!(MAX_EGFX_CAPSET_LEN <= MAX_EGFX_PDU) };
     }
 }
