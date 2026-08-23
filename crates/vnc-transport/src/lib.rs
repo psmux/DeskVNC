@@ -21,6 +21,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod tcp;
 pub mod tls;
+#[cfg(feature = "legacy-tls")]
+pub mod tls_legacy;
 
 /// Any bidirectional byte stream a VNC session can run over.
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}

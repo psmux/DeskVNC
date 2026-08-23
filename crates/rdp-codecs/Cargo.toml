@@ -1,0 +1,46 @@
+[package]
+name = "rdp-codecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# RDP bitmap decoders: pure functions over slices into caller owned buffers.
+#
+# MUST NOT depend on tokio, on any I/O, or on any third party RDP crate (D3).
+# The only workspace dependency is remote-pixel (PRDRDP/00 R37). In particular
+# NOT rdp-pdu: the codec payload boundary (PRDRDP/12 §2.2.2) is the reason.
+# Enforced by crates/rdp-pdu/tests/workspace_rules.rs (PRDRDP/12 §2.5).
+
+[dependencies]
+# Pixel format conversion and the integer bilinear resampler, generalised out
+# of vnc-core/src/pixel/convert.rs for stride and row order (PRDRDP/00 R37,
+# PRDRDP/04 §4.2). A leaf crate with no dependencies at all, shared with
+# vnc-core so there is one conversion rather than two that drift.
+remote-pixel = { path = "../remote-pixel" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+hex = { workspace = true }
+# Self dev-dependency so the benches and the integration tests see the
+# reference encoders of `encode`, which PRDRDP/04 §11.4 requires and gates off
+# the shipped build. Cargo builds the lib once with the union of the features,
+# so this costs a feature flag rather than a second compilation.
+rdp-codecs = { path = ".", features = ["encode"] }
+
+[features]
+default = []
+# Progressive RemoteFX (MS-RDPEGFX 2.2.4.2, 3.3.7). Phase 3 (D10). It is a
+# second, larger RemoteFX decoder with its own tile state, and compiling it
+# into a phase 1 binary is dead weight the fuzzer also has to cover.
+progressive = []
+# Minimal reference encoders, one legal form of each construct, used to build
+# bench fixtures and round trip tests (PRDRDP/04 §11.4). Never shipped: the
+# spec vectors in the unit tests are what stops "our encoder agrees with our
+# decoder" from being the only evidence.
+encode = []
+
+[[bench]]
+name = "decode"
+harness = false

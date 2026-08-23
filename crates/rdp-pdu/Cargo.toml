@@ -1,0 +1,34 @@
+[package]
+name = "rdp-pdu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# RDP wire formats: encode and decode, nothing else.
+#
+# MUST NOT depend on tokio, on any I/O, or on any third party RDP crate (D3).
+# MUST NOT depend on any other crate in this workspace.
+# Enforced by crates/rdp-pdu/tests/workspace_rules.rs (PRDRDP/12 §2.5).
+
+[dependencies]
+# The receive buffer type. Parsed structures hold `Bytes` slices of the
+# framer's buffer rather than copying, which is the D9 zero copy invariant
+# (PRDRDP/12 §4.2).
+bytes = { workspace = true }
+thiserror = { workspace = true }
+# `trace!` on an unrecognised capability set or PDU type, and nothing else.
+# A parser that logs its own progress is a parser nobody can bench.
+tracing = { workspace = true }
+# The licensing PDUs carry a client random and a premaster secret
+# (MS-RDPELE 2.2.2.3); those buffers zeroize on drop (PRDRDP/12 §6.4).
+zeroize = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+
+[features]
+default = []
+# Emits a `tracing::trace!` per decoded PDU with its type and length. Off by
+# default because it costs a formatting call on the hot path (PRDRDP/13 §2.1).
+trace-pdu = []
