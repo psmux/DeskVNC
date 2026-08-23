@@ -62,6 +62,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - `docs/RDP_SPEC_NOTES.md`, which records the places where the code had to
   choose a reading that only a specification vector can settle, so nobody has
   to rediscover them from a module comment.
+- **A self signed RDP host can now be connected to.** The certificate prompt
+  waits for an answer instead of refusing, which matters because nearly every
+  RDP host is self signed the first time you meet it. Dismissing the prompt
+  stops the connection before anything is sent to the server.
+- The graphics channel, end to end. A frame arrives compressed, is decoded and
+  reaches the screen at the right place, with the clipboard alongside it.
+- Hosts saved in the library can be RDP hosts, with their own settings and
+  their own domain, user and password. Existing profiles are untouched and
+  keep working exactly as they did.
+- Network discovery finds RDP hosts as well as VNC ones, and reads the name off
+  the certificate on the connection it already opened rather than opening a
+  second one. It can be turned off, and when it is off it opens nothing.
+- `.rdp` files can be imported.
+- H.264 video from a Windows host reuses the decoder the browser already has
+  and the picture path VNC already used, so there is no second video decoder in
+  the application.
 
 ### Changed
 
@@ -83,6 +99,9 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - RDP certificates are pinned under their own scheme rather than sharing the
   VNC one. A host can serve both protocols with unrelated certificates, and a
   shared row would have let one vouch for the other.
+- Locking the credential store now wipes every decrypted secret it was holding.
+  It previously wiped only the key and let the decrypted entries drop, which
+  left every password it had opened sitting in freed memory.
 
 ## [0.12.0] - 2026-08-23
 

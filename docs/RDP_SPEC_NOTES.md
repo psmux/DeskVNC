@@ -30,9 +30,23 @@ PDU, which is a miserable thing to chase.
 This is the highest risk item in the RDP tree. One test against the MS-RDPBCGR
 section 4 vector settles it.
 
-Mitigating for now: nothing reaches this decoder yet. `rdp-core` joins the
-graphics channel and ignores data on it, so the reconstruction is not on any
-live path. It must not go live before the vector is run.
+**It is now live.** `rdp-core`'s graphics channel decompresses through it, so
+this table is on the path of every EGFX frame. The earlier note here said it
+must not go live before the vector is run; that was overtaken by wiring EGFX up,
+and the decision was taken knowingly, because EGFX is worthless without it.
+
+What was put in place instead of waiting. A wrong literal row produces bytes
+that are wrong but structurally plausible, and the layer above catches that: an
+`RDPGFX_HEADER` whose `pduLength` does not agree with what was decompressed is
+an error naming ZGFX, this file and `zgfx.rs`, rather than a frame drawn from
+mangled pixels. Two tests hold it, a unit one in `channels/egfx/tests.rs` and
+`a_malformed_egfx_message_after_decompression_is_reported_and_names_zgfx` over a
+real socket. So the failure mode is a named refusal, not silent corruption.
+
+That is a guard, not a fix. A wrong row that happens to keep the header
+consistent still corrupts pixels quietly. The MS-RDPBCGR section 4 vector is
+still the thing that settles it, and it is still the first item to spend an
+afternoon on.
 
 ### 1.2 The RemoteFX inverse DWT: two readings, one right
 
@@ -73,7 +87,54 @@ the whole point of a shared body, and the field only looks doubled because
 MS-RDPBCGR describes the nesting twice. A test pins the decision. A capture from
 a real server settles it.
 
-### 1.5 Golden vectors we could not source
+### 1.5 Server Redirection field order, and where the packet starts
+
+`crates/rdp-pdu/src/rdp/redirection.rs`.
+
+Two separate uncertainties in one structure, both of which produce garbage
+rather than an error if they are wrong.
+
+`PRDRDP/13 §4.10.4` lists the tail of `RDP_SERVER_REDIRECTION_PACKET` as
+`TsvUrl`, `RedirectionGuid`, `TargetCertificate`, `TargetNetAddresses`, putting
+the address list last. Every other field in that structure runs in ascending
+`RedirFlags` order, and `LB_TARGET_NET_ADDRESSES` is `0x800`, below
+`LB_CLIENT_TSV_URL` at `0x1000` and well below the two flags appended later,
+`LB_REDIRECTION_GUID` at `0x8000` and `LB_TARGET_CERTIFICATE` at `0x10000`. The
+code puts `TargetNetAddresses` directly after `TsvUrl`. The two readings differ
+only for a server that sets `LB_TARGET_NET_ADDRESSES` together with one of the
+two later flags.
+
+Separately, where the packet begins inside its two wrappers is a guess.
+MS-RDPBCGR 2.2.13.2 puts a `pad2Octets` between the Share Control header and the
+packet, which `read_standard` skips; 2.2.13.3 appears to put the packet
+immediately after the four byte security header, which the plain `Decode`
+assumes. `Flags` is a checked magic value precisely so that a wrong guess fails
+as one `InvalidField` at offset zero or two, rather than assembling a host name
+out of the middle of a password.
+
+A captured broker redirection settles both.
+
+### 1.6 Nothing declines RemoteFX Progressive, and we cannot decode it
+
+`crates/rdp-core/src/channels/egfx/`, `crates/rdp-codecs/src/progressive.rs`.
+
+This is a live interop risk rather than an ambiguity, and it is the one most
+likely to be hit by the first real Windows host.
+
+Progressive RemoteFX is available from EGFX capability version 8, which is what
+we advertise. There is no capability bit that says "do not send it":
+`RDPGFX_CAPS_FLAG_AVC_DISABLED` exists only from version 10, and there is no
+progressive equivalent at any version. `rdp_codecs::progressive` is a stub
+behind an off by default feature, because progressive is phase 3.
+
+So a server may legitimately send `RDPGFX_CODECID_CAPROGRESSIVE` and the session
+will stop with a named refusal. Nothing is corrupted and nothing is silent, but
+the session ends. The fix is implementing the decoder, not a protocol trick.
+
+Related: `rdp_pdu::vc::egfx::codec_id` does not define `0x0009`, so the session
+names it locally with a citation. That constant belongs in `rdp-pdu`.
+
+### 1.7 Golden vectors we could not source
 
 `PRDRDP/09 §9.2` calls for vectors transcribed from the annotated captures in
 the MS-RDPBCGR section 4 material, which is not in the design set. Every vector
@@ -171,6 +232,8 @@ a judgement call, and the code had to pick one.
 | Where does the codec `Reader` live? | `PRDRDP/04 §4.1` says `rdp-pdu` and `rdp-codecs` re-exports it; `PRDRDP/12 §2.2.2` forbids that dependency, and the codec payload boundary is why it exists. | Follows `12`. |
 | Must a CHALLENGE echo `NTLMSSP_NEGOTIATE_SIGN`? | The 2022-07-26 MS-NLMP erratum says yes. Enforcing it refuses hosts predating the erratum. | Accepted with a log line, not refused. |
 | What colour depth do the slow presets ask for? | `PRDRDP/04 §9.2` argues for 16 bpp at length; the code resolves `Low` and `BlackAndWhite` to 15 bpp. | 15 bpp, unreconciled. |
+| What is in the stored `rdp_settings` blob? | `PRDRDP/08 §2.5` specifies an `RdpSettings` struct that does not exist, and its field list disagrees with `remote_core::RdpOptions`, which does, on six fields (`domain`, `color_depth`, `codecs`, `multi_monitor`, `keyboard_layout`, `gateway`). Four more of its fields (`clipboard`, `microphone`, `console_session`, `restricted_admin`) exist in neither. | `RdpSettings` is a versioned envelope carrying `v` plus a flattened `RdpOptions`, with the four extra fields on the envelope. Because they are flattened, moving one into `RdpOptions` later changes no stored blob and does not bump `v`. |
+| Does probing 3389 slow down a scan that finds nothing? | `PRDRDP/08 §4.5` requires one rate limiter slot per connection and makes it a measured acceptance criterion. The owner's standing instruction is that the probe must not make a scan slower for people with no RDP hosts. Both cannot hold: probing a port everywhere costs a connection everywhere. | Follows `§4.5`. On a /24 at the default 500 per second, pacing goes from about 0.5 s to about 1.0 s. It adds no latency to the critical path, a closed port refuses in about a millisecond on a LAN, `probe_rdp: false` opens nothing, and a host that does answer costs one connection fewer overall because the certificate read shares the probe's socket. |
 | How large may a dynamic channel message be? | `PRDRDP/13 §2.8` fixes 4 MiB; `PRDRDP/05 §5.2` gives graphics 32 MiB. An uncompressed 4K surface command is just under 32 MiB, so 4 MiB refuses a legal PDU. | 4 MiB default, up to the 64 MiB ceiling on request. |
 
 ## 4. Where the specification itself is ambiguous
