@@ -87,6 +87,33 @@ pub const MAX_STRING_UTF16: usize = 512;
 /// as an erratum.
 pub const MAX_REDIRECTION_FIELD: usize = 64 * 1024;
 
+/// One `LICENSE_BINARY_BLOB` (MS-RDPBCGR 2.2.1.12.1.2). `wBlobLen` is a
+/// `u16`, so this is the wire type's own bound restated: the largest blob a
+/// licence server sends is the `ServerCertificate` of a `LICENSE_REQUEST`,
+/// which is a certificate chain and still fits.
+pub const MAX_LICENSE_BLOB: usize = 65535;
+
+/// `SCOPE_LIST.ScopeCount` (MS-RDPELE 2.2.2.1.1). The field is a `u32` and
+/// the specification states no bound; a real licence server offers one or two
+/// scopes, so this is ours and bounds the `Vec`.
+pub const MAX_LICENSE_SCOPES: usize = 64;
+
+/// `sourceDescriptor` of a Demand Active, Confirm Active or Deactivate All
+/// (MS-RDPBCGR 2.2.1.13.1.1). `lengthSourceDescriptor` is a `u16`; every
+/// server sends a short ASCII name and mstsc sends `"MSTSC"`, so this is ours.
+pub const MAX_SOURCE_DESCRIPTOR: usize = 256;
+
+/// `TS_BITMAPCODECS.bitmapCodecCount` (MS-RDPBCGR 2.2.7.2.10). The field is a
+/// `u8`; four codecs are defined and this leaves room without letting a
+/// hostile server make us allocate 255 property blobs.
+pub const MAX_BITMAP_CODECS: usize = 32;
+
+/// The total entries of a Client Persistent Key List PDU (MS-RDPBCGR
+/// 2.2.1.17.1), summed over its five caches. We advertise no persistent cache
+/// so we never send one, and we decode it for the mock server; the cap bounds
+/// that decode. Each entry is eight bytes.
+pub const MAX_PERSISTENT_KEYS: usize = 16384;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
@@ -101,6 +128,7 @@ mod tests {
         assert_eq!(MAX_VC_CHUNK, u16::MAX as usize);
         assert_eq!(MAX_SEGMENT_COUNT, u16::MAX as usize);
         assert_eq!(MAX_FASTPATH_LEN, (1 << 15) - 1);
+        assert_eq!(MAX_LICENSE_BLOB, u16::MAX as usize);
     }
 
     /// A chunk cannot be larger than the buffer it is reassembled into, and a
@@ -112,5 +140,6 @@ mod tests {
         const { assert!(MAX_VC_CHUNK < MAX_VC_REASSEMBLED) };
         const { assert!(MAX_BITMAP_DATA <= MAX_UNCOMPRESSED_SIZE) };
         const { assert!(MAX_CAPSET_LEN <= MAX_GCC_USER_DATA) };
+        const { assert!(MAX_SOURCE_DESCRIPTOR < MAX_CAPSET_LEN) };
     }
 }
