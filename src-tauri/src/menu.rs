@@ -235,7 +235,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let pointers = SubmenuBuilder::new(app, "Pointers")
         .item(&check!("menu:remote-cursor", "Show the Remote Pointer"))
         .separator()
-        .item(&check!("menu:cursor:standard", "My Pointer: Standard Arrow"))
+        .item(&check!(
+            "menu:cursor:standard",
+            "My Pointer: Standard Arrow"
+        ))
         .item(&check!("menu:cursor:dot", "My Pointer: Dot"))
         .item(&check!("menu:cursor:off", "My Pointer: Hidden"))
         .build()?;
@@ -301,18 +304,27 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let quality = SubmenuBuilder::new(app, "Quality")
         .item(&check!("menu:quality:auto", "Auto (detect from the link)"))
         .item(&check!("menu:quality:high", "High (LAN, no adaptation)"))
-        .item(&check!("menu:quality:medium", "Medium (WAN, save bandwidth)"))
+        .item(&check!(
+            "menu:quality:medium",
+            "Medium (WAN, save bandwidth)"
+        ))
         .item(&check!("menu:quality:low", "Low"))
         .item(&check!("menu:quality:bw", "Black & White"))
         .separator()
         .item(&gray)
         .separator()
-        .item(&check!("menu:always-refresh", "Always Request Fresh Frames"))
+        .item(&check!(
+            "menu:always-refresh",
+            "Always Request Fresh Frames"
+        ))
         .build()?;
     gated_menus.push(quality.clone());
 
     let keyboard = SubmenuBuilder::new(app, "Keyboard")
-        .item(&check!("menu:passthrough", "Pass System Shortcuts to Remote"))
+        .item(&check!(
+            "menu:passthrough",
+            "Pass System Shortcuts to Remote"
+        ))
         .separator()
         .item(&action!("menu:send-cad", "Send Ctrl+Alt+Del"))
         .item(&action!("menu:send-cmd-tab", "Send Cmd/Alt+Tab"))
@@ -453,7 +465,11 @@ pub fn sync(app: &AppHandle, update: MenuSync) {
         "remote-resize" => "remote",
         _ => "",
     };
-    menu.radio("menu:scale-", &["fit", "aspect", "actual", "remote"], scaling);
+    menu.radio(
+        "menu:scale-",
+        &["fit", "aspect", "actual", "remote"],
+        scaling,
+    );
     menu.radio(
         "menu:quality:",
         &["auto", "high", "medium", "low", "bw"],
@@ -532,7 +548,8 @@ fn rebuild_displays(
     if !state.layout_known {
         displays.append(&PredefinedMenuItem::separator(app)?)?;
         displays.append(
-            &MenuItemBuilder::with_id("menu:detect-displays", "Detect Displays Again").build(app)?,
+            &MenuItemBuilder::with_id("menu:detect-displays", "Detect Displays Again")
+                .build(app)?,
         )?;
     }
     Ok(())
