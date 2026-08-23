@@ -42,8 +42,21 @@ commit.**
 | `save_tag` | `invoke("save_tag", { tag })` | `HostTag` |
 | `delete_tag` | `invoke("delete_tag", { tagId })` | `void` |
 | `set_host_tags` | `invoke("set_host_tags", { hostId, tagIds })` | `void` |
+| `set_hosts_group` | `invoke("set_hosts_group", { hostIds, groupId? })` | `void` |
+| `add_tag_to_hosts` | `invoke("add_tag_to_hosts", { hostIds, tagId })` | `void` |
+| `remove_tag_from_hosts` | `invoke("remove_tag_from_hosts", { hostIds, tagId })` | `void` |
 | `list_history` | `invoke("list_history", { hostId? limit? })` | `HistoryEntry[]` (newest first, `limit` defaults to 100) |
 | `get_thumbnail` | `invoke("get_thumbnail", { hostId })` | `ArrayBuffer`, raw PNG bytes, **empty** when there is no thumbnail |
+
+`set_hosts_group`, `add_tag_to_hosts` and `remove_tag_from_hosts` are the
+bulk counterparts to `save_host` and `set_host_tags`, for a multi-selection
+drag in the Library. Each runs as one database transaction: either every host
+in `hostIds` is updated, or (on error, e.g. an unknown `groupId`) none is. An
+empty `hostIds` is a no-op, not an error. `groupId` omitted or `null` on
+`set_hosts_group` removes every host in the selection from its group.
+`add_tag_to_hosts`/`remove_tag_from_hosts` touch only the one tag named by
+`tagId`, every other tag already on each host is left alone, unlike
+`set_host_tags`, which replaces a single host's whole tag set.
 
 `get_thumbnail` returns `tauri::ipc::Response`, so the webview receives an
 `ArrayBuffer`, not base64. Build a blob URL and **revoke it** when it is

@@ -28,6 +28,7 @@ import { useSessions } from "../state/SessionsContext";
 import { useTabs } from "../state/TabsContext";
 import { classNames, formatBps, fuzzyMatch, modKeyLabel, timeAgo } from "../lib/util";
 import { Sidebar, type SidebarSelection } from "../components/Sidebar";
+import { useHostDragSelect, type DropTarget } from "../hooks/useHostDragSelect";
 import { HostTile, DiscoveredTile, osLabel } from "../components/HostTile";
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
@@ -87,7 +88,7 @@ export function Library({
   autoAddDiscoveredId?: string | null;
   onAutoAddHandled?: () => void;
 }): ReactNode {
-  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, savePassword, saveSshPassphrase, wakeHost, refresh, refreshThumbnail } = useHosts();
+  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, wakeHost, refresh, refreshThumbnail } = useHosts();
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
@@ -98,7 +99,6 @@ export function Library({
 
   const [selection, setSelection] = useState<SidebarSelection>({ kind: "all" });
   const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [hostDialog, setHostDialog] = useState<HostDraft | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
@@ -239,15 +239,6 @@ export function Library({
   }, []);
   useEffect(refreshAllowMultiple, [refreshAllowMultiple]);
 
-  const openCtxMenu = useCallback(
-    (e: { clientX: number; clientY: number }, host: HostProfile): void => {
-      refreshAllowMultiple();
-      setSelectedId(host.id);
-      setCtxMenu({ x: e.clientX, y: e.clientY, host });
-    },
-    [refreshAllowMultiple],
-  );
-
   // Browser dev only: stand in for "this machine was connected to once
   // already" so a Nearby tile can be seen with a real picture (see mock.ts).
   const mock = useMockData();
@@ -328,6 +319,152 @@ export function Library({
 
   const showNearbyBand =
     (selection.kind === "all" || selection.kind === "nearby") && unsavedDiscovered.length > 0;
+
+  // --------------------------------------------------- selection and drag
+
+  /** Display order, which is what a shift-click range and a marquee follow. */
+  const visibleOrder = useMemo(() => visibleHosts.map((h) => h.id), [visibleHosts]);
+  /** Id lookup: a Cmd+A selection turns every `hosts.find` into a full scan. */
+  const hostById = useMemo(() => new Map(hosts.map((h) => [h.id, h] as const)), [hosts]);
+  const hostName = useCallback(
+    (id: string): string => hostById.get(id)?.friendlyName ?? "host",
+    [hostById],
+  );
+
+  /** "3 hosts" / "Studio", for toasts about a dropped selection. */
+  const describe = useCallback(
+    (ids: string[]): string => (ids.length === 1 ? hostName(ids[0]) : `${ids.length} hosts`),
+    [hostName],
+  );
+
+  /**
+   * A selection was dropped on a group or a tag in the sidebar.
+   *
+   * Every branch is undoable, because a drag is the easiest gesture in the app
+   * to make by accident: the previous group of each host, and which of them
+   * did not already carry the tag, are captured BEFORE the write so Undo can
+   * put things back exactly, rather than blanket-clearing.
+   */
+  const dropOnTarget = useCallback(
+    (ids: string[], target: DropTarget): void => {
+      const previousGroup = new Map(
+        ids.map((id) => [id, hostById.get(id)?.groupId ?? null] as const),
+      );
+      /**
+       * Put every host back in the group it came from.
+       *
+       * Sequential, not a fan-out: each write ends with its own `refresh()`,
+       * and three unordered refreshes can settle on the snapshot taken before
+       * the last write landed, leaving a correct database behind a stale grid.
+       */
+      const undoGroups = async (): Promise<void> => {
+        const byGroup = new Map<string | null, string[]>();
+        for (const [id, gid] of previousGroup) byGroup.set(gid, [...(byGroup.get(gid) ?? []), id]);
+        for (const [gid, members] of byGroup) await setHostsGroup(members, gid);
+      };
+      // An undo that fails has to say so. Letting the promise reject into
+      // nothing is the very bug this change exists to fix, and it is no more
+      // acceptable on the way back than on the way there.
+      const reportUndo = (run: () => Promise<void>) => (): void => {
+        void run().catch((err: unknown) => push("danger", `Could not undo: ${String(err)}`));
+      };
+
+      if (target.kind === "ungroup") {
+        // Nothing to do for hosts that are not in a group anyway.
+        const grouped = ids.filter((id) => previousGroup.get(id) !== null);
+        if (grouped.length === 0) {
+          push("info", `${describe(ids)} ${ids.length === 1 ? "is" : "are"} not in a group`);
+          return;
+        }
+        void setHostsGroup(grouped, null).then(
+          () =>
+            push("success", `Removed ${describe(grouped)} from their group`, {
+              label: "Undo",
+              run: reportUndo(undoGroups),
+            }),
+          (err: unknown) => push("danger", `Could not move those hosts: ${String(err)}`),
+        );
+        return;
+      }
+
+      if (target.kind === "group") {
+        const group = groups.find((g) => g.id === target.id);
+        if (!group) return;
+        const moving = ids.filter((id) => previousGroup.get(id) !== target.id);
+        // Silence here would be indistinguishable from a drop that missed.
+        if (moving.length === 0) {
+          push("info", `${describe(ids)} already in ${group.name}`);
+          return;
+        }
+        void setHostsGroup(moving, target.id).then(
+          () =>
+            push("success", `Moved ${describe(moving)} to ${group.name}`, {
+              label: "Undo",
+              run: reportUndo(undoGroups),
+            }),
+          (err: unknown) => push("danger", `Could not move those hosts: ${String(err)}`),
+        );
+        return;
+      }
+
+      const tag = tags.find((t) => t.id === target.id);
+      if (!tag) return;
+      // Hosts that already carry the tag are left out of the Undo, or undoing
+      // would strip a tag the user had put there earlier by hand.
+      const tagging = ids.filter((id) => !(hostById.get(id)?.tags ?? []).includes(target.id));
+      if (tagging.length === 0) {
+        push("info", `${describe(ids)} already tagged ${tag.name}`);
+        return;
+      }
+      void addTagToHosts(tagging, target.id).then(
+        () =>
+          push("success", `Tagged ${describe(tagging)} with ${tag.name}`, {
+            label: "Undo",
+            run: reportUndo(() => removeTagFromHosts(tagging, target.id)),
+          }),
+        (err: unknown) => push("danger", `Could not tag those hosts: ${String(err)}`),
+      );
+    },
+    [hostById, groups, tags, setHostsGroup, addTagToHosts, removeTagFromHosts, describe, push],
+  );
+
+  const {
+    selectedIds,
+    selectOnly,
+    selectAll,
+    clear: clearSelection,
+    containerRef,
+    onPointerDown,
+    isGesturing,
+    cancelGesture,
+    marquee,
+    drag,
+  } = useHostDragSelect({ order: visibleOrder, onDrop: dropOnTarget });
+
+  /**
+   * What the Escape / Select-all shortcuts need to know, in a ref.
+   *
+   * Through the state itself, the keydown effect below would tear down and
+   * re-register its window listener every time the selection or a dialog
+   * changed, which during a marquee sweep is once per pointer move.
+   */
+  const selectionKeys = useRef({ overlaid: false, hasSelection: false });
+  selectionKeys.current = {
+    overlaid: hostDialog !== null || paletteOpen || namePrompt !== null || ctxMenu !== null,
+    hasSelection: selectedIds.size > 0,
+  };
+
+  const openCtxMenu = useCallback(
+    (e: { clientX: number; clientY: number }, host: HostProfile): void => {
+      refreshAllowMultiple();
+      // Right-clicking outside the selection is a fresh start, exactly as it
+      // is in a file manager; inside it, the selection is kept so the menu can
+      // act on all of it.
+      if (!selectedIds.has(host.id)) selectOnly(host.id);
+      setCtxMenu({ x: e.clientX, y: e.clientY, host });
+    },
+    [refreshAllowMultiple, selectedIds, selectOnly],
+  );
 
   // ------------------------------------------------------------ actions
 
@@ -451,6 +588,30 @@ export function Library({
       // the focus into a search box nobody can see.
       if (!inFront) return;
       const mod = e.metaKey || e.ctrlKey;
+      // Typing in the search box or a dialog field: only the app-level
+      // shortcuts below apply, "select all" belongs to the text there.
+      // `instanceof` rather than a cast: a keydown delivered with no element
+      // target (window) would otherwise throw on `.closest` and take the rest
+      // of these shortcuts down with it.
+      const el = e.target instanceof HTMLElement ? e.target : null;
+      const typing = el?.closest("input, textarea, select") != null;
+      // A dialog, the palette or a context menu is in front: Escape belongs to
+      // whatever is on top, and selecting every tile behind a modal (then
+      // popping the selection bar up underneath it) helps nobody.
+      const { overlaid, hasSelection } = selectionKeys.current;
+      if (mod && e.key.toLowerCase() === "a" && !typing && !overlaid) {
+        e.preventDefault();
+        selectAll();
+        return;
+      }
+      // One owner for Escape. Mid-gesture it means "cancel this sweep", which
+      // puts back the selection the sweep started from; otherwise it clears.
+      if (e.key === "Escape" && !typing && !overlaid) {
+        if (isGesturing()) cancelGesture();
+        else if (hasSelection) clearSelection();
+        else return;
+        return;
+      }
       if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((o) => !o);
@@ -468,7 +629,7 @@ export function Library({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [inFront, focusQuickConnect]);
+  }, [inFront, focusQuickConnect, selectAll, clearSelection, isGesturing, cancelGesture]);
 
   // The same two things off the native File menu. menu.rs routes them here
   // whichever window has focus, so they work from inside a session too, and in
@@ -493,6 +654,66 @@ export function Library({
   }, [focusQuickConnect, selectTab]);
 
   // ------------------------------------------------------------ context menu
+
+  /**
+   * Menu for a right-click inside a multi-selection. Connect and Edit are
+   * deliberately absent: they are single-host gestures, and "connect to nine
+   * machines at once" is not something to offer by accident.
+   */
+  const multiMenuItems = useCallback(
+    (ids: string[]): MenuItem[] => {
+      const grouped = ids.filter((id) => hosts.find((h) => h.id === id)?.groupId);
+      return [
+        {
+          label: `Remove ${ids.length} hosts from their group`,
+          disabled: grouped.length === 0,
+          onSelect: () => dropOnTarget(ids, { kind: "ungroup" }),
+        },
+        ...groups.map((g) => ({
+          label: `Move to ${g.name}`,
+          onSelect: () => dropOnTarget(ids, { kind: "group", id: g.id }),
+        })),
+        ...tags.map((t) => ({
+          label: `Tag with ${t.name}`,
+          separatorAbove: t.id === tags[0]?.id,
+          onSelect: () => dropOnTarget(ids, { kind: "tag", id: t.id }),
+        })),
+        {
+          label: `Delete ${ids.length} hosts…`,
+          danger: true,
+          separatorAbove: true,
+          onSelect: () => {
+            const doomed = ids
+              .map((id) => hostById.get(id))
+              .filter((h): h is HostProfile => h !== undefined);
+            clearSelection();
+            // Awaited, and one at a time: each delete ends with its own
+            // refresh, and the toast must not claim the work is done before
+            // any of it has been attempted.
+            void (async () => {
+              for (const h of doomed) await deleteHost(h.id);
+              // Undo restores the profiles and their tags. It cannot bring
+              // back the saved passwords: `delete_host` drops the keychain
+              // entry, the history rows and the thumbnail, and none of those
+              // are recoverable from here. Say so rather than promise more
+              // than the button delivers.
+              push("info", `Deleted ${doomed.length} hosts. Saved passwords are gone.`, {
+                label: "Undo",
+                run: () => {
+                  void (async () => {
+                    for (const h of doomed) await saveHost({ ...h });
+                  })().catch((err: unknown) =>
+                    push("danger", `Could not restore those hosts: ${String(err)}`),
+                  );
+                },
+              });
+            })();
+          },
+        },
+      ];
+    },
+    [hostById, groups, tags, dropOnTarget, deleteHost, saveHost, clearSelection, push],
+  );
 
   const menuItemsFor = useCallback(
     (host: HostProfile): MenuItem[] => [
@@ -704,7 +925,11 @@ export function Library({
         onRemember={rememberQuickConnect}
       />
 
-      <div className="flex min-h-0 flex-1">
+      {/* `relative` anchors the floating selection bar: it must NOT be part of
+          the flow, or appearing on the first click would push every tile down
+          by its height and land the second click of a Shift-range on the wrong
+          row. */}
+      <div className="relative flex min-h-0 flex-1">
         <Sidebar
           hosts={hosts}
           groups={groups}
@@ -726,9 +951,19 @@ export function Library({
           onNewGroup={() => setNamePrompt("group")}
           onNewTag={() => setNamePrompt("tag")}
           onOpenPreferences={onOpenPreferences}
+          dragging={drag !== null}
+          dropOverKey={drag?.over ?? null}
         />
 
-        <main className="min-w-0 flex-1 overflow-y-auto p-4" aria-label="Hosts">
+        <main
+          ref={containerRef}
+          onPointerDown={onPointerDown}
+          // select-none on the whole pane, not just the tiles: a marquee that
+          // starts on a heading or on the empty-state copy would otherwise
+          // drag a text highlight along with the rectangle.
+          className="min-w-0 flex-1 select-none overflow-y-auto p-4"
+          aria-label="Hosts"
+        >
           {loading ? (
             <div className={gridClass} style={gridCap(8, settings.compact)}>
               {Array.from({ length: 8 }, (_, i) => (
@@ -761,8 +996,7 @@ export function Library({
                       <HostTile
                         key={h.id}
                         host={h}
-                        selected={selectedId === h.id}
-                        onSelect={() => setSelectedId(h.id)}
+                        selected={selectedIds.has(h.id)}
                         onConnect={() => connectHost(h)}
                         onEdit={() => editHost(h)}
                         onWake={() => void wakeHost(h.id)}
@@ -778,8 +1012,7 @@ export function Library({
                     hosts={visibleHosts}
                     groups={groups}
                     tags={tags}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
+                    selectedIds={selectedIds}
                     onConnect={connectHost}
                     onContextMenu={(e, h) => {
                       e.preventDefault();
@@ -817,11 +1050,59 @@ export function Library({
             </>
           )}
         </main>
+
+        {/* Two or more only: with a single host selected the bar is noise, and
+            everything on it is already on that host's own tile or its
+            right-click menu. */}
+        {selectedIds.size > 1 ? (
+          <SelectionBar
+            count={selectedIds.size}
+            groups={groups}
+            tags={tags}
+            onMoveToGroup={(gid) =>
+              dropOnTarget([...selectedIds], gid === null ? { kind: "ungroup" } : { kind: "group", id: gid })
+            }
+            onAddTag={(tid) => dropOnTarget([...selectedIds], { kind: "tag", id: tid })}
+            onClear={clearSelection}
+          />
+        ) : null}
       </div>
 
       {/* Overlays */}
+      {marquee ? (
+        <div
+          className="pointer-events-none fixed z-40 rounded-xs border border-accent bg-accent/15"
+          style={{
+            left: marquee.left,
+            top: marquee.top,
+            width: marquee.right - marquee.left,
+            height: marquee.bottom - marquee.top,
+          }}
+        />
+      ) : null}
+      {/* The dragged stack follows the pointer. `pointer-events: none` is not
+          decoration: the drop target is found with elementFromPoint, and a
+          ghost that could be hit would always be the answer. */}
+      {drag ? (
+        <div
+          className="pointer-events-none fixed z-50 flex items-center gap-2 rounded-pill border border-subtle bg-raised px-2.5 py-1 text-xs font-medium text-primary shadow-(--shadow-pop)"
+          style={{ left: drag.x + 14, top: drag.y + 14 }}
+        >
+          <IconMonitor size={13} className="text-tertiary" />
+          {drag.ids.length === 1 ? hostName(drag.ids[0]) : `${drag.ids.length} hosts`}
+        </div>
+      ) : null}
       {ctxMenu ? (
-        <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={menuItemsFor(ctxMenu.host)} onClose={() => setCtxMenu(null)} />
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={
+            selectedIds.size > 1 && selectedIds.has(ctxMenu.host.id)
+              ? multiMenuItems([...selectedIds])
+              : menuItemsFor(ctxMenu.host)
+          }
+          onClose={() => setCtxMenu(null)}
+        />
       ) : null}
       {paletteOpen ? (
         <CommandPalette
@@ -844,13 +1125,112 @@ export function Library({
         <NamePromptDialog
           kind={namePrompt}
           onSubmit={(name, color) => {
-            if (namePrompt === "group") void saveGroup({ name });
-            else void saveTag({ name, color });
+            const kind = namePrompt;
+            const created = kind === "group" ? saveGroup({ name }) : saveTag({ name, color });
+            // A failure here used to be invisible: the dialog closed, nothing
+            // appeared in the sidebar, and the only trace was a console
+            // warning nobody sees in a packaged app.
+            void created.then(
+              () => push("success", `Created the ${kind} ${name}`),
+              (err: unknown) => push("danger", `Could not create the ${kind}: ${String(err)}`),
+            );
             setNamePrompt(null);
           }}
           onClose={() => setNamePrompt(null)}
         />
       ) : null}
+    </div>
+  );
+}
+
+// -------------------------------------------------------------- selection bar
+
+/**
+ * What to do with the hosts that are selected, without dragging them anywhere.
+ *
+ * The drag onto the sidebar is the quick route, but it is invisible until you
+ * try it, and it is awkward with a trackpad on a long list. This bar states
+ * plainly what is selected and offers the same two writes.
+ *
+ * It floats over the bottom of the grid rather than sitting above it. In the
+ * flow it would appear on the first click of a Shift-range and push every tile
+ * down by its own height, so the second click would land on the wrong row.
+ * Bottom RIGHT, because the toast shelf owns bottom centre.
+ */
+function SelectionBar({
+  count,
+  groups,
+  tags,
+  onMoveToGroup,
+  onAddTag,
+  onClear,
+}: {
+  count: number;
+  groups: { id: string; name: string }[];
+  tags: { id: string; name: string; color: string }[];
+  onMoveToGroup: (groupId: string | null) => void;
+  onAddTag: (tagId: string) => void;
+  onClear: () => void;
+}): ReactNode {
+  return (
+    <div
+      className="fade-in absolute bottom-4 right-4 z-30 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-md border border-strong bg-raised/95 px-3 py-2 text-sm shadow-(--shadow-pop) backdrop-blur-sm"
+    >
+      {/* Only the count is a live region. Wrapping the selects in one would
+          have a screen reader re-read every control each time the count
+          changed, which during a marquee is constantly. */}
+      <span className="font-medium text-primary" role="status">
+        {count} hosts selected
+      </span>
+      <span className="hidden text-xs text-tertiary lg:inline">
+        Drag onto a group or tag in the sidebar, or:
+      </span>
+      <label className="flex items-center gap-1.5 text-xs text-secondary">
+        Group
+        <Select
+          wrapperClassName="!inline-block"
+          className="!w-auto !py-1 text-xs"
+          aria-label="Move selected hosts to a group"
+          value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v) onMoveToGroup(v === "__none__" ? null : v);
+            e.target.value = "";
+          }}
+        >
+          <option value="">Move to…</option>
+          {groups.map((g) => (
+            <option key={g.id} value={g.id}>
+              {g.name}
+            </option>
+          ))}
+          <option value="__none__">No group</option>
+        </Select>
+      </label>
+      <label className="flex items-center gap-1.5 text-xs text-secondary">
+        Tag
+        <Select
+          wrapperClassName="!inline-block"
+          className="!w-auto !py-1 text-xs"
+          aria-label="Add a tag to the selected hosts"
+          value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v) onAddTag(v);
+            e.target.value = "";
+          }}
+        >
+          <option value="">Add tag…</option>
+          {tags.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </Select>
+      </label>
+      <button type="button" className="btn-secondary ml-auto !py-1 !text-xs" onClick={onClear}>
+        Clear selection
+      </button>
     </div>
   );
 }
@@ -861,22 +1241,20 @@ function HostListView({
   hosts,
   groups,
   tags,
-  selectedId,
-  onSelect,
+  selectedIds,
   onConnect,
   onContextMenu,
 }: {
   hosts: HostProfile[];
   groups: { id: string; name: string }[];
   tags: { id: string; name: string; color: string }[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
+  selectedIds: ReadonlySet<string>;
   onConnect: (h: HostProfile) => void;
   onContextMenu: (e: React.MouseEvent, h: HostProfile) => void;
 }): ReactNode {
   const { forKey } = useSessions();
   return (
-    <div className="overflow-x-auto rounded-md border border-subtle bg-surface">
+    <div className="select-none overflow-x-auto rounded-md border border-subtle bg-surface">
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-subtle text-left text-xs text-tertiary">
@@ -892,13 +1270,13 @@ function HostListView({
           {hosts.map((h) => (
             <tr
               key={h.id}
+              data-host-id={h.id}
               tabIndex={0}
-              aria-selected={selectedId === h.id}
+              aria-selected={selectedIds.has(h.id)}
               className={classNames(
                 "cursor-default border-b border-subtle last:border-b-0",
-                selectedId === h.id ? "bg-accent/12" : "hover:bg-inset/60",
+                selectedIds.has(h.id) ? "bg-accent/12" : "hover:bg-inset/60",
               )}
-              onClick={() => onSelect(h.id)}
               onDoubleClick={() => onConnect(h)}
               onContextMenu={(e) => onContextMenu(e, h)}
               onKeyDown={(e) => {

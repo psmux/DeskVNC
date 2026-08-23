@@ -108,6 +108,11 @@ fn main() {
             "save_tag",
             "delete_tag",
             "set_host_tags",
+            // bulk counterparts, for a multi-selection dragged onto a group or
+            // a tag in the Library
+            "set_hosts_group",
+            "add_tag_to_hosts",
+            "remove_tag_from_hosts",
             "list_history",
             "get_thumbnail",
             "get_app_setting",
