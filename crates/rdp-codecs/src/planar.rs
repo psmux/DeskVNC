@@ -28,7 +28,8 @@
 //! possible failure. [`crate::DstView`] owns the flip and this module never
 //! touches it.
 
-use crate::dst::{put, DstView, OutFormat};
+use remote_pixel::{put, DstView, OutFormat};
+
 use crate::{DecodeError, Reader};
 
 /// Colour loss level, bits 0 to 2 of the format header.
@@ -461,8 +462,8 @@ pub fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dst::RowOrder;
     use crate::uncompressed::dst_len;
+    use remote_pixel::RowOrder;
 
     fn view<'a>(buf: &'a mut [u8], w: u16, h: u16, order: RowOrder) -> DstView<'a> {
         DstView::packed(buf, w, h, OutFormat::Rgba, order).unwrap()

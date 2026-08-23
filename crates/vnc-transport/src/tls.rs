@@ -32,6 +32,14 @@ use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use tokio_rustls::TlsConnector;
 
+// The DER walker this module used to carry itself. It moved to `rdp-pdu` so
+// there is one X.690 implementation in the workspace rather than two that
+// drift: CredSSP needs the same walk for `TSRequest` and for the server
+// public key it hashes (PRDRDP/13 §3.5, PRDRDP/00 R45). `extract_spki` and
+// `subject_common_name` kept their signatures exactly, so the call sites below
+// are unchanged and this line is the whole of the import side of the move.
+use rdp_pdu::asn1::der;
+
 use crate::{
     format_fingerprint, normalize_fingerprint, BoxedStream, Result, Stream, TransportError,
     TrustDecision,
@@ -239,239 +247,6 @@ impl ServerCertVerifier for TofuVerifier {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Minimal DER walking
-// ---------------------------------------------------------------------------
-
-/// Just enough X.509/DER to pull the `SubjectPublicKeyInfo` and the subject CN
-/// out of a certificate. A full ASN.1 parser is not a dependency this crate
-/// needs, and everything here is bounds-checked against a hostile server.
-mod der {
-    /// A parsed TLV: the tag, the content, and the full element including header.
-    struct Tlv<'a> {
-        tag: u8,
-        content: &'a [u8],
-        full: &'a [u8],
-    }
-
-    /// Read one TLV from the front of `buf`, returning it and the remainder.
-    fn read_tlv(buf: &[u8]) -> Option<(Tlv<'_>, &[u8])> {
-        if buf.len() < 2 {
-            return None;
-        }
-        let tag = buf[0];
-        // Multi-byte tags are not used anywhere on our path.
-        if tag & 0x1f == 0x1f {
-            return None;
-        }
-        let first = buf[1];
-        let (len, header) = if first & 0x80 == 0 {
-            (first as usize, 2usize)
-        } else {
-            let n = (first & 0x7f) as usize;
-            // Indefinite length is illegal in DER; >4 length bytes means a
-            // certificate larger than 4 GiB. Reject both.
-            if n == 0 || n > 4 || buf.len() < 2 + n {
-                return None;
-            }
-            let mut len = 0usize;
-            for b in &buf[2..2 + n] {
-                len = (len << 8) | (*b as usize);
-            }
-            (len, 2 + n)
-        };
-        let end = header.checked_add(len)?;
-        if buf.len() < end {
-            return None;
-        }
-        Some((
-            Tlv {
-                tag,
-                content: &buf[header..end],
-                full: &buf[..end],
-            },
-            &buf[end..],
-        ))
-    }
-
-    const SEQUENCE: u8 = 0x30;
-    const SET: u8 = 0x31;
-    const INTEGER: u8 = 0x02;
-    const OID: u8 = 0x06;
-    /// `[0]` constructed, the EXPLICIT version tag in a TBSCertificate.
-    const CONTEXT_0: u8 = 0xa0;
-    /// OID 2.5.4.3 (id-at-commonName).
-    const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
-
-    /// Walk `Certificate -> TBSCertificate -> subjectPublicKeyInfo` and return
-    /// that element's complete DER encoding (header included), which is what a
-    /// "SPKI fingerprint" is computed over.
-    pub fn extract_spki(cert: &[u8]) -> Option<&[u8]> {
-        let tbs = tbs_certificate(cert)?;
-        let mut rest = tbs;
-        // Optional [0] version.
-        let (first, after_first) = read_tlv(rest)?;
-        if first.tag == CONTEXT_0 {
-            rest = after_first;
-        }
-        // serialNumber
-        let (serial, rest2) = read_tlv(rest)?;
-        if serial.tag != INTEGER {
-            return None;
-        }
-        // signature, issuer, validity, subject, four SEQUENCEs, then SPKI.
-        let mut rest = rest2;
-        for _ in 0..4 {
-            let (tlv, next) = read_tlv(rest)?;
-            if tlv.tag != SEQUENCE {
-                return None;
-            }
-            rest = next;
-        }
-        let (spki, _) = read_tlv(rest)?;
-        if spki.tag != SEQUENCE {
-            return None;
-        }
-        Some(spki.full)
-    }
-
-    /// The subject `CN=` value, for display in the TOFU prompt. Untrusted text:
-    /// the caller must render it as plain text, never as markup.
-    pub fn subject_common_name(cert: &[u8]) -> Option<String> {
-        let tbs = tbs_certificate(cert)?;
-        let mut rest = tbs;
-        let (first, after_first) = read_tlv(rest)?;
-        if first.tag == CONTEXT_0 {
-            rest = after_first;
-        }
-        let (_serial, rest2) = read_tlv(rest)?;
-        let (_sigalg, rest3) = read_tlv(rest2)?;
-        let (_issuer, rest4) = read_tlv(rest3)?;
-        let (_validity, rest5) = read_tlv(rest4)?;
-        let (subject, _) = read_tlv(rest5)?;
-        if subject.tag != SEQUENCE {
-            return None;
-        }
-
-        // Name ::= SEQUENCE OF RelativeDistinguishedName (SET OF AttributeTVA)
-        let mut rdns = subject.content;
-        while let Some((rdn, next)) = read_tlv(rdns) {
-            rdns = next;
-            if rdn.tag != SET {
-                continue;
-            }
-            let mut attrs = rdn.content;
-            while let Some((attr, next_attr)) = read_tlv(attrs) {
-                attrs = next_attr;
-                if attr.tag != SEQUENCE {
-                    continue;
-                }
-                let (oid, after_oid) = read_tlv(attr.content)?;
-                if oid.tag != OID || oid.content != OID_CN {
-                    continue;
-                }
-                let (value, _) = read_tlv(after_oid)?;
-                // Cap the length, a server may claim anything.
-                let text: String = String::from_utf8_lossy(value.content)
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(128)
-                    .collect();
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
-        }
-        None
-    }
-
-    fn tbs_certificate(cert: &[u8]) -> Option<&[u8]> {
-        let (outer, _) = read_tlv(cert)?;
-        if outer.tag != SEQUENCE {
-            return None;
-        }
-        let (tbs, _) = read_tlv(outer.content)?;
-        if tbs.tag != SEQUENCE {
-            return None;
-        }
-        Some(tbs.content)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn rejects_truncated_input() {
-            assert!(extract_spki(&[]).is_none());
-            assert!(extract_spki(&[0x30]).is_none());
-            assert!(extract_spki(&[0x30, 0x82, 0xff, 0xff]).is_none());
-            assert!(subject_common_name(&[0x30, 0x03, 0x30, 0x01]).is_none());
-        }
-
-        #[test]
-        fn rejects_non_certificate() {
-            // A well-formed SEQUENCE that is not a certificate.
-            let der = [0x30, 0x03, 0x02, 0x01, 0x05];
-            assert!(extract_spki(&der).is_none());
-        }
-
-        #[test]
-        fn long_form_lengths_are_bounds_checked() {
-            // Claims 0x0102 content bytes but supplies none.
-            let der = [0x30, 0x82, 0x01, 0x02];
-            assert!(extract_spki(&der).is_none());
-        }
-
-        /// A real self-signed certificate (`CN=vnc.example.test`, P-256).
-        /// The expected digest is what
-        /// `openssl x509 -pubkey | openssl pkey -pubin -outform der | sha256`
-        /// produces, i.e. the value users compare against elsewhere.
-        const TEST_CERT_HEX: &str = "3082021b308201c0020900fed9f6f5144ee51d300a06082a8648ce3d040302301b31\
-19301706035504030c10766e632e6578616d706c652e74657374301e170d3236303732383139333830395a170d32363037323931\
-39333830395a301b3119301706035504030c10766e632e6578616d706c652e746573743082014b3082010306072a8648ce3d0201\
-3081f7020101302c06072a8648ce3d0101022100ffffffff00000001000000000000000000000000ffffffffffffffffffffffff\
-305b0420ffffffff00000001000000000000000000000000fffffffffffffffffffffffc04205ac635d8aa3a93e7b3ebbd557698\
-86bc651d06b0cc53b0f63bce3c3e27d2604b031500c49d360886e704936a6678e1139d26b7819f7e900441046b17d1f2e12c4247\
-f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb64068\
-37bf51f5022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551020101034200040b2ec0b3fed6\
-08022b545e768b3ab0ffc340ff9fb4f606b0c6c9e98a8a2f1919bb93370b6d21abd621dc5122cf599bff084ff2d8b16df21bf62a\
-96fcbd59975a300a06082a8648ce3d0403020349003046022100ba92e99e98c2144752897231a266796f434ccab0137f03df2af2\
-69c74c7f545402210084092ec5d5ddc0caad180befc2aa4e62cbef693c063287947a776840d6c92b88";
-
-        #[test]
-        fn spki_digest_matches_openssl() {
-            use sha2::{Digest, Sha256};
-            let der = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
-            let spki = extract_spki(&der).expect("SPKI should be found");
-            let digest = Sha256::digest(spki);
-            assert_eq!(
-                hex::encode(digest),
-                "c42563ef393c1cabdf5438ffc8c5a8f0ecd2796cc33b556d4ee4d9f386e2118a"
-            );
-        }
-
-        #[test]
-        fn reads_the_subject_common_name() {
-            let der = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
-            assert_eq!(
-                subject_common_name(&der).as_deref(),
-                Some("vnc.example.test")
-            );
-        }
-
-        /// Truncating a real certificate anywhere must fail cleanly, never panic.
-        #[test]
-        fn truncated_real_certificate_never_panics() {
-            let der = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
-            for n in 0..der.len() {
-                let _ = extract_spki(&der[..n]);
-                let _ = subject_common_name(&der[..n]);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +265,51 @@ mod tests {
         let v = TofuVerifier::new(p, Some("de:ad:be:ef")).unwrap();
         assert_eq!(v.pin.as_deref(), Some("DEADBEEF"));
         assert!(v.decision().is_none());
+    }
+
+    /// A real self-signed certificate (`CN=vnc.example.test`, P-256).
+    ///
+    /// The walker itself is tested in `rdp-pdu`, which the move took it to
+    /// (PRDRDP/13 §3.5). This vector stays here as well because the assertion
+    /// that matters to this crate is the one `rdp-pdu` cannot make: the
+    /// SHA-256 of the SPKI, which is the fingerprint step 1 of the module
+    /// comment above defines and the string a user compares against
+    /// `openssl x509 -pubkey | openssl pkey -pubin -outform der | sha256sum`.
+    /// `rdp-pdu` has no hash dependency and should not gain one for a test
+    /// (AGENT_BRIEF D12: the leaf crates build and test in under a second and
+    /// fuzz without a runtime, which is a property of a small tree), so it
+    /// asserts the SPKI bytes and this asserts their digest.
+    const TEST_CERT_HEX: &str = "3082021b308201c0020900fed9f6f5144ee51d300a06082a8648ce3d040302301b31\
+19301706035504030c10766e632e6578616d706c652e74657374301e170d3236303732383139333830395a170d32363037323931\
+39333830395a301b3119301706035504030c10766e632e6578616d706c652e746573743082014b3082010306072a8648ce3d0201\
+3081f7020101302c06072a8648ce3d0101022100ffffffff00000001000000000000000000000000ffffffffffffffffffffffff\
+305b0420ffffffff00000001000000000000000000000000fffffffffffffffffffffffc04205ac635d8aa3a93e7b3ebbd557698\
+86bc651d06b0cc53b0f63bce3c3e27d2604b031500c49d360886e704936a6678e1139d26b7819f7e900441046b17d1f2e12c4247\
+f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb64068\
+37bf51f5022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551020101034200040b2ec0b3fed6\
+08022b545e768b3ab0ffc340ff9fb4f606b0c6c9e98a8a2f1919bb93370b6d21abd621dc5122cf599bff084ff2d8b16df21bf62a\
+96fcbd59975a300a06082a8648ce3d0403020349003046022100ba92e99e98c2144752897231a266796f434ccab0137f03df2af2\
+69c74c7f545402210084092ec5d5ddc0caad180befc2aa4e62cbef693c063287947a776840d6c92b88";
+
+    #[test]
+    fn spki_digest_matches_openssl() {
+        let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
+        let spki = der::extract_spki(&der_bytes).expect("SPKI should be found");
+        let digest = Sha256::digest(spki);
+        assert_eq!(
+            hex::encode(digest),
+            "c42563ef393c1cabdf5438ffc8c5a8f0ecd2796cc33b556d4ee4d9f386e2118a"
+        );
+    }
+
+    /// The subject CN is what the TOFU prompt shows, so this crate keeps a
+    /// test that the re-exported walker still reads it (PRDRDP/13 §3.5).
+    #[test]
+    fn reads_the_subject_common_name() {
+        let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
+        assert_eq!(
+            der::subject_common_name(&der_bytes).as_deref(),
+            Some("vnc.example.test")
+        );
     }
 }

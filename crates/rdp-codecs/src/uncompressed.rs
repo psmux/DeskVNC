@@ -8,10 +8,12 @@
 //!   (MS-RDPBCGR 2.2.9.1.1.3.1.2.2) with `BITMAP_COMPRESSION` clear is a
 //!   Windows DIB body: rows are stored **bottom to top** and each row is
 //!   padded to a four byte boundary. Both traps are in [`dib_stride`] and
-//!   [`RowOrder::BottomUp`], and neither costs a copy.
+//!   [`RowOrder::BottomUp`](remote_pixel::RowOrder::BottomUp), and neither
+//!   costs a copy.
 //! * **EGFX.** `RDPGFX_CODECID_UNCOMPRESSED` (0x0000) is raw 32 bpp XRGB or
 //!   ARGB, top down, tightly packed with no row padding. Same function with
-//!   `src_stride = width * 4` and [`RowOrder::TopDown`].
+//!   `src_stride = width * 4` and
+//!   [`RowOrder::TopDown`](remote_pixel::RowOrder::TopDown).
 //!
 //! ## No scratch buffer
 //!
@@ -27,13 +29,14 @@
 //! ## This is also `convert_image`
 //!
 //! PRDRDP/04 §4.2 gives the conversion primitive the signature
-//! `convert_image(fmt, src, src_stride, order, w, h, pal, dst)`. That is this
-//! function with the destination arguments folded into [`DstView`], and it is
-//! what the interleaved RLE path calls on its wire format scratch (§4.4). When
-//! `remote-pixel` lands (PRDRDP/00 R37) the body here becomes a delegation and
-//! the signature does not change.
+//! `convert_image(fmt, src, src_stride, order, w, h, pal, dst)`. That is
+//! [`decode`] with the destination arguments folded into [`DstView`], and it
+//! is what the interleaved RLE path calls on its wire format scratch (§4.4).
+//! `remote-pixel` has landed (PRDRDP/00 R37), so the body is now a delegation
+//! to [`remote_pixel::convert_image`] and the signature did not change.
 
-use crate::dst::{convert_row, DstView, Palette, PixelFormat, DST_BPP};
+use remote_pixel::{convert_image, DstView, Format as PixelFormat, Palette, DST_BPP};
+
 use crate::DecodeError;
 
 /// The stride of a legacy DIB scanline, in bytes.
@@ -53,10 +56,7 @@ pub fn dib_stride(width: u16, bits_per_pixel: u8) -> usize {
 /// always sends it, and accepting a stream without it costs nothing and
 /// removes one reason to reject a rect from a server we have not met.
 pub fn min_src_len(fmt: PixelFormat, src_stride: usize, width: u16, height: u16) -> usize {
-    match usize::from(height).checked_sub(1) {
-        None => 0,
-        Some(n) => n * src_stride + fmt.row_bytes(width),
-    }
+    fmt.min_src_len(src_stride, width, height)
 }
 
 /// Convert an uncompressed image into the caller's destination.
@@ -75,28 +75,7 @@ pub fn decode(
     palette: &Palette,
     dst: &mut DstView<'_>,
 ) -> Result<(), DecodeError> {
-    let (w, h) = (dst.width(), dst.height());
-    let row_bytes = fmt.row_bytes(w);
-    if src_stride < row_bytes {
-        return Err(DecodeError::Range {
-            what: "source stride",
-            got: src_stride as u32,
-        });
-    }
-    if src.len() < min_src_len(fmt, src_stride, w, h) {
-        return Err(DecodeError::Truncated {
-            what: "uncompressed bitmap",
-        });
-    }
-    let out = dst.format();
-    for y in 0..usize::from(h) {
-        // Cut to the row's real bytes so the DIB padding is never read, and
-        // slice once per row rather than once per pixel.
-        let start = y * src_stride;
-        let row = &src[start..(start + row_bytes).min(src.len())];
-        convert_row(fmt, row, dst.row(y), out, palette);
-    }
-    Ok(())
+    Ok(convert_image(fmt, src, src_stride, palette, dst)?)
 }
 
 /// The legacy shorthand: a DIB body at `bits_per_pixel`, bottom up, with the
@@ -131,7 +110,7 @@ pub fn dst_len(width: u16, height: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dst::{OutFormat, RowOrder};
+    use remote_pixel::{OutFormat, RowOrder};
 
     #[test]
     fn dib_stride_matches_the_worked_examples() {

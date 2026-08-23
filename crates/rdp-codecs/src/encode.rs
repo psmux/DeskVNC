@@ -237,9 +237,9 @@ fn emit_plane_run(out: &mut Vec<u8>, pending: &mut Vec<u8>, byte: u8, mut n: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dst::{DstView, OutFormat, RowOrder};
     use crate::uncompressed::dst_len;
     use crate::{planar as planar_dec, rle};
+    use remote_pixel::{DstView, OutFormat, RowOrder};
 
     /// Desktop-like content: flat panes, a gradient and text-like detail. The
     /// same mix as `crates/vnc-core/benches/decode.rs:47`, because a codec is

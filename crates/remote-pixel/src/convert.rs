@@ -1,9 +1,20 @@
 //! Pixel format conversion to RGBA8888.
 //!
-//! Handles 8/16/24/32 bpp, true-colour with arbitrary max/shift values, both
-//! endiannesses, and indexed-colour (colour map) mode.
+//! Two halves that share one destination abstraction.
+//!
+//! The RFB half handles 8/16/24/32 bpp, true-colour with arbitrary max/shift
+//! values, both endiannesses, and indexed-colour (colour map) mode. It returns
+//! a `Vec` per call, which is what the RFB decoders in `vnc-core/src/encodings/`
+//! want.
+//!
+//! The RDP half is [`convert_row`] and [`convert_image`], moved from
+//! `crates/rdp-codecs/src/dst.rs` (PRDRDP/00 R37, PRDRDP/04 §4.2). It writes
+//! through a [`DstView`](crate::DstView) into a caller owned buffer and never
+//! allocates, because §4.2's single copy rule says a pixel is written to its
+//! final destination exactly once.
 
-use crate::format::PixelFormat;
+use crate::dst::{put, DstView, OutFormat, PixelError, DST_BPP};
+use crate::format::{Format, PixelFormat};
 
 /// Server colour map (SetColourMapEntries, RFB §7.6.2), used when the pixel
 /// format is not true-colour.
@@ -299,6 +310,221 @@ pub fn convert_to_rgba_mapped(
     out
 }
 
+// ---------------------------------------------------------------------------
+// The RDP half: caller owned destination, explicit stride and row order
+// (PRDRDP/04 §4.2, moved from crates/rdp-codecs/src/dst.rs by PRDRDP/00 R37)
+// ---------------------------------------------------------------------------
+
+/// A 256 entry RGBA table. The RDP palette (`TS_UPDATE_PALETTE`,
+/// MS-RDPBCGR 2.2.9.1.1.3.1.1.1) and the RFB colour map are the same thing
+/// once built.
+///
+/// [`ColourMap`] above is the RFB spelling of the same table and it stays
+/// separate: it stores three bytes per entry and is filled by
+/// `SetColourMapEntries` (RFB §7.6.2), where this one stores four and is
+/// filled by a `TS_UPDATE_PALETTE` body. Merging them would put a conversion
+/// in the per pixel path of one protocol to save a type in the other.
+#[derive(Clone)]
+pub struct Palette([[u8; 4]; 256]);
+
+impl Palette {
+    /// Replace one entry from a `TS_PALETTE_ENTRY`
+    /// (MS-RDPBCGR 2.2.9.1.1.3.1.1.1).
+    pub fn set(&mut self, index: u8, red: u8, green: u8, blue: u8) {
+        self.0[usize::from(index)] = [red, green, blue, 0xFF];
+    }
+
+    /// Load from the `TS_UPDATE_PALETTE` body, which is `{red, green, blue}`
+    /// bytes per entry. A short list leaves the remaining entries alone,
+    /// because a server is allowed to send fewer than 256.
+    pub fn load_rgb_triplets(&mut self, entries: &[u8]) {
+        for (i, e) in entries.chunks_exact(3).take(256).enumerate() {
+            self.0[i] = [e[0], e[1], e[2], 0xFF];
+        }
+    }
+
+    #[inline]
+    fn entry(&self, index: u8) -> [u8; 4] {
+        self.0[usize::from(index)]
+    }
+}
+
+impl Default for Palette {
+    /// A grayscale identity ramp, the same defensive default [`ColourMap`]
+    /// builds a few lines above (PRDRDP/04 §2.7). A server that sends indexed
+    /// pixels before its palette then produces a legible grey picture rather
+    /// than a black screen.
+    fn default() -> Self {
+        let mut t = [[0u8; 4]; 256];
+        for (i, e) in t.iter_mut().enumerate() {
+            let v = i as u8;
+            *e = [v, v, v, 0xFF];
+        }
+        Palette(t)
+    }
+}
+
+/// Expand a 5 bit channel to 8 bits by bit replication, which is what
+/// [`scale_channel`] does for the general case and what the fixed 5-6-5 and
+/// 5-5-5 layouts of PRDRDP/04 §4.2 collapse to. 0x1F maps to 0xFF, so white
+/// stays white.
+#[inline(always)]
+pub fn expand5(v: u16) -> u8 {
+    let v = (v & 0x1F) as u8;
+    (v << 3) | (v >> 2)
+}
+
+/// Expand a 6 bit channel to 8 bits by bit replication (PRDRDP/04 §4.2).
+#[inline(always)]
+pub fn expand6(v: u16) -> u8 {
+    let v = (v & 0x3F) as u8;
+    (v << 2) | (v >> 4)
+}
+
+/// One source row into one RGBA or BGRA destination row (PRDRDP/04 §4.2).
+///
+/// `src` is cut to the row's real bytes by the caller, so the DIB padding of
+/// PRDRDP/04 §2.3 is never read. `dst` is exactly `w * 4`.
+///
+/// A short `src` does not panic: the tail is opaque black. That is the policy
+/// [`convert_to_rgba_mapped`] already applies to a short RFB input, and it is
+/// the second line of defence behind the length check every decoder does up
+/// front.
+///
+/// `#[inline]` because the callers are in `rdp-codecs` now, and the per row
+/// dispatch has to fold into their row loops the way it did when the two
+/// lived in one crate.
+#[inline]
+pub fn convert_row(fmt: Format, src: &[u8], dst: &mut [u8], out: OutFormat, pal: &Palette) {
+    match out {
+        OutFormat::Rgba => convert_row_impl::<false>(fmt, src, dst, pal),
+        OutFormat::Bgra => convert_row_impl::<true>(fmt, src, dst, pal),
+    }
+}
+
+fn convert_row_impl<const BGRA: bool>(fmt: Format, src: &[u8], dst: &mut [u8], pal: &Palette) {
+    let want = dst.len() / DST_BPP;
+    // How many pixels the source really carries. Everything past this is the
+    // opaque black tail.
+    let have = match fmt {
+        Format::Mono1 => src.len() * 8,
+        other => src.len() / (other.bits() / 8),
+    };
+    let n = want.min(have);
+    // Slice once, with a length proved here, so neither loop below can panic
+    // partway through. LLVM will not vectorise a loop that can
+    // (PRDRDP/04 §4.6.8 rule two).
+    let (head, tail) = dst.split_at_mut(n * DST_BPP);
+
+    match fmt {
+        // The canonical 32 bpp path: a pure byte swizzle, measured at
+        // 6332 MPix/s through the RFB entry point of this same file
+        // (docs/PERFORMANCE.md §3.2). RDP's 32 bpp wire format is exactly
+        // that layout.
+        Format::BgrX32 => {
+            for (s, d) in src.chunks_exact(4).zip(head.chunks_exact_mut(DST_BPP)) {
+                put::<BGRA>(d, s[2], s[1], s[0], 0xFF);
+            }
+        }
+        Format::BgrA32 => {
+            for (s, d) in src.chunks_exact(4).zip(head.chunks_exact_mut(DST_BPP)) {
+                put::<BGRA>(d, s[2], s[1], s[0], s[3]);
+            }
+        }
+        Format::Bgr24 => {
+            for (s, d) in src.chunks_exact(3).zip(head.chunks_exact_mut(DST_BPP)) {
+                put::<BGRA>(d, s[2], s[1], s[0], 0xFF);
+            }
+        }
+        // The channel maxima are compile time constants here, unlike the RFB
+        // path above which has to handle arbitrary maxima, so the shift and
+        // mask sequence is inlined instead of going through [`ChannelLuts`]
+        // (PRDRDP/04 §4.2).
+        Format::Rgb565 => {
+            for (s, d) in src.chunks_exact(2).zip(head.chunks_exact_mut(DST_BPP)) {
+                let v = u16::from_le_bytes([s[0], s[1]]);
+                put::<BGRA>(d, expand5(v >> 11), expand6(v >> 5), expand5(v), 0xFF);
+            }
+        }
+        Format::Rgb555 => {
+            for (s, d) in src.chunks_exact(2).zip(head.chunks_exact_mut(DST_BPP)) {
+                let v = u16::from_le_bytes([s[0], s[1]]);
+                put::<BGRA>(d, expand5(v >> 10), expand5(v >> 5), expand5(v), 0xFF);
+            }
+        }
+        Format::Palette8 => {
+            for (s, d) in src.iter().zip(head.chunks_exact_mut(DST_BPP)) {
+                let e = pal.entry(*s);
+                put::<BGRA>(d, e[0], e[1], e[2], e[3]);
+            }
+        }
+        // MSB first within each byte, so bit 7 is the leftmost pixel.
+        Format::Mono1 => {
+            for (i, d) in head.chunks_exact_mut(DST_BPP).enumerate() {
+                let byte = src[i / 8];
+                let v = if byte & (0x80 >> (i % 8)) != 0 {
+                    0xFF
+                } else {
+                    0x00
+                };
+                put::<BGRA>(d, v, v, v, 0xFF);
+            }
+        }
+    }
+
+    for d in tail.chunks_exact_mut(DST_BPP) {
+        put::<BGRA>(d, 0, 0, 0, 0xFF);
+    }
+}
+
+/// A whole image, with an explicit source stride and a caller owned
+/// destination (PRDRDP/04 §4.2).
+///
+/// `src_stride` is the byte distance between the starts of two consecutive
+/// wire scanlines: the four byte aligned DIB stride for a legacy bitmap
+/// (PRDRDP/04 §2.3), `width * 4` for EGFX. The row order, the destination
+/// stride and the destination channel order all live in `dst`, because each
+/// of the three is a property of the destination mapping rather than of the
+/// source data.
+///
+/// Errors with [`PixelError::Truncated`] if `src` is shorter than
+/// [`Format::min_src_len`], and with [`PixelError::Range`] if `src_stride` is
+/// narrower than one scanline. It cannot panic on any input.
+///
+/// This is the function `rdp_codecs::uncompressed::decode` delegates to, with
+/// its signature unchanged.
+#[inline]
+pub fn convert_image(
+    fmt: Format,
+    src: &[u8],
+    src_stride: usize,
+    pal: &Palette,
+    dst: &mut DstView<'_>,
+) -> Result<(), PixelError> {
+    let (w, h) = (dst.width(), dst.height());
+    let row_bytes = fmt.row_bytes(w);
+    if src_stride < row_bytes {
+        return Err(PixelError::Range {
+            what: "source stride",
+            got: src_stride as u32,
+        });
+    }
+    if src.len() < fmt.min_src_len(src_stride, w, h) {
+        return Err(PixelError::Truncated {
+            what: "uncompressed bitmap",
+        });
+    }
+    let out = dst.format();
+    for y in 0..usize::from(h) {
+        // Cut to the row's real bytes so the DIB padding is never read, and
+        // slice once per row rather than once per pixel.
+        let start = y * src_stride;
+        let row = &src[start..(start + row_bytes).min(src.len())];
+        convert_row(fmt, row, dst.row(y), out, pal);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +710,151 @@ mod tests {
         let rgba = convert_to_rgba(&[1, 2, 3, 4], &pf, 3);
         assert_eq!(rgba.len(), 12);
         assert_eq!(&rgba[4..], &[0, 0, 0, 255, 0, 0, 0, 255]);
+    }
+}
+
+/// The tests that came with [`convert_row`] from `crates/rdp-codecs/src/dst.rs`
+/// (PRDRDP/00 R37). They are a second module rather than additions to the one
+/// above because the two halves of this file have separate fixtures.
+#[cfg(test)]
+mod rdp_tests {
+    use super::*;
+    use crate::dst::RowOrder;
+
+    #[test]
+    fn channel_expansion_hits_the_endpoints() {
+        assert_eq!(expand5(0), 0);
+        assert_eq!(expand5(0x1F), 0xFF);
+        assert_eq!(expand6(0), 0);
+        assert_eq!(expand6(0x3F), 0xFF);
+    }
+
+    #[test]
+    fn short_source_row_pads_with_opaque_black() {
+        let mut dst = [0u8; 4 * 4];
+        convert_row(
+            Format::BgrX32,
+            &[1, 2, 3, 0],
+            &mut dst,
+            OutFormat::Rgba,
+            &Palette::default(),
+        );
+        assert_eq!(&dst[0..4], &[3, 2, 1, 0xFF]);
+        assert_eq!(&dst[4..16], &[0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF]);
+    }
+
+    #[test]
+    fn mono1_is_msb_first() {
+        let mut dst = [0u8; 8 * 4];
+        convert_row(
+            Format::Mono1,
+            &[0b1000_0001],
+            &mut dst,
+            OutFormat::Rgba,
+            &Palette::default(),
+        );
+        assert_eq!(dst[0], 0xFF);
+        assert_eq!(dst[4], 0x00);
+        assert_eq!(dst[7 * 4], 0xFF);
+    }
+
+    #[test]
+    fn rgb565_and_rgb555_agree_on_white_and_black() {
+        let pal = Palette::default();
+        for fmt in [Format::Rgb565, Format::Rgb555] {
+            let mut dst = [0u8; 8];
+            convert_row(
+                fmt,
+                &[0xFF, 0xFF, 0x00, 0x00],
+                &mut dst,
+                OutFormat::Rgba,
+                &pal,
+            );
+            assert_eq!(&dst[0..4], &[0xFF, 0xFF, 0xFF, 0xFF], "{fmt:?} white");
+            assert_eq!(&dst[4..8], &[0x00, 0x00, 0x00, 0xFF], "{fmt:?} black");
+        }
+    }
+
+    #[test]
+    fn bgra_output_swaps_red_and_blue() {
+        let pal = Palette::default();
+        let mut rgba = [0u8; 4];
+        let mut bgra = [0u8; 4];
+        convert_row(
+            Format::Bgr24,
+            &[0x10, 0x20, 0x30],
+            &mut rgba,
+            OutFormat::Rgba,
+            &pal,
+        );
+        convert_row(
+            Format::Bgr24,
+            &[0x10, 0x20, 0x30],
+            &mut bgra,
+            OutFormat::Bgra,
+            &pal,
+        );
+        assert_eq!(rgba, [0x30, 0x20, 0x10, 0xFF]);
+        assert_eq!(bgra, [0x10, 0x20, 0x30, 0xFF]);
+    }
+
+    /// The destination stride PRDRDP/04 §4.2's published signature left out:
+    /// a rect written straight into a wider framebuffer, which is the case
+    /// that would otherwise need a packed scratch and a second copy.
+    #[test]
+    fn a_rect_converts_into_a_wider_framebuffer_without_a_scratch() {
+        // A 4 pixel wide framebuffer, two rows, holding a 2x2 rect at x = 1.
+        const FB_STRIDE: usize = 4 * DST_BPP;
+        let mut fb = [0xAAu8; FB_STRIDE * 2];
+        let src = [
+            0x10u8, 0x20, 0x30, 0x00, 0x11, 0x21, 0x31, 0x00, // wire row 0
+            0x12, 0x22, 0x32, 0x00, 0x13, 0x23, 0x33, 0x00, // wire row 1
+        ];
+        {
+            // The rect starts at column 1 of the framebuffer.
+            let at = DST_BPP;
+            let mut v = DstView::new(
+                &mut fb[at..],
+                FB_STRIDE,
+                2,
+                2,
+                OutFormat::Rgba,
+                RowOrder::TopDown,
+            )
+            .unwrap();
+            convert_image(Format::BgrX32, &src, 8, &Palette::default(), &mut v).unwrap();
+        }
+        // Columns 1 and 2 of both rows carry the rect, and nothing else moved.
+        assert_eq!(&fb[0..4], &[0xAA; 4], "column 0 must be untouched");
+        assert_eq!(
+            &fb[4..12],
+            &[0x30, 0x20, 0x10, 0xFF, 0x31, 0x21, 0x11, 0xFF]
+        );
+        assert_eq!(&fb[12..16], &[0xAA; 4], "column 3 must be untouched");
+        assert_eq!(&fb[FB_STRIDE..FB_STRIDE + 4], &[0xAA; 4]);
+        assert_eq!(
+            &fb[FB_STRIDE + 4..FB_STRIDE + 12],
+            &[0x32, 0x22, 0x12, 0xFF, 0x33, 0x23, 0x13, 0xFF]
+        );
+    }
+
+    /// The stride check and the truncation check are the two errors
+    /// [`convert_image`] can return, and neither is a panic (PRDRDP/04 §4.1
+    /// rule five).
+    #[test]
+    fn a_narrow_stride_and_a_short_source_are_errors_not_panics() {
+        let mut out = vec![0u8; 4 * 4];
+        let mut v = DstView::packed(&mut out, 2, 2, OutFormat::Rgba, RowOrder::TopDown).unwrap();
+        assert!(matches!(
+            convert_image(Format::BgrX32, &[0; 32], 4, &Palette::default(), &mut v),
+            Err(PixelError::Range {
+                what: "source stride",
+                ..
+            })
+        ));
+        assert!(matches!(
+            convert_image(Format::BgrX32, &[0; 8], 8, &Palette::default(), &mut v),
+            Err(PixelError::Truncated { .. })
+        ));
     }
 }

@@ -19,6 +19,14 @@ members = [
     "src-tauri",
 ]
 
+# Fuzz targets live in their own workspaces so `libfuzzer-sys` and `arbitrary`
+# stay out of the main dependency tree (AGENT_BRIEF D11, PRDRDP/11 §3.3).
+exclude = [
+    "crates/rdp-pdu/fuzz",
+    "crates/rdp-codecs/fuzz",
+    "crates/rdp-auth/fuzz",
+]
+
 [workspace.package]
 version = "0.12.0"
 edition = "2021"

@@ -36,7 +36,6 @@
 //!    Each decoder module carries the prefix test that proves it.
 #![forbid(unsafe_code)]
 
-mod dst;
 mod reader;
 
 pub mod planar;
@@ -56,7 +55,19 @@ pub mod remotefx;
 #[cfg(any(test, feature = "encode"))]
 pub mod encode;
 
-pub use dst::{DstView, OutFormat, Palette, PixelFormat, RowOrder};
+// The destination abstraction and the pixel conversion live in
+// `remote-pixel` (PRDRDP/00 R37, PRDRDP/04 §4.2), which is a leaf crate with
+// no dependencies at all, so `rdp-codecs` can take it and still have no tokio
+// (D12). They are re-exported here at the names this crate has always used,
+// so no call site and no test changed with the move.
+//
+// `remote_pixel::Format` is `PixelFormat` here because there is only one
+// notion of a wire pixel layout inside a codec payload. In `remote-pixel` it
+// has to share the module with the open ended RFB `PixelFormat`, which this
+// crate never sees.
+pub use remote_pixel::Format as PixelFormat;
+pub use remote_pixel::{DstView, OutFormat, Palette, PixelError, RowOrder};
+
 pub use reader::Reader;
 
 /// Everything that can go wrong inside a codec payload (PRDRDP/04 §4.1).
@@ -85,4 +96,54 @@ pub enum DecodeError {
     /// Cross call codec state is missing or out of sequence.
     #[error("codec state lost: {0}")]
     StateLost(&'static str),
+}
+
+/// The three [`PixelError`] variants map one for one onto the three
+/// [`DecodeError`] variants they came from, so moving the conversion into
+/// `remote-pixel` changed no error a caller can observe (PRDRDP/00 R37).
+///
+/// This impl is why `remote-pixel` can stay dependency free: it carries the
+/// error shape and this crate puts the `thiserror` derive on it.
+impl From<PixelError> for DecodeError {
+    fn from(e: PixelError) -> Self {
+        match e {
+            PixelError::Truncated { what } => DecodeError::Truncated { what },
+            PixelError::Range { what, got } => DecodeError::Range { what, got },
+            PixelError::Dst { need, have } => DecodeError::Dst { need, have },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The move to `remote-pixel` (PRDRDP/00 R37) put the destination checks
+    /// behind a crate boundary and a `From`. This is the test that the errors
+    /// a caller sees did not change on the way: the same three variants, the
+    /// same payloads, the same `Display` text `thiserror` generates.
+    #[test]
+    fn the_pixel_errors_arrive_as_the_decode_errors_they_always_were() {
+        assert_eq!(
+            DecodeError::from(PixelError::Truncated {
+                what: "uncompressed bitmap"
+            }),
+            DecodeError::Truncated {
+                what: "uncompressed bitmap"
+            }
+        );
+        assert_eq!(
+            DecodeError::from(PixelError::Range {
+                what: "bitsPerPixel",
+                got: 7
+            }),
+            DecodeError::Range {
+                what: "bitsPerPixel",
+                got: 7
+            }
+        );
+        let e = DecodeError::from(PixelError::Dst { need: 64, have: 4 });
+        assert_eq!(e, DecodeError::Dst { need: 64, have: 4 });
+        assert_eq!(e.to_string(), "output buffer too small: need 64, have 4");
+    }
 }
