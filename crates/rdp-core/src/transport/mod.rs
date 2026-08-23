@@ -12,66 +12,21 @@ use std::time::Duration;
 
 use remote_core::{CertPins, ConnectOptions, SessionEvent, SessionState};
 use tokio::sync::mpsc;
-use vnc_transport::{BoxedStream, TrustDecision};
+use vnc_transport::BoxedStream;
 
 use crate::error::{ConnectStage, RdpError, Result};
 
-/// What a completed TLS upgrade hands back (PRDRDP/00 R47).
+/// What a completed TLS upgrade hands back (PRDRDP/00 R47, spelled by R62).
 ///
-/// PRDRDP/12 §3.8 puts this type in `vnc-transport`, because both TLS
-/// backends have to produce the same value and the shared module is the only
-/// place that can guarantee it, and has `rdp-core` re-export the name and add
-/// nothing. **It is declared here instead, and that is a gap rather than a
-/// design choice.** `vnc_transport::tls::upgrade` returns
-/// `(BoxedStream, TrustDecision)` and nothing else
-/// (`crates/vnc-transport/src/tls.rs:59`), so the two certificate fields
-/// below are `None` on every path today and CredSSP cannot run. PRDRDP/03
-/// §4.3 owns the additive change to `vnc-transport`
-/// (`upgrade_with_identity`), and [`crate::connection::nla`] is the one place
-/// that reads the fields.
+/// Declared in `vnc-transport`, because both TLS backends have to produce the
+/// same value and the shared module is the only place that can guarantee it
+/// (PRDRDP/03 §4.7.1, PRDRDP/12 §3.8). This crate re-exports the name and adds
+/// nothing: every field is owned, which is the whole of R47, so a second
+/// backend cannot leak `rustls-pki-types` or `openssl` types up here.
 ///
-/// Every field is owned, which is the whole of R47: this crate depends on
-/// neither `rustls-pki-types` nor `openssl`, so a second backend cannot leak
-/// its types up here.
-pub struct TlsUpgrade {
-    /// The upgraded stream.
-    pub stream: BoxedStream,
-    /// What the trust on first use verifier decided.
-    pub trust: TrustDecision,
-    /// The leaf certificate, DER encoded.
-    ///
-    /// Two things need it and both need the same bytes: the SHA-256 of its
-    /// `SubjectPublicKeyInfo` is the pin, and the `subjectPublicKey` inside
-    /// it is what CredSSP's `pubKeyAuth` binds to (MS-CSSP 3.1.5). Extracting
-    /// it once, at the moment of the upgrade, is why PRDRDP/03 §4 asks
-    /// `vnc-transport` for an upgrade variant that returns it.
-    pub server_certificate: Option<Vec<u8>>,
-    /// The certificate's `signatureAlgorithm` OID, DER content octets only.
-    ///
-    /// RFC 5929 §4.1 picks the `tls-server-end-point` hash from it, so the
-    /// channel binding cannot be computed without it.
-    pub signature_algorithm_oid: Option<Vec<u8>>,
-}
-
-/// A hand written `Debug`, because `BoxedStream` is a trait object over a
-/// trait that does not require `Debug`, and because a certificate is a value
-/// that identifies a host: its length is diagnostic, its bytes are not
-/// (PRDRDP/12 §6.4, §6.5).
-impl std::fmt::Debug for TlsUpgrade {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsUpgrade")
-            .field("trust", &self.trust)
-            .field(
-                "server_certificate",
-                &self.server_certificate.as_ref().map(Vec::len),
-            )
-            .field(
-                "signature_algorithm_oid",
-                &self.signature_algorithm_oid.as_ref().map(Vec::len),
-            )
-            .finish_non_exhaustive()
-    }
-}
+/// [`crate::connection::nla`] is the one place that reads the two certificate
+/// fields.
+pub use vnc_transport::TlsUpgrade;
 
 /// Open the stream this attempt runs over, within `connect_timeout`.
 ///
@@ -122,18 +77,19 @@ pub async fn open_stream(
 
 /// Upgrade to TLS with trust on first use (MS-RDPBCGR 5.4.5.1).
 ///
-/// The pin is looked up under [`remote_core::PinScheme::Tls`]. PRDRDP/12 §3.8
-/// asks for a new `PinScheme::RdpTls` variant so an RDP pin and a VeNCrypt
-/// pin for the same host cannot be confused; it does not exist yet
-/// (`crates/remote-core/src/pins.rs:35` still has a two entry `ALL`), so this
-/// uses the TLS scheme and the report names the gap.
+/// The pin is looked up under [`remote_core::PinScheme::RdpTls`], never under
+/// [`remote_core::PinScheme::Tls`]. One host can serve VNC over VeNCrypt and
+/// RDP on 3389 with two unrelated certificates, and sharing one pin row would
+/// mean a certificate approved for one protocol silently vouching for the
+/// other (PRDRDP/02 §2.1, PRDRDP/12 §3.8).
 ///
 /// `legacy_tls` is permission, never a request. With it false and the server
 /// offering nothing above TLS 1.1 the attempt fails rather than downgrading
-/// (AGENT_BRIEF V3-B). The second backend is behind `vnc-transport`'s
-/// `legacy-tls` feature and this crate would forward the flag to it; nothing
-/// forwards it today, so the argument is recorded and refused rather than
-/// silently ignored.
+/// (AGENT_BRIEF V3-B). The selection is made here, before the socket is
+/// touched, and nothing the server says is an input to it (PRDRDP/03 §4.7.2).
+/// This crate does not enable `vnc-transport`'s `legacy-tls` feature, so
+/// `TlsBackend::Legacy` does not exist in this build and the flag is refused
+/// with a message rather than silently ignored.
 ///
 /// # Errors
 ///
@@ -151,23 +107,19 @@ pub async fn upgrade_tls(
         // reach a Server 2008 R2 host sees the same failure with no clue that
         // the switch did nothing.
         return Err(RdpError::Tls(format!(
-            "{server_name}: the TLS 1.0 and 1.1 backend is not wired up in this build \
-             (AGENT_BRIEF V3-B, PRDRDP/12 §3.16)"
+            "{server_name}: the TLS 1.0 and 1.1 backend is not compiled into this build \
+             (AGENT_BRIEF V3-B, PRDRDP/03 §4.7.2)"
         )));
     }
 
-    let pin = pins.for_scheme(remote_core::PinScheme::Tls);
-    let (stream, trust) = vnc_transport::tls::upgrade(stream, server_name, pin).await?;
-
-    Ok(TlsUpgrade {
+    let pin = pins.for_scheme(remote_core::PinScheme::RdpTls);
+    Ok(vnc_transport::tls::upgrade_with_identity(
         stream,
-        trust,
-        // See this type's documentation: `vnc_transport::tls::upgrade` does
-        // not hand back the leaf certificate, so these stay empty and CredSSP
-        // reports a named gap rather than computing a binding from nothing.
-        server_certificate: None,
-        signature_algorithm_oid: None,
-    })
+        server_name,
+        pin,
+        vnc_transport::TlsBackend::Modern,
+    )
+    .await?)
 }
 
 /// Wrap `fut` in `limit`, reporting a timeout against `stage` so the message

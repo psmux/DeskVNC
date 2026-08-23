@@ -16,8 +16,8 @@
 //! There is exactly one place where CredSSP plugs in and it is
 //! [`credssp_client`]. It builds a [`rdp_auth::CredSspConfig`] and returns a
 //! [`rdp_auth::CredSspClient`]; [`authenticate`] drives it through
-//! [`rdp_auth::Step`] and never looks inside a token. The one thing the seam
-//! needs and cannot get today is the server's leaf certificate: see
+//! [`rdp_auth::Step`] and never looks inside a token. What the seam binds to
+//! comes from the TLS upgrade in one piece: see
 //! [`ServerIdentity::from_upgrade`].
 
 use rdp_auth::{CredSspClient, CredSspConfig, Identity, Step};
@@ -71,47 +71,65 @@ pub struct ServerIdentity {
 impl ServerIdentity {
     /// Pull the three values out of a completed TLS upgrade.
     ///
+    /// `vnc_transport::tls::upgrade_with_identity` hands back the leaf
+    /// certificate and its `signatureAlgorithm` OID beside the stream
+    /// (PRDRDP/00 R47), so both come from one extraction at the moment of the
+    /// handshake and cannot describe two different connections. The third
+    /// value, the `subjectPublicKey` CredSSP binds to, is walked out of that
+    /// same certificate here.
+    ///
     /// # Errors
-    ///
-    /// [`RdpError::NotImplemented`] against [`ConnectStage::SecurityUpgrade`]
-    /// when the upgrade carried no certificate, which is every upgrade today.
-    /// `vnc_transport::tls::upgrade` returns `(BoxedStream, TrustDecision)`
-    /// and nothing else (`crates/vnc-transport/src/tls.rs:59`), so the one
-    /// value CredSSP cannot proceed without is not available. PRDRDP/03 §4.3
-    /// owns the additive change (`upgrade_with_identity`); the certificate
-    /// DER is already in hand inside `TofuVerifier`, which computes the SPKI
-    /// fingerprint from it (`crates/vnc-transport/src/tls.rs:309`), so the
-    /// change is small.
-    ///
-    /// The gap is reported against the upgrade rather than against CredSSP,
-    /// because that is the phase with the missing value.
     ///
     /// [`RdpError::Tls`] when the certificate parses but has no
     /// `subjectPublicKey`, which is a certificate we should not have accepted.
     pub fn from_upgrade(upgrade: &TlsUpgrade) -> Result<Self> {
-        let (Some(certificate), Some(oid)) = (
-            upgrade.server_certificate.as_deref(),
-            upgrade.signature_algorithm_oid.as_deref(),
-        ) else {
-            return Err(RdpError::NotImplemented {
-                stage: ConnectStage::SecurityUpgrade,
-            });
-        };
-
         // The DER walk is `rdp-pdu`'s. PRDRDP/00 R45: there is one walker in
         // this workspace and it is not written a second time here.
-        let public_key = rdp_pdu::asn1::der::subject_public_key(certificate)
+        let public_key = rdp_pdu::asn1::der::subject_public_key(&upgrade.server_certificate)
             .ok_or_else(|| {
                 RdpError::Tls("the server certificate has no subjectPublicKey".to_owned())
             })?
             .to_vec();
 
         Ok(Self {
-            certificate: certificate.to_vec(),
-            signature_algorithm_oid: oid.to_vec(),
+            certificate: upgrade.server_certificate.clone(),
+            signature_algorithm_oid: upgrade.signature_algorithm_oid.clone(),
             public_key,
         })
     }
+}
+
+/// Split what the user typed into the user name and the domain the logon goes
+/// to.
+///
+/// `DOMAIN\user` and `user@domain.tld` are both parsed by `rdp-auth`, and this
+/// is the one place that decides, so the CredSSP identity and the Client Info
+/// PDU (MS-RDPBCGR 2.2.1.11.1.1) cannot disagree about who is signing in. The
+/// profile's domain is the fallback, never the override: what the user typed
+/// in the box wins.
+///
+/// A user principal name is the deliberate exception. It goes in the user
+/// field whole with an empty domain, because a UPN is already fully qualified
+/// and splitting it produces `NTOWFv2("user", "domain.example.com")`, which is
+/// not what the domain controller computes
+/// (`crates/rdp-auth/src/identity.rs:33`).
+#[must_use]
+pub fn logon_identity(
+    username: &str,
+    creds: &Credentials,
+    opts: &ResolvedOptions,
+) -> (String, String) {
+    let (user, qualified_domain) = rdp_auth::split_qualified_username(username);
+    let domain = if qualified_domain.is_empty() {
+        creds
+            .domain
+            .clone()
+            .or_else(|| opts.domain.clone())
+            .unwrap_or_default()
+    } else {
+        qualified_domain
+    };
+    (user, domain)
 }
 
 /// **The CredSSP seam.** Build the state machine `rdp-auth` owns.
@@ -148,20 +166,7 @@ pub fn credssp_client(
         .as_deref()
         .ok_or_else(|| RdpError::CredentialsRequired("no password".to_owned()))?;
 
-    // `DOMAIN\user` and `user@domain.tld` are both parsed by `rdp-auth`, so
-    // the CredSSP identity and, later, the Client Info PDU cannot disagree
-    // about who is signing in. The profile's domain is the fallback, never
-    // the override: what the user typed in the box wins.
-    let (user, qualified_domain) = rdp_auth::split_qualified_username(username);
-    let domain = if qualified_domain.is_empty() {
-        creds
-            .domain
-            .clone()
-            .or_else(|| opts.domain.clone())
-            .unwrap_or_default()
-    } else {
-        qualified_domain
-    };
+    let (user, domain) = logon_identity(username, creds, opts);
 
     let config = CredSspConfig::new(
         Identity::from_prompt(&user, &domain, password)?,
@@ -171,38 +176,6 @@ pub fn credssp_client(
         identity.signature_algorithm_oid.clone(),
     );
     Ok(CredSspClient::new(config)?)
-}
-
-/// Run CredSSP over `framer` from inside the spawned session task.
-///
-/// **This is the one line that is waiting on another crate.** [`authenticate`]
-/// below is written, driven and unit tested, and it is not called from the
-/// session path because a future that holds a [`CredSspClient`] across an
-/// await is not `Send`, so `tokio::spawn` refuses the whole session task.
-/// The cause is one missing bound: `CredSspClient` holds
-/// `mechanism: Box<dyn GssMechanism>` with no `Send`
-/// (`crates/rdp-auth/src/credssp/mod.rs:236`), and `GssMechanism` itself does
-/// not require `Send` (`crates/rdp-auth/src/gss.rs:36`). Adding `+ Send` to
-/// that field, or to the trait, makes this function `authenticate(..).await`
-/// and nothing else in this crate changes.
-///
-/// Reporting a named gap is the honest answer in the meantime. A session that
-/// parses remote bytes may not answer this with a panic, and pretending the
-/// exchange succeeded would hand a password to an unauthenticated peer.
-///
-/// # Errors
-///
-/// [`RdpError::NotImplemented`] against [`ConnectStage::Credssp`].
-pub async fn authenticate_in_session<S: AsyncRead + AsyncWrite + Unpin>(
-    _framer: &mut Framer<S>,
-    _opts: &ResolvedOptions,
-    _creds: &Credentials,
-    _selected: SecurityProtocol,
-    _identity: &ServerIdentity,
-) -> Result<rdp_auth::Outcome> {
-    Err(RdpError::NotImplemented {
-        stage: ConnectStage::Credssp,
-    })
 }
 
 /// Run CredSSP to completion over `framer`, which is already inside TLS.
@@ -354,10 +327,10 @@ mod tests {
     use super::*;
     use vnc_transport::TrustDecision;
 
-    fn upgrade(cert: Option<Vec<u8>>, oid: Option<Vec<u8>>) -> TlsUpgrade {
+    fn upgrade(cert: Vec<u8>, oid: Vec<u8>) -> TlsUpgrade {
         TlsUpgrade {
             stream: Box::pin(tokio::io::empty()),
-            trust: TrustDecision::VerifiedByCa,
+            decision: TrustDecision::VerifiedByCa,
             server_certificate: cert,
             signature_algorithm_oid: oid,
         }
@@ -369,21 +342,28 @@ mod tests {
         ResolvedOptions::resolve(&c, &rdp, &mut Vec::new()).expect("valid")
     }
 
-    /// The gap is reported against the stage that has the missing value, not
-    /// against CredSSP, because the certificate is the TLS upgrade's to
-    /// provide. And it is a typed error naming the phase, never a panic: a
-    /// session that parses remote bytes must not answer an unimplemented
-    /// phase with an abort.
+    /// A real certificate yields three values, and the two that come from the
+    /// same bytes are not the same value: `public_key` is the inner
+    /// `subjectPublicKey` contents and `certificate` is the whole leaf. Using
+    /// one where the other belongs produces an exchange that reaches message 4
+    /// and dies opaquely (PRDRDP/03 §4.3).
     #[test]
-    fn an_upgrade_without_a_certificate_names_the_security_upgrade_stage() {
-        let err = ServerIdentity::from_upgrade(&upgrade(None, None)).expect_err("no certificate");
-        match &err {
-            RdpError::NotImplemented { stage } => {
-                assert_eq!(*stage, ConnectStage::SecurityUpgrade);
-            }
-            other => panic!("expected a named gap, got {other:?}"),
-        }
-        assert!(err.to_string().contains("5.4.5.1"), "{err}");
+    fn a_completed_upgrade_yields_the_three_values_credssp_binds_to() {
+        let cert = test_certificate();
+        let oid = vec![0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+        let identity = ServerIdentity::from_upgrade(&upgrade(cert.clone(), oid.clone()))
+            .expect("a well formed certificate");
+        assert_eq!(identity.certificate, cert);
+        assert_eq!(identity.signature_algorithm_oid, oid);
+        // A P-256 uncompressed point: one 0x04 marker and two 32 byte
+        // coordinates. Not the SPKI element, which wraps it in an algorithm
+        // identifier and is the trust on first use pin instead.
+        assert_eq!(identity.public_key.len(), 65);
+        assert_eq!(identity.public_key.first(), Some(&0x04));
+        assert_ne!(
+            identity.public_key,
+            rdp_pdu::asn1::der::extract_spki(&cert).expect("an SPKI element")
+        );
     }
 
     /// A certificate that is not one is refused rather than fed to CredSSP as
@@ -391,9 +371,28 @@ mod tests {
     /// message 4 and dies opaquely.
     #[test]
     fn a_certificate_with_no_public_key_is_refused() {
-        let err = ServerIdentity::from_upgrade(&upgrade(Some(vec![0x30, 0x00]), Some(vec![0x2a])))
+        let err = ServerIdentity::from_upgrade(&upgrade(vec![0x30, 0x00], vec![0x2a]))
             .expect_err("not a certificate");
         assert!(matches!(err, RdpError::Tls(_)), "{err:?}");
+    }
+
+    /// The same self signed P-256 certificate (`CN=vnc.example.test`) that
+    /// `vnc-transport` keeps for its SPKI digest test
+    /// (`crates/vnc-transport/src/tls.rs:282`), so both sides of the seam are
+    /// exercised against one set of bytes rather than two that can drift.
+    fn test_certificate() -> Vec<u8> {
+        const HEX: &str = "3082021b308201c0020900fed9f6f5144ee51d300a06082a8648ce3d040302301b31\
+19301706035504030c10766e632e6578616d706c652e74657374301e170d3236303732383139333830395a170d32363037323931\
+39333830395a301b3119301706035504030c10766e632e6578616d706c652e746573743082014b3082010306072a8648ce3d0201\
+3081f7020101302c06072a8648ce3d0101022100ffffffff00000001000000000000000000000000ffffffffffffffffffffffff\
+305b0420ffffffff00000001000000000000000000000000fffffffffffffffffffffffc04205ac635d8aa3a93e7b3ebbd557698\
+86bc651d06b0cc53b0f63bce3c3e27d2604b031500c49d360886e704936a6678e1139d26b7819f7e900441046b17d1f2e12c4247\
+f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb64068\
+37bf51f5022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551020101034200040b2ec0b3fed6\
+08022b545e768b3ab0ffc340ff9fb4f606b0c6c9e98a8a2f1919bb93370b6d21abd621dc5122cf599bff084ff2d8b16df21bf62a\
+96fcbd59975a300a06082a8648ce3d0403020349003046022100ba92e99e98c2144752897231a266796f434ccab0137f03df2af2\
+69c74c7f545402210084092ec5d5ddc0caad180befc2aa4e62cbef693c063287947a776840d6c92b88";
+        hex::decode(HEX.replace(['\n', ' '], "")).expect("a certificate fixture")
     }
 
     /// A missing credential is asked for, never guessed at. The session is

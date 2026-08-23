@@ -67,6 +67,21 @@ impl ChannelMap {
             .map(|(_, id)| *id)
     }
 
+    /// True for a channel this session joined.
+    ///
+    /// Data on any other channel means the server is confused about the
+    /// session, which is not something to carry on through
+    /// (MS-RDPBCGR 2.2.1.13.3.1). An unknown PDU type on a channel we did join
+    /// is normal and is ignored; the two are told apart here because only the
+    /// first is a reason to stop.
+    #[must_use]
+    pub fn knows(&self, id: u16) -> bool {
+        id == self.io_channel_id
+            || id == self.user_channel_id
+            || self.message_channel_id == Some(id)
+            || self.statics.iter().any(|(_, cid)| *cid == id)
+    }
+
     /// Every channel that has to be joined, in the order MS-RDPBCGR 2.2.1.8
     /// lists them: the user channel, the I/O channel, the message channel,
     /// then each virtual channel.

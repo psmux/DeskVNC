@@ -84,26 +84,41 @@
 //! subtle downgrade bugs. Taking OpenSSL trades that class of bug for an
 //! advisory stream we have to track; that trade is the right one.
 
+use crate::tls::TlsUpgrade;
 use crate::{BoxedStream, Result, Stream, TransportError, TrustDecision};
 
-/// Upgrade an established byte stream to TLS 1.0/1.1 through OpenSSL.
+/// Upgrade an established byte stream to TLS 1.0/1.1 through OpenSSL, and hand
+/// back the server identity material with it.
 ///
-/// STUB (PRDRDP/10 P0.6): always returns
-/// [`TransportError::Tls`] naming the `legacy-tls` feature. No OpenSSL
-/// context is built, no socket byte is touched, and the `server_name` and
-/// `pin` parameters exist only to match the shape [`crate::tls::upgrade`]
-/// will keep in phase 1b, so callers do not have to change again when the
-/// real handshake lands.
-pub async fn upgrade<S: Stream + 'static>(
+/// STUB (PRDRDP/10 P0.6): always returns [`TransportError::Tls`] naming the
+/// `legacy-tls` feature. No OpenSSL context is built and no socket byte is
+/// touched. The parameters and the return type match
+/// [`crate::tls::upgrade_with_identity`] exactly, which is the seam PRDRDP/03
+/// §4.7.1 fixes: both backends produce one [`TlsUpgrade`] and nothing else
+/// crosses, so the pin, the CredSSP public key and the RFC 5929 channel
+/// binding are computed once in `rdp-core` from values that carry no trace of
+/// which library produced them.
+pub async fn upgrade_with_identity<S: Stream + 'static>(
     _stream: S,
     _server_name: &str,
     _pin: Option<&str>,
-) -> Result<(BoxedStream, TrustDecision)> {
+) -> Result<TlsUpgrade> {
     Err(TransportError::Tls(
         "legacy TLS (feature `legacy-tls`) is not implemented yet; \
          the dependency and build are wired up, the handshake is phase 1b"
             .to_string(),
     ))
+}
+
+/// [`upgrade_with_identity`] for a caller that wants only the stream and the
+/// decision, matching [`crate::tls::upgrade`]'s shape.
+pub async fn upgrade<S: Stream + 'static>(
+    stream: S,
+    server_name: &str,
+    pin: Option<&str>,
+) -> Result<(BoxedStream, TrustDecision)> {
+    let up = upgrade_with_identity(stream, server_name, pin).await?;
+    Ok((up.stream, up.decision))
 }
 
 #[cfg(test)]

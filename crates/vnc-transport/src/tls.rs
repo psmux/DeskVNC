@@ -20,6 +20,21 @@
 //!
 //! Note that VeNCrypt's anonymous-DH `TLS*` subtypes cannot be served by rustls
 //! at all (no anon ciphersuites); only `X509*` reaches this module.
+//!
+//! # Two entry points, one handshake
+//!
+//! [`upgrade_with_identity`] is the real one. It returns a [`TlsUpgrade`],
+//! which PRDRDP/00 R47 and R62 fix at four owned values: the stream, the trust
+//! decision, the leaf certificate DER, and that certificate's
+//! `signatureAlgorithm` OID. RDP needs all four, because CredSSP binds to the
+//! server's public key (MS-CSSP 3.1.5) and the RFC 5929 section 4.1
+//! `tls-server-end-point` channel binding picks its hash from the signature
+//! algorithm. Neither derived value is computed here: a TLS module that
+//! computes a CredSSP binding is a TLS module that has to know what CredSSP
+//! is, and `rdp-core` derives both from these two pieces of evidence.
+//!
+//! [`upgrade`] keeps its old three argument signature and its old return type,
+//! so every VeNCrypt call site is unchanged.
 
 use std::sync::Arc;
 
@@ -59,16 +74,147 @@ fn ensure_provider() -> Arc<CryptoProvider> {
         .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
 }
 
+/// Which TLS implementation performs the handshake (PRDRDP/03 §4.7.2).
+///
+/// Chosen by the caller from the host profile and never from anything the peer
+/// said. Automatic fallback from one to the other would be a downgrade an
+/// attacker triggers by sending one alert, so there is none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TlsBackend {
+    /// rustls, TLS 1.2 and 1.3. The only value when `legacy-tls` is off.
+    #[default]
+    Modern,
+    /// Vendored OpenSSL, TLS 1.0 through 1.2. Requires the `legacy-tls`
+    /// feature; without it this variant does not exist, so a build that cannot
+    /// speak TLS 1.0 also cannot be asked to.
+    #[cfg(feature = "legacy-tls")]
+    Legacy,
+}
+
+/// Everything a caller can learn about the peer from one TLS handshake
+/// (PRDRDP/00 R47, spelled by R62).
+///
+/// Owned values only. This struct names no `rustls-pki-types` type and no
+/// `openssl` type, so a consumer does not acquire either dependency to read
+/// it, and the concrete `tokio_rustls::client::TlsStream` never escapes the
+/// function that built it. That is also what lets one authentication path
+/// serve both backends: everything derived from the certificate is derived in
+/// the consumer, from bytes that carry no trace of which library produced
+/// them.
+pub struct TlsUpgrade {
+    /// The upgraded stream.
+    pub stream: BoxedStream,
+    /// What the trust on first use policy decided.
+    pub decision: TrustDecision,
+    /// The end entity certificate, DER, exactly as the peer sent it.
+    ///
+    /// Not an `Option`: no anonymous cipher suite is permitted on either
+    /// backend, so a handshake that reaches this struct has a certificate, and
+    /// an `Option` would put a dead arm at every call site.
+    pub server_certificate: Vec<u8>,
+    /// The OID of that certificate's `signatureAlgorithm`, as its DER content
+    /// octets.
+    ///
+    /// The RFC 5929 section 4.1 hash choice input and nothing else. Empty when
+    /// the certificate does not parse far enough to name one, which the
+    /// consumer treats as "use SHA-256", the same answer RFC 5929 gives for an
+    /// unrecognised algorithm.
+    pub signature_algorithm_oid: Vec<u8>,
+}
+
+/// A hand written `Debug`, because `BoxedStream` is a trait object over a
+/// trait that does not require `Debug`, and because a certificate identifies a
+/// host: its length is diagnostic, its bytes are not.
+impl std::fmt::Debug for TlsUpgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsUpgrade")
+            .field("decision", &self.decision)
+            .field("server_certificate", &self.server_certificate.len())
+            .field("signature_algorithm_oid", &self.signature_algorithm_oid)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The OID of `Certificate.signatureAlgorithm`, as its DER content octets.
+///
+/// ```text
+/// Certificate         ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+/// AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER, parameters ANY OPTIONAL }
+/// ```
+///
+/// RFC 5280 §4.1. Three TLV reads over the walker `rdp-pdu` already owns
+/// (PRDRDP/00 R45), so this adds no second X.690 implementation.
+///
+/// **Seam.** PRDRDP/00 R62 puts this function in `rdp_pdu::asn1::der` under
+/// this name. It is not there yet (`crates/rdp-pdu/src/asn1/der.rs` publishes
+/// `read_tlv`, `expect_tag`, `extract_spki`, `subject_public_key` and
+/// `subject_common_name` and no more), and that crate has another author this
+/// week, so it lives here and moves when the name appears.
+#[must_use]
+pub fn signature_algorithm_oid(cert: &[u8]) -> Option<&[u8]> {
+    /// `SEQUENCE`, constructed, universal (X.690 §8.1.2).
+    const SEQUENCE: u8 = 0x30;
+    /// `OBJECT IDENTIFIER`, primitive, universal.
+    const OID: u8 = 0x06;
+
+    let (certificate, _) = der::expect_tag(cert, SEQUENCE)?;
+    let (_tbs, rest) = der::read_tlv(certificate)?;
+    let (algorithm_identifier, _) = der::expect_tag(rest, SEQUENCE)?;
+    let (oid, _) = der::expect_tag(algorithm_identifier, OID)?;
+    Some(oid)
+}
+
 /// Upgrade an established byte stream to TLS.
 ///
 /// `server_name` is used both for SNI and for CA hostname verification;
 /// `pin` is the stored SHA-256 SPKI fingerprint for this host, if any (any
 /// separator style, any case).
+///
+/// The VeNCrypt entry point, kept at its old signature so no RFB call site
+/// changed when RDP needed more (PRDRDP/03 §4.3). It hard codes
+/// [`TlsBackend::Modern`], so the VNC path cannot acquire a legacy handshake
+/// by accident.
 pub async fn upgrade<S: Stream + 'static>(
     stream: S,
     server_name: &str,
     pin: Option<&str>,
 ) -> Result<(BoxedStream, TrustDecision)> {
+    let up = upgrade_with_identity(stream, server_name, pin, TlsBackend::Modern).await?;
+    Ok((up.stream, up.decision))
+}
+
+/// Upgrade an established byte stream to TLS and hand back the server identity
+/// material with it (PRDRDP/03 §4.3).
+///
+/// The same handshake and the same trust policy as [`upgrade`]; the difference
+/// is only what comes back.
+///
+/// # Errors
+///
+/// [`TransportError::CertificateMismatch`] when a pin was supplied and the
+/// peer presented a different key, which aborts the handshake from inside the
+/// verifier and never yields a usable stream, and [`TransportError::Tls`] for
+/// anything else the handshake reports.
+pub async fn upgrade_with_identity<S: Stream + 'static>(
+    stream: S,
+    server_name: &str,
+    pin: Option<&str>,
+    backend: TlsBackend,
+) -> Result<TlsUpgrade> {
+    match backend {
+        TlsBackend::Modern => upgrade_rustls(stream, server_name, pin).await,
+        #[cfg(feature = "legacy-tls")]
+        TlsBackend::Legacy => {
+            crate::tls_legacy::upgrade_with_identity(stream, server_name, pin).await
+        }
+    }
+}
+
+async fn upgrade_rustls<S: Stream + 'static>(
+    stream: S,
+    server_name: &str,
+    pin: Option<&str>,
+) -> Result<TlsUpgrade> {
     let provider = ensure_provider();
 
     let verifier = Arc::new(TofuVerifier::new(provider.clone(), pin)?);
@@ -108,8 +254,24 @@ pub async fn upgrade<S: Stream + 'static>(
         return Err(TransportError::CertificateMismatch { expected, actual });
     }
 
+    // The verifier kept the leaf next to the decision it recorded, so both
+    // describe the same handshake. A handshake that produced a decision
+    // produced a certificate, which is why R62 makes the field non optional
+    // and why this is an error rather than an empty vector.
+    let server_certificate = verifier
+        .certificate()
+        .ok_or_else(|| TransportError::Tls("the server sent no certificate".into()))?;
+    let signature_algorithm_oid = signature_algorithm_oid(&server_certificate)
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+
     tracing::debug!(?decision, "tls handshake complete");
-    Ok((Box::pin(tls) as BoxedStream, decision))
+    Ok(TlsUpgrade {
+        stream: Box::pin(tls) as BoxedStream,
+        decision,
+        server_certificate,
+        signature_algorithm_oid,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +286,9 @@ struct TofuVerifier {
     /// Normalised (hex, uppercase, no separators) expected fingerprint.
     pin: Option<String>,
     decision: Mutex<Option<TrustDecision>>,
+    /// The leaf certificate DER, filled beside the decision so the two cannot
+    /// describe different handshakes (PRDRDP/03 §4.7.6).
+    certificate: Mutex<Option<Vec<u8>>>,
 }
 
 impl TofuVerifier {
@@ -142,11 +307,16 @@ impl TofuVerifier {
             provider,
             pin,
             decision: Mutex::new(None),
+            certificate: Mutex::new(None),
         })
     }
 
     fn decision(&self) -> Option<TrustDecision> {
         self.decision.lock().clone()
+    }
+
+    fn certificate(&self) -> Option<Vec<u8>> {
+        self.certificate.lock().clone()
     }
 
     fn record(&self, d: TrustDecision) {
@@ -165,6 +335,11 @@ impl ServerCertVerifier for TofuVerifier {
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         let spki = der::extract_spki(end_entity.as_ref())
             .ok_or_else(|| rustls::Error::General("malformed server certificate".into()))?;
+        // Copied out here rather than after the handshake, because this is the
+        // only place the concrete rustls type exists and because RFC 5929 wants
+        // the certificate "as it appears, octet for octet, in the server's
+        // Certificate message" rather than a re-encode (PRDRDP/03 §4.7.6).
+        *self.certificate.lock() = Some(end_entity.as_ref().to_vec());
         let digest = Sha256::digest(spki);
         let fingerprint = format_fingerprint(&digest);
         let normalized = normalize_fingerprint(&fingerprint);
@@ -300,6 +475,43 @@ f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e16
             hex::encode(digest),
             "c42563ef393c1cabdf5438ffc8c5a8f0ecd2796cc33b556d4ee4d9f386e2118a"
         );
+    }
+
+    /// RFC 5929 §4.1 picks the channel binding hash from this OID, so reading
+    /// the wrong element produces a binding a Windows host with Extended
+    /// Protection set to "Require" rejects, and the failure reads to the user
+    /// as a wrong password (PRDRDP/03 §4.3).
+    ///
+    /// The fixture is signed `ecdsa-with-SHA256`, OID 1.2.840.10045.4.3.2,
+    /// whose DER content octets are `2a 86 48 ce 3d 04 03 02`.
+    #[test]
+    fn reads_the_signature_algorithm_oid_and_not_the_subject_key() {
+        let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
+        assert_eq!(
+            signature_algorithm_oid(&der_bytes),
+            Some(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02][..])
+        );
+        // The two values a certificate yields are different things and must
+        // not be allowed to collapse into one another by a later refactor: the
+        // pin is SHA-256 over the whole SPKI element, and the CredSSP binding
+        // input is the inner subjectPublicKey contents (PRDRDP/03 §4.3).
+        let spki = der::extract_spki(&der_bytes).unwrap();
+        let key = der::subject_public_key(&der_bytes).unwrap();
+        assert_ne!(spki, key);
+        assert!(spki.len() > key.len());
+    }
+
+    /// Truncation and rubbish are `None`, never a panic and never a partial
+    /// OID: this walks bytes a remote peer chose.
+    #[test]
+    fn a_malformed_certificate_yields_no_oid() {
+        let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
+        for cut in 0..64 {
+            let _ = signature_algorithm_oid(&der_bytes[..cut]);
+        }
+        assert_eq!(signature_algorithm_oid(&[]), None);
+        assert_eq!(signature_algorithm_oid(&[0x30, 0x00]), None);
+        assert_eq!(signature_algorithm_oid(&[0x02, 0x01, 0x00]), None);
     }
 
     /// The subject CN is what the TOFU prompt shows, so this crate keeps a

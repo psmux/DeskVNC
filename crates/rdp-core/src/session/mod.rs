@@ -3,6 +3,8 @@
 //!
 //! * [`connect`] performs one connection attempt end to end.
 //! * [`run_loop`] is the connected state pump.
+//! * [`graphics`] decodes bitmap and pointer updates into events.
+//! * [`input`] turns a [`ClientCommand`] into fast path input events.
 //! * [`signal`] is the vocabulary the pump matches on.
 //! * [`settings`] is the state that survives a reconnect.
 //!
@@ -22,6 +24,8 @@
 //! splitting them (PRDRDP/06 §2.1).
 
 pub mod connect;
+pub mod graphics;
+pub mod input;
 pub mod run_loop;
 pub mod settings;
 pub mod signal;

@@ -118,6 +118,10 @@ pub struct ResolvedOptions {
     /// they will be joined. Never more than
     /// [`rdp_pdu::io::limits::MAX_CHANNELS`].
     pub channels: Vec<&'static str>,
+    /// The quality preset, kept because it is what
+    /// [`ResolvedOptions::performance_flags`] answers from and because
+    /// `RdpColorDepth::Auto` was already resolved against it above.
+    pub quality: QualityPreset,
 }
 
 /// `cliprdr`, the clipboard channel (MS-RDPECLIP). Seven significant
@@ -252,6 +256,7 @@ impl ResolvedOptions {
             legacy_tls: rdp.legacy_tls,
             send_mstshash_cookie: rdp.send_mstshash_cookie,
             channels,
+            quality: options.quality,
         })
     }
 
@@ -260,6 +265,37 @@ impl ResolvedOptions {
     #[must_use]
     pub const fn stage() -> ConnectStage {
         ConnectStage::Resolving
+    }
+
+    /// `TS_EXTENDED_INFO_PACKET.performanceFlags` for this preset
+    /// (MS-RDPBCGR 2.2.1.11.1.1.1, PRDRDP/04 §9.2 owns the mapping).
+    ///
+    /// These are the only quality knob an RDP client has on the legacy path:
+    /// the server picks the codecs and the quantisation, and what we get to
+    /// say is which desktop effects it should not bother drawing.
+    #[must_use]
+    pub fn performance_flags(&self) -> u32 {
+        use rdp_pdu::rdp::client_info::performance_flags as p;
+        match self.quality {
+            QualityPreset::High => p::ENABLE_FONT_SMOOTHING | p::ENABLE_DESKTOP_COMPOSITION,
+            QualityPreset::Auto => p::ENABLE_FONT_SMOOTHING,
+            QualityPreset::Medium => {
+                p::DISABLE_WALLPAPER
+                    | p::DISABLE_MENUANIMATIONS
+                    | p::DISABLE_CURSOR_SHADOW
+                    | p::ENABLE_FONT_SMOOTHING
+            }
+            // Black and white is a renderer side shader effect and nothing on
+            // the wire beyond `Low`'s flags (PRDRDP/04 §9.2).
+            QualityPreset::Low | QualityPreset::BlackAndWhite => {
+                p::DISABLE_WALLPAPER
+                    | p::DISABLE_MENUANIMATIONS
+                    | p::DISABLE_CURSOR_SHADOW
+                    | p::DISABLE_FULLWINDOWDRAG
+                    | p::DISABLE_THEMING
+                    | p::DISABLE_CURSORSETTINGS
+            }
+        }
     }
 }
 
@@ -308,6 +344,24 @@ mod tests {
         assert_eq!(r.color_depth, ColorDepthBits::Bpp32);
         assert_eq!(r.scale_factor, 100);
         assert!(!r.send_mstshash_cookie, "PRDRDP/00 R29 defaults it off");
+    }
+
+    /// The one quality knob the legacy RDP path has. A preset that turns
+    /// nothing off on a slow link is a preset that does nothing.
+    #[test]
+    fn a_slow_preset_turns_the_desktop_effects_off() {
+        use rdp_pdu::rdp::client_info::performance_flags as p;
+        let (mut opts, rdp) = options();
+        opts.quality = QualityPreset::Low;
+        let low = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+        assert_ne!(low.performance_flags() & p::DISABLE_WALLPAPER, 0);
+        assert_ne!(low.performance_flags() & p::DISABLE_THEMING, 0);
+        assert_eq!(low.performance_flags() & p::ENABLE_FONT_SMOOTHING, 0);
+
+        opts.quality = QualityPreset::High;
+        let high = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+        assert_eq!(high.performance_flags() & p::DISABLE_WALLPAPER, 0);
+        assert_ne!(high.performance_flags() & p::ENABLE_DESKTOP_COMPOSITION, 0);
     }
 
     /// The dial address and the name we verify a certificate against are

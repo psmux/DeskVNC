@@ -27,21 +27,25 @@
 //! `Wire`, `Cursor`, `CursorAt`, `Clipboard`, `Protocol`, `Reactivate`,
 //! `Terminate` and `Ignored`, and PRDRDP/06 §2.3 records the disagreement
 //! without resolving it: the gap is grain, not spelling, and the owner has to
-//! pick one list. This file follows PRDRDP/06's names, because its finer
-//! grain is what §4.3 and §5.5 of that document rely on and because losing a
-//! distinction is harder to undo than adding one.
+//! pick one list. This file follows PRDRDP/06's names, with one departure the
+//! next section argues for.
 //!
-//! # What is here today
+//! # One output variant rather than five
 //!
-//! Only the variants something can currently produce. `rdp-pdu`'s `rdp/`
-//! module is being written now (`crates/rdp-pdu/src/lib.rs:41`), so the share
-//! control and share data PDUs that produce `Graphics`, `Pointer`,
-//! `ErrorInfo`, `DeactivateAll`, `DemandActive`, `SaveSessionInfo`,
-//! `AutoReconnectFailed`, `ShutdownDenied`, `AutoDetect`, `Heartbeat` and
-//! `Redirect` cannot be parsed and those variants are not declared. Declaring
-//! a variant nothing can construct would be a match arm nobody has tested
-//! against a real PDU, which is worse than a compile error when the PDU
-//! arrives.
+//! PRDRDP/06 §2.3 lists `Graphics`, `Pointer`, `ErrorInfo`, `SaveSessionInfo`
+//! and the rest as separate members of this vocabulary. They are one variant
+//! here, [`SessionSignal::Output`], and the reason is the fast path: one
+//! `TS_FP_UPDATE_PDU` (MS-RDPBCGR 2.2.9.1.2) carries a sequence of records, so
+//! a single frame can produce a bitmap update, a cursor shape and a cursor
+//! position together. With five variants the dispatcher would have to return a
+//! `Vec<SessionSignal>` and the loop would match on each element, which is the
+//! same code with an extra allocation and an extra layer.
+//!
+//! What the loop does with them is identical in every case: emit them in
+//! order, which is the ordering the server chose and the only one that is
+//! right. So the distinction the five variants would carry buys nothing at the
+//! one match site, and the finer grain is kept where it belongs, in
+//! [`remote_core::SessionEvent`], which the shell already matches on.
 
 use bytes::Bytes;
 
@@ -55,6 +59,24 @@ pub enum SessionSignal {
     /// opinion about. Carries whatever has to go back on the wire, so the
     /// loop writes at most once per inbound PDU.
     Handled {
+        /// Bytes to queue for the writer task, already encoded.
+        reply: Option<Bytes>,
+    },
+
+    /// Decoded output: dirty rectangles, cursor news and protocol news, in the
+    /// order the server sent them, plus whatever has to go back on the wire.
+    ///
+    /// Produced by the fast path update PDU (MS-RDPBCGR 2.2.9.1.2), the Server
+    /// Graphics Update PDU (2.2.9.1.1.3), the Server Pointer Update PDU
+    /// (2.2.9.1.1.4), the Save Session Info PDU (2.2.10.1) and the Set Error
+    /// Info PDU (2.2.5.1.1). The `reply` half carries the Confirm Active and
+    /// finalisation batch a Demand Active during a reactivation needs
+    /// (2.2.1.13, PRDRDP/06 §6.1).
+    Output {
+        /// Events to emit, in order. The renderer presents once per
+        /// `FramebufferUpdate`, so several bitmap records out of one fast path
+        /// PDU arrive as one event and not as one per rectangle.
+        events: Vec<remote_core::SessionEvent>,
         /// Bytes to queue for the writer task, already encoded.
         reply: Option<Bytes>,
     },

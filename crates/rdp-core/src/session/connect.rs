@@ -71,7 +71,16 @@ pub async fn run_once(
     };
 
     remote_core::emit_state(events, SessionState::Connected).await?;
-    run_connected(framer, connected, events, commands, cancel).await
+    run_connected(
+        framer,
+        connected,
+        &opts,
+        settings.view_only,
+        events,
+        commands,
+        cancel,
+    )
+    .await
 }
 
 /// Split the stream, start the writer task, and pump.
@@ -79,9 +88,12 @@ pub async fn run_once(
 /// Separate from [`run_once`] so the split and the join are in one place: the
 /// writer task owns the write half from here until the session ends, and the
 /// two halves are never rejoined.
+#[allow(clippy::too_many_arguments)]
 async fn run_connected(
     framer: Framer<vnc_transport::BoxedStream>,
     connected: connection::Connected,
+    opts: &ResolvedOptions,
+    view_only: bool,
     events: &mpsc::Sender<SessionEvent>,
     commands: &mut mpsc::Receiver<ClientCommand>,
     cancel: &CancellationToken,
@@ -102,8 +114,19 @@ async fn run_connected(
     let (outbound, rx) = mpsc::channel(WRITER_QUEUE);
     let writer = tokio::spawn(writer::writer_task(write_half, rx, sent.clone()));
 
-    let mut run_loop = RunLoop::new(framer, outbound, connected.channels, received, sent);
-    let outcome = run_loop.run(events, commands, cancel).await;
+    let mut run_loop = RunLoop::new(
+        framer,
+        outbound,
+        connected.channels,
+        opts.clone(),
+        connected.activation,
+        view_only,
+        received,
+        sent,
+    );
+    let outcome = run_loop
+        .run(connected.pending, events, commands, cancel)
+        .await;
 
     // The teardown queued `Outbound::Shutdown`, so the writer task is either
     // finished or about to be. Joining it inside the budget is what makes the
