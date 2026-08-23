@@ -12,7 +12,6 @@
 
 mod common;
 
-use common::mock_server::*;
 use common::*;
 
 use vnc_core::encodings::{decode_rect, DecoderState};
