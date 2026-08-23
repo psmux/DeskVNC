@@ -57,12 +57,19 @@ pub async fn run_once(
     // deliberately not cancellation safe, so it is raced against the token
     // rather than being polled inside a `select!` alongside anything else:
     // cancelling it drops the whole attempt and the whole stream with it.
+    //
+    // The one thing it does await on is the user: an unpinned server key
+    // parks the sequence on a `ClientCommand::TrustCertificate` answer, which
+    // is why the command receiver is lent down here rather than being read
+    // only by the pump (`crate::connection::trust`). Nothing else reads it
+    // while the sequence runs.
     let connect = connection::connect(
         stream,
         &opts,
         &options.credentials,
         &options.cert_pins,
         events,
+        Some(connection::TrustPrompt { commands, cancel }),
     );
     let (connected, framer) = tokio::select! {
         biased;

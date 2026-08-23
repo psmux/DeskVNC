@@ -616,11 +616,7 @@ mod tests {
     /// used to be mislabelled because of it.
     #[test]
     fn a_windows_only_name_service_settles_the_os() {
-        for source in [
-            NameSource::NetBios,
-            NameSource::MsrpcEndpoint,
-            NameSource::RdpCertificate,
-        ] {
+        for source in [NameSource::NetBios, NameSource::MsrpcEndpoint] {
             let mut h = host("TigerVNC", vec![]);
             h.hostname = Some("DESKTOP-TFBL07A".to_string());
             h.name_source = Some(source);
@@ -637,12 +633,19 @@ mod tests {
     /// …and the rungs that are *not* proof must not pretend to be. Avahi
     /// answers reverse mDNS on Linux, this LAN's `raspberrypi` is named
     /// exactly that way, so `mdns-ptr` may never imply macOS.
+    ///
+    /// `rdp-cert` is in this list and it used to be in the one above. Answering
+    /// on 3389 with a TLS certificate is not proof of Windows: xrdp serves
+    /// exactly that on Linux, and so do several thin client appliances. The
+    /// certificate's CN is a good name and it is not evidence of an OS, so this
+    /// rung under-claims rather than labelling every xrdp box Windows.
     #[test]
     fn a_shared_name_service_proves_nothing_about_the_os() {
         for source in [
             NameSource::MdnsPtr,
             NameSource::Llmnr,
             NameSource::ReverseDns,
+            NameSource::RdpCertificate,
         ] {
             let mut h = host("VNC server (RFB 3.8)", vec![]);
             h.hostname = Some("raspberrypi".to_string());

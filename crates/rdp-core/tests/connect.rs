@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use common::mock_rdp_server::{
     McsBehaviour, MockConfig, MockRdpServer, Negotiation, SessionBehaviour, BITMAP_AT,
+    CF_UNICODETEXT, EGFX_DRAW_AT, EGFX_DVC_CHANNEL_ID, EGFX_FRAME_ID, EGFX_SURFACE_AT,
     IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, SERVER_DESKTOP, SHARE_ID, USER_CHANNEL_ID,
 };
 use common::{options_for, rdp_half, DEFAULT_TIMEOUT};
@@ -598,30 +599,103 @@ async fn credssp_without_a_certificate_is_refused_rather_than_started() {
     }
 }
 
+/// One "wait for this, then send those" step of a session script.
+///
+/// Queuing every command up front is a race, and it was a real one: the pump's
+/// `select!` is `biased` with the socket ahead of the command channel, but
+/// bias only decides between two *ready* futures. A `Disconnect` sitting in
+/// the channel before the server's first update has arrived wins, the loop
+/// tears down, and the test fails on a loaded machine and passes on a quiet
+/// one. Gating each batch on an event the client has actually emitted removes
+/// the timing from the test entirely.
+struct Step {
+    /// The event that releases this step, or `None` to send it at once.
+    gate: Option<Gate>,
+    commands: Vec<ClientCommand>,
+}
+
+/// The predicate a [`Step`] waits on.
+type Gate = Box<dyn Fn(&SessionEvent) -> bool + Send>;
+
+impl Step {
+    /// Send `commands` once an event matching `gate` has been emitted.
+    fn after(
+        gate: impl Fn(&SessionEvent) -> bool + Send + 'static,
+        commands: Vec<ClientCommand>,
+    ) -> Self {
+        Self {
+            gate: Some(Box::new(gate)),
+            commands,
+        }
+    }
+}
+
+/// True for the event that says a frame reached the shell.
+fn is_framebuffer_update(event: &SessionEvent) -> bool {
+    matches!(event, SessionEvent::FramebufferUpdate { .. })
+}
+
 /// Drive the whole thing: the connection sequence, then the connected pump
-/// over the same socket, with `commands` queued for the loop to act on.
+/// over the same socket, with `steps` deciding when each command goes.
 ///
 /// The split between the two halves is the production one:
 /// `session::connect::run_connected` does exactly this, and the reason it is
 /// repeated here rather than called is the TLS handshake in the middle of
 /// `connection::connect` that the mock cannot do.
-async fn run_session(
-    commands: Vec<ClientCommand>,
+async fn run_session_steps(
+    config: MockConfig,
+    steps: Vec<Step>,
 ) -> (
     MockRdpServer,
     Vec<SessionEvent>,
     Result<RunOutcome, RdpError>,
 ) {
-    let server = MockRdpServer::start(MockConfig::default()).await;
+    let server = MockRdpServer::start(config).await;
     let options = options_for(server.addr);
     let rdp = rdp_half(&options);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
     let (events, mut event_rx) = mpsc::channel(256);
     let (command_tx, mut command_rx) = mpsc::channel(256);
-    for command in commands {
-        command_tx.send(command).await.expect("the channel is open");
-    }
+
+    // The collector owns the event receiver for the whole run, so it can both
+    // gather what the assertions read and release each step of the script.
+    // It holds the command sender too, which is what keeps the pump from
+    // seeing a closed command channel and treating it as a teardown.
+    let collector = tokio::spawn(async move {
+        let mut collected: Vec<SessionEvent> = Vec::new();
+        let mut steps = steps.into_iter();
+        let mut pending = steps.next();
+
+        // Anything with no gate goes at once.
+        while pending.as_ref().is_some_and(|s| s.gate.is_none()) {
+            for command in pending.take().expect("checked").commands {
+                let _ = command_tx.send(command).await;
+            }
+            pending = steps.next();
+        }
+
+        while let Some(event) = event_rx.recv().await {
+            let released = pending
+                .as_ref()
+                .and_then(|s| s.gate.as_ref())
+                .is_some_and(|gate| gate(&event));
+            if released {
+                for command in pending.take().expect("checked").commands {
+                    let _ = command_tx.send(command).await;
+                }
+                pending = steps.next();
+                while pending.as_ref().is_some_and(|s| s.gate.is_none()) {
+                    for command in pending.take().expect("checked").commands {
+                        let _ = command_tx.send(command).await;
+                    }
+                    pending = steps.next();
+                }
+            }
+            collected.push(event);
+        }
+        collected
+    });
 
     let outcome = tokio::time::timeout(DEFAULT_TIMEOUT, async {
         let stream = TcpStream::connect(server.addr)
@@ -682,11 +756,24 @@ async fn run_session(
     .expect("the session finished inside the timeout");
 
     drop(events);
-    let mut drained = Vec::new();
-    while let Some(event) = event_rx.recv().await {
-        drained.push(event);
-    }
+    let drained = collector.await.expect("the collector finished");
     (server, drained, outcome)
+}
+
+/// The legacy shape: one batch of commands, sent once the picture has
+/// arrived.
+async fn run_session(
+    commands: Vec<ClientCommand>,
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<RunOutcome, RdpError>,
+) {
+    run_session_steps(
+        MockConfig::default(),
+        vec![Step::after(is_framebuffer_update, commands)],
+    )
+    .await
 }
 
 /// The picture. One bitmap update reaches the pump on the fast path and comes
@@ -840,4 +927,424 @@ async fn a_spawned_session_reports_its_failure_through_the_event_stream() {
 
     let (reason, _) = last.expect("a Disconnected state reached the shell");
     assert!(!reason.is_empty(), "a failure has to say something");
+}
+
+// ---------------------------------------------------------------------------
+// The trust prompt (PRDRDP/00 R13, PRDRDP/03 §5.4)
+// ---------------------------------------------------------------------------
+
+/// Drive phase 1, then the trust gate, then the rest of the sequence.
+///
+/// This is the composition `connection::connect` makes, with the one piece
+/// the mock cannot do left out: in production `transport::upgrade_tls` runs
+/// between the negotiation and the gate and it is what produces the
+/// [`TrustDecision`]. Here the decision is supplied and everything after it,
+/// the prompt, the park, the answer and the phases that follow, is the
+/// production code.
+///
+/// `answer` is sent only once the client has actually emitted
+/// `SessionEvent::CertificatePrompt`, so a gate that did not park would
+/// deadlock rather than pass.
+async fn run_sequence_with_trust(
+    decision: TrustDecision,
+    answer: Vec<ClientCommand>,
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<Connected, RdpError>,
+) {
+    let server = MockRdpServer::start(MockConfig::default()).await;
+    let options = options_for(server.addr);
+    let rdp = rdp_half(&options);
+    let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
+
+    let (events, mut event_rx) = mpsc::channel(256);
+    let (command_tx, mut command_rx) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+
+    let collector = tokio::spawn(async move {
+        let mut collected: Vec<SessionEvent> = Vec::new();
+        let mut answer = Some(answer);
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, SessionEvent::CertificatePrompt { .. }) {
+                for command in answer.take().unwrap_or_default() {
+                    let _ = command_tx.send(command).await;
+                }
+            }
+            collected.push(event);
+        }
+        collected
+    });
+
+    let gated = decision.clone();
+    let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let stream = TcpStream::connect(server.addr)
+            .await
+            .expect("the mock is up");
+        let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
+        let selected =
+            connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
+
+        connection::trust::approve(
+            &gated,
+            &events,
+            Some(connection::TrustPrompt {
+                commands: &mut command_rx,
+                cancel: &cancel,
+            }),
+        )
+        .await?;
+
+        connection::after_upgrade(
+            &mut framer,
+            &opts,
+            &options.credentials,
+            selected,
+            None,
+            decision,
+            &events,
+        )
+        .await
+    })
+    .await
+    .expect("the sequence finished inside the timeout");
+
+    drop(events);
+    let drained = collector.await.expect("the collector finished");
+    (server, drained, result)
+}
+
+fn unknown_key() -> TrustDecision {
+    TrustDecision::Unknown {
+        fingerprint: "AA:BB:CC:DD".into(),
+        subject: "CN=win-host".into(),
+    }
+}
+
+/// The whole point of the lane's first item. A self signed certificate, which
+/// is what nearly every RDP host serves on first contact, used to end the
+/// attempt with a sentence. Now it stops, asks, and carries on from where it
+/// parked when the answer arrives.
+#[tokio::test]
+async fn a_trust_prompt_is_answered_and_the_sequence_continues_from_where_it_parked() {
+    let (server, events, result) = run_sequence_with_trust(
+        unknown_key(),
+        vec![ClientCommand::TrustCertificate {
+            // Round tripped through a UI that dropped the separators, which
+            // still names the same key.
+            fingerprint: "aabbccdd".into(),
+            permanent: true,
+            scheme: remote_core::PinScheme::RdpTls,
+        }],
+    )
+    .await;
+
+    let connected = result.expect("the sequence completed after the approval");
+    assert_eq!(connected.activation.share_id, SHARE_ID);
+    assert_eq!(connected.channels.io_channel_id, IO_CHANNEL_ID);
+
+    // The prompt reached the shell, carrying the RDP pin scheme so the answer
+    // is stored against the key the user was shown and not against the
+    // VeNCrypt one for the same host (PRDRDP/02 §2.1).
+    let prompt = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::CertificatePrompt {
+                fingerprint,
+                subject,
+                is_change,
+                scheme,
+            } => Some((fingerprint, subject, *is_change, *scheme)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a certificate prompt: {events:?}"));
+    assert_eq!(prompt.0, "AA:BB:CC:DD");
+    assert_eq!(prompt.1, "CN=win-host");
+    assert!(!prompt.2, "an unpinned key is not a changed one");
+    assert_eq!(prompt.3, remote_core::PinScheme::RdpTls);
+
+    // And the phases after the gate really ran: the Client Info PDU is the
+    // first thing that goes out once the key is approved.
+    let recorded = server.wait_until(|r| r.client_info.is_some()).await;
+    assert!(recorded.client_info.is_some());
+}
+
+/// The security property the gate exists for. A prompt the user dismisses
+/// ends the attempt, and nothing that depends on the server's identity has
+/// gone out: no MCS Connect Initial, and above all no Client Info PDU, which
+/// is where the password is (MS-RDPBCGR 2.2.1.11, PRDRDP/00 R13).
+#[tokio::test]
+async fn a_dismissed_trust_prompt_stops_before_the_connect_initial() {
+    for dismissal in [ClientCommand::CancelCredentials, ClientCommand::Disconnect] {
+        let (server, events, result) =
+            run_sequence_with_trust(unknown_key(), vec![dismissal.clone()]).await;
+
+        let err = result.expect_err("a dismissed prompt stops the attempt");
+        assert!(
+            matches!(err, RdpError::CertificateUntrusted(_)),
+            "{dismissal:?}: {err}"
+        );
+        // Classified as needing the user, so a reconnect ladder does not
+        // reopen the same dialog every backoff interval.
+        assert!(err.needs_user_action());
+        assert!(!err.is_transient());
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::CertificatePrompt { .. })));
+
+        // The client future has already resolved with the refusal, so it can
+        // never write again; the only thing to wait for is the mock having
+        // read what phase 1 sent.
+        let recorded = server.wait_until(|r| r.connection_request.is_some()).await;
+        assert!(
+            recorded.connection_request.is_some(),
+            "phase 1 happens before there is a key to judge"
+        );
+        assert!(
+            recorded.client_blocks.is_none(),
+            "{dismissal:?}: the connect initial must not reach an unapproved server"
+        );
+        assert!(
+            recorded.client_info.is_none(),
+            "{dismissal:?}: the credentials must not reach an unapproved server"
+        );
+    }
+}
+
+/// A key that replaced a pinned one is a hard stop and is never shown as a
+/// prompt: that is the case the pin was stored to catch
+/// (`crates/vnc-transport/src/lib.rs:78`).
+#[tokio::test]
+async fn a_changed_pin_is_a_hard_stop_and_never_a_prompt() {
+    let (_, events, result) = run_sequence_with_trust(
+        TrustDecision::Changed {
+            expected: "AA".into(),
+            actual: "BB".into(),
+        },
+        Vec::new(),
+    )
+    .await;
+
+    let err = result.expect_err("a changed pin stops");
+    assert!(matches!(err, RdpError::CertificateMismatch { .. }), "{err}");
+    assert_eq!(err.symbol(), Some("certificate-changed"));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, SessionEvent::CertificatePrompt { .. })));
+}
+
+// ---------------------------------------------------------------------------
+// The graphics pipeline (MS-RDPEGFX)
+// ---------------------------------------------------------------------------
+
+fn channel_config(session: SessionBehaviour) -> MockConfig {
+    MockConfig {
+        session,
+        ..MockConfig::default()
+    }
+}
+
+/// The lane's third item, end to end over a socket: drdynvc opens, the
+/// graphics channel is created, capabilities are advertised and confirmed, a
+/// frame arrives inside an `RDP_SEGMENTED_DATA` envelope, is decoded into a
+/// surface, and comes out at the coordinates the surface was mapped to.
+#[tokio::test]
+async fn an_egfx_frame_is_decoded_and_emitted_at_its_mapped_origin() {
+    let (server, events, outcome) = run_session_steps(
+        channel_config(SessionBehaviour::ServeChannels),
+        vec![Step::after(
+            is_framebuffer_update,
+            vec![ClientCommand::Disconnect],
+        )],
+    )
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    let (rects, damage) = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::FramebufferUpdate { rects, damage } => Some((rects, damage)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a framebuffer update: {events:?}"));
+
+    assert_eq!(rects.len(), 1, "one wire to surface command is one rect");
+    // The surface is mapped at (10, 20) and the rectangle is at (2, 3) inside
+    // it, so the framebuffer coordinates are (12, 23). A client that emitted
+    // surface coordinates would report (2, 3) here.
+    assert_eq!(
+        (rects[0].rect.x, rects[0].rect.y),
+        (
+            EGFX_SURFACE_AT.0 as u16 + EGFX_DRAW_AT.0,
+            EGFX_SURFACE_AT.1 as u16 + EGFX_DRAW_AT.1
+        )
+    );
+    assert_eq!((rects[0].rect.width, rects[0].rect.height), (2, 1));
+    assert_eq!(*damage, rects[0].rect);
+
+    let RectPayload::Rgba(pixels) = &rects[0].payload else {
+        panic!("a decoded rect carries its own pixels and never a surface");
+    };
+    assert_eq!(pixels.len(), 2 * 4, "exactly this rectangle's pixels");
+    assert_eq!(
+        pixels.as_slice(),
+        // The wire is B, G, R, X and the payload is R, G, B, A: red then
+        // blue, opaque, because the surface is XRGB.
+        &[0xff, 0x00, 0x00, 0xff, 0x00, 0x00, 0xff, 0xff]
+    );
+
+    // The handshake that got us here, as the server saw it.
+    let recorded = server.wait_until(|r| !r.frame_acks.is_empty()).await;
+    assert_eq!(
+        recorded.dvc_version,
+        Some(3),
+        "the client answers the version it was offered, capped at what it speaks"
+    );
+    assert_eq!(
+        recorded.dvc_creations,
+        vec![(EGFX_DVC_CHANNEL_ID, 0)],
+        "the graphics channel was accepted and nothing else was opened"
+    );
+    assert_eq!(
+        recorded.egfx_advertised,
+        vec![0x0008_0004, 0x0008_0105],
+        "capability set versions 8 and 8.1, and nothing with H.264 in it"
+    );
+    assert_eq!(
+        recorded.egfx_cache_offer,
+        Some(0),
+        "nothing in this build saves a cache between sessions"
+    );
+
+    // Frame acknowledgement is flow control, not a formality: getting it
+    // wrong stalls the server or floods it (MS-RDPEGFX 2.2.2.13).
+    assert_eq!(recorded.frame_acks.len(), 1);
+    let ack = recorded.frame_acks[0];
+    assert_eq!(ack.frame_id, EGFX_FRAME_ID);
+    assert_eq!(ack.total_frames_decoded, 1);
+    assert_ne!(
+        ack.queue_depth, 0xFFFF_FFFF,
+        "SUSPEND_FRAME_ACKNOWLEDGEMENT is forbidden (PRDRDP/04 §3.6)"
+    );
+}
+
+/// The mitigation `docs/RDP_SPEC_NOTES.md` §1.1 asks for, over a socket.
+///
+/// The ZGFX literal token table is a reconstruction. If one of its rows is
+/// wrong, decompression produces a wrong byte every few thousand, and inside
+/// an EGFX message that is a `cmdId` or a `pduLength` that will not parse.
+/// The session has to stop and say so, naming the file to look in, rather
+/// than drawing whatever fell out of the decompressor.
+#[tokio::test]
+async fn a_malformed_egfx_message_after_decompression_is_reported_and_names_zgfx() {
+    let (_, events, outcome) = run_session_steps(
+        channel_config(SessionBehaviour::ServeMalformedEgfx),
+        Vec::new(),
+    )
+    .await;
+
+    let err = outcome.expect_err("a message that will not parse ends the session");
+    let text = err.to_string();
+    assert!(text.contains("do not parse as EGFX commands"), "{text}");
+    assert!(text.contains("ZGFX"), "{text}");
+    assert!(text.contains("RDP_SPEC_NOTES"), "{text}");
+    assert!(text.contains("zgfx.rs"), "{text}");
+    // Not transient: the same bytes will not parse on the next attempt
+    // either, so a backoff ladder against our own decoder is a loop.
+    assert!(!err.is_transient());
+    // And nothing was drawn from the nonsense.
+    assert!(
+        !events.iter().any(is_framebuffer_update),
+        "a mangled frame must not reach the renderer: {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The clipboard (MS-RDPECLIP)
+// ---------------------------------------------------------------------------
+
+/// Both directions in one session: the server offers text, the client raises
+/// a notify, the shell asks and gets it with its line endings converted; then
+/// the shell offers text, the server pulls it, and it arrives as UTF-16LE
+/// with CRLF.
+#[tokio::test]
+async fn a_clipboard_round_trip_goes_both_ways() {
+    let (server, events, outcome) = run_session_steps(
+        channel_config(SessionBehaviour::ServeChannels),
+        vec![
+            // The notify means the server has announced text, so there is
+            // something to ask for and something to answer with.
+            Step::after(
+                |e| matches!(e, SessionEvent::ClipboardNotify { .. }),
+                vec![
+                    ClientCommand::ClipboardText("local\nclipboard".into()),
+                    ClientCommand::ClipboardRequest { formats: 1 },
+                ],
+            ),
+            Step::after(
+                |e| matches!(e, SessionEvent::ClipboardText(_)),
+                vec![ClientCommand::Disconnect],
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    // Inbound. The notify is raised rather than the text being pulled
+    // unasked: a remote session that helps itself to the local clipboard is
+    // the behaviour PRDRDP/05 §4.3 rules out.
+    let notified = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::ClipboardNotify { formats } => Some(*formats),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a clipboard notify: {events:?}"));
+    assert_eq!(notified, 1, "the plain text format bit");
+
+    let text = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::ClipboardText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("clipboard text: {events:?}"));
+    assert_eq!(
+        text, "server side\nsecond line",
+        "the server's CRLF became LF on the way to the shell"
+    );
+
+    // Outbound.
+    let recorded = server
+        .wait_until(|r| r.clipboard_from_client.is_some())
+        .await;
+    assert!(
+        recorded.clipboard_caps,
+        "the client answered CB_MONITOR_READY"
+    );
+    assert_eq!(
+        recorded.clipboard_from_client.as_deref(),
+        Some("local\r\nclipboard"),
+        "the shell's LF became CRLF on the way to the server"
+    );
+
+    // The first format list is empty, because the shell had put nothing on
+    // the clipboard yet; the second announces text once it has.
+    assert!(
+        recorded.clipboard_formats.len() >= 2,
+        "{:?}",
+        recorded.clipboard_formats
+    );
+    assert!(
+        recorded.clipboard_formats[0].is_empty(),
+        "an empty clipboard is announced as an empty list"
+    );
+    assert!(
+        recorded
+            .clipboard_formats
+            .iter()
+            .any(|ids| ids.contains(&CF_UNICODETEXT)),
+        "the offer names CF_UNICODETEXT: {:?}",
+        recorded.clipboard_formats
+    );
 }

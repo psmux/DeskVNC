@@ -43,8 +43,9 @@ pub mod activate;
 pub mod mcs;
 pub mod negotiate;
 pub mod nla;
+pub mod trust;
 
-use remote_core::{Credentials, PinScheme, SessionEvent, SessionState};
+use remote_core::{Credentials, SessionEvent, SessionState};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use vnc_transport::{BoxedStream, TrustDecision};
@@ -58,6 +59,7 @@ pub use activate::Activated;
 pub use mcs::{ChannelMap, McsConnected};
 pub use negotiate::SecurityProtocol;
 pub use nla::ServerIdentity;
+pub use trust::TrustPrompt;
 
 /// What the connection sequence hands the run loop, and nothing it does not.
 #[derive(Debug)]
@@ -230,6 +232,7 @@ pub async fn connect(
     creds: &Credentials,
     pins: &remote_core::CertPins,
     events: &mpsc::Sender<SessionEvent>,
+    prompt: Option<TrustPrompt<'_>>,
 ) -> Result<(Connected, Framer<BoxedStream>)> {
     let received = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut framer = Framer::new(stream, received.clone());
@@ -244,7 +247,7 @@ pub async fn connect(
     // The prompt gates CredSSP, so it happens before the identity is built and
     // long before a credential is encrypted under the server's key
     // (PRDRDP/00 R13, PRDRDP/03 §5.4).
-    check_trust(&trust)?;
+    trust::approve(&trust, events, prompt).await?;
     let identity = ServerIdentity::from_upgrade(&upgrade)?;
 
     let TlsUpgrade { stream, .. } = upgrade;
@@ -262,82 +265,9 @@ pub async fn connect(
     Ok((connected, framer))
 }
 
-/// Act on what the trust on first use verifier decided.
-///
-/// The certificate prompt has to complete **before** CredSSP starts, and that
-/// is a deliberate divergence from the VNC order, where the password goes out
-/// before the prompt resolves (`crates/vnc-core/src/session/connection.rs`
-/// records that as a pre existing bug). The reason is specific to RDP:
-/// CredSSP hands the plaintext password, encrypted under the session key, to
-/// whoever holds the private key of the certificate we accepted. Accepting
-/// after sending it would be accepting a fact (PRDRDP/00 R13, PRDRDP/03
-/// §5.4).
-///
-/// The prompt itself is not wired up in this pass: an unknown key is refused
-/// rather than shown, so nothing is ever sent to a server the user has not
-/// approved. Emitting the prompt means parking the sequence on a
-/// [`remote_core::ClientCommand::TrustCertificate`] answer, which needs the
-/// command channel threaded down here from the session task, and that is the
-/// piece that is missing rather than the pin scheme, which now exists. The
-/// report names it, and the message names it too so a user is not left
-/// guessing why a self signed host is refused.
-///
-/// # Errors
-///
-/// [`RdpError::CertificateMismatch`] for a changed pin, which is a hard stop
-/// and never auto retried, and [`RdpError::CertificateUntrusted`] for a key
-/// with no pin.
-fn check_trust(trust: &TrustDecision) -> Result<()> {
-    match trust {
-        TrustDecision::VerifiedByCa | TrustDecision::PinnedMatch => Ok(()),
-        TrustDecision::Changed { expected, actual } => Err(RdpError::CertificateMismatch {
-            expected: expected.clone(),
-            actual: actual.clone(),
-        }),
-        TrustDecision::Unknown { fingerprint, .. } => {
-            // The prompt is `SessionEvent::CertificatePrompt { scheme:
-            // PinScheme::RdpTls }` and a park on the answer, and the pin is
-            // already looked up under that scheme
-            // (`crate::transport::upgrade_tls`), so an approval would be
-            // stored against the RDP key rather than against the VeNCrypt one
-            // for the same host (PRDRDP/02 §2.1).
-            debug_assert_eq!(PinScheme::RdpTls.as_str(), "rdp-tls");
-            Err(RdpError::CertificateUntrusted(format!(
-                "{fingerprint} has not been approved, and the trust prompt is not wired up yet"
-            )))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A changed pin is a hard stop and is never auto retried; an unapproved
-    /// key stops and asks. Both classify as needing user action, and neither
-    /// is transient, because retrying either produces the same answer.
-    #[test]
-    fn the_trust_gate_stops_on_a_changed_key_and_on_an_unknown_one() {
-        assert!(check_trust(&TrustDecision::VerifiedByCa).is_ok());
-        assert!(check_trust(&TrustDecision::PinnedMatch).is_ok());
-
-        let err = check_trust(&TrustDecision::Changed {
-            expected: "AA".into(),
-            actual: "BB".into(),
-        })
-        .expect_err("changed");
-        assert!(matches!(err, RdpError::CertificateMismatch { .. }));
-        assert!(err.needs_user_action());
-        assert!(!err.is_transient());
-
-        let err = check_trust(&TrustDecision::Unknown {
-            fingerprint: "CC:DD".into(),
-            subject: "CN=host".into(),
-        })
-        .expect_err("unknown");
-        assert!(err.to_string().contains("CC:DD"), "{err}");
-        assert!(err.needs_user_action());
-    }
 
     /// Every stage of the sequence now has code behind it, so nothing in this
     /// module returns [`RdpError::NotImplemented`] any more. What is left of

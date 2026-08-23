@@ -41,11 +41,24 @@ pub async fn save_password(
                 StoredCredentials::default()
             }
         };
+        // Every field is `sent.or(stored)`, and the literal is exhaustive on
+        // purpose: adding a credential field to the store breaks this line
+        // rather than silently defaulting the new field away, which is what
+        // forces a decision about the merge rule here (PRDRDP/08 §3.4).
+        //
+        // `.or` is the rule for THIS caller and not for every caller. This is
+        // a dialog write, and a dialog that did not show a field must not
+        // erase it. The post-connect save is the other case: it runs after a
+        // handshake with a complete set, so it replaces rather than fills in,
+        // and it lives in `PendingCredentialSave::merge_into`.
         let merged = StoredCredentials {
             vnc_password: creds.vnc_password.or(existing.vnc_password),
             vencrypt_user: creds.vencrypt_user.or(existing.vencrypt_user),
             vencrypt_pass: creds.vencrypt_pass.or(existing.vencrypt_pass),
             ssh_passphrase: creds.ssh_passphrase.or(existing.ssh_passphrase),
+            rdp_user: creds.rdp_user.or(existing.rdp_user),
+            rdp_domain: creds.rdp_domain.or(existing.rdp_domain),
+            rdp_password: creds.rdp_password.or(existing.rdp_password),
         };
         credentials.save(&host_id, &merged)
     })

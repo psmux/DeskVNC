@@ -48,7 +48,7 @@ use rdp_pdu::gcc::server::{
 };
 use rdp_pdu::io::{Decode, Encode, Payload, Writer};
 use rdp_pdu::mcs::{result_code, DomainMcsPdu};
-use rdp_pdu::rdp::capabilities::InputCapabilitySet;
+use rdp_pdu::rdp::capabilities::{ClientCapabilitySupport, InputCapabilitySet};
 use rdp_pdu::rdp::license::{
     blob_type, message_type, preamble_flags, LicenseBinaryBlob, LicenseErrorMessage,
     LicenseMessage, LicensePdu, LicensePreamble, LICENSE_PREAMBLE_LEN,
@@ -59,7 +59,11 @@ use rdp_pdu::rdp::{
 };
 use rdp_pdu::update::fastpath::{encode_fastpath_update, update_code, FpUpdate, FpUpdateHeader};
 use rdp_pdu::update::slowpath::GraphicsUpdate;
-use rdp_pdu::update::{BitmapData, BitmapUpdate, RectInclusive};
+use rdp_pdu::update::{BitmapData, BitmapUpdate, RectExclusive, RectInclusive};
+use rdp_pdu::vc::dvc::{cmd as dvc_cmd, dvc_version, read_channel_id, DvcHeader, DvcPdu};
+use rdp_pdu::vc::egfx::{caps_version, codec_id, pixel_format, Capset, EgfxPdu};
+use rdp_pdu::vc::segment::Segmented;
+use rdp_pdu::vc::static_vc::{channel_flags, ChannelPduHeader};
 use rdp_pdu::x224::{
     self, security_protocol, NegotiationFailure, NegotiationResponse, X224ConnectionConfirm,
     X224ConnectionRequest, X224Negotiation,
@@ -110,6 +114,67 @@ pub const BITMAP_ROWS: &[u8] = &[
     0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff, 0x00, // top row: red
 ];
 
+/// The dynamic channel id the mock hands the graphics channel
+/// (MS-RDPEDYC 2.2.2.1). Any non zero value; three is arbitrary and is only
+/// here so the client's Create Response can be checked against it.
+pub const EGFX_DVC_CHANNEL_ID: u32 = 3;
+
+/// The surface the mock creates on the graphics channel.
+pub const EGFX_SURFACE_ID: u16 = 1;
+
+/// Where that surface is mapped on the output
+/// (`RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU`, MS-RDPEGFX 2.2.2.15).
+///
+/// Deliberately not the origin, so a client that ignores the mapping and
+/// emits surface coordinates fails rather than passing by accident.
+pub const EGFX_SURFACE_AT: (u32, u32) = (10, 20);
+
+/// The surface's geometry.
+pub const EGFX_SURFACE_SIZE: (u16, u16) = (64, 64);
+
+/// The `frameId` of the one frame the mock draws (MS-RDPEGFX 2.2.2.11).
+pub const EGFX_FRAME_ID: u32 = 42;
+
+/// Two pixels of `RDPGFX_CODECID_UNCOMPRESSED`: B, G, R, X per pixel, top
+/// down, rows packed to `width * 4` (MS-RDPEGFX 2.2.2.1).
+///
+/// Red then blue, so a client that swapped the channels or read the row
+/// backwards fails rather than passing on a symmetric fixture.
+pub const EGFX_PIXELS: &[u8] = &[
+    0x00, 0x00, 0xff, 0x00, // red
+    0xff, 0x00, 0x00, 0x00, // blue
+];
+
+/// Where the mock draws inside the surface.
+pub const EGFX_DRAW_AT: (u16, u16) = (2, 3);
+
+/// The text the mock puts on its clipboard for the client to fetch.
+///
+/// CRLF on the wire, because that is what Windows puts on a clipboard
+/// (MS-RDPECLIP 2.2.5.2). The client has to hand the shell the LF form.
+pub const CLIPBOARD_FROM_SERVER: &str = "server side\r\nsecond line";
+
+/// `CF_UNICODETEXT` (MS-RDPECLIP 1.3.1.2).
+pub const CF_UNICODETEXT: u32 = 13;
+
+/// `CLIPRDR_HEADER.msgType` values the mock uses (MS-RDPECLIP 2.2.1).
+pub mod clip_msg {
+    /// `CB_MONITOR_READY`.
+    pub const MONITOR_READY: u16 = 0x0001;
+    /// `CB_FORMAT_LIST`.
+    pub const FORMAT_LIST: u16 = 0x0002;
+    /// `CB_FORMAT_LIST_RESPONSE`.
+    pub const FORMAT_LIST_RESPONSE: u16 = 0x0003;
+    /// `CB_FORMAT_DATA_REQUEST`.
+    pub const FORMAT_DATA_REQUEST: u16 = 0x0004;
+    /// `CB_FORMAT_DATA_RESPONSE`.
+    pub const FORMAT_DATA_RESPONSE: u16 = 0x0005;
+    /// `CB_CLIP_CAPS`.
+    pub const CLIP_CAPS: u16 = 0x0007;
+    /// `CB_RESPONSE_OK`.
+    pub const RESPONSE_OK: u16 = 0x0001;
+}
+
 /// How the mock answers the X.224 Connection Request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Negotiation {
@@ -139,6 +204,18 @@ pub enum SessionBehaviour {
     /// Answer licensing with `ERR_NO_LICENSE_SERVER`, which is a refusal the
     /// client must report as a sentence rather than carry on through.
     RefuseLicence,
+    /// The whole of phases 6 to 10, and then a virtual channel session
+    /// instead of a legacy bitmap: the drdynvc version handshake, the
+    /// graphics channel with one frame on it, and a clipboard exchange in
+    /// both directions.
+    ServeChannels,
+    /// The same, but the graphics frame is an EGFX message that decompresses
+    /// into bytes that are not EGFX commands.
+    ///
+    /// That is the shape a wrong row in the ZGFX literal token table produces
+    /// (`docs/RDP_SPEC_NOTES.md` §1.1), and the client has to report it
+    /// rather than draw whatever fell out.
+    ServeMalformedEgfx,
 }
 
 /// How the mock answers the MCS Connect Initial.
@@ -223,6 +300,43 @@ pub struct Recorded {
     pub finalization: Vec<u8>,
     /// Every fast path input event the client sent, in order.
     pub input_events: Vec<rdp_pdu::input::fastpath::FastPathInputEvent>,
+
+    // -- The virtual channels (MS-RDPEDYC, MS-RDPEGFX, MS-RDPECLIP) -------
+    /// The `Version` in the client's drdynvc Capabilities Response
+    /// (MS-RDPEDYC 2.2.1.2).
+    pub dvc_version: Option<u16>,
+    /// Every Create Response the client sent, as `(ChannelId,
+    /// CreationStatus)` (MS-RDPEDYC 2.2.2.2).
+    pub dvc_creations: Vec<(u32, i32)>,
+    /// The capability set versions in the client's
+    /// `RDPGFX_CAPS_ADVERTISE_PDU` (MS-RDPEGFX 2.2.2.18).
+    pub egfx_advertised: Vec<u32>,
+    /// Entries in the client's `RDPGFX_CACHE_IMPORT_OFFER_PDU`
+    /// (MS-RDPEGFX 2.2.2.16), and `None` until one arrives.
+    pub egfx_cache_offer: Option<usize>,
+    /// Every `RDPGFX_FRAME_ACKNOWLEDGE_PDU` the client sent
+    /// (MS-RDPEGFX 2.2.2.13).
+    pub frame_acks: Vec<FrameAck>,
+    /// True once the client has sent `CB_CLIP_CAPS` (MS-RDPECLIP 2.2.2.1).
+    pub clipboard_caps: bool,
+    /// The format ids of every `CB_FORMAT_LIST` the client sent, in order
+    /// (MS-RDPECLIP 2.2.3.1).
+    pub clipboard_formats: Vec<Vec<u32>>,
+    /// The text the client handed back in a `CB_FORMAT_DATA_RESPONSE`,
+    /// decoded from UTF-16LE with its terminator stripped
+    /// (MS-RDPECLIP 2.2.5.2).
+    pub clipboard_from_client: Option<String>,
+}
+
+/// One `RDPGFX_FRAME_ACKNOWLEDGE_PDU` (MS-RDPEGFX 2.2.2.13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameAck {
+    /// `queueDepth`: how many frames the client says are waiting to be shown.
+    pub queue_depth: u32,
+    /// `frameId`, the frame being acknowledged.
+    pub frame_id: u32,
+    /// `totalFramesDecoded`, a running count over the life of the channel.
+    pub total_frames_decoded: u32,
 }
 
 /// A running mock. Dropping it leaves the accept task to finish on its own.
@@ -512,7 +626,7 @@ async fn serve(
         // The client's next PDU is the Client Info (MS-RDPBCGR 2.2.1.11) and
         // this scenario does not answer it, so the client hangs up. Whatever
         // arrives is recorded so a test can assert the teardown was ordered.
-        return drain(&mut stream, &recorded).await;
+        return drain(&mut stream, &recorded, None).await;
     }
 
     // ---- Phase 6: the Client Info PDU -----------------------------------
@@ -531,7 +645,7 @@ async fn serve(
             );
             stream.write_all(&io_frame(&bye)).await?;
             stream.flush().await?;
-            return drain(&mut stream, &recorded).await;
+            return drain(&mut stream, &recorded, None).await;
         }
         _ => {
             // The one licensing answer a TLS session actually sees: "no
@@ -546,12 +660,16 @@ async fn serve(
     }
 
     // ---- Phase 9: the capability exchange -------------------------------
-    let capabilities = CapabilitySets::client_defaults(
+    // The server's own advertisement. `ClientCapabilitySupport` names the two
+    // optional sets from the client's side, and a server offering both is the
+    // case that proves the client removes what it cannot decode rather than
+    // relying on the server not to offer it.
+    let capabilities = CapabilitySets::client(
         SERVER_DESKTOP.0,
         SERVER_DESKTOP.1,
         SERVER_PDU_SOURCE,
         InputCapabilitySet::client(0x0409, 4, 0, 12),
-        false,
+        ClientCapabilitySupport::minimal().with_surface_commands(true),
     );
     let demand = SharePdu::DemandActive {
         pdu_source: SERVER_PDU_SOURCE,
@@ -607,7 +725,26 @@ async fn serve(
     }
     stream.flush().await?;
 
-    // ---- The live session: one bitmap update on the fast path -----------
+    // ---- The live session ------------------------------------------------
+    //
+    // Two shapes. The legacy one draws a bitmap on the fast path, which is
+    // what every scenario before the virtual channels used. The other opens
+    // drdynvc, runs the graphics channel and the clipboard, and never sends a
+    // legacy bitmap at all, which is what a Windows host with the graphics
+    // pipeline on actually does.
+    if matches!(
+        config.session,
+        SessionBehaviour::ServeChannels | SessionBehaviour::ServeMalformedEgfx
+    ) {
+        let mut script = ChannelScript::new(
+            &recorded,
+            config.session == SessionBehaviour::ServeMalformedEgfx,
+        )?;
+        script.open(&mut stream).await?;
+        return drain(&mut stream, &recorded, Some(&mut script)).await;
+    }
+
+    // ---- The legacy live session: one bitmap update on the fast path ----
     let bitmap = BitmapUpdate {
         rectangles: vec![BitmapData {
             dest: RectInclusive {
@@ -640,7 +777,7 @@ async fn serve(
     stream.write_all(&wire).await?;
     stream.flush().await?;
 
-    drain(&mut stream, &recorded).await
+    drain(&mut stream, &recorded, None).await
 }
 
 /// Read until the client hangs up, recording the input events and the
@@ -650,7 +787,11 @@ async fn serve(
 /// deliberately not shared with the client's: TPKT's first byte is version 3
 /// and a fast path header's low two bits are the action code, which is how
 /// MS-RDPBCGR 2.2.9.1.2 arranges for them to be told apart.
-async fn drain(stream: &mut TcpStream, recorded: &Arc<Mutex<Recorded>>) -> std::io::Result<()> {
+async fn drain(
+    stream: &mut TcpStream,
+    recorded: &Arc<Mutex<Recorded>>,
+    mut script: Option<&mut ChannelScript>,
+) -> std::io::Result<()> {
     use rdp_pdu::input::fastpath::FastPathInputPdu;
 
     loop {
@@ -672,10 +813,26 @@ async fn drain(stream: &mut TcpStream, recorded: &Arc<Mutex<Recorded>>) -> std::
                 .await?;
             let mut r = Reader::new(&frame);
             if let Ok(mut body) = x224::read_data_tpdu(&mut r) {
-                if let Ok(DomainMcsPdu::DisconnectProviderUltimatum { reason }) =
-                    DomainMcsPdu::decode(&mut body)
-                {
-                    recorded.lock().expect("not poisoned").client_disconnect = Some(reason);
+                match DomainMcsPdu::decode(&mut body) {
+                    Ok(DomainMcsPdu::DisconnectProviderUltimatum { reason }) => {
+                        recorded.lock().expect("not poisoned").client_disconnect = Some(reason);
+                    }
+                    // A virtual channel PDU. Without a script this is a
+                    // scenario that does not run the channels, and the PDU is
+                    // length prefixed so ignoring it cannot desynchronise the
+                    // mock's own framing.
+                    Ok(DomainMcsPdu::SendDataRequest {
+                        channel_id,
+                        payload,
+                        ..
+                    }) => {
+                        if let Some(script) = script.as_deref_mut() {
+                            script
+                                .channel_pdu(channel_id, payload.as_slice(), stream, recorded)
+                                .await?;
+                        }
+                    }
+                    _ => {}
                 }
             }
             continue;
@@ -775,4 +932,545 @@ fn expect_domain(frame: &[u8], recorded: &Arc<Mutex<Recorded>>) -> std::io::Resu
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The virtual channel scenario (MS-RDPEDYC, MS-RDPEGFX, MS-RDPECLIP)
+// ---------------------------------------------------------------------------
+
+/// The server half of a virtual channel session, driven by what the client
+/// says.
+///
+/// Reactive rather than scripted in a straight line, and that is the point: a
+/// real server answers what arrives, and a mock that wrote its side in a fixed
+/// order would deadlock the moment the client's ordering differed by one PDU.
+/// Each arm of [`ChannelScript::channel_pdu`] is one "when the client says X,
+/// answer Y", which is also how MS-RDPEDYC 1.3.1 and MS-RDPECLIP 1.3.2.1
+/// describe the two sequences.
+pub struct ChannelScript {
+    drdynvc_id: u16,
+    cliprdr_id: u16,
+    /// Send an EGFX message that decompresses into nonsense instead of a
+    /// frame, for the ZGFX failure mode (`docs/RDP_SPEC_NOTES.md` §1.1).
+    malformed_egfx: bool,
+    /// Partial static channel messages, per channel id. Everything the client
+    /// sends here fits one 1600 byte chunk, but reassembling anyway is what
+    /// makes the mock's framing independent of that assumption.
+    partial: std::collections::HashMap<u16, Vec<u8>>,
+    /// Whether the mock has already offered its own clipboard formats, so a
+    /// second format list from the client does not start the exchange again.
+    offered_clipboard: bool,
+}
+
+impl ChannelScript {
+    /// Work out which MCS channel ids the joins gave `drdynvc` and `cliprdr`.
+    ///
+    /// The mock allocated them in the order the client asked for them
+    /// (see `read_connect_initial`), so the name's position in
+    /// `TS_UD_CS_NET` is the offset from [`FIRST_VIRTUAL_CHANNEL_ID`].
+    fn new(recorded: &Arc<Mutex<Recorded>>, malformed_egfx: bool) -> std::io::Result<Self> {
+        let id = |name: &str| -> std::io::Result<u16> {
+            let rec = recorded.lock().expect("not poisoned");
+            let index = rec
+                .client_blocks
+                .as_ref()
+                .and_then(|b| b.network.as_ref())
+                .and_then(|n| n.channels.iter().position(|c| c.name == name))
+                .ok_or_else(|| {
+                    std::io::Error::other(format!("the client did not ask for {name}"))
+                })?;
+            Ok(FIRST_VIRTUAL_CHANNEL_ID + index as u16)
+        };
+        Ok(Self {
+            drdynvc_id: id("drdynvc")?,
+            cliprdr_id: id("cliprdr")?,
+            malformed_egfx,
+            partial: std::collections::HashMap::new(),
+            offered_clipboard: false,
+        })
+    }
+
+    /// Open both channels: the drdynvc version handshake and the clipboard's
+    /// `CB_MONITOR_READY`.
+    ///
+    /// Both are the server's first word on their channel
+    /// (MS-RDPEDYC 1.3.1, MS-RDPECLIP 1.3.2.1).
+    async fn open(&mut self, stream: &mut TcpStream) -> std::io::Result<()> {
+        self.send_dvc(
+            stream,
+            &DvcPdu::Capabilities {
+                version: dvc_version::V3,
+                priority_charges: Some([0, 0, 0, 0]),
+            },
+        )
+        .await?;
+        self.send_clip(stream, clip_msg::MONITOR_READY, 0, &[])
+            .await
+    }
+
+    /// One MCS Send Data Request on a virtual channel.
+    async fn channel_pdu(
+        &mut self,
+        channel_id: u16,
+        payload: &[u8],
+        stream: &mut TcpStream,
+        recorded: &Arc<Mutex<Recorded>>,
+    ) -> std::io::Result<()> {
+        let Some(message) = self.reassemble(channel_id, payload)? else {
+            return Ok(());
+        };
+        if channel_id == self.drdynvc_id {
+            self.drdynvc(&message, stream, recorded).await
+        } else if channel_id == self.cliprdr_id {
+            self.cliprdr(&message, stream, recorded).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The static channel layer: `CHANNEL_PDU_HEADER` and its chunks
+    /// (MS-RDPBCGR 2.2.6.1).
+    fn reassemble(&mut self, channel_id: u16, payload: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+        let mut r = Reader::new(payload);
+        let header = ChannelPduHeader::decode(&mut r).map_err(std::io::Error::other)?;
+        let chunk = r.rest();
+        if header.is_first() && header.is_last() {
+            return Ok(Some(chunk.to_vec()));
+        }
+        let buf = self.partial.entry(channel_id).or_default();
+        if header.is_first() {
+            buf.clear();
+        }
+        buf.extend_from_slice(chunk);
+        if header.is_last() {
+            return Ok(Some(std::mem::take(buf)));
+        }
+        Ok(None)
+    }
+
+    /// One drdynvc PDU from the client (MS-RDPEDYC 2.2).
+    async fn drdynvc(
+        &mut self,
+        message: &[u8],
+        stream: &mut TcpStream,
+        recorded: &Arc<Mutex<Recorded>>,
+    ) -> std::io::Result<()> {
+        // `DYNVC_CREATE` is the one PDU whose two directions share a `Cmd`:
+        // a Create Request is a NUL terminated name and a Create Response is
+        // four bytes of `CreationStatus`, and nothing on the wire tells them
+        // apart (MS-RDPEDYC 2.2.2.1, 2.2.2.2). `DvcPdu::decode` is written for
+        // the client, which only ever receives requests, and says so
+        // (`crates/rdp-pdu/src/vc/dvc.rs:407`). The mock is the other end, so
+        // it reads this one by hand rather than being handed a
+        // `CreateRequest` with an empty name.
+        if let Some(response) = read_create_response(message) {
+            recorded
+                .lock()
+                .expect("not poisoned")
+                .dvc_creations
+                .push(response);
+            return Ok(());
+        }
+        match DvcPdu::decode(&mut Reader::new(message)).map_err(std::io::Error::other)? {
+            DvcPdu::Capabilities { version, .. } => {
+                recorded.lock().expect("not poisoned").dvc_version = Some(version);
+                // The version is settled, so the graphics channel can be
+                // opened (MS-RDPEDYC 1.3.1).
+                self.send_dvc(
+                    stream,
+                    &DvcPdu::CreateRequest {
+                        channel_id: EGFX_DVC_CHANNEL_ID,
+                        channel_name: "Microsoft::Windows::RDS::Graphics".to_owned(),
+                    },
+                )
+                .await
+            }
+            DvcPdu::Data {
+                channel_id, data, ..
+            } if channel_id == EGFX_DVC_CHANNEL_ID => {
+                self.egfx(data.as_slice(), stream, recorded).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// One EGFX message from the client: the envelope, then its commands
+    /// (MS-RDPEGFX 2.2.5.1, 2.2.1.5).
+    async fn egfx(
+        &mut self,
+        message: &[u8],
+        stream: &mut TcpStream,
+        recorded: &Arc<Mutex<Recorded>>,
+    ) -> std::io::Result<()> {
+        // The client sends the literal form, so the mock reads the envelope
+        // rather than decompressing: there is no ZGFX compressor in the tree
+        // and a client to server message is never compressed.
+        let segmented =
+            Segmented::decode(&mut Reader::new(message)).map_err(std::io::Error::other)?;
+        let Segmented::Literal { data, .. } = segmented else {
+            return Err(std::io::Error::other(
+                "the client compressed an EGFX message, which it never should",
+            ));
+        };
+        for item in EgfxPdu::iter(data.as_slice()) {
+            match item.map_err(std::io::Error::other)? {
+                EgfxPdu::CapsAdvertise { capsets } => {
+                    recorded.lock().expect("not poisoned").egfx_advertised =
+                        capsets.iter().map(|c| c.version).collect();
+                    // Confirm the highest set the client offered, which is
+                    // what a server does (MS-RDPEGFX 3.3.5.2).
+                    let confirmed = capsets
+                        .iter()
+                        .map(|c| c.version)
+                        .max()
+                        .unwrap_or(caps_version::V8);
+                    self.send_egfx(
+                        stream,
+                        &[EgfxPdu::CapsConfirm {
+                            capset: Capset::new(confirmed, &[0, 0, 0, 0]),
+                        }],
+                    )
+                    .await?;
+                }
+                EgfxPdu::CacheImportOffer { entries } => {
+                    recorded.lock().expect("not poisoned").egfx_cache_offer = Some(entries.len());
+                    // The offer is the last thing in the opening exchange, so
+                    // this is where the picture starts.
+                    self.send_egfx(
+                        stream,
+                        &[EgfxPdu::CacheImportReply {
+                            cache_slots: Vec::new(),
+                        }],
+                    )
+                    .await?;
+                    if self.malformed_egfx {
+                        self.send_malformed_egfx(stream).await?;
+                    } else {
+                        self.send_frame(stream).await?;
+                    }
+                }
+                EgfxPdu::FrameAcknowledge {
+                    queue_depth,
+                    frame_id,
+                    total_frames_decoded,
+                } => {
+                    recorded
+                        .lock()
+                        .expect("not poisoned")
+                        .frame_acks
+                        .push(FrameAck {
+                            queue_depth,
+                            frame_id,
+                            total_frames_decoded,
+                        });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// One whole frame: a surface, its output mapping, and one rectangle
+    /// between a `START_FRAME` and an `END_FRAME` (MS-RDPEGFX 3.3.5.6).
+    async fn send_frame(&mut self, stream: &mut TcpStream) -> std::io::Result<()> {
+        let dest = RectExclusive {
+            left: EGFX_DRAW_AT.0,
+            top: EGFX_DRAW_AT.1,
+            right: EGFX_DRAW_AT.0 + 2,
+            bottom: EGFX_DRAW_AT.1 + 1,
+        };
+        self.send_egfx(
+            stream,
+            &[
+                EgfxPdu::CreateSurface {
+                    surface_id: EGFX_SURFACE_ID,
+                    width: EGFX_SURFACE_SIZE.0,
+                    height: EGFX_SURFACE_SIZE.1,
+                    pixel_format: pixel_format::XRGB_8888,
+                },
+                EgfxPdu::MapSurfaceToOutput {
+                    surface_id: EGFX_SURFACE_ID,
+                    reserved: 0,
+                    output_origin_x: EGFX_SURFACE_AT.0,
+                    output_origin_y: EGFX_SURFACE_AT.1,
+                },
+                EgfxPdu::StartFrame {
+                    timestamp: 0x0001_0203,
+                    frame_id: EGFX_FRAME_ID,
+                },
+                EgfxPdu::WireToSurface1 {
+                    surface_id: EGFX_SURFACE_ID,
+                    codec_id: codec_id::UNCOMPRESSED,
+                    pixel_format: pixel_format::XRGB_8888,
+                    dest_rect: dest,
+                    bitmap_data: Payload::new(EGFX_PIXELS),
+                },
+                EgfxPdu::EndFrame {
+                    frame_id: EGFX_FRAME_ID,
+                },
+            ],
+        )
+        .await
+    }
+
+    /// A well formed envelope holding bytes that are not EGFX commands.
+    ///
+    /// This is what a wrong row in the ZGFX literal token table produces: the
+    /// decompression succeeds and what falls out has a `cmdId` or a
+    /// `pduLength` that does not parse (`docs/RDP_SPEC_NOTES.md` §1.1). The
+    /// `pduLength` here claims 65,535 bytes and eight are present.
+    async fn send_malformed_egfx(&mut self, stream: &mut TcpStream) -> std::io::Result<()> {
+        let mut body = vec![0xE0, 0x04];
+        body.extend_from_slice(&0x000B_u16.to_le_bytes()); // RDPGFX_CMDID_STARTFRAME
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0xFFFF_u32.to_le_bytes());
+        self.send_dvc(
+            stream,
+            &DvcPdu::Data {
+                channel_id: EGFX_DVC_CHANNEL_ID,
+                data: Payload::new(&body),
+                compressed: false,
+            },
+        )
+        .await
+    }
+
+    /// One `cliprdr` PDU from the client (MS-RDPECLIP 2.2.1).
+    async fn cliprdr(
+        &mut self,
+        message: &[u8],
+        stream: &mut TcpStream,
+        recorded: &Arc<Mutex<Recorded>>,
+    ) -> std::io::Result<()> {
+        let mut r = Reader::new(message);
+        let msg_type = r.u16("msgType").map_err(std::io::Error::other)?;
+        let _flags = r.u16("msgFlags").map_err(std::io::Error::other)?;
+        let len = r.u32("dataLen").map_err(std::io::Error::other)? as usize;
+        let body = r.rest().get(..len).unwrap_or(&[]).to_vec();
+
+        match msg_type {
+            clip_msg::CLIP_CAPS => {
+                recorded.lock().expect("not poisoned").clipboard_caps = true;
+                self.send_clip(stream, clip_msg::CLIP_CAPS, 0, &general_capability())
+                    .await
+            }
+            clip_msg::FORMAT_LIST => {
+                let ids = long_format_ids(&body);
+                let has_text = ids.contains(&CF_UNICODETEXT);
+                recorded
+                    .lock()
+                    .expect("not poisoned")
+                    .clipboard_formats
+                    .push(ids);
+                // The response is mandatory: a server thread waiting on it
+                // hangs copy and paste for every application on the desktop
+                // (MS-RDPECLIP 3.1.5.2.4).
+                self.send_clip(
+                    stream,
+                    clip_msg::FORMAT_LIST_RESPONSE,
+                    clip_msg::RESPONSE_OK,
+                    &[],
+                )
+                .await?;
+                if !self.offered_clipboard {
+                    // Our own formats, so the client can raise a notify.
+                    self.offered_clipboard = true;
+                    self.send_clip(
+                        stream,
+                        clip_msg::FORMAT_LIST,
+                        0,
+                        &unicode_text_format_list(),
+                    )
+                    .await?;
+                }
+                if has_text {
+                    // The client has text: pull it, which is what a paste on
+                    // the server side does (MS-RDPECLIP 1.3.2.2).
+                    self.send_clip(
+                        stream,
+                        clip_msg::FORMAT_DATA_REQUEST,
+                        0,
+                        &CF_UNICODETEXT.to_le_bytes(),
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            clip_msg::FORMAT_DATA_REQUEST => {
+                self.send_clip(
+                    stream,
+                    clip_msg::FORMAT_DATA_RESPONSE,
+                    clip_msg::RESPONSE_OK,
+                    &utf16_nul(CLIPBOARD_FROM_SERVER),
+                )
+                .await
+            }
+            clip_msg::FORMAT_DATA_RESPONSE => {
+                recorded.lock().expect("not poisoned").clipboard_from_client =
+                    Some(from_utf16_nul(&body));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Wrap one drdynvc PDU and put it on the wire.
+    async fn send_dvc(&self, stream: &mut TcpStream, pdu: &DvcPdu<'_>) -> std::io::Result<()> {
+        let body = encoded(pdu);
+        stream
+            .write_all(&channel_frame(self.drdynvc_id, &body))
+            .await?;
+        stream.flush().await
+    }
+
+    /// Wrap a sequence of EGFX commands in an uncompressed `RDP_SEGMENTED_DATA`
+    /// envelope, then in a `DYNVC_DATA`, and put it on the wire.
+    ///
+    /// The envelope is descriptor `SINGLE` (0xE0) then a flags byte of
+    /// `PACKET_COMPR_TYPE_RDP8` with `PACKET_COMPRESSED` clear (0x04). That is
+    /// a real envelope and the client's `rdp_codecs::zgfx` entry point walks
+    /// it; what it does not exercise is the token table, because there is no
+    /// ZGFX compressor in the tree to build a compressed fixture with.
+    async fn send_egfx(&self, stream: &mut TcpStream, pdus: &[EgfxPdu<'_>]) -> std::io::Result<()> {
+        let mut body = vec![0xE0, 0x04];
+        for pdu in pdus {
+            body.extend_from_slice(&encoded(pdu));
+        }
+        self.send_dvc(
+            stream,
+            &DvcPdu::Data {
+                channel_id: EGFX_DVC_CHANNEL_ID,
+                data: Payload::new(&body),
+                compressed: false,
+            },
+        )
+        .await
+    }
+
+    /// Frame one `cliprdr` message and put it on the wire
+    /// (MS-RDPECLIP 2.2.1).
+    async fn send_clip(
+        &self,
+        stream: &mut TcpStream,
+        msg_type: u16,
+        flags: u16,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        let mut pdu = Vec::with_capacity(8 + body.len());
+        let mut w = Writer::new(&mut pdu);
+        w.u16(msg_type);
+        w.u16(flags);
+        w.u32(body.len() as u32);
+        w.bytes(body);
+        stream
+            .write_all(&channel_frame(self.cliprdr_id, &pdu))
+            .await?;
+        stream.flush().await
+    }
+}
+
+/// A client `DYNVC_CREATE` read as a Create Response: the header, the channel
+/// id at the width `cbId` names, then a four byte `CreationStatus`
+/// (MS-RDPEDYC 2.2.2.2).
+///
+/// Returns `None` for anything that is not a `DYNVC_CREATE` or that does not
+/// have exactly a status behind the channel id, which is what a Create
+/// Request looks like.
+fn read_create_response(message: &[u8]) -> Option<(u32, i32)> {
+    let mut r = Reader::new(message);
+    let header = DvcHeader::from_u8(r.u8("DYNVC header").ok()?);
+    if header.cmd != dvc_cmd::CREATE {
+        return None;
+    }
+    let channel_id = read_channel_id(&mut r, header.cb_id, "DYNVC_CREATE ChannelId").ok()?;
+    let status = r.u32("DYNVC_CREATE CreationStatus").ok()?;
+    r.is_empty().then_some((channel_id, status as i32))
+}
+
+/// One whole channel PDU in a single `CHANNEL_PDU_HEADER` chunk, inside an MCS
+/// Send Data Indication (MS-RDPBCGR 2.2.6.1).
+///
+/// Everything the mock sends fits one chunk. A client that only handled the
+/// single chunk case would still pass here, which is why
+/// `crate::channels::tests` drives the multi chunk path separately.
+fn channel_frame(channel_id: u16, body: &[u8]) -> Vec<u8> {
+    let header = ChannelPduHeader {
+        length: body.len() as u32,
+        flags: channel_flags::FIRST | channel_flags::LAST,
+    };
+    let mut payload = Vec::with_capacity(ChannelPduHeader::LEN + body.len());
+    header
+        .encode(&mut Writer::new(&mut payload))
+        .expect("the mock encodes what the client parses");
+    payload.extend_from_slice(body);
+    domain_frame(&DomainMcsPdu::SendDataIndication {
+        initiator: SERVER_PDU_SOURCE,
+        channel_id,
+        payload: Payload::new(&payload),
+    })
+}
+
+/// `CLIPRDR_CAPS` holding one `CLIPRDR_GENERAL_CAPABILITY` that agrees long
+/// format names (MS-RDPECLIP 2.2.2.1.1.1).
+fn general_capability() -> Vec<u8> {
+    let mut body = Vec::new();
+    let mut w = Writer::new(&mut body);
+    w.u16(1); // cCapabilitiesSets
+    w.u16(0); // pad1
+    w.u16(0x0001); // CB_CAPSTYPE_GENERAL
+    w.u16(12); // lengthCapability
+    w.u32(0x0000_0002); // CB_CAPS_VERSION_2
+    w.u32(0x0000_0002); // CB_USE_LONG_FORMAT_NAMES
+    body
+}
+
+/// A long form `CLIPRDR_FORMAT_LIST` offering `CF_UNICODETEXT` and nothing
+/// else (MS-RDPECLIP 2.2.3.1.2). A standard format has no name, so the name is
+/// the two byte UTF-16 terminator.
+fn unicode_text_format_list() -> Vec<u8> {
+    let mut body = Vec::new();
+    let mut w = Writer::new(&mut body);
+    w.u32(CF_UNICODETEXT);
+    w.u16(0);
+    body
+}
+
+/// The format ids in a long form `CLIPRDR_FORMAT_LIST`
+/// (MS-RDPECLIP 2.2.3.1.2).
+fn long_format_ids(body: &[u8]) -> Vec<u32> {
+    let mut ids = Vec::new();
+    let mut r = Reader::new(body);
+    while r.remaining() >= 4 {
+        let Ok(id) = r.u32("formatId") else { break };
+        ids.push(id);
+        loop {
+            match r.u16("formatName") {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => return ids,
+            }
+        }
+    }
+    ids
+}
+
+/// UTF-16LE with a NUL terminator, which is what `CF_UNICODETEXT` is
+/// (MS-RDPECLIP 2.2.5.2).
+fn utf16_nul(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() * 2 + 2);
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// The inverse of [`utf16_nul`].
+fn from_utf16_nul(body: &[u8]) -> String {
+    let units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|u| *u != 0)
+        .collect();
+    String::from_utf16_lossy(&units)
 }
