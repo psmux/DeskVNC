@@ -34,7 +34,14 @@ pub enum GssStep {
 /// advances a sequence number and an RC4 keystream. A `&self` signature would
 /// be a lie and would let a caller reorder two wraps without a compiler
 /// complaint.
-pub trait GssMechanism {
+/// `Send` is a supertrait because the session that drives a mechanism lives in
+/// a `tokio::spawn`ed task, and a future holding a `Box<dyn GssMechanism>`
+/// across an await is only `Send` if the box is (`rdp-core`
+/// `connection/nla.rs`, which spawns the session task). Nothing here is
+/// `Sync`: `wrap`, `unwrap`, `mic` and `verify_mic` all advance a sequence
+/// number and an RC4 keystream, so two threads holding one at once would be a
+/// bug whatever the compiler said.
+pub trait GssMechanism: Send {
     /// The DER-encoded OBJECT IDENTIFIER, contents only, for SPNEGO's
     /// mechTypes list (MS-SPNG, RFC 4178).
     fn oid(&self) -> &'static [u8];
