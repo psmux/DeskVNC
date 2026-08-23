@@ -10,6 +10,67 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-23
+
+### Added
+
+- **The floating toolbar can be switched off, and the app menu carries
+  everything it did.** Preferences ▸ Session has a "Hide the floating
+  toolbar" switch for anyone who would rather have nothing at all on top of
+  the remote desktop. The View and Session menus grew to cover the whole bar
+  first: scaling and zoom, the monitor list, pointer options, quality and
+  gray levels, view only, shortcut pass-through and the send-to-remote
+  chords, clipboard, file transfer, screenshot, refresh, and a Connection
+  Info dialog with the latency and throughput figures the status button used
+  to show. The menu is live rather than decorative, it shows which scaling
+  mode, quality preset and monitor are actually in force, follows whichever
+  session is in front, and greys the session half out when nothing is
+  connected. The zoom items deliberately carry no keyboard shortcuts:
+  a menu accelerator is claimed by the OS before the webview sees it, so
+  Cmd/Ctrl+= and Cmd/Ctrl+- would have been stolen from every remote
+  application for the life of the app.
+- **Preferences ▸ Session sets the defaults for every toolbar option.**
+  Scaling, quality, gray levels, view only, always-request-fresh-frames,
+  shortcut pass-through, zoom lock and edge panning all have a global default
+  now, which is where a computer starts before anything has been adjusted on
+  it. "My pointer" joined "Show the remote pointer" under Input.
+
+### Fixed
+
+- **The chosen monitor is remembered, and no longer thrown away by a
+  reconnect.** Picking a monitor is now kept against that computer, through a
+  disconnect, a reconnect, and closing the app. It survived none of those
+  before, and the reconnect case was not really about persistence: the
+  selection was cleared the instant its id was missing from the list of
+  monitors, and a reconnect arrives with an empty list before the server
+  describes itself again, so the choice was dropped in the gap and never came
+  back. The selection is now derived from a remembered intent rather than
+  stored as an applied id, so a list that momentarily matches nothing shows
+  the whole desktop and the monitor returns with the layout. Matching is by
+  identity where there is one (a server's own screen id, or the detected
+  left/right pair, which is followed even when the seam moves by a pixel
+  between runs) and by rectangle otherwise, so a manual cut is never carried
+  onto a desktop of another size where its id would mean a different piece of
+  the screen.
+- **"Always request fresh frames" never did anything.** `set_always_refresh`
+  was wired up as a command and called by the toolbar, but was missing from
+  the permission manifest and from both capability files, so every call was
+  refused with "Command not found" and the switch moved without changing the
+  session. It is allowed from the library and session windows now.
+- **Menu items could act twice on one click.** The `menu://action` listeners
+  resolved a turn after the effect that registered them, so a cleanup that had
+  already run left the unsubscribe function to be assigned after the fact and
+  the listener stayed registered for good; every re-run added another. It went
+  unnoticed while the menu held only one-way actions, and would have made
+  every new toggle a no-op, applied once by each listener and landing back
+  where it started.
+- **Everything else the toolbar changes is remembered too**, per computer:
+  scaling mode, zoom, quality preset, gray levels, view only,
+  always-request-fresh-frames and shortcut pass-through. Pass-through is
+  re-armed quietly on reconnect, without raising the Accessibility explainer
+  on its own. Ending a session no longer counts as switching pass-through
+  off, which is what used to erase that setting on every disconnect.
+
 ## [0.10.0] - 2026-08-17
 
 ### Added
@@ -803,7 +864,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/psmux/DeskVNC/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/psmux/DeskVNC/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/psmux/DeskVNC/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/psmux/DeskVNC/compare/v0.8.2...v0.9.0
