@@ -37,6 +37,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - A `legacy-tls` build feature carrying a vendored OpenSSL, off by default and
   with its handshake still stubbed. It exists now so that a toolchain problem
   surfaces while nothing depends on it.
+- The wire layer now covers every PDU the first two phases need: the client
+  info and licensing exchange, twenty five capability sets in both directions,
+  connection finalisation, and the per frame traffic in both the slow and the
+  fast path. A fast path update that arrives in one fragment is handed onward
+  as a borrow of the receive buffer rather than a copy.
+- Network Level Authentication, end to end. CredSSP and SPNEGO over the
+  NTLMv2 that landed earlier, including the public key exchange that is what
+  actually stops a machine in the middle from reading the session. A key that
+  does not match the one we sent is refused, and that refusal is a test.
+- The RDP session itself: transport, the connection state machine, the session
+  and writer tasks, and the driver the shell will look up in its registry. It
+  reaches the end of MCS channel connection against a mock server. Everything
+  past that point returns an error naming the phase rather than pretending.
+- Pixel conversion gained stride, row order and destination channel order, so a
+  rectangle can be written straight into a larger framebuffer with no second
+  copy, and both protocols share one implementation instead of two that drift.
 
 ### Changed
 
@@ -53,7 +69,11 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   from the lockfile up.
 - Every new decoder is fed bytes controlled by a remote peer, so every one has
   a test asserting that a truncated input returns an error rather than
-  panicking, for every possible prefix.
+  panicking, for every possible prefix. The codec decoders now also have fuzz
+  targets driven from raw bytes.
+- RDP certificates are pinned under their own scheme rather than sharing the
+  VNC one. A host can serve both protocols with unrelated certificates, and a
+  shared row would have let one vouch for the other.
 
 ## [0.12.0] - 2026-08-23
 
