@@ -87,3 +87,17 @@ path = "fuzz_targets/fuzz_zgfx.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_avc420"
+path = "fuzz_targets/fuzz_avc420.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mppc"
+path = "fuzz_targets/fuzz_mppc.rs"
+test = false
+doc = false
+bench = false
