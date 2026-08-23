@@ -152,6 +152,28 @@ impl ControlPdu {
         }
     }
 
+    /// Server Control (Granted Control) (MS-RDPBCGR 2.2.1.16.1).
+    ///
+    /// The server to client half of the exchange, and the only one of the
+    /// three this client never sends: it is here so the mock server of
+    /// PRDRDP/09 §3 builds one by name instead of filling the three public
+    /// fields by hand, which is how a `grantId` and a `controlId` get
+    /// swapped.
+    ///
+    /// `grant_id` is the client's user channel id, taken from the MCS Attach
+    /// User Confirm, and `control_id` is the server's own channel id. The
+    /// client checks neither, which is why they are parameters rather than
+    /// constants: the specification gives 0x03EA as the usual `controlId` and
+    /// a server is free to send another.
+    #[must_use]
+    pub const fn granted_control(grant_id: u16, control_id: u32) -> Self {
+        Self {
+            action: control_action::GRANTED_CONTROL,
+            grant_id,
+            control_id,
+        }
+    }
+
     /// True for the Granted Control that ends the control exchange.
     #[must_use]
     pub const fn is_granted(&self) -> bool {
@@ -470,11 +492,21 @@ mod tests {
         assert!(!cooperate.is_granted());
 
         // The server's Granted Control, which carries our user id.
-        let granted = ControlPdu {
-            action: control_action::GRANTED_CONTROL,
-            grant_id: 0x03ea,
-            control_id: 0x0000_03ea,
-        };
+        let granted = ControlPdu::granted_control(0x03ea, 0x0000_03ea);
+        assert_eq!(
+            granted,
+            ControlPdu {
+                action: control_action::GRANTED_CONTROL,
+                grant_id: 0x03ea,
+                control_id: 0x0000_03ea,
+            }
+        );
+        // `action` 0x0002, `grantId` 0x03EA, `controlId` 0x000003EA, all
+        // little endian: 02 00 | ea 03 | ea 03 00 00.
+        assert_eq!(
+            encode(&granted),
+            [0x02, 0x00, 0xea, 0x03, 0xea, 0x03, 0x00, 0x00]
+        );
         let bytes = encode(&granted);
         assert_eq!(
             ControlPdu::decode(&mut Reader::new(&bytes)).unwrap(),

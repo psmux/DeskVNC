@@ -1701,14 +1701,17 @@ impl MultifragmentUpdateCapabilitySet {
     ///
     /// PRDRDP/13 §4.8.3 says two things about this number that cannot both
     /// hold: "we send 8 * 1024 * 1024" and "the value we advertise is the
-    /// value `MAX_VC_REASSEMBLED` enforces", where that cap is 16 MiB. The
-    /// second is the one that matters, because advertising a budget larger
-    /// than the one we enforce invites an update we then refuse, so this is
-    /// [`MAX_VC_REASSEMBLED`](crate::io::limits::MAX_VC_REASSEMBLED).
+    /// value the reassembler enforces", which is 16 MiB. The second is the
+    /// one that matters, because advertising a budget larger than the one we
+    /// enforce invites an update we then refuse, so this is
+    /// [`MAX_FASTPATH_REASSEMBLED`](crate::io::limits::MAX_FASTPATH_REASSEMBLED),
+    /// the same constant
+    /// [`FastPathReassembler`](crate::update::fastpath::FastPathReassembler)
+    /// checks against.
     #[must_use]
     pub const fn client() -> Self {
         Self {
-            max_request_size: crate::io::limits::MAX_VC_REASSEMBLED as u32,
+            max_request_size: crate::io::limits::MAX_FASTPATH_REASSEMBLED as u32,
         }
     }
 }
@@ -2599,6 +2602,78 @@ impl<'a> Decode<'a> for CapabilitySet<'a> {
     }
 }
 
+/// What the client can actually consume, which decides which optional
+/// capability sets [`CapabilitySets::client`] advertises.
+///
+/// The two fields here are the two sets whose presence changes what a server
+/// sends rather than only what it permits. Everything else in §4.8.3 is
+/// either mandatory or harmless to advertise, which is why this is a small
+/// struct of named booleans and not a flag word: a caller writes
+/// `surface_commands: false` and the reason is on the page.
+///
+/// A set added here later is a set whose absence a server acts on. Anything
+/// else belongs in PRDRDP/04 §8.2's policy layer, which may replace any set
+/// after this function has built it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientCapabilitySupport {
+    /// Whether to ask for desktop composition (`CAPSETTYPE_COMPDESK`,
+    /// MS-RDPBCGR 2.2.7.2.8).
+    ///
+    /// The aero glass effect. It costs bandwidth for a translucency the user
+    /// cannot interact with, so PRDRDP/04 §9.2 turns it on only for the High
+    /// quality preset. Unlike the other field this one is a level rather than
+    /// a presence: the set goes out either way, carrying
+    /// `COMPDESK_NOT_SUPPORTED` when this is false.
+    pub desktop_composition: bool,
+
+    /// Whether the caller decodes surface commands (`CAPSETTYPE_SURFACE_COMMANDS`,
+    /// MS-RDPBCGR 2.2.7.2.9).
+    ///
+    /// A server that reads `CMDTYPE_SET_SURFACE_BITS` draws with Surface Bits
+    /// commands instead of Bitmap Updates. Set this false in a build that
+    /// decodes no surface command and the set is left out entirely, so the
+    /// server keeps sending Bitmap Updates.
+    pub surface_commands: bool,
+}
+
+impl ClientCapabilitySupport {
+    /// Neither optional set: Bitmap Updates only, no desktop composition.
+    ///
+    /// The honest starting point for a build that decodes the slow path and
+    /// the fast path and nothing else.
+    #[must_use]
+    pub const fn minimal() -> Self {
+        Self {
+            desktop_composition: false,
+            surface_commands: false,
+        }
+    }
+
+    /// The same, asking for desktop composition.
+    #[must_use]
+    pub const fn with_desktop_composition(self, enabled: bool) -> Self {
+        Self {
+            desktop_composition: enabled,
+            ..self
+        }
+    }
+
+    /// The same, declaring that the caller decodes surface commands.
+    #[must_use]
+    pub const fn with_surface_commands(self, enabled: bool) -> Self {
+        Self {
+            surface_commands: enabled,
+            ..self
+        }
+    }
+}
+
+impl Default for ClientCapabilitySupport {
+    fn default() -> Self {
+        Self::minimal()
+    }
+}
+
 /// The capability sets of one Demand Active or Confirm Active PDU.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CapabilitySets<'a> {
@@ -2649,6 +2724,16 @@ impl<'a> CapabilitySets<'a> {
         self.sets
             .iter()
             .find(|set| set.capability_set_type() == set_type)
+    }
+
+    /// The Surface Commands set, if it was advertised at all.
+    ///
+    /// [`CapabilitySets::client`] leaves it out when the caller says it
+    /// decodes no surface command, so [`None`] here on our own sets means
+    /// "we did not ask for it" and not "we forgot".
+    #[must_use]
+    pub fn has_surface_commands(&self) -> bool {
+        self.find(capability_set_type::SURFACE_COMMANDS).is_some()
     }
 
     /// The General set, which carries the fast path output flag the update
@@ -2714,10 +2799,48 @@ impl<'a> CapabilitySets<'a> {
     /// Input set echoes `TS_UD_CS_CORE` and the session already holds that
     /// block; [`InputCapabilitySet::client`] builds it.
     ///
-    /// PRDRDP/04 §8.2 owns the policy and may replace any of these before the
-    /// PDU is sent; this is the list that matches what §4.8.3 states, in the
-    /// order mstsc sends it. Bitmap Codecs is not here: it is phase 2 and its
-    /// property blobs have to outlive this call, so the session appends it.
+    /// `support` is what the caller can actually consume. A capability set is
+    /// a promise: a server that reads `CMDTYPE_SET_SURFACE_BITS` draws with
+    /// Surface Bits commands instead of Bitmap Updates, so advertising it in
+    /// a build that decodes no surface command means asking for pixels we
+    /// then throw away. PRDRDP/04 §9.3 is the rule: the allow list is
+    /// enforced at negotiation and not only at dispatch. Absence is the
+    /// specification's way of saying "not supported", which is why an
+    /// unsupported set is left out rather than sent with a zero flag word:
+    /// some servers read a zero `cmdFlags` as a client that still supports
+    /// the frame marker.
+    ///
+    /// PRDRDP/04 §8.2 owns the rest of the policy and may replace any of
+    /// these before the PDU is sent; this is the list that matches what
+    /// §4.8.3 states, in the order mstsc sends it. Bitmap Codecs is not here:
+    /// it is phase 2 and its property blobs have to outlive this call, so the
+    /// session appends it.
+    #[must_use]
+    pub fn client(
+        desktop_width: u16,
+        desktop_height: u16,
+        node_id: u16,
+        input: InputCapabilitySet,
+        support: ClientCapabilitySupport,
+    ) -> Self {
+        let mut sets =
+            Self::all_client_sets(desktop_width, desktop_height, node_id, input, support);
+        if !support.surface_commands {
+            sets.sets
+                .retain(|set| set.capability_set_type() != capability_set_type::SURFACE_COMMANDS);
+        }
+        sets
+    }
+
+    /// The sets a Confirm Active carries in phase 1, with Surface Commands
+    /// always advertised.
+    ///
+    /// **Seam.** Superseded by [`CapabilitySets::client`], which takes a
+    /// [`ClientCapabilitySupport`] instead of a lone `desktop_composition`
+    /// flag. This name stays only while `rdp-core` moves its two call sites
+    /// across, because it is called from another crate as this is written;
+    /// once it does, this function and the hand written
+    /// `retain(|set| ... != SURFACE_COMMANDS)` that follows it there both go.
     #[must_use]
     pub fn client_defaults(
         desktop_width: u16,
@@ -2726,6 +2849,28 @@ impl<'a> CapabilitySets<'a> {
         input: InputCapabilitySet,
         desktop_composition: bool,
     ) -> Self {
+        Self::client(
+            desktop_width,
+            desktop_height,
+            node_id,
+            input,
+            ClientCapabilitySupport {
+                desktop_composition,
+                surface_commands: true,
+            },
+        )
+    }
+
+    /// Every set of §4.8.3 in mstsc's order, before `support` removes the
+    /// ones this build cannot consume.
+    fn all_client_sets(
+        desktop_width: u16,
+        desktop_height: u16,
+        node_id: u16,
+        input: InputCapabilitySet,
+        support: ClientCapabilitySupport,
+    ) -> Self {
+        let desktop_composition = support.desktop_composition;
         Self {
             sets: vec![
                 CapabilitySet::General(GeneralCapabilitySet::client()),
@@ -2772,13 +2917,109 @@ mod tests {
     }
 
     fn client_sets() -> CapabilitySets<'static> {
-        CapabilitySets::client_defaults(
+        CapabilitySets::client(
             1920,
             1080,
             0x03ea,
             InputCapabilitySet::client(0x0409, 4, 0, 12),
-            true,
+            ClientCapabilitySupport::minimal()
+                .with_desktop_composition(true)
+                .with_surface_commands(true),
         )
+    }
+
+    /// A capability set is a promise, so a build that decodes no surface
+    /// command must not advertise one (PRDRDP/04 §9.3). The set is absent
+    /// rather than present with a zero `cmdFlags`, because some servers read
+    /// a zero flag word as a client that still supports the frame marker.
+    #[test]
+    fn an_unsupported_set_is_left_out_rather_than_sent_empty() {
+        let input = || InputCapabilitySet::client(0x0409, 4, 0, 12);
+        let with = CapabilitySets::client(
+            1024,
+            768,
+            0x03ea,
+            input(),
+            ClientCapabilitySupport::minimal().with_surface_commands(true),
+        );
+        let without = CapabilitySets::client(
+            1024,
+            768,
+            0x03ea,
+            input(),
+            ClientCapabilitySupport::minimal(),
+        );
+
+        assert!(with.has_surface_commands());
+        assert!(!without.has_surface_commands());
+        assert!(without.surface_commands().is_none());
+        assert_eq!(without.sets.len() + 1, with.sets.len());
+
+        // Nothing else moved: the two lists agree set for set apart from the
+        // one that was removed.
+        let removed: Vec<u16> = with
+            .sets
+            .iter()
+            .map(CapabilitySet::capability_set_type)
+            .filter(|t| *t != capability_set_type::SURFACE_COMMANDS)
+            .collect();
+        let kept: Vec<u16> = without
+            .sets
+            .iter()
+            .map(CapabilitySet::capability_set_type)
+            .collect();
+        assert_eq!(removed, kept);
+
+        // And the Confirm Active is shorter by exactly that set's own eight
+        // bytes (MS-RDPBCGR 2.2.7.2.9: four of header, `cmdFlags` and
+        // `reserved`, which is 4 + 4 + 4 = 12).
+        assert_eq!(SurfaceCommandsCapabilitySet::client().size(), 12);
+    }
+
+    /// Desktop composition is a level and not a presence: the set goes out
+    /// either way, which is the difference between the two fields of
+    /// [`ClientCapabilitySupport`].
+    #[test]
+    fn desktop_composition_changes_the_value_and_not_the_list() {
+        let input = || InputCapabilitySet::client(0x0409, 4, 0, 12);
+        let on = CapabilitySets::client(
+            1024,
+            768,
+            0,
+            input(),
+            ClientCapabilitySupport::minimal().with_desktop_composition(true),
+        );
+        let off = CapabilitySets::client(1024, 768, 0, input(), ClientCapabilitySupport::minimal());
+        assert_eq!(on.sets.len(), off.sets.len());
+        assert_ne!(
+            on.find(capability_set_type::COMP_DESK),
+            off.find(capability_set_type::COMP_DESK)
+        );
+    }
+
+    /// The seam of item 6: the old name still produces exactly what it used
+    /// to, so `rdp-core` sees no behaviour change before it moves across.
+    #[test]
+    fn the_old_entry_point_still_advertises_what_it_always_did() {
+        let input = || InputCapabilitySet::client(0x0409, 4, 0, 12);
+        for composition in [false, true] {
+            assert_eq!(
+                CapabilitySets::client_defaults(1024, 768, 7, input(), composition),
+                CapabilitySets::client(
+                    1024,
+                    768,
+                    7,
+                    input(),
+                    ClientCapabilitySupport {
+                        desktop_composition: composition,
+                        surface_commands: true,
+                    },
+                )
+            );
+        }
+        assert!(
+            CapabilitySets::client_defaults(1024, 768, 7, input(), false).has_surface_commands()
+        );
     }
 
     /// Each set's encoded length against the number MS-RDPBCGR states, header

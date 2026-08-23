@@ -52,6 +52,24 @@ pub const MAX_BITMAP_DATA: usize = 16 * 1024 * 1024;
 /// MS-RDPBCGR 2.2.9.1.1.4.7 caps a large pointer at 384 by 384.
 pub const MAX_POINTER_DIM: usize = 384;
 
+/// The largest a `TS_COLORPOINTERATTRIBUTE` or `TS_POINTERATTRIBUTE` cursor
+/// may be (MS-RDPBCGR 2.2.9.1.1.4.4, 2.2.9.1.1.4.5).
+///
+/// Only `TS_LARGEPOINTERATTRIBUTE` reaches [`MAX_POINTER_DIM`], and only when
+/// the Large Pointer capability set negotiated it (2.2.7.2.7). Both numbers
+/// are the specification's own, so raising either is a bug.
+pub const MAX_COLOR_POINTER_DIM: usize = 96;
+
+/// The most events this crate will put in, or take out of, one input PDU.
+///
+/// The fast path count is a byte, so 255 is the wire's own bound
+/// (MS-RDPBCGR 2.2.8.1.2, PRDRDP/05 §2.3: "holds 1 to 255 events"). The slow
+/// path field is a `u16` and the same cap is applied to it, because the
+/// client is the only sender of input and it never batches more than a
+/// pointer move plus a handful of edges. It bounds the decoder's `Vec`
+/// (PRDRDP/13 §10.1 statement 2).
+pub const MAX_INPUT_EVENTS: usize = 255;
+
 /// One `CHANNEL_PDU_HEADER` chunk (MS-RDPBCGR 2.2.6.1.1). The reassembled
 /// total is bounded separately by [`MAX_VC_REASSEMBLED`].
 pub const MAX_VC_CHUNK: usize = 65535;
@@ -63,6 +81,20 @@ pub const MAX_VC_CHUNK: usize = 65535;
 /// behaviour learned by reading it, in the D3 sense, and never its code. This
 /// constant is what stops us repeating it (D11).
 pub const MAX_VC_REASSEMBLED: usize = 16 * 1024 * 1024;
+
+/// A reassembled fast path output update (MS-RDPBCGR 2.2.9.1.2.1).
+///
+/// Its own constant rather than a borrowed [`MAX_VC_REASSEMBLED`], because
+/// the two bound different things and one of them is advertised on the wire.
+/// This number is what
+/// [`MultifragmentUpdateCapabilitySet::client`](crate::rdp::capabilities::MultifragmentUpdateCapabilitySet::client)
+/// puts in `MaxRequestSize` (2.2.7.2.6) and what
+/// [`FastPathReassembler`](crate::update::fastpath::FastPathReassembler)
+/// enforces, and PRDRDP/13 §4.8.3 requires the advertised budget and the
+/// enforced one to be the same value: advertising more than we accept invites
+/// an update we then refuse, which reads to a user as a server that hangs.
+/// The `const` assertion in this file's tests is what keeps the pair honest.
+pub const MAX_FASTPATH_REASSEMBLED: usize = 16 * 1024 * 1024;
 
 /// One drdynvc message after reassembly (MS-RDPEDYC 2.2).
 pub const MAX_DVC_PDU: usize = 4 * 1024 * 1024;
@@ -86,6 +118,13 @@ pub const MAX_STRING_UTF16: usize = 512;
 /// The specification states no cap of its own, which PRDRDP/11 §5.3 records
 /// as an erratum.
 pub const MAX_REDIRECTION_FIELD: usize = 64 * 1024;
+
+/// `TARGET_NET_ADDRESSES.addressCount` (MS-RDPBCGR 2.2.13.1.1). The field is
+/// a `u32` and the specification states no bound; a broker offers one address
+/// per network the target is on, so this is ours and bounds the `Vec`. It is
+/// also below what [`MAX_REDIRECTION_FIELD`] can hold at the six bytes an
+/// empty entry costs, so the byte cap can never be the looser of the two.
+pub const MAX_REDIRECTION_ADDRESSES: usize = 64;
 
 /// One `LICENSE_BINARY_BLOB` (MS-RDPBCGR 2.2.1.12.1.2). `wBlobLen` is a
 /// `u16`, so this is the wire type's own bound restated: the largest blob a
@@ -168,6 +207,20 @@ mod tests {
         assert_eq!(MAX_SEGMENT_COUNT, u16::MAX as usize);
         assert_eq!(MAX_FASTPATH_LEN, (1 << 15) - 1);
         assert_eq!(MAX_LICENSE_BLOB, u16::MAX as usize);
+        assert_eq!(MAX_INPUT_EVENTS, u8::MAX as usize);
+    }
+
+    /// The advertised fast path reassembly budget and the enforced one are
+    /// one number. `MaxRequestSize` is a `u32` on the wire, so the cap has to
+    /// fit one.
+    #[test]
+    fn the_fast_path_budget_is_advertisable() {
+        assert_eq!(
+            crate::rdp::capabilities::MultifragmentUpdateCapabilitySet::client().max_request_size
+                as usize,
+            MAX_FASTPATH_REASSEMBLED
+        );
+        assert!(u32::try_from(MAX_FASTPATH_REASSEMBLED).is_ok());
     }
 
     /// A chunk cannot be larger than the buffer it is reassembled into, and a
@@ -177,6 +230,8 @@ mod tests {
     #[test]
     fn the_caps_are_ordered_consistently() {
         const { assert!(MAX_VC_CHUNK < MAX_VC_REASSEMBLED) };
+        const { assert!(MAX_FASTPATH_LEN < MAX_FASTPATH_REASSEMBLED) };
+        const { assert!(MAX_COLOR_POINTER_DIM <= MAX_POINTER_DIM) };
         const { assert!(MAX_BITMAP_DATA <= MAX_UNCOMPRESSED_SIZE) };
         const { assert!(MAX_CAPSET_LEN <= MAX_GCC_USER_DATA) };
         const { assert!(MAX_SOURCE_DESCRIPTOR < MAX_CAPSET_LEN) };

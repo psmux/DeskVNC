@@ -96,7 +96,7 @@ pub use x224::{X224ConnectionConfirm, X224ConnectionRequest, X224Negotiation};
 
 // The session PDUs, at the crate root so `rdp-core` does not have to spell the
 // module path for the types it touches on every connection.
-pub use codes::ErrInfo;
+pub use codes::{ErrInfo, MultitransportProtocol};
 // The virtual channel layer, at the crate root for the same reason: the
 // session touches these on every EGFX frame.
 pub use vc::dvc::{DvcPdu, DvcReassembler};
@@ -107,4 +107,9 @@ pub use vc::static_vc::{chunk_channel_pdu, ChannelPduHeader, ChannelReassembler}
 pub use rdp::{
     decode_io_pdu, CapabilitySets, ClientInfoPdu, ConfirmActivePdu, DemandActivePdu, IoPdu,
     IoPduContext, LicensePdu, ShareDataPdu, SharePdu, SlowPathClass,
+};
+pub use rdp::{
+    AutoDetectResponse, ClientCapabilitySupport, ClientInitiateMultitransportResponse,
+    ClientSecurityExchange, SecretBytes, ServerInitiateMultitransportRequest,
+    ServerRedirectionPacket,
 };

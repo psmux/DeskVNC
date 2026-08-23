@@ -494,6 +494,92 @@ pub fn write_expected_header(
     BasicSecurityHeader::new(class.security_flag() | extra).encode(w)
 }
 
+/// The Client Security Exchange PDU (MS-RDPBCGR 2.2.1.10), decoded only.
+///
+/// # Why it is in this file
+///
+/// It is a security layer PDU and nothing else: a basic security header whose
+/// only distinguishing feature is `SEC_EXCHANGE_PKT`, then
+/// `TS_SECURITY_PACKET` (2.2.1.10.1), which is one length and one blob. It
+/// carries no share header, so `share.rs` has no claim on it; it is not part
+/// of the connection sequence this client runs, so `client_info.rs` has none
+/// either. What it does belong beside is [`security_flags::EXCHANGE_PKT`],
+/// the flag that identifies it, and the table in this file's module comment
+/// that says which classes carry a header at all.
+///
+/// # Why there is no encoder
+///
+/// The client sends this PDU only under standard RDP security, where it
+/// carries a 32 byte client random encrypted under the server's proprietary
+/// certificate with RSA (MS-RDPBCGR 5.3.4). This client requires an external
+/// security protocol (PRDRDP/03 §13.1) and this crate does no cryptography
+/// (PRDRDP/00 R54), so there is nothing to put in the blob and an encoder
+/// would be an encoder for a PDU we cannot legitimately fill. Decoding is
+/// still worth having: it lets the mock server of PRDRDP/09 §3 recognise the
+/// PDU by name when a test drives the standard security path, and it makes
+/// §11's row for 2.2.1.10 complete rather than absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientSecurityExchange<'a> {
+    /// The basic header, kept because `flags` may carry more than
+    /// `SEC_EXCHANGE_PKT`.
+    pub header: BasicSecurityHeader,
+    /// `encryptedClientRandom`, `length` bytes of which the last eight are
+    /// padding (2.2.1.10.1). Borrowed: nothing here is interpreted, so
+    /// nothing is copied.
+    pub encrypted_client_random: crate::io::Payload<'a>,
+}
+
+impl<'a> ClientSecurityExchange<'a> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "TS_SECURITY_PACKET";
+
+    /// The eight bytes of padding `length` counts and the blob ends with
+    /// (MS-RDPBCGR 2.2.1.10.1).
+    pub const PADDING_LEN: usize = 8;
+}
+
+impl<'a> Decode<'a> for ClientSecurityExchange<'a> {
+    const NAME: &'static str = Self::NAME;
+
+    fn decode(r: &mut Reader<'a>) -> PduResult<Self> {
+        let at = r.offset();
+        let header = BasicSecurityHeader::decode(r)?;
+        if !header.has(security_flags::EXCHANGE_PKT) {
+            return Err(PduError::InvalidField {
+                context: Self::NAME,
+                field: "flags (SEC_EXCHANGE_PKT)",
+                value: u64::from(header.flags),
+                offset: at,
+            });
+        }
+        let at = r.offset();
+        let length = r.u32(Self::NAME)?;
+        // No cap: the blob is never allocated, only borrowed, so a lie in
+        // `length` costs a `Truncated` error and not a `Vec`. The one bound
+        // worth stating is the specification's own, that `length` counts the
+        // eight padding bytes and so cannot be smaller than them.
+        let length = usize::try_from(length).map_err(|_| PduError::InvalidField {
+            context: Self::NAME,
+            field: "length",
+            value: u64::from(length),
+            offset: at,
+        })?;
+        if length < Self::PADDING_LEN {
+            return Err(PduError::InvalidField {
+                context: Self::NAME,
+                field: "length",
+                value: length as u64,
+                offset: at,
+            });
+        }
+        let encrypted_client_random = crate::io::Payload::new(r.slice(length, Self::NAME)?);
+        Ok(Self {
+            header,
+            encrypted_client_random,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
@@ -672,6 +758,85 @@ mod tests {
                 case
             );
         }
+    }
+
+    /// A hand computed Client Security Exchange (MS-RDPBCGR 2.2.1.10.1).
+    ///
+    /// `SEC_EXCHANGE_PKT` is 0x0001, so `flags` is `01 00` and `flagsHi` is
+    /// `00 00`. `length` is the blob plus its eight padding bytes: eight
+    /// bytes of "random" here plus eight of padding is sixteen, so `length`
+    /// is `10 00 00 00`. Four header bytes plus four length bytes plus
+    /// sixteen of blob is twenty four bytes in all.
+    fn client_security_exchange_bytes() -> Vec<u8> {
+        let mut bytes = vec![0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00];
+        bytes.extend_from_slice(&[0xaa; 8]);
+        bytes.extend_from_slice(&[0x00; 8]);
+        assert_eq!(bytes.len(), 4 + 4 + 16);
+        bytes
+    }
+
+    #[test]
+    fn a_client_security_exchange_decodes_its_blob_without_copying_it() {
+        let bytes = client_security_exchange_bytes();
+        let pdu = ClientSecurityExchange::decode(&mut Reader::new(&bytes)).unwrap();
+        assert!(pdu.header.has(security_flags::EXCHANGE_PKT));
+        assert_eq!(pdu.encrypted_client_random.len(), 16);
+        assert_eq!(
+            pdu.encrypted_client_random.as_slice(),
+            &bytes[8..],
+            "the blob is the tail of the buffer"
+        );
+        // Borrowed, so the view points inside the buffer it was decoded from.
+        let offset =
+            pdu.encrypted_client_random.as_slice().as_ptr() as usize - bytes.as_ptr() as usize;
+        assert_eq!(offset, 8);
+    }
+
+    #[test]
+    fn a_security_exchange_without_its_flag_is_refused() {
+        let mut bytes = client_security_exchange_bytes();
+        bytes[0] = 0x40;
+        assert!(matches!(
+            ClientSecurityExchange::decode(&mut Reader::new(&bytes)).unwrap_err(),
+            PduError::InvalidField {
+                field: "flags (SEC_EXCHANGE_PKT)",
+                ..
+            }
+        ));
+    }
+
+    /// `length` counts the eight padding bytes, so a smaller value is a
+    /// structure we are not looking at (MS-RDPBCGR 2.2.1.10.1).
+    #[test]
+    fn a_security_exchange_shorter_than_its_padding_is_refused() {
+        let mut bytes = client_security_exchange_bytes();
+        bytes[4] = 0x07;
+        assert!(matches!(
+            ClientSecurityExchange::decode(&mut Reader::new(&bytes)).unwrap_err(),
+            PduError::InvalidField {
+                field: "length",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn every_prefix_of_a_security_exchange_errors_rather_than_panicking() {
+        let bytes = client_security_exchange_bytes();
+        for cut in 0..bytes.len() {
+            assert!(
+                ClientSecurityExchange::decode(&mut Reader::new(&bytes[..cut])).is_err(),
+                "a {cut} byte prefix decoded"
+            );
+        }
+        // A `length` a hostile server made enormous is a truncation and never
+        // an allocation.
+        let mut huge = client_security_exchange_bytes();
+        huge[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            ClientSecurityExchange::decode(&mut Reader::new(&huge)).unwrap_err(),
+            PduError::Truncated { .. }
+        ));
     }
 
     #[test]

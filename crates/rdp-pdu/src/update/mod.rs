@@ -23,19 +23,8 @@ pub mod fastpath;
 pub mod slowpath;
 pub mod surface;
 
-use crate::io::limits::{MAX_BITMAP_RECTS, MAX_POINTER_DIM};
+use crate::io::limits::{MAX_BITMAP_RECTS, MAX_COLOR_POINTER_DIM, MAX_POINTER_DIM};
 use crate::io::{Decode, Encode, Payload, PduError, PduResult, Reader, Writer};
-
-/// The largest a `TS_COLORPOINTERATTRIBUTE` or `TS_POINTERATTRIBUTE` cursor
-/// may be (MS-RDPBCGR 2.2.9.1.1.4.4, 2.2.9.1.1.4.5).
-///
-/// Only `TS_LARGEPOINTERATTRIBUTE` reaches
-/// [`MAX_POINTER_DIM`], and only when the
-/// Large Pointer capability set negotiated it (2.2.7.2.7).
-///
-/// This belongs in [`crate::io::limits`] beside `MAX_POINTER_DIM`. It is here
-/// because that file has another author while this lane is being written.
-pub const MAX_COLOR_POINTER_DIM: usize = 96;
 
 /// `TS_BITMAP_DATA.flags` (MS-RDPBCGR 2.2.9.1.1.3.1.2.2).
 pub mod bitmap_flags {
