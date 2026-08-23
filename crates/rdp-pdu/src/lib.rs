@@ -73,9 +73,13 @@
 #![warn(missing_docs)]
 
 pub mod asn1;
+pub mod codes;
 pub mod gcc;
+pub mod input;
 pub mod io;
 pub mod mcs;
+pub mod rdp;
+pub mod update;
 pub mod x224;
 
 pub use gcc::{
@@ -88,3 +92,11 @@ pub use io::writer::Writer;
 pub use io::{Decode, Encode, Payload};
 pub use mcs::{ConnectInitial, ConnectResponse, DomainMcsPdu, DomainParameters};
 pub use x224::{X224ConnectionConfirm, X224ConnectionRequest, X224Negotiation};
+
+// The session PDUs, at the crate root so `rdp-core` does not have to spell the
+// module path for the types it touches on every connection.
+pub use codes::ErrInfo;
+pub use rdp::{
+    decode_io_pdu, CapabilitySets, ClientInfoPdu, ConfirmActivePdu, DemandActivePdu, IoPdu,
+    IoPduContext, LicensePdu, ShareDataPdu, SharePdu, SlowPathClass,
+};

@@ -252,23 +252,43 @@ impl ClientCoreData {
     /// The structure's name in the specification.
     pub const NAME: &'static str = "TS_UD_CS_CORE";
 
-    /// The length of the tail fields that are present.
+    /// The length of the tail fields `encode` will actually write.
+    ///
+    /// Presence in `TS_UD_CS_CORE`'s tail is cumulative (MS-RDPBCGR
+    /// 2.2.1.3.2): a field is on the wire only when every field before it is,
+    /// which is why `encode` returns at the first `None`. This counts the same
+    /// way, stopping where `encode` stops.
+    ///
+    /// Summing the present fields independently is the obvious way to write
+    /// this and it is wrong. A caller that sets `desktop_scale_factor` without
+    /// the three fields before it would get a `size()` four bytes longer than
+    /// the bytes `encode` produces, and `size()` is what
+    /// `write_block_header` puts in the block's own length field, so the
+    /// server would read the next block starting four bytes early. The
+    /// `encode_checked` debug assertion catches the disagreement in tests;
+    /// this keeps it from arising at all.
     fn tail_len(&self) -> usize {
-        self.post_beta2_color_depth.map_or(0, |_| 2)
-            + self.client_product_id.map_or(0, |_| 2)
-            + self.serial_number.map_or(0, |_| 4)
-            + self.high_color_depth.map_or(0, |_| 2)
-            + self.supported_color_depths.map_or(0, |_| 2)
-            + self.early_capability_flags.map_or(0, |_| 2)
-            + self.client_dig_product_id.as_ref().map_or(0, |_| 64)
-            + self.connection_type.map_or(0, |_| 1)
-            + self.pad1octet.map_or(0, |_| 1)
-            + self.server_selected_protocol.map_or(0, |_| 4)
-            + self.desktop_physical_width.map_or(0, |_| 4)
-            + self.desktop_physical_height.map_or(0, |_| 4)
-            + self.desktop_orientation.map_or(0, |_| 2)
-            + self.desktop_scale_factor.map_or(0, |_| 4)
-            + self.device_scale_factor.map_or(0, |_| 4)
+        [
+            (self.post_beta2_color_depth.is_some(), 2),
+            (self.client_product_id.is_some(), 2),
+            (self.serial_number.is_some(), 4),
+            (self.high_color_depth.is_some(), 2),
+            (self.supported_color_depths.is_some(), 2),
+            (self.early_capability_flags.is_some(), 2),
+            (self.client_dig_product_id.is_some(), 64),
+            (self.connection_type.is_some(), 1),
+            (self.pad1octet.is_some(), 1),
+            (self.server_selected_protocol.is_some(), 4),
+            (self.desktop_physical_width.is_some(), 4),
+            (self.desktop_physical_height.is_some(), 4),
+            (self.desktop_orientation.is_some(), 2),
+            (self.desktop_scale_factor.is_some(), 4),
+            (self.device_scale_factor.is_some(), 4),
+        ]
+        .iter()
+        .take_while(|(present, _)| *present)
+        .map(|(_, len)| len)
+        .sum()
     }
 }
 
@@ -1012,6 +1032,35 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
     use super::*;
+
+    /// A gapped tail must not make `size()` disagree with what `encode`
+    /// writes. Reported by the `rdp-core` lane, which tripped the
+    /// `encode_checked` debug assertion building a Connect Initial.
+    #[test]
+    fn a_gapped_core_tail_is_sized_by_what_encode_writes() {
+        // Everything from `desktop_physical_width` on is absent, so setting a
+        // field after the gap must not add to the length.
+        let core = ClientCoreData {
+            desktop_physical_width: None,
+            desktop_scale_factor: Some(100),
+            device_scale_factor: Some(100),
+            ..ClientCoreData::default()
+        };
+
+        let mut buf = Vec::new();
+        let mut w = Writer::new(&mut buf);
+        core.encode(&mut w).expect("encode");
+        assert_eq!(
+            core.size(),
+            buf.len(),
+            "size() must equal the bytes encode produced"
+        );
+
+        // And the block header's own length field has to agree too, since a
+        // short read of it walks the next block's start backwards.
+        let declared = u16::from_le_bytes([buf[2], buf[3]]) as usize;
+        assert_eq!(declared, buf.len(), "block header length");
+    }
 
     fn sample() -> ClientGccBlocks {
         ClientGccBlocks {
