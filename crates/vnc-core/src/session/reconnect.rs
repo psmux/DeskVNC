@@ -354,7 +354,7 @@ mod tests {
     fn unreachable_options() -> ConnectOptions {
         // Port 1 on localhost: virtually always closed -> fast refusal, which
         // is a transient error.
-        let mut o = ConnectOptions::new("127.0.0.1", 1);
+        let mut o = ConnectOptions::vnc("127.0.0.1", 1);
         o.quality = QualityPreset::Auto;
         o.connect_timeout = Duration::from_secs(2);
         o.reconnect = ReconnectPolicy {

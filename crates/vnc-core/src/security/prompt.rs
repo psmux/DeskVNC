@@ -166,6 +166,7 @@ impl<'a> CredentialSource<'a> {
             return Ok(Credentials {
                 username: stored_user,
                 password: stored_pass,
+                domain: None,
             });
         }
 
@@ -221,7 +222,11 @@ impl<'a> CredentialSource<'a> {
         }
 
         *self.last_username.lock().expect("not poisoned") = username.clone();
-        Ok(Credentials { username, password })
+        Ok(Credentials {
+            username,
+            password,
+            domain: None,
+        })
     }
 }
 
@@ -253,7 +258,7 @@ mod tests {
     use super::*;
 
     fn opts() -> ConnectOptions {
-        ConnectOptions::new("h", 5900)
+        ConnectOptions::vnc("h", 5900)
     }
 
     #[tokio::test]
@@ -394,6 +399,7 @@ mod tests {
                 .send(Some(Credentials {
                     username: Some(String::new()),
                     password: Some("pw".into()),
+                    domain: None,
                 }))
                 .unwrap();
         });

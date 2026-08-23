@@ -1,0 +1,495 @@
+//! Connect options: what the shell hands a driver to start a session.
+//!
+//! Moved out of `vnc-core/src/types.rs` (PRDRDP/02 §2.1, §5). `QualityPreset`
+//! arrives without its `settings()` method: that method returns
+//! `vnc_core::QualitySettings`, an RFB struct which stays where it is, so it
+//! is now `vnc_core::quality::QualityResolve::settings` (PRDRDP/02 §2.2.1).
+
+use crate::credentials::Credentials;
+use crate::driver::ProtocolKind;
+use crate::pins::CertPins;
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Quality presets (PRD/09)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum QualityPreset {
+    #[default]
+    Auto,
+    High,
+    Medium,
+    Low,
+    BlackAndWhite,
+}
+
+// ---------------------------------------------------------------------------
+// Connection options
+// ---------------------------------------------------------------------------
+
+/// An injected transport (today: the SSH tunnel), see
+/// [`vnc_transport::StreamConnector`]. Newtype so `ConnectOptions` can keep
+/// deriving `Debug` without asking every connector to implement it.
+#[derive(Clone)]
+pub struct Connector(pub std::sync::Arc<dyn vnc_transport::StreamConnector>);
+
+impl std::fmt::Debug for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Connector")
+            .field(&self.0.describe())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    pub host: String,
+    pub port: u16,
+    /// When set, the byte stream comes from here instead of a direct TCP
+    /// connect; `host`/`port` are interpreted by the connector (for an SSH
+    /// tunnel, resolved on the far side).
+    pub connector: Option<Connector>,
+    pub credentials: Credentials,
+    pub quality: QualityPreset,
+    pub view_only: bool,
+    /// Pinned SHA-256 SPKI fingerprints for TOFU (hex), one per scheme.
+    pub cert_pins: CertPins,
+    pub connect_timeout: std::time::Duration,
+    /// Auto-reconnect policy (PRD/05 §6).
+    pub reconnect: ReconnectPolicy,
+    /// The protocol specific half. Its discriminant is the session's
+    /// [`ProtocolKind`].
+    pub protocol: ProtocolOptions,
+}
+
+impl ConnectOptions {
+    /// A VNC session with today's defaults. This is the old
+    /// `ConnectOptions::new`, renamed rather than kept as an alias: a
+    /// constructor called `new` on a type that is no longer about VNC is how
+    /// an RDP session ends up with `shared: true` (PRDRDP/02 §5.1).
+    pub fn vnc(host: impl Into<String>, port: u16) -> Self {
+        Self::with_protocol(host, port, ProtocolOptions::Vnc(VncOptions::default()))
+    }
+
+    /// The same common defaults with an RDP protocol half.
+    pub fn rdp(host: impl Into<String>, port: u16) -> Self {
+        Self::with_protocol(host, port, ProtocolOptions::Rdp(RdpOptions::default()))
+    }
+
+    fn with_protocol(host: impl Into<String>, port: u16, protocol: ProtocolOptions) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            connector: None,
+            credentials: Credentials::default(),
+            quality: QualityPreset::Auto,
+            view_only: false,
+            cert_pins: CertPins::default(),
+            connect_timeout: std::time::Duration::from_secs(15),
+            reconnect: ReconnectPolicy::default(),
+            protocol,
+        }
+    }
+
+    pub fn kind(&self) -> ProtocolKind {
+        self.protocol.kind()
+    }
+
+    /// The VNC half, or `None` when these are not VNC options.
+    pub fn vnc_options(&self) -> Option<&VncOptions> {
+        match &self.protocol {
+            ProtocolOptions::Vnc(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The RDP half, or `None` when these are not RDP options.
+    pub fn rdp_options(&self) -> Option<&RdpOptions> {
+        match &self.protocol {
+            ProtocolOptions::Rdp(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The VNC half, mutably, for a caller that built these options and
+    /// already knows they are VNC.
+    ///
+    /// # Panics
+    ///
+    /// When the options are not VNC.
+    pub fn vnc_mut(&mut self) -> &mut VncOptions {
+        match &mut self.protocol {
+            ProtocolOptions::Vnc(v) => v,
+            other => panic!("expected VNC options, got {:?}", other.kind()),
+        }
+    }
+
+    /// The RDP half, mutably, on the same terms as [`Self::vnc_mut`].
+    ///
+    /// # Panics
+    ///
+    /// When the options are not RDP.
+    pub fn rdp_mut(&mut self) -> &mut RdpOptions {
+        match &mut self.protocol {
+            ProtocolOptions::Rdp(r) => r,
+            other => panic!("expected RDP options, got {:?}", other.kind()),
+        }
+    }
+}
+
+/// The protocol specific half of [`ConnectOptions`].
+///
+/// A typed enum rather than a `Box<dyn Any>` payload: the downcast would land
+/// in every driver, and `ConnectOptions` would lose the `Debug` and `Clone`
+/// that the credential redaction test depends on (PRDRDP/02 §5.2).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ProtocolOptions {
+    Vnc(VncOptions),
+    Rdp(RdpOptions),
+}
+
+impl ProtocolOptions {
+    pub fn kind(&self) -> ProtocolKind {
+        match self {
+            ProtocolOptions::Vnc(_) => ProtocolKind::Vnc,
+            ProtocolOptions::Rdp(_) => ProtocolKind::Rdp,
+        }
+    }
+}
+
+/// RFB specific connect options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VncOptions {
+    /// `None` = automatic strongest-first selection.
+    ///
+    /// A string rather than `vnc_core::SecurityType`, which stays in vnc-core
+    /// because it is an RFB wire number. The shell already stores this setting
+    /// as a string in the `security_pref` column, so the string is the honest
+    /// representation; `SecurityType::parse_pref` maps it (PRDRDP/02 §5.3).
+    pub security_pref: Option<String>,
+    pub shared: bool,
+    /// Sharpen lossily-painted regions once motion stops (PRD/09 §3.2). RFB
+    /// only, and unchanged.
+    pub lossless_refresh: bool,
+    /// Allow security types that leave the session in cleartext. It lives
+    /// here rather than on [`ConnectOptions`] because an SSH tunnel sets it
+    /// and a tunnel proves nothing about an RDP host (PRDRDP/00 R26).
+    pub allow_insecure: bool,
+}
+
+impl Default for VncOptions {
+    fn default() -> Self {
+        Self {
+            security_pref: None,
+            shared: true,
+            lossless_refresh: true,
+            allow_insecure: false,
+        }
+    }
+}
+
+/// RDP specific connect options.
+///
+/// Data only. Nothing in phase 0 reads any of it; the fields are here so the
+/// `hosts.rdp_settings` column and the host editor form do not change shape
+/// when the protocol lands (PRDRDP/02 §5.4).
+///
+/// Serialized into that column, so every field is `#[serde(default)]` and no
+/// field holds a secret: the username and password travel in
+/// [`ConnectOptions::credentials`], which is not serializable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RdpOptions {
+    /// The name used for SNI, certificate verification, pin lookup and the
+    /// Kerberos SPN. `None` means "use [`ConnectOptions::host`]". Separate
+    /// from the dial address so all four survive an SSH tunnel, where the
+    /// dial address is frequently `localhost` (PRDRDP/00 R26).
+    pub server_name: Option<String>,
+
+    /// NetBIOS or DNS domain for the logon. MS-RDPBCGR 2.2.1.11.1.1
+    /// TS_INFO_PACKET `Domain`. Empty and `None` are the same thing: a local
+    /// account logon.
+    pub domain: Option<String>,
+
+    /// Whether CredSSP (MS-CSSP) is required.
+    pub nla: NlaPolicy,
+
+    /// Permit the TLS 1.0 and 1.1 backend for this host.
+    ///
+    /// rustls speaks TLS 1.2 and 1.3 only, so reaching a Windows 7 SP1 or
+    /// Server 2008 R2 era host means the second, vendored OpenSSL backend
+    /// (PRDRDP/00 R55). This field is permission, never a request: with it
+    /// false and the server offering nothing above TLS 1.1 the attempt fails
+    /// rather than downgrading, and with it true the connection still prefers
+    /// the highest version the server will negotiate.
+    pub legacy_tls: bool,
+
+    /// Colour depth to request. MS-RDPBCGR 2.2.1.3.2 TS_UD_CS_CORE
+    /// `highColorDepth` plus `supportedColorDepths`.
+    pub color_depth: RdpColorDepth,
+
+    /// Which bitmap and graphics codecs we advertise. A codec the user turned
+    /// off is never advertised, so the server cannot pick it.
+    pub codecs: CodecSet,
+
+    /// Audio output redirection. MS-RDPEA.
+    pub audio: AudioMode,
+
+    /// Which of the server's monitors to attach to. MS-RDPBCGR 2.2.1.3.6
+    /// TS_UD_CS_MONITOR and 2.2.1.3.9 Client Monitor Extended Data; the
+    /// specification caps the list at 16 entries.
+    pub monitors: MonitorPolicy,
+
+    /// Ask the server to follow the window size while the session runs, using
+    /// the Display Update Virtual Channel (MS-RDPEDISP,
+    /// DISPLAYCONTROL_MONITOR_LAYOUT_PDU). When false the desktop size is
+    /// fixed at connect time and the client scales.
+    pub dynamic_resolution: bool,
+
+    /// Windows keyboard layout identifier (KLID), MS-RDPBCGR 2.2.1.3.2
+    /// `keyboardLayout`. 0 means "let the client pick from the host OS".
+    /// 0x0000_0409 is US English.
+    pub keyboard_layout: u32,
+
+    /// Reported client machine name, MS-RDPBCGR 2.2.1.3.2 `clientName`. The
+    /// field on the wire is 32 bytes of UTF-16, so 15 characters plus a null;
+    /// longer names are truncated by the driver, not here.
+    pub client_name: String,
+
+    /// TS_EXTENDED_INFO_PACKET `performanceFlags`, MS-RDPBCGR 2.2.1.11.1.1.1.
+    pub performance: PerformanceFlags,
+
+    /// RD Gateway. Phase 3. Carried earlier as a placeholder so the store
+    /// column and the UI form do not change shape later; the driver rejects a
+    /// connect with `Some(_)` until it lands, with a clear message rather
+    /// than a silent direct connect.
+    pub gateway: Option<GatewayOptions>,
+
+    /// Send credentials in the Info PDU so the server skips its own logon
+    /// screen. MS-RDPBCGR 2.2.1.11.1.1 INFO_AUTOLOGON (0x00000008).
+    pub autologon: bool,
+
+    /// KDC proxy (MS-KKDCP) URL for Kerberos through an HTTPS proxy. Phase 3
+    /// with the rest of Kerberos; `None` means plain KDC discovery over DNS
+    /// SRV when that phase arrives.
+    pub kdc_proxy_url: Option<String>,
+
+    /// Whether the X.224 Connection Request carries the `Cookie: mstshash=`
+    /// routing token (MS-RDPBCGR 2.2.1.1). Off by default: the token leaks
+    /// the username into server and load balancer logs, and the brokers that
+    /// need it are a phase 3 gateway concern.
+    pub send_mstshash_cookie: bool,
+
+    /// Offer the auto reconnect cookie on a re-dial so the same Windows
+    /// session resumes. MS-RDPBCGR 2.2.4.
+    pub allow_auto_reconnect: bool,
+
+    /// HiDPI scale factor, percent, 100 to 500. MS-RDPBCGR 2.2.2.2.1
+    /// DISPLAYCONTROL_MONITOR_LAYOUT `DeviceScaleFactor` and the connector's
+    /// `desktopScaleFactor`. 100 means no scaling.
+    pub desktop_scale_factor: u32,
+}
+
+impl Default for RdpOptions {
+    fn default() -> Self {
+        Self {
+            server_name: None,
+            domain: None,
+            nla: NlaPolicy::Required,
+            legacy_tls: false,
+            color_depth: RdpColorDepth::Auto,
+            codecs: CodecSet::default(),
+            audio: AudioMode::PlayLocally,
+            monitors: MonitorPolicy::Primary,
+            dynamic_resolution: true,
+            keyboard_layout: 0,
+            // The driver fills this from the OS hostname when it is empty.
+            client_name: String::new(),
+            performance: PerformanceFlags::default(),
+            gateway: None,
+            autologon: true,
+            kdc_proxy_url: None,
+            send_mstshash_cookie: false,
+            allow_auto_reconnect: true,
+            desktop_scale_factor: 100,
+        }
+    }
+}
+
+/// NLA on by default, with an explicit per host escape hatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NlaPolicy {
+    /// CredSSP (MS-CSSP) must succeed or the connection fails.
+    #[default]
+    Required,
+    /// Try CredSSP; if the server refuses it, continue with TLS only and let
+    /// the server's own logon screen collect the credentials. Standard RDP
+    /// security (RC4) is never used, so this still means TLS.
+    ///
+    /// Choosing this disables credential saving for the host: reaching
+    /// `Connected` without CredSSP does not prove the password was right,
+    /// because the server completes the connection either way (PRDRDP/00
+    /// R14).
+    AllowFallback,
+}
+
+/// MS-RDPBCGR 2.2.1.3.2 `highColorDepth` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RdpColorDepth {
+    /// Let the quality preset choose.
+    #[default]
+    Auto,
+    Bpp15,
+    Bpp16,
+    Bpp24,
+    Bpp32,
+}
+
+/// Which codecs to advertise. A struct of flags rather than a bitmask so a
+/// stored blob stays readable and a new codec is an added field with a
+/// default, not a renumbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CodecSet {
+    /// Always true, and not settable to false: uncompressed bitmap updates
+    /// are the only thing every server can send. Present so the field list
+    /// reads completely.
+    pub uncompressed: bool,
+    /// Interleaved RLE, MS-RDPBCGR 3.1.9, wire stream 2.2.9.1.1.3.1.2.4
+    /// RLE_BITMAP_STREAM.
+    pub interleaved_rle: bool,
+    /// Planar (RDP 6.0) bitmap codec, MS-RDPBCGR 3.1.9.2.
+    pub planar: bool,
+    /// MS-RDPNSC.
+    pub nscodec: bool,
+    /// MS-RDPRFX, both image and video modes.
+    pub remotefx: bool,
+    /// MS-RDPEGFX RDPGFX_CODECID_CLEARCODEC (0x0008).
+    pub clearcodec: bool,
+    /// MS-RDPEGFX progressive (RFX_PROGRESSIVE).
+    pub progressive: bool,
+    /// MS-RDPEGFX 2.2.4.4 RFX_AVC420_METABLOCK.
+    pub avc420: bool,
+    /// MS-RDPEGFX 2.2.4.5 RFX_AVC444_METABLOCK.
+    pub avc444: bool,
+}
+
+impl Default for CodecSet {
+    /// Everything on. The quality preset narrows it; a user who wants less
+    /// turns individual codecs off in the host dialog.
+    fn default() -> Self {
+        Self {
+            uncompressed: true,
+            interleaved_rle: true,
+            planar: true,
+            nscodec: true,
+            remotefx: true,
+            clearcodec: true,
+            progressive: true,
+            avc420: true,
+            avc444: true,
+        }
+    }
+}
+
+/// MS-RDPEA. The three modes mstsc offers; the second and third differ only
+/// in whether the client opens the rdpsnd channel at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioMode {
+    /// Redirect to this machine.
+    #[default]
+    PlayLocally,
+    /// Leave the sound on the server: do not open rdpsnd.
+    LeaveAtServer,
+    /// Mute: do not open rdpsnd and ask the server not to play either.
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MonitorPolicy {
+    #[default]
+    Primary,
+    All,
+    /// Monitor indices into the server's reported layout. MS-RDPBCGR caps a
+    /// monitor list at 16 entries (2.2.1.3.6); the driver truncates.
+    Selected(Vec<u32>),
+}
+
+/// TS_EXTENDED_INFO_PACKET `performanceFlags`, MS-RDPBCGR 2.2.1.11.1.1.1.
+/// Named booleans rather than a `u32` so a stored blob is legible and the
+/// quality preset mapping is readable. The PERF_DISABLE_* bit values belong
+/// in the PDU layer, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PerformanceFlags {
+    pub disable_wallpaper: bool,
+    pub disable_full_window_drag: bool,
+    pub disable_menu_animations: bool,
+    pub disable_theming: bool,
+    pub disable_cursor_shadow: bool,
+    pub disable_cursor_blinking: bool,
+    pub enable_font_smoothing: bool,
+    pub enable_desktop_composition: bool,
+}
+
+/// RD Gateway (MS-TSGU). Phase 3 placeholder, see [`RdpOptions::gateway`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[non_exhaustive]
+pub struct GatewayOptions {
+    pub host: String,
+    pub port: u16,
+    /// Reuse the session credentials, or prompt separately.
+    pub separate_credentials: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Reconnect policy (PRD/05 §6.2)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ReconnectPolicy {
+    pub enabled: bool,
+    /// None = retry forever while the session window is open.
+    pub max_attempts: Option<u32>,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub multiplier: f64,
+    /// Jitter fraction (0.0..=1.0) applied to each delay.
+    pub jitter: f64,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        // 250ms -> 500 -> 1s -> 2s -> 4s -> 8s -> capped 15s, ±20% jitter.
+        Self {
+            enabled: true,
+            max_attempts: None,
+            initial_delay_ms: 250,
+            max_delay_ms: 15_000,
+            multiplier: 2.0,
+            jitter: 0.2,
+        }
+    }
+}
+
+impl ReconnectPolicy {
+    /// Delay before attempt `attempt` (1-based), with jitter applied.
+    pub fn delay_for(&self, attempt: u32, rand_unit: f64) -> std::time::Duration {
+        let base =
+            (self.initial_delay_ms as f64) * self.multiplier.powi(attempt.saturating_sub(1) as i32);
+        let capped = base.min(self.max_delay_ms as f64);
+        let jitter_span = capped * self.jitter;
+        // rand_unit in [0,1) -> symmetric jitter around `capped`
+        let jittered = capped - jitter_span + (2.0 * jitter_span * rand_unit);
+        std::time::Duration::from_millis(jittered.max(0.0) as u64)
+    }
+}

@@ -22,7 +22,9 @@
 use vnc_transport::BoxedStream;
 
 use super::prompt::CredentialSource;
-use super::{read_bytes_max, read_u32, write_all, AuthOutcome, ProtocolVersionInfo};
+use super::{
+    allow_insecure, read_bytes_max, read_u32, write_all, AuthOutcome, ProtocolVersionInfo,
+};
 use crate::error::{Result, VncError};
 use crate::types::ConnectOptions;
 
@@ -88,7 +90,7 @@ pub fn select_auth_code_with(
     let has = |code: i32| caps.iter().any(|c| c.code == code);
 
     if has(auth_code::VNC)
-        && (opts.allow_insecure || opts.credentials.password.is_some() || can_prompt)
+        && (allow_insecure(opts) || opts.credentials.password.is_some() || can_prompt)
     {
         return Ok(auth_code::VNC);
     }
@@ -200,7 +202,7 @@ mod tests {
     }
 
     fn opts_with_password() -> ConnectOptions {
-        let mut o = ConnectOptions::new("h", 5900);
+        let mut o = ConnectOptions::vnc("h", 5900);
         o.credentials = Credentials::password("pw");
         o
     }
@@ -236,7 +238,7 @@ mod tests {
         // plain security-type path did, behind an opt-in nothing could set.
         let caps = [cap(auth_code::NONE)];
         assert_eq!(
-            select_auth_code(&caps, &ConnectOptions::new("h", 5900)).unwrap(),
+            select_auth_code(&caps, &ConnectOptions::vnc("h", 5900)).unwrap(),
             auth_code::NONE
         );
     }
@@ -245,7 +247,7 @@ mod tests {
     fn vnc_auth_without_a_password_prompts() {
         let caps = [cap(auth_code::VNC)];
         assert!(matches!(
-            select_auth_code(&caps, &ConnectOptions::new("h", 5900)),
+            select_auth_code(&caps, &ConnectOptions::vnc("h", 5900)),
             Err(VncError::CredentialsRequired(_))
         ));
     }
@@ -254,7 +256,7 @@ mod tests {
     fn vnc_auth_is_selectable_when_we_can_ask_the_user() {
         let caps = [cap(auth_code::VNC)];
         assert_eq!(
-            select_auth_code_with(&caps, &ConnectOptions::new("h", 5900), true).unwrap(),
+            select_auth_code_with(&caps, &ConnectOptions::vnc("h", 5900), true).unwrap(),
             auth_code::VNC
         );
     }

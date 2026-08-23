@@ -23,7 +23,7 @@ async fn main() {
 
     println!("== connecting to {host}:{port} with NO stored credentials ==");
 
-    let mut options = ConnectOptions::new(host, port);
+    let mut options = ConnectOptions::vnc(host, port);
     // Exactly the state a user is in on a fresh host: nothing saved.
     options.credentials = Default::default();
     options.connect_timeout = Duration::from_secs(10);

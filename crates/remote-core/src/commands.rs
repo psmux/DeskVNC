@@ -1,0 +1,74 @@
+//! Commands sent into a running session.
+//!
+//! Moved out of `vnc-core/src/types.rs` unchanged (PRDRDP/02 §2.1). This enum
+//! deliberately does not derive `Serialize`: the shell builds each command
+//! from a Tauri argument by hand, so a new variant is a compile error where it
+//! has to be decided rather than a silently dropped message.
+
+use crate::options::QualityPreset;
+use crate::pins::PinScheme;
+
+#[derive(Debug, Clone)]
+pub enum ClientCommand {
+    Pointer {
+        x: u16,
+        y: u16,
+        button_mask: u16,
+    },
+    Key {
+        keysym: u32,
+        keycode: Option<u32>,
+        down: bool,
+    },
+    /// Release every key we believe is pressed (blur / disconnect safety).
+    ReleaseAllKeys,
+    ClipboardText(String),
+    ClipboardRequest {
+        formats: u32,
+    },
+    SetQuality(QualityPreset),
+    RequestResize {
+        width: u16,
+        height: u16,
+    },
+    /// Force a full non-incremental update.
+    Refresh,
+    /// Keep forcing a full non-incremental update every stats tick.
+    ///
+    /// The escape hatch for servers whose damage tracking cannot be trusted:
+    /// it stops the client relying on the server to say what changed and
+    /// simply re-fetches the screen, at a real bandwidth cost, so a picture
+    /// can never stay stale no matter what the server forgot to send.
+    SetAlwaysRefresh(bool),
+    SetViewOnly(bool),
+    /// Keyboard mode. `true` (the default) prefers QEMU scancodes when the
+    /// server supports them, so the SERVER's keymap decides what a physical
+    /// key types ("match the remote layout"). `false` suppresses scancodes
+    /// and sends only layout-aware keysyms, so keys type what they type
+    /// LOCALLY ("match my local layout"). The distinction only matters when
+    /// the two machines' layouts differ; RealVNC and TigerVNC expose the
+    /// same choice.
+    SetPreferScancodes(bool),
+    /// User accepted a server key at the TOFU prompt. `scheme` is echoed back
+    /// from the prompt that raised it, never inferred here.
+    TrustCertificate {
+        fingerprint: String,
+        permanent: bool,
+        scheme: PinScheme,
+    },
+    /// User answered a [`SessionEvent::CredentialsRequired`] prompt.
+    ///
+    /// `save` is the "remember these credentials" checkbox. The core never
+    /// touches the keychain, the shell persists them only after the session
+    /// actually reaches `Connected`, so a rejected password is never stored.
+    ProvideCredentials {
+        username: Option<String>,
+        password: String,
+        save: bool,
+    },
+    /// User dismissed the credentials prompt, abandon the connection attempt.
+    CancelCredentials,
+    /// Reset backoff and retry immediately (network came back / user clicked).
+    ReconnectNow,
+    Disconnect,
+}

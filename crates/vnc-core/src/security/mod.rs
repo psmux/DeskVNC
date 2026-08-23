@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use vnc_transport::{BoxedStream, TransportError, TrustDecision};
 
 use crate::error::{Result, VncError};
-use crate::types::{ConnectOptions, PinScheme, SecurityType};
+use crate::types::{ConnectOptions, PinScheme, SecurityType, VncOptions};
 
 pub mod apple_dh;
 pub mod mslogon;
@@ -269,11 +269,33 @@ pub fn is_supported(t: SecurityType) -> bool {
     )
 }
 
+/// The RFB half of the options, or its defaults.
+///
+/// The `None` arm is unreachable in a running session: `VncDriver::spawn`
+/// rejects options that are not VNC before a task exists (PRDRDP/02 §4.3).
+pub(crate) fn vnc_opts(opts: &ConnectOptions) -> std::borrow::Cow<'_, VncOptions> {
+    match opts.vnc_options() {
+        Some(v) => std::borrow::Cow::Borrowed(v),
+        None => std::borrow::Cow::Owned(VncOptions::default()),
+    }
+}
+
+/// Whether the user opted into a security type that leaves the session in
+/// cleartext.
+pub(crate) fn allow_insecure(opts: &ConnectOptions) -> bool {
+    vnc_opts(opts).allow_insecure
+}
+
+/// The pinned security type, if the profile names one this build knows.
+pub(crate) fn security_pref(opts: &ConnectOptions) -> Option<SecurityType> {
+    SecurityType::parse_pref(vnc_opts(opts).security_pref.as_deref())
+}
+
 /// Pick the strongest mutually-supported security type (PRD/10 §2).
 ///
-/// * `opts.security_pref` pins the choice, if the server does not offer it we
-///   fail rather than silently downgrading ("never silently downgrade").
-/// * `opts.allow_insecure` gates `None` and `VncAuth`.
+/// * `VncOptions::security_pref` pins the choice, if the server does not offer
+///   it we fail rather than silently downgrading ("never silently downgrade").
+/// * `VncOptions::allow_insecure` gates `None` and `VncAuth`.
 pub fn select_security_type(offered: &[u8], opts: &ConnectOptions) -> Result<SecurityType> {
     if offered.is_empty() {
         return Err(VncError::NoSupportedSecurityType(Vec::new()));
@@ -286,7 +308,7 @@ pub fn select_security_type(offered: &[u8], opts: &ConnectOptions) -> Result<Sec
         .collect();
 
     // An explicit user choice is honoured exactly, or not at all.
-    if let Some(pref) = opts.security_pref {
+    if let Some(pref) = security_pref(opts) {
         if !types.contains(&pref) {
             return Err(VncError::NoSupportedSecurityType(offered.to_vec()));
         }
@@ -457,7 +479,7 @@ mod tests {
     use crate::types::Credentials;
 
     fn opts() -> ConnectOptions {
-        ConnectOptions::new("host", 5900)
+        ConnectOptions::vnc("host", 5900)
     }
 
     #[test]
@@ -565,7 +587,7 @@ mod tests {
     #[test]
     fn vnc_auth_connects_without_any_optin() {
         let o = opts();
-        assert!(!o.allow_insecure);
+        assert!(!o.vnc_options().unwrap().allow_insecure);
         assert_eq!(
             select_security_type(&[2], &o).unwrap(),
             SecurityType::VncAuth
@@ -594,7 +616,7 @@ mod tests {
     #[test]
     fn preference_is_honoured_and_never_downgraded() {
         let mut o = opts();
-        o.security_pref = Some(SecurityType::AppleDh);
+        o.vnc_mut().security_pref = Some("apple-dh".into());
         assert_eq!(
             select_security_type(&[19, 30], &o).unwrap(),
             SecurityType::AppleDh
@@ -603,7 +625,7 @@ mod tests {
         assert!(select_security_type(&[19, 2], &o).is_err());
         // Pinning a type is the user's decision and is honoured as given,
         // including "None" against a server that offers something stronger.
-        o.security_pref = Some(SecurityType::None);
+        o.vnc_mut().security_pref = Some("none".into());
         assert_eq!(select_security_type(&[1], &o).unwrap(), SecurityType::None);
         assert_eq!(
             select_security_type(&[1, 2], &o).unwrap(),
@@ -632,7 +654,7 @@ mod tests {
         });
 
         let mut o = opts();
-        o.allow_insecure = true;
+        o.vnc_mut().allow_insecure = true;
         o.credentials = Credentials::password("swordfish");
         let (_stream, chosen) = authenticate(client, ProtocolVersionInfo::new(3, 8), &[2], &o)
             .await
@@ -668,7 +690,7 @@ mod tests {
         });
 
         let mut o = opts();
-        o.allow_insecure = true;
+        o.vnc_mut().allow_insecure = true;
         o.credentials = Credentials::password("pw");
         match authenticate(client, ProtocolVersionInfo::new(3, 8), &[2], &o).await {
             Err(VncError::AuthFailed(reason)) => {
@@ -694,7 +716,7 @@ mod tests {
         });
 
         let mut o = opts();
-        o.allow_insecure = true;
+        o.vnc_mut().allow_insecure = true;
         o.credentials = Credentials::password("pw");
         authenticate(client, ProtocolVersionInfo::new(3, 3), &[2], &o)
             .await
@@ -711,7 +733,7 @@ mod tests {
         // tried to read a SecurityResult this would hang and then time out.
         let (client, _server) = tokio::io::duplex(16);
         let mut o = opts();
-        o.allow_insecure = true;
+        o.vnc_mut().allow_insecure = true;
         let (_s, chosen) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             authenticate(client, ProtocolVersionInfo::new(3, 3), &[1], &o),
@@ -743,8 +765,8 @@ mod selection_regression {
     /// framebuffer" stream desync).
     #[test]
     fn prefers_plain_vnc_auth_over_tight_when_both_offered() {
-        let mut opts = ConnectOptions::new("h", 5900);
-        opts.allow_insecure = true;
+        let mut opts = ConnectOptions::vnc("h", 5900);
+        opts.vnc_mut().allow_insecure = true;
         assert_eq!(
             select_security_type(&[2, 16], &opts).unwrap(),
             SecurityType::VncAuth
@@ -754,8 +776,8 @@ mod selection_regression {
     /// ...but a server offering ONLY Tight must still work.
     #[test]
     fn still_selects_tight_when_it_is_the_only_option() {
-        let mut opts = ConnectOptions::new("h", 5900);
-        opts.allow_insecure = true;
+        let mut opts = ConnectOptions::vnc("h", 5900);
+        opts.vnc_mut().allow_insecure = true;
         assert_eq!(
             select_security_type(&[16], &opts).unwrap(),
             SecurityType::Tight

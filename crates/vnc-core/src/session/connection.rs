@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{Result, VncError};
 use crate::proto::{self, messages, version::NegotiatedVersion, ProtocolVersion};
+use crate::quality::QualityResolve;
 use crate::security::{CredentialAsk, CredentialSource, MAX_CREDENTIAL_ATTEMPTS};
 use crate::types::{
     ClientCommand, ColorDepth, ConnectOptions, Credentials, PixelFormat, QualityPreset, Rect,
@@ -48,7 +49,10 @@ impl SessionSettings {
         Self {
             quality: options.quality,
             view_only: options.view_only,
-            lossless_refresh: options.lossless_refresh,
+            lossless_refresh: options
+                .vnc_options()
+                .map(|v| v.lossless_refresh)
+                .unwrap_or(true),
             requested_size: None,
             always_refresh: false,
             prefer_scancodes: true,
@@ -261,7 +265,8 @@ async fn establish(
     }
 
     emit_state(events, SessionState::Negotiating).await?;
-    proto::write_client_init(&mut stream, options.shared).await?;
+    let shared = options.vnc_options().map(|v| v.shared).unwrap_or(true);
+    proto::write_client_init(&mut stream, shared).await?;
     let server_init = with_timeout(
         options.connect_timeout,
         proto::read_server_init(&mut stream),
@@ -333,6 +338,7 @@ async fn serve_credential_ask(
                 }) => Some(Credentials {
                     username: username.filter(|u| !u.is_empty()),
                     password: Some(password),
+                    domain: None,
                 }),
                 Some(ClientCommand::CancelCredentials) | Some(ClientCommand::Disconnect) => None,
                 // Anything else (input, clipboard, quality) is meaningless

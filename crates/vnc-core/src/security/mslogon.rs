@@ -218,7 +218,7 @@ mod tests {
         server.write_all(&[0u8; 8]).await.unwrap(); // generator 0
         server.write_all(&[0u8; 8]).await.unwrap(); // modulus 0
         server.write_all(&[0u8; 8]).await.unwrap();
-        let mut o = ConnectOptions::new("h", 5900);
+        let mut o = ConnectOptions::vnc("h", 5900);
         o.credentials = crate::types::Credentials::user_pass("u", "p");
         let s: BoxedStream = Box::pin(client);
         assert!(matches!(

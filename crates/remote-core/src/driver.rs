@@ -1,0 +1,217 @@
+//! Protocol identity, the session handle, and the event sink.
+//!
+//! `SessionHandle`, `emit` and `emit_state` move here out of
+//! `vnc-core/src/session/mod.rs` (PRDRDP/02 §4.2, §11.1). Their error types
+//! change, because remote-core must not know `VncError`; vnc-core converts
+//! both back with a `From` impl, so every `emit(..).await?` inside the run
+//! loop keeps producing `VncError::Cancelled` exactly as it did.
+
+use crate::commands::ClientCommand;
+use crate::events::SessionEvent;
+use crate::options::ConnectOptions;
+use crate::state::SessionState;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+/// Which wire protocol a session speaks.
+///
+/// `#[non_exhaustive]` because a third protocol is meant to cost one registry
+/// line, and a shell `match` that stops compiling when a variant is added is
+/// the point. There are no out of tree consumers, so it is cheap insurance.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ProtocolKind {
+    /// `Default` is VNC so a host row written before the protocol column
+    /// existed reads as VNC with no special casing in vnc-store.
+    #[default]
+    Vnc,
+    Rdp,
+}
+
+impl ProtocolKind {
+    /// Every protocol, for callers that must handle all of them. A slice
+    /// rather than the fixed array `PinScheme::ALL` uses, so adding one is a
+    /// one line change.
+    pub const ALL: &'static [ProtocolKind] = &[ProtocolKind::Vnc, ProtocolKind::Rdp];
+
+    /// The stored spelling. Matches the serde representation and the
+    /// `hosts.protocol` column.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ProtocolKind::Vnc => "vnc",
+            ProtocolKind::Rdp => "rdp",
+        }
+    }
+
+    /// Parses a stored spelling. `None` for anything unrecognised: a row
+    /// written by a newer build is ignored, never guessed at, which is the
+    /// rule `PinScheme::parse` already follows.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "vnc" => Some(ProtocolKind::Vnc),
+            "rdp" => Some(ProtocolKind::Rdp),
+            _ => None,
+        }
+    }
+
+    /// The port used when the user gives a bare hostname. RFB display 0 is
+    /// 5900; RDP is 3389 (MS-RDPBCGR 2.2.1.1, the X.224 Connection Request is
+    /// sent to the well known TCP port 3389).
+    pub const fn default_port(self) -> u16 {
+        match self {
+            ProtocolKind::Vnc => 5900,
+            ProtocolKind::Rdp => 3389,
+        }
+    }
+
+    /// URL scheme accepted by QuickConnect.
+    pub const fn url_scheme(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ProtocolKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The session task is gone: its command receiver was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("session is no longer running")]
+pub struct SessionGone;
+
+/// Handle to a running session, held by the shell.
+#[derive(Debug, Clone)]
+pub struct SessionHandle {
+    pub id: String,
+    /// Which protocol the task on the other end of `commands` speaks. Kept on
+    /// the handle rather than in a parallel map, because the shell needs it
+    /// wherever it routes a command or labels a window.
+    pub kind: ProtocolKind,
+    pub commands: mpsc::Sender<ClientCommand>,
+    pub cancel: CancellationToken,
+}
+
+impl SessionHandle {
+    pub async fn send(&self, cmd: ClientCommand) -> Result<(), SessionGone> {
+        self.commands.send(cmd).await.map_err(|_| SessionGone)
+    }
+
+    /// Non-async, never blocking way in. The input path uses it because input
+    /// must never queue unboundedly behind a stalled session
+    /// (`src-tauri/src/commands/capture.rs:126` says so on the raw sender).
+    pub fn try_send(&self, cmd: ClientCommand) -> Result<(), SessionGone> {
+        self.commands.try_send(cmd).map_err(|_| SessionGone)
+    }
+
+    pub fn shutdown(&self) {
+        self.cancel.cancel();
+    }
+}
+
+/// A protocol implementation, as the shell sees it.
+///
+/// One value per protocol, constructed once at startup and kept in the
+/// registry. Implementations are stateless: everything per session lives in
+/// the task `spawn` starts. Object safe on purpose, the shell stores
+/// `Arc<dyn ProtocolDriver>`.
+pub trait ProtocolDriver: Send + Sync + 'static {
+    fn kind(&self) -> ProtocolKind;
+
+    /// The port used when the user gives a bare hostname. Normally
+    /// `self.kind().default_port()`; a driver may override.
+    fn default_port(&self) -> u16 {
+        self.kind().default_port()
+    }
+
+    /// Spawn a supervised session. Must be called from inside a tokio runtime.
+    ///
+    /// Returns `Err(OptionsMismatch)` when `options.protocol` is not this
+    /// driver's kind. Everything else is reported through `events` as a
+    /// `SessionState::Disconnected`, never as a return value: the caller has
+    /// already opened a window by this point and needs a live event stream to
+    /// put an error into.
+    fn spawn(
+        &self,
+        id: String,
+        options: ConnectOptions,
+        events: mpsc::Sender<SessionEvent>,
+    ) -> Result<SessionHandle, OptionsMismatch>;
+}
+
+/// A driver was handed another protocol's options.
+///
+/// `ConnectOptions` carries its protocol half as data, so nothing in the type
+/// system stops the shell handing `RdpOptions` to the VNC driver. A caught,
+/// typed error beats a `debug_assert` or a silent misparse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{expected} driver was given {actual} options")]
+pub struct OptionsMismatch {
+    pub expected: ProtocolKind,
+    pub actual: ProtocolKind,
+}
+
+/// The shell dropped the event receiver. Every caller treats this as "tear
+/// this session down", the same as a cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the event sink is closed")]
+pub struct EventSinkClosed;
+
+/// Send one event to the shell. A closed events channel means the shell is
+/// gone; surface that so the session tears down.
+pub async fn emit(
+    events: &mpsc::Sender<SessionEvent>,
+    event: SessionEvent,
+) -> Result<(), EventSinkClosed> {
+    events.send(event).await.map_err(|_| EventSinkClosed)
+}
+
+/// Convenience: emit a state transition.
+pub async fn emit_state(
+    events: &mpsc::Sender<SessionEvent>,
+    state: SessionState,
+) -> Result<(), EventSinkClosed> {
+    emit(events, SessionEvent::StateChanged(state)).await
+}
+
+#[cfg(test)]
+mod protocol_kind_tests {
+    use super::*;
+
+    /// The spelling is a stored value: the `hosts.protocol` column, the serde
+    /// representation and the URL scheme must all agree.
+    #[test]
+    fn kind_spelling_is_stable() {
+        for kind in ProtocolKind::ALL.iter().copied() {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{}\"", kind.as_str()));
+            assert_eq!(ProtocolKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(kind.url_scheme(), kind.as_str());
+            assert_eq!(
+                serde_json::from_str::<ProtocolKind>(&json).unwrap(),
+                kind,
+                "round trip"
+            );
+        }
+        assert_eq!(ProtocolKind::parse(" RDP "), Some(ProtocolKind::Rdp));
+    }
+
+    #[test]
+    fn an_unknown_protocol_does_not_degrade_into_a_known_one() {
+        for junk in ["", "vnc2", "spice", "ssh"] {
+            assert_eq!(ProtocolKind::parse(junk), None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn default_ports_are_the_registered_ones() {
+        assert_eq!(ProtocolKind::Vnc.default_port(), 5900);
+        assert_eq!(ProtocolKind::Rdp.default_port(), 3389);
+        assert_eq!(ProtocolKind::default(), ProtocolKind::Vnc);
+    }
+}

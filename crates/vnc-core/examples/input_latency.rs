@@ -33,8 +33,8 @@ async fn main() {
         .unwrap_or(200);
 
     let server = MockServer::start(MockConfig::new().size(1920, 1080).name("Input Bench")).await;
-    let mut opts = ConnectOptions::new("127.0.0.1", server.port());
-    opts.allow_insecure = true;
+    let mut opts = ConnectOptions::vnc("127.0.0.1", server.port());
+    opts.vnc_mut().allow_insecure = true;
     opts.connect_timeout = Duration::from_secs(5);
 
     let (tx, mut rx) = mpsc::channel(512);

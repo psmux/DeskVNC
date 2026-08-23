@@ -55,7 +55,9 @@ async fn raw_handshake(port: u16, opts: &ConnectOptions) -> Result<RawHandshake,
     };
     let (mut stream, security) = authenticate(tcp, info, &offered, opts).await?;
 
-    stream.write_all(&[opts.shared as u8]).await?;
+    stream
+        .write_all(&[opts.vnc_options().unwrap().shared as u8])
+        .await?;
     stream.flush().await?;
     let server_init = proto::read_server_init(&mut stream).await?;
     Ok(RawHandshake {
@@ -365,7 +367,10 @@ async fn unsupported_security_stops_the_session_without_retrying() {
 async fn a_password_less_server_connects_on_the_defaults() {
     let server = MockServer::start(MockConfig::new().security(&[SEC_NONE])).await;
     let opts = options(server.port());
-    assert!(!opts.allow_insecure, "the defaults must carry no opt-in");
+    assert!(
+        !opts.vnc_options().unwrap().allow_insecure,
+        "the defaults must carry no opt-in"
+    );
     let caps = raw_handshake(server.port(), &opts)
         .await
         .expect("a None-only server should connect");

@@ -1,0 +1,22 @@
+[package]
+name = "remote-pixel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Pixel format conversion and the integer bilinear resampler, generalised out
+# of vnc-core/src/pixel/ for stride and row order (PRDRDP/00 R37).
+#
+# A leaf crate with NO dependencies at all. That is the property which makes it
+# safe for rdp-codecs to take, since rdp-codecs may not carry tokio and
+# remote-core does (PRDRDP/02 §13 commit 1b). Keep [dependencies] empty.
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "convert"
+harness = false

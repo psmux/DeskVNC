@@ -220,7 +220,7 @@ fn write_png(path: &str, w: usize, h: usize, rgba: &[u8]) {
 
 fn options() -> ConnectOptions {
     let host = std::env::var("DVV_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-    let mut o = ConnectOptions::new(host, 5900);
+    let mut o = ConnectOptions::vnc(host, 5900);
     // Auto is what the app's profile uses; a FIXED preset never sends a
     // mid-session SetEncodings, which is the discriminating experiment for
     // state that desyncs on a quality switch.
@@ -230,16 +230,17 @@ fn options() -> ConnectOptions {
         Ok("low") => QualityPreset::Low,
         _ => QualityPreset::Auto,
     };
-    o.allow_insecure = true;
+    o.vnc_mut().allow_insecure = true;
     o.credentials = Credentials {
         username: std::env::var("DVV_USER").ok(),
         password: std::env::var("DVV_PASS").ok(),
+        domain: None,
     };
     o.reconnect.enabled = false;
     // DVV_ALR=0 disables auto lossless refresh: with the tuner still active,
     // this splits "the tuner's SetEncodings corrupts" from "ALR's
     // SetEncodings-toggle-around-a-request corrupts".
-    o.lossless_refresh = std::env::var("DVV_ALR").as_deref() != Ok("0");
+    o.vnc_mut().lossless_refresh = std::env::var("DVV_ALR").as_deref() != Ok("0");
     o
 }
 

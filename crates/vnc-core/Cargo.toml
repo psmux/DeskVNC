@@ -34,6 +34,8 @@ byteorder = { workspace = true }
 hex = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
+remote-core = { path = "../remote-core" }
+remote-pixel = { path = "../remote-pixel" }
 vnc-transport = { path = "../vnc-transport" }
 
 [dev-dependencies]

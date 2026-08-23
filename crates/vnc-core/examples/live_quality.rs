@@ -46,22 +46,23 @@ async fn main() {
         _ => QualityPreset::Auto,
     };
 
-    let mut options = ConnectOptions::new(host.clone(), port);
+    let mut options = ConnectOptions::vnc(host.clone(), port);
     options.quality = preset;
     // Pin the security type when asked: which one a server authenticates you
     // with changes how the credentials are presented, and RealVNC offers
     // three at once.
-    options.security_pref = match std::env::var("DVV_SECURITY").as_deref() {
-        Ok("ra2") => Some(vnc_core::types::SecurityType::Ra2),
-        Ok("ra2-256") => Some(vnc_core::types::SecurityType::Ra2_256),
-        Ok("vencrypt") => Some(vnc_core::types::SecurityType::VeNCrypt),
+    options.vnc_mut().security_pref = match std::env::var("DVV_SECURITY").as_deref() {
+        Ok("ra2") => Some("ra2".to_string()),
+        Ok("ra2-256") => Some("ra2-256".to_string()),
+        Ok("vencrypt") => Some("vencrypt".to_string()),
         _ => None,
     };
     // The Pi's server offers VncAuth, which the client refuses by default.
-    options.allow_insecure = true;
+    options.vnc_mut().allow_insecure = true;
     options.credentials = Credentials {
         username: std::env::var("DVV_USER").ok(),
         password: std::env::var("DVV_PASS").ok(),
+        domain: None,
     };
     // One attempt: a reconnect loop would muddy the measurement.
     options.reconnect.enabled = false;

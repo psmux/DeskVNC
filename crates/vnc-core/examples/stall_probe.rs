@@ -83,10 +83,11 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let mut o = ConnectOptions::new(host.clone(), port);
+    let mut o = ConnectOptions::vnc(host.clone(), port);
     o.credentials = Credentials {
         username: std::env::var("DVV_USER").ok(),
         password: std::env::var("DVV_PASS").ok(),
+        domain: None,
     };
     o.quality = match std::env::var("DVV_QUALITY").as_deref() {
         Ok("high") => QualityPreset::High,
@@ -94,8 +95,8 @@ async fn main() {
         Ok("low") => QualityPreset::Low,
         _ => QualityPreset::Auto,
     };
-    o.lossless_refresh = alr;
-    o.allow_insecure = true;
+    o.vnc_mut().lossless_refresh = alr;
+    o.vnc_mut().allow_insecure = true;
     o.reconnect.enabled = false;
 
     println!(

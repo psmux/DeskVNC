@@ -21,7 +21,7 @@ So the benchmark suite covers exactly the code on that path:
 | Group | What it covers |
 |---|---|
 | `decode/*` | Every rect decoder, driven through the real public `decode_rect` dispatcher, at 1080p and 4K |
-| `convert/*` | `convert_to_rgba` for the canonical format and for the awkward ones (16bpp, 8bpp indexed, non-canonical shifts/maxes) |
+| `convert/*` | `convert_to_rgba` for the canonical format and for the awkward ones (16bpp, 8bpp indexed, non-canonical shifts/maxes). This group lives in `crates/remote-pixel/benches/convert.rs`; every other group is in `crates/vnc-core/benches/decode.rs` |
 | `framebuffer/*` | `Framebuffer::apply` for RGBA rects and for overlapping CopyRect |
 | `thumbnail/*` | The pure-Rust box downscale for host tiles (PRD/03 §3) |
 | `damage/*` | The `Rect::union` coalescing the run loop does per `FramebufferUpdate` |

@@ -1085,7 +1085,7 @@ mod tests {
                 credentials
             });
 
-            let mut o = ConnectOptions::new("h", 5900);
+            let mut o = ConnectOptions::vnc("h", 5900);
             o.credentials = crate::types::Credentials::user_pass("alice", "hunter2");
             o.cert_pins.ra2 = stored_pin.clone();
             // A TLS pin for the same endpoint must be ignored here: it
@@ -1286,7 +1286,7 @@ mod tests {
         blob.extend_from_slice(&e);
         server.write_all(&blob).await.unwrap();
 
-        let mut o = ConnectOptions::new("h", 5900);
+        let mut o = ConnectOptions::vnc("h", 5900);
         o.credentials = crate::types::Credentials::password("pw");
         // The pin we saved on a previous, honest connection.
         o.cert_pins = CertPins::one(PinScheme::Ra2, key_fingerprint(&test_key(0x31)).unwrap());
@@ -1322,7 +1322,7 @@ mod tests {
     async fn rejects_an_absurd_server_key_length() {
         let (client, mut server) = tokio::io::duplex(64);
         server.write_all(&99_999u32.to_be_bytes()).await.unwrap();
-        let mut o = ConnectOptions::new("h", 5900);
+        let mut o = ConnectOptions::vnc("h", 5900);
         o.credentials = crate::types::Credentials::password("pw");
         let s: BoxedStream = Box::pin(client);
         assert!(matches!(

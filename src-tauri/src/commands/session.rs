@@ -20,7 +20,9 @@ use parking_lot::Mutex;
 use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
-use vnc_core::{ClientCommand, ConnectOptions, QualityPreset, Session, SessionEvent, SessionState};
+use vnc_core::{
+    ClientCommand, ConnectOptions, ProtocolKind, QualityPreset, SessionEvent, SessionState,
+};
 
 use crate::state::{AppState, ExistingWindow, MachineKey, PendingCredentialSave, SessionEntry};
 use crate::windows::validate_session_id;
@@ -45,29 +47,6 @@ pub const SESSIONS_STATS_EVENT: &str = "sessions://stats";
 
 /// Map a profile's `quality_pref` string (PRD/03 §5 schema) onto the core
 /// preset. Unknown values fall back to Auto.
-/// The host editor's "Security type" values (see `ui/src/components/HostDialog.tsx`
-/// and the `security_pref` column). `None` means Auto: negotiate the strongest
-/// type the server offers.
-///
-/// This was stored and written for releases without ever being read, so the
-/// dropdown did nothing at all; pinning "None" to reach a passwordless server
-/// was the workaround suggested for issue #1 and could not have worked.
-fn parse_security_pref(pref: Option<&str>) -> Option<vnc_core::types::SecurityType> {
-    use vnc_core::types::SecurityType;
-    match pref?.trim().to_ascii_lowercase().as_str() {
-        "none" => Some(SecurityType::None),
-        "vncauth" => Some(SecurityType::VncAuth),
-        "tight" => Some(SecurityType::Tight),
-        "vencrypt" | "vencrypt-x509" => Some(SecurityType::VeNCrypt),
-        "ra2" => Some(SecurityType::Ra2),
-        "apple-dh" => Some(SecurityType::AppleDh),
-        "ms-logon" | "mslogon" => Some(SecurityType::MsLogonII),
-        // "auto", and anything a newer build wrote that this one predates:
-        // negotiate rather than guess at what was meant.
-        _ => None,
-    }
-}
-
 fn parse_quality(pref: &str) -> QualityPreset {
     match pref {
         "high" => QualityPreset::High,
@@ -127,6 +106,14 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         SessionEvent::Error(message) => json!({ "type": "error", "message": message }),
         // Binary channel traffic, not JSON.
         SessionEvent::FramebufferUpdate { .. } | SessionEvent::CursorUpdate(_) => return None,
+        // Audio goes to the audio device, not to the webview, so it never
+        // becomes JSON. Kept as its own arm rather than folded into the line
+        // above, because the two are dropped for different reasons.
+        SessionEvent::Audio(_) => return None,
+        // No protocol emits one yet. When RDP does, this arm is the single
+        // readable place where somebody has to decide what the UI sees
+        // (PRDRDP/02 §9.4 has the mapping).
+        SessionEvent::Protocol(_) => return None,
     };
     if let serde_json::Value::Object(map) = &mut value {
         map.insert("sessionId".into(), json!(session_id));
@@ -538,11 +525,11 @@ pub async fn connect_session(
     // the moment it asks for the disconnect.
     reap_existing_session(&state, &id).await?;
 
-    let mut options = ConnectOptions::new(address, port);
+    let mut options = ConnectOptions::vnc(address, port);
 
     // Auto lossless refresh (PRD/09 §3.2): after motion stops, repaint the
     // regions that were JPEG-compressed at full quality. Global preference, // on a metered link the user may prefer to keep the saved bandwidth.
-    options.lossless_refresh = state
+    options.vnc_mut().lossless_refresh = state
         .store
         .get_setting("lossless_refresh")
         .ok()
@@ -594,7 +581,7 @@ pub async fn connect_session(
         if let Some(profile) = super::blocking(move || store.get_host(&lookup)).await? {
             options.quality = parse_quality(&profile.quality_pref);
             options.view_only = profile.view_only;
-            options.security_pref = parse_security_pref(profile.security_pref.as_deref());
+            options.vnc_mut().security_pref = profile.security_pref.clone();
             ssh_tunnel_raw = profile.ssh_tunnel;
         }
 
@@ -616,6 +603,9 @@ pub async fn connect_session(
                     options.credentials = vnc_core::Credentials {
                         username: stored.vencrypt_user,
                         password: stored.vencrypt_pass.or(stored.vnc_password),
+                        // RFB has no logon domain. The RDP credential fields
+                        // arrive with the protocol.
+                        domain: None,
                     };
                 }
                 Ok(None) => {}
@@ -653,7 +643,7 @@ pub async fn connect_session(
                 // and the classic tunnelled setup is a loopback-only server
                 // offering security type None; refusing it here would make
                 // the recommended configuration unusable.
-                options.allow_insecure = true;
+                options.vnc_mut().allow_insecure = true;
             }
             TunnelOutcome::HostKeyPrompt {
                 host,
@@ -686,7 +676,18 @@ pub async fn connect_session(
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(256);
     let address = options.host.clone();
-    let handle = Session::spawn(id.clone(), options, event_tx);
+    // Hard coded to VNC for now: the `protocol` column that decides this
+    // arrives with the store migration. The lookup is what matters, because
+    // it is the line a second protocol changes.
+    let kind = ProtocolKind::Vnc;
+    let driver = state
+        .protocols
+        .get(kind)
+        .ok_or_else(|| format!("this build cannot speak {kind}"))?
+        .clone();
+    let handle = driver
+        .spawn(id.clone(), options, event_tx)
+        .map_err(|e| e.to_string())?;
 
     let window_label = window.label().to_string();
     state.sessions.lock().insert(
@@ -1680,6 +1681,7 @@ mod tests {
         SessionEntry {
             handle: vnc_core::SessionHandle {
                 id: "s1".into(),
+                kind: vnc_core::ProtocolKind::Vnc,
                 commands,
                 cancel: tokio_util::sync::CancellationToken::new(),
             },
