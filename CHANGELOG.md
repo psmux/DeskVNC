@@ -53,6 +53,15 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - Pixel conversion gained stride, row order and destination channel order, so a
   rectangle can be written straight into a larger framebuffer with no second
   copy, and both protocols share one implementation instead of two that drift.
+- Virtual channels: static channel chunking, the dynamic channel layer, all
+  twenty three graphics channel commands, and the RDP 8.0 bulk data envelope.
+  A message that arrives in one chunk is passed on without being copied.
+- The phase 2 codecs: RemoteFX with both entropy coders and its inverse wavelet
+  transform, NSCodec, ClearCodec with its three caches, and the RDP 8.0
+  decompressor. Still no `unsafe` in any of it.
+- `docs/RDP_SPEC_NOTES.md`, which records the places where the code had to
+  choose a reading that only a specification vector can settle, so nobody has
+  to rediscover them from a module comment.
 
 ### Changed
 
