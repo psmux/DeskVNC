@@ -20,3 +20,30 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 socket2 = { workspace = true }
+
+# Legacy TLS backend (V3-B, PRDRDP/11 sec 3.10), reaching TLS 1.0 and 1.1
+# hosts that rustls will never speak to (rustls implements 1.2 and 1.3 only,
+# by upstream design, and the project has said it will not add earlier
+# versions). Optional, behind the `legacy-tls` feature, not in `default`.
+#
+# The versions and the reason for the `=300.5.5` pin are in the workspace
+# manifest, which is the only place they are stated.
+openssl = { workspace = true, optional = true }
+openssl-src = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
+
+[features]
+default = []
+# Vendored OpenSSL, built with TLS 1.0 and 1.1 enabled, for hosts that only
+# offer those (Windows 7 SP1 / Server 2008 R2 and similar). Off by default:
+# phase 0 ships only the dependency, the build configuration and CI, and a
+# stub upgrade path (`tls_legacy::upgrade`) that returns "not implemented".
+# No TLS 1.0 connection is made anywhere behind this feature yet; that is
+# phase 1b (PRDRDP/10 P0.6).
+#
+# Vendored rather than the system library: Debian/Ubuntu set `MinProtocol`
+# in openssl.cnf, RHEL applies crypto policies, and recent Windows disables
+# TLS 1.0 in SChannel outbound. None of those three can be overridden
+# predictably from inside our process, so shipping our own OpenSSL build
+# makes the legacy backend's behaviour identical on all three platforms.
+legacy-tls = ["dep:openssl", "dep:openssl-src", "dep:tokio-openssl"]

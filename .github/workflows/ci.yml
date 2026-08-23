@@ -44,6 +44,8 @@ jobs:
         # break only surfaced during a release build.
         run: >
           cargo clippy
+          -p remote-core -p remote-pixel
+          -p rdp-pdu -p rdp-codecs -p rdp-auth -p rdp-core
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
           --all-targets -- -D warnings
@@ -51,8 +53,61 @@ jobs:
       - name: Test
         run: >
           cargo test
+          -p remote-core -p remote-pixel
+          -p rdp-pdu -p rdp-codecs -p rdp-auth -p rdp-core
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
+
+  legacy-tls:
+    name: legacy-tls (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # PRDRDP/10 P0.6: the vendored OpenSSL backend behind `vnc-transport`'s
+    # `legacy-tls` feature, off by default (V3-B). This job is deliberately
+    # separate from `rust` above and scoped to `-p vnc-transport` only: it
+    # is the one crate that names the feature (PRDRDP/12 §2.5's
+    # `only_vnc_transport_names_openssl`), and keeping it its own job means
+    # a toolchain failure here (Perl, make, or the Windows NASM path,
+    # PRDRDP/11 §3.10.3) is legible on its own line rather than buried in
+    # the six-crate `rust` job.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # NASM is Windows MSVC only and not on the runner image (PRDRDP/11
+      # §3.10.3). Without it `openssl-src` silently falls back to `no-asm`,
+      # which still builds but is a different libcrypto from the other two
+      # platforms, which is the exact divergence R55 vendors OpenSSL to
+      # avoid. `OPENSSL_RUST_USE_NASM=1` below turns a dropped runner tool
+      # into a loud build failure instead of a silent one.
+      - name: Install NASM (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install nasm -y
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: legacy-tls
+
+      - name: Build (legacy-tls)
+        env:
+          OPENSSL_RUST_USE_NASM: ${{ matrix.os == 'windows-latest' && '1' || '' }}
+        run: cargo build -p vnc-transport --features legacy-tls
+
+      - name: Test (legacy-tls)
+        env:
+          OPENSSL_RUST_USE_NASM: ${{ matrix.os == 'windows-latest' && '1' || '' }}
+        run: cargo test -p vnc-transport --features legacy-tls
+
+      - name: Clippy (legacy-tls)
+        env:
+          OPENSSL_RUST_USE_NASM: ${{ matrix.os == 'windows-latest' && '1' || '' }}
+        run: cargo clippy -p vnc-transport --features legacy-tls --all-targets -- -D warnings
 
   frontend:
     name: Frontend

@@ -1,0 +1,57 @@
+[package]
+name = "rdp-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# CredSSP, SPNEGO, NTLMv2, and later Kerberos. Pure state machines over byte
+# slices: feed them a token, get a token back.
+#
+# MUST NOT depend on tokio or on any I/O (D12). The session does the I/O.
+# MUST NOT depend on any third party CredSSP, SPNEGO, NTLM or Kerberos
+# implementation (D3).
+# MUST NOT implement a cryptographic operation. Every cipher, hash, MAC, KDF
+# and cipher mode in this crate is a call into a crate named below
+# (PRDRDP/00 R54, PRDRDP/11 §3.1 rule 0). What this crate owns is the order
+# the calls happen in, which is what MS-NLMP and MS-CSSP specify.
+# The only workspace dependency is rdp-pdu, for `io` and `asn1::der` only.
+# Enforced by crates/rdp-pdu/tests/workspace_rules.rs (PRDRDP/12 §2.5).
+
+[dependencies]
+rdp-pdu = { path = "../rdp-pdu" }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }     # CSPRNG: client challenge, clientNonce
+zeroize = { workspace = true }
+
+# Every cryptographic operation in this crate comes from one of these. None of
+# them knows what NTLM is; the sequence is ours and the arithmetic is theirs
+# (PRDRDP/00 R54).
+md4 = { workspace = true }      # NTOWFv2 (MS-NLMP 3.3.2)
+md-5 = { workspace = true }     # NTLM session security (MS-NLMP 3.4.5.2)
+sha1 = { workspace = true }     # Kerberos AES checksums (RFC 3962)
+sha2 = { workspace = true }     # CredSSP hashes (MS-CSSP 3.1.5)
+hmac = { workspace = true }     # HMAC-MD5 for NTLMv2, HMAC-SHA1 for Kerberos
+# NTLM SEAL/SIGN key streams (MS-NLMP 3.4.3).
+# The `zeroize` feature is NOT on by default in rc4 0.1: its only features are
+# `std` and `zeroize`, and both the `ZeroizeOnDrop` on `Rc4Core` and the `Drop`
+# that clears the 256 byte state array are behind `#[cfg(feature = "zeroize")]`.
+# PRDRDP/14 §8.2 depends on it. Drop this line and that paragraph becomes false
+# silently, with no compile error and no test failure, because a missing
+# zeroize is invisible to every test that can be written in process.
+rc4 = { workspace = true, features = ["zeroize"] }
+aes = { workspace = true }      # Kerberos AES128 and AES256, phase 3
+cbc = { workspace = true }      # the CBC half of AES-CTS
+cipher = { workspace = true }
+subtle = { workspace = true }   # constant time compares (PRDRDP/12 §9.8)
+
+[features]
+default = []
+# Kerberos: phase 3 (D10). It does not build until PRDRDP/11 §3.9.2's
+# ciphertext stealing escalation is answered, and nothing is blocked today.
+kerberos = []
+
+[dev-dependencies]
+hex = { workspace = true }

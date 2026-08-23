@@ -46,6 +46,15 @@ are changing that code, and say in the PR whether you did.
 
 ```
 crates/
+  remote-core/         Protocol neutral session contract: options, events, commands,
+                       stats, the ProtocolDriver trait. Depends on no protocol crate.
+  remote-pixel/        Pixel format conversion and resampling. No dependencies at all,
+                       so a codec crate can take it without acquiring tokio.
+  rdp-pdu/             RDP wire formats: Reader/Writer, BER, PER, DER, X.224, MCS, GCC,
+                       security headers, capability sets, fast path framing. No I/O.
+  rdp-codecs/          RDP bitmap decoders as pure functions over caller owned buffers.
+  rdp-auth/            CredSSP, SPNEGO, NTLMv2. Pure state machines over byte slices.
+  rdp-core/            RDP session, connection state machine, channels, lifecycle.
   vnc-core/            RFB protocol, encodings, security, input, clipboard, session
   vnc-transport/       TCP, TLS with trust-on-first-use pinning, SSH tunnel
   vnc-discovery/       mDNS, subnet scan, banner fingerprint, name resolution, Wake-on-LAN
@@ -58,9 +67,18 @@ ui/                    React, TypeScript, Tailwind, WebGL2 renderer
 
 Two boundaries are worth preserving:
 
-- **`vnc-core` has no Tauri dependency.** The protocol layer is UI agnostic so
-  the frontend can be replaced without touching protocol code. Please do not
-  introduce one.
+- **No protocol crate has a Tauri dependency.** The protocol layer is UI agnostic
+  so the frontend can be replaced without touching protocol code. Please do not
+  introduce one. `rdp-pdu`, `rdp-codecs` and `rdp-auth` go further and carry no
+  tokio either, so they build and test in about a second and can be fuzzed without
+  a runtime. `crates/rdp-pdu/tests/workspace_rules.rs` enforces both.
+
+- **The RDP stack is written here, the cryptography never is.** No third party
+  RDP, CredSSP, SPNEGO, NTLM or Kerberos crate may be depended on, vendored or
+  copied from. Every cipher, hash, MAC and key derivation is a call into a vetted
+  crate; what this workspace owns is the order those calls happen in. A
+  construction with no vetted crate behind it is a question for the maintainers,
+  not something to write.
 - **Decoded pixels never cross the IPC boundary as whole frames.** They travel
   as binary dirty-rect messages over a Tauri channel and are uploaded into a
   single WebGL2 texture. Changes that serialise full framebuffers through IPC

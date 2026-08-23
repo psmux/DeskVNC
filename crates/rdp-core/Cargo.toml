@@ -1,0 +1,43 @@
+[package]
+name = "rdp-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# UI-agnostic RDP protocol core. MUST NOT depend on tauri.
+# The only crate in the RDP set that owns a socket or a tokio task.
+
+[dependencies]
+# The contract. Everything this crate exposes is spelled in these types.
+remote-core = { path = "../remote-core" }
+vnc-transport = { path = "../vnc-transport" }
+
+# The RDP set (PRDRDP/12 §2.1).
+rdp-pdu = { path = "../rdp-pdu" }
+rdp-codecs = { path = "../rdp-codecs" }
+rdp-auth = { path = "../rdp-auth" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+zeroize = { workspace = true }
+
+[features]
+default = []
+# Kerberos, forwarded to rdp-auth. Off in phase 1 and 2: NTLMv2 covers local
+# and domain accounts on every Windows host that will do NLA at all (D6).
+kerberos = ["rdp-auth/kerberos"]
+# Progressive RemoteFX, forwarded to rdp-codecs. Phase 3 (D10).
+progressive = ["rdp-codecs/progressive"]
+# MS-RDPEA audio playback. Phase 2 (D10).
+audio = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+hex = { workspace = true }

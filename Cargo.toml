@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
+    # Protocol-neutral layers. Every protocol crate depends on these; these
+    # depend on no protocol crate (PRDRDP/01 §2.2, PRDRDP/02 §3).
+    "crates/remote-core",
+    "crates/remote-pixel",
+    # The RDP set (AGENT_BRIEF D12, PRDRDP/12 §2).
+    "crates/rdp-pdu",
+    "crates/rdp-codecs",
+    "crates/rdp-auth",
+    "crates/rdp-core",
     "crates/vnc-core",
     "crates/vnc-transport",
     "crates/vnc-discovery",
@@ -49,6 +58,10 @@ cipher = "0.4"
 aes = "0.8"
 eax = "0.5"
 sha1 = "0.10"
+md4 = "0.10"
+hmac = "0.12"
+rc4 = "0.1"
+subtle = "2"
 sha2 = "0.10"
 md-5 = "0.10"
 rsa = "0.10.0-rc.18"
@@ -62,6 +75,15 @@ chacha20poly1305 = "0.10"
 russh = "0.62"
 russh-sftp = "2.3"
 rustls = "0.23"
+# Legacy TLS backend, optional and off by default (AGENT_BRIEF V3-B, PRDRDP/10
+# P0.6). Only vnc-transport may name these, which crates/rdp-pdu/tests/
+# workspace_rules.rs enforces. `=300.5.5` is openssl-src's newest build of
+# OpenSSL 3.5, the LTS branch supported to 2030-04-08; the default `vendored`
+# resolution picks the 3.6 branch, which goes end of life on 2026-11-01. Moving
+# this pin is an advisory policy decision, never a `cargo update`.
+openssl = { version = "0.10.81", features = ["vendored"] }
+openssl-src = "=300.5.5"
+tokio-openssl = "0.6"
 tokio-rustls = "0.26"
 rustls-pki-types = "1"
 webpki-roots = "1"
