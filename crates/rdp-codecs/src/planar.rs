@@ -262,7 +262,7 @@ fn decode_plane(
 /// only when the lifting form shifts by `cll`. Kept in one named constant
 /// expression so there is a single place to correct if a vector disagrees.
 #[inline(always)]
-fn ycocg_to_rgb(y: u8, co: u8, cg: u8, cll: u8) -> (u8, u8, u8) {
+pub(crate) fn ycocg_to_rgb(y: u8, co: u8, cg: u8, cll: u8) -> (u8, u8, u8) {
     let y = i16::from(y);
     let co = i16::from(co as i8) << cll;
     let cg = i16::from(cg as i8) << cll;
