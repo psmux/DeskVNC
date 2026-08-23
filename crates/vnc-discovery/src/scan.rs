@@ -3,9 +3,10 @@
 use crate::banner::server_label;
 use crate::error::Result;
 use crate::filter::{self, LocalNetwork};
-use crate::probe::fingerprint;
+use crate::probe::{fingerprint, rdp_fingerprint};
 use crate::resolve::{self, Resolved};
 use crate::types::{DiscoveredHost, DiscoveryEvent, DiscoverySource, ScanOptions};
+use remote_core::ProtocolKind;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -40,6 +41,16 @@ struct NameResolution {
     rows: HashMap<Ipv4Addr, Vec<DiscoveredHost>>,
     /// Addresses whose ladder has finished, with whatever it learned.
     done: HashMap<Ipv4Addr, Resolved>,
+}
+
+/// One answering service: the row to emit, and what the probe learned that the
+/// resolver would otherwise have to open its own connection for.
+struct Hit {
+    host: DiscoveredHost,
+    /// Subject `CN` from the certificate the RDP probe read on the connection
+    /// it already had open (PRDRDP/08 §4.6). `None` for a VNC row and for an
+    /// RDP host that offered no certificate.
+    cert_name: Option<String>,
 }
 
 /// Fold a resolution into a row. Returns true if it changed anything.
@@ -84,7 +95,12 @@ impl NameResolution {
     /// Register a freshly-found host, starting its resolution if this is the
     /// first time we have seen the address. Applies an already-known name in
     /// place, so the `Found` event carries it and no `Updated` is needed.
-    fn track(&mut self, host: &mut DiscoveredHost, tasks: &mut JoinSet<(Ipv4Addr, Resolved)>) {
+    fn track(
+        &mut self,
+        host: &mut DiscoveredHost,
+        cert_name: Option<String>,
+        tasks: &mut JoinSet<(Ipv4Addr, Resolved)>,
+    ) {
         let IpAddr::V4(ip) = host.address else {
             return;
         };
@@ -99,7 +115,12 @@ impl NameResolution {
         if first_sighting && !self.done.contains_key(&ip) {
             let budget = self.budget;
             let deep = self.probe_other_services;
-            tasks.spawn(async move { (ip, resolve::resolve_host_with(ip, budget, deep).await) });
+            tasks.spawn(async move {
+                (
+                    ip,
+                    resolve::resolve_host_sharing(ip, budget, deep, cert_name).await,
+                )
+            });
         }
     }
 
@@ -116,6 +137,22 @@ impl NameResolution {
         }
         self.done.insert(ip, resolved);
         updates
+    }
+}
+
+/// A human label for an RDP row, built the way `server_label` builds one for
+/// RFB: from what the server actually said, never from a guess.
+fn rdp_label(caps: &crate::types::RdpCaps) -> String {
+    if caps.standard_only {
+        return "Remote Desktop (unsupported security)".to_string();
+    }
+    if caps.failure_code.is_some() {
+        return "Remote Desktop (negotiation refused)".to_string();
+    }
+    match (caps.tls, caps.nla) {
+        (_, true) => "Remote Desktop (TLS, NLA)".to_string(),
+        (true, false) => "Remote Desktop (TLS)".to_string(),
+        (false, false) => "Remote Desktop".to_string(),
     }
 }
 
@@ -189,6 +226,10 @@ pub async fn scan_subnet(
         }
     }
 
+    // Progress counts addresses, not connections, which is what a user reads
+    // it as. Phase 1 issues more than one task per address when RDP probing is
+    // on, so `scanned` can exceed `total`; the events are clamped below rather
+    // than the total being inflated into a number that means nothing.
     let total = hosts.len() as u32;
     let base_port = *opts.ports.first().unwrap_or(&5900);
     let extra_ports: Vec<u16> = opts
@@ -205,35 +246,90 @@ pub async fn scan_subnet(
     let scanned = Arc::new(AtomicU32::new(0));
     let found = Arc::new(AtomicU32::new(0));
 
-    // ---- Phase 1: probe base_port across all hosts. ----
-    let mut set: JoinSet<Option<DiscoveredHost>> = JoinSet::new();
+    // ---- Phase 1: probe base_port, and 3389, across all hosts. ----
+    //
+    // One task per address per service rather than one per address. Both take
+    // the same semaphore permit and the same rate limiter slot before
+    // connecting, so the politeness cap stays a cap on connections per second
+    // in total rather than becoming one per service, which is the property
+    // PRDRDP/08 §4.5 asks to be measured. They run concurrently, so an RDP
+    // probe never delays a VNC row: a row is emitted the moment its own
+    // answer arrives.
+    let rdp_ports: Vec<u16> = if opts.probe_rdp {
+        opts.rdp_ports.clone()
+    } else {
+        Vec::new()
+    };
+    let mut set: JoinSet<Option<Hit>> = JoinSet::new();
     for ip in hosts {
         if cancel.is_cancelled() {
             break;
         }
-        let sem = semaphore.clone();
-        let lim = limiter.clone();
-        let cancel = cancel.clone();
-        set.spawn(async move {
-            let _permit = sem.acquire_owned().await.ok()?;
-            if cancel.is_cancelled() {
-                return None;
-            }
-            lim.acquire().await;
-            if cancel.is_cancelled() {
-                return None;
-            }
-            let addr = SocketAddr::new(IpAddr::V4(ip), base_port);
-            let banner = fingerprint(addr, connect_timeout).await?;
-            let mut host = DiscoveredHost::new(
-                IpAddr::V4(ip),
-                base_port,
-                DiscoverySource::Scan,
-                server_label(banner.major, banner.minor),
-            );
-            host.rfb_version = Some(banner.raw);
-            Some(host)
-        });
+        {
+            let sem = semaphore.clone();
+            let lim = limiter.clone();
+            let cancel = cancel.clone();
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok()?;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                lim.acquire().await;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                let addr = SocketAddr::new(IpAddr::V4(ip), base_port);
+                let banner = fingerprint(addr, connect_timeout).await?;
+                let mut host = DiscoveredHost::new(
+                    IpAddr::V4(ip),
+                    base_port,
+                    DiscoverySource::Scan,
+                    server_label(banner.major, banner.minor),
+                );
+                host.rfb_version = Some(banner.raw);
+                Some(Hit {
+                    host,
+                    cert_name: None,
+                })
+            });
+        }
+        for &port in &rdp_ports {
+            let sem = semaphore.clone();
+            let lim = limiter.clone();
+            let cancel = cancel.clone();
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok()?;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                lim.acquire().await;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                let caps = rdp_fingerprint(addr, connect_timeout).await?;
+                let cert_name = caps.cert_cn.clone();
+                let mut host = DiscoveredHost::new(
+                    IpAddr::V4(ip),
+                    port,
+                    DiscoverySource::Scan,
+                    rdp_label(&caps),
+                );
+                host.protocol = ProtocolKind::Rdp;
+                // The probe read the certificate on the connection it already
+                // had open, so this row is named without the ladder running at
+                // all. It matters most when name resolution is off entirely,
+                // where the row would otherwise be a bare address forever.
+                host.hostname = cert_name
+                    .as_deref()
+                    .and_then(|cn| resolve::sanitize_hostname(cn, ip));
+                if host.hostname.is_some() {
+                    host.name_source = Some(resolve::NameSource::RdpCertificate);
+                }
+                host.rdp = Some(caps);
+                Some(Hit { host, cert_name })
+            });
+        }
     }
 
     // Hostname resolution runs alongside the scan, never in front of it.
@@ -264,11 +360,17 @@ pub async fn scan_subnet(
             res = set.join_next() => {
                 let Some(joined) = res else { break };
                 scanned.fetch_add(1, Ordering::Relaxed);
-                if let Ok(Some(mut host)) = joined {
+                if let Ok(Some(Hit { mut host, cert_name })) = joined {
+                    // An address that answers on 3389 counts as a responder,
+                    // so a Windows box found by RDP gets its 5901 to 5906
+                    // probed as well. It is the same machine and it might run
+                    // both.
                     if let IpAddr::V4(v4) = host.address {
-                        responders.push(v4);
+                        if !responders.contains(&v4) {
+                            responders.push(v4);
+                        }
                     }
-                    names.track(&mut host, &mut resolvers);
+                    names.track(&mut host, cert_name, &mut resolvers);
                     found.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.send(DiscoveryEvent::Found(host)).await;
                 }
@@ -276,7 +378,7 @@ pub async fn scan_subnet(
                     last_progress = Instant::now();
                     let _ = tx
                         .send(DiscoveryEvent::ScanProgress {
-                            scanned: scanned.load(Ordering::Relaxed),
+                            scanned: scanned.load(Ordering::Relaxed).min(total),
                             total,
                         })
                         .await;
@@ -331,7 +433,7 @@ pub async fn scan_subnet(
                 res = set2.join_next() => {
                     let Some(joined) = res else { break };
                     if let Ok(Some(mut host)) = joined {
-                        names.track(&mut host, &mut resolvers);
+                        names.track(&mut host, None, &mut resolvers);
                         found.fetch_add(1, Ordering::Relaxed);
                         let _ = tx.send(DiscoveryEvent::Found(host)).await;
                     }

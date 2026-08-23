@@ -227,11 +227,21 @@ impl HostRegistry {
     }
 
     /// Rung 2: the live row that already answers to one of `host`'s MACs.
+    ///
+    /// A shared MAC on one port is a dual-homed machine and the two rows are
+    /// one machine, with one exception: a row for another protocol is another
+    /// service, never the same one. Today the port keeps those apart on its
+    /// own, so this can only fire if the keying ever changes, which is exactly
+    /// when it needs to.
     fn owner_by_mac(&self, host: &DiscoveredHost) -> Option<Key> {
         host.macs()
             .filter_map(canonical_mac)
             .find_map(|mac| self.by_mac.get(&(mac, host.port)).copied())
-            .filter(|key| self.by_key.contains_key(key))
+            .filter(|key| {
+                self.by_key
+                    .get(key)
+                    .is_some_and(|row| row.protocol == host.protocol)
+            })
     }
 
     /// Rung 3: the live row that already answers to `host`'s name, unless its
@@ -245,11 +255,19 @@ impl HostRegistry {
     /// Another live row that is the same machine as `key`, if there is one.
     fn twin_of(&self, key: Key) -> Option<Key> {
         let row = self.by_key.get(&key)?;
+        // Same rule as `owner_by_mac`: one MAC on one port is one machine,
+        // and two protocols are still two services.
         let by_mac = row
             .macs()
             .filter_map(canonical_mac)
             .filter_map(|mac| self.by_mac.get(&(mac, row.port)).copied())
-            .find(|other| *other != key && self.by_key.contains_key(other));
+            .find(|other| {
+                *other != key
+                    && self
+                        .by_key
+                        .get(other)
+                        .is_some_and(|twin| twin.protocol == row.protocol)
+            });
         if by_mac.is_some() {
             return by_mac;
         }
@@ -379,6 +397,13 @@ fn add_mac(host: &mut DiscoveredHost, mac: &str) -> bool {
 /// answer one port with two different banners. A placeholder label is not a
 /// fingerprint (mDNS never sees the banner), so it never conflicts.
 fn banner_conflict(a: &DiscoveredHost, b: &DiscoveredHost) -> bool {
+    // Two different protocols are two different services, whatever else
+    // matches. Today the port already keeps them apart, because `Key` and
+    // `name_key` both carry it, so this can only fire if the keying ever
+    // changes. That is exactly when it needs to fire.
+    if a.protocol != b.protocol {
+        return true;
+    }
     if let (Some(x), Some(y)) = (&a.rfb_version, &b.rfb_version) {
         if x != y {
             return true;
@@ -547,6 +572,23 @@ mod tests {
         h.hostname = Some(name.to_string());
         h.name_source = Some(NameSource::NetBios);
         h.mac = Some(mac.to_string());
+        h
+    }
+
+    /// What the 3389 probe emits for the same machine.
+    fn rdp_scan(addr: &str) -> DiscoveredHost {
+        let mut h = DiscoveredHost::new(
+            ip(addr),
+            3389,
+            DiscoverySource::Scan,
+            "Remote Desktop (TLS, NLA)".to_string(),
+        );
+        h.protocol = remote_core::ProtocolKind::Rdp;
+        h.rdp = Some(crate::types::RdpCaps {
+            tls: true,
+            nla: true,
+            ..Default::default()
+        });
         h
     }
 
@@ -1042,5 +1084,98 @@ mod tests {
             "a0:d3:c1:0f:81:e4",
         )));
         assert_eq!(row.name_source, Some(NameSource::NetBios));
+    }
+
+    /// One machine running both services is two rows with two ids. The port is
+    /// already part of every key the registry uses, so this falls out of the
+    /// existing rules rather than needing new ones, and that is worth pinning.
+    #[test]
+    fn a_machine_answering_on_5900_and_3389_is_two_rows() {
+        let mut reg = registry();
+        reg.observe(windows_scan("192.168.77.20"));
+        reg.observe(rdp_scan("192.168.77.20"));
+
+        let rows: Vec<_> = reg.hosts().cloned().collect();
+        assert_eq!(rows.len(), 2, "two services, two rows: {rows:?}");
+        let mut ports: Vec<u16> = rows.iter().map(|h| h.port).collect();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![3389, 5900]);
+
+        // And a name learned for the address reaches both rows, because the
+        // scan's resolution bookkeeping keys on the address rather than the
+        // port.
+        let mut named_vnc = windows_scan("192.168.77.20");
+        named_vnc.hostname = Some("DESKTOP-H21K47C".into());
+        named_vnc.name_source = Some(NameSource::NetBios);
+        reg.observe(named_vnc);
+        let mut named_rdp = rdp_scan("192.168.77.20");
+        named_rdp.hostname = Some("DESKTOP-H21K47C".into());
+        named_rdp.name_source = Some(NameSource::NetBios);
+        reg.observe(named_rdp);
+
+        let rows: Vec<_> = reg.hosts().cloned().collect();
+        assert_eq!(rows.len(), 2, "naming them must not merge them: {rows:?}");
+        assert!(rows
+            .iter()
+            .all(|h| h.hostname.as_deref() == Some("DESKTOP-H21K47C")));
+    }
+
+    /// Forced into the state the port normally prevents: one name, one MAC and
+    /// one port shared by a VNC row and an RDP row. They must still not merge.
+    /// This is the insurance for a future change to the keying, and it is the
+    /// only line RDP adds to the de-duplication.
+    #[test]
+    fn a_vnc_row_and_an_rdp_row_never_merge() {
+        let mut reg = registry();
+        let mut vnc = windows_scan("192.168.77.21");
+        vnc.hostname = Some("DESKTOP-H21K47C".into());
+        vnc.mac = Some("aa:bb:cc:dd:ee:ff".into());
+
+        let mut rdp = rdp_scan("192.168.77.22");
+        rdp.port = 5900;
+        rdp.hostname = Some("DESKTOP-H21K47C".into());
+        rdp.mac = Some("aa:bb:cc:dd:ee:ff".into());
+
+        reg.observe(vnc);
+        reg.observe(rdp);
+        let rows: Vec<_> = reg.hosts().cloned().collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "two protocols are two services whatever else matches: {rows:?}"
+        );
+    }
+
+    /// An xrdp certificate names a host and proves nothing about its OS, where
+    /// a Windows computer name does both. Before the scan probed 3389 on every
+    /// address, nothing brought a Linux host on that port into the list and
+    /// the distinction did not arise; now it does, and a Linux box with a
+    /// Windows icon is a small thing that is hard to trace.
+    #[test]
+    fn an_xrdp_certificate_cn_does_not_prove_windows() {
+        let windows_cn = |cn: &str| {
+            let mut h = rdp_scan("192.168.77.23");
+            h.hostname = Some(cn.to_string());
+            h.name_source = Some(NameSource::RdpCertificate);
+            h.rdp.as_mut().unwrap().cert_cn = Some(cn.to_string());
+            h.implies_windows()
+        };
+
+        assert!(windows_cn("DESKTOP-H21K47C"), "a real Windows machine name");
+        assert!(windows_cn("PC-1"));
+        assert!(
+            windows_cn("A123456789012345".get(..15).unwrap()),
+            "15 passes"
+        );
+        assert!(!windows_cn("www.xrdp.org"), "xrdp's packaged certificate");
+        assert!(!windows_cn("A1234567890123456"), "16 fails");
+        assert!(!windows_cn("host_name"), "an underscore fails");
+        assert!(!windows_cn(""), "an empty CN fails");
+
+        // A name from a rung that is itself Windows-only still proves it.
+        let mut netbios = windows_scan("192.168.77.24");
+        netbios.hostname = Some("anything".into());
+        netbios.name_source = Some(NameSource::NetBios);
+        assert!(netbios.implies_windows());
     }
 }
