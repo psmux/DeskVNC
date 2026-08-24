@@ -51,13 +51,18 @@ pub enum Entropy {
 // The adaptation constants of MS-RDPRFX 3.1.8.1.7.1, quoted verbatim so a
 // reviewer can diff them against the document.
 /// Ceiling for both `kp` and `krp`.
-const KPMAX: i32 = 80;
+///
+/// This one and the three below are `pub(crate)` because the progressive
+/// codec's SRL layer (MS-RDPEGFX 3.3.7) is the same run mode adaptation with
+/// a different symbol at the end of the run, and two copies of four numbers
+/// that must agree is how they stop agreeing.
+pub(crate) const KPMAX: i32 = 80;
 /// Shift that turns `kp` into `k` and `krp` into `kr`.
-const LSGR: u32 = 3;
+pub(crate) const LSGR: u32 = 3;
 /// `kp` increase after a full zero block in run mode.
-const UP_GR: i32 = 4;
+pub(crate) const UP_GR: i32 = 4;
 /// `kp` decrease after a non zero symbol in run mode.
-const DN_GR: i32 = 6;
+pub(crate) const DN_GR: i32 = 6;
 /// `kp` increase after a zero symbol in Golomb Rice mode.
 const UQ_GR: i32 = 3;
 /// `kp` decrease after a non zero symbol in Golomb Rice mode.
@@ -87,7 +92,7 @@ const MAX_VK: u32 = 1 << 16;
 /// Reads past the end of the input return zero and are counted, so
 /// [`BitReader::exhausted`] is the loop's termination condition and no caller
 /// has to track a length itself.
-struct BitReader<'a> {
+pub(crate) struct BitReader<'a> {
     src: &'a [u8],
     /// Next byte to pull into the window.
     next: usize,
@@ -100,7 +105,7 @@ struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    fn new(src: &'a [u8]) -> Self {
+    pub(crate) fn new(src: &'a [u8]) -> Self {
         Self {
             src,
             next: 0,
@@ -113,7 +118,7 @@ impl<'a> BitReader<'a> {
     /// True once every bit of `src` has been handed out. Everything after
     /// that point is the zero padding described in the module comment.
     #[inline]
-    fn exhausted(&self) -> bool {
+    pub(crate) fn exhausted(&self) -> bool {
         self.used >= self.src.len() * 8
     }
 
@@ -136,7 +141,7 @@ impl<'a> BitReader<'a> {
 
     /// `k` bits, `k <= 32`. `k == 0` reads nothing and returns zero.
     #[inline]
-    fn bits(&mut self, k: u32) -> u32 {
+    pub(crate) fn bits(&mut self, k: u32) -> u32 {
         debug_assert!(k <= 32);
         if k == 0 {
             return 0;
@@ -153,7 +158,7 @@ impl<'a> BitReader<'a> {
 
     /// One bit.
     #[inline]
-    fn bit(&mut self) -> u32 {
+    pub(crate) fn bit(&mut self) -> u32 {
         self.bits(1)
     }
 }

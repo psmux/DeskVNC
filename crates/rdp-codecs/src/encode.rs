@@ -503,13 +503,16 @@ fn rgb_to_ycbcr(px: [u8; 3]) -> (i16, i16, i16) {
     )
 }
 
-/// One tile's three entropy coded components.
-fn rfx_tile_components(
-    mode: crate::remotefx::Entropy,
-    px: &[[u8; 3]],
-    quant: &[u8; 10],
-) -> [Vec<u8>; 3] {
-    use crate::remotefx::quant::{BANDS, COEFS, LL3};
+/// One tile's three quantized coefficient planes, in the plain subband
+/// layout, before the LL3 differential and before any entropy coding.
+///
+/// Split out of [`rfx_tile_components`] because the progressive encoder needs
+/// exactly these numbers: a progressive first pass carries them shifted right
+/// by its progressive quantization and an upgrade pass carries the bits that
+/// shift dropped, so both have to start from the same array a simple tile
+/// starts from or the multi pass test cannot converge on anything.
+pub(crate) fn rfx_quantized_planes(px: &[[u8; 3]], quant: &[u8; 10]) -> [Vec<i16>; 3] {
+    use crate::remotefx::quant::{BANDS, COEFS};
     assert_eq!(px.len(), COEFS);
     let mut planes = [[0i16; COEFS], [0i16; COEFS], [0i16; COEFS]];
     for (i, &p) in px.iter().enumerate() {
@@ -520,8 +523,8 @@ fn rfx_tile_components(
     }
 
     let mut out = [Vec::new(), Vec::new(), Vec::new()];
-    let mut coef = vec![0i16; COEFS];
     for (c, plane) in planes.iter().enumerate() {
+        let mut coef = vec![0i16; COEFS];
         crate::remotefx::dwt::forward::forward_2d(plane, &mut coef);
         // Quantize band by band: the inverse of `quant::dequantize`, rounding
         // to nearest rather than truncating. A real encoder rounds too, and
@@ -535,6 +538,22 @@ fn rfx_tile_components(
                 *v = ((i32::from(*v) + half) >> shift) as i16;
             }
         }
+        out[c] = coef;
+    }
+    out
+}
+
+/// One tile's three entropy coded components.
+fn rfx_tile_components(
+    mode: crate::remotefx::Entropy,
+    px: &[[u8; 3]],
+    quant: &[u8; 10],
+) -> [Vec<u8>; 3] {
+    use crate::remotefx::quant::{COEFS, LL3};
+    let planes = rfx_quantized_planes(px, quant);
+    let mut out = [Vec::new(), Vec::new(), Vec::new()];
+    for (c, plane) in planes.into_iter().enumerate() {
+        let mut coef = plane;
         // Differential encode LL3: the inverse of `quant::differential_ll3`,
         // and it runs backwards so each difference uses the original
         // predecessor rather than the one already rewritten.
@@ -1550,5 +1569,335 @@ mod tests {
             packed.len(),
             raw.len()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Progressive RemoteFX (MS-RDPEGFX 2.2.4.2)
+// ---------------------------------------------------------------------------
+
+/// A minimal progressive RemoteFX encoder, for the multi pass tests and the
+/// bench fixtures (PRDRDP/04 §11.4).
+///
+/// **One deliberate gap, stated so no test reads as covering more than it
+/// does.** Every tile this module emits is in the plain subband layout, with
+/// `RFX_DWT_REDUCE_EXTRAPOLATE` clear, because writing a forward extrapolated
+/// wavelet would be a second unverifiable transform sitting next to the
+/// inverse it is supposed to check. The extrapolated layout is covered by the
+/// unit tests in [`crate::progressive::dwt`] instead, which pin it against
+/// properties (a flat band reconstructs flat, a spike stays local, the bands
+/// tile 4096 exactly) rather than against a mirror of itself.
+///
+/// The SRL and raw writers here are the exact inverse of
+/// [`crate::progressive::srl`], so a multi pass round trip proves the pair and
+/// neither half on its own. That is the same limit `remotefx::dwt`'s forward
+/// transform carries and it is stated for the same reason.
+pub mod progressive {
+    use super::{blockt, rfx_quantized_planes, rlgr, BitWriter};
+    use crate::remotefx::quant::{BANDS, COEFS, LL3};
+    use crate::remotefx::{Entropy, Rect};
+
+    /// The adaptation constants, mirrored from the decoder because an encoder
+    /// that adapts differently produces a stream only it can read.
+    const KPMAX: i32 = 80;
+    const LSGR: u32 = 3;
+    const UP_GR: i32 = 4;
+    const DN_GR: i32 = 6;
+
+    /// A sign preserving right shift. `-5 >> 1` is `-3` and this is `-2`,
+    /// which is the difference between a magnitude the decoder can rebuild
+    /// bit by bit and one it cannot.
+    fn reduce(v: i16, p: u32) -> i16 {
+        let m = (u32::from(v.unsigned_abs())) >> p.min(31);
+        if v < 0 {
+            -(m as i32) as i16
+        } else {
+            m as i16
+        }
+    }
+
+    /// The SRL run coder, written as the exact inverse of
+    /// [`crate::progressive::srl`]'s reader.
+    struct Srl {
+        w: BitWriter,
+        kp: i32,
+        k: u32,
+        run: u32,
+    }
+
+    impl Srl {
+        fn new() -> Self {
+            Self {
+                w: BitWriter::new(),
+                kp: 1 << LSGR,
+                k: 1,
+                run: 0,
+            }
+        }
+
+        fn zero(&mut self) {
+            self.run += 1;
+        }
+
+        fn value(&mut self, v: i16, num_bits: u32) {
+            let mut left = self.run;
+            self.run = 0;
+            loop {
+                let block = 1u32 << self.k;
+                if left >= block {
+                    self.w.put(0, 1);
+                    left -= block;
+                    self.kp = (self.kp + UP_GR).min(KPMAX);
+                    self.k = (self.kp >> LSGR) as u32;
+                } else {
+                    self.w.put(1, 1);
+                    self.w.put(left, self.k);
+                    self.kp = (self.kp - DN_GR).max(0);
+                    self.k = (self.kp >> LSGR) as u32;
+                    break;
+                }
+            }
+            self.w.put(u32::from(v < 0), 1);
+            self.w.put(u32::from(v.unsigned_abs()), num_bits);
+        }
+
+        /// Trailing zeros are simply not written: the decoder's padding is
+        /// zeros and a zero bit in run mode means another block of them, so
+        /// the tail comes free. That is the same property `rlgr` relies on.
+        fn finish(self) -> Vec<u8> {
+            self.w.finish()
+        }
+    }
+
+    /// The three quantized coefficient planes of one 64 by 64 tile.
+    pub type Planes = [Vec<i16>; 3];
+
+    /// Quantize a tile the way a simple pass would, which is the array every
+    /// pass of that tile is derived from.
+    pub fn planes(px: &[[u8; 3]], quant: &[u8; 10]) -> Planes {
+        rfx_quantized_planes(px, quant)
+    }
+
+    fn component_first(coef: &[i16], prog: &[u8; 10]) -> Vec<u8> {
+        let mut w = vec![0i16; COEFS];
+        for (off, n, qi) in BANDS {
+            let p = u32::from(prog[qi]);
+            for (dst, &src) in w[off..off + n].iter_mut().zip(&coef[off..off + n]) {
+                *dst = reduce(src, p);
+            }
+        }
+        // Differential encode LL3, backwards so each difference uses the
+        // original predecessor.
+        for i in (LL3 + 1..COEFS).rev() {
+            w[i] = w[i].wrapping_sub(w[i - 1]);
+        }
+        rlgr(Entropy::Rlgr1, &w)
+    }
+
+    fn component_upgrade(coef: &[i16], old: &[u8; 10], new: &[u8; 10]) -> (Vec<u8>, Vec<u8>) {
+        let mut srl = Srl::new();
+        let mut raw = BitWriter::new();
+        for (off, n, qi) in BANDS {
+            let p_old = u32::from(old[qi]);
+            let p_new = u32::from(new[qi]);
+            if p_old <= p_new {
+                continue;
+            }
+            let num_bits = p_old - p_new;
+            for &v in &coef[off..off + n] {
+                let mag_new = u32::from(v.unsigned_abs()) >> p_new.min(31);
+                if reduce(v, p_old) != 0 {
+                    raw.put(mag_new & ((1 << num_bits) - 1), num_bits);
+                } else if mag_new == 0 {
+                    srl.zero();
+                } else {
+                    let signed = if v < 0 {
+                        -(mag_new as i32) as i16
+                    } else {
+                        mag_new as i16
+                    };
+                    srl.value(signed, num_bits);
+                }
+            }
+        }
+        (srl.finish(), raw.finish())
+    }
+
+    fn tile_head(out: &mut Vec<u8>, x: u16, y: u16) {
+        out.extend_from_slice(&[0u8, 0, 0]); // quantIdxY, quantIdxCb, quantIdxCr
+        out.extend_from_slice(&x.to_le_bytes());
+        out.extend_from_slice(&y.to_le_bytes());
+    }
+
+    fn tile_body(out: &mut Vec<u8>, blobs: [Vec<u8>; 3]) {
+        for blob in blobs.iter() {
+            out.extend_from_slice(&(blob.len() as u16).to_le_bytes());
+        }
+        out.extend_from_slice(&0u16.to_le_bytes()); // tailLen
+        for blob in blobs.iter() {
+            out.extend_from_slice(blob);
+        }
+    }
+
+    /// `WBT_TILE_SIMPLE`: the whole tile in one pass, no progressive
+    /// quantization at all (MS-RDPEGFX 2.2.4.2.1.6.1).
+    pub fn tile_simple(x: u16, y: u16, planes: &Planes) -> Vec<u8> {
+        let mut body = Vec::new();
+        tile_head(&mut body, x, y);
+        body.push(0); // flags
+        let blobs = [
+            component_first(&planes[0], &[0; 10]),
+            component_first(&planes[1], &[0; 10]),
+            component_first(&planes[2], &[0; 10]),
+        ];
+        tile_body(&mut body, blobs);
+        let mut out = Vec::new();
+        blockt(&mut out, 0xCCC5, &body);
+        out
+    }
+
+    /// `WBT_TILE_FIRST`: a coarse pass at progressive quantization `prog`,
+    /// labelled with the `quality` index the region's table gives it
+    /// (MS-RDPEGFX 2.2.4.2.1.6.2).
+    pub fn tile_first(x: u16, y: u16, planes: &Planes, quality: u8, prog: &[u8; 10]) -> Vec<u8> {
+        let mut body = Vec::new();
+        tile_head(&mut body, x, y);
+        body.push(0); // flags
+        body.push(quality);
+        let blobs = [
+            component_first(&planes[0], prog),
+            component_first(&planes[1], prog),
+            component_first(&planes[2], prog),
+        ];
+        tile_body(&mut body, blobs);
+        let mut out = Vec::new();
+        blockt(&mut out, 0xCCC6, &body);
+        out
+    }
+
+    /// `WBT_TILE_UPGRADE`: the bits between two progressive quantizations
+    /// (MS-RDPEGFX 2.2.4.2.1.6.3).
+    pub fn tile_upgrade(
+        x: u16,
+        y: u16,
+        planes: &Planes,
+        quality: u8,
+        old: &[u8; 10],
+        new: &[u8; 10],
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        tile_head(&mut body, x, y);
+        body.push(quality);
+        let parts: Vec<(Vec<u8>, Vec<u8>)> = planes
+            .iter()
+            .map(|p| component_upgrade(p, old, new))
+            .collect();
+        for (srl, raw) in &parts {
+            body.extend_from_slice(&(srl.len() as u16).to_le_bytes());
+            body.extend_from_slice(&(raw.len() as u16).to_le_bytes());
+        }
+        for (srl, raw) in &parts {
+            body.extend_from_slice(srl);
+            body.extend_from_slice(raw);
+        }
+        let mut out = Vec::new();
+        blockt(&mut out, 0xCCC7, &body);
+        out
+    }
+
+    /// A whole progressive message: sync, frame begin, context, one region
+    /// carrying the tiles, frame end.
+    ///
+    /// `progs` is the region's `RFX_PROGRESSIVE_CODEC_QUANT` table, one entry
+    /// per quality index, and each entry uses the same ten nibbles for all
+    /// three components.
+    pub fn message(
+        tiles: &[Vec<u8>],
+        quant: &[u8; 10],
+        progs: &[[u8; 10]],
+        rects: Option<&[Rect]>,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+
+        let mut sync = Vec::new();
+        sync.extend_from_slice(&0xCACC_ACCAu32.to_le_bytes());
+        sync.extend_from_slice(&0x0100u16.to_le_bytes());
+        blockt(&mut out, 0xCCC0, &sync);
+
+        let mut fb = Vec::new();
+        fb.extend_from_slice(&11u32.to_le_bytes()); // frameIndex
+        fb.extend_from_slice(&1u16.to_le_bytes()); // regionCount
+        blockt(&mut out, 0xCCC1, &fb);
+
+        let mut ctx = vec![0u8]; // ctxId
+        ctx.extend_from_slice(&0x0040u16.to_le_bytes());
+        ctx.push(0); // flags: the plain wavelet, see the module comment
+        blockt(&mut out, 0xCCC3, &ctx);
+
+        let mut tiles_data = Vec::new();
+        for t in tiles {
+            tiles_data.extend_from_slice(t);
+        }
+
+        let rects = rects.unwrap_or(&[]);
+        let mut body = vec![0x40u8];
+        body.extend_from_slice(&(rects.len() as u16).to_le_bytes());
+        body.push(1); // numQuant
+        body.push(progs.len() as u8);
+        body.push(0); // flags
+        body.extend_from_slice(&(tiles.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(tiles_data.len() as u32).to_le_bytes());
+        for r in rects {
+            body.extend_from_slice(&r.x.to_le_bytes());
+            body.extend_from_slice(&r.y.to_le_bytes());
+            body.extend_from_slice(&r.w.to_le_bytes());
+            body.extend_from_slice(&r.h.to_le_bytes());
+        }
+        body.extend_from_slice(&nibbles(quant));
+        for (i, p) in progs.iter().enumerate() {
+            body.push(i as u8); // the quality label
+            for _ in 0..3 {
+                body.extend_from_slice(&nibbles(p));
+            }
+        }
+        body.extend_from_slice(&tiles_data);
+        blockt(&mut out, 0xCCC4, &body);
+
+        blockt(&mut out, 0xCCC2, &[]);
+        out
+    }
+
+    /// Ten four bit factors into five bytes, low nibble first
+    /// (MS-RDPEGFX 2.2.4.2.1.5.1).
+    fn nibbles(q: &[u8; 10]) -> [u8; 5] {
+        let mut out = [0u8; 5];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = (q[i * 2] & 0x0F) | ((q[i * 2 + 1] & 0x0F) << 4);
+        }
+        out
+    }
+
+    /// Where the first tile block starts inside a message this module built,
+    /// for the tests that corrupt one field of it.
+    ///
+    /// # Panics
+    ///
+    /// If the message carries no region, which would mean this module and the
+    /// test using it disagree about what it emits.
+    pub fn first_tile_offset(msg: &[u8]) -> usize {
+        let mut at = 0usize;
+        while at + 6 <= msg.len() {
+            let ty = u16::from_le_bytes([msg[at], msg[at + 1]]);
+            let len =
+                u32::from_le_bytes([msg[at + 2], msg[at + 3], msg[at + 4], msg[at + 5]]) as usize;
+            if ty == 0xCCC4 {
+                let num_rects = usize::from(u16::from_le_bytes([msg[at + 7], msg[at + 8]]));
+                let num_quant = usize::from(msg[at + 9]);
+                let num_prog = usize::from(msg[at + 10]);
+                return at + 18 + num_rects * 8 + num_quant * 5 + num_prog * 16;
+            }
+            at += len.max(6);
+        }
+        panic!("no region in this message");
     }
 }

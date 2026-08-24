@@ -29,6 +29,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use rdp_codecs::mppc::{MppcDecompressor, Variant, PACKET_AT_FRONT, PACKET_COMPRESSED};
+use rdp_codecs::progressive::{self, Layout, ProgressiveState};
 use rdp_codecs::remotefx::{dwt, quant, rlgr, ycbcr, Entropy, RfxContext, RfxScratch, TILE};
 use rdp_codecs::{
     avc420, clear, encode, mppc, nscodec, planar, remotefx, rle, uncompressed, zgfx, DstView,
@@ -956,6 +957,169 @@ fn contains_idr_byte_at_a_time(data: &[u8]) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Progressive RemoteFX (PRDRDP/04 §4.9, §11.1)
+// ---------------------------------------------------------------------------
+
+/// The three quality stages the progressive benches step through.
+///
+/// A first pass at four bits of extra quantization and two upgrades down to
+/// none, which is the shape a server uses when it wants a region on screen in
+/// one frame and sharp in three. The numbers are the fixture, not the wire:
+/// nothing published fixes what a server picks.
+const PROG_STAGES: [[u8; 10]; 3] = [[4; 10], [2; 10], [0; 10]];
+
+/// A whole frame of progressive tiles, 510 of them at 1080p.
+///
+/// `pass` selects which of the three blocks each tile is sent as: `0` is
+/// `WBT_TILE_SIMPLE`, `1` is `WBT_TILE_FIRST` at the coarse stage, and `2` is
+/// the upgrade off it.
+///
+/// `photo` picks the fixture, and both are measured because the two documents
+/// disagree about which one belongs here. `PRDRDP/09 §5` names `synth_desktop`
+/// for `progressive_pass1`, and it is right to: xrdp's GFX path sends
+/// progressive for the whole surface including the text, which is not how a
+/// Windows server uses RemoteFX. But the RemoteFX lines above are measured on
+/// the photographic fixture for the reason `photo_image` gives, and a
+/// progressive number measured on a different image is not comparable with
+/// them. So both are reported and the pair is the answer.
+fn prog_frame(w: usize, h: usize, pass: usize, photo: bool) -> Vec<u8> {
+    let img = if photo {
+        photo_image(w, h)
+    } else {
+        rgb_image(w, h)
+    };
+    let mut tiles = Vec::new();
+    for ty in 0..h.div_ceil(TILE) {
+        for tx in 0..w.div_ceil(TILE) {
+            let px = tile_at(&img, w, h, tx, ty);
+            let planes = encode::progressive::planes(&px, &encode::RFX_QUANT_TYPICAL);
+            let (tx, ty) = (tx as u16, ty as u16);
+            tiles.push(match pass {
+                0 => encode::progressive::tile_simple(tx, ty, &planes),
+                1 => encode::progressive::tile_first(tx, ty, &planes, 0, &PROG_STAGES[0]),
+                2 => encode::progressive::tile_upgrade(
+                    tx,
+                    ty,
+                    &planes,
+                    1,
+                    &PROG_STAGES[0],
+                    &PROG_STAGES[1],
+                ),
+                _ => encode::progressive::tile_upgrade(
+                    tx,
+                    ty,
+                    &planes,
+                    2,
+                    &PROG_STAGES[1],
+                    &PROG_STAGES[2],
+                ),
+            });
+        }
+    }
+    encode::progressive::message(&tiles, &encode::RFX_QUANT_TYPICAL, &PROG_STAGES, None)
+}
+
+fn bench_progressive(c: &mut Criterion) {
+    let (w, h) = (1920usize, 1080usize);
+    let n = (w * h) as u64;
+    let mut out = vec![0u8; uncompressed::dst_len(w as u16, h as u16)];
+
+    let mut g = c.benchmark_group("rdp_decode");
+    g.throughput(Throughput::Elements(n));
+
+    // Whole codec through its real entry point. PRDRDP/04 §4.9.5 asks for
+    // 250 MPix/s on a first pass, which is 8.3 ms at 1080p.
+    //
+    // Each of these runs the same pass over and over, which is what makes the
+    // numbers comparable. The upgrade lines need a store that has already had
+    // a first pass, so it is primed outside the timed loop and the timed loop
+    // then re-applies the same upgrade to it. That is not what a session does
+    // and it is the only honest way to measure one pass in isolation: the
+    // second application refines coefficients that are already refined, which
+    // costs exactly the same bits and the same arithmetic.
+    // `progressive_pass1` and `progressive_upgrade` are the two ids
+    // `PRDRDP/09 §5` and its acceptance table name, so they are spelled the
+    // way the criterion is written rather than the way the block is.
+    for (pass, photo, id) in [
+        (1usize, false, "progressive_pass1"),
+        (2, false, "progressive_upgrade"),
+        (0, false, "progressive_simple"),
+        (1, true, "progressive_pass1_photo"),
+        (2, true, "progressive_upgrade_photo"),
+        (0, true, "progressive_simple_photo"),
+    ] {
+        let msg = prog_frame(w, h, pass, photo);
+        let mut state = ProgressiveState::new();
+        let mut scratch = RfxScratch::with_capacity();
+        if pass == 2 {
+            let first = prog_frame(w, h, 1, photo);
+            let mut v = DstView::packed(
+                &mut out,
+                w as u16,
+                h as u16,
+                OutFormat::Bgra,
+                RowOrder::TopDown,
+            )
+            .unwrap();
+            progressive::decode_message(&first, &mut state, &mut scratch, &mut v).unwrap();
+        }
+        g.bench_function(BenchmarkId::new(id, "1080p"), |b| {
+            b.iter(|| {
+                let mut v = DstView::packed(
+                    &mut out,
+                    w as u16,
+                    h as u16,
+                    OutFormat::Bgra,
+                    RowOrder::TopDown,
+                )
+                .unwrap();
+                progressive::decode_message(&msg, &mut state, &mut scratch, &mut v).unwrap()
+            })
+        });
+    }
+    g.finish();
+
+    // The two stages progressive does not share with RemoteFX, per tile
+    // component, so a miss can be attributed to one of them rather than to
+    // "progressive". The RemoteFX line to compare each against is in
+    // `rdp_stage`: `rfx_dwt` for the wavelet and `rfx_rlgr1` for the entropy
+    // layer the SRL pass replaces.
+    let mut g = c.benchmark_group("rdp_stage");
+    g.throughput(Throughput::Elements(4096));
+
+    let (_, coef) = rfx_component(Entropy::Rlgr3, true);
+    let mut buf = coef.clone();
+    let mut tmp = vec![0i16; 4096];
+    g.bench_function(BenchmarkId::new("prog_dwt_extrapolate", "tile"), |b| {
+        b.iter(|| progressive::dwt::inverse_2d(&mut buf, &mut tmp))
+    });
+
+    // One component's upgrade pass, over the two bitstreams a real one
+    // carries. The tile is primed with the coarse stage so roughly the
+    // coefficients a real first pass leaves non zero are non zero here, which
+    // is what decides the split between the SRL stream and the raw one.
+    let px = tile_at(&photo_image(1920, 1080), 1920, 1080, 15, 8);
+    let planes = encode::progressive::planes(&px, &encode::RFX_QUANT_TYPICAL);
+    let block =
+        encode::progressive::tile_upgrade(0, 0, &planes, 1, &PROG_STAGES[0], &PROG_STAGES[1]);
+    // The two blobs of the Y component start after the 26 byte block header
+    // and the first two length fields name them.
+    let srl_len = usize::from(u16::from_le_bytes([block[14], block[15]]));
+    let raw_len = usize::from(u16::from_le_bytes([block[16], block[17]]));
+    let srl = block[26..26 + srl_len].to_vec();
+    let raw = block[26 + srl_len..26 + srl_len + raw_len].to_vec();
+    let old = [10u8; 10];
+    let new = [8u8; 10];
+    let mut store = coef.clone();
+    g.bench_function(BenchmarkId::new("prog_srl_upgrade", "tile"), |b| {
+        b.iter(|| {
+            progressive::srl::upgrade_component(&mut store, Layout::Plain, &old, &new, &srl, &raw)
+        })
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode,
@@ -964,6 +1128,7 @@ criterion_group!(
     bench_before_after,
     bench_phase2_decode,
     bench_phase2_stage,
-    bench_phase2_bulk
+    bench_phase2_bulk,
+    bench_progressive
 );
 criterion_main!(benches);

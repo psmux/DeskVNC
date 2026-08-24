@@ -100,7 +100,7 @@ pub struct Rect {
 
 impl Rect {
     /// The intersection, or `None` when they do not overlap.
-    fn intersect(self, other: Rect) -> Option<Rect> {
+    pub(crate) fn intersect(self, other: Rect) -> Option<Rect> {
         let x0 = self.x.max(other.x);
         let y0 = self.y.max(other.y);
         let x1 = (self.x as u32 + self.w as u32).min(other.x as u32 + other.w as u32);
@@ -117,7 +117,7 @@ impl Rect {
     }
 
     /// The smallest rectangle covering both.
-    fn union(self, other: Rect) -> Rect {
+    pub(crate) fn union(self, other: Rect) -> Rect {
         let x0 = self.x.min(other.x);
         let y0 = self.y.min(other.y);
         let x1 = (self.x as u32 + self.w as u32).max(other.x as u32 + other.w as u32);
@@ -139,17 +139,25 @@ impl Rect {
 /// rectangles. Every tile is tested against it by walking these bytes again,
 /// which is eight bytes per rectangle out of L1 and cheaper than the
 /// allocation would be.
+///
+/// `pub(crate)` because the progressive codec's `WBT_REGION` carries the same
+/// `RFX_RECT` array with the same meaning (MS-RDPEGFX 2.2.4.2.1.5), so the
+/// clip stage is shared rather than written twice.
 #[derive(Clone, Copy, Default)]
-struct Region<'a> {
+pub(crate) struct Region<'a> {
     rects: &'a [u8],
 }
 
 impl<'a> Region<'a> {
-    fn count(&self) -> usize {
+    pub(crate) fn new(rects: &'a [u8]) -> Self {
+        Self { rects }
+    }
+
+    pub(crate) fn count(&self) -> usize {
         self.rects.len() / 8
     }
 
-    fn iter(&self) -> impl Iterator<Item = Rect> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Rect> + '_ {
         self.rects.chunks_exact(8).map(|c| Rect {
             x: u16::from_le_bytes([c[0], c[1]]),
             y: u16::from_le_bytes([c[2], c[3]]),
@@ -248,6 +256,16 @@ impl RfxScratch {
         Self::default()
     }
 
+    /// Size the buffers, so the next decode does not allocate.
+    ///
+    /// `remotefx::decode_message` calls `grow` directly; this exists for
+    /// `progressive::decode_message`, which pools the same four buffers, and
+    /// is gated so a `--no-default-features` build has no unused method.
+    #[cfg(feature = "progressive")]
+    pub(crate) fn ensure(&mut self) {
+        self.grow();
+    }
+
     /// A scratch already sized, so the first decode does not allocate either.
     pub fn with_capacity() -> Self {
         let mut s = Self::new();
@@ -271,7 +289,12 @@ impl RfxScratch {
         }
     }
 
-    fn parts(&mut self) -> (&mut [i16], &mut [i16], &mut [i16], &mut [i16]) {
+    /// The three component buffers and the inverse DWT's working buffer.
+    ///
+    /// `pub(crate)` because the progressive codec needs exactly this set of
+    /// four and pooling a second identical type would be four buffers of the
+    /// same size under a different name.
+    pub(crate) fn parts(&mut self) -> (&mut [i16], &mut [i16], &mut [i16], &mut [i16]) {
         let (y, rest) = self.buf.split_at_mut(COEFS);
         let (cb, rest) = rest.split_at_mut(COEFS);
         let (cr, tmp) = rest.split_at_mut(COEFS);
@@ -400,9 +423,7 @@ pub fn decode_message(
                 let _channel_id = b.u8()?;
                 let _region_flags = b.u8()?;
                 let num_rects = usize::from(b.u16_le()?);
-                region = Region {
-                    rects: b.take(num_rects * 8)?,
-                };
+                region = Region::new(b.take(num_rects * 8)?);
                 let region_type = b.u16_le()?;
                 if region_type != CBT_REGION {
                     return Err(DecodeError::Range {
@@ -598,12 +619,17 @@ fn decode_tile(
     }
     frame.decoded += 1;
 
+    let (y, cb, cr, _) = scratch.parts();
     match clip {
-        None => blit(scratch, tile_rect, visible, dst, frame),
+        None => {
+            blit(y, cb, cr, tile_rect, visible, dst);
+            frame.touch(visible);
+        }
         Some(region) => {
             for rect in region.iter() {
                 if let Some(part) = visible.intersect(rect) {
-                    blit(scratch, tile_rect, part, dst, frame);
+                    blit(y, cb, cr, tile_rect, part, dst);
+                    frame.touch(part);
                 }
             }
         }
@@ -611,20 +637,25 @@ fn decode_tile(
     Ok(())
 }
 
-/// Write the part of the decoded tile that `part` covers.
+/// Write the part of a decoded tile that `part` covers.
 ///
 /// `part` is already proved to be inside both the tile and the destination,
 /// so every slice below is in range by construction and the row loop carries
 /// no bounds check (PRDRDP/04 §4.6.8 rule two).
-fn blit(
-    scratch: &mut RfxScratch,
+///
+/// `pub(crate)` and taking the three component buffers rather than a
+/// [`RfxScratch`] because the progressive codec's tile blit is this function
+/// exactly: the same 64 by 64 layout, the same clip rectangle, the same
+/// colour conversion (MS-RDPEGFX 3.3.7).
+pub(crate) fn blit(
+    y: &[i16],
+    cb: &[i16],
+    cr: &[i16],
     tile: Rect,
     part: Rect,
     dst: &mut DstView<'_>,
-    frame: &mut RfxFrame,
 ) {
     let bgra = matches!(dst.format(), OutFormat::Bgra);
-    let (y, cb, cr, _) = scratch.parts();
     let cx = usize::from(part.x - tile.x);
     let cy = usize::from(part.y - tile.y);
     let w = usize::from(part.w);
@@ -638,7 +669,6 @@ fn blit(
             ycbcr::row::<false>(&y[off..][..w], &cb[off..][..w], &cr[off..][..w], d);
         }
     }
-    frame.touch(part);
 }
 
 #[cfg(test)]

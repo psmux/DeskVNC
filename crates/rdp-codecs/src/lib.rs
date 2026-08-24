@@ -46,7 +46,24 @@
 //! scheme entirely (MS-RDPEGDI 3.1.8.1 and 3.1.8.2) and are refused by name
 //! rather than guessed at; the module comment says why.
 //!
-//! Progressive RemoteFX ([`progressive`], phase 3) is the one stub left.
+//! ## What the progressive commit added
+//!
+//! [`progressive`], nominally phase 3 and pulled forward because it was the
+//! most likely way a real Windows host ends a session. `docs/RDP_SPEC_NOTES.md`
+//! §1.6 has the argument: progressive is available from EGFX capability
+//! version 8, which is what we advertise, and no capability bit declines it at
+//! any version, so a server may simply send it. It is compiled by default for
+//! that reason; the `progressive` feature is still there and
+//! `--no-default-features` turns it off.
+//!
+//! It is split the way [`remotefx`] is, with the stages it does not share in
+//! their own modules: [`progressive::bands`] for the two subband layouts,
+//! [`progressive::dwt`] for the extrapolated wavelet, [`progressive::srl`] for
+//! the upgrade pass and [`progressive::state`] for the per tile store. What it
+//! does share it shares as calls: RLGR1, the quantization value parsing, the
+//! plain layout's differential decode, dequantization and whole inverse
+//! wavelet, the clip region, the tile blit, the colour transform and the
+//! scratch buffers.
 //!
 //! ## The five crate rules (PRDRDP/04 §4.1)
 //!
@@ -71,9 +88,7 @@ pub mod planar;
 pub mod rle;
 pub mod uncompressed;
 
-// Phase 1b and phase 2. `progressive` is the only stub left, and it exists so
-// the shape of the crate is visible and so the module a later commit fills in
-// is already named and cited.
+// Phase 1b, phase 2, and the one phase 3 module that was pulled forward.
 pub mod avc420;
 pub mod clear;
 pub mod mppc;
