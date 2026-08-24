@@ -604,11 +604,46 @@ fn an_envelope_the_decompressor_refuses_says_so() {
     assert!(err.to_string().contains("could not decompress"), "{err}");
 }
 
-/// RemoteFX Progressive is the one unsupported codec a Windows server is
-/// likely to actually send, so the refusal names it rather than printing a
-/// number.
+/// One `RFX_PROGRESSIVE_SYNC` block, MS-RDPEGFX 2.2.4.2.1.1: the block type,
+/// the `blockLen` that covers the six byte header and the six byte body, the
+/// magic and the version.
+fn progressive_sync(magic: u32) -> Vec<u8> {
+    let mut out = vec![0xC0, 0xCC];
+    out.extend_from_slice(&12u32.to_le_bytes());
+    out.extend_from_slice(&magic.to_le_bytes());
+    out.extend_from_slice(&0x0100u16.to_le_bytes());
+    out
+}
+
+/// RemoteFX Progressive is the one codec a Windows server is likely to send
+/// that no capability bit declines, and this build decodes it
+/// (`docs/RDP_SPEC_NOTES.md` §1.6). What is proved here is the routing: the
+/// codec id reaches `rdp_codecs::progressive` rather than the refusal that
+/// used to stand in for it.
 #[test]
-fn a_progressive_rectangle_names_progressive() {
+fn a_progressive_rectangle_reaches_the_progressive_decoder() {
+    let (mut egfx, mut events, mut replies) = confirmed();
+    mapped_surface(&mut egfx, 1, 16, 16, 0, 0);
+    egfx.message(
+        &message(&[EgfxPdu::WireToSurface1 {
+            surface_id: 1,
+            codec_id: CODEC_CAPROGRESSIVE,
+            pixel_format: pixel_format::XRGB_8888,
+            dest_rect: rect(0, 0, 2, 1),
+            bitmap_data: rdp_pdu::Payload::new(&progressive_sync(0xCACC_ACCA)),
+        }]),
+        ctx(),
+        &mut events,
+        &mut replies,
+    )
+    .expect("a well formed progressive message");
+}
+
+/// A bitstream the progressive decoder refuses is named the way every other
+/// codec's refusal is named, and carries no byte of the bitstream
+/// (PRDRDP/12 §6.4).
+#[test]
+fn a_refused_progressive_bitstream_names_the_codec() {
     let (mut egfx, mut events, mut replies) = confirmed();
     mapped_surface(&mut egfx, 1, 16, 16, 0, 0);
     let err = egfx
@@ -618,15 +653,17 @@ fn a_progressive_rectangle_names_progressive() {
                 codec_id: CODEC_CAPROGRESSIVE,
                 pixel_format: pixel_format::XRGB_8888,
                 dest_rect: rect(0, 0, 2, 1),
-                bitmap_data: rdp_pdu::Payload::new(&[]),
+                // Not `RFX_PROGRESSIVE_SYNC.magic`, which the decoder checks
+                // before it walks anything (MS-RDPEGFX 2.2.4.2.1.1).
+                bitmap_data: rdp_pdu::Payload::new(&progressive_sync(0xDEAD_BEEF)),
             }]),
             ctx(),
             &mut events,
             &mut replies,
         )
-        .expect_err("no progressive decoder");
-    assert!(err.to_string().contains("Progressive"), "{err}");
-    assert!(err.to_string().contains("progressive` feature"), "{err}");
+        .expect_err("a wrong sync magic");
+    assert!(err.to_string().contains("progressive decoder"), "{err}");
+    assert!(err.to_string().contains("2x1"), "{err}");
 }
 
 /// A command naming a surface that was never created means the two ends

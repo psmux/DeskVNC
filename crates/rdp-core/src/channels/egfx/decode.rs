@@ -24,12 +24,20 @@
 //! buffers; all of them grow to their working size on the first frame and are
 //! reused for every frame after it (PRDRDP/04 §4.1 rule two).
 
+use rdp_codecs::progressive::ProgressiveState;
 use rdp_codecs::{
-    clear, planar, remotefx, uncompressed, DecodeError, DstView, Palette, PixelFormat,
+    clear, planar, progressive, remotefx, uncompressed, DecodeError, DstView, Palette, PixelFormat,
 };
 use rdp_pdu::vc::egfx::{codec_id, pixel_format};
 
 use crate::error::{RdpError, Result};
+
+/// `RDPGFX_CODECID_CAPROGRESSIVE` (MS-RDPEGFX 2.2.2.1).
+///
+/// Not in `rdp_pdu::vc::egfx::codec_id`, which lists the eight ids it needs.
+/// It is named here so this file reads the same as every other arm, and so a
+/// log line says "progressive" rather than "0x0009".
+pub const CAPROGRESSIVE: u16 = 0x0009;
 
 /// Every decoder's cross call state, allocated with the channel.
 pub struct Decoders {
@@ -112,12 +120,20 @@ impl Decoders {
 /// [`RdpError::Protocol`] naming the codec and the geometry, for both a codec
 /// this build does not decode and a bitstream the decoder refused. Neither
 /// message carries a byte of the bitstream (PRDRDP/12 §6.4).
+///
+/// `progressive_state` is the destination surface's own tile store
+/// (`crate::channels::egfx::surface::Surface::progressive_view`). It is a
+/// separate argument rather than a field of [`Decoders`] because
+/// MS-RDPEGFX 2.2.4.2 makes it per surface: a `WBT_TILE_UPGRADE` refines the
+/// tile a previous pass left behind, and refining one surface's tile with
+/// another surface's coefficients draws the wrong picture.
 pub fn wire_to_surface(
     codec: u16,
     pixel_fmt: u8,
     surface_alpha: bool,
     src: &[u8],
     decoders: &mut Decoders,
+    progressive_state: &mut ProgressiveState,
     dst: &mut DstView<'_>,
 ) -> Result<()> {
     let (w, h) = (dst.width(), dst.height());
@@ -153,6 +169,17 @@ pub fn wire_to_surface(
             remotefx::decode_message(src, &mut decoders.rfx, &mut decoders.rfx_scratch, dst)
                 .map(|_| ())
                 .map_err(|e| refused("remotefx", w, h, &e))
+        }
+        // Progressive RemoteFX (MS-RDPEGFX 2.2.4.2). The scratch is
+        // RemoteFX's, which is the same four buffers and holds nothing
+        // between calls (`rdp_codecs::progressive::scratch_len`), so the two
+        // codecs share one pool rather than each keeping an idle copy. The
+        // tile store is not shared and cannot be: it belongs to the surface
+        // being drawn into, which is why it arrives as its own argument.
+        CAPROGRESSIVE => {
+            progressive::decode_message(src, progressive_state, &mut decoders.rfx_scratch, dst)
+                .map(|_| ())
+                .map_err(|e| refused("progressive", w, h, &e))
         }
         // H.264 arrived with capability set version 10 and we advertise 8
         // and 8.1 only (`crate::channels::egfx::ADVERTISED`), so a server
@@ -227,6 +254,7 @@ mod tests {
             false,
             &src,
             &mut decoders,
+            &mut ProgressiveState::new(),
             &mut view(&mut buf, 2, 1),
         )
         .expect("decodes");
@@ -251,6 +279,7 @@ mod tests {
             true,
             &src,
             &mut decoders,
+            &mut ProgressiveState::new(),
             &mut view(&mut buf, 1, 1),
         )
         .expect("decodes");
@@ -263,6 +292,7 @@ mod tests {
             true,
             &src,
             &mut decoders,
+            &mut ProgressiveState::new(),
             &mut view(&mut buf, 1, 1),
         )
         .expect("decodes");
@@ -281,6 +311,7 @@ mod tests {
             false,
             &[0x00],
             &mut decoders,
+            &mut ProgressiveState::new(),
             &mut view(&mut buf, 2, 2),
         )
         .expect_err("truncated");
@@ -307,6 +338,7 @@ mod tests {
                 false,
                 &[],
                 &mut decoders,
+                &mut ProgressiveState::new(),
                 &mut view(&mut buf, 1, 1),
             )
             .expect_err("unsupported");

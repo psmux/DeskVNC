@@ -37,6 +37,7 @@
 //! decode and it is not a conversion; it is the handover, and it exists
 //! because `RectPayload::Rgba` owns its bytes.
 
+use rdp_codecs::progressive::ProgressiveState;
 use rdp_codecs::{DstView, OutFormat, RowOrder};
 use rdp_pdu::update::{Point16, RectExclusive};
 use rdp_pdu::vc::egfx::{pixel_format, Color32};
@@ -80,6 +81,31 @@ pub struct Surface {
     pub origin: Option<(u32, u32)>,
     /// RGBA8888, packed, top down.
     pixels: Vec<u8>,
+    /// The progressive codec's tile store for this surface.
+    ///
+    /// It lives on the surface because that is what MS-RDPEGFX 2.2.4.2 makes
+    /// it: a first pass leaves a coarse tile behind and a later
+    /// `WBT_TILE_UPGRADE` refines that same tile in place, so the store has
+    /// to outlive the message and die with the surface it describes. A store
+    /// pooled per channel instead would refine one surface's tiles with
+    /// another's coefficients.
+    ///
+    /// It allocates nothing until a progressive tile arrives, so a session
+    /// that never sees the codec pays a `Vec` header per surface
+    /// (`rdp_codecs::progressive::ProgressiveState::new`).
+    ///
+    /// # What bounds it
+    ///
+    /// The per store ceiling is `rdp_codecs::progressive::DEFAULT_MAX_BYTES`
+    /// (128 MiB, PRDRDP/04 §4.9.4), which no legal surface reaches: the grid
+    /// is fixed by the surface's own geometry, so the store cannot exceed
+    /// `ceil(w/64) * ceil(h/64) * 24 KiB`, which is 47.8 MiB at 4K. Across
+    /// the session the bound is geometric too, at one and a half times
+    /// [`MAX_SURFACE_BYTES`], because a tile costs 24 KiB of coefficients for
+    /// 16 KiB of pixels. §4.9.4's cross context eviction is therefore not
+    /// implemented: there is nothing it could evict that the surface budget
+    /// has not already refused.
+    progressive: ProgressiveState,
 }
 
 impl Surface {
@@ -93,6 +119,13 @@ impl Surface {
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.pixels.len()
+    }
+
+    /// Bytes the progressive tile store is holding for this surface, which is
+    /// zero until a progressive tile arrives (PRDRDP/04 §11.3).
+    #[must_use]
+    pub fn progressive_bytes(&self) -> usize {
+        self.progressive.bytes()
     }
 
     /// Check a rectangle against the surface's own bounds and return it as
@@ -154,6 +187,44 @@ impl Surface {
         // surface (PRDRDP/04 §2.8).
         DstView::new(buf, stride, w, h, OutFormat::Rgba, RowOrder::TopDown)
             .map_err(|e| dst_error(self.id, &e))
+    }
+
+    /// The progressive tile store for this surface, beside a destination view
+    /// of one rectangle of it.
+    ///
+    /// Two borrows of fields that do not overlap, which is the whole reason
+    /// this is not [`Surface::view`] plus a second call: the view already
+    /// borrows the surface, and the progressive decoder needs the store and
+    /// the destination at the same time
+    /// (`rdp_codecs::progressive::decode_message`).
+    ///
+    /// # Errors
+    ///
+    /// [`RdpError::Protocol`] when the rectangle is not inside the surface.
+    pub fn progressive_view(
+        &mut self,
+        rect: RectExclusive,
+        what: &str,
+    ) -> Result<(&mut ProgressiveState, DstView<'_>)> {
+        let (left, top, w, h) = self.bounded(rect, what)?;
+        let (id, stride) = (self.id, self.stride());
+        let Self {
+            pixels,
+            progressive,
+            ..
+        } = self;
+        let dst = if w == 0 || h == 0 {
+            // A zero sized destination is legal on the wire and there is
+            // nothing to write; `DstView` accepts it and every decoder's row
+            // loop runs zero times.
+            DstView::new(&mut [], 0, 0, 0, OutFormat::Rgba, RowOrder::TopDown)
+        } else {
+            let start = usize::from(top) * stride + usize::from(left) * BPP;
+            let buf = pixels.get_mut(start..).unwrap_or(&mut []);
+            DstView::new(buf, stride, w, h, OutFormat::Rgba, RowOrder::TopDown)
+        }
+        .map_err(|e| dst_error(id, &e))?;
+        Ok((progressive, dst))
     }
 
     /// Copy one rectangle out, appending `width * height * 4` bytes to `out`.
@@ -371,6 +442,18 @@ impl SurfaceStore {
         self.bytes
     }
 
+    /// Bytes the progressive tile stores are holding, across every surface.
+    ///
+    /// Counted rather than tracked, because it changes on every tile and the
+    /// only reader is the trace line. It is not part of [`Self::bytes`]: that
+    /// figure decides whether a `CREATE_SURFACE` is admitted against
+    /// [`MAX_SURFACE_BYTES`], and an admission test that moved with decode
+    /// history would refuse a surface for what a previous frame drew.
+    #[must_use]
+    pub fn progressive_bytes(&self) -> usize {
+        self.surfaces.iter().map(Surface::progressive_bytes).sum()
+    }
+
     /// `RDPGFX_CREATE_SURFACE_PDU` (MS-RDPEGFX 2.2.2.9).
     ///
     /// # Errors
@@ -415,6 +498,7 @@ impl SurfaceStore {
             // Zeroed, so a surface read before it is drawn is black rather
             // than whatever the allocator last held.
             pixels: vec![0; bytes],
+            progressive: ProgressiveState::new(),
         });
         self.bytes += bytes;
         tracing::debug!(

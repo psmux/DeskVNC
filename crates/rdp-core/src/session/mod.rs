@@ -109,6 +109,16 @@ impl RetryClassify for RdpError {
     fn user_message(&self) -> String {
         RdpError::user_message(self)
     }
+
+    /// The fourth, and the reason this method exists on the trait at all.
+    ///
+    /// [`RdpError::symbol`] was written before anything read it
+    /// (`crates/rdp-core/src/error.rs:473`), so the identifier never left the
+    /// crate and the UI had only the sentence to match on. It now travels
+    /// beside the sentence on `SessionState::Disconnected`.
+    fn symbol(&self) -> Option<&'static str> {
+        RdpError::symbol(self)
+    }
 }
 
 /// One RDP connection attempt, and everything about it that survives into the

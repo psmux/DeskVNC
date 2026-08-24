@@ -102,6 +102,21 @@ pub trait RetryClassify {
     fn needs_user_action(&self) -> bool;
     /// The sentence the user sees.
     fn user_message(&self) -> String;
+
+    /// The stable identifier for this failure, or `None` when it has no
+    /// specific remedy.
+    ///
+    /// It travels beside [`user_message`](RetryClassify::user_message) on
+    /// [`SessionState::Disconnected`] so the UI matches an identifier and
+    /// shows a sentence. Matching on the sentence instead makes every copy
+    /// edit a silent behaviour change, which is what this exists to stop
+    /// (PRDRDP/07 §6.15).
+    ///
+    /// Defaulted to `None` so a protocol with no such taxonomy needs no impl:
+    /// `VncError` has none today.
+    fn symbol(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// One protocol's "make an attempt" half of the supervisor.
@@ -252,6 +267,7 @@ pub async fn supervise<C: ConnectOnce>(
                     SessionState::Disconnected {
                         reason: "Disconnected".into(),
                         can_retry: true,
+                        symbol: None,
                     },
                 )
                 .await;
@@ -270,6 +286,7 @@ pub async fn supervise<C: ConnectOnce>(
                         SessionState::Disconnected {
                             reason: "The server kept redirecting this session".into(),
                             can_retry: true,
+                            symbol: None,
                         },
                     )
                     .await;
@@ -294,6 +311,7 @@ pub async fn supervise<C: ConnectOnce>(
                     SessionState::Disconnected {
                         reason: err.user_message(),
                         can_retry,
+                        symbol: err.symbol().map(str::to_owned),
                     },
                 )
                 .await;
@@ -337,6 +355,7 @@ pub async fn supervise<C: ConnectOnce>(
                             SessionState::Disconnected {
                                 reason: "Disconnected".into(),
                                 can_retry: true,
+                                symbol: None,
                             },
                         )
                         .await;
@@ -382,6 +401,9 @@ mod tests {
         }
         fn user_message(&self) -> String {
             format!("{self:?}")
+        }
+        fn symbol(&self) -> Option<&'static str> {
+            matches!(self, TestError::NeedsUser).then_some("needs-user")
         }
     }
 
@@ -592,11 +614,67 @@ mod tests {
 
         let states = states(&mut rx).await;
         match states.last() {
-            Some(SessionState::Disconnected { reason, can_retry }) => {
+            Some(SessionState::Disconnected {
+                reason, can_retry, ..
+            }) => {
                 assert!(reason.contains("redirect"), "{reason}");
                 assert!(*can_retry);
             }
             other => panic!("expected a terminal state, got {other:?}"),
         }
+    }
+    /// The identifier travels beside the sentence, so the UI matches a token
+    /// and shows prose. Matching on the prose instead makes every copy edit a
+    /// silent behaviour change (PRDRDP/07 §6.15).
+    #[tokio::test]
+    async fn a_terminal_state_carries_the_error_symbol_beside_the_sentence() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: fast_policy(),
+            script: vec![Err(TestError::NeedsUser)],
+            absorbed: 0,
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+
+        let states = states(&mut rx).await;
+        match states.last() {
+            Some(SessionState::Disconnected {
+                reason,
+                can_retry,
+                symbol,
+            }) => {
+                assert_eq!(reason, "NeedsUser");
+                assert!(!can_retry);
+                assert_eq!(symbol.as_deref(), Some("needs-user"));
+            }
+            other => panic!("expected a terminal state, got {other:?}"),
+        }
+    }
+
+    /// A protocol with no taxonomy carries no symbol, which is the default on
+    /// the trait and is what every RFB failure reports today.
+    #[tokio::test]
+    async fn an_error_with_no_symbol_carries_none() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: ReconnectPolicy {
+                enabled: false,
+                ..fast_policy()
+            },
+            script: vec![Err(TestError::Fatal)],
+            absorbed: 0,
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+
+        let states = states(&mut rx).await;
+        assert!(
+            matches!(
+                states.last(),
+                Some(SessionState::Disconnected { symbol: None, .. })
+            ),
+            "{states:?}"
+        );
     }
 }

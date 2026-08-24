@@ -15,7 +15,12 @@ vnc-transport = { path = "../vnc-transport" }
 
 # The RDP set (PRDRDP/12 §2.1).
 rdp-pdu = { path = "../rdp-pdu" }
-rdp-codecs = { path = "../rdp-codecs" }
+# `progressive` is asked for outright rather than left to rdp-codecs' own
+# defaults, because `channels::egfx::decode` routes
+# `RDPGFX_CODECID_CAPROGRESSIVE` unconditionally: a build of this crate
+# without the decoder would not compile, and the feature being on by default
+# elsewhere is not the same promise as this crate needing it.
+rdp-codecs = { path = "../rdp-codecs", features = ["progressive"] }
 rdp-auth = { path = "../rdp-auth" }
 
 tokio = { workspace = true }
@@ -41,7 +46,11 @@ default = []
 # Kerberos, forwarded to rdp-auth. Off in phase 1 and 2: NTLMv2 covers local
 # and domain accounts on every Windows host that will do NLA at all (D6).
 kerberos = ["rdp-auth/kerberos"]
-# Progressive RemoteFX, forwarded to rdp-codecs. Phase 3 (D10).
+# Progressive RemoteFX. The name is kept so a profile that still lists it
+# resolves, but the codec is no longer optional here: nothing in MS-RDPEGFX
+# declines it at the capability sets we advertise, so a session without a
+# decoder ends on a frame a server was entitled to send
+# (docs/RDP_SPEC_NOTES.md §1.6). The dependency above asks for it outright.
 progressive = ["rdp-codecs/progressive"]
 # MS-RDPEA audio playback. Phase 2 (D10).
 audio = []

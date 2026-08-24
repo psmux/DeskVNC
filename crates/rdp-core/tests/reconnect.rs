@@ -110,12 +110,13 @@ impl ConnectOnce for MockConnect {
             let connected = match connection::after_upgrade(
                 &mut framer,
                 &opts,
-                &self.options.credentials,
+                &mut self.options.credentials.clone(),
                 selected,
                 None,
                 TrustDecision::VerifiedByCa,
                 arc,
                 events,
+                None,
             )
             .await
             {

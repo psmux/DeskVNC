@@ -341,7 +341,9 @@ async fn unsupported_security_stops_the_session_without_retrying() {
 
     let (reason, can_retry) = events
         .wait_state(DEFAULT_TIMEOUT, "terminal Disconnected", |s| match s {
-            SessionState::Disconnected { reason, can_retry } => Some((reason.clone(), *can_retry)),
+            SessionState::Disconnected {
+                reason, can_retry, ..
+            } => Some((reason.clone(), *can_retry)),
             _ => None,
         })
         .await;
@@ -436,7 +438,9 @@ async fn user_disconnect_is_a_clean_terminal_state() {
     send(&handle, ClientCommand::Disconnect).await;
     let (reason, can_retry) = events
         .wait_state(DEFAULT_TIMEOUT, "Disconnected", |s| match s {
-            SessionState::Disconnected { reason, can_retry } => Some((reason.clone(), *can_retry)),
+            SessionState::Disconnected {
+                reason, can_retry, ..
+            } => Some((reason.clone(), *can_retry)),
             _ => None,
         })
         .await;

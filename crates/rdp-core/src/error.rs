@@ -262,6 +262,24 @@ pub enum RdpError {
     #[error("tls error: {0}")]
     Tls(String),
 
+    /// The host profile asks for TLS 1.0 and 1.1 and this build has no
+    /// backend that speaks them.
+    ///
+    /// `legacy_tls` is permission rather than a request
+    /// (`crate::transport::upgrade_tls`), so the switch being on is not by
+    /// itself a failure: it becomes one only when it is on and there is
+    /// nothing behind it, which is every build that does not enable
+    /// `vnc-transport`'s `legacy-tls` feature. Silently ignoring it would
+    /// leave a user who turned it on to reach a Server 2008 R2 host looking
+    /// at the same handshake failure with no clue that the switch did
+    /// nothing (AGENT_BRIEF V3-B, PRDRDP/03 §4.7.2). `symbol()` reports
+    /// `"legacy-tls-unavailable"`.
+    #[error(
+        "{0}: this build has no TLS 1.0 or TLS 1.1 backend, so the legacy TLS setting \
+         cannot be honoured (AGENT_BRIEF V3-B, PRDRDP/03 §4.7.2)"
+    )]
+    LegacyTlsUnavailable(String),
+
     /// The pinned key changed. A hard stop, never auto retried (PRD/10 §4.3).
     #[error("server identity changed: expected {expected}, got {actual}")]
     CertificateMismatch {
@@ -290,6 +308,27 @@ pub enum RdpError {
     /// that PRDRDP/07 §6.15 matches on.
     #[error("the server would not accept network level authentication")]
     NlaRefused,
+
+    /// The remote end will not do NTLM, which is the only mechanism this
+    /// build offers (D6).
+    ///
+    /// Two wire shapes reach here and both mean the same thing. A SPNEGO
+    /// `negTokenResp` that rejects every mechanism in our `mechTypes` list
+    /// (RFC 4178 §4.2.2), and `STATUS_NTLM_BLOCKED` in `TSRequest.errorCode`
+    /// (MS-CSSP 2.2.1, MS-ERREF 2.3.1), which is what a domain controller
+    /// under the "Network security: Restrict NTLM" policy answers with.
+    ///
+    /// It is a variant of its own rather than an [`RdpError::AuthFailed`]
+    /// because the remedy is different and the cost of confusing the two
+    /// falls on the user's account: nothing about the password was wrong, so
+    /// re-prompting spends attempts against a lockout counter for a password
+    /// that will be refused however it is spelled. `symbol()` reports
+    /// `"ntlm-refused-by-policy"`.
+    #[error(
+        "the remote computer will not accept ntlm, which is the only sign in method this \
+         client offers (RFC 4178 §4.2.2)"
+    )]
+    NtlmRefusedByPolicy,
 
     // ---- protocol --------------------------------------------------------
     /// A PDU did not parse. Carries `rdp-pdu`'s message, which names the
@@ -425,9 +464,30 @@ impl From<vnc_transport::TransportError> for RdpError {
     }
 }
 
+/// `STATUS_NTLM_BLOCKED`, MS-ERREF 2.3.1. The NTSTATUS a domain controller
+/// under "Network security: Restrict NTLM: NTLM authentication in this
+/// domain" returns for an NTLM logon it will not process.
+const STATUS_NTLM_BLOCKED: u32 = 0xC000_0418;
+
 impl From<rdp_auth::AuthError> for RdpError {
     fn from(e: rdp_auth::AuthError) -> Self {
-        use rdp_auth::Class;
+        use rdp_auth::{AuthError, Class};
+        // Two shapes are pulled out before the class decides, because both
+        // mean "NTLM is off here" rather than "that password was wrong", and
+        // the difference decides whether the user is asked to type it again.
+        // `NoCommonMechanism` is the SPNEGO rejection (RFC 4178 §4.2.2), and
+        // NTLM is the only mechanism this build offers (D6), so a refusal of
+        // every mechanism we offered is a refusal of NTLM.
+        // `STATUS_NTLM_BLOCKED` is the same policy answered from the domain
+        // controller (MS-ERREF 2.3.1); `rdp-auth`'s table has no row for it
+        // (`crates/rdp-auth/src/credssp/nstatus.rs:88`), so without this it
+        // would arrive as a generic fatal.
+        if matches!(
+            e,
+            AuthError::NoCommonMechanism | AuthError::ServerStatus(STATUS_NTLM_BLOCKED)
+        ) {
+            return RdpError::NtlmRefusedByPolicy;
+        }
         // `AuthError::class` already draws the line between "the password was
         // wrong" and "the exchange was malformed", and the taxonomy here is
         // the same line drawn again. Reusing it means one place decides.
@@ -477,6 +537,8 @@ impl RdpError {
                 | RdpError::CertificateMismatch { .. }
                 | RdpError::CertificateUntrusted(_)
                 | RdpError::NlaRefused
+                | RdpError::NtlmRefusedByPolicy
+                | RdpError::LegacyTlsUnavailable(_)
                 | RdpError::NegotiationFailed { .. }
                 | RdpError::NegotiationInconsistent
         )
@@ -492,6 +554,8 @@ impl RdpError {
     pub const fn symbol(&self) -> Option<&'static str> {
         match self {
             RdpError::NlaRefused => Some("nla-refused"),
+            RdpError::NtlmRefusedByPolicy => Some("ntlm-refused-by-policy"),
+            RdpError::LegacyTlsUnavailable(_) => Some("legacy-tls-unavailable"),
             RdpError::CertificateMismatch { .. } => Some("certificate-changed"),
             RdpError::NotImplemented { .. } => Some("not-implemented"),
             _ => None,
@@ -532,6 +596,8 @@ mod tests {
             RdpError::NotImplemented {
                 stage: ConnectStage::SendClientInfo,
             },
+            RdpError::NtlmRefusedByPolicy,
+            RdpError::LegacyTlsUnavailable("host.example".into()),
             RdpError::Cancelled,
         ];
         for e in &errors {
@@ -635,5 +701,48 @@ mod tests {
             }
             other => panic!("expected a Pdu error, got {other:?}"),
         }
+    }
+    /// A domain under a Kerberos only policy is not a wrong password, and the
+    /// UI has to be able to tell them apart: re-prompting on a policy refusal
+    /// spends attempts against a lockout counter for a password that will be
+    /// refused however it is spelled.
+    #[test]
+    fn an_ntlm_policy_refusal_is_told_apart_from_a_wrong_password() {
+        use rdp_auth::AuthError;
+
+        for refused in [
+            AuthError::NoCommonMechanism,
+            // `STATUS_NTLM_BLOCKED`, MS-ERREF 2.3.1.
+            AuthError::ServerStatus(0xC000_0418),
+        ] {
+            let e = RdpError::from(refused);
+            assert!(matches!(e, RdpError::NtlmRefusedByPolicy), "{e:?}");
+            assert_eq!(e.symbol(), Some("ntlm-refused-by-policy"));
+            assert!(e.needs_user_action());
+            assert!(!e.is_transient(), "the policy will say the same next time");
+        }
+
+        // A bare rejection is still a wrong password, and still carries no
+        // symbol of its own: its absence is what tells the two apart.
+        let e = RdpError::from(AuthError::AuthFailed);
+        assert!(matches!(e, RdpError::AuthFailed(_)), "{e:?}");
+        assert_eq!(e.symbol(), None);
+
+        // And a malformed exchange is neither.
+        let e = RdpError::from(AuthError::UnexpectedToken);
+        assert!(matches!(e, RdpError::Protocol(_)), "{e:?}");
+    }
+
+    /// The legacy TLS switch failing for want of a backend is its own answer,
+    /// not a generic handshake error, so the UI can say which switch to turn
+    /// off rather than "tls error".
+    #[test]
+    fn the_missing_legacy_tls_backend_names_itself() {
+        let e = RdpError::LegacyTlsUnavailable("host.example".into());
+        assert_eq!(e.symbol(), Some("legacy-tls-unavailable"));
+        assert!(e.to_string().contains("host.example"), "{e}");
+        assert!(e.to_string().contains("TLS 1.0"), "{e}");
+        assert!(e.needs_user_action());
+        assert!(!e.is_transient());
     }
 }
