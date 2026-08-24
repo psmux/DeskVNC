@@ -98,6 +98,11 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   saved credential is how an account gets locked.
 - Windows hosts that send progressively refined graphics no longer end the
   session. The decoder existed; nothing was handing frames to it.
+- **Domains that refuse NTLM can be logged into.** Kerberos is implemented, so
+  a machine whose policy allows only Kerberos is reachable rather than being
+  told to wait for a later release. It is behind a build feature for now and
+  still needs a name lookup the shell does not yet perform, so it is not on by
+  default in a shipped build.
 
 ### Changed
 
