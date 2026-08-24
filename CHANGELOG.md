@@ -10,6 +10,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-24
+
+### Fixed
+
+- **RDP showed no picture.** The first bitmap update of every session was
+  rejected as malformed and ended the connection. The fast path body carries a
+  two octet type field that this client skipped, so the count of rectangles was
+  read as the first rectangle's left edge and the rectangle came out inverted.
+  A Windows 11 host sends 162 tiles in that first update; none of them arrived.
+  Verified against a real host: 155 frames and 42 cursor updates in twenty
+  seconds, where 0.13.0 managed none.
+
+  The test server had the same gap, which is why two thousand passing tests
+  agreed with the fault. It now sends what a real server sends, and the twelve
+  octets a Windows host actually put on the wire are a test vector.
+
 ## [0.13.0] - 2026-08-24
 
 ### Added
@@ -104,12 +120,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 RDP is new in this release and these are the edges of it.
 
-- **It has been connected to exactly one real machine, once.** A Windows 11
-  host, on 2026-08-24, reaching the desktop through NLA. That run found four
-  faults in an hour that two thousand passing tests never could, because the
-  mock server is built from the same reading of the specification as the client
-  and agrees with every misreading. Expect more of them on hosts that differ:
-  older Windows, a domain, a gateway, xrdp. `docs/RDP_SPEC_NOTES.md` names the
+- **It has been connected to one real machine.** A Windows 11 host, on
+  2026-08-24, reaching the desktop through NLA and receiving the picture. That
+  work found five faults in an afternoon that two thousand passing tests never
+  could, because the mock server is built from the same reading of the
+  specification as the client and agrees with every misreading. Expect more of
+  them on hosts that differ: older Windows, a domain, a gateway, xrdp. `docs/RDP_SPEC_NOTES.md` names the
   two places where being wrong shows up as subtly wrong pixels rather than an
   error, and neither is settled.
 - **H.264 is not used.** The client advertises graphics capability versions 8
