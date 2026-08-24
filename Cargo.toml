@@ -70,6 +70,13 @@ md4 = "0.10"
 hmac = "0.12"
 rc4 = "0.1"
 subtle = "2"
+# Kerberos only, behind rdp-auth's `kerberos` feature and nothing else.
+# `cts` is CBC with ciphertext stealing (RFC 3962 §5). Read the module comment
+# on crates/rdp-auth/src/kerberos/crypto.rs before touching how it is called:
+# its single block case is wrong, and wrong in a way that round trips against
+# itself, so the length dispatch around it is load bearing.
+cts = "0.6.0"
+pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
 sha2 = "0.10"
 md-5 = "0.10"
 rsa = "0.10.0-rc.18"

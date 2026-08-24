@@ -125,6 +125,28 @@ pub enum AuthError {
     /// (PRDRDP/14 §3.13).
     #[error("the authentication exchange did not finish")]
     TooManyRounds,
+
+    /// `KRB-ERROR.error-code`, RFC 4120 §5.9.1 and §7.5.9. The domain
+    /// controller refused the request and said why. The table is
+    /// [`kerberos::kstatus`](crate::kerberos::kstatus).
+    ///
+    /// The same exception R63 grants [`AuthError::ServerStatus`], for the
+    /// same reason: a KDC we cannot satisfy still has to reach the user as
+    /// something searchable, and four bytes of error code cannot hold a
+    /// token, a key or a password.
+    #[error("the domain controller refused the sign in with Kerberos error {0}")]
+    KdcRefused(i32),
+
+    /// This computer's clock and the domain controller's differ by more than
+    /// the domain allows (RFC 4120 §5.4.1, `KRB_AP_ERR_SKEW`). Carries the
+    /// measured difference in seconds, positive when the domain controller is
+    /// ahead.
+    ///
+    /// A number of seconds derived from two clocks is not a secret, and it is
+    /// the one number that turns "logon failed" into an instruction. Raised
+    /// only after the one retry of PRDRDP/14 §7.1 item 11 has also failed.
+    #[error("this computer's clock differs from the domain controller's by {0} seconds")]
+    ClockSkew(i64),
 }
 
 impl AuthError {
@@ -143,6 +165,16 @@ impl AuthError {
             AuthError::ServerStatus(code) => {
                 crate::credssp::nstatus::classify(code).map_or(Class::Fatal, |row| row.class)
             }
+            // The other place a class comes from the wire, and the same rule:
+            // a code the table does not carry is Fatal, because we do not
+            // know that a retry is safe (R46).
+            AuthError::KdcRefused(code) => {
+                crate::kerberos::kstatus::classify(code).map_or(Class::Fatal, |row| row.class)
+            }
+            // Fatal and not User: retyping the password does not move a
+            // clock, and not Transient, because the next attempt fails the
+            // same way and the account pays for it (R46).
+            AuthError::ClockSkew(_) => Class::Fatal,
             AuthError::MalformedMessage(_)
             | AuthError::LegacyServerRefused
             | AuthError::UnexpectedToken
@@ -201,6 +233,20 @@ impl AuthError {
                 || format!("The remote computer refused the sign in ({code:#010x})."),
                 |row| row.message.to_owned(),
             ),
+            // The decimal code for an unrecognised Kerberos error, because
+            // RFC 4120 §7.5.9 numbers them in decimal and a support ticket
+            // carrying "60" is searchable where "0x3c" is not.
+            AuthError::KdcRefused(code) => crate::kerberos::kstatus::classify(code).map_or_else(
+                || format!("The domain controller refused the sign in (Kerberos error {code})."),
+                |row| row.message.to_owned(),
+            ),
+            // The measured difference, because "too far apart" without a
+            // number leaves the user nothing to check.
+            AuthError::ClockSkew(seconds) => format!(
+                "This computer's clock is {} seconds away from the domain controller's. \
+                 Correct the clock and try again.",
+                seconds.abs()
+            ),
             AuthError::MalformedMessage(_)
             | AuthError::UnexpectedToken
             | AuthError::ContextNotEstablished
@@ -222,6 +268,24 @@ impl AuthError {
         match self {
             AuthError::ServerStatus(code) => {
                 crate::credssp::nstatus::classify(code).map(|row| row.symbol)
+            }
+            _ => None,
+        }
+    }
+
+    /// The RFC 4120 §7.5.9 symbol behind a Kerberos refusal, for the log line
+    /// only.
+    ///
+    /// `None` for everything except [`AuthError::KdcRefused`], and `None` for
+    /// a code the table in [`kerberos::kstatus`](crate::kerberos::kstatus)
+    /// does not carry. The symbol never reaches a user message (§8.4), which
+    /// is the same rule [`nt_status_symbol`](Self::nt_status_symbol) follows
+    /// and is asserted by the same test.
+    #[must_use]
+    pub fn kdc_error_symbol(self) -> Option<&'static str> {
+        match self {
+            AuthError::KdcRefused(code) => {
+                crate::kerberos::kstatus::classify(code).map(|row| row.symbol)
             }
             _ => None,
         }
