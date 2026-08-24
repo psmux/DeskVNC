@@ -134,3 +134,16 @@ window receives them.
 
 The full command surface (arguments, return types, the `discovery://` events)
 is documented in `src-tauri/IPC_CONTRACT.md`.
+
+## Unknown message types and unknown JSON event types
+
+The binary channel already says a receiver must ignore a `msg_type` it does
+not know. The same rule holds for the JSON `session://event` table in
+`IPC_CONTRACT.md`, and it is written down there for the same reason: it is
+what lets the shell and the webview ship a new event in separate commits.
+
+Nothing in this file changes for RDP. Decoded RDP bitmaps arrive as rect
+format 0 (RGBA), an EGFX AVC420 frame as rect format 3 (H.264 Annex B), and
+a pointer shape as `msg_type = 2`, exactly as for VNC. There is one path for
+pixels and there is not going to be a second.
+

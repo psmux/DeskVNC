@@ -140,7 +140,7 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
           <div>
             <h3 className="text-lg font-semibold text-primary">DeskVNCViewer</h3>
             <p className="text-sm text-secondary">
-              A fast, native VNC viewer for macOS, Windows and Linux.
+              A fast, native remote desktop viewer for macOS, Windows and Linux.
             </p>
             <p className="mt-1 text-sm text-tertiary">
               Version {info ? `${info.appVersion} (${info.gitDescribe})` : "-"}
@@ -220,7 +220,8 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
 
           <p className="text-xs text-tertiary">
             © {new Date().getFullYear()} {AUTHOR_NAME}. Supports RFB 3.3-3.8 with
-            VNC, VeNCrypt, RA2, Apple Diffie-Hellman and MS-Logon authentication.
+            VNC, VeNCrypt, RA2, Apple Diffie-Hellman and MS-Logon authentication,
+            and RDP with network level authentication.
           </p>
 
           <div className="flex gap-2 pt-1">
@@ -248,7 +249,7 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
           <section>
             <h3 className="mb-1.5 text-sm font-semibold text-primary">Getting started</h3>
             <ol className="list-inside list-decimal space-y-1 text-sm text-secondary">
-              <li>Use <strong className="text-primary">Scan network</strong> to find VNC servers nearby, or <strong className="text-primary">New Host</strong> to add one by address.</li>
+              <li>Use <strong className="text-primary">Scan network</strong> to find computers nearby, or <strong className="text-primary">New Host</strong> to add one by address.</li>
               <li>Double-click a tile to connect. Passwords are saved to the OS keychain on first use.</li>
               <li>Group and tag hosts from the sidebar to keep a large library navigable.</li>
             </ol>

@@ -122,6 +122,11 @@ fn main() {
             // the native menu mirrors the session toolbar, so the webview has
             // to push it the state that toolbar would have shown
             "sync_session_menu",
+            // `.rdp` file import. The webview sends a PATH and the shell
+            // reads the file, so these are the only two new command names
+            // this work adds and each is a grant to review on its own.
+            "import_rdp_file",
+            "import_rdp_files",
             // credentials (write/query only, passwords never flow back to JS)
             "save_password",
             "has_password",

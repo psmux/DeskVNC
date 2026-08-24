@@ -171,6 +171,17 @@ fn host_json(host: &DiscoveredHost) -> serde_json::Value {
         // not decoration: `netbios` / `msrpc-epm` / `rdp-cert` are Windows-only
         // services and are what `osHint` trusts over the banner text.
         "nameSource": host.name_source.map(vnc_discovery::NameSource::as_str),
+        // Which protocol answers on THIS row's port. One row is one service,
+        // so a machine running both produces two rows and the interface joins
+        // them, not the registry.
+        "protocol": host.protocol,
+        // What the X.224 negotiation learned, `null` for a VNC row and for an
+        // RDP row that has not been deep probed. `nlaRequired` inside it is
+        // itself nullable, because one negotiation cannot answer it: a server
+        // that permits both TLS and NLA selects the stronger, which proves
+        // NLA is available and says nothing about whether TLS alone would
+        // have been refused.
+        "rdp": host.rdp,
         // The shell does not join against the host library on the hot path;
         // the UI already de-dupes discovered entries against its own list.
         "savedHostId": serde_json::Value::Null,
@@ -315,8 +326,21 @@ pub async fn scan_network(
         .map(|v| v != "false")
         .unwrap_or(true);
 
+    // One extra connection per address, to 3389. Read the same way as the
+    // setting above and on by default for the same reason: without it an RDP
+    // only machine is invisible to the scan. It takes the same politeness
+    // permit as every RFB probe, so the cap stays a cap on the total.
+    let probe_rdp = state
+        .store
+        .get_setting("probe_rdp")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
     let options = ScanOptions {
         probe_other_services,
+        probe_rdp,
         subnets: parsed,
         ..ScanOptions::default()
     };
@@ -333,21 +357,50 @@ pub async fn scan_network(
     Ok(())
 }
 
-/// Second-phase probe of a single host: complete the RFB version handshake
-/// and read the offered security-type list, closing before authenticating
-/// (PRD/04 §5). Returns `{ "securityTypes": [u8...] }`.
+/// Second-phase probe of a single host, dispatched on what speaks there.
+///
+/// For VNC: complete the RFB version handshake and read the offered
+/// security-type list, closing before authenticating (PRD/04 §5). Returns
+/// `{ "protocol": "vnc", "securityTypes": [u8...] }`.
+///
+/// For RDP: a second X.224 negotiation advertising `PROTOCOL_SSL` alone,
+/// which is the only way to learn whether NLA is *required* rather than
+/// merely available. Returns `{ "protocol": "rdp", "rdp": { … } }` with
+/// `nlaRequired` filled in.
+///
+/// `protocol` is passed by the caller, never inferred from the port. A port
+/// number says nothing about what is behind it, and sending an RFB handshake
+/// at something else is exactly the mistake the connect path refuses to make.
+/// Absent means VNC, which is what every existing caller meant.
 #[tauri::command]
-pub async fn deep_probe(address: String, port: u16) -> Result<serde_json::Value, String> {
+pub async fn deep_probe(
+    address: String,
+    port: u16,
+    protocol: Option<vnc_discovery::ProtocolKind>,
+) -> Result<serde_json::Value, String> {
     // Resolve hostnames; prefer the first result.
     let addr: SocketAddr = tokio::net::lookup_host((address.as_str(), port))
         .await
         .map_err(|e| format!("could not resolve {address}: {e}"))?
         .next()
         .ok_or_else(|| format!("could not resolve {address}"))?;
-    let security_types = Discovery::deep_probe(addr)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "securityTypes": security_types }))
+    match protocol.unwrap_or_default() {
+        vnc_discovery::ProtocolKind::Rdp => {
+            let caps = Discovery::rdp_deep_probe(addr)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "protocol": "rdp", "rdp": caps }))
+        }
+        _ => {
+            let security_types = Discovery::deep_probe(addr)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({
+                "protocol": "vnc",
+                "securityTypes": security_types,
+            }))
+        }
+    }
 }
 
 /// CIDR strings of local subnets eligible for scanning, so the UI can show

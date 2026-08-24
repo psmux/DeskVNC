@@ -86,7 +86,29 @@ const url = buf.byteLength ? URL.createObjectURL(new Blob([buf], { type: "image/
 `securityPref`, `qualityPref`, `colorDepth`, `scalingMode`, `keyboardMode`,
 `passthrough`, `viewOnly`, `sshTunnel`, `wolMac`, `wolBroadcast`, `networkId`,
 `certPin`, `hasPassword`, `thumbnailAt`, `lastConnected`, `connectCount`,
-`tags` (tag ids joined from `host_tags`), `createdAt`, `updatedAt`.
+`tags` (tag ids joined from `host_tags`), `createdAt`, `updatedAt`,
+`protocol`, `rdpSettings`.
+
+`protocol` is `"vnc"` (the default) or `"rdp"`. It is text rather than an
+enum so a protocol a future build adds is a row and not a schema change, and
+so a value this build does not recognise stays listable, editable and
+deletable rather than becoming a tile that vanished. `connect_session`
+refuses to dial such a profile, with a message, rather than falling back to
+VNC.
+
+`rdpSettings` is a nullable JSON blob of RDP-only options, `null` for a VNC
+host. `null` and `"{}"` are different and must stay different: "not an RDP
+profile" is not "an RDP profile with nothing set". The store never parses it,
+so a malformed blob cannot break the library; `connect_session` is where it
+is read, and there a parse failure **fails the connect** rather than
+substituting defaults, because defaulting would turn a deliberate "network
+level authentication required" into whatever this build happens to default
+to. See [the `rdpSettings` blob](#the-rdpsettings-blob).
+
+Both fields carry `#[serde(default)]` on the Rust side, which is not
+decoration: `save_host` deserializes a **whole** `HostProfile`, so without
+them a webview build predating these fields would fail every save with
+"invalid args".
 
 The UI additionally carries **`favorite`** and **`online`**. Neither is a
 column in the `hosts` table nor a field on the Rust struct, they are
@@ -99,8 +121,60 @@ wire, see `set_quality` below.
 
 Other models: `HostGroup` = `{ id, name, parentId, sort }`; `HostTag` =
 `{ id, name, color }`; `HistoryEntry` =
-`{ id, hostId, connectedAt, durationS? securityType? disconnectReason? }`
-(the last three are nullable).
+`{ id, hostId, connectedAt, durationS? securityType? disconnectReason?,
+protocol }` (the three `?` fields are nullable). `protocol` is `"vnc"` or
+`"rdp"`; rows written before the column existed read `"vnc"`, which is what
+they were. For an RDP row the `securityType` vocabulary is `nla-ntlm`, `tls`
+and, from phase 3, `nla-kerberos`, the same tokens the `authenticating`
+state carries.
+
+### The `rdpSettings` blob
+
+camelCase JSON, mirroring `vnc_store::RdpSettings`, which flattens
+`remote_core::RdpOptions` into itself so the blob is one flat field list
+rather than two nested ones.
+
+```jsonc
+{ "v": 1,                                  // blob version, absent means 1
+  "clipboard": true, "microphone": false,
+  "consoleSession": false, "restrictedAdmin": false,
+  // …RdpOptions, flattened:
+  "serverName": null, "domain": "CORP",
+  "nla": "required",                       // "required" | "allow-fallback"
+  "legacyTls": false,
+  "colorDepth": "auto",                    // "auto"|"bpp15"|"bpp16"|"bpp24"|"bpp32"
+  "codecs": { "uncompressed": true, "interleavedRle": true, "planar": true,
+              "nscodec": true, "remotefx": true, "clearcodec": true,
+              "progressive": true, "avc420": true, "avc444": true },
+  "audio": "play-locally",                 // "play-locally"|"leave-at-server"|"off"
+  "monitors": "primary",                   // "primary" | "all" | { "selected": [0,1] }
+  "dynamicResolution": true,
+  "keyboardLayout": 0, "clientName": "",
+  "performance": { "disableWallpaper": false, "disableFullWindowDrag": false,
+                   "disableMenuAnimations": false, "disableTheming": false,
+                   "disableCursorShadow": false, "disableCursorBlinking": false,
+                   "enableFontSmoothing": false, "enableDesktopComposition": false },
+  "gateway": null, "autologon": true, "kdcProxyUrl": null,
+  "sendMstshashCookie": false, "allowAutoReconnect": true,
+  "desktopScaleFactor": 100 }
+```
+
+**No secret ever appears in this blob.** The domain does, because a domain is
+not a secret and belongs with the connection configuration; the user name and
+password live in the keychain. That is the same rule `sshTunnel` states.
+
+Unknown fields are ignored, so a blob written by a newer build still parses.
+What a newer build cannot do is change what an existing field *means* without
+bumping `v`, and a blob whose `v` exceeds what this build understands is an
+error rather than a downgrade. Field level defaults handle a field being
+added or removed; `v` handles a field whose meaning changed, which is on the
+roadmap for the codec set and the gateway block.
+
+An editor that round trips this blob **must re-emit fields it does not
+recognise**. Parsing into a typed object and writing a fresh one drops a
+newer build's fields silently, and the one that matters is `legacyTls`: the
+host quietly stops being reachable. Losing a relaxation fails in the safe
+direction, but it still fails.
 
 ---
 
@@ -109,13 +183,27 @@ Other models: `HostGroup` = `{ id, name, parentId, sort }`; `HostTag` =
 | Command | JS call | Returns |
 |---|---|---|
 | `save_password` | `invoke("save_password", { hostId, creds })` | `void` |
-| `has_password` | `invoke("has_password", { hostId })` | `boolean` |
+| `has_password` | `invoke("has_password", { hostId, protocol? })` | `boolean` |
 | `delete_password` | `invoke("delete_password", { hostId })` | `void` |
 | `credential_backend` | `invoke("credential_backend")` | `"OsKeychain" \| "EncryptedFile" \| "Locked"` |
 | `unlock_credentials` | `invoke("unlock_credentials", { masterPassword })` | `void` |
 
 `creds` is a `StoredCredentials`:
-`{ vncPassword? vencryptUser? vencryptPass? sshPassphrase? }`.
+`{ vncPassword? vencryptUser? vencryptPass? sshPassphrase? rdpUser? rdpDomain?
+rdpPassword? }`.
+
+`has_password`'s `protocol` narrows the question to "a credential this
+protocol could use": `"rdp"` asks for `rdpPassword`, `"vnc"` for
+`vncPassword` or `vencryptPass`. Omit it and the answer is "any credential at
+all", which is what the key icon has always meant and stays the behaviour for
+a caller that predates the argument. With two protocols the coarse answer
+starts lying: a host holding only an SSH passphrase would claim to have what
+it needs.
+
+The three `rdp*` fields carry no snake_case `alias`, unlike the four above
+them. Those aliases exist for one specific reason, blobs written before the
+camelCase switch, and no such blob can contain a field that did not exist
+then.
 
 `save_password` **merges per field**: only the fields present (non-null) in
 `creds` are overwritten, so saving a VNC password never disturbs a stored SSH
@@ -138,9 +226,26 @@ camelCase switch still deserialize.
 | `start_discovery` | `invoke("start_discovery")` | `void` (idempotent mDNS browse) |
 | `stop_discovery` | `invoke("stop_discovery")` | `void` |
 | `scan_network` | `invoke("scan_network", { subnets? })` | `void`, `subnets` is a list of CIDR strings; omit for the safe local interfaces. Errors if a scan is already running. |
-| `deep_probe` | `invoke("deep_probe", { address, port })` | `{ securityTypes: number[] }` |
+| `deep_probe` | `invoke("deep_probe", { address, port, protocol? })` | `{ protocol: "vnc", securityTypes: number[] }` or `{ protocol: "rdp", rdp: RdpCaps }` |
 | `local_subnets` | `invoke("local_subnets")` | `string[]` of CIDRs (VPN/tunnel interfaces excluded) |
 | `wake_host` | `invoke("wake_host", { profileId })` | `void`, note **`profileId`**, not `hostId` |
+
+`deep_probe` dispatches on `protocol`, which the caller passes and the shell
+never infers from the port. A port number says nothing about what is behind
+it, and sending an RFB handshake at something else is the mistake
+`connect_session` already refuses to make. Absent means `"vnc"`, which is
+what every caller predating the argument meant. The VNC probe completes the
+RFB version handshake and reads the offered security types, closing before it
+authenticates. The RDP probe sends a second X.224 negotiation advertising
+`PROTOCOL_SSL` alone, which is the only way to learn whether NLA is
+*required* rather than merely available.
+
+`scan_network` reads two settings out of the store's KV table, both defaulting
+on: `probe_other_services` (names disclosed by MSRPC on 135 and the RDP
+certificate on 3389) and `probe_rdp` (one extra connection per address, to
+3389, without which an RDP-only machine is invisible to the scan). Both take
+the same politeness permit as every RFB probe, so the rate cap stays a cap on
+the total rather than becoming one per service.
 
 Results stream as events; these commands do not return hosts.
 
@@ -170,18 +275,40 @@ Results stream as events; these commands do not return hosts.
 
 ### `open_session_window`
 
-Accepts `{ sessionId? profileId? address? port? title? }`. For a saved
-host, pass only `profileId`, the shell resolves the endpoint and display name
-from the store. For an ad-hoc connect, pass `address` and `port`. A missing
-`sessionId` is generated as a uuid.
+Accepts `{ sessionId? profileId? address? port? title? protocol? }`. For a
+saved host, pass only `profileId`, the shell resolves the endpoint, the
+display name and the protocol from the store. For an ad-hoc connect, pass
+`address` and `port`, and `protocol` when it is not VNC. A missing
+`sessionId` is generated as a uuid. A missing `port` falls back to the
+protocol's default port, which the registry answers (5900 or 3389) rather
+than a literal in this command.
 
 The window (label `session-<id>`) loads
-`index.html?sessionId=…&address=…&port=…&name=…[&profileId=…]`, which
+`index.html?sessionId=…&address=…&port=…&name=…[&profileId=…][&protocol=rdp]`,
+which
 `readSessionParams()` in `ui/src/hooks/useSession.ts` reads back. **Those query
 keys are part of this contract**, the session window connects itself from
-them.
+them. `protocol` is appended **only when it is not `vnc`**, so every URL an
+older build produces still parses and every URL a newer build produces for a
+VNC session is byte identical to today's.
+
+For a tab (`asTab: true`) no window is built and the same parameters come
+back as `params`, a `SessionTabParams`:
+`{ profileId, address, port, name, protocol }`. `protocol` is unconditional
+there, being a fresh JSON payload with no legacy readers.
 
 ### `connect_session`
+
+Accepts `{ profileId? address, port, sessionId? protocol?
+ignoreStoredCredentials? acceptSshHostKey? onEvent }`.
+
+`protocol` is the ad-hoc path: quick connect typed `rdp://box`, so there is
+no profile to read it from. The shell resolves the protocol from this
+argument, then the profile's `protocol` column, then VNC, so a webview build
+that omits the key still invokes successfully. A value this build does not
+know is a **hard error with a message for the user**, never a fallback:
+falling back to VNC would dial the wrong protocol at an endpoint the user
+configured for something else.
 
 `onEvent` is a `Channel` and becomes the binary framebuffer/cursor transport
 (see `FRAME_FORMAT.md`). Control events go to the *invoking window*, so this
@@ -210,6 +337,17 @@ host-key pin store is shared with the Files panel. Secrets never appear in
 the blob: `stored` auth reads the profile's saved SSH passphrase/password
 from the keychain in Rust.
 
+An RDP session works over the same tunnel with no extra configuration, with
+one difference that is deliberate. A tunnel sets `allowInsecure` for VNC,
+because the SSH layer already encrypts the path and the classic tunnelled
+setup is a loopback-only server offering security type None. It does **not**
+for RDP: network level authentication authenticates the *server*, and an SSH
+gateway proves the identity of the gateway, not of the Windows machine
+reached through it, which may be a different box. An RDP session still does
+full TLS and NLA inside the tunnel, and the name used for SNI, the
+certificate pin and the Kerberos service name is the address on the profile,
+never the loopback endpoint the tunnel hands back.
+
 ### `set_quality`
 
 `preset` is a `vnc_core::QualityPreset` with `rename_all = "kebab-case"`:
@@ -224,8 +362,20 @@ The answer to a `credentials-required` event (PRD/10 §3.4). The session is
 **paused inside the handshake** until one of these arrives, it does not fail
 the connection and ask afterwards.
 
+Accepts `{ sessionId, username?, domain?, password, save }`.
+
 - `username` is `null` for `kind: "password-only"`; send the typed value for
   `"username-and-password"`.
+- `domain` is the logon domain, `null` for every VNC method and for an RDP
+  logon with no domain (a local account, or a UPN in `username`). Being
+  optional, a webview build that omits the key still invokes successfully;
+  that is the whole compatibility story for this command. The shell stores
+  the domain and the user separately in the keychain, and folds them back
+  into `DOMAIN\user` for the driver. A name that already carries a domain is
+  left alone, and so is a UPN: an RDP server accepts `alice@corp.example`
+  with an empty domain, and pinning a NetBIOS domain in front of one fails
+  against Entra ID and against any forest whose NetBIOS name is not the DNS
+  label.
 - `save` is the "remember this" checkbox. It does **not** write anything at
   call time: the shell keeps the credential in memory
   (`AppState::pending_credentials`, keyed by session id) and writes it to the
@@ -234,9 +384,24 @@ the connection and ask afterwards.
   all drop the intent unwritten. **A password is never persisted until it has
   been proven to work.**
 - On success the shell writes a `StoredCredentials` merged over whatever the
-  host already had (so an SSH passphrase survives): `vencryptUser`/
-  `vencryptPass` when a username was supplied, otherwise `vncPassword`. It also
-  flips the profile's `hasPassword` flag via `save_host`.
+  host already had (so an SSH passphrase, and the other protocol's password,
+  survive). For VNC: `vencryptUser`/`vencryptPass` when a username was
+  supplied, otherwise `vncPassword`. For RDP: `rdpUser`, `rdpDomain` and
+  `rdpPassword`, replaced as a triple rather than merged field by field,
+  because the three were proven together and keeping an old domain beside a
+  new username would store a credential that has never worked anywhere. It
+  also flips the profile's `hasPassword` flag via `save_host`.
+- **For RDP, reaching `connected` is not always proof.** With NLA on it is:
+  CredSSP either authenticates or the connection fails. With NLA off the
+  credentials go out in the Client Info PDU and Windows evaluates them inside
+  the session, so the connection completes whether the password was right or
+  wrong. The shell therefore holds such an intent past `connected` and
+  settles it on the server's own `logon-info` event instead. Every terminal
+  state still drops it unwritten.
+- An ad-hoc RDP session that asks to be remembered is adopted as a profile
+  **with its own protocol**: quick connecting `rdp://box`, ticking remember
+  and getting a saved host that says VNC would be a bug, and that profile
+  would dial the wrong protocol for ever after.
 - **Ad-hoc sessions (no `profileId`) have nowhere to attach a credential.**
   `save: true` is then honoured in memory for the life of the session only, and
   is **not** an error.
@@ -299,7 +464,8 @@ already unwinding are filtered out (they announce themselves as `ended`
 moments later). Returns `ActiveSession[]` (**camelCase**):
 
 ```ts
-{ sessionId: string; profileId: string | null; address: string; port: number }
+{ sessionId: string; profileId: string | null; address: string; port: number;
+  protocol: "vnc" | "rdp" }
 ```
 
 `profileId` is `null` for an ad-hoc connect. This is the seed for the
@@ -385,16 +551,44 @@ discriminator, there is no nested `event` object.
 | `clipboard-text` | `text`, **untrusted** |
 | `clipboard-notify` | `formats` (u32 bitmask) |
 | `bell` |, |
-| `certificate-prompt` | `fingerprint`, `subject`, `isChange` (**camelCase**) |
+| `certificate-prompt` | `fingerprint`, `subject`, `isChange`, `scheme` (**camelCase**). `scheme` is `"tls"` (VeNCrypt X.509), `"ra2"` (RealVNC RSA) or `"rdp-tls"` (an RDP server's own certificate). It is plumbing, not copy: the UI hands it back to `trust_certificate` unchanged so the pin lands under the key the user actually looked at. One host can serve VNC over VeNCrypt and RDP on 3389 with two unrelated certificates, and sharing one row would mean a certificate approved for one protocol silently vouching for the other |
 | `credentials-required` | `request`, a `CredentialRequest` (**camelCase**); the session is PAUSED until `provide_credentials`/`cancel_credentials` |
 | `stats` | `stats`, `SessionStats`, fields **snake_case** |
 | `error` | `message` |
 | `ended` | `durationS`, the session task is fully gone |
+| `logon-info` | `domain`, `user`, `remoteSessionId`. RDP only. Who the server says is signed in. Both strings **untrusted**, render as text only |
+| `logon-error` | `notificationType`, `notificationData`, `message`. RDP only. The driver derived the sentence, so the UI owns no code table |
+| `error-info` | `code`, `symbol`, `message`. RDP only. The server ended the session and said why; `symbol` is the specification's constant name, empty when this build does not recognise `code`, and `code` is always the raw value so a bug report can carry it |
+| `redirect` | `target`, `remoteSessionId`. RDP only. Informational: the driver performs the redirect itself, the UI just stops naming the old host |
+| `auto-reconnect-armed` | none, deliberately. A fast reconnect is now possible; the cookie itself is a bearer secret and never crosses IPC |
+| `license-warning` | `message`. RDP only |
+| `audio-format` | `sampleRate`, `channels`. Emitted once, and again only when the server changes format, never per packet |
+
+**Unknown `type` values must be ignored.** The webview's handler already ends
+in a `default: break`, so a shell emitting an event a given UI build predates
+does nothing, silently and correctly. That is what lets the shell and the UI
+ship a new event in separate commits, and it is stated here rather than left
+as an accident. The mirror image is also safe: a new `case` arm never fires
+against an old shell.
+
+**Audio samples are not here and never will be.** A JSON array of PCM is the
+audio equivalent of shipping a whole framebuffer across IPC. What the UI is
+told is the *format*; the samples go to the audio device.
 
 `SessionState` variants (tag `state`): `idle`, `resolving`, `connecting`,
 `authenticating` + `method`, `negotiating`, `connected`, `reconnecting` +
 `{ attempt, next_retry_ms, reason }`, `disconnected` + `{ reason, can_retry }`.
 The inner field names are snake_case.
+
+`authenticating`'s `method` is a **stable identifier the UI maps to its own
+copy**, not a sentence to display. For RDP the three values are `nla-ntlm`
+(CredSSP with NTLMv2, all a phase 1 or phase 2 build can produce), `tls`
+(the `allow-fallback` policy fired and there is no network level
+authentication) and `nla-kerberos` (reserved, phase 3). The same three tokens
+go in the history table's `securityType` column and in the log lines, so
+there is one vocabulary rather than two. VNC keeps its own descriptive
+strings. An unrecognised value falls back to the UI's generic "the server's
+method" copy rather than to a blank.
 
 `SessionStats`: `rtt_ms`, `throughput_bps`, `throughput_up_bps`, `fps`,
 `decode_ms`, `bytes_received`, `bytes_sent`, `rects_decoded`,
@@ -431,7 +625,8 @@ discriminator, top-level keys **camelCase**:
 
 | Payload | When |
 |---|---|
-| `{ type: "started", sessionId, profileId, address, port }` | `connect_session` registered the session (`profileId` is `null` for ad-hoc) |
+| `{ type: "started", sessionId, profileId, address, port, protocol }` | `connect_session` registered the session (`profileId` is `null` for ad-hoc) |
+| `{ type: "host-adopted", sessionId, profileId, address, port, protocol }` | an ad-hoc session that asked to be remembered just gained a host profile; the Library re-reads its host list on it |
 | `{ type: "state", sessionId, state }` | every state change; `state` is **only the kebab-case tag** (`"connecting"`, `"connected"`, `"reconnecting"`, `"disconnected"`, …), never the full `SessionState` object |
 | `{ type: "ended", sessionId }` | the session task is fully gone and its registry entry removed |
 
@@ -444,6 +639,7 @@ addition to the per-window `stats` event:
 
 ```jsonc
 { "sessionId": "…", "profileId": "…|null", "address": "…", "port": 5900,
+  "protocol": "vnc",
   "stats": { /* full SessionStats, fields snake_case, see above */ } }
 ```
 
@@ -531,7 +727,7 @@ thumbnail would otherwise never ask for one. See
 ```ts
 { id, name, address, port, osHint, serverHint, securityHint,
   security, securityTypes, source, mac, alternateMacs, nameSource,
-  savedHostId }
+  protocol, rdp, savedHostId }
 ```
 
 - `id` is `"<address>:<port>"`, derived, because `lost` carries only an
@@ -560,6 +756,31 @@ thumbnail would otherwise never ask for one. See
 - `security` is `verified` | `unverified` | `unencrypted` | `unknown`, derived
   from `securityTypes`. Only a `deep_probe` fills `securityTypes`, so an
   un-probed host is `unknown`, never optimistically "secure".
+- `protocol` is `"vnc"` or `"rdp"` and says what answers on **this row's
+  port**, not what the machine runs. A machine running both produces two
+  rows; joining them is the interface's job, not the registry's.
+- `rdp` is what the X.224 negotiation learned, `null` for a VNC row:
+
+  ```ts
+  { tls, nla, nlaRequired: boolean | null, gfx, extendedClientData,
+    restrictedAdmin, redirectedAuth, standardOnly,
+    failureCode: number | null, selectedProtocol }
+  ```
+
+  `nlaRequired` is nullable because one negotiation cannot answer it. A
+  server that permits both TLS and NLA selects the stronger, which proves NLA
+  is *available* and says nothing about whether TLS alone would have been
+  refused; learning that needs the on-demand `deep_probe`. `null` means "not
+  asked", and an unprobed host must read that way rather than as an
+  optimistic `false`. `standardOnly` marks a server that offered no
+  `rdpNegData` at all, so it speaks only standard RDP security, which this
+  client does not support: such a host is listed and marked rather than
+  hidden, because "there is an RDP server here that this client cannot talk
+  to" is more useful than silence.
+
+  Note what is deliberately **not** in there: a TLS version. The probe never
+  completes a handshake, so the only honest way to learn that a server tops
+  out at TLS 1.1 is to fail a connection to it.
 - `savedHostId` is always `null` from the shell; the UI de-dupes discovered
   entries against its own host list.
 - `name` / `serverHint` are **server-derived and untrusted**, text only.
@@ -676,3 +897,100 @@ flat shape: `sessionId` sits alongside a kebab-case `type` discriminator.
 
 Exactly one terminal event (`completed`/`failed`/`cancelled`) per `id`. At most
 3 transfers run at once; files inside one folder tree run sequentially.
+
+---
+
+## `.rdp` file import, `commands/rdpfile.rs`
+
+| Command | JS call | Returns |
+|---|---|---|
+| `import_rdp_file` | `invoke("import_rdp_file", { path })` | `RdpImport` |
+| `import_rdp_files` | `invoke("import_rdp_files", { paths })` | `RdpFileImport[]` |
+
+**The webview sends a path, never file content.** The parser is pure and
+takes bytes, so the shell does the reading: a `.rdp` file may carry a
+`password 51:b:` line, which is a DPAPI blob rather than plaintext but is
+still a secret, and keeping the bytes on the Rust side is one fewer place it
+can be logged. It also means the one megabyte size cap is enforced from the
+file's metadata, before the read, rather than after the webview has already
+pulled a gigabyte off disk.
+
+`RdpImport` is `{ profile, username?, mapped[], ignored[], unparseable,
+warnings[], desktopSize? }`. `profile` is a whole draft `HostProfile` with
+`protocol: "rdp"`, because `save_host` deserializes a whole one and a draft
+missing a field would be rejected at save time, which is a confusing place to
+find out. `mapped`, `ignored` and `warnings` are **key names and sentences
+only**; no value from the file ever appears in them.
+
+Nothing here writes. The draft goes to the host editor and the user saves it
+through the ordinary `save_host`, so an import is reviewable before it
+becomes a profile, and an imported profile's password is still only stored
+after a server has accepted it.
+
+`import_rdp_files` never fails as a whole: one refused file among ten must
+not lose the other nine, so each row carries either an `import` or an
+`error`, in the order the paths were given.
+
+Errors, for a file that must not become a profile at all: unreadable, over
+the size cap, or one that launches a RemoteApp, which does something
+materially different from opening a desktop. Everything else is a warning on
+an otherwise usable draft, because a file the user chose to import should not
+be refused over one setting this app does not have.
+
+---
+
+## Mismatched builds
+
+The shell and the webview ship together, so a mismatch is a development
+accident (a stale `ui/dist` against a rebuilt shell, or a hot reloading vite
+server) rather than something a user meets. It still has to not corrupt data.
+
+### An old UI against a new shell
+
+* `list_hosts` returns two extra keys. The old UI's interface lacks them,
+  TypeScript does not check at runtime, and they are carried around
+  untouched.
+* `save_host` is the dangerous one and it is safe **because** of that
+  carrying. `HostsContext.saveHost` builds the payload as
+  `{ ...(existing ?? blankHostProfile()), ...host }` where `existing` came
+  from `list_hosts`, so the two unknown keys survive the round trip. An RDP
+  host edited by an old UI stays an RDP host.
+* The failure mode that would exist without `#[serde(default)]` on the two
+  new Rust fields is a *new* host, where `blankHostProfile()` supplies no
+  `protocol` and `save_host` would reject the whole struct with "invalid
+  args". The defaults make it succeed and produce a VNC host, which is the
+  right answer.
+* `provide_credentials` without `domain`, `connect_session` without
+  `protocol`, `has_password` without `protocol` and `deep_probe` without
+  `protocol` all deserialize to `None`, because Tauri allows an `Option<T>`
+  argument to be absent. Each falls back to exactly what it did before.
+* New `session://event` types hit the webview's `default: break`.
+* `list_active_sessions` and the `sessions://` broadcasts carry an extra
+  `protocol` key, which the old UI ignores.
+* One case is worse than the rest and is worth naming. The `rdpSettings`
+  blob is carried opaquely by `save_host`, so it survives that round trip,
+  but an **editor** that parses it into a typed object and writes a fresh one
+  does not: a UI build predating a field drops it. See the re-emit rule under
+  [the blob](#the-rdpsettings-blob).
+
+### A new UI against an old shell
+
+It degrades to "RDP does not exist" rather than to anything broken.
+
+* `save_host` sends two extra keys. `HostProfile` has no
+  `deny_unknown_fields`, so serde ignores them and the profile saves as VNC,
+  silently. Acceptable for a development mismatch, but worth knowing: the
+  symptom is "I set it to RDP and it saved as VNC".
+* `connect_session` with `protocol: "rdp"` fails with Tauri's "invalid args"
+  for the unknown argument. Loud, which is right.
+* `provide_credentials` with `domain` fails the same way, so the credential
+  prompt does nothing on an old shell. Noted so nobody loses an afternoon.
+* `import_rdp_file` does not exist, so the importer's entry point errors
+  rather than half working.
+* The new `PinScheme` includes `"rdp-tls"`, which an old shell's parser
+  rejects. Unreachable in practice, since an old shell never raises an
+  `rdp-tls` prompt.
+
+The rule that follows: **the shell lands first.** Every shell side addition
+goes in before any UI change that depends on it, and the UI change ships in
+the same release.

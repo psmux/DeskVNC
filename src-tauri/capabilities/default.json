@@ -44,6 +44,8 @@
     "allow-about-info",
     "allow-set-app-setting",
     "allow-sync-session-menu",
+    "allow-import-rdp-file",
+    "allow-import-rdp-files",
 
     "allow-save-password",
     "allow-has-password",

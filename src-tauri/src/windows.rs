@@ -39,6 +39,11 @@ pub struct SessionWindowParams<'a> {
     pub address: &'a str,
     pub port: u16,
     pub name: &'a str,
+    /// Which protocol the session speaks. Written into the query string only
+    /// when it is not VNC, so every URL an older build produces still parses
+    /// and every URL a newer build produces for a VNC session is byte
+    /// identical to today's.
+    pub protocol: vnc_core::ProtocolKind,
 }
 
 /// Percent-encode a query-string value, keeping only the RFC 3986 unreserved
@@ -87,6 +92,10 @@ pub fn open_session_window(
     if let Some(profile_id) = params.profile_id {
         query.push_str("&profileId=");
         query.push_str(&encode_component(profile_id));
+    }
+    if params.protocol != vnc_core::ProtocolKind::Vnc {
+        query.push_str("&protocol=");
+        query.push_str(&encode_component(params.protocol.as_str()));
     }
 
     let url = WebviewUrl::App(format!("index.html?{query}").into());

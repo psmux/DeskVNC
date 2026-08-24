@@ -56,6 +56,25 @@ export const MOCK_HOSTS: HostProfile[] = [
     qualityPref: "auto", scalingMode: "fit",
     online: false,
   },
+  // One RDP profile is enough to exercise the whole of the RDP interface with
+  // no backend: the protocol badge and the protocol column both appear (the
+  // library now holds two protocols), the address label hides 3389 rather than
+  // 5900, the editor opens on the RDP side of the selector, and the parsed
+  // blob fills Advanced.
+  {
+    ...blankHostProfile("rdp"),
+    id: "h-rdp", friendlyName: "Reception PC", address: "10.0.0.31", port: 3389,
+    rdpSettings: JSON.stringify({
+      v: 1,
+      clipboard: true, microphone: false, consoleSession: false, restrictedAdmin: false,
+      domain: "CORP", nla: "required", legacyTls: false, colorDepth: "bpp32",
+      audio: "play-locally", monitors: "all", dynamicResolution: true,
+    }),
+    groupId: "g-office", osHint: "windows", serverHint: "Windows Remote Desktop",
+    qualityPref: "auto", scalingMode: "aspect-fit",
+    hasPassword: true, tags: ["t-prod"],
+    lastConnected: now - 7200, connectCount: 9, online: true,
+  },
 ];
 
 /**
@@ -104,6 +123,22 @@ export const MOCK_DISCOVERED: DiscoveredHost[] = [
     osHint: "unknown", serverHint: "TightVNC", securityHint: "VncAuth",
     security: "unencrypted", securityTypes: [2], source: "scan",
     mac: null, nameSource: "rdp-cert",
+    savedHostId: null,
+  },
+  // An RDP-only machine, which is what the Nearby band shows for a Windows
+  // box that runs no VNC server at all. `nlaRequired` is null because one
+  // negotiation cannot answer it; only the on-demand deep probe can.
+  {
+    id: "10.0.0.88:3389", name: "WAREHOUSE-01", address: "10.0.0.88", port: 3389,
+    osHint: "windows", serverHint: "Windows Remote Desktop", securityHint: null,
+    security: "unverified", securityTypes: [], source: "scan",
+    mac: null, nameSource: "rdp-cert",
+    protocol: "rdp",
+    rdp: {
+      tls: true, nla: true, nlaRequired: null, gfx: true,
+      extendedClientData: true, restrictedAdmin: false, redirectedAuth: false,
+      standardOnly: false, failureCode: null, selectedProtocol: 3,
+    },
     savedHostId: null,
   },
 ];
@@ -331,12 +366,19 @@ export function withMockThumbnails(hosts: HostProfile[]): HostProfile[] {
  * dialog is reachable in the browser dev build (no Tauri, no VNC server).
  *
  * `?mockCreds=<kind>` turns it on; the rest are optional knobs:
- *   `mockCreds`     `password-only` (default) | `username-and-password`
+ *   `mockCreds`     `password-only` (default) | `username-and-password` | `rdp`
  *   `mockAttempt`   1-based attempt number; >1 renders the retry banner
  *   `mockError`     rejection reason shown in that banner
  *   `mockTruncates` `0` to suppress the 8-character legacy-VNC warning
  *   `mockMethod`    override the method label
  *   `mockUser`      username prefill
+ *   `mockDomain`    domain prefill, only meaningful with `mockCreds=rdp`
+ *
+ * `mockCreds=rdp` is what makes the domain field, the `CORP\alice` splitter
+ * and the Windows-flavoured introduction reviewable in a plain browser. The
+ * domain field itself is driven by the SESSION's protocol rather than by
+ * anything on the request, so the mock session reads `?protocol=rdp` for
+ * that; this flag supplies the rest of the prompt's shape.
  *
  * Returns null in a real Tauri session or when the flag is absent, so this can
  * never shadow a genuine prompt.
@@ -347,20 +389,59 @@ export function mockCredentialRequest(): CredentialRequest | null {
   const flag = q.get("mockCreds");
   if (!flag) return null;
 
+  const rdp = flag === "rdp";
   const kind: CredentialKind =
-    flag === "username-and-password" ? "username-and-password" : "password-only";
+    rdp || flag === "username-and-password" ? "username-and-password" : "password-only";
   const attempt = Math.max(1, parseInt(q.get("mockAttempt") ?? "1", 10) || 1);
   const truncates = q.get("mockTruncates") !== "0" && kind === "password-only";
 
   return {
     method:
       q.get("mockMethod") ??
-      (kind === "username-and-password" ? "VeNCrypt (X509Plain)" : "VNC Authentication"),
+      (rdp
+        ? "CredSSP (NTLM)"
+        : kind === "username-and-password"
+          ? "VeNCrypt (X509Plain)"
+          : "VNC Authentication"),
     kind,
     attempt,
     error:
       attempt > 1 ? (q.get("mockError") ?? "The server rejected that password.") : null,
-    truncatesPassword: truncates,
-    usernameHint: q.get("mockUser") ?? (kind === "username-and-password" ? "admin" : null),
+    // Never fires for RDP: nothing in CredSSP truncates a password at eight
+    // characters, so there is nothing to warn about.
+    truncatesPassword: rdp ? false : truncates,
+    usernameHint:
+      q.get("mockUser") ?? (rdp ? "alice" : kind === "username-and-password" ? "admin" : null),
   };
+}
+
+/**
+ * A synthetic terminal failure, so the disconnect copy can be read and
+ * reviewed in a plain browser.
+ *
+ * `?mockError=ntlm-policy` is the one that matters: it is the message a
+ * domain user under a Kerberos-only policy will hit, it names two Group
+ * Policy settings in the words an administrator sees in `gpedit`, and it
+ * cannot be produced without a domain controller configured that way.
+ *
+ *   `ntlm-policy`           the domain refuses NTLM
+ *   `nla-refused`           the server refuses network level authentication
+ *   `legacy-tls`            the server offers nothing above TLS 1.1
+ *   `legacy-tls-unavailable` this build cannot use those versions
+ */
+export function mockDisconnectReason(): string | null {
+  if (!useMockData()) return null;
+  const q = new URLSearchParams(window.location.search);
+  switch (q.get("mockError")) {
+    case "ntlm-policy":
+      return "ntlm-refused-by-policy";
+    case "nla-refused":
+      return "nla-refused";
+    case "legacy-tls":
+      return "legacy-tls-required";
+    case "legacy-tls-unavailable":
+      return "legacy-tls-unavailable";
+    default:
+      return null;
+  }
 }

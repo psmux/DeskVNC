@@ -7,12 +7,19 @@ import { useState, type ReactNode } from "react";
 import { Dialog } from "./primitives";
 import { fingerprintMnemonic, formatFingerprint } from "../lib/util";
 import { IconAlert, IconLock } from "./icons";
+import type { PinScheme } from "../lib/types";
 
 export interface CertPromptData {
   fingerprint: string;
   subject: string;
   isChange: boolean;
   hostName: string;
+  /**
+   * Which key this fingerprint belongs to. Routing, not copy: it is handed
+   * back to `trust_certificate` untouched. It reaches the copy only through
+   * the one branch below, because what a user can usefully verify differs.
+   */
+  scheme: PinScheme;
 }
 
 export function CertPrompt({
@@ -49,6 +56,13 @@ export function CertPrompt({
               you trusted before. This can mean the server was reinstalled, or that someone is
               intercepting your connection. <strong>Do not continue unless you know why this
               changed.</strong>
+              {data.scheme === "rdp-tls" ? (
+                <span className="mt-2 block">
+                  A Windows reinstall, or a new machine certificate after a domain
+                  change, both look exactly like this. So does an attacker. Do not
+                  continue unless you know which it is.
+                </span>
+              ) : null}
             </p>
           </div>
           <FingerprintBlock fingerprint={data.fingerprint} mnemonic={mnemonic} subject={data.subject} />
@@ -95,8 +109,20 @@ export function CertPrompt({
             <IconLock size={20} />
           </span>
           <p className="text-sm text-secondary">
-            This is the first time this computer has identified itself with the key below. Verify
-            the fingerprint matches the one shown on the server, then choose how much to trust it.
+            {data.scheme === "rdp-tls" ? (
+              <>
+                Windows Remote Desktop normally identifies itself with a certificate
+                it generated for itself, so on a fresh machine there is nothing to
+                compare this against. Remembering it now means you will be told if
+                it ever changes.
+              </>
+            ) : (
+              <>
+                This is the first time this computer has identified itself with the
+                key below. Verify the fingerprint matches the one shown on the
+                server, then choose how much to trust it.
+              </>
+            )}
           </p>
         </div>
         <FingerprintBlock fingerprint={data.fingerprint} mnemonic={mnemonic} subject={data.subject} />

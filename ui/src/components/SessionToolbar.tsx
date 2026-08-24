@@ -11,7 +11,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { DisplayOption, QualityPreset, ScalingMode, SessionState, SessionStats } from "../lib/types";
+import type {
+  DisplayOption,
+  ProtocolKind,
+  QualityPreset,
+  ScalingMode,
+  SessionState,
+  SessionStats,
+} from "../lib/types";
 import { displayLabel } from "../lib/displays";
 import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
@@ -104,6 +111,11 @@ function storeLayout(key: string, value: string): void {
 
 export interface SessionToolbarProps {
   desktopName: string;
+  /**
+   * Which protocol this session speaks. Four rows differ, and each for its
+   * own reason, written out where it is gated rather than as a list here.
+   */
+  protocol: ProtocolKind;
   state: SessionState;
   stats: SessionStats | null;
   scalingMode: ScalingMode;
@@ -689,9 +701,26 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                   {Math.round(props.zoom * 100)}%
                 </span>
               </div>
-              <MenuRow selected={props.scalingMode === "remote-resize"} onClick={() => props.onScalingMode("remote-resize")}>
+              {/*
+                Disabled with a reason rather than hidden, the rule the Files
+                button already sets, which exists so "why can't I do this?"
+                has an answer. Asking a Windows host to resize needs the
+                Display Update channel, which this version does not speak
+                yet.
+              */}
+              <MenuRow
+                selected={props.scalingMode === "remote-resize"}
+                disabled={props.protocol === "rdp"}
+                onClick={() => props.onScalingMode("remote-resize")}
+              >
                 Remote resize (match window)
               </MenuRow>
+              {props.protocol === "rdp" ? (
+                <p className="px-2.5 pb-1 text-2xs text-tertiary">
+                  Resizing the remote desktop to the window is not available for
+                  Remote Desktop connections yet.
+                </p>
+              ) : null}
               <MenuRow
                 selected={props.zoomLocked}
                 onClick={() => props.onZoomLocked(!props.zoomLocked)}
@@ -753,7 +782,20 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                   {displayLabel(s, i)}
                 </MenuRow>
               ))}
-              {!props.layoutKnown ? (
+              {/*
+                A Remote Desktop session without multiple monitors negotiated
+                is genuinely one display, not a wide framebuffer with monitors
+                hidden inside it, so cutting it in half by width would be
+                inventing monitors. The line that replaces the detector points
+                at the setting that fills this menu instead of leaving it
+                empty.
+              */}
+              {!props.layoutKnown && props.protocol === "rdp" ? (
+                <p className="px-2.5 py-1 text-2xs text-tertiary">
+                  This session is using a single display. Turn on “Use all of my
+                  monitors” in this computer's settings to use more.
+                </p>
+              ) : !props.layoutKnown ? (
                 <>
                   <MenuRow onClick={props.onDetectDisplays}>Detect displays again</MenuRow>
                   <p className="px-2.5 py-1 text-2xs text-tertiary">
@@ -794,19 +836,34 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                   {q === "bw" ? "Black & White" : q[0].toUpperCase() + q.slice(1)}
                 </MenuRow>
               ))}
-              <div className="mt-1 border-t border-subtle pt-1">
-                <MenuRow
-                  selected={props.alwaysRefresh}
-                  onClick={() => props.onAlwaysRefresh(!props.alwaysRefresh)}
-                >
-                  Always request fresh frames
-                </MenuRow>
-                <p className="px-2.5 pb-1 text-2xs text-tertiary">
-                  Re-fetches the whole screen every second instead of trusting the
-                  server to report what changed. Fixes a picture that stays stale
-                  or smeared; uses more bandwidth.
-                </p>
-              </div>
+              {/*
+                Hidden for RDP rather than disabled, and that asymmetry with
+                "Remote resize" above is deliberate. This switch exists for a
+                failure that is specific to RFB: the client asks for an
+                incremental update and gets back whatever the server thinks
+                changed, so a server whose damage tracking cannot be trusted
+                leaves a stale picture that a poll fixes. Remote Desktop
+                pushes its own updates with its own ordering, so there is no
+                equivalent state to poll out of. A switch that costs the whole
+                desktop in bandwidth every second and fixes nothing is worse
+                than no switch, and "disabled with a reason" would still be
+                claiming the problem exists.
+              */}
+              {props.protocol === "rdp" ? null : (
+                <div className="mt-1 border-t border-subtle pt-1">
+                  <MenuRow
+                    selected={props.alwaysRefresh}
+                    onClick={() => props.onAlwaysRefresh(!props.alwaysRefresh)}
+                  >
+                    Always request fresh frames
+                  </MenuRow>
+                  <p className="px-2.5 pb-1 text-2xs text-tertiary">
+                    Re-fetches the whole screen every second instead of trusting the
+                    server to report what changed. Fixes a picture that stays stale
+                    or smeared; uses more bandwidth.
+                  </p>
+                </div>
+              )}
               {props.quality === "bw" ? (
                 <div className="mt-1 border-t border-subtle pt-1">
                   <p className="px-2.5 py-1 text-2xs text-tertiary">Gray levels</p>

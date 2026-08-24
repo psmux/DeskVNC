@@ -67,6 +67,17 @@ interface HostsContextValue {
    * disturbs a stored VNC password (nor the reverse).
    */
   saveSshPassphrase: (hostId: string, passphrase: string) => Promise<void>;
+  /**
+   * The RDP identity: user name, domain and password together.
+   *
+   * One call rather than three because the three are one credential, and
+   * because `save_password` merges per field on the Rust side, so writing
+   * them never disturbs a VNC password or an SSH passphrase on the same host.
+   */
+  saveRdpCredentials: (
+    hostId: string,
+    creds: { user: string; domain: string; password: string },
+  ) => Promise<void>;
   deletePassword: (hostId: string) => Promise<void>;
   wakeHost: (hostId: string) => Promise<void>;
   /**
@@ -468,6 +479,27 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     [],
   );
 
+  const saveRdpCredentials = useCallback(
+    async (
+      hostId: string,
+      creds: { user: string; domain: string; password: string },
+    ): Promise<void> => {
+      // Only non-empty fields are sent: `save_password` fills in rather than
+      // overwrites, so an empty box in the editor means "keep what is
+      // stored" exactly as the password box already does.
+      const payload: Record<string, string> = {};
+      if (creds.user.trim()) payload.rdpUser = creds.user.trim();
+      if (creds.domain.trim()) payload.rdpDomain = creds.domain.trim();
+      if (creds.password) payload.rdpPassword = creds.password;
+      if (Object.keys(payload).length === 0) return;
+      await safeInvoke("save_password", { hostId, creds: payload }, null);
+      if (payload.rdpPassword) {
+        setHosts((prev) => prev.map((h) => (h.id === hostId ? { ...h, hasPassword: true } : h)));
+      }
+    },
+    [],
+  );
+
   const deletePassword = useCallback(
     async (hostId: string): Promise<void> => {
       await safeInvoke("delete_password", { hostId }, null);
@@ -553,13 +585,13 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     () => ({
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
       deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
-      removeTagFromHosts, savePassword, saveSshPassphrase, deletePassword,
+      removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     }),
     [
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
       deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
-      removeTagFromHosts, savePassword, saveSshPassphrase, deletePassword,
+      removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     ],
   );

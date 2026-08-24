@@ -20,7 +20,9 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Dialog } from "./primitives";
 import { IconAlert, IconLock } from "./icons";
-import type { CredentialRequest } from "../lib/types";
+import type { CredentialRequest, ProtocolKind } from "../lib/types";
+import { promptNeedsDomain } from "../lib/types";
+import { splitDomainUser } from "../lib/credentials";
 
 /** DES truncation point for VncAuth / TLSVnc / X509Vnc. */
 const VNC_PASSWORD_LIMIT = 8;
@@ -28,27 +30,61 @@ const VNC_PASSWORD_LIMIT = 8;
 export function CredentialPrompt({
   request,
   hostName,
+  protocol,
   onSubmit,
   onCancel,
 }: {
   request: CredentialRequest;
   hostName: string;
-  onSubmit: (username: string | null, password: string, save: boolean) => void;
+  /** Which protocol is asking. RDP is the one that takes a logon domain. */
+  protocol: ProtocolKind;
+  onSubmit: (
+    username: string | null,
+    domain: string | null,
+    password: string,
+    save: boolean,
+  ) => void;
   onCancel: () => void;
 }): ReactNode {
-  const needsUsername = request.kind === "username-and-password";
+  const needsDomain = promptNeedsDomain(protocol);
+  // An RDP logon is always user-first, whatever kind the request names.
+  const needsUsername = needsDomain || request.kind === "username-and-password";
   const [username, setUsername] = useState(request.usernameHint ?? "");
+  const [domain, setDomain] = useState("");
   const [password, setPassword] = useState("");
   const [save, setSave] = useState(false); // opt-in, per PRD/10 §3.4
   const submitted = useRef(false);
 
   // A rejected attempt re-raises the prompt with a higher `attempt`. Clear the
   // password (it was wrong) and re-arm submission, but keep what the user
-  // typed for the user name and their "remember" choice.
+  // typed for the user name, the domain and their "remember" choice. A
+  // rejected password rarely means the domain was wrong.
   useEffect(() => {
     submitted.current = false;
     setPassword("");
   }, [request.attempt]);
+
+  /**
+   * Move a typed `CORP\alice` into the two fields.
+   *
+   * The move is visible rather than silent, so somebody who typed it sees
+   * where it went. `@` is never a separator: an RDP server accepts a UPN as
+   * the user name with an empty domain, and splitting `alice@corp.example`
+   * would fail against Entra ID and against any forest whose NetBIOS name is
+   * not the DNS label.
+   */
+  const onUsernameChange = (raw: string): void => {
+    if (!needsDomain || !raw.includes("\\")) {
+      setUsername(raw);
+      return;
+    }
+    // An explicit prefix wins even over a domain already typed by hand:
+    // typing `CORP\alice` after filling the domain box is an unambiguous
+    // correction, not an accident.
+    const split = splitDomainUser(raw);
+    setUsername(split.user);
+    if (split.domain !== null) setDomain(split.domain);
+  };
 
   const retry = request.attempt > 1;
   const truncating = request.truncatesPassword && password.length > VNC_PASSWORD_LIMIT;
@@ -57,7 +93,12 @@ export function CredentialPrompt({
     e.preventDefault();
     if (submitted.current || password.length === 0) return;
     submitted.current = true;
-    onSubmit(needsUsername ? username : null, password, save);
+    onSubmit(
+      needsUsername ? username : null,
+      needsDomain && domain.trim() !== "" ? domain.trim() : null,
+      password,
+      save,
+    );
   };
 
   return (
@@ -72,9 +113,11 @@ export function CredentialPrompt({
           <div className="min-w-0">
             <p className="text-sm text-primary">
               <strong className="break-words">{hostName}</strong>{" "}
-              {needsUsername
-                ? "needs a user name and password before it will let you in."
-                : "needs a password before it will let you in."}
+              {needsDomain
+                ? "needs your Windows sign-in before it will let you in."
+                : needsUsername
+                  ? "needs a user name and password before it will let you in."
+                  : "needs a password before it will let you in."}
             </p>
             <p className="mt-0.5 text-xs text-tertiary">{request.method}</p>
           </div>
@@ -111,8 +154,30 @@ export function CredentialPrompt({
               autoCorrect="off"
               spellCheck={false}
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              onChange={(e) => onUsernameChange(e.target.value)}
             />
+          </label>
+        ) : null}
+
+        {needsDomain ? (
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-secondary">Domain</span>
+            <input
+              className="field"
+              type="text"
+              name="domain"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              aria-describedby="rdp-domain-hint"
+            />
+            <span id="rdp-domain-hint" className="mt-1 block text-xs text-tertiary">
+              Leave blank for a local account, or if your user name is already an
+              email-style name.
+            </span>
           </label>
         ) : null}
 

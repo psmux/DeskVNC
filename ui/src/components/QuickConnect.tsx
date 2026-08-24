@@ -12,8 +12,9 @@
  * else connects ad-hoc.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DiscoveredHost, HostProfile } from "../lib/types";
-import { formatEndpoint, parseConnectAddress } from "../lib/address";
+import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
+import { hostProtocol, protocolLabel } from "../lib/types";
+import { formatTarget, parseConnectTarget, presetProtocol } from "../lib/address";
 import { classNames, fuzzyMatch, modKeyLabel } from "../lib/util";
 import { IconArrowRight, IconClock, IconMonitor, IconZap } from "./icons";
 
@@ -32,6 +33,9 @@ interface Suggestion {
   kind: "address" | "host" | "nearby" | "recent";
   label: string;
   sub: string;
+  /** Shown as a chip on the row, so "Connect to rdp://frontdesk" and
+   *  "Connect to frontdesk" are visibly different things. */
+  protocol: ProtocolKind;
   run: () => void;
 }
 
@@ -54,7 +58,7 @@ export function QuickConnect({
   recents: string[];
   inputRef: React.RefObject<HTMLInputElement | null>;
   onConnectHost: (host: HostProfile) => void;
-  onConnectAddress: (address: string, port: number) => void;
+  onConnectAddress: (protocol: ProtocolKind, address: string, port: number) => void;
   onRemember: (address: string) => void;
 }): ReactNode {
   const [value, setValue] = useState("");
@@ -66,7 +70,13 @@ export function QuickConnect({
   const listRef = useRef<HTMLDivElement>(null);
 
   const trimmed = value.trim();
-  const parsed = useMemo(() => parseConnectAddress(value), [value]);
+  const parsed = useMemo(() => parseConnectTarget(value), [value]);
+  /**
+   * The user has overridden the chip for what is currently typed. Cleared on
+   * every keystroke, so it applies to one address rather than becoming a
+   * sticky mode the user cannot see.
+   */
+  const [flipped, setFlipped] = useState<ProtocolKind | null>(null);
 
   /**
    * Go through the saved host when the typed address is one we already know:
@@ -75,30 +85,56 @@ export function QuickConnect({
    */
   const savedMatch = useMemo((): HostProfile | null => {
     if (!parsed.ok) return null;
-    const { address, port, explicitPort } = parsed.endpoint;
+    const { address, port, explicitPort, protocol } = parsed.target;
     // A bare hostname means "that machine", not "that machine on 5900", so it
     // should still find a host saved on 5901 rather than sit above it in the
     // list as a near-identical second row.
+    //
+    // When the input NAMED a protocol, only a host of that protocol matches:
+    // typing `rdp://box` must not connect through a VNC profile saved at that
+    // address, which would dial the wrong thing at the wrong port.
     return (
-      hosts.find((h) => sameAddress(h.address, address) && (!explicitPort || h.port === port)) ??
-      null
+      hosts.find(
+        (h) =>
+          sameAddress(h.address, address) &&
+          (!explicitPort || h.port === port) &&
+          (protocol === null || hostProtocol(h) === protocol),
+      ) ?? null
     );
   }, [parsed, hosts]);
+
+  /**
+   * The protocol this connect will use: what the input named, then a saved
+   * host's, then the port preset.
+   *
+   * The hard rule this exists for is that ambiguity never resolves silently
+   * to VNC against port 3389. Whatever it resolves to, the chip shows it
+   * before Enter and one click flips it.
+   */
+  const resolved: ProtocolKind = useMemo(() => {
+    if (!parsed.ok) return flipped ?? "vnc";
+    return (
+      flipped ??
+      parsed.target.protocol ??
+      (savedMatch ? hostProtocol(savedMatch) : presetProtocol(parsed.target))
+    );
+  }, [parsed, flipped, savedMatch]);
 
   const connectTyped = (): void => {
     if (!parsed.ok) {
       setAttempted(true);
       return;
     }
-    const { address, port } = parsed.endpoint;
+    const { address, port, username } = parsed.target;
     if (savedMatch) {
       onConnectHost(savedMatch);
     } else {
-      onConnectAddress(address, port);
-      onRemember(formatEndpoint(address, port));
+      onConnectAddress(resolved, address, port);
+      onRemember(formatTarget(resolved, address, port, username));
     }
     setValue("");
     setAttempted(false);
+    setFlipped(null);
     setOpen(false);
   };
 
@@ -106,7 +142,8 @@ export function QuickConnect({
     const out: Suggestion[] = [];
 
     if (trimmed !== "" && parsed.ok) {
-      const { address, port } = parsed.endpoint;
+      const { address, port, username } = parsed.target;
+      const typedLabel = formatTarget(resolved, address, port, username);
       out.push(
         savedMatch
           ? {
@@ -114,21 +151,27 @@ export function QuickConnect({
               kind: "host",
               label: `Connect to ${savedMatch.friendlyName}`,
               sub: "saved host",
+              protocol: hostProtocol(savedMatch),
               run: () => {
                 onConnectHost(savedMatch);
                 setValue("");
+                setFlipped(null);
                 setOpen(false);
               },
             }
           : {
               key: "typed",
               kind: "address",
-              label: `Connect to ${formatEndpoint(address, port)}`,
-              sub: port === 5900 ? "" : `port ${port}`,
+              label: `Connect to ${typedLabel}`,
+              // An ad-hoc RDP row says so; a VNC row keeps naming its port,
+              // which is the thing worth reading there.
+              sub: resolved === "rdp" ? "" : port === 5900 ? "" : `port ${port}`,
+              protocol: resolved,
               run: () => {
-                onConnectAddress(address, port);
-                onRemember(formatEndpoint(address, port));
+                onConnectAddress(resolved, address, port);
+                onRemember(typedLabel);
                 setValue("");
+                setFlipped(null);
                 setOpen(false);
               },
             },
@@ -147,10 +190,12 @@ export function QuickConnect({
           key: `host-${h.id}`,
           kind: "host",
           label: h.friendlyName,
-          sub: formatEndpoint(h.address, h.port),
+          sub: formatTarget(hostProtocol(h), h.address, h.port),
+          protocol: hostProtocol(h),
           run: () => {
             onConnectHost(h);
             setValue("");
+            setFlipped(null);
             setOpen(false);
           },
         });
@@ -161,15 +206,19 @@ export function QuickConnect({
         .filter((d) => fuzzyMatch(trimmed, `${d.name} ${d.address}`) !== null)
         .slice(0, MAX_NEARBY_SUGGESTIONS);
       for (const d of nearby) {
+        const kind = d.protocol ?? "vnc";
+        const label = formatTarget(kind, d.address, d.port);
         out.push({
           key: `nearby-${d.id}`,
           kind: "nearby",
           label: d.name,
-          sub: formatEndpoint(d.address, d.port),
+          sub: label,
+          protocol: kind,
           run: () => {
-            onConnectAddress(d.address, d.port);
-            onRemember(formatEndpoint(d.address, d.port));
+            onConnectAddress(kind, d.address, d.port);
+            onRemember(label);
             setValue("");
+            setFlipped(null);
             setOpen(false);
           },
         });
@@ -183,26 +232,36 @@ export function QuickConnect({
       trimmed === "" ? recentPool : recentPool.filter((r) => fuzzyMatch(trimmed, r) !== null)
     ).slice(0, MAX_RECENT_SUGGESTIONS);
     for (const r of recentMatches) {
-      const p = parseConnectAddress(r);
+      const p = parseConnectTarget(r);
       if (!p.ok) continue;
+      // A recent round trips through `formatTarget`, so its own text says
+      // which protocol it was. Anything that does not re-parse to itself
+      // would connect somewhere the user never went.
+      const kind = p.target.protocol ?? presetProtocol(p.target);
       out.push({
         key: `recent-${r}`,
         kind: "recent",
         label: r,
         sub: "recent",
+        protocol: kind,
         run: () => {
-          onConnectAddress(p.endpoint.address, p.endpoint.port);
+          onConnectAddress(kind, p.target.address, p.target.port);
           onRemember(r);
           setValue("");
+          setFlipped(null);
           setOpen(false);
         },
       });
     }
 
     return out;
-  }, [trimmed, parsed, savedMatch, hosts, discovered, recents, onConnectHost, onConnectAddress, onRemember]);
+  }, [trimmed, parsed, resolved, savedMatch, hosts, discovered, recents, onConnectHost, onConnectAddress, onRemember]);
 
-  useEffect(() => setSelected(-1), [value]);
+  useEffect(() => {
+    setSelected(-1);
+    // The override is for one typed address, not a mode.
+    setFlipped(null);
+  }, [value]);
 
   // Discovery arriving or a host being saved can shorten the list under a
   // highlight that is already past its new end, which would leave Enter
@@ -254,7 +313,7 @@ export function QuickConnect({
         <input
           ref={inputRef}
           className="field mono !pl-8"
-          placeholder={`Connect to an address, e.g. 192.168.1.20:1  (${modKeyLabel}T)`}
+          placeholder={`Connect to an address, e.g. 192.168.1.20:1 or rdp://frontdesk  (${modKeyLabel}T)`}
           aria-label="Address to connect to"
           spellCheck={false}
           autoComplete="off"
@@ -305,6 +364,14 @@ export function QuickConnect({
                   <SuggestionIcon kind={s.kind} />
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{s.label}</span>
+                <span
+                  className={classNames(
+                    "mono shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold tracking-wide",
+                    i === selected ? "bg-black/15" : "bg-inset text-tertiary",
+                  )}
+                >
+                  {protocolLabel(s.protocol)}
+                </span>
                 {s.sub ? (
                   <span
                     className={classNames(
@@ -320,6 +387,28 @@ export function QuickConnect({
           </div>
         ) : null}
       </div>
+      {/*
+        The chip is the answer to "which protocol is this about to speak", and
+        it is a button because the answer is sometimes a guess. `box:3389` with
+        no saved host is the case it exists for: the guess is visible before
+        Enter and one click corrects it.
+      */}
+      {trimmed !== "" && parsed.ok ? (
+        <button
+          type="button"
+          className="mono shrink-0 rounded-md border border-subtle px-2 py-1 text-xs font-semibold text-secondary hover:text-primary"
+          title={
+            savedMatch
+              ? `${savedMatch.friendlyName} is saved as ${protocolLabel(resolved)}`
+              : "Click to connect with the other protocol instead"
+          }
+          disabled={savedMatch !== null}
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={() => setFlipped(resolved === "rdp" ? "vnc" : "rdp")}
+        >
+          {protocolLabel(resolved)}
+        </button>
+      ) : null}
       <button
         type="button"
         className="btn-secondary shrink-0"

@@ -1,8 +1,27 @@
 /** Add/Edit host dialog with progressive disclosure (PRD/11 §3.3). */
 import { useMemo, useState, type ReactNode } from "react";
-import type { HostGroup, HostProfile, HostTag, OsHint, QualityPreset, ScalingMode, SshTunnelSettings } from "../lib/types";
-import { blankSshTunnel, parseSshTunnel } from "../lib/types";
-import { parseConnectAddress } from "../lib/address";
+import type {
+  HostGroup,
+  HostProfile,
+  HostTag,
+  OsHint,
+  ProtocolKind,
+  QualityPreset,
+  ScalingMode,
+  SshTunnelSettings,
+} from "../lib/types";
+import {
+  DEFAULT_PORT,
+  PROTOCOLS,
+  blankSshTunnel,
+  hostProtocol,
+  parseSshTunnel,
+  protocolName,
+} from "../lib/types";
+import type { RdpSettings } from "../lib/rdp";
+import { blankRdpSettings, parseRdpSettings } from "../lib/rdp";
+import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
+import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { classNames } from "../lib/util";
@@ -10,6 +29,7 @@ import { classNames } from "../lib/util";
 export interface HostDraft {
   id?: string;
   friendlyName: string;
+  protocol: ProtocolKind;
   address: string;
   port: number;
   groupId: string | null;
@@ -37,14 +57,36 @@ export interface HostDraft {
    * auto-filled value is never applied out of sight. Never persisted.
    */
   macFromDiscovery?: boolean;
+
+  /** Parsed `rdpSettings` blob; `null` for a VNC host. */
+  rdp: RdpSettings | null;
+  /**
+   * RDP account name, written on save alongside the password.
+   *
+   * Seeded BLANK even for a saved host, like `password`: there is no
+   * `get_password` and there is not going to be one, so this field carries
+   * the same "leave blank to keep what is stored" affordance the password
+   * field already has.
+   */
+  rdpUser: string;
+  /** Logon domain, part of the stored credential rather than the profile
+   *  blob's `domain`. Blank means "leave what is stored alone". */
+  rdpDomain: string;
+  /**
+   * UI-only: the user has deliberately set the port, so switching protocol
+   * must not move it. Never persisted.
+   */
+  portTouched?: boolean;
 }
 
 export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft>): HostDraft {
+  const protocol: ProtocolKind = h ? hostProtocol(h) : (prefill?.protocol ?? "vnc");
   return {
     id: h?.id,
     friendlyName: h?.friendlyName ?? prefill?.friendlyName ?? "",
+    protocol,
     address: h?.address ?? prefill?.address ?? "",
-    port: h?.port ?? prefill?.port ?? 5900,
+    port: h?.port ?? prefill?.port ?? DEFAULT_PORT[protocol],
     groupId: h?.groupId ?? null,
     tagIds: h?.tags ?? [],
     osHint: h?.osHint ?? prefill?.osHint ?? "unknown",
@@ -61,7 +103,16 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     // the draft, both for a brand-new host and for a saved one that has none.
     wolMac: h?.wolMac ?? prefill?.wolMac ?? null,
     macFromDiscovery: !h?.wolMac && Boolean(prefill?.wolMac),
+    rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? blankRdpSettings()) : null,
+    rdpUser: "",
+    rdpDomain: "",
+    portTouched: portWasTouched(h),
   };
+}
+
+/** Either of the Security disclosure's switches is already on. */
+function securityIsOn(d: HostDraft): boolean {
+  return d.protocol === "rdp" && (d.rdp?.nla === "allow-fallback" || d.rdp?.legacyTls === true);
 }
 
 export function HostDialog({
@@ -83,15 +134,50 @@ export function HostDialog({
   // changes how every connection is made and should not be editable only for
   // those who remember it exists.
   const [advanced, setAdvanced] = useState(
-    () => Boolean(initial.macFromDiscovery) || Boolean(initial.sshTunnel?.enabled),
+    () =>
+      Boolean(initial.macFromDiscovery) ||
+      Boolean(initial.sshTunnel?.enabled) ||
+      securityIsOn(initial),
   );
+  // The Security disclosure opens by itself when either of its switches is
+  // already on, for the same reason Advanced does: a setting that changes how
+  // the connection is made must never be editable only by people who
+  // remember it exists.
+  const [security, setSecurity] = useState(() => securityIsOn(initial));
   const [touched, setTouched] = useState(false);
 
   const set = (patch: Partial<HostDraft>): void => setD((prev) => ({ ...prev, ...patch }));
 
+  const isRdp = d.protocol === "rdp";
+  const rdp = d.rdp ?? blankRdpSettings();
+  const setRdp = (patch: Partial<RdpSettings>): void => set({ rdp: { ...rdp, ...patch } });
+
+  /**
+   * Switching protocol reorganises the form, so it also has to move the port,
+   * but only when the port is still the outgoing protocol's default and the
+   * user has not deliberately set it. The rule itself is a pure function in
+   * `lib/hostDraft.ts` so it can be tested without rendering.
+   */
+  const changeProtocol = (to: ProtocolKind): void => {
+    if (to === d.protocol) return;
+    set({
+      protocol: to,
+      port: portOnProtocolChange(d.protocol, to, d.port, d.portTouched === true),
+      rdp: to === "rdp" ? (d.rdp ?? blankRdpSettings()) : d.rdp,
+      // Prefilled, not forced: xrdp on Linux exists, and so does a Mac with
+      // an RDP server on it.
+      osHint: to === "rdp" && d.osHint === "unknown" ? "windows" : d.osHint,
+    });
+  };
+
   // The same parser the connection itself uses, so the dialog refuses exactly
-  // what would fail to connect, and says why instead of just "invalid".
-  const parsed = useMemo(() => parseConnectAddress(d.address), [d.address]);
+  // what would fail to connect, and says why instead of just "invalid". It is
+  // told which protocol to parse as, so `box:1` in an RDP host's address field
+  // reads as port 1 rather than as display 1.
+  const parsed = useMemo(
+    () => parseConnectTarget(d.address, d.protocol),
+    [d.address, d.protocol],
+  );
 
   const addressError = touched && !parsed.ok ? parsed.error : null;
 
@@ -103,7 +189,7 @@ export function HostDialog({
     // Saving straight from the keyboard skips the blur that normalizes the
     // address, so it is normalized here too rather than only on the way out
     // of the field.
-    const address = parsed.endpoint.address;
+    const address = parsed.target.address;
     const name = d.friendlyName.trim() || address;
     onSave({ ...d, address, friendlyName: name });
   };
@@ -127,6 +213,36 @@ export function HostDialog({
           />
         </Field>
 
+        {/*
+          Above the address row, because it changes what the rest of the form
+          means and a control that reorganises a form comes before the form.
+        */}
+        <Field label="Connect using">
+          <div
+            className="flex gap-1 rounded-md border border-subtle p-0.5"
+            role="radiogroup"
+            aria-label="Connection protocol"
+          >
+            {PROTOCOLS.map((p) => (
+              <button
+                key={p}
+                type="button"
+                role="radio"
+                aria-checked={d.protocol === p}
+                className={classNames(
+                  "flex-1 rounded-sm px-3 py-1.5 text-sm",
+                  d.protocol === p
+                    ? "bg-accent/12 font-medium text-accent"
+                    : "text-secondary hover:text-primary",
+                )}
+                onClick={() => changeProtocol(p)}
+              >
+                {protocolName(p)}
+              </button>
+            ))}
+          </div>
+        </Field>
+
         <div className="grid grid-cols-[1fr_120px] gap-3">
           <Field label="Address" error={addressError}>
             <input
@@ -141,17 +257,24 @@ export function HostDialog({
                 // saved verbatim and then never resolve, and an address that
                 // does not match the canonical form cannot be recognised as
                 // a saved host when it is typed into QuickConnect later.
-                if (parsed.ok) set({ address: parsed.endpoint.address });
+                if (parsed.ok) set({ address: parsed.target.address });
               }}
               onChange={(e) => {
-                const typed = parseConnectAddress(e.target.value);
+                const typed = parseConnectTarget(e.target.value, d.protocol);
                 // Only a port the user actually typed moves into the Port
                 // field; a bare hostname leaves this profile's saved port
                 // alone. Anything else stays as typed so the field stays
                 // editable while it is still half-written.
+                //
+                // A port that arrived this way counts as deliberately set,
+                // so a later protocol switch leaves it where it is.
                 set(
-                  typed.ok && typed.endpoint.explicitPort
-                    ? { address: typed.endpoint.address, port: typed.endpoint.port }
+                  typed.ok && typed.target.explicitPort
+                    ? {
+                        address: typed.target.address,
+                        port: typed.target.port,
+                        portTouched: true,
+                      }
                     : { address: e.target.value },
                 );
               }}
@@ -164,10 +287,62 @@ export function HostDialog({
               min={1}
               max={65535}
               value={d.port}
-              onChange={(e) => set({ port: parseInt(e.target.value, 10) || 5900 })}
+              onChange={(e) =>
+                set({
+                  port: parseInt(e.target.value, 10) || DEFAULT_PORT[d.protocol],
+                  portTouched: true,
+                })
+              }
             />
           </Field>
         </div>
+
+        {/* An RDP logon is user first, so the name field sits above the
+            password rather than beside the security type. */}
+        {isRdp ? (
+          <div className="grid grid-cols-2 gap-3">
+            <Field
+              label="User name"
+              hint={
+                d.hasPassword && !d.rdpUser
+                  ? "Leave blank to keep the saved one."
+                  : "The account to sign in with"
+              }
+            >
+              <input
+                className="field"
+                value={d.rdpUser}
+                placeholder={d.hasPassword ? "(unchanged)" : "Administrator"}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => set({ rdpUser: e.target.value })}
+              />
+            </Field>
+            {/*
+              The hint is doing real work. Splitting a UPN into a domain is
+              the classic way to break an Entra ID sign-in, and nothing in
+              this app will do it for the user, so the field has to say when
+              to leave itself empty.
+            */}
+            <Field
+              label="Domain"
+              hint="Leave blank for a local account, or if your user name is already an email-style name like you@company.com."
+            >
+              <input
+                className="field"
+                value={d.rdpDomain}
+                placeholder="Optional"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => set({ rdpDomain: e.target.value })}
+              />
+            </Field>
+          </div>
+        ) : null}
 
         <Field
           label="Password"
@@ -258,20 +433,31 @@ export function HostDialog({
           {advanced ? (
             <div className="space-y-4 border-t border-subtle p-3">
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Security type" hint="Auto negotiates the strongest supported">
-                  <Select
-                    value={d.securityPref ?? "auto"}
-                    onChange={(e) => set({ securityPref: e.target.value === "auto" ? null : e.target.value })}
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
-                    <option value="ra2">RSA-AES (RA2)</option>
-                    <option value="apple-dh">Apple Screen Sharing</option>
-                    <option value="vncauth">VNC password only</option>
-                    <option value="none">None</option>
-                  </Select>
-                </Field>
-                <Field label="Quality" hint="Auto adapts to network conditions">
+                {/* RFB security types mean nothing to RDP; the Security
+                    disclosure below is what takes their place there. */}
+                {isRdp ? null : (
+                  <Field label="Security type" hint="Auto negotiates the strongest supported">
+                    <Select
+                      value={d.securityPref ?? "auto"}
+                      onChange={(e) => set({ securityPref: e.target.value === "auto" ? null : e.target.value })}
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
+                      <option value="ra2">RSA-AES (RA2)</option>
+                      <option value="apple-dh">Apple Screen Sharing</option>
+                      <option value="vncauth">VNC password only</option>
+                      <option value="none">None</option>
+                    </Select>
+                  </Field>
+                )}
+                <Field
+                  label="Quality"
+                  hint={
+                    isRdp
+                      ? "Auto adapts to network conditions. Lower settings turn off wallpaper and effects on the remote desktop."
+                      : "Auto adapts to network conditions"
+                  }
+                >
                   <Select
                     value={d.qualityPref}
                     onChange={(e) => set({ qualityPref: e.target.value as QualityPreset })}
@@ -280,7 +466,15 @@ export function HostDialog({
                     <option value="high">High</option>
                     <option value="medium">Medium</option>
                     <option value="low">Low</option>
-                    <option value="bw">Black &amp; White</option>
+                    {/*
+                      Black and White is a shader in this app, not a wire
+                      setting, so the toolbar keeps offering it live for both
+                      protocols. As a STORED default for an RDP host it would
+                      quietly mean "low quality, plus a grey screen on every
+                      connect", which is not what choosing a saved default is
+                      for.
+                    */}
+                    {isRdp ? null : <option value="bw">Black &amp; White</option>}
                   </Select>
                 </Field>
               </div>
@@ -302,7 +496,8 @@ export function HostDialog({
                     onChange={(e) => set({ keyboardMode: e.target.value })}
                   >
                     <option value="auto">Auto</option>
-                    <option value="keysym">Keysym</option>
+                    {/* RDP has no concept of a keysym. */}
+                    {isRdp ? null : <option value="keysym">Keysym</option>}
                     <option value="unicode">Unicode</option>
                     <option value="scancode">Scancode</option>
                   </Select>
@@ -335,10 +530,21 @@ export function HostDialog({
                 <span>
                   Capture system shortcuts by default
                   <span className="block text-xs text-tertiary">
-                    Sends shortcuts like Cmd+Tab / Alt+Tab to the remote computer
+                    {isRdp
+                      ? "Sends shortcuts like Alt+Tab and the Windows key to the remote computer"
+                      : "Sends shortcuts like Cmd+Tab / Alt+Tab to the remote computer"}
                   </span>
                 </span>
               </label>
+              {isRdp ? <RdpOptionsSection rdp={rdp} onChange={setRdp} /> : null}
+              {isRdp ? (
+                <SecuritySection
+                  rdp={rdp}
+                  open={security}
+                  onToggle={() => setSecurity((v) => !v)}
+                  onChange={setRdp}
+                />
+              ) : null}
               <SshTunnelSection
                 tunnel={d.sshTunnel}
                 passphrase={d.sshPassphrase}
@@ -359,6 +565,214 @@ export function HostDialog({
         </div>
       </form>
     </Dialog>
+  );
+}
+
+/**
+ * The RDP options that are ordinary preferences, inside Advanced.
+ *
+ * Everything that is a security decision lives in {@link SecuritySection}
+ * below instead, so a person scanning Advanced for the resolution setting
+ * does not meet a TLS downgrade switch on the way.
+ */
+function RdpOptionsSection({
+  rdp,
+  onChange,
+}: {
+  rdp: RdpSettings;
+  onChange: (patch: Partial<RdpSettings>) => void;
+}): ReactNode {
+  const [codecs, setCodecs] = useState(false);
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Colour depth" hint="Auto follows the quality setting">
+          <Select
+            value={rdp.colorDepth}
+            onChange={(e) => onChange({ colorDepth: e.target.value as RdpSettings["colorDepth"] })}
+          >
+            <option value="auto">Auto</option>
+            <option value="bpp32">32-bit</option>
+            <option value="bpp24">24-bit</option>
+            <option value="bpp16">16-bit</option>
+            <option value="bpp15">15-bit</option>
+          </Select>
+        </Field>
+        <Field label="Sound">
+          <Select
+            value={rdp.audio}
+            onChange={(e) => onChange({ audio: e.target.value as RdpSettings["audio"] })}
+          >
+            <option value="play-locally">Play here</option>
+            <option value="leave-at-server">Play there</option>
+            <option value="off">Do not play</option>
+          </Select>
+        </Field>
+      </div>
+
+      <Check
+        checked={rdp.monitors === "all"}
+        onChange={(on) => onChange({ monitors: on ? "all" : "primary" })}
+        label="Use all of my monitors"
+        hint="Makes the Displays menu list the remote monitors instead of just the one."
+      />
+      <Check
+        checked={rdp.dynamicResolution}
+        onChange={(dynamicResolution) => onChange({ dynamicResolution })}
+        label="Match the remote resolution to this window"
+      />
+      <Check
+        checked={rdp.clipboard}
+        onChange={(clipboard) => onChange({ clipboard })}
+        label="Share my clipboard"
+      />
+      <Check
+        checked={rdp.consoleSession}
+        onChange={(consoleSession) => onChange({ consoleSession })}
+        label="Connect to the console session"
+      />
+
+      <div className="rounded-md border border-subtle">
+        <button
+          type="button"
+          aria-expanded={codecs}
+          className="flex w-full items-center gap-1.5 px-3 py-2 text-sm font-medium text-secondary hover:text-primary"
+          onClick={() => setCodecs((v) => !v)}
+        >
+          {codecs ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+          Codecs
+        </button>
+        {codecs ? (
+          <div className="space-y-3 border-t border-subtle p-3">
+            <p className="text-xs text-tertiary">
+              Turn one of these off only to work around a server whose picture is
+              wrong. They all make the connection faster.
+            </p>
+            {(
+              [
+                ["remotefx", "RemoteFX"],
+                ["clearcodec", "ClearCodec"],
+                ["planar", "Planar"],
+                ["avc420", "H.264 (AVC 4:2:0)"],
+              ] as const
+            ).map(([key, label]) => (
+              <Check
+                key={key}
+                checked={rdp.codecs[key]}
+                onChange={(on) => onChange({ codecs: { ...rdp.codecs, [key]: on } })}
+                label={label}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The two switches that make the connection less safe, behind one heading, in
+ * the same bordered block the SSH tunnel section uses.
+ *
+ * They are together and set apart on purpose. Both are relaxations, both are
+ * off by default, and neither should be met by accident while looking for
+ * something else. The disclosure opens by itself when either is already on.
+ */
+function SecuritySection({
+  rdp,
+  open,
+  onToggle,
+  onChange,
+}: {
+  rdp: RdpSettings;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (patch: Partial<RdpSettings>) => void;
+}): ReactNode {
+  return (
+    <div className="rounded-md border border-subtle">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-sm font-medium text-secondary hover:text-primary"
+        onClick={onToggle}
+      >
+        {open ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
+        Security
+      </button>
+      {open ? (
+        <div className="space-y-4 border-t border-subtle p-3">
+          <Check
+            checked={rdp.nla === "allow-fallback"}
+            onChange={(on) => onChange({ nla: on ? "allow-fallback" : "required" })}
+            label="Allow connecting without network level authentication"
+            hint="Some older or misconfigured servers refuse network level authentication. Without it your password is sent to a computer whose identity has not been checked yet."
+          />
+          <div>
+            <Check
+              checked={rdp.legacyTls}
+              onChange={(legacyTls) => onChange({ legacyTls })}
+              label="Allow legacy TLS (1.0 and 1.1)"
+              hint="For Windows 7 and Server 2008 R2 era computers that were never updated. Those machines offer only TLS 1.0 or 1.1, which this app normally refuses. Leave this off unless a connection has already failed for that reason."
+            />
+            {/*
+              Shown only while the box is ticked, in the same danger colour
+              the address field uses for its error text.
+
+              Five things about this copy are deliberate. It names the
+              machines before the protocol versions, because somebody with a
+              Server 2008 R2 box in a cupboard does not know which TLS
+              versions it offers. It says what still holds, because "this is
+              insecure" with nothing after it makes people either ignore the
+              warning or abandon a connection they legitimately need, and the
+              honest position is narrower than either. It does not promise
+              safety. It is per host and says so by living in one host's
+              editor. And it never appears for a VNC profile.
+            */}
+            {rdp.legacyTls ? (
+              <p className="mt-2 text-xs text-danger" role="status">
+                TLS 1.0 and 1.1 are old and weak. Someone who can sit between you
+                and this computer has a better chance of reading or changing the
+                traffic than they would over TLS 1.2. What still protects you is
+                the certificate this app pinned the first time you connected,
+                which is checked on every connection whichever version is used,
+                and network level authentication, which proves the computer is
+                the one you signed in to before your password is sent. Turn this
+                on for one computer at a time, not as a habit.
+              </p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** A checkbox with the label-and-hint shape this dialog uses everywhere. */
+function Check({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean;
+  onChange: (on: boolean) => void;
+  label: string;
+  hint?: string;
+}): ReactNode {
+  return (
+    <label className="flex items-start gap-2.5 text-sm text-primary">
+      <input
+        type="checkbox"
+        className="mt-0.5 accent-(--accent)"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>
+        {label}
+        {hint ? <span className="block text-xs text-tertiary">{hint}</span> : null}
+      </span>
+    </label>
   );
 }
 
@@ -394,7 +808,7 @@ function SshTunnelSection({
         <span>
           Tunnel over SSH
           <span className="block text-xs text-tertiary">
-            Runs the VNC connection through an SSH login, so it works for servers that
+            Runs the connection through an SSH login, so it works for servers that
             only listen on the remote computer&apos;s own loopback, and is encrypted end to end
           </span>
         </span>
@@ -402,11 +816,11 @@ function SshTunnelSection({
       {t.enabled ? (
         <>
           <div className="grid grid-cols-[1fr_120px] gap-3">
-            <Field label="SSH host" hint="Leave blank to SSH to the VNC address above">
+            <Field label="SSH host" hint="Leave blank to SSH to the address above">
               <input
                 className="field mono"
                 value={t.host}
-                placeholder="Same as the VNC address"
+                placeholder="Same as the address above"
                 spellCheck={false}
                 onChange={(e) => patch({ host: e.target.value })}
               />

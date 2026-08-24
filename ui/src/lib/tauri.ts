@@ -5,6 +5,7 @@
  */
 import { invoke, isTauri as tauriDetect } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ProtocolKind } from "./types";
 
 export function inTauri(): boolean {
   try {
@@ -140,6 +141,9 @@ export interface SessionTabParams {
   address: string;
   port: number;
   name: string;
+  /** Unconditional here, unlike the window's query key: this is a fresh JSON
+   *  payload with no legacy readers. */
+  protocol: ProtocolKind;
 }
 
 /** Result of `open_session_window` (`commands::session::SessionWindowOutcome`). */
@@ -165,6 +169,12 @@ export interface OpenSessionOptions {
   /** Ad-hoc connect (Nearby, quick connect). */
   address?: string;
   port?: number;
+  /**
+   * Which protocol to speak, for an ad-hoc connect. A saved host resolves it
+   * from the profile, exactly as it already resolves the endpoint and the
+   * name, so this is only for the case where there is no profile to ask.
+   */
+  protocol?: ProtocolKind;
   /**
    * Bypass one-window-per-machine for this call, the explicit
    * "Connect in new window" command, which is only offered when the
@@ -196,6 +206,7 @@ export function openSessionWindow(
       profileId: options.profileId ?? null,
       address: options.address ?? null,
       port: options.port ?? null,
+      protocol: options.protocol ?? null,
       forceNew: options.forceNew ?? false,
       asTab: options.asTab ?? false,
     },
@@ -211,7 +222,8 @@ export function openSessionWindow(
  * Answer a `credentials-required` prompt. The session is parked mid-handshake
  * until this (or {@link cancelCredentials}) arrives.
  *
- * `username` must be null for password-only methods. `save` is the "remember
+ * `username` must be null for password-only methods, and `domain` for
+ * everything except an RDP logon that has one. `save` is the "remember
  * this" checkbox, the shell holds it in memory and only writes to the
  * keychain once the server actually accepts it, so a wrong password is never
  * persisted.
@@ -224,11 +236,12 @@ export function openSessionWindow(
 export async function provideCredentials(
   sessionId: string,
   username: string | null,
+  domain: string | null,
   password: string,
   save: boolean,
 ): Promise<void> {
   if (!inTauri()) return;
-  await invoke("provide_credentials", { sessionId, username, password, save });
+  await invoke("provide_credentials", { sessionId, username, domain, password, save });
 }
 
 /** Dismiss the prompt and abandon the connection attempt. */

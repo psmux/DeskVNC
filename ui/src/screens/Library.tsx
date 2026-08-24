@@ -12,8 +12,15 @@ import { useHosts } from "../state/HostsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
-import type { DiscoveredHost, HostProfile } from "../lib/types";
-import { hostMac, resolvedOsHint, serializeSshTunnel } from "../lib/types";
+import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
+import { serializeRdpSettings } from "../lib/rdp";
+import {
+  hostMac,
+  hostProtocol,
+  protocolLabel,
+  resolvedOsHint,
+  serializeSshTunnel,
+} from "../lib/types";
 import {
   allowsMultipleSessions,
   inTauri,
@@ -29,7 +36,7 @@ import { useTabs } from "../state/TabsContext";
 import { classNames, formatBps, fuzzyMatch, modKeyLabel, timeAgo } from "../lib/util";
 import { Sidebar, type SidebarSelection } from "../components/Sidebar";
 import { useHostDragSelect, type DropTarget } from "../hooks/useHostDragSelect";
-import { HostTile, DiscoveredTile, osLabel } from "../components/HostTile";
+import { HostTile, DiscoveredTile, addressLabel, osLabel } from "../components/HostTile";
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
 import { QuickConnect } from "../components/QuickConnect";
@@ -46,7 +53,8 @@ import {
   IconWindows,
   IconZap,
 } from "../components/icons";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
+import { EDIT_HOST_EVENT, type EditHostRequest } from "../lib/editHost";
 
 interface CtxMenuState {
   x: number;
@@ -88,7 +96,7 @@ export function Library({
   autoAddDiscoveredId?: string | null;
   onAutoAddHandled?: () => void;
 }): ReactNode {
-  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, wakeHost, refresh, refreshThumbnail } = useHosts();
+  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, wakeHost, refresh, refreshThumbnail } = useHosts();
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
@@ -160,6 +168,7 @@ export function Library({
           address: outcome.params.address,
           port: outcome.params.port,
           name: outcome.params.name,
+          protocol: outcome.params.protocol,
         });
       }
       onConnected?.();
@@ -169,6 +178,7 @@ export function Library({
 
   const connectHost = useCallback(
     (host: HostProfile, forceNew = false): void => {
+      const protocol = hostProtocol(host);
       if (inTauri()) {
         void openSession({ profileId: host.id, forceNew }, host.friendlyName, () => {
           void safeInvoke("touch_connected", { hostId: host.id }, null);
@@ -186,20 +196,22 @@ export function Library({
           address: host.address,
           port: host.port,
           name: host.friendlyName,
+          protocol,
         });
         return;
       }
       window.location.search =
         `?sessionId=dev&profileId=${encodeURIComponent(host.id)}` +
-        `&name=${encodeURIComponent(host.friendlyName)}`;
+        `&name=${encodeURIComponent(host.friendlyName)}` +
+        (protocol === "vnc" ? "" : `&protocol=${protocol}`);
     },
     [openSession, tabbed, openTab],
   );
 
   const connectAdHoc = useCallback(
-    (address: string, port: number): void => {
+    (protocol: ProtocolKind, address: string, port: number): void => {
       if (inTauri()) {
-        void openSession({ address, port }, address);
+        void openSession({ address, port, protocol }, address);
         return;
       }
       // Endpoint rides along exactly as the shell sets it: an ad-hoc session
@@ -207,12 +219,20 @@ export function Library({
       // dev session has nothing to attach its capture to.
       if (tabbed) {
         const id = devSessionId();
-        openTab(id, { sessionId: id, profileId: null, address, port, name: address });
+        openTab(id, {
+          sessionId: id,
+          profileId: null,
+          address,
+          port,
+          name: address,
+          protocol,
+        });
         return;
       }
       window.location.search =
         `?sessionId=dev&address=${encodeURIComponent(address)}&port=${port}` +
-        `&name=${encodeURIComponent(address)}`;
+        `&name=${encodeURIComponent(address)}` +
+        (protocol === "vnc" ? "" : `&protocol=${protocol}`);
     },
     [openSession, tabbed, openTab],
   );
@@ -305,6 +325,19 @@ export function Library({
     }
     return sorted;
   }, [hosts, groups, tags, selection, search, activeTagIds, tagMode, settings.sortKey]);
+
+  /**
+   * Badge every tile, or none.
+   *
+   * A library that speaks one protocol has nothing to disambiguate, and it is
+   * the majority case today; the moment a second one appears every tile needs
+   * to say which it is, because a badge on some tiles leaves the user
+   * guessing what the unbadged ones are.
+   */
+  const showProtocol = useMemo(
+    () => new Set(hosts.map((h) => h.protocol)).size > 1,
+    [hosts],
+  );
 
   const unsavedDiscovered = useMemo(
     () =>
@@ -482,6 +515,10 @@ export function Library({
         friendlyName: d.name,
         address: d.address,
         port: d.port,
+        // The discovery row already knows what answers on that port, so the
+        // editor opens on the right side of the protocol selector rather
+        // than making the user notice and switch it.
+        protocol: d.protocol ?? "vnc",
         osHint: resolvedOsHint(d),
         wolMac: hostMac(d),
       }),
@@ -502,6 +539,11 @@ export function Library({
    * profile has none. It is only a pre-fill, nothing is written until Save, * so a host added before NetBIOS lookups existed can pick one up simply by
    * being opened.
    */
+  // Read inside the listener rather than captured, so the subscription is
+  // not torn down and rebuilt every time a host list arrives.
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
+
   const editHost = useCallback(
     (host: HostProfile): void => {
       setHostDialog(
@@ -513,6 +555,27 @@ export function Library({
     },
     [discoveredMacFor],
   );
+
+  /**
+   * A session window asked for a host's security settings.
+   *
+   * The disconnect panel names a setting, and the editor lives here rather
+   * than in the session window, so the request arrives as a broadcast. The
+   * dialog opens with Advanced and Security already expanded, which
+   * `HostDialog` does for itself whenever either of those switches is on and
+   * which is exactly the state a user sent here needs.
+   */
+  useEffect(() => {
+    if (!inTauri()) return;
+    let stop: (() => void) | null = null;
+    void listen<EditHostRequest>(EDIT_HOST_EVENT, (e) => {
+      const host = hostsRef.current.find((h) => h.id === e.payload?.hostId);
+      if (host) editHost(host);
+    }).then((un) => {
+      stop = un;
+    });
+    return () => stop?.();
+  }, [editHost]);
 
   const saveDraft = useCallback(
     async (draft: HostDraft): Promise<void> => {
@@ -532,17 +595,32 @@ export function Library({
         wolMac: draft.wolMac,
         tags: draft.tagIds,
         hasPassword: draft.hasPassword,
+        protocol: draft.protocol,
+        // An untouched settings object stores null, so the column only fills
+        // once the user actually changes something and the Rust side keeps
+        // applying its own defaults.
+        rdpSettings: draft.protocol === "rdp" ? serializeRdpSettings(draft.rdp) : null,
       });
       const id = saved?.id ?? draft.id;
       if (id) {
-        if (draft.password) await savePassword(id, draft.password);
+        // An RDP password belongs with its user name and domain, which are
+        // three fields of one credential rather than a password on its own.
+        if (draft.protocol === "rdp") {
+          await saveRdpCredentials(id, {
+            user: draft.rdpUser,
+            domain: draft.rdpDomain,
+            password: draft.password,
+          });
+        } else if (draft.password) {
+          await savePassword(id, draft.password);
+        }
         if (draft.sshPassphrase) await saveSshPassphrase(id, draft.sshPassphrase);
         await setHostTags(id, draft.tagIds);
       }
       setHostDialog(null);
       push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
     },
-    [saveHost, savePassword, saveSshPassphrase, setHostTags, push],
+    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, push],
   );
 
   const paletteActions = useMemo((): PaletteAction[] => {
@@ -974,7 +1052,7 @@ export function Library({
             <EmptyState
               icon={<IconMonitor size={56} />}
               title="Let's find your computers"
-              body="DeskVNCViewer can discover VNC servers on your local network automatically, or you can add one by address."
+              body="DeskVNCViewer can discover computers on your local network automatically, or you can add one by address."
               primary={{ label: "Find computers on my network", onClick: () => void startScan() }}
               secondary={{ label: "Add a computer manually", onClick: () => setHostDialog(draftFromHost(null)) }}
             />
@@ -997,6 +1075,7 @@ export function Library({
                         key={h.id}
                         host={h}
                         selected={selectedIds.has(h.id)}
+                        showProtocol={showProtocol}
                         onConnect={() => connectHost(h)}
                         onEdit={() => editHost(h)}
                         onWake={() => void wakeHost(h.id)}
@@ -1013,6 +1092,7 @@ export function Library({
                     groups={groups}
                     tags={tags}
                     selectedIds={selectedIds}
+                    showProtocol={showProtocol}
                     onConnect={connectHost}
                     onContextMenu={(e, h) => {
                       e.preventDefault();
@@ -1033,7 +1113,7 @@ export function Library({
                         key={d.id}
                         host={d}
                         onAdd={() => addDiscovered(d)}
-                        onConnect={() => connectAdHoc(d.address, d.port)}
+                        onConnect={() => connectAdHoc(d.protocol ?? "vnc", d.address, d.port)}
                       />
                     ))}
                   </div>
@@ -1042,7 +1122,7 @@ export function Library({
                 <EmptyState
                   icon={<IconZap size={48} />}
                   title="Nothing discovered yet"
-                  body="Some VNC servers don't advertise themselves on the network. You can actively scan this subnet, or add a computer by address."
+                  body="Some computers don't advertise themselves on the network. You can actively scan this subnet, or add a computer by address."
                   primary={{ label: "Scan this network", onClick: () => void startScan() }}
                   secondary={{ label: "Add manually", onClick: () => setHostDialog(draftFromHost(null)) }}
                 />
@@ -1244,6 +1324,7 @@ function HostListView({
   selectedIds,
   onConnect,
   onContextMenu,
+  showProtocol,
 }: {
   hosts: HostProfile[];
   groups: { id: string; name: string }[];
@@ -1251,6 +1332,8 @@ function HostListView({
   selectedIds: ReadonlySet<string>;
   onConnect: (h: HostProfile) => void;
   onContextMenu: (e: React.MouseEvent, h: HostProfile) => void;
+  /** The library holds more than one protocol, so the column earns its width. */
+  showProtocol?: boolean;
 }): ReactNode {
   const { forKey } = useSessions();
   return (
@@ -1262,6 +1345,7 @@ function HostListView({
             <th className="px-3 py-2 font-medium">Address</th>
             <th className="px-3 py-2 font-medium">Group</th>
             <th className="px-3 py-2 font-medium">Tags</th>
+            {showProtocol ? <th className="px-3 py-2 font-medium">Protocol</th> : null}
             <th className="px-3 py-2 font-medium">OS</th>
             <th className="px-3 py-2 font-medium">Last connected</th>
           </tr>
@@ -1294,8 +1378,7 @@ function HostListView({
                 </span>
               </td>
               <td className="mono px-3 py-2 text-secondary">
-                {h.address}
-                {h.port !== 5900 ? `:${h.port}` : ""}
+                {addressLabel(h)}
                 <RowBandwidth bandwidth={forKey(h.id).bandwidth} />
               </td>
               <td className="px-3 py-2 text-secondary">
@@ -1317,6 +1400,9 @@ function HostListView({
                   })}
                 </span>
               </td>
+              {showProtocol ? (
+                <td className="px-3 py-2 text-secondary">{protocolLabel(h.protocol)}</td>
+              ) : null}
               <td className="px-3 py-2 text-secondary">{osLabel(h.osHint)}</td>
               <td className="px-3 py-2 text-secondary">{timeAgo(h.lastConnected)}</td>
             </tr>

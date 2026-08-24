@@ -70,7 +70,7 @@ export function SshHostKeyPrompt({
             <IconLock size={20} />
           </span>
           <p className="text-sm text-secondary">
-            Your VNC connection will be tunnelled through the SSH server at{" "}
+            Your connection will be tunnelled through the SSH server at{" "}
             <span className="mono">{endpoint}</span>, and this is the first time it has
             identified itself. Verify the fingerprint below matches the server&apos;s
             (<span className="mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</span>)

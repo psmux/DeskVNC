@@ -14,6 +14,7 @@ import { SessionInput } from "../render/input";
 import { KEY_COMBO } from "../render/keysyms";
 import {
   useSession,
+  authMethodLabel,
   readSessionParams,
   type SessionBridge,
   type SessionParams,
@@ -29,9 +30,12 @@ import { ToastShelf } from "../components/primitives";
 import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
 import { classNames } from "../lib/util";
+import { emit } from "@tauri-apps/api/event";
+import { EDIT_HOST_EVENT } from "../lib/editHost";
 import { Dialog } from "../components/primitives";
 import { candidateSeams, detectVerticalSeam } from "../render/seams";
 import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import { diagnose, isAuthFailure, opensSecuritySettings } from "../lib/diagnose";
 import {
   buildDisplayOptions,
   displayLabel,
@@ -673,21 +677,33 @@ function SessionView({
   }, []);
 
   const layoutKnown = session.screens.length >= 2;
+  /**
+   * Guessing where the monitors are is a VNC-only affordance.
+   *
+   * RFB servers frequently paint several monitors into one framebuffer and
+   * never say where the joins are, so reading the picture for a seam and
+   * offering splits by width is the best available answer. A Remote Desktop
+   * session without multiple monitors negotiated really is one display, and
+   * cutting it in half would be inventing monitors that are not there.
+   */
+  const guessDisplays = params.protocol !== "rdp";
   useEffect(() => {
-    if (layoutKnown || session.state.state !== "connected") return;
+    if (!guessDisplays || layoutKnown || session.state.state !== "connected") return;
     const t = window.setTimeout(detectDisplays, THUMBNAIL_SETTLE_MS);
     return () => window.clearTimeout(t);
-  }, [layoutKnown, session.state.state, remoteSize, detectDisplays]);
+  }, [guessDisplays, layoutKnown, session.state.state, remoteSize, detectDisplays]);
 
   /** What the Displays menus offer (see `lib/displays`). */
   const displayOptions = useMemo(
     () =>
-      buildDisplayOptions(
-        session.screens,
-        remoteSize,
-        detectedSeam && detectedSeam.forWidth === remoteSize?.w ? detectedSeam.x : null,
-      ),
-    [session.screens, remoteSize, detectedSeam],
+      guessDisplays || session.screens.length >= 2
+        ? buildDisplayOptions(
+            session.screens,
+            remoteSize,
+            detectedSeam && detectedSeam.forWidth === remoteSize?.w ? detectedSeam.x : null,
+          )
+        : [],
+    [guessDisplays, session.screens, remoteSize, detectedSeam],
   );
 
   /**
@@ -1585,6 +1601,7 @@ function SessionView({
       {hideToolbar ? null : (
         <SessionToolbar
           desktopName={session.desktopName}
+          protocol={params.protocol}
           state={st}
           stats={session.stats}
           scalingMode={scalingMode}
@@ -1675,6 +1692,21 @@ function SessionView({
           name={session.desktopName}
           reason={st.reason}
           canRetry={st.can_retry}
+          profileId={params.profileId}
+          onEditSecurity={
+            params.profileId
+              ? () => {
+                  // The editor lives in the library window, which this
+                  // session may not be in, so the request is broadcast and
+                  // the library opens the dialog with Advanced and Security
+                  // already expanded.
+                  void emit(EDIT_HOST_EVENT, {
+                    hostId: params.profileId,
+                    section: "security",
+                  });
+                }
+              : null
+          }
           onReconnect={session.retryConnect}
           onClose={dismiss}
         />
@@ -1722,6 +1754,7 @@ function SessionView({
             subject: session.certPrompt.subject,
             isChange: session.certPrompt.isChange,
             hostName: session.desktopName,
+            scheme: session.certPrompt.scheme,
           }}
           onTrust={() => session.trustCertificate(true)}
           onConnectOnce={() => session.trustCertificate(false)}
@@ -1755,6 +1788,7 @@ function SessionView({
           <CredentialPrompt
             request={session.credentialRequest}
             hostName={session.desktopName}
+            protocol={params.protocol}
             onSubmit={session.submitCredentials}
             onCancel={session.dismissCredentialPrompt}
           />
@@ -1881,7 +1915,9 @@ function stageLabel(st: SessionState): string {
     case "connecting":
       return "Connecting";
     case "authenticating":
-      return `Authenticating (${st.method})`;
+      // The wire value is a stable identifier, so the copy is the UI's own.
+      // An unrecognised one comes back verbatim rather than as a blank.
+      return `Authenticating (${authMethodLabel(st.method)})`;
     case "negotiating":
       return "Negotiating";
     default:
@@ -1979,58 +2015,27 @@ function ReconnectOverlay({
 }
 
 // ------------------------------------------------------- terminal disconnect
-
-/**
- * Was this a rejected credential? Those get a different offer: replaying the
- * same stored password would just fail again, so the retry has to ask.
- */
-function isAuthFailure(reason: string): boolean {
-  const r = reason.toLowerCase();
-  if (r.includes("cancel")) return true;
-  return r.includes("auth") || r.includes("password") || r.includes("credential");
-}
-
-/**
- * Turn a raw failure reason into a sentence.
- *
- * `reason` is typed `string` but arrives over IPC, so it is coerced first: a
- * `reason.toLowerCase()` on a payload that turned out not to carry one threw
- * during render, and with nothing to catch it React unmounted the whole tree, * the "crash" that left a white session window with no way out.
- */
-function diagnose(reason: unknown): string {
-  const text = typeof reason === "string" ? reason : "";
-  const r = text.toLowerCase();
-  // Ordered: "cancelled" must win over the generic auth match below, or
-  // dismissing the password prompt would be reported as a failed login.
-  if (r.includes("cancel")) return "Authentication was cancelled. Reconnect to try again.";
-  if (r.includes("refused")) return "Connection refused, the VNC server may not be running on this port.";
-  if (r.includes("timed out") || r.includes("timeout")) return "The computer didn't respond, it may be asleep, off, or unreachable from this network.";
-  // Deliberately NOT a bare "auth" match. That caught every message merely
-  // mentioning authentication, so a server offering none at all was reported
-  // to the user as "incorrect password" for a server that has no password
-  // (issue #1). Match only what really means "the credentials were rejected".
-  if (
-    r.includes("password") ||
-    r.includes("authentication failed") ||
-    r.includes("auth failed")
-  ) {
-    return "Incorrect password, the server did not accept it.";
-  }
-  if (r.includes("certificate") || r.includes("tls")) return "The secure connection could not be verified.";
-  if (r.includes("reset")) return "The connection was closed by the other side.";
-  return text || "The connection ended.";
-}
+//
+// `diagnose` and `isAuthFailure` live in `lib/diagnose.ts`. They are pure
+// string-to-string functions with no React in them, and the vitest include
+// pattern does not collect `.tsx`, so while they were here the branch
+// ordering everything below depends on could not be tested at all.
 
 function DisconnectedOverlay({
   name,
   reason,
   canRetry,
+  profileId,
+  onEditSecurity,
   onReconnect,
   onClose,
 }: {
   name: string;
   reason: string;
   canRetry: boolean;
+  /** Null for an ad-hoc session: there is no profile to open in the editor. */
+  profileId: string | null;
+  onEditSecurity: (() => void) | null;
   onReconnect: (options?: { reprompt?: boolean }) => void;
   onClose: () => void;
 }): ReactNode {
@@ -2043,7 +2048,9 @@ function DisconnectedOverlay({
       el?.querySelector<HTMLElement>("button"))?.focus();
   }, []);
 
-  const authFailure = isAuthFailure(typeof reason === "string" ? reason : "");
+  const text = typeof reason === "string" ? reason : "";
+  const authFailure = isAuthFailure(text);
+  const securityFix = opensSecuritySettings(text);
   // A rejected password is ALWAYS retryable from the user's side, whatever the
   // core said: `can_retry: false` means "do not reconnect automatically", not
   // "there is nothing this person can do". Offering only a Close button after
@@ -2073,6 +2080,28 @@ function DisconnectedOverlay({
           <p className="mt-1.5 text-xs text-tertiary">
             Reconnecting asks for the password again instead of reusing the saved one.
           </p>
+        ) : null}
+        {/*
+          The message above names a setting, so the panel offers the way to
+          it rather than making the user find the host in the library first.
+          An ad-hoc session has no profile to edit, so it gets the sentence
+          that says what to do instead.
+        */}
+        {securityFix ? (
+          profileId && onEditSecurity ? (
+            <button
+              type="button"
+              className="mt-2.5 text-xs font-medium text-accent underline underline-offset-2"
+              onClick={onEditSecurity}
+            >
+              Open this computer's security settings
+            </button>
+          ) : (
+            <p className="mt-1.5 text-xs text-tertiary">
+              Save this computer to your library first, then change the setting in
+              its settings.
+            </p>
+          )
         ) : null}
         <div className="mt-4 flex flex-wrap justify-end gap-2.5">
           <button type="button" className="btn-secondary" onClick={onClose}>

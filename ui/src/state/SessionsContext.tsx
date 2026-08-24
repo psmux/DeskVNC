@@ -26,7 +26,8 @@ import {
   type ReactNode,
 } from "react";
 import { emit } from "@tauri-apps/api/event";
-import type { SessionStats } from "../lib/types";
+import type { ProtocolKind, SessionStats } from "../lib/types";
+import { isProtocolKind } from "../lib/types";
 import { inTauri, safeInvoke, safeListen } from "../lib/tauri";
 import { discoveredThumbKey } from "../components/HostTile";
 
@@ -81,6 +82,8 @@ interface ActiveSessionRow {
   profileId: string | null;
   address: string;
   port: number;
+  /** Optional because an older shell sends no such key. */
+  protocol?: ProtocolKind;
 }
 
 // ------------------------------------------------------------------- state
@@ -97,6 +100,7 @@ interface LiveSession {
   profileId: string | null;
   address: string;
   port: number;
+  protocol: ProtocolKind;
   /** Kebab-case state tag ("connecting", "connected", …). */
   state: string;
   /** Last ~60 s of 1 Hz throughput samples, oldest first. */
@@ -146,6 +150,12 @@ function sessionKeyOf(s: { profileId: string | null; address: string; port: numb
 function blankSession(row: ActiveSessionRow, state: string): LiveSession {
   return {
     sessionId: row.sessionId,
+    // Carried so a tile can show which protocol is live on it. The tile KEY
+    // deliberately does not change: two protocols to one machine use
+    // different ports, so `discovered:<address>:<port>` is already distinct
+    // and a VNC and an RDP session to one box get two tiles, which is
+    // correct, they are two different things to look at.
+    protocol: isProtocolKind(row.protocol) ? row.protocol : "vnc",
     profileId: typeof row.profileId === "string" && row.profileId ? row.profileId : null,
     address: typeof row.address === "string" ? row.address : "",
     port: num(row.port) || 5900,
