@@ -45,6 +45,25 @@
 //!   [`the_token_table_is_a_prefix_code`] proves the table is decodable and
 //!   proves nothing about whether it is the right one.
 //!
+//! What the literal rows do have, and it is the only thing found so far, is
+//! an ordering. Sorted by prefix length and then by code, every length class
+//! runs its match rows and then its literal rows, the match bases increase
+//! strictly through the class and so do the literal bytes, across all thirty
+//! seven rows with no exception. That is what a canonical Huffman assignment
+//! over symbols sorted within each length produces, so it is structure rather
+//! than coincidence, and
+//! [`each_prefix_length_runs_matches_then_literals_in_increasing_order`]
+//! checks it. It catches a transposed pair and a digit that breaks the order.
+//! It does not catch a wrong byte that keeps the order, and nothing internal
+//! does. [`the_table_leaves_exactly_two_prefixes_unassigned`] is the other
+//! half: a row lost on the way out of the document leaves the table a
+//! decodable prefix code with a third hole, which the prefix code test would
+//! not notice.
+//!
+//! The reference encoder in [`crate::encode::zgfx`] reads this same array, so
+//! a round trip through it proves the two directions agree and says nothing
+//! about whether either matches the wire.
+//!
 //! This is the single highest risk transcription in this crate and it is
 //! reported as such. The MS-RDPBCGR §4 segmented data vector settles it in
 //! one test (PRDRDP/04 §11.8).
@@ -539,6 +558,105 @@ mod tests {
             }
         }
         assert_eq!(owner, LUT);
+    }
+
+    /// No byte has two literal rows.
+    ///
+    /// The prefix code test proves no two rows share a *code*. This proves no
+    /// two rows share a *value*, which is the other way a transcription slips:
+    /// a digit copied down a column gives two rows the same byte and silently
+    /// costs the table one of the bytes it was meant to carry. It is the only
+    /// check in this file that looks at a literal's value at all and it still
+    /// does not say the values are right.
+    #[test]
+    fn no_literal_token_repeats_a_byte() {
+        let mut seen = [false; 256];
+        for t in TOKENS.iter().filter(|t| !t.is_match && t.value_bits == 0) {
+            let b = t.value_base as usize;
+            assert!(b < 256, "literal value {b} is not a byte");
+            assert!(!seen[b], "two literal rows carry {b:#04x}");
+            seen[b] = true;
+        }
+        // Twenty five explicit bytes plus the eight bit escape row.
+        assert_eq!(seen.iter().filter(|&&s| s).count(), 25);
+        assert_eq!(TOKENS.iter().filter(|t| !t.is_match).count(), 26);
+    }
+
+    /// The one piece of internal structure the literal rows do have.
+    ///
+    /// Sorted by prefix length and then by code, which is the order [`TOKENS`]
+    /// is written in, every length class runs its match rows first and its
+    /// literal rows second, the match distance bases increase strictly through
+    /// the class, and so do the literal bytes. That holds across all thirty
+    /// seven rows with no exception, which is what a canonical Huffman
+    /// assignment over symbols sorted within each length looks like.
+    ///
+    /// **This catches a transposition and a digit that breaks the order. It
+    /// does not catch a wrong byte that happens to keep it**, so a row reading
+    /// `0x66` where the document says `0x67` still passes. There is no
+    /// internal evidence that would catch that one; only the MS-RDPBCGR §4
+    /// vector settles it (PRDRDP/04 §11.8).
+    #[test]
+    fn each_prefix_length_runs_matches_then_literals_in_increasing_order() {
+        let mut sorted: Vec<&Token> = TOKENS.iter().collect();
+        sorted.sort_by_key(|t| (t.len, t.code));
+        let as_written: Vec<&Token> = TOKENS.iter().collect();
+        for (a, b) in sorted.iter().zip(as_written.iter()) {
+            assert_eq!(
+                (a.len, a.code),
+                (b.len, b.code),
+                "the table is not written in prefix order"
+            );
+        }
+
+        for len in 1..=8u8 {
+            let class: Vec<&Token> = TOKENS.iter().filter(|t| t.len == len).collect();
+            let matches = class.iter().filter(|t| t.is_match).count();
+            for (i, t) in class.iter().enumerate() {
+                assert_eq!(
+                    t.is_match,
+                    i < matches,
+                    "length {len} interleaves its matches and its literals"
+                );
+            }
+            for w in class.windows(2) {
+                if w[0].is_match != w[1].is_match {
+                    continue;
+                }
+                // The eight bit escape literal of length one has no byte, and
+                // it is the only row of its class, so no window reaches here
+                // with it.
+                assert!(
+                    w[1].value_base > w[0].value_base,
+                    "length {len} is out of order at {} and {}",
+                    w[0].value_base,
+                    w[1].value_base
+                );
+            }
+        }
+    }
+
+    /// Exactly two nine bit prefixes decode to nothing, `10000` and `1011111`,
+    /// which is twenty of the five hundred and twelve slots.
+    ///
+    /// This is the completeness half of the transcription check and the prefix
+    /// code test does not give it: a row dropped on the way out of the
+    /// document leaves the table decodable and leaves a third hole. Pinning
+    /// the two that are there means a lost row fails here.
+    #[test]
+    fn the_table_leaves_exactly_two_prefixes_unassigned() {
+        let holes: Vec<usize> = LUT
+            .iter()
+            .enumerate()
+            .filter(|(_, &t)| t == NO_TOKEN)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(holes.len(), 20);
+        // `10000` covers sixteen of the nine bit indices and `1011111` four.
+        let want: Vec<usize> = (0b10000usize << 4..(0b10000usize + 1) << 4)
+            .chain(0b1011111usize << 2..(0b1011111usize + 1) << 2)
+            .collect();
+        assert_eq!(holes, want);
     }
 
     /// The match rows' own consistency proof, written out as a test so a

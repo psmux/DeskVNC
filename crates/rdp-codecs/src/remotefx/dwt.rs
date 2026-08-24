@@ -38,6 +38,20 @@
 //! either one. Reported to the owner. MS-RDPRFX §4's worked example settles
 //! it in one test when we have it.
 //!
+//! What can be checked without the vector is how far apart the two readings
+//! are, and it is exactly one factor of two and one rounding bit:
+//! [`tests::the_two_readings_are_one_factor_of_two_and_one_rounding_bit_apart`]
+//! runs §4.6.5's form over doubled high pass coefficients and finds it
+//! reproduces this one to within one everywhere, because `(s + 1) >> 1`
+//! rounds where `s >> 1` truncates. Nothing else separates them. So a vector
+//! that decides against us costs the two constants in [`row_1d`] rather than
+//! a rewrite, and a decoder that is wrong here is wrong by a clean factor of
+//! two on every high pass band. No internal property distinguishes the two:
+//! both are self consistent, the DC gain through the whole three level
+//! transform is one either way, and the five fractional bits
+//! [`super::quant::dequantize`] leaves are set by the LL3 path, which neither
+//! reading touches.
+//!
 //! ## Where the vectorisation is
 //!
 //! Neither stencil is a recurrence, so both passes vectorise. They do not
@@ -358,6 +372,94 @@ mod tests {
         // residual the forward halving can round.
         assert_eq!(back[0], x[0]);
         assert!((i32::from(back[15]) - i32::from(x[15])).abs() <= 2);
+    }
+
+    /// PRDRDP/04 §4.6.5's inverse, the unmodified reversible 5/3, written out
+    /// so the disagreement the module comment records can be measured rather
+    /// than argued about. Nothing in the crate calls it.
+    fn row_1d_plain_53(l: &[i16], h: &[i16], out: &mut [i16]) {
+        let n = l.len();
+        for i in 0..n {
+            let hm = if i == 0 { h[0] } else { h[i - 1] };
+            out[2 * i] = (i32::from(l[i]) - ((i32::from(hm) + i32::from(h[i]) + 2) >> 2)) as i16;
+        }
+        for i in 0..n {
+            let e0 = i32::from(out[2 * i]);
+            let e1 = if i + 1 == n {
+                e0
+            } else {
+                i32::from(out[2 * i + 2])
+            };
+            out[2 * i + 1] = (i32::from(h[i]) + ((e0 + e1) >> 1)) as i16;
+        }
+    }
+
+    /// What the two readings of MS-RDPRFX 3.1.8.1.4 actually differ by.
+    ///
+    /// The module comment says the doubled form here and the plain 5/3 of
+    /// PRDRDP/04 §4.6.5 are the same function read at two scales. That is
+    /// nearly right and this pins down the "nearly": handed high pass
+    /// coefficients at twice our scale, §4.6.5's form reproduces ours to
+    /// within one, everywhere, and it is not exactly equal because
+    /// `(s + 1) >> 1` rounds where our `s >> 1` truncates. At the **same**
+    /// scale the two disagree by thousands, which is the amplitude error the
+    /// module comment warns about.
+    ///
+    /// **This settles nothing about which reading matches the wire.** It says
+    /// that if the §4 vector decides against us, this decoder is wrong by
+    /// exactly a factor of two on every high pass band and by nothing else,
+    /// so the correction is the two constants in [`row_1d`] and not a
+    /// rewrite. That is the whole of what is checkable without a vector; see
+    /// `docs/RDP_SPEC_NOTES.md` §1.2.
+    #[test]
+    fn the_two_readings_are_one_factor_of_two_and_one_rounding_bit_apart() {
+        // A deterministic sweep, wide enough that a doubled high pass still
+        // sits far inside `i16` so neither form wraps.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 33) % 8001) as i16 - 4000
+        };
+
+        let mut worst_doubled = 0i32;
+        let mut differed = false;
+        let mut worst_same_scale = 0i32;
+        for _ in 0..2000 {
+            for &n in &[8usize, 16, 32] {
+                let l: Vec<i16> = (0..n).map(|_| next()).collect();
+                let h: Vec<i16> = (0..n).map(|_| next()).collect();
+                let doubled: Vec<i16> = h.iter().map(|&v| v * 2).collect();
+
+                let mut ours = vec![0i16; 2 * n];
+                row_1d(&l, &h, &mut ours);
+
+                let mut theirs = vec![0i16; 2 * n];
+                row_1d_plain_53(&l, &doubled, &mut theirs);
+                for (&a, &b) in ours.iter().zip(&theirs) {
+                    let d = (i32::from(a) - i32::from(b)).abs();
+                    worst_doubled = worst_doubled.max(d);
+                    differed |= d != 0;
+                }
+
+                let mut same = vec![0i16; 2 * n];
+                row_1d_plain_53(&l, &h, &mut same);
+                for (&a, &b) in ours.iter().zip(&same) {
+                    worst_same_scale = worst_same_scale.max((i32::from(a) - i32::from(b)).abs());
+                }
+            }
+        }
+        assert_eq!(worst_doubled, 1, "the two forms are not one rounding apart");
+        assert!(
+            differed,
+            "the rounding term never showed, so this proved nothing"
+        );
+        assert!(
+            worst_same_scale > 1000,
+            "the two forms agree at the same scale, so the factor of two is \
+             not what separates them: {worst_same_scale}"
+        );
     }
 
     /// One level of the 2D transform round trips on a signal chosen so the

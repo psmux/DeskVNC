@@ -27,7 +27,12 @@ hex = { workspace = true }
 # reference encoders of `encode`, which PRDRDP/04 §11.4 requires and gates off
 # the shipped build. Cargo builds the lib once with the union of the features,
 # so this costs a feature flag rather than a second compilation.
-rdp-codecs = { path = ".", features = ["encode"] }
+# `default-features = false` matters more than it looks. Without it this line
+# pulls `default` back in, so `--no-default-features` resolved to
+# `default,encode,progressive` and tested nothing: the flag looked like a check
+# for years of waves and was not one. `cargo tree -p rdp-codecs
+# --no-default-features -f "{p} {f}"` is how to see it.
+rdp-codecs = { path = ".", default-features = false, features = ["encode"] }
 
 [features]
 # `progressive` is on by default. It used to be off, on the argument that a

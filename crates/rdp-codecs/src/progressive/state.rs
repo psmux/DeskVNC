@@ -120,10 +120,34 @@ impl TileState {
     }
 
     /// Start this tile again under `layout`, forgetting every coefficient.
-    /// This is what a `WBT_TILE_SIMPLE` or a `WBT_TILE_FIRST` without
-    /// `RFX_TILE_DIFFERENCE` does.
+    ///
+    /// This is what a `RFX_TILE_DIFFERENCE` pass arriving on a tile coded
+    /// under the other wavelet does: the difference has to be added to zeros
+    /// because nothing the tile holds means anything in the new layout.
     pub fn restart(&mut self, layout: Layout) {
         self.coef.fill(0);
+        self.bit_pos = [[0u8; 10]; COMPONENTS];
+        self.layout = layout;
+    }
+
+    /// [`TileState::restart`] without the zero fill, for a caller that
+    /// overwrites every coefficient immediately afterwards.
+    ///
+    /// A `WBT_TILE_SIMPLE`, or a `WBT_TILE_FIRST` without
+    /// `RFX_TILE_DIFFERENCE`, replaces the tile rather than adding to it
+    /// (MS-RDPEGFX 2.2.4.2.1.6.1), so every one of the 12288 coefficients is
+    /// written by the `copy_from_slice` that follows. Zeroing them first was
+    /// 24 KiB of stores per tile that nothing ever read, which is 510 tiles
+    /// and 12 MiB of them on a 1080p frame. The bit positions are cleared
+    /// because they are 30 bytes and clearing them keeps this exactly
+    /// `restart` minus the fill; the caller sets all three straight after.
+    ///
+    /// Calling this without writing every coefficient leaves the tile holding
+    /// the previous pass's values under the new pass's bit positions, which
+    /// is why it is `pub(super)` and why
+    /// [`super::tests::a_simple_tile_wipes_an_upgraded_tile`] decodes a real
+    /// replacing pass onto a refined store rather than trusting the argument.
+    pub(super) fn adopt(&mut self, layout: Layout) {
         self.bit_pos = [[0u8; 10]; COMPONENTS];
         self.layout = layout;
     }

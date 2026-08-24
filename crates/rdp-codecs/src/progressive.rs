@@ -508,8 +508,18 @@ fn decode_tile(
             }
 
             let tile = state.entry(place.x_idx, place.y_idx, layout)?;
-            if !difference || tile.layout() != layout {
-                tile.restart(layout);
+            if difference {
+                if tile.layout() != layout {
+                    // The wavelet moved under a tile that is asking to be
+                    // added to, so the difference is added to zeros instead.
+                    tile.restart(layout);
+                }
+            } else {
+                // A replacing pass writes every coefficient in the loop
+                // below, so `restart`'s zero fill would be 24 KiB stored and
+                // then stored over. `adopt` takes the layout and the bit
+                // position reset and skips the fill.
+                tile.adopt(layout);
             }
             // `RFX_TILE_DIFFERENCE` on a tile that has never been sent is not
             // an error the way an upgrade on one is. A freshly allocated tile
