@@ -802,7 +802,7 @@ runs on the shipping defaults, which is what turned this red.
 
 - The session toolbar could be dragged almost entirely out of the window, drag
   handle and all, leaving no way to get it back. The clamp bounded the anchor
-  point to 5–95% of the window, but the anchor was the toolbar's *centre* and
+  point to 5 to 95% of the window, but the anchor was the toolbar's *centre* and
   the box hung off it, so on a 1400px window a 614px toolbar reached
   `left: -237px`. Placement is now computed as a clamped top-left corner, which
   is the thing that actually has to stay on screen. A position already stored
