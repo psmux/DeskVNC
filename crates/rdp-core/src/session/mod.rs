@@ -2,6 +2,8 @@
 //! reconnect (PRDRDP/12 §3.13, PRDRDP/06 §2.1).
 //!
 //! * [`connect`] performs one connection attempt end to end.
+//! * [`cookie`] holds the auto reconnect cookie between attempts.
+//! * [`redirect`] follows a Server Redirection to the machine it names.
 //! * [`run_loop`] is the connected state pump.
 //! * [`graphics`] decodes bitmap and pointer updates into events.
 //! * [`input`] turns a [`ClientCommand`] into fast path input events.
@@ -24,19 +26,26 @@
 //! splitting them (PRDRDP/06 §2.1).
 
 pub mod connect;
+pub mod cookie;
 pub mod graphics;
 pub mod input;
+pub mod redirect;
 pub mod run_loop;
 pub mod settings;
 pub mod signal;
 
-use remote_core::{
-    ClientCommand, ConnectOptions, ProtocolKind, SessionEvent, SessionHandle, SessionState,
-};
+use std::future::Future;
+use std::pin::Pin;
+
+use remote_core::reconnect::{ConnectOnce, RetryClassify, RunOutcome};
+use remote_core::{ClientCommand, ConnectOptions, ProtocolKind, SessionEvent, SessionHandle};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RdpError;
+use crate::session::cookie::ReconnectCookie;
+use crate::session::redirect::Redirection;
+use crate::session::run_loop::Attempt;
 use crate::session::settings::RdpSessionSettings;
 
 /// Slots in the command channel.
@@ -78,53 +87,170 @@ impl RdpSession {
     }
 }
 
-/// One attempt, then report what happened.
+/// What the shared supervisor needs to know about an RDP failure.
 ///
-/// PRDRDP/12 §3.13 puts the reconnect ladder in
-/// `remote_core::reconnect::supervise`, generic over a `ConnectOnce` trait
-/// that PRDRDP/02 §11.2 specifies. Neither exists yet
-/// (`crates/remote-core/src/lib.rs` has no `reconnect` module), so this runs
-/// one attempt and stops. [`RdpError::is_transient`] and
-/// [`RdpError::needs_user_action`] are already written and already tested, so
-/// the classification the ladder needs is in place; what is missing is the
-/// ladder. The report names it.
+/// Three of the four are the inherent methods [`RdpError`] already carries
+/// (`crates/rdp-core/src/error.rs:430`, `:453`, `:485`), which is why this
+/// impl is a wrapper: the classification was written before the ladder that
+/// consumes it (PRDRDP/06 §5.2).
+impl RetryClassify for RdpError {
+    fn is_cancelled(&self) -> bool {
+        matches!(self, RdpError::Cancelled)
+    }
+
+    fn is_transient(&self) -> bool {
+        RdpError::is_transient(self)
+    }
+
+    fn needs_user_action(&self) -> bool {
+        RdpError::needs_user_action(self)
+    }
+
+    fn user_message(&self) -> String {
+        RdpError::user_message(self)
+    }
+}
+
+/// One RDP connection attempt, and everything about it that survives into the
+/// next one (PRDRDP/06 §5.2, which sketches this struct field for field).
+///
+/// This is the `ConnectOnce` implementor, and the reason the supervisor takes
+/// a trait with state rather than a bare async function: something has to
+/// hold the auto reconnect cookie across an attempt, and a redirection has to
+/// be able to rewrite the host it dials next (MS-RDPBCGR 2.2.4, 2.2.13.1).
+pub struct RdpConnect {
+    /// The profile, rewritten in place by a Server Redirection.
+    options: ConnectOptions,
+    /// What the user changed and must not lose to a dropped connection.
+    settings: RdpSessionSettings,
+    /// What one attempt hands to the next.
+    carry: Continuity,
+}
+
+/// What one attempt reads from the last one and writes for the next.
+///
+/// Three fields, and each is the reason a `ConnectOnce` implementor has to be
+/// a struct rather than a bare async function (PRDRDP/02 §11.2).
+#[derive(Debug, Default)]
+pub struct Continuity {
+    /// In: the cookie to offer, when one is stored and not stale. Out: the
+    /// cookie the server minted during the attempt, or `None` when it
+    /// rejected ours or the user hung up (MS-RDPBCGR 2.2.4, PRDRDP/06 §5.5).
+    pub cookie: Option<ReconnectCookie>,
+    /// In: the `LoadBalanceInfo` a redirection told us to present in the next
+    /// X.224 Connection Request's routing token (MS-RDPBCGR 3.2.5.3.1).
+    pub routing_token: Option<Vec<u8>>,
+    /// Out: the redirection this attempt was told to follow
+    /// (MS-RDPBCGR 2.2.13.1).
+    pub redirect: Option<Redirection>,
+}
+
+impl RdpConnect {
+    /// A fresh session's state, from the host profile.
+    #[must_use]
+    pub fn new(options: ConnectOptions) -> Self {
+        let settings = RdpSessionSettings::from_options(&options);
+        Self {
+            options,
+            settings,
+            carry: Continuity::default(),
+        }
+    }
+}
+
+impl ConnectOnce for RdpConnect {
+    type Error = RdpError;
+
+    fn policy(&self) -> &remote_core::ReconnectPolicy {
+        &self.options.reconnect
+    }
+
+    fn run_once<'a>(
+        &'a mut self,
+        events: &'a mpsc::Sender<SessionEvent>,
+        commands: &'a mut mpsc::Receiver<ClientCommand>,
+        cancel: &'a CancellationToken,
+        connected_at: &'a mut Option<std::time::Instant>,
+    ) -> Pin<Box<dyn Future<Output = Result<RunOutcome, RdpError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.settings.apply(&self.options);
+            let outcome = connect::run_once(
+                &self.options,
+                &mut self.settings,
+                &mut self.carry,
+                events,
+                commands,
+                cancel,
+                connected_at,
+            )
+            .await?;
+            Ok(absorb_attempt(&mut self.options, &mut self.carry, outcome))
+        })
+    }
+
+    fn absorb_while_disconnected(&mut self, cmd: &ClientCommand) {
+        self.settings.absorb(cmd);
+    }
+}
+
+/// Turn one attempt's outcome into the supervisor's, applying whatever the
+/// attempt learned about where to go next.
+///
+/// Public because the integration tests drive the supervisor against the mock
+/// server, which has no TLS, so they run the connection sequence themselves
+/// and then take this decision with the same code the driver does
+/// (`crates/rdp-core/tests/connect.rs`). The alternative is a second copy of
+/// the redirection rules in a test, which is the copy that goes stale.
+#[must_use]
+pub fn absorb_attempt(
+    options: &mut ConnectOptions,
+    carry: &mut Continuity,
+    outcome: Attempt,
+) -> RunOutcome {
+    match carry.redirect.take() {
+        Some(redirect) => {
+            // The cookie belongs to the session on the machine we are
+            // leaving, and offering it to the target would be a wasted round
+            // trip and a rejection (PRDRDP/06 §5.5.5).
+            carry.cookie = None;
+            let why = redirect.describe();
+            redirect.apply(options, &mut carry.routing_token);
+            RunOutcome::Reattempt { why }
+        }
+        // A logoff and an administrative close are both deliberate, and
+        // reconnecting into a session the far end just ended is a loop. A
+        // dropped socket is not this: it arrives as
+        // `RdpError::ConnectionClosed`, which classifies as transient and
+        // does climb the ladder.
+        None => {
+            debug_assert!(matches!(
+                outcome,
+                Attempt::UserDisconnect | Attempt::ServerDisconnect { .. }
+            ));
+            RunOutcome::UserDisconnect
+        }
+    }
+}
+
+/// The supervised session task spawned by [`RdpSession::spawn`].
+///
+/// A wrapper around the shared ladder, which is where the retry policy now
+/// lives for both protocols (PRDRDP/02 §11.2, PRDRDP/06 §5.2). Before this
+/// landed, this function ran one attempt and stopped.
 async fn supervise(
     id: String,
     options: ConnectOptions,
     events: mpsc::Sender<SessionEvent>,
-    mut commands: mpsc::Receiver<ClientCommand>,
+    commands: mpsc::Receiver<ClientCommand>,
     cancel: CancellationToken,
 ) {
-    let mut settings = RdpSessionSettings::from_options(&options);
-    let result = connect::run_once(&options, &mut settings, &events, &mut commands, &cancel).await;
-
-    let (reason, can_retry) = match result {
-        Ok(outcome) => {
-            tracing::info!(session = %id, ?outcome, "the rdp session ended");
-            ("Disconnected".to_owned(), true)
-        }
-        Err(RdpError::Cancelled) => {
-            // The window is gone. Nobody is waiting for a message, and
-            // emitting one races the shell dropping the receiver.
-            tracing::debug!(session = %id, "the rdp session was cancelled");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(session = %id, error = %e, "the rdp session failed");
-            let can_retry = !e.needs_user_action();
-            (e.user_message(), can_retry)
-        }
-    };
-
-    // A closed events channel means the shell is already gone, which is the
-    // one case where there is nobody to tell.
-    let _ =
-        remote_core::emit_state(&events, SessionState::Disconnected { reason, can_retry }).await;
+    remote_core::reconnect::supervise(id, RdpConnect::new(options), events, commands, cancel).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use remote_core::SessionState;
 
     /// The handle carries the protocol so the shell can route a command
     /// without a parallel map, and cancelling it is what closes the session.

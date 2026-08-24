@@ -49,13 +49,15 @@ use rdp_pdu::gcc::server::{
 use rdp_pdu::io::{Decode, Encode, Payload, Writer};
 use rdp_pdu::mcs::{result_code, DomainMcsPdu};
 use rdp_pdu::rdp::capabilities::{ClientCapabilitySupport, InputCapabilitySet};
+use rdp_pdu::rdp::client_info::ArcServerPrivatePacket;
+use rdp_pdu::rdp::control::LogonInfoExtended;
 use rdp_pdu::rdp::license::{
     blob_type, message_type, preamble_flags, LicenseBinaryBlob, LicenseErrorMessage,
     LicenseMessage, LicensePdu, LicensePreamble, LICENSE_PREAMBLE_LEN,
 };
 use rdp_pdu::rdp::{
-    CapabilitySets, ClientInfoPdu, ControlPdu, DemandActivePdu, FontMapPdu, ShareDataPdu, SharePdu,
-    SynchronizePdu,
+    CapabilitySets, ClientInfoPdu, ControlPdu, DemandActivePdu, FontMapPdu, SaveSessionInfoPdu,
+    ServerRedirectionPacket, ShareDataPdu, SharePdu, SynchronizePdu,
 };
 use rdp_pdu::update::fastpath::{encode_fastpath_update, update_code, FpUpdate, FpUpdateHeader};
 use rdp_pdu::update::slowpath::GraphicsUpdate;
@@ -101,6 +103,34 @@ pub const SHARE_ID: u32 = 0x0010_3ea9;
 /// a test can prove the client adopts the server's answer rather than its own
 /// request (MS-RDPBCGR 2.2.7.1.2).
 pub const SERVER_DESKTOP: (u16, u16) = (800, 600);
+
+/// The dynamic channel id the mock gives the display control channel
+/// (MS-RDPEDISP 1.5). Any non zero value distinct from the graphics one.
+pub const DISPLAY_DVC_CHANNEL_ID: u32 = 4;
+
+/// `DISPLAYCONTROL_CAPS_PDU.MaxNumMonitors` the mock advertises
+/// (MS-RDPEDISP 2.2.2.1).
+pub const DISPLAY_MAX_MONITORS: u32 = 4;
+/// `MaxMonitorAreaFactorA`, so the budget is four 8192 by 8192 monitors.
+pub const DISPLAY_AREA_FACTOR: u32 = 8192;
+
+/// `ARC_SC_PRIVATE_PACKET.LogonId` the mock mints (MS-RDPBCGR 2.2.4.2).
+pub const COOKIE_LOGON_ID: u32 = 0x0000_2a2a;
+/// `ARC_SC_PRIVATE_PACKET.ArcRandomBits` the mock mints. Sixteen bytes, and
+/// the client's `SecurityVerifier` is the HMAC-MD5 of thirty two zero bytes
+/// under them (5.5 step 4).
+pub const COOKIE_RANDOM_BITS: [u8; 16] = [
+    0xa8, 0x02, 0xe7, 0x25, 0xe2, 0x4c, 0x82, 0xb7, 0x52, 0xa5, 0x53, 0x50, 0x34, 0x98, 0xa1, 0xa8,
+];
+
+/// `RDP_SERVER_REDIRECTION_PACKET.SessionID` the mock redirects to.
+pub const REDIRECT_SESSION_ID: u32 = 0x0000_00b1;
+/// The `LoadBalanceInfo` the mock hands out, which the next Connection
+/// Request has to carry as its routing token (MS-RDPBCGR 3.2.5.3.1).
+pub const REDIRECT_ROUTING_TOKEN: &[u8] = b"tsv://MS Terminal Services Plugin.1.mock";
+/// The `UserName` the redirection carries, so a test can prove the credential
+/// out of the packet reached the next Client Info PDU.
+pub const REDIRECT_USERNAME: &str = "redirected-user";
 
 /// Where the mock draws its one bitmap.
 pub const BITMAP_AT: (u16, u16) = (10, 20);
@@ -216,6 +246,20 @@ pub enum SessionBehaviour {
     /// (`docs/RDP_SPEC_NOTES.md` §1.1), and the client has to report it
     /// rather than draw whatever fell out.
     ServeMalformedEgfx,
+    /// Phases 6 to 10, then a Save Session Info PDU carrying an auto
+    /// reconnect cookie (MS-RDPBCGR 2.2.10.1.1.4 wrapping 2.2.4.2), and then
+    /// the socket closes with no ultimatum.
+    ///
+    /// The shape of a dropped link: MS-RDPBCGR 1.3.1.4.2 makes every closing
+    /// PDU optional, so a bare close is legal and is what a Wi-Fi roam looks
+    /// like. The client must classify it as transient and come back with the
+    /// cookie in its next Client Info PDU.
+    CookieThenDrop,
+    /// Phases 6 to 10, then a Standard Server Redirection PDU
+    /// (MS-RDPBCGR 2.2.13.2) naming this same mock as the target, with a
+    /// `LoadBalanceInfo` the next Connection Request has to echo as its
+    /// routing token (3.2.5.3.1).
+    RedirectAfterLogon,
 }
 
 /// How the mock answers the MCS Connect Initial.
@@ -291,6 +335,16 @@ pub struct Recorded {
     pub client_disconnect: Option<u8>,
     /// The `TS_INFO_PACKET` from the Client Info PDU, decoded.
     pub client_info: Option<ClientInfoPdu>,
+    /// How many TCP connections the client has made. Every reconnect and
+    /// every redirection is one more.
+    pub connections: usize,
+    /// The `autoReconnectCookie` of each connection's Client Info PDU, in
+    /// order, so a test can say "the second attempt offered the cookie the
+    /// first was given" (MS-RDPBCGR 2.2.4.3).
+    pub auto_reconnect_cookies: Vec<Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>>,
+    /// The routing token of each connection's X.224 Connection Request, in
+    /// order (MS-RDPBCGR 2.2.1.1).
+    pub routing_tokens: Vec<Option<Vec<u8>>>,
     /// The `shareId` the client echoed in its Confirm Active.
     pub confirmed_share_id: Option<u32>,
     /// The `capabilitySetType` of every set the client confirmed, in order.
@@ -298,6 +352,9 @@ pub struct Recorded {
     /// The `pduType2` of every Share Data PDU the client sent after the
     /// Confirm Active, in order.
     pub finalization: Vec<u8>,
+    /// Every `DISPLAYCONTROL_MONITOR_LAYOUT_PDU` the client sent, decoded to
+    /// the fields a test asserts on (MS-RDPEDISP 2.2.2.2).
+    pub monitor_layouts: Vec<MonitorLayoutRecord>,
     /// Every fast path input event the client sent, in order.
     pub input_events: Vec<rdp_pdu::input::fastpath::FastPathInputEvent>,
 
@@ -339,6 +396,26 @@ pub struct FrameAck {
     pub total_frames_decoded: u32,
 }
 
+/// One `DISPLAYCONTROL_MONITOR_LAYOUT` the client sent (MS-RDPEDISP
+/// 2.2.2.2.1), read back by the mock's own decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorLayoutRecord {
+    /// `NumMonitors` of the PDU this entry came from.
+    pub monitors: u32,
+    /// `Flags`.
+    pub flags: u32,
+    /// `Left` and `Top`.
+    pub origin: (i32, i32),
+    /// `Width` and `Height`.
+    pub size: (u32, u32),
+    /// `PhysicalWidth` and `PhysicalHeight`.
+    pub physical: (u32, u32),
+    /// `Orientation`.
+    pub orientation: u32,
+    /// `DesktopScaleFactor` and `DeviceScaleFactor`.
+    pub scale: (u32, u32),
+}
+
 /// A running mock. Dropping it leaves the accept task to finish on its own.
 pub struct MockRdpServer {
     /// Where to dial.
@@ -349,6 +426,18 @@ pub struct MockRdpServer {
 impl MockRdpServer {
     /// Bind and start serving one connection.
     pub async fn start(config: MockConfig) -> Self {
+        Self::start_sequence(vec![config]).await
+    }
+
+    /// Bind and serve a sequence of connections, one configuration each.
+    ///
+    /// The last configuration repeats, so a two entry script is "misbehave
+    /// once, then behave for as long as the client keeps coming back". This
+    /// is what a reconnect and a redirection need: both are two connections
+    /// to the same listener, and asserting on the second one is the whole
+    /// point of the test (PRDRDP/09 §3, PRDRDP/06 §9.3).
+    pub async fn start_sequence(configs: Vec<MockConfig>) -> Self {
+        assert!(!configs.is_empty(), "a mock needs at least one behaviour");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("binding the loopback");
@@ -356,11 +445,19 @@ impl MockRdpServer {
         let recorded = Arc::new(Mutex::new(Recorded::default()));
         let shared = recorded.clone();
         tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                if let Err(e) = serve(stream, config, shared).await {
+            let mut n = 0usize;
+            while let Ok((stream, _)) = listener.accept().await {
+                let config = configs
+                    .get(n)
+                    .or_else(|| configs.last())
+                    .expect("checked non empty")
+                    .clone();
+                n += 1;
+                shared.lock().expect("not poisoned").connections = n;
+                if let Err(e) = serve(stream, config, shared.clone()).await {
                     // A test that stops reading part way through is normal:
                     // the client got the error it was looking for and hung up.
-                    eprintln!("mock rdp server finished: {e}");
+                    eprintln!("mock rdp server connection {n} finished: {e}");
                 }
             }
         });
@@ -435,7 +532,14 @@ async fn serve(
     let frame = read_tpkt(&mut stream).await?;
     let request =
         X224ConnectionRequest::decode(&mut Reader::new(&frame)).map_err(std::io::Error::other)?;
-    recorded.lock().expect("not poisoned").connection_request = Some(request);
+    {
+        let mut rec = recorded.lock().expect("not poisoned");
+        rec.routing_tokens.push(match &request.cookie {
+            Some(x224::X224Cookie::RoutingToken(t)) => Some(t.clone()),
+            _ => None,
+        });
+        rec.connection_request = Some(request);
+    }
 
     let confirm = X224ConnectionConfirm {
         dst_ref: 0,
@@ -633,7 +737,16 @@ async fn serve(
     let frame = read_tpkt(&mut stream).await?;
     let payload = expect_io_payload(&frame)?;
     let info = ClientInfoPdu::decode(&mut Reader::new(&payload)).map_err(std::io::Error::other)?;
-    recorded.lock().expect("not poisoned").client_info = Some(info);
+    {
+        let mut rec = recorded.lock().expect("not poisoned");
+        rec.auto_reconnect_cookies.push(
+            info.info
+                .extra_info
+                .as_ref()
+                .and_then(|e| e.auto_reconnect_cookie),
+        );
+        rec.client_info = Some(info);
+    }
 
     // ---- Phase 7: licensing ---------------------------------------------
     match config.session {
@@ -742,6 +855,56 @@ async fn serve(
         )?;
         script.open(&mut stream).await?;
         return drain(&mut stream, &recorded, Some(&mut script)).await;
+    }
+
+    // ---- A cookie, and then the link goes away --------------------------
+    if config.session == SessionBehaviour::CookieThenDrop {
+        // MS-RDPBCGR 2.2.10.1.1.4: `TS_LOGON_INFO_EXTENDED` inside a Save
+        // Session Info PDU, with `LOGON_EX_AUTORECONNECTCOOKIE` set. This is
+        // the only way a client ever gets a cookie.
+        let cookie = SharePdu::data(
+            SERVER_PDU_SOURCE,
+            SHARE_ID,
+            ShareDataPdu::SaveSessionInfo(Box::new(SaveSessionInfoPdu::Extended(
+                LogonInfoExtended {
+                    auto_reconnect_cookie: Some(ArcServerPrivatePacket {
+                        logon_id: COOKIE_LOGON_ID,
+                        arc_random_bits: COOKIE_RANDOM_BITS,
+                    }),
+                    logon_errors: None,
+                },
+            ))),
+        );
+        stream.write_all(&io_frame(&encoded(&cookie))).await?;
+        stream.flush().await?;
+        // Give the client time to read it, then drop the socket with no
+        // ultimatum, which MS-RDPBCGR 1.3.1.4.2 allows and which is what a
+        // dropped link looks like.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        return Ok(());
+    }
+
+    // ---- A broker redirection -------------------------------------------
+    if config.session == SessionBehaviour::RedirectAfterLogon {
+        let mut packet = ServerRedirectionPacket::new(REDIRECT_SESSION_ID);
+        // The mock is its own redirection target, which is what makes the
+        // second connection land back here and be assertable.
+        packet.target_net_address = Some("127.0.0.1".to_owned());
+        packet.load_balance_info = Some(Payload::new(REDIRECT_ROUTING_TOKEN));
+        packet.username = Some(REDIRECT_USERNAME.to_owned());
+        let mut body = vec![0u8; rdp_pdu::rdp::redirection::STANDARD_PAD_LEN];
+        packet
+            .encode_checked(&mut Writer::new(&mut body))
+            .expect("the mock encodes what the client parses");
+        let share = SharePdu::ServerRedirection {
+            pdu_source: SERVER_PDU_SOURCE,
+            body: Payload::new(&body),
+        };
+        stream.write_all(&io_frame(&encoded(&share))).await?;
+        stream.flush().await?;
+        // The client hangs up politely after a redirection, so the ultimatum
+        // is read here rather than the socket being dropped underneath it.
+        return drain(&mut stream, &recorded, None).await;
     }
 
     // ---- The legacy live session: one bitmap update on the fast path ----
@@ -915,6 +1078,69 @@ fn expect_io_payload(frame: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
+/// Read a `DISPLAYCONTROL_MONITOR_LAYOUT_PDU` the client sent
+/// (MS-RDPEDISP 2.2.2.2).
+///
+/// The mock's own decoder, written from the field table rather than shared
+/// with the client's encoder, which is the rule the whole file follows: a
+/// shared encoder would agree with itself about a wrong layout.
+fn read_monitor_layout(message: &[u8], recorded: &Arc<Mutex<Recorded>>) -> std::io::Result<()> {
+    let mut r = Reader::new(message);
+    let pdu_type = r
+        .u32("DISPLAYCONTROL_HEADER")
+        .map_err(std::io::Error::other)?;
+    let length = r
+        .u32("DISPLAYCONTROL_HEADER")
+        .map_err(std::io::Error::other)?;
+    if pdu_type != 0x0000_0002 {
+        return Err(std::io::Error::other(format!(
+            "expected a monitor layout pdu, got type {pdu_type}"
+        )));
+    }
+    if length as usize != message.len() {
+        return Err(std::io::Error::other(format!(
+            "Length is {length} for a {} byte pdu",
+            message.len()
+        )));
+    }
+    let layout_size = r
+        .u32("DISPLAYCONTROL_MONITOR_LAYOUT_PDU")
+        .map_err(std::io::Error::other)?;
+    if layout_size != 40 {
+        return Err(std::io::Error::other(format!(
+            "MonitorLayoutSize MUST be 40, got {layout_size}"
+        )));
+    }
+    let monitors = r
+        .u32("DISPLAYCONTROL_MONITOR_LAYOUT_PDU")
+        .map_err(std::io::Error::other)?;
+    let mut rec = recorded.lock().expect("not poisoned");
+    for _ in 0..monitors {
+        let name = "DISPLAYCONTROL_MONITOR_LAYOUT";
+        let mut u = || r.u32(name).map_err(std::io::Error::other);
+        let flags = u()?;
+        let left = u()? as i32;
+        let top = u()? as i32;
+        let width = u()?;
+        let height = u()?;
+        let physical_width = u()?;
+        let physical_height = u()?;
+        let orientation = u()?;
+        let desktop_scale = u()?;
+        let device_scale = u()?;
+        rec.monitor_layouts.push(MonitorLayoutRecord {
+            monitors,
+            flags,
+            origin: (left, top),
+            size: (width, height),
+            physical: (physical_width, physical_height),
+            orientation,
+            scale: (desktop_scale, device_scale),
+        });
+    }
+    Ok(())
+}
+
 /// Record an Erect Domain Request or an Attach User Request.
 fn expect_domain(frame: &[u8], recorded: &Arc<Mutex<Recorded>>) -> std::io::Result<()> {
     let mut r = Reader::new(frame);
@@ -1074,13 +1300,39 @@ impl ChannelScript {
         match DvcPdu::decode(&mut Reader::new(message)).map_err(std::io::Error::other)? {
             DvcPdu::Capabilities { version, .. } => {
                 recorded.lock().expect("not poisoned").dvc_version = Some(version);
-                // The version is settled, so the graphics channel can be
-                // opened (MS-RDPEDYC 1.3.1).
+                // The version is settled, so the channels can be opened
+                // (MS-RDPEDYC 1.3.1).
                 self.send_dvc(
                     stream,
                     &DvcPdu::CreateRequest {
                         channel_id: EGFX_DVC_CHANNEL_ID,
                         channel_name: "Microsoft::Windows::RDS::Graphics".to_owned(),
+                    },
+                )
+                .await?;
+                self.send_dvc(
+                    stream,
+                    &DvcPdu::CreateRequest {
+                        channel_id: DISPLAY_DVC_CHANNEL_ID,
+                        channel_name: "Microsoft::Windows::RDS::DisplayControl".to_owned(),
+                    },
+                )
+                .await?;
+                // MS-RDPEDISP 1.3.1: the server's capabilities are the first
+                // thing on the channel, and nothing may be sent before them.
+                let mut caps = Vec::new();
+                let mut w = Writer::new(&mut caps);
+                w.u32(0x0000_0005); // DISPLAYCONTROL_PDU_TYPE_CAPS
+                w.u32(20); // Length, header included
+                w.u32(DISPLAY_MAX_MONITORS);
+                w.u32(DISPLAY_AREA_FACTOR);
+                w.u32(DISPLAY_AREA_FACTOR);
+                self.send_dvc(
+                    stream,
+                    &DvcPdu::Data {
+                        channel_id: DISPLAY_DVC_CHANNEL_ID,
+                        data: Payload::new(&caps),
+                        compressed: false,
                     },
                 )
                 .await
@@ -1089,6 +1341,11 @@ impl ChannelScript {
                 channel_id, data, ..
             } if channel_id == EGFX_DVC_CHANNEL_ID => {
                 self.egfx(data.as_slice(), stream, recorded).await
+            }
+            DvcPdu::Data {
+                channel_id, data, ..
+            } if channel_id == DISPLAY_DVC_CHANNEL_ID => {
+                read_monitor_layout(data.as_slice(), recorded)
             }
             _ => Ok(()),
         }

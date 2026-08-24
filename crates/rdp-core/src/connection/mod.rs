@@ -121,9 +121,17 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
 /// Everything after the TLS upgrade: CredSSP when the negotiation asked for
 /// it, then the MCS phases and the rest of the sequence.
 ///
+/// `arc` is the auto reconnect cookie's client packet, when one is stored and
+/// still fresh: it rides in the Client Info PDU and is what makes a reconnect
+/// land in the user's existing Windows session rather than a new one
+/// (MS-RDPBCGR 2.2.4.3, PRDRDP/06 §5.5).
+///
 /// # Errors
 ///
-/// As [`nla::authenticate`], [`mcs::connect`] and [`activate::activate`].
+/// As [`nla::authenticate`], [`mcs::connect`] and [`activate::activate`],
+/// plus [`RdpError::Redirected`] when a broker sent us elsewhere before the
+/// share existed, which is not a failure (MS-RDPBCGR 1.3.8).
+#[allow(clippy::too_many_arguments)]
 pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     framer: &mut Framer<S>,
     opts: &ResolvedOptions,
@@ -131,6 +139,7 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     selected: SecurityProtocol,
     identity: Option<&ServerIdentity>,
     trust: TrustDecision,
+    arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
     events: &mpsc::Sender<SessionEvent>,
 ) -> Result<Connected> {
     let mut method = selected.method();
@@ -203,6 +212,7 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
         opts,
         creds,
         &connected.channels,
+        arc,
         events,
         &mut pending,
     )
@@ -226,11 +236,13 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
 /// # Errors
 ///
 /// Whatever the phase that failed reports. Every error names the phase.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect(
     stream: BoxedStream,
     opts: &ResolvedOptions,
     creds: &Credentials,
     pins: &remote_core::CertPins,
+    arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
     events: &mpsc::Sender<SessionEvent>,
     prompt: Option<TrustPrompt<'_>>,
 ) -> Result<(Connected, Framer<BoxedStream>)> {
@@ -259,6 +271,7 @@ pub async fn connect(
         selected,
         Some(&identity),
         trust,
+        arc,
         events,
     )
     .await?;

@@ -1,96 +1,139 @@
 //! The session supervisor: auto-retry and fast reconnect (PRD/05 §6).
 //!
+//! The ladder itself moved to `remote_core::reconnect` in phase 1, generic
+//! over a [`ConnectOnce`] implementor, so RFB and RDP share one retry
+//! policy instead of two that have to be kept identical by hand
+//! (PRDRDP/02 §11.2, PRDRDP/06 §5.2). What is left here is this protocol's
+//! three quarters of that trait: which errors are worth retrying
+//! ([`RetryClassify`] for [`VncError`]), what one attempt is
+//! ([`VncConnect`]), and which settings survive a reconnect. The behaviour is
+//! unchanged, which the eight tests below are unchanged in order to say.
+//!
 //! Loop: attempt a connection, run it to completion, then classify the
 //! outcome. Transient failures reconnect with exponential backoff + jitter;
 //! auth/security failures and user actions stop the session. Session settings
 //! (quality, view-only, requested resolution) survive across reconnects.
 
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Instant;
+// The supervisor tests below drive the ladder with millisecond delays.
+#[cfg(test)]
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::VncError;
-use crate::types::{ClientCommand, ConnectOptions, ReconnectPolicy, SessionEvent, SessionState};
+use crate::types::{ClientCommand, ConnectOptions, ReconnectPolicy, SessionEvent};
 
-use super::connection::{self, RunOutcome, SessionSettings};
-use super::emit_state;
+use super::connection::{self, SessionSettings};
 
-/// A connection that stayed up at least this long resets the attempt counter.
-const STABLE_UPTIME: Duration = Duration::from_secs(60);
+// The supervisor's own vocabulary, re-exported at the paths this module used
+// to define them at, so every caller and every test below is unchanged.
+pub(crate) use remote_core::reconnect::{RetryClassify, RunOutcome};
+// Only the classification tests below name these now: the ladder that used to
+// call `classify` lives in remote-core and calls the generic form directly.
+#[cfg(test)]
+pub(crate) use remote_core::reconnect::Decision;
 
-/// What the supervisor should do after a connection attempt failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Decision {
-    /// Schedule another attempt.
-    Retry,
-    /// Stop the session. `can_retry` hints whether the UI may offer a manual
-    /// reconnect button (false for security problems needing user action).
-    Stop { can_retry: bool },
+/// What the shared supervisor needs to know about an RFB failure.
+///
+/// Three of the four are the inherent methods `VncError` already had
+/// (`crates/vnc-core/src/error.rs:106`, `:118`, `:129`), and the fourth is the
+/// `matches!(err, VncError::Cancelled)` the old supervisor body did inline.
+impl RetryClassify for VncError {
+    fn is_cancelled(&self) -> bool {
+        matches!(self, VncError::Cancelled)
+    }
+
+    fn is_transient(&self) -> bool {
+        VncError::is_transient(self)
+    }
+
+    fn needs_user_action(&self) -> bool {
+        VncError::needs_user_action(self)
+    }
+
+    fn user_message(&self) -> String {
+        VncError::user_message(self)
+    }
 }
 
 /// Classify a connection failure against the reconnect policy.
 ///
 /// `attempts_made` is the number of reconnect attempts already performed
 /// (0 on the first failure of a fresh/stable connection).
+///
+/// A one line call into `remote_core::reconnect::classify`, kept at this path
+/// because the four tests below are tests of what `VncError` classifies as,
+/// and those are worth keeping next to the error type rather than moving to a
+/// crate that cannot name it.
+#[cfg(test)]
 pub(crate) fn classify(err: &VncError, policy: &ReconnectPolicy, attempts_made: u32) -> Decision {
-    if matches!(err, VncError::Cancelled) {
-        return Decision::Stop { can_retry: false };
-    }
-    if err.needs_user_action() {
-        // Wrong password, certificate change, ... never auto-retried.
-        return Decision::Stop { can_retry: false };
-    }
-    if !err.is_transient() {
-        // Protocol/feature errors: retrying the same server won't help, but a
-        // manual retry is harmless.
-        return Decision::Stop { can_retry: true };
-    }
-    if !policy.enabled {
-        return Decision::Stop { can_retry: true };
-    }
-    if let Some(max) = policy.max_attempts {
-        if attempts_made >= max {
-            return Decision::Stop { can_retry: true };
-        }
-    }
-    Decision::Retry
+    remote_core::reconnect::classify(err, policy, attempts_made)
 }
 
-enum WaitOutcome {
-    Elapsed,
-    RetryNow,
-    Stop,
+/// One RFB connection attempt, and everything about it that survives into the
+/// next one.
+///
+/// `SessionSettings` lives here rather than in remote-core because it is RFB
+/// state: a pixel format preference, an encoding list and a lossless refresh
+/// flag mean nothing to another protocol (PRDRDP/02 §11.2).
+pub(crate) struct VncConnect {
+    options: ConnectOptions,
+    settings: SessionSettings,
 }
 
-/// Wait out the backoff delay while staying responsive to commands.
-/// `ReconnectNow` interrupts the wait and resets the attempt counter.
-async fn wait_backoff(
-    delay: Duration,
-    commands: &mut mpsc::Receiver<ClientCommand>,
-    cancel: &CancellationToken,
-    settings: &mut SessionSettings,
-) -> WaitOutcome {
-    let sleep = tokio::time::sleep(delay);
-    tokio::pin!(sleep);
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return WaitOutcome::Stop,
-            _ = &mut sleep => return WaitOutcome::Elapsed,
-            cmd = commands.recv() => match cmd {
-                None => return WaitOutcome::Stop,
-                Some(ClientCommand::ReconnectNow) => return WaitOutcome::RetryNow,
-                Some(ClientCommand::Disconnect) => return WaitOutcome::Stop,
-                // Keep settings changes made while disconnected.
-                Some(ClientCommand::SetQuality(q)) => settings.quality = q,
-                Some(ClientCommand::SetViewOnly(v)) => settings.view_only = v,
-                Some(ClientCommand::RequestResize { width, height }) => {
-                    settings.requested_size = Some((width, height));
-                }
-                // Input/clipboard while disconnected is dropped.
-                Some(_) => {}
-            },
+impl VncConnect {
+    pub(crate) fn new(options: ConnectOptions) -> Self {
+        let settings = SessionSettings::from_options(&options);
+        Self { options, settings }
+    }
+}
+
+impl remote_core::reconnect::ConnectOnce for VncConnect {
+    type Error = VncError;
+
+    fn policy(&self) -> &ReconnectPolicy {
+        &self.options.reconnect
+    }
+
+    fn run_once<'a>(
+        &'a mut self,
+        events: &'a mpsc::Sender<SessionEvent>,
+        commands: &'a mut mpsc::Receiver<ClientCommand>,
+        cancel: &'a CancellationToken,
+        connected_at: &'a mut Option<Instant>,
+    ) -> Pin<Box<dyn Future<Output = Result<RunOutcome, VncError>> + Send + 'a>> {
+        Box::pin(async move {
+            connection::run_once(
+                &self.options,
+                &mut self.settings,
+                events,
+                commands,
+                cancel,
+                connected_at,
+            )
+            .await
+            // RFB has exactly one way for an attempt to end without failing.
+            // `RunOutcome::Reattempt` is the RDP redirection case and nothing
+            // here produces one.
+            .map(|connection::RunOutcome::UserDisconnect| RunOutcome::UserDisconnect)
+        })
+    }
+
+    fn absorb_while_disconnected(&mut self, cmd: &ClientCommand) {
+        // The three arms the old `wait_backoff` carried inline
+        // (this file at :86 to :90 before the move). Everything else,
+        // input and clipboard while disconnected, is dropped.
+        match cmd {
+            ClientCommand::SetQuality(q) => self.settings.quality = *q,
+            ClientCommand::SetViewOnly(v) => self.settings.view_only = *v,
+            ClientCommand::RequestResize { width, height } => {
+                self.settings.requested_size = Some((*width, *height));
+            }
+            _ => {}
         }
     }
 }
@@ -100,111 +143,10 @@ pub(crate) async fn supervise(
     id: String,
     options: ConnectOptions,
     events: mpsc::Sender<SessionEvent>,
-    mut commands: mpsc::Receiver<ClientCommand>,
+    commands: mpsc::Receiver<ClientCommand>,
     cancel: CancellationToken,
 ) {
-    let mut settings = SessionSettings::from_options(&options);
-    let mut attempts_made: u32 = 0;
-
-    loop {
-        let mut connected_at: Option<Instant> = None;
-        let result = connection::run_once(
-            &options,
-            &mut settings,
-            &events,
-            &mut commands,
-            &cancel,
-            &mut connected_at,
-        )
-        .await;
-
-        // A connection that stayed up long enough proves the network is fine
-        // again, start backoff from scratch on the next drop (PRD/05 §6.2).
-        if let Some(t) = connected_at {
-            if t.elapsed() >= STABLE_UPTIME {
-                attempts_made = 0;
-            }
-        }
-
-        let err = match result {
-            Ok(RunOutcome::UserDisconnect) => {
-                tracing::info!(session = %id, "user disconnected");
-                let _ = emit_state(
-                    &events,
-                    SessionState::Disconnected {
-                        reason: "Disconnected".into(),
-                        can_retry: true,
-                    },
-                )
-                .await;
-                return;
-            }
-            Err(e) => e,
-        };
-
-        match classify(&err, &options.reconnect, attempts_made) {
-            Decision::Stop { can_retry } => {
-                tracing::warn!(session = %id, error = %err, "session stopped");
-                if !matches!(err, VncError::Cancelled) {
-                    let _ = super::emit(&events, SessionEvent::Error(err.user_message())).await;
-                }
-                let _ = emit_state(
-                    &events,
-                    SessionState::Disconnected {
-                        reason: err.user_message(),
-                        can_retry,
-                    },
-                )
-                .await;
-                return;
-            }
-            Decision::Retry => {
-                attempts_made += 1;
-                let delay = options
-                    .reconnect
-                    .delay_for(attempts_made, rand::random::<f64>());
-                tracing::info!(
-                    session = %id,
-                    attempt = attempts_made,
-                    delay_ms = delay.as_millis() as u64,
-                    error = %err,
-                    "reconnecting"
-                );
-                if emit_state(
-                    &events,
-                    SessionState::Reconnecting {
-                        attempt: attempts_made,
-                        next_retry_ms: delay.as_millis() as u64,
-                        reason: err.user_message(),
-                    },
-                )
-                .await
-                .is_err()
-                {
-                    return; // shell is gone
-                }
-                match wait_backoff(delay, &mut commands, &cancel, &mut settings).await {
-                    WaitOutcome::Elapsed => {}
-                    WaitOutcome::RetryNow => {
-                        // Network came back / user clicked "Retry now": reset
-                        // backoff and go immediately.
-                        attempts_made = 0;
-                    }
-                    WaitOutcome::Stop => {
-                        let _ = emit_state(
-                            &events,
-                            SessionState::Disconnected {
-                                reason: "Disconnected".into(),
-                                can_retry: true,
-                            },
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
-        }
-    }
+    remote_core::reconnect::supervise(id, VncConnect::new(options), events, commands, cancel).await;
 }
 
 #[cfg(test)]

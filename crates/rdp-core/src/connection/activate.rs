@@ -290,7 +290,11 @@ async fn next_tpkt<S: AsyncRead + Unpin>(
 /// the remote session's clock is UTC unless the server overrides it.
 /// `clientDir` is the fixed string every client sends.
 #[must_use]
-pub fn client_info(opts: &ResolvedOptions, creds: &Credentials) -> ClientInfoPdu {
+pub fn client_info(
+    opts: &ResolvedOptions,
+    creds: &Credentials,
+    arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
+) -> ClientInfoPdu {
     use rdp_pdu::rdp::client_info::info_flags;
 
     let username = creds
@@ -327,7 +331,11 @@ pub fn client_info(opts: &ResolvedOptions, creds: &Credentials) -> ClientInfoPdu
                 client_time_zone: rdp_pdu::rdp::client_info::TimeZoneInfo::default(),
                 client_session_id: 0,
                 performance_flags: opts.performance_flags(),
-                auto_reconnect_cookie: None,
+                // MS-RDPBCGR 2.2.1.11.1.1.1: `cbAutoReconnectCookie` is zero
+                // or 0x1C, and the cookie sits immediately after
+                // `performanceFlags`, which is why the encoder writes the two
+                // together or neither.
+                auto_reconnect_cookie: arc,
                 dynamic_dst_time_zone_key_name: None,
                 dynamic_daylight_time_disabled: None,
             }),
@@ -492,17 +500,19 @@ fn push_share(out: &mut Vec<u8>, channels: &ChannelMap, share: &SharePdu<'_>) ->
 /// sent a PDU no phase of the sequence allows, [`RdpError::ServerError`] when
 /// it sent a Set Error Info PDU, [`RdpError::Pdu`] when anything did not
 /// parse, and [`RdpError::Timeout`] against the stage that was waiting.
+#[allow(clippy::too_many_arguments)]
 pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
     framer: &mut Framer<S>,
     opts: &ResolvedOptions,
     creds: &Credentials,
     channels: &ChannelMap,
+    arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
     events: &mpsc::Sender<SessionEvent>,
     pending: &mut Vec<Framed>,
 ) -> Result<Activated> {
     // Phase 6. The credentials go out here even under CredSSP, because that is
     // what single sign on into the session is (PRDRDP/03 §2.7).
-    let info = client_info(opts, creds);
+    let info = client_info(opts, creds, arc);
     let mut body = Vec::with_capacity(info.size());
     info.encode_checked(&mut Writer::new(&mut body))?;
     tracing::debug!(stage = %ConnectStage::SendClientInfo, "sending the client info pdu");
@@ -576,6 +586,18 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
             IoPdu::Heartbeat(_) => {
                 tracing::trace!("a heartbeat arrived during the connection sequence");
             }
+            IoPdu::Other { header, body }
+                if header.basic().flags & security_flags::REDIRECTION_PKT != 0 =>
+            {
+                // The Enhanced Security Server Redirection PDU
+                // (MS-RDPBCGR 2.2.13.3): the same packet as the standard form
+                // with a basic security header in front of it instead of a
+                // Share Control header, which is why the plain `Decode` is
+                // the right one here and `read_standard` is not
+                // (`docs/RDP_SPEC_NOTES.md` §1.5 records that both offsets
+                // are inferred).
+                return Err(redirection(body.as_slice()));
+            }
             IoPdu::Other { header, .. } => {
                 // The Server Initiate Multitransport Request is the only class
                 // that reaches here in practice. We sent a Client Multitransport
@@ -621,6 +643,12 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                             tracing::trace!(pdu_type2 = pdu.pdu_type2(), "finalisation pdu");
                         }
                     }
+                    // A broker redirects immediately after licensing, before
+                    // the share exists (MS-RDPBCGR 1.3.8). The attempt is
+                    // over and the session dials the target instead.
+                    SharePdu::ServerRedirection { body, .. } => {
+                        return Err(redirection_standard(body.as_slice()));
+                    }
                     SharePdu::FlowControl => {}
                     other => {
                         return Err(RdpError::Protocol(format!(
@@ -650,6 +678,44 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
             .await?;
             return Ok(settled);
         }
+    }
+}
+
+/// Turn an Enhanced Security Server Redirection PDU body into the error the
+/// session acts on (MS-RDPBCGR 2.2.13.3).
+///
+/// The redirection travels as an error because the connection sequence is
+/// straight line `await` code: there is no share, no pump and nothing for
+/// this function to return. `crate::session::connect` catches it and the next
+/// attempt dials the target. A packet we will not follow (`LB_NOREDIRECT`, or
+/// a target that is not a plausible host) becomes a `Protocol` error naming
+/// the phase rather than a silent stall, because the sequence has nowhere to
+/// carry on to either way.
+fn redirection(body: &[u8]) -> RdpError {
+    match rdp_pdu::rdp::ServerRedirectionPacket::decode(&mut Reader::new(body)) {
+        Ok(packet) => redirection_from(&packet),
+        Err(e) => RdpError::from(e),
+    }
+}
+
+/// The same for the Standard Redirection PDU (MS-RDPBCGR 2.2.13.2), whose
+/// body begins with the `pad2Octets` [`ServerRedirectionPacket::read_standard`]
+/// skips.
+fn redirection_standard(body: &[u8]) -> RdpError {
+    match rdp_pdu::rdp::ServerRedirectionPacket::read_standard(&mut Reader::new(body)) {
+        Ok(packet) => redirection_from(&packet),
+        Err(e) => RdpError::from(e),
+    }
+}
+
+fn redirection_from(packet: &rdp_pdu::rdp::ServerRedirectionPacket<'_>) -> RdpError {
+    match crate::session::redirect::Redirection::from_packet(packet) {
+        Some(redirect) => RdpError::Redirected(Box::new(redirect)),
+        None => RdpError::Protocol(
+            "the server ended the connection sequence with a redirection this client will \
+             not follow (MS-RDPBCGR 2.2.13.1)"
+                .to_owned(),
+        ),
     }
 }
 
@@ -753,11 +819,11 @@ mod tests {
         use rdp_pdu::rdp::client_info::info_flags;
         let opts = resolved();
 
-        let anonymous = client_info(&opts, &Credentials::default());
+        let anonymous = client_info(&opts, &Credentials::default(), None);
         assert_eq!(anonymous.info.flags & info_flags::AUTOLOGON, 0);
         assert_ne!(anonymous.info.flags & info_flags::UNICODE, 0);
 
-        let full = client_info(&opts, &Credentials::user_pass("CORP\\alice", "pw"));
+        let full = client_info(&opts, &Credentials::user_pass("CORP\\alice", "pw"), None);
         assert_ne!(full.info.flags & info_flags::AUTOLOGON, 0);
         assert_eq!(full.info.user_name, "alice");
         assert_eq!(full.info.domain, "CORP");
@@ -772,7 +838,7 @@ mod tests {
         let mut opts = resolved();
         opts.domain = Some("PROFILE".into());
         let creds = Credentials::user_pass("alice", "pw");
-        let info = client_info(&opts, &creds);
+        let info = client_info(&opts, &creds, None);
         assert_eq!(info.info.user_name, "alice");
         assert_eq!(
             (info.info.user_name.clone(), info.info.domain.clone()),
@@ -787,7 +853,7 @@ mod tests {
         use rdp_pdu::rdp::client_info::performance_flags as p;
         let mut opts = resolved();
         opts.quality = QualityPreset::Low;
-        let info = client_info(&opts, &Credentials::default());
+        let info = client_info(&opts, &Credentials::default(), None);
         let extra = info.info.extra_info.expect("an extended info packet");
         assert_ne!(extra.performance_flags & p::DISABLE_WALLPAPER, 0);
         assert_eq!(extra.client_address_family, address_family::INET);

@@ -98,7 +98,19 @@ pub async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     username: Option<&str>,
 ) -> Result<SecurityProtocol> {
     let mut request = X224ConnectionRequest::new(REQUESTED_PROTOCOLS);
-    if opts.send_mstshash_cookie {
+    // A Connection Request carries at most one cookie (MS-RDPBCGR 2.2.1.1),
+    // and the routing token wins: it was handed to us by the broker we are
+    // being redirected from, and presenting it is the whole reason the target
+    // will admit us to the right session (3.2.5.3.1). The `mstshash` cookie
+    // exists to help a broker route in the first place, which by this point
+    // has already happened.
+    if let Some(token) = opts.routing_token.as_ref() {
+        tracing::debug!(
+            len = token.len(),
+            "presenting the routing token from a server redirection"
+        );
+        request.cookie = Some(X224Cookie::RoutingToken(token.clone()));
+    } else if opts.send_mstshash_cookie {
         // PRDRDP/00 R29 defaults this off: the identifier travels in
         // cleartext ahead of the TLS upgrade and lands in server and load
         // balancer logs. It exists because a broker needs it to route.

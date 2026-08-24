@@ -28,6 +28,14 @@ bytes = { workspace = true }
 parking_lot = { workspace = true }
 zeroize = { workspace = true }
 
+# The auto reconnect cookie's security verifier is HMAC-MD5 over the server's
+# ArcRandomBits (MS-RDPBCGR 5.5 step 4). Both are library calls: AGENT_BRIEF
+# V3-A and PRDRDP/00 R54 forbid writing any cryptographic operation here, down
+# to one this small. Both crates are already in Cargo.lock for the RFB
+# security code, so the package count does not change.
+hmac = { workspace = true }
+md-5 = { workspace = true }
+
 [features]
 default = []
 # Kerberos, forwarded to rdp-auth. Off in phase 1 and 2: NTLMv2 covers local

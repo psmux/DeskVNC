@@ -10,8 +10,9 @@
 //!
 //! # What we open, and what we refuse
 //!
-//! Exactly one name is answered with `STATUS_SUCCESS`:
-//! [`EGFX_CHANNEL_NAME`]. Every other name is refused with
+//! Two names are answered with `STATUS_SUCCESS`, and three with the `audio`
+//! feature on: [`EGFX_CHANNEL_NAME`], `Microsoft::Windows::RDS::DisplayControl`
+//! and `AUDIO_PLAYBACK_DVC`. Every other name is refused with
 //! `STATUS_NOT_FOUND`, which MS-RDPEDYC 3.2.5.2 defines as the answer for a
 //! channel the client does not implement. Refusing by name is what stops a
 //! server opening `rdpdr` or `rdpsnd` and then waiting forever for traffic
@@ -35,7 +36,10 @@ use rdp_pdu::vc::segment::Segmented;
 use rdp_pdu::vc::static_vc::CHANNEL_CHUNK_LENGTH;
 use rdp_pdu::{Decode, Encode, Payload, Reader, Writer};
 
+use crate::channels::display::{DisplayControl, DISPLAY_CHANNEL_NAME};
 use crate::channels::egfx::Egfx;
+#[cfg(feature = "audio")]
+use crate::channels::rdpsnd::{Rdpsnd, AUDIO_CHANNEL_NAME};
 use crate::channels::{encode_channel_pdu, ChannelCtx, Outbox};
 use crate::error::{RdpError, Result};
 
@@ -63,6 +67,24 @@ const MAX_DVC_FRAGMENT: usize = CHANNEL_CHUNK_LENGTH - 9;
 /// a 4K surface is `3840 * 2160 * 4` bytes, a little under 32 MiB on its own,
 /// so the 4 MiB default would refuse a legal PDU as a cap violation.
 const EGFX_REASSEMBLY_CAP: usize = 32 * 1024 * 1024;
+
+/// The reassembly cap for the display control channel.
+///
+/// Sixty four kibibytes. The only message the server sends is a twenty byte
+/// capability PDU (MS-RDPEDISP 2.2.2.1), and the largest a client sends is
+/// sixteen monitors at forty bytes. The cap is three orders of magnitude
+/// above both, which is the point: a server that claims a megabyte on this
+/// channel is not sending a display control PDU.
+const DISPLAY_REASSEMBLY_CAP: usize = 64 * 1024;
+
+/// The reassembly cap for the audio playback channel (MS-RDPEA).
+///
+/// One mebibyte, which matches the largest block
+/// `crate::channels::rdpsnd::Rdpsnd` will assemble. Two seconds of stereo
+/// 48 kHz sixteen bit PCM is 384,000 bytes, so this is five times the largest
+/// legitimate message.
+#[cfg(feature = "audio")]
+const AUDIO_REASSEMBLY_CAP: usize = 1024 * 1024;
 
 /// The highest drdynvc version we answer with.
 ///
@@ -158,12 +180,35 @@ struct DynChannel {
 
 /// The handler behind one dynamic channel.
 ///
-/// One variant today. It is an enum rather than a single struct field so the
-/// second channel (display control, audio) is a variant and a name, not a
-/// refactor of this file.
+/// One variant per dynamic channel this build speaks. An enum rather than a
+/// `Box<dyn>` for the reason [`crate::channels::Handler`] gives: the set is
+/// closed at compile time and a wildcard arm would be a bug.
 #[derive(Debug)]
 enum DynKind {
     Egfx(Box<Egfx>),
+    /// `Microsoft::Windows::RDS::DisplayControl` (MS-RDPEDISP).
+    Display(DisplayControl),
+    /// `AUDIO_PLAYBACK_DVC` (MS-RDPEA), behind the `audio` feature.
+    ///
+    /// Boxed for the reason the graphics channel is: this variant carries the
+    /// wave assembly buffer and the negotiated format list, and an enum whose
+    /// largest variant is a megabyte would make every entry in the channel
+    /// table that size.
+    #[cfg(feature = "audio")]
+    Audio(Box<Rdpsnd>),
+}
+
+impl DynKind {
+    /// Whether this channel's messages ride inside an `RDP_SEGMENTED_DATA`
+    /// envelope.
+    ///
+    /// The graphics channel's do (MS-RDPEGFX 2.2.5.1) and nothing else's
+    /// does: the segmentation layer is defined by MS-RDPEGFX and is not part
+    /// of MS-RDPEDYC, so a display control PDU wrapped in one would be read
+    /// by the server as a malformed header.
+    const fn segmented(&self) -> bool {
+        matches!(self, DynKind::Egfx(_))
+    }
 }
 
 /// The dynamic channel multiplexer.
@@ -197,6 +242,77 @@ impl DvcMux {
     pub fn reset(&mut self) {
         self.open.clear();
         self.version = None;
+    }
+
+    /// Send a size the display control debounce held back
+    /// (MS-RDPEDISP 2.2.2.2, PRDRDP/05 §5.4).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the encoder reported.
+    pub fn flush_pending_resize(
+        &mut self,
+        static_id: u16,
+        ctx: ChannelCtx,
+        out: &mut Outbox,
+    ) -> Result<()> {
+        let Some(index) = self
+            .open
+            .iter()
+            .position(|c| matches!(c.kind, DynKind::Display(_)))
+        else {
+            return Ok(());
+        };
+        let Self { open, replies, .. } = self;
+        let channel = &mut open[index];
+        let channel_id = channel.id;
+        let DynKind::Display(display) = &mut channel.kind else {
+            unreachable!("the index came from a matches! on this variant");
+        };
+        display.flush_pending(replies)?;
+        if replies.is_empty() {
+            return Ok(());
+        }
+        self.flush(channel_id, false, static_id, ctx, out)
+    }
+
+    /// The window changed size: ask the server to resize the desktop
+    /// (MS-RDPEDISP 2.2.2.2).
+    ///
+    /// A no op when the server never opened the display control channel,
+    /// which is what a host with dynamic resolution turned off leaves us
+    /// with. The request is not remembered here: the session settings hold
+    /// it, and it is re-applied on the next connection
+    /// (`crate::session::settings::RdpSessionSettings::requested_size`).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the encoder reported.
+    pub fn resize(
+        &mut self,
+        width: u32,
+        height: u32,
+        scale_percent: u32,
+        static_id: u16,
+        ctx: ChannelCtx,
+        out: &mut Outbox,
+    ) -> Result<()> {
+        let Some(index) = self
+            .open
+            .iter()
+            .position(|c| matches!(c.kind, DynKind::Display(_)))
+        else {
+            tracing::debug!("a resize with no display control channel to send it on");
+            return Ok(());
+        };
+        let Self { open, replies, .. } = self;
+        let channel = &mut open[index];
+        let channel_id = channel.id;
+        let DynKind::Display(display) = &mut channel.kind else {
+            unreachable!("the index came from a matches! on this variant");
+        };
+        display.resize(width, height, scale_percent, replies)?;
+        self.flush(channel_id, false, static_id, ctx, out)
     }
 
     /// One complete drdynvc message.
@@ -317,6 +433,49 @@ impl DvcMux {
             )));
         }
 
+        #[cfg(feature = "audio")]
+        if name == AUDIO_CHANNEL_NAME {
+            tracing::info!(channel_id, "opening the audio playback channel");
+            self.write_dvc(
+                &DvcPdu::CreateResponse {
+                    channel_id,
+                    creation_status: creation_status::SUCCESS,
+                },
+                static_id,
+                ctx,
+                out,
+            )?;
+            // MS-RDPEA 1.3.2: the server speaks first, with its format list,
+            // so there is nothing to flush here.
+            self.open.push(DynChannel {
+                id: channel_id,
+                kind: DynKind::Audio(Box::new(Rdpsnd::new())),
+                reassembler: DvcReassembler::with_cap(AUDIO_REASSEMBLY_CAP),
+            });
+            return Ok(());
+        }
+
+        if name == DISPLAY_CHANNEL_NAME {
+            tracing::info!(channel_id, "opening the display control channel");
+            self.write_dvc(
+                &DvcPdu::CreateResponse {
+                    channel_id,
+                    creation_status: creation_status::SUCCESS,
+                },
+                static_id,
+                ctx,
+                out,
+            )?;
+            // MS-RDPEDISP 1.3.1: the client says nothing until the server's
+            // capability PDU arrives, so there is nothing to flush here.
+            self.open.push(DynChannel {
+                id: channel_id,
+                kind: DynKind::Display(DisplayControl::new()),
+                reassembler: DvcReassembler::with_cap(DISPLAY_REASSEMBLY_CAP),
+            });
+            return Ok(());
+        }
+
         if name != EGFX_CHANNEL_NAME {
             tracing::debug!(
                 channel_id,
@@ -358,7 +517,7 @@ impl DvcMux {
             kind: DynKind::Egfx(egfx),
             reassembler: DvcReassembler::with_cap(EGFX_REASSEMBLY_CAP),
         });
-        self.flush(channel_id, static_id, ctx, out)
+        self.flush(channel_id, true, static_id, ctx, out)
     }
 
     /// A Data or Data First fragment (MS-RDPEDYC 2.2.3.1, 2.2.3.2).
@@ -420,20 +579,27 @@ impl DvcMux {
         let Some(message) = complete else {
             return Ok(());
         };
+        let segmented = kind.segmented();
         match kind {
             DynKind::Egfx(egfx) => egfx.message(message, ctx, &mut out.events, replies)?,
+            DynKind::Display(display) => display.message(message, replies)?,
+            #[cfg(feature = "audio")]
+            DynKind::Audio(audio) => audio.message(message, &mut out.events, replies)?,
         }
-        self.flush(channel_id, static_id, ctx, out)
+        self.flush(channel_id, segmented, static_id, ctx, out)
     }
 
     /// Wrap and queue everything the handler produced.
     ///
-    /// Each reply is one EGFX message, so it gets its own
-    /// `RDP_SEGMENTED_DATA` envelope (MS-RDPEGFX 2.2.5.1) and its own
-    /// drdynvc fragmentation. Every buffer goes straight back to the pool.
+    /// An EGFX reply gets its own `RDP_SEGMENTED_DATA` envelope
+    /// (MS-RDPEGFX 2.2.5.1); every other channel's rides in `DYNVC_DATA` on
+    /// its own, because the segmentation layer is MS-RDPEGFX's and not
+    /// MS-RDPEDYC's. Either way it gets its own drdynvc fragmentation and
+    /// every buffer goes straight back to the pool.
     fn flush(
         &mut self,
         channel_id: u32,
+        segmented: bool,
         static_id: u16,
         ctx: ChannelCtx,
         out: &mut Outbox,
@@ -445,15 +611,19 @@ impl DvcMux {
         let result = (|| -> Result<()> {
             for payload in &ready {
                 self.wire.clear();
-                // A client to server EGFX message is never compressed: the
-                // flags byte carries `PACKET_COMPR_TYPE_RDP8` with
-                // `PACKET_COMPRESSED` clear, which is the literal form
-                // (MS-RDPEGFX 2.2.5.1, MS-RDPBCGR 3.1.8.4.2).
-                let segmented = Segmented::Literal {
-                    flags: CompressionType::Rdp8.to_u8(),
-                    data: Payload::new(payload),
-                };
-                segmented.encode_checked(&mut Writer::new(&mut self.wire))?;
+                if segmented {
+                    // A client to server EGFX message is never compressed:
+                    // the flags byte carries `PACKET_COMPR_TYPE_RDP8` with
+                    // `PACKET_COMPRESSED` clear, which is the literal form
+                    // (MS-RDPEGFX 2.2.5.1, MS-RDPBCGR 3.1.8.4.2).
+                    Segmented::Literal {
+                        flags: CompressionType::Rdp8.to_u8(),
+                        data: Payload::new(payload),
+                    }
+                    .encode_checked(&mut Writer::new(&mut self.wire))?;
+                } else {
+                    self.wire.extend_from_slice(payload);
+                }
                 self.fragment(channel_id, static_id, ctx, out)?;
             }
             Ok(())
@@ -720,8 +890,13 @@ mod tests {
     }
 
     /// A channel we do not speak is refused by name with `STATUS_NOT_FOUND`,
-    /// and the graphics one is accepted and immediately advertises what it
-    /// can decode (MS-RDPEDYC 3.2.5.2, MS-RDPEGFX 3.3.5.1).
+    /// the graphics one is accepted and immediately advertises what it can
+    /// decode, and the display control one is accepted and says nothing until
+    /// the server's capabilities arrive (MS-RDPEDYC 3.2.5.2,
+    /// MS-RDPEGFX 3.3.5.1, MS-RDPEDISP 1.3.1).
+    ///
+    /// `rdpsnd` stands in for the refused channel here. It used to be the
+    /// display control channel, which this build now speaks.
     #[test]
     fn only_the_graphics_channel_is_opened_and_the_rest_are_refused_by_name() {
         let mut mux = DvcMux::new();
@@ -741,7 +916,7 @@ mod tests {
         mux.message(
             &from_server(&DvcPdu::CreateRequest {
                 channel_id: 4,
-                channel_name: "Microsoft::Windows::RDS::DisplayControl".to_owned(),
+                channel_name: "rdpdr".to_owned(),
             }),
             STATIC_ID,
             ctx(),
@@ -753,6 +928,23 @@ mod tests {
             vec![(4, creation_status::NOT_FOUND)]
         );
         assert!(egfx_payloads(&out).is_empty(), "nothing was opened");
+
+        // The display control channel is accepted, and MS-RDPEDISP 1.3.1
+        // says nothing goes out on it until the server has sent its
+        // capabilities, so the creation status is the only frame.
+        let mut out = Outbox::new();
+        mux.message(
+            &from_server(&DvcPdu::CreateRequest {
+                channel_id: 6,
+                channel_name: DISPLAY_CHANNEL_NAME.to_owned(),
+            }),
+            STATIC_ID,
+            ctx(),
+            &mut out,
+        )
+        .expect("accepted");
+        assert_eq!(creation_statuses(&out), vec![(6, creation_status::SUCCESS)]);
+        assert_eq!(out.frames.len(), 1, "the status and nothing else");
 
         let mut out = Outbox::new();
         mux.message(

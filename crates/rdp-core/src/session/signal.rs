@@ -132,6 +132,13 @@ pub enum DisconnectSignal {
     /// MS-RDPBCGR 1.3.1.4.2 makes every one of the three closing PDUs
     /// optional.
     Eof,
+    /// A Server Redirection PDU (MS-RDPBCGR 2.2.13.1): this connection is
+    /// over and the next one goes to the machine the packet named.
+    ///
+    /// Not a failure and not a logoff, which is why it is neither of the two
+    /// above: the session continues on another socket, and the user should
+    /// see a reconnecting picture rather than a red banner.
+    Redirected,
 }
 
 impl DisconnectSignal {

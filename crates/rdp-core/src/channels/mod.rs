@@ -36,8 +36,11 @@
 //! is written anywhere is a decoded pixel (D9).
 
 pub mod cliprdr;
+pub mod display;
 pub mod dvc;
 pub mod egfx;
+#[cfg(feature = "audio")]
+pub mod rdpsnd;
 
 use bytes::Bytes;
 use rdp_pdu::vc::static_vc::{
@@ -274,6 +277,49 @@ impl StaticChannels {
             }
         }
         tracing::debug!("clipboard text with no cliprdr channel to put it on");
+        Ok(())
+    }
+
+    /// The window changed size: ask the server to resize the desktop
+    /// (MS-RDPEDISP 2.2.2.2, PRDRDP/05 §5.4).
+    ///
+    /// A no op with no `drdynvc` channel, or with no display control channel
+    /// open on it, which is what a server with dynamic resolution turned off
+    /// leaves us with.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the encoder reported.
+    pub fn resize(
+        &mut self,
+        width: u32,
+        height: u32,
+        scale_percent: u32,
+        ctx: ChannelCtx,
+        out: &mut Outbox,
+    ) -> Result<()> {
+        for entry in &mut self.entries {
+            if let Handler::Dvc(mux) = &mut entry.handler {
+                return mux.resize(width, height, scale_percent, entry.id, ctx, out);
+            }
+        }
+        tracing::debug!("a resize with no drdynvc channel to carry it");
+        Ok(())
+    }
+
+    /// Send a resize the display control debounce held back.
+    ///
+    /// Called once a second from the run loop's stats tick.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the encoder reported.
+    pub fn flush_pending_resize(&mut self, ctx: ChannelCtx, out: &mut Outbox) -> Result<()> {
+        for entry in &mut self.entries {
+            if let Handler::Dvc(mux) = &mut entry.handler {
+                return mux.flush_pending_resize(entry.id, ctx, out);
+            }
+        }
         Ok(())
     }
 
