@@ -216,6 +216,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         channels = opts.channels.len(),
         "sending the mcs connect initial"
     );
+    tracing::debug!(frame = %hex_dump(&frame), "the mcs connect initial as encoded");
     framer.write_pdu(&frame).await?;
 
     let response = with_timeout(
@@ -236,6 +237,22 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     })
 }
 
+/// Lowercase hex for a diagnostic log line, capped so a hostile length cannot
+/// turn one bad frame into a gigabyte of log.
+pub(crate) fn hex_dump(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    const CAP: usize = 512;
+    let shown = bytes.len().min(CAP);
+    let mut out = String::with_capacity(shown * 2 + 24);
+    for b in &bytes[..shown] {
+        let _ = write!(out, "{b:02x}");
+    }
+    if bytes.len() > CAP {
+        let _ = write!(out, " ...{} more bytes", bytes.len() - CAP);
+    }
+    out
+}
+
 /// Decode a Connect Response into a [`ChannelMap`].
 ///
 /// Takes the frame rather than the stream so every rejection below is a unit
@@ -249,7 +266,17 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
 pub fn read_connect_response(frame: &[u8], opts: &ResolvedOptions) -> Result<ChannelMap> {
     let mut r = Reader::new(frame);
     let mut body = x224::read_data_tpdu(&mut r)?;
-    let response = ConnectResponse::decode(&mut body)?;
+    let response = ConnectResponse::decode(&mut body).inspect_err(|e| {
+        // A malformed Connect Response says an offset and a byte, and neither
+        // is actionable without the frame they came from. This is the first
+        // structure a real server sends that we did not also encode, so it is
+        // where a reading of T.125 that the mock server shares gets found out.
+        tracing::error!(
+            error = %e,
+            frame = %hex_dump(frame),
+            "the mcs connect response did not parse"
+        );
+    })?;
     if response.result != u32::from(result_code::RT_SUCCESSFUL) {
         return Err(RdpError::Protocol(format!(
             "the server refused the MCS conference with result {} (T.125 §7)",
@@ -257,7 +284,14 @@ pub fn read_connect_response(frame: &[u8], opts: &ResolvedOptions) -> Result<Cha
         )));
     }
 
-    let ccrsp = ConferenceCreateResponse::decode(&mut Reader::new(response.user_data))?;
+    let ccrsp = ConferenceCreateResponse::decode(&mut Reader::new(response.user_data))
+        .inspect_err(|e| {
+            tracing::error!(
+                error = %e,
+                user_data = %hex_dump(response.user_data),
+                "the gcc conference create response did not parse"
+            );
+        })?;
     if ccrsp.result != result_code::RT_SUCCESSFUL {
         return Err(RdpError::Protocol(format!(
             "the server refused the GCC conference with result {} (T.124 §8.7)",

@@ -2322,10 +2322,19 @@ impl<'a> Decode<'a> for BitmapCodecsCapabilitySet<'a> {
             let codec_guid = b.array::<16>(Self::NAME)?;
             let at = b.offset();
             let codec_id = b.u8(Self::NAME)?;
-            if codecs.iter().any(|c| c.codec_id == codec_id) {
-                // Two codecs sharing an id is unrecoverable: every
+            if codec_id != 0 && codecs.iter().any(|c| c.codec_id == codec_id) {
+                // Two codecs sharing a non zero id is unrecoverable: every
                 // `TS_BITMAP_DATA_EX.codecID` after it is ambiguous
                 // (PRDRDP/13 §4.8.4).
+                //
+                // Zero is exempt because it is not an id. The client assigns
+                // the ids and the server's Demand Active echoes the set with
+                // every `codecID` set to zero (MS-RDPBCGR 2.2.7.2.10.1.1).
+                // Measured against Windows 11 (DESKTOP-H21K47C, 2026-08-24):
+                // four codecs, RemoteFX, NSCodec, Ignore and ClearCodec, all
+                // with id zero, and the capability set's own length arithmetic
+                // agrees to the byte. Treating that as a conflict refused the
+                // capability exchange of a server that was behaving correctly.
                 return Err(PduError::InvalidField {
                     context: Self::NAME,
                     field: "codecID",
@@ -3351,6 +3360,40 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A server's Demand Active sets every `codecID` to zero, so four codecs
+    /// share it and none of them conflict. These are the exact 96 bytes a
+    /// Windows 11 host sent on 2026-08-24: RemoteFX, NSCodec, Ignore and
+    /// ClearCodec, in that order. It was rejected as an id conflict, which
+    /// ended the capability exchange against a server doing nothing wrong.
+    ///
+    /// The vector is a transcription of a real capture, which is what makes it
+    /// worth more than the hand built ones around it.
+    #[test]
+    fn a_server_demand_active_may_repeat_codec_id_zero() {
+        // Verbatim from the capture, header included, extracted from the
+        // logged frame rather than read off a screen: a first attempt at this
+        // vector by eye had one nibble wrong in the RemoteFX GUID.
+        let bytes = hex::decode(
+            "1d00600004b91b8dca0f004f15589fae2d1a87e2d6000300010103122f777672bd6344afb3b73c9c6f788600040000000000a651439c3535ae42910ccdfce5760b5800040000000000d4cc44278a9d744e803c0ecbeea19c5400040000000000",
+        )
+        .expect("the capture is valid hex");
+
+        // The declared length and what is present agree, which is what says
+        // the reader is aligned rather than lucky.
+        assert_eq!(bytes.len(), 96);
+        assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]) as usize, 96);
+
+        let set = BitmapCodecsCapabilitySet::decode(&mut Reader::new(&bytes))
+            .expect("four codecs sharing id zero is what a server sends");
+        assert_eq!(set.codecs.len(), 4);
+        assert!(
+            set.codecs.iter().all(|c| c.codec_id == 0),
+            "the server sets every codecID to zero"
+        );
+        assert_eq!(set.codecs[0].codec_guid, codec_guid::NSCODEC);
+        assert_eq!(set.codecs[1].codec_guid, codec_guid::REMOTEFX);
     }
 
     /// The GUID trap, checked against the braced form: the first three groups

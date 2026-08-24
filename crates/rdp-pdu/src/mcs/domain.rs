@@ -26,13 +26,27 @@ use crate::asn1::per;
 use crate::io::{Decode, Encode, Payload, PduError, PduResult, Reader, Writer};
 
 /// `dataPriority` (2 bits) and `segmentation` (2 bits) packed into the top
-/// nibble of one octet, with `begin` and `end` both set.
-///
-/// A server that sends anything else is fragmenting an MCS PDU across several
-/// Send Data Indications. None do, and reassembling one would need state in a
-/// crate that has none, so the decoder returns
-/// [`PduError::Unsupported`] and says so (PRDRDP/13 §4.2.3).
+/// nibble of one octet (T.125 §7). This is what we write: `high` priority
+/// with `begin` and `end` both set.
 const SEND_DATA_PRIORITY_SEGMENTATION: u8 = 0x70;
+
+/// The `segmentation` bits alone, which are the only two the decoder checks.
+///
+/// Both set means the PDU is whole. Anything else is an MCS PDU fragmented
+/// across several Send Data Indications, and reassembling one would need
+/// state in a crate that has none, so that is [`PduError::Unsupported`]
+/// (PRDRDP/13 §4.2.3).
+///
+/// `dataPriority` is deliberately not checked. It is the sender's scheduling
+/// hint and means nothing to a decoder. Comparing the whole octet against
+/// `0x70` also pinned the priority to `high`, and a real Windows 11 host
+/// (DESKTOP-H21K47C, 2026-08-24) sends `top`, so its first Send Data
+/// Indication after the Demand Active was refused as an unsupported
+/// segmentation when nothing was fragmented at all.
+const SEGMENTATION_MASK: u8 = 0x30;
+
+/// `begin` and `end` both set: one whole PDU in one indication.
+const SEGMENTATION_BEGIN_END: u8 = 0x30;
 
 /// `ChannelId ::= INTEGER (0..65535)` (T.125 §7).
 const CHANNEL_ID_MAX: u32 = 65535;
@@ -359,7 +373,7 @@ impl<'a> Decode<'a> for DomainMcsPdu<'a> {
                 let channel_id = read_channel_id(r)?;
                 let at_seg = r.offset();
                 let segmentation = r.u8(Self::NAME)?;
-                if segmentation != SEND_DATA_PRIORITY_SEGMENTATION {
+                if segmentation & SEGMENTATION_MASK != SEGMENTATION_BEGIN_END {
                     return Err(PduError::Unsupported {
                         context: Self::NAME,
                         kind: "dataPriority and segmentation",

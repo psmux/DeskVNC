@@ -47,9 +47,20 @@ impl BerTag {
     /// `Connect-Response ::= [APPLICATION 102] IMPLICIT SEQUENCE`, `7F 66`
     /// (T.125 §7).
     pub const CONNECT_RESPONSE: Self = Self::HighApplication(102);
-    /// `DomainParameters ::= [APPLICATION 30] IMPLICIT SEQUENCE`, the single
-    /// octet `7E` because 30 fits in five bits (T.125 §7).
-    pub const DOMAIN_PARAMETERS: Self = Self::Low(0x7e);
+    /// `DomainParameters ::= SEQUENCE`, the single octet `30` (T.125 §7).
+    ///
+    /// It is a plain universal SEQUENCE and carries no application tag. This
+    /// constant said `[APPLICATION 30] IMPLICIT SEQUENCE` and emitted `7E`,
+    /// which is how an application tag of number 30 would encode, for a type
+    /// T.125 never tags that way. The three `DomainParameters` in a Connect
+    /// Initial therefore went out with the wrong identifier octet and a real
+    /// Windows host answered `rejectMCSPDUUltimatum` with the diagnostic
+    /// `dc-invalid-BER-encoding`, which is precisely what it means.
+    ///
+    /// Nothing in this repository caught it: the decoder read the same wrong
+    /// tag the encoder wrote, so every round trip and every mock server
+    /// exchange agreed with itself. Only a real server disagreed.
+    pub const DOMAIN_PARAMETERS: Self = Self::Low(tag::SEQUENCE);
 
     /// The identifier octets, for an error message and for
     /// [`write_tag_len`].
@@ -312,7 +323,7 @@ mod tests {
     /// maxHeight 1, maxMCSPDUsize 65535, protocolVersion 2. This is the target
     /// parameter set every mstsc sends (MS-RDPBCGR 2.2.1.3.1).
     const DOMAIN_PARAMETERS: &[u8] = &[
-        0x7e, 0x1a, 0x02, 0x01, 0x22, 0x02, 0x01, 0x02, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01, 0x02,
+        0x30, 0x1a, 0x02, 0x01, 0x22, 0x02, 0x01, 0x02, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01, 0x02,
         0x01, 0x00, 0x02, 0x01, 0x01, 0x02, 0x03, 0x00, 0xff, 0xff, 0x02, 0x01, 0x02,
     ];
 

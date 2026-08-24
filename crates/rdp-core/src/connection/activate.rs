@@ -555,7 +555,14 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
         let mut reply: Option<Bytes> = None;
         let mut done = false;
 
-        match decode_io_pdu(&mut r, context, class)? {
+        let decoded = decode_io_pdu(&mut r, context, class).inspect_err(|e| {
+            tracing::error!(
+                error = %e,
+                body = %crate::connection::mcs::hex_dump(&data.payload),
+                "an i/o channel pdu did not parse during activation"
+            );
+        })?;
+        match decoded {
             IoPdu::License(license) => {
                 if let Some(bytes) = licensing_step(&license)? {
                     reply = Some(send_data_request(
