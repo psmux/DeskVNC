@@ -91,6 +91,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   an administrator sees, and does not ask for the password again. Asking again
   would have spent three attempts against a lockout counter for a password that
   was never wrong.
+- **Connecting to an RDP host with no saved password now asks for one.** It
+  used to end the connection instead. A password the host rejects is asked
+  again on a fresh connection, and a password that came from the keychain
+  rather than from you is tried once and not replayed, because replaying a
+  saved credential is how an account gets locked.
+- Windows hosts that send progressively refined graphics no longer end the
+  session. The decoder existed; nothing was handing frames to it.
 
 ### Changed
 
