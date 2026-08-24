@@ -344,6 +344,25 @@ pub enum RdpError {
     },
 
     // ---- lifecycle -------------------------------------------------------
+    /// A Remote Desktop Connection Broker told this connection to go
+    /// somewhere else (MS-RDPBCGR 2.2.13.1, 1.3.8).
+    ///
+    /// **Not a failure.** It travels as an error because the connection
+    /// sequence is straight line `await` code where `?` is how a phase stops
+    /// early, and a redirection stops the sequence in exactly that way: there
+    /// is no share, no pump and nothing to run. `crate::session::connect`
+    /// catches it, hands the redirection to the supervisor, and the next
+    /// attempt dials the target.
+    ///
+    /// Nothing here is a secret: [`crate::session::redirect::Redirection`]'s
+    /// `Display` and `Debug` name the target host and elide the credential
+    /// and the routing token the packet carried. If this ever does reach the
+    /// supervisor unhandled it classifies as neither transient nor a user
+    /// problem, which stops the session with a manual retry offered rather
+    /// than looping.
+    #[error("{0}")]
+    Redirected(Box<crate::session::redirect::Redirection>),
+
     /// The session was cancelled, or the shell dropped the event sink.
     #[error("session cancelled by user")]
     Cancelled,

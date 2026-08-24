@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use common::mock_rdp_server::{
     McsBehaviour, MockConfig, MockRdpServer, Negotiation, SessionBehaviour, BITMAP_AT,
-    CF_UNICODETEXT, EGFX_DRAW_AT, EGFX_DVC_CHANNEL_ID, EGFX_FRAME_ID, EGFX_SURFACE_AT,
-    IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, SERVER_DESKTOP, SHARE_ID, USER_CHANNEL_ID,
+    CF_UNICODETEXT, DISPLAY_DVC_CHANNEL_ID, EGFX_DRAW_AT, EGFX_DVC_CHANNEL_ID, EGFX_FRAME_ID,
+    EGFX_SURFACE_AT, IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, SERVER_DESKTOP, SHARE_ID, USER_CHANNEL_ID,
 };
 use common::{options_for, rdp_half, DEFAULT_TIMEOUT};
 use rdp_core::connection::{self, Connected, SecurityProtocol};
@@ -80,6 +80,7 @@ async fn run_sequence(
             selected,
             None,
             TrustDecision::VerifiedByCa,
+            None,
             &events,
         )
         .await
@@ -584,6 +585,7 @@ async fn credssp_without_a_certificate_is_refused_rather_than_started() {
             selected,
             None,
             TrustDecision::VerifiedByCa,
+            None,
             &events,
         )
         .await
@@ -712,6 +714,7 @@ async fn run_session_steps(
             selected,
             None,
             TrustDecision::VerifiedByCa,
+            None,
             &events,
         )
         .await
@@ -1002,6 +1005,7 @@ async fn run_sequence_with_trust(
             selected,
             None,
             decision,
+            None,
             &events,
         )
         .await
@@ -1144,6 +1148,76 @@ fn channel_config(session: SessionBehaviour) -> MockConfig {
     }
 }
 
+/// A resize reaches the server as a monitor layout on the display control
+/// channel (MS-RDPEDISP 2.2.2.2, PRDRDP/05 §5.4).
+///
+/// The whole path: the server opens
+/// `Microsoft::Windows::RDS::DisplayControl` and sends its capabilities, the
+/// shell sends `ClientCommand::RequestResize`, and the layout comes out the
+/// other end with every field the specification constrains set to something
+/// it allows. The mock decodes it with its own reader, so an encoder that
+/// agrees only with itself fails here.
+#[tokio::test]
+async fn a_resize_reaches_the_server_as_a_monitor_layout() {
+    let (server, _events, outcome) = run_session_steps(
+        channel_config(SessionBehaviour::ServeChannels),
+        vec![Step::after(
+            is_framebuffer_update,
+            vec![
+                // 1927 is deliberately not a multiple of eight: PRDRDP/00 R19
+                // aligns the width down, and 1920 is what must reach the wire.
+                ClientCommand::RequestResize {
+                    width: 1927,
+                    height: 1080,
+                },
+                ClientCommand::Disconnect,
+            ],
+        )],
+    )
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    let recorded = server.wait_until(|r| !r.monitor_layouts.is_empty()).await;
+    assert_eq!(
+        recorded.monitor_layouts.len(),
+        1,
+        "one resize is one layout: {:?}",
+        recorded.monitor_layouts
+    );
+    let layout = recorded.monitor_layouts[0];
+    assert_eq!(layout.monitors, 1, "phase 2 sends the primary only");
+    assert_eq!(layout.flags, 1, "DISPLAYCONTROL_MONITOR_PRIMARY");
+    assert_eq!(layout.origin, (0, 0), "the primary sits at the origin");
+    assert_eq!(
+        layout.size,
+        (1920, 1080),
+        "the width is aligned down to a multiple of eight (PRDRDP/00 R19)"
+    );
+    assert_eq!(
+        layout.physical,
+        (0, 0),
+        "both physical fields are zero, or the server discards the layout"
+    );
+    assert_eq!(layout.orientation, 0);
+    assert_eq!(
+        layout.scale,
+        (100, 100),
+        "both scale factors are legal, or the pair is ignored together"
+    );
+
+    // The channel was created, which is the half of this that the client
+    // decides: a build that refused the name would never see a capability PDU
+    // and would drop the resize with a log line instead.
+    assert!(
+        recorded
+            .dvc_creations
+            .iter()
+            .any(|(id, status)| *id == DISPLAY_DVC_CHANNEL_ID && *status == 0),
+        "the display control channel was accepted: {:?}",
+        recorded.dvc_creations
+    );
+}
+
 /// The lane's third item, end to end over a socket: drdynvc opens, the
 /// graphics channel is created, capabilities are advertised and confirmed, a
 /// frame arrives inside an `RDP_SEGMENTED_DATA` envelope, is decoded into a
@@ -1202,8 +1276,9 @@ async fn an_egfx_frame_is_decoded_and_emitted_at_its_mapped_origin() {
     );
     assert_eq!(
         recorded.dvc_creations,
-        vec![(EGFX_DVC_CHANNEL_ID, 0)],
-        "the graphics channel was accepted and nothing else was opened"
+        vec![(EGFX_DVC_CHANNEL_ID, 0), (DISPLAY_DVC_CHANNEL_ID, 0)],
+        "the two channels this build speaks were accepted, in the order the \
+         server opened them, and nothing else was"
     );
     assert_eq!(
         recorded.egfx_advertised,

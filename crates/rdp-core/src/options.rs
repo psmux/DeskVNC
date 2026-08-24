@@ -122,6 +122,15 @@ pub struct ResolvedOptions {
     /// [`ResolvedOptions::performance_flags`] answers from and because
     /// `RdpColorDepth::Auto` was already resolved against it above.
     pub quality: QualityPreset,
+    /// The routing token to put in the X.224 Connection Request's `Cookie`
+    /// field, which is the `LoadBalanceInfo` a Server Redirection handed us
+    /// (MS-RDPBCGR 2.2.13.1, 3.2.5.3.1).
+    ///
+    /// Not a profile setting and never persisted: it is scoped to one
+    /// attempt, it is presented to the host that issued it, and
+    /// [`ResolvedOptions::resolve`] always sets it to `None`. The session
+    /// fills it in afterwards, which is the only way in.
+    pub routing_token: Option<Vec<u8>>,
 }
 
 /// `cliprdr`, the clipboard channel (MS-RDPECLIP). Seven significant
@@ -257,6 +266,9 @@ impl ResolvedOptions {
             send_mstshash_cookie: rdp.send_mstshash_cookie,
             channels,
             quality: options.quality,
+            // A redirection is the only thing that puts a token here, and it
+            // does it after this function has run.
+            routing_token: None,
         })
     }
 

@@ -51,8 +51,10 @@ use crate::connection::activate::{self, Activated};
 use crate::connection::ChannelMap;
 use crate::error::{RdpError, Result};
 use crate::options::ResolvedOptions;
+use crate::session::cookie::ReconnectCookie;
 use crate::session::graphics::Graphics;
 use crate::session::input::{self, Input};
+use crate::session::redirect::Redirection;
 use crate::session::signal::{DisconnectSignal, SessionSignal};
 use crate::transport::framer::{Framed, FramedKind, Framer};
 use crate::transport::writer::Outbound;
@@ -68,6 +70,13 @@ pub enum RunOutcome {
         user_requested: bool,
     },
 }
+
+/// The pump's outcome, named for what the supervisor does with it.
+///
+/// `remote_core::reconnect::RunOutcome` is the supervisor's vocabulary and
+/// this is the protocol's, and both would otherwise be `RunOutcome` in one
+/// file (`crate::session::mod`).
+pub type Attempt = RunOutcome;
 
 /// What one pass of the select loop decided to do.
 enum Step {
@@ -114,6 +123,16 @@ pub struct RunLoop<R> {
     /// The last `ERRINFO` the server latched, so the disconnect reports why
     /// rather than reporting a bare close (MS-RDPBCGR 2.2.5.1.1).
     error_info: Option<RdpError>,
+    /// An auto reconnect cookie that arrived during this connection
+    /// (MS-RDPBCGR 2.2.4.2). Handed to the supervisor when the pump ends, so
+    /// it survives into the next attempt and no further.
+    cookie: Option<ReconnectCookie>,
+    /// The stored cookie must not be offered again: the server rejected it
+    /// (2.2.4.1) or the user hung up (PRDRDP/06 §5.5.4).
+    cookie_discarded: bool,
+    /// A Server Redirection this session was told to follow
+    /// (MS-RDPBCGR 2.2.13.1).
+    redirect: Option<Redirection>,
     received: Arc<AtomicU64>,
     sent: Arc<AtomicU64>,
     /// The last figures reported, so a tick reports a delta rather than a
@@ -149,6 +168,9 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             input: Input::new(activated.desktop, activated.server_input_flags, view_only),
             reassembler: FastPathReassembler::new(),
             error_info: None,
+            cookie: None,
+            cookie_discarded: false,
+            redirect: None,
             opts,
             activated,
             received,
@@ -156,6 +178,27 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             last_received: 0,
             last_sent: 0,
         }
+    }
+
+    /// The auto reconnect cookie this connection was given, if any.
+    ///
+    /// Read once, by [`crate::session::connect`], after the pump has ended.
+    /// The cookie is a bearer credential and this is the only way out of the
+    /// pump for one; nothing here can emit it, log it or persist it.
+    pub fn take_cookie(&mut self) -> Option<ReconnectCookie> {
+        self.cookie.take()
+    }
+
+    /// True when whatever cookie the supervisor was holding must be thrown
+    /// away: the server rejected it, or the user disconnected deliberately.
+    #[must_use]
+    pub const fn cookie_discarded(&self) -> bool {
+        self.cookie_discarded
+    }
+
+    /// The redirection this session was told to follow, if any.
+    pub fn take_redirect(&mut self) -> Option<Redirection> {
+        self.redirect.take()
     }
 
     /// Queue bytes for the writer task. Never writes to the socket.
@@ -302,6 +345,33 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             }
             SessionSignal::Terminate(signal) => {
                 tracing::info!(?signal, "the server ended the session");
+                // A redirection is not a failure and has somewhere to be: the
+                // supervisor is about to dial the target, and reporting a
+                // latched error code instead would stop the session in front
+                // of the user (MS-RDPBCGR 3.2.5.3.1).
+                if let Some(redirect) = self.redirect.as_ref() {
+                    // The routing token and the redirection password are
+                    // NEVER in the event: the shell shows this as a note, and
+                    // the driver performs the redirect itself
+                    // (`remote_core::RdpEvent::Redirected`).
+                    let target = redirect.describe();
+                    let session_id = redirect.session_id;
+                    remote_core::emit(
+                        events,
+                        SessionEvent::Protocol(ProtocolEvent::Rdp(RdpEvent::Redirected {
+                            target,
+                            session_id,
+                        })),
+                    )
+                    .await?;
+                    // The far end is still there and waiting for us to hang
+                    // up, so the close is ordered rather than a dropped
+                    // socket (PRDRDP/06 §6.4).
+                    self.teardown().await;
+                    return Ok(Some(RunOutcome::ServerDisconnect {
+                        user_requested: false,
+                    }));
+                }
                 // A latched `ERRINFO` is why the session ended, and it says
                 // more than "the server ended it" (MS-RDPBCGR 2.2.5.1.1).
                 if let Some(e) = self.error_info.take() {
@@ -529,9 +599,14 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             SharePdu::Data { pdu, .. } => {
                 self.share_data(pdu, &mut events)?;
             }
-            SharePdu::ConfirmActive { .. } | SharePdu::ServerRedirection { .. } => {
+            SharePdu::ServerRedirection { body, .. } => {
+                return self.server_redirection(body.as_slice());
+            }
+            // The client sends this one; a server that echoes it back is
+            // confused about which end it is.
+            SharePdu::ConfirmActive { .. } => {
                 return Ok(SessionSignal::Ignored(
-                    "a confirm active or a server redirection, which this build does not act on",
+                    "a confirm active from the server, which this build does not act on",
                 ));
             }
         }
@@ -569,6 +644,9 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                         },
                     )));
                 }
+                if let rdp_pdu::rdp::SaveSessionInfoPdu::Extended(extended) = info.as_ref() {
+                    self.save_session_info_extended(extended, events);
+                }
             }
             ShareDataPdu::Compressed(_) => {
                 // Phase 1 advertises no bulk compression (PRDRDP/04 §4.13), so
@@ -588,6 +666,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     route_graphics(&mut self.graphics, &update, &mut rects)?;
                     flush(&mut rects, events);
                 }
+                pdu_type2::ARC_STATUS => self.auto_reconnect_status(body.as_slice()),
                 pdu_type2::POINTER => {
                     let pointer = PointerPdu::decode(&mut Reader::new(body.as_slice()))?;
                     if let Some(event) = self.graphics.pointer(&pointer.update)? {
@@ -608,12 +687,124 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         Ok(())
     }
 
+    /// `TS_LOGON_INFO_EXTENDED` (MS-RDPBCGR 2.2.10.1.1.4).
+    ///
+    /// Two fields, and the first is the auto reconnect cookie. It can arrive
+    /// at any point in a connected session and not only at logon, because the
+    /// server rotates it hourly and sends the replacement unprompted
+    /// (MS-RDPBCGR 5.5, PRDRDP/06 §5.5.5). Which is why this is in the pump
+    /// and not in the connection sequence.
+    fn save_session_info_extended(
+        &mut self,
+        extended: &rdp_pdu::rdp::control::LogonInfoExtended,
+        events: &mut Vec<SessionEvent>,
+    ) {
+        if let Some(packet) = extended.auto_reconnect_cookie {
+            // Replace rather than keep: an old cookie is worse than none,
+            // because it costs a round trip and produces a rejection.
+            let cookie = ReconnectCookie::from_server(&packet, std::time::Instant::now());
+            tracing::info!(
+                logon_id = cookie.logon_id(),
+                "an auto reconnect cookie arrived"
+            );
+            self.cookie = Some(cookie);
+            self.cookie_discarded = false;
+            // No payload: the cookie is a bearer secret and the UI's only
+            // legitimate interest is "a fast reconnect is now possible"
+            // (`remote_core::RdpEvent::AutoReconnectArmed`).
+            events.push(SessionEvent::Protocol(ProtocolEvent::Rdp(
+                RdpEvent::AutoReconnectArmed,
+            )));
+        }
+        if let Some(errors) = extended.logon_errors {
+            // MS-RDPBCGR 2.2.10.1.1.4.1. The driver supplies the sentence, so
+            // the UI never has to own a code table (PRDRDP/02 §9.4).
+            let message = format!(
+                "{} ({})",
+                errors.notification_type.describe(),
+                errors.notification_data.describe()
+            );
+            tracing::info!(
+                notification = errors.notification_type.symbol(),
+                data = errors.notification_data.symbol(),
+                "the server reported a logon notification"
+            );
+            events.push(SessionEvent::Protocol(ProtocolEvent::Rdp(
+                RdpEvent::LogonError {
+                    notification_type: errors.notification_type.to_u32(),
+                    notification_data: errors.notification_data.to_u32(),
+                    message,
+                },
+            )));
+        }
+    }
+
+    /// The Server Auto-Reconnect Status PDU (MS-RDPBCGR 2.2.4.1).
+    ///
+    /// The server checked the verifier we sent and it did not match, so it
+    /// has already fallen back to a normal logon. MS-RDPBCGR 3.2.5.6.1: the
+    /// client discards the cookie and carries on. **This is not a connection
+    /// failure**, and treating it as one would turn a cosmetic rejection into
+    /// a dead session.
+    fn auto_reconnect_status(&mut self, body: &[u8]) {
+        // Four bytes the specification requires to be zero. Read for the log
+        // line and not acted on, because there is no second value defined.
+        let status = Reader::new(body)
+            .u32("SERVER_AUTO_RECONNECT_STATUS_PDU")
+            .ok();
+        tracing::info!(
+            ?status,
+            "the server rejected the auto reconnect cookie: discarding it and logging on normally"
+        );
+        self.cookie = None;
+        self.cookie_discarded = true;
+    }
+
+    /// One Standard Server Redirection PDU (MS-RDPBCGR 2.2.13.2).
+    ///
+    /// The packet names a machine, a session and, usually, a credential to
+    /// reach them with. Acting on it means ending this connection and dialling
+    /// the target, which is what the supervisor does with
+    /// [`RunLoop::take_redirect`]; the decision to follow it at all is
+    /// [`Redirection::from_packet`]'s.
+    ///
+    /// `docs/RDP_SPEC_NOTES.md` §1.5 records that the packet's field order
+    /// and its start offset are both inferred rather than known. Both failure
+    /// modes land here as an `RdpError::Pdu` naming the field, or as a target
+    /// this client refuses, and neither one is a connection to somewhere
+    /// nobody named.
+    fn server_redirection(&mut self, body: &[u8]) -> Result<SessionSignal> {
+        use rdp_pdu::rdp::ServerRedirectionPacket;
+
+        let packet = ServerRedirectionPacket::read_standard(&mut Reader::new(body))?;
+        let Some(redirect) = Redirection::from_packet(&packet) else {
+            // `LB_NOREDIRECT`, or a target we will not dial. Either way the
+            // session carries on where it is, which is what the specification
+            // says `LB_NOREDIRECT` means.
+            return Ok(SessionSignal::Ignored(
+                "a server redirection this client will not follow",
+            ));
+        };
+        tracing::info!(?redirect, "the server redirected this session");
+        self.redirect = Some(redirect);
+        // The session is over on this socket: `act` emits the event, hangs
+        // up in order, and the supervisor dials the target
+        // (MS-RDPBCGR 3.2.5.3.1).
+        Ok(SessionSignal::Terminate(DisconnectSignal::Redirected))
+    }
+
     /// Act on one command from the shell.
     ///
     /// Returns `Some` when the command ends the session.
     async fn handle_command(&mut self, cmd: ClientCommand) -> Result<Option<RunOutcome>> {
         match cmd {
             ClientCommand::Disconnect => {
+                // A cookie that survives a deliberate sign out and lets the
+                // next launch silently resume somebody's session is a security
+                // smell, even though the protocol would permit it
+                // (PRDRDP/06 §5.5.4).
+                self.cookie = None;
+                self.cookie_discarded = true;
                 // Every key the server believes is held would repeat into the
                 // session forever, so they go out before the ultimatum
                 // (PRDRDP/05 §2.11).
@@ -673,9 +864,27 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                 self.flush_channel(out).await?;
                 Ok(None)
             }
-            // Quality and resize arrive with the channels that carry them
-            // (PRDRDP/05 §5.4). Dropping one silently would be a command the
-            // shell believes it sent, so each says so once.
+            // MS-RDPEDISP: the window changed size, so ask the server to
+            // rebuild its desktop at the new one. The request is not stored
+            // here; `RdpSessionSettings::requested_size` holds it so a
+            // reconnect comes back at the size the user was using
+            // (PRDRDP/05 §5.4).
+            ClientCommand::RequestResize { width, height } => {
+                let ctx = self.channel_ctx();
+                let mut out = Outbox::new();
+                self.vc.resize(
+                    u32::from(width),
+                    u32::from(height),
+                    self.opts.scale_factor,
+                    ctx,
+                    &mut out,
+                )?;
+                self.flush_channel(out).await?;
+                Ok(None)
+            }
+            // Quality arrives with the channels that carry it
+            // (PRDRDP/05 §5.4). Dropping a command silently would be one the
+            // shell believes it sent, so it says so once.
             other => {
                 tracing::debug!(?other, "command has no wire path yet");
                 Ok(None)
@@ -754,9 +963,19 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         )
     }
 
-    /// Emit one [`remote_core::SessionStats`].
+    /// Emit one [`remote_core::SessionStats`], and flush anything the second
+    /// timer this loop deliberately does not have would have flushed.
     async fn tick(&mut self, events: &mpsc::Sender<SessionEvent>) -> Result<()> {
         use std::sync::atomic::Ordering;
+
+        // The trailing edge of a resize burst (MS-RDPEDISP, PRDRDP/05 §5.4).
+        // This is why the display control debounce needs no `select!` arm of
+        // its own.
+        let ctx = self.channel_ctx();
+        let mut out = Outbox::new();
+        self.vc.flush_pending_resize(ctx, &mut out)?;
+        self.flush_channel(out).await?;
+
         let received = self.received.load(Ordering::Relaxed);
         let sent = self.sent.load(Ordering::Relaxed);
         let stats = remote_core::SessionStats {

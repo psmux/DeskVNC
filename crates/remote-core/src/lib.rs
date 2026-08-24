@@ -18,6 +18,7 @@
 //! | [`commands`]    | What the shell tells a session                          |
 //! | [`stats`]       | Per tick measurements                                   |
 //! | [`driver`]      | Protocol identity, the session handle, the event sink   |
+//! | [`reconnect`]   | The retry ladder, shared by every protocol              |
 //!
 //! Every public item is re-exported at the crate root, because
 //! `vnc_core::types` re-exports this crate with a glob and its call sites are
@@ -36,6 +37,7 @@ pub mod events;
 pub mod geometry;
 pub mod options;
 pub mod pins;
+pub mod reconnect;
 pub mod state;
 pub mod stats;
 

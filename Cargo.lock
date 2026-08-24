@@ -1374,6 +1374,8 @@ dependencies = [
  "crossbeam-channel",
  "os_info",
  "parking_lot",
+ "rdp-core",
+ "remote-core",
  "serde",
  "serde_json",
  "tauri",
@@ -4785,6 +4787,8 @@ dependencies = [
  "bytes",
  "futures",
  "hex",
+ "hmac 0.12.1",
+ "md-5",
  "parking_lot",
  "rdp-auth",
  "rdp-codecs",
@@ -4883,6 +4887,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "remote-core"
 version = "0.12.0"
 dependencies = [
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

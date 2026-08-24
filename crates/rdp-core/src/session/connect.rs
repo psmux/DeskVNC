@@ -17,8 +17,9 @@ use tokio_util::sync::CancellationToken;
 use crate::connection;
 use crate::error::{RdpError, Result};
 use crate::options::ResolvedOptions;
-use crate::session::run_loop::{RunLoop, RunOutcome};
+use crate::session::run_loop::{Attempt, RunLoop};
 use crate::session::settings::RdpSessionSettings;
+use crate::session::Continuity;
 use crate::transport::framer::Framer;
 use crate::transport::writer::{self, WRITER_QUEUE};
 
@@ -29,13 +30,16 @@ use crate::transport::writer::{self, WRITER_QUEUE};
 /// Whatever the phase that failed reports. Every error names the phase it
 /// happened in, which is what a support log needs and what a `todo!()` would
 /// have destroyed.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_once(
     options: &ConnectOptions,
     settings: &mut RdpSessionSettings,
+    carry: &mut Continuity,
     events: &mpsc::Sender<SessionEvent>,
     commands: &mut mpsc::Receiver<ClientCommand>,
     cancel: &CancellationToken,
-) -> Result<RunOutcome> {
+    connected_at: &mut Option<std::time::Instant>,
+) -> Result<Attempt> {
     let rdp = options.rdp_options().ok_or_else(|| {
         // `ConnectOptions` carries its protocol half as data, so nothing in
         // the type system stops the wrong half reaching here. `RdpDriver`
@@ -45,11 +49,45 @@ pub async fn run_once(
     })?;
 
     let mut warnings = Vec::new();
-    let opts = ResolvedOptions::resolve(options, rdp, &mut warnings)?;
+    let mut opts = ResolvedOptions::resolve(options, rdp, &mut warnings)?;
     for warning in &warnings {
         tracing::warn!(warning, "the host profile was adjusted");
     }
-    settings.apply(options);
+    // A size the user asked for outlives the connection it was asked on, so
+    // the desktop comes back at the size they were using rather than at the
+    // profile's (PRDRDP/05 §5.4). The display control channel re-applies it
+    // once the session is up; this is the connect time half.
+    if let Some((width, height)) = settings.requested_size {
+        opts.desktop = (width, height);
+    }
+    // A redirection told us to present its `LoadBalanceInfo` as the routing
+    // token of the next Connection Request (MS-RDPBCGR 3.2.5.3.1). It is
+    // taken rather than borrowed: a token is presented once, to the host that
+    // issued it.
+    opts.routing_token = carry.routing_token.take();
+
+    // MS-RDPBCGR 5.5 step 3: the cookie goes in the Client Info PDU of the
+    // attempt after the one that received it. A stale one is treated as
+    // absent (PRDRDP/06 §5.5.5).
+    let now = std::time::Instant::now();
+    let arc = match carry.cookie.as_ref() {
+        Some(cookie) if cookie.is_stale(now) => {
+            tracing::info!(
+                logon_id = cookie.logon_id(),
+                "the auto reconnect cookie is past its rotation window: not offering it"
+            );
+            carry.cookie = None;
+            None
+        }
+        Some(cookie) => {
+            tracing::info!(
+                logon_id = cookie.logon_id(),
+                "offering the auto reconnect cookie"
+            );
+            Some(cookie.client_packet())
+        }
+        None => None,
+    };
 
     let stream = crate::transport::open_stream(options, events).await?;
 
@@ -68,21 +106,42 @@ pub async fn run_once(
         &opts,
         &options.credentials,
         &options.cert_pins,
+        arc,
         events,
         Some(connection::TrustPrompt { commands, cancel }),
     );
-    let (connected, framer) = tokio::select! {
+    let result = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(RdpError::Cancelled),
-        result = connect => result?,
+        result = connect => result,
+    };
+    let (connected, framer) = match result {
+        Ok(pair) => pair,
+        // A broker can redirect before the session is up (MS-RDPBCGR 1.3.8),
+        // in which case there is no pump to run: the attempt is over and the
+        // next one goes to the machine the broker named. Not a failure, which
+        // is why the supervisor is handed an outcome rather than the error.
+        Err(RdpError::Redirected(redirect)) => {
+            tracing::info!(%redirect, "redirected during the connection sequence");
+            carry.redirect = Some(*redirect);
+            return Ok(Attempt::ServerDisconnect {
+                user_requested: false,
+            });
+        }
+        Err(e) => return Err(e),
     };
 
     remote_core::emit_state(events, SessionState::Connected).await?;
+    // What `STABLE_UPTIME` is measured from: a connection that stayed up long
+    // enough proves the network is fine and resets the backoff ladder
+    // (`remote_core::reconnect`).
+    *connected_at = Some(std::time::Instant::now());
     run_connected(
         framer,
         connected,
         &opts,
         settings.view_only,
+        carry,
         events,
         commands,
         cancel,
@@ -101,10 +160,11 @@ async fn run_connected(
     connected: connection::Connected,
     opts: &ResolvedOptions,
     view_only: bool,
+    carry: &mut Continuity,
     events: &mpsc::Sender<SessionEvent>,
     commands: &mut mpsc::Receiver<ClientCommand>,
     cancel: &CancellationToken,
-) -> Result<RunOutcome> {
+) -> Result<Attempt> {
     let (stream, buffered) = framer.into_inner();
     let (read_half, write_half) = tokio::io::split(stream);
 
@@ -134,6 +194,19 @@ async fn run_connected(
     let outcome = run_loop
         .run(connected.pending, events, commands, cancel)
         .await;
+
+    // Whatever the pump learned that outlives this connection. Rejection
+    // first and arrival second: a server that refused our cookie and then
+    // minted a fresh one has given us something to keep (PRDRDP/06 §5.5.4).
+    if run_loop.cookie_discarded() {
+        carry.cookie = None;
+    }
+    if let Some(cookie) = run_loop.take_cookie() {
+        carry.cookie = Some(cookie);
+    }
+    if let Some(redirect) = run_loop.take_redirect() {
+        carry.redirect = Some(redirect);
+    }
 
     // The teardown queued `Outbound::Shutdown`, so the writer task is either
     // finished or about to be. Joining it inside the budget is what makes the
