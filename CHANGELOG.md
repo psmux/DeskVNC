@@ -10,8 +10,66 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-24
+
+### Added
+
+- **DeskVNCViewer speaks RDP.** Add a host, choose Windows Remote Desktop, and
+  the port and the fields change to suit it. Quick connect takes `rdp://host`.
+  Saved hosts connect, ask about the certificate the first time, ask for a
+  password if none is saved, and show a desktop you can type into and click on.
+  The clipboard works both ways, the remote desktop follows the window when you
+  resize it, and a dropped connection retries on the same ladder VNC has always
+  used.
+- The whole RDP stack is written in this repository. No third party RDP,
+  CredSSP, NTLM or Kerberos library is used anywhere, and a test refuses one
+  from the lockfile up. Cryptography is the exact opposite: every cipher, hash,
+  MAC and key derivation is a call into a vetted library, and three tests fail
+  if a source file starts to look like a hand written primitive.
+- Graphics arrive through the modern graphics channel: RemoteFX, ClearCodec,
+  NSCodec, progressive RemoteFX, the planar and interleaved codecs, and the
+  RDP 8.0 bulk decompressor. There is no `unsafe` in any of it, and every
+  decoder beats the performance budget written for it.
+- Network Level Authentication with NTLMv2, checked against the published test
+  vectors at every intermediate value. Kerberos is implemented too, for domains
+  whose policy refuses NTLM, though see the limitations below.
+- Network discovery finds RDP hosts as well as VNC ones, and reads the name off
+  the certificate on the connection it already opened rather than opening a
+  second one. It can be turned off, and when it is off it opens nothing.
+- `.rdp` files can be imported.
+- A message for a case domain users actually hit: a host whose policy refuses
+  NTLM now names the two Group Policy settings to change, in the words an
+  administrator sees, and does not ask for the password again. Asking again
+  would have spent three attempts against a lockout counter for a password that
+  was never wrong.
+- `docs/RDP_SPEC_NOTES.md`, which records every place the code had to choose a
+  reading that only a specification vector can settle, so nobody has to
+  rediscover them from a module comment.
+
+### Changed
+
+- **The host database gains a schema version, and the interface contract gains
+  fields.** Existing profiles migrate and keep working exactly as they did, and
+  a profile written by a newer build is refused with a message saying so rather
+  than misread. This is what makes the release a minor one rather than a patch.
+- Internals were split so two protocols can share them rather than growing a
+  second copy: the session contract, pixel conversion, the reconnect ladder,
+  the credential and certificate prompts, the renderer, the frame channel and
+  the SSH tunnel are now common to both. The VNC side behaves as it did, and
+  its tests pass without an assertion being edited.
+
 ### Fixed
 
+- **Four faults that only a real server could find.** The first connection to a
+  real Windows host found all of them in an hour. The domain parameters in the
+  MCS connect were tagged as an application type rather than a plain sequence,
+  which the host rejected by name. The length the host gives for its own
+  greeting understates it by the two blocks it appends afterwards, and trusting
+  that number cut the greeting short. A server lists its codecs with no
+  identifiers assigned, which was read as four codecs colliding. And the
+  priority marking on the host's first real message was compared against the
+  one value this client happens to send. Every one of them passed every test in
+  the suite, because the test server was written from the same misreadings.
 - **A right click could do nothing, and then take effect much later.** Input
   packets were sent as independent IPC requests, and nothing made the shell
   handle two of them in the order they were issued. A press and its release
@@ -23,123 +81,50 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   another, and a synthesised right click travels as a single packet the way a
   wheel click already did.
 
-### Added
-
-- **The groundwork for a second protocol, and the first working pieces of an
-  RDP stack written here rather than borrowed.** Nothing user visible changes
-  yet: no RDP connection can be made, and the VNC side behaves exactly as it
-  did. What lands is the shape everything after it needs.
-- Six new crates. `remote-core` holds the session contract that was never
-  about RFB (options, events, commands, stats, credentials, and the
-  `ProtocolDriver` trait), and `remote-pixel` holds pixel conversion with an
-  empty dependency table, which is what lets a codec crate use it without
-  dragging in an async runtime. `rdp-pdu` is the wire layer, `rdp-codecs` the
-  bitmap decoders, `rdp-auth` the authentication, and `rdp-core` the session
-  that will tie them together.
-- The RDP wire layer covers X.224 and TPKT, the MCS connect envelope and its
-  domain PDUs over BER, and every GCC user data block in both directions over
-  aligned PER. Every read is bounds checked by construction and returns a
-  result; no parser indexes a slice anywhere.
-- Bitmap decoding for uncompressed data, interleaved RLE at four colour
-  depths, and the planar codec with its RLE planes, delta pass and inverse
-  YCoCg transform. All of it beats its performance budget by at least 1.8x at
-  both 1080p and 4K, with no `unsafe` in any of it.
-- NTLMv2, built message by message and checked against the published MS-NLMP
-  test vectors at every intermediate step, from the one way functions through
-  to the signing and sealing keys.
-- A `legacy-tls` build feature carrying a vendored OpenSSL, off by default and
-  with its handshake still stubbed. It exists now so that a toolchain problem
-  surfaces while nothing depends on it.
-- The wire layer now covers every PDU the first two phases need: the client
-  info and licensing exchange, twenty five capability sets in both directions,
-  connection finalisation, and the per frame traffic in both the slow and the
-  fast path. A fast path update that arrives in one fragment is handed onward
-  as a borrow of the receive buffer rather than a copy.
-- Network Level Authentication, end to end. CredSSP and SPNEGO over the
-  NTLMv2 that landed earlier, including the public key exchange that is what
-  actually stops a machine in the middle from reading the session. A key that
-  does not match the one we sent is refused, and that refusal is a test.
-- The RDP session itself: transport, the connection state machine, the session
-  and writer tasks, and the driver the shell will look up in its registry. It
-  reaches the end of MCS channel connection against a mock server. Everything
-  past that point returns an error naming the phase rather than pretending.
-- Pixel conversion gained stride, row order and destination channel order, so a
-  rectangle can be written straight into a larger framebuffer with no second
-  copy, and both protocols share one implementation instead of two that drift.
-- Virtual channels: static channel chunking, the dynamic channel layer, all
-  twenty three graphics channel commands, and the RDP 8.0 bulk data envelope.
-  A message that arrives in one chunk is passed on without being copied.
-- The phase 2 codecs: RemoteFX with both entropy coders and its inverse wavelet
-  transform, NSCodec, ClearCodec with its three caches, and the RDP 8.0
-  decompressor. Still no `unsafe` in any of it.
-- `docs/RDP_SPEC_NOTES.md`, which records the places where the code had to
-  choose a reading that only a specification vector can settle, so nobody has
-  to rediscover them from a module comment.
-- **A self signed RDP host can now be connected to.** The certificate prompt
-  waits for an answer instead of refusing, which matters because nearly every
-  RDP host is self signed the first time you meet it. Dismissing the prompt
-  stops the connection before anything is sent to the server.
-- The graphics channel, end to end. A frame arrives compressed, is decoded and
-  reaches the screen at the right place, with the clipboard alongside it.
-- Hosts saved in the library can be RDP hosts, with their own settings and
-  their own domain, user and password. Existing profiles are untouched and
-  keep working exactly as they did.
-- Network discovery finds RDP hosts as well as VNC ones, and reads the name off
-  the certificate on the connection it already opened rather than opening a
-  second one. It can be turned off, and when it is off it opens nothing.
-- `.rdp` files can be imported.
-- H.264 video from a Windows host reuses the decoder the browser already has
-  and the picture path VNC already used, so there is no second video decoder in
-  the application.
-- **RDP is reachable from the application.** Add a host, choose Windows Remote
-  Desktop, and the port and the fields change to suit it. Quick connect takes
-  `rdp://host`. Saved RDP hosts connect, prompt for a certificate the first
-  time, and show a picture.
-- Dropped RDP connections retry on the same ladder VNC has always used, rather
-  than a second one written beside it. The desktop follows the window when you
-  resize it, a redirected connection follows the redirect, and audio is carried
-  behind a build feature.
-- A message for the case a domain user actually hits: a host whose policy
-  refuses NTLM now says which two Group Policy settings to change, in the words
-  an administrator sees, and does not ask for the password again. Asking again
-  would have spent three attempts against a lockout counter for a password that
-  was never wrong.
-- **Connecting to an RDP host with no saved password now asks for one.** It
-  used to end the connection instead. A password the host rejects is asked
-  again on a fresh connection, and a password that came from the keychain
-  rather than from you is tried once and not replayed, because replaying a
-  saved credential is how an account gets locked.
-- Windows hosts that send progressively refined graphics no longer end the
-  session. The decoder existed; nothing was handing frames to it.
-- **Domains that refuse NTLM can be logged into.** Kerberos is implemented, so
-  a machine whose policy allows only Kerberos is reachable rather than being
-  told to wait for a later release. It is behind a build feature for now and
-  still needs a name lookup the shell does not yet perform, so it is not on by
-  default in a shipped build.
-
-### Changed
-
-- `ConnectOptions` splits into a shared half and a per protocol half, and the
-  shell now finds a session driver in a registry instead of calling into the
-  VNC session directly. Stored profiles and the IPC contract are unchanged.
-
 ### Security
 
-- No cryptography is implemented in this workspace. Every cipher, hash, MAC and
-  key derivation in the new code is a call into a vetted library, and three
-  tests enforce that mechanically instead of leaving it to review. A further
-  test refuses any third party RDP, CredSSP, NTLM or Kerberos implementation
-  from the lockfile up.
-- Every new decoder is fed bytes controlled by a remote peer, so every one has
-  a test asserting that a truncated input returns an error rather than
-  panicking, for every possible prefix. The codec decoders now also have fuzz
-  targets driven from raw bytes.
+- Every decoder is fed bytes controlled by a remote peer, so every one has a
+  test asserting that a truncated input returns an error rather than panicking,
+  for every possible prefix. The codec decoders also have fuzz targets driven
+  from raw bytes.
 - RDP certificates are pinned under their own scheme rather than sharing the
   VNC one. A host can serve both protocols with unrelated certificates, and a
   shared row would have let one vouch for the other.
+- Nothing is sent to a server whose certificate you have not approved. The
+  prompt holds the connection open until you answer, and dismissing it ends the
+  attempt before the first credential is built.
+- A password that came from the keychain rather than from you is tried once and
+  not replayed, because replaying a saved credential is how a domain account
+  gets locked out.
 - Locking the credential store now wipes every decrypted secret it was holding.
   It previously wiped only the key and let the decrypted entries drop, which
   left every password it had opened sitting in freed memory.
+
+### Known limitations
+
+RDP is new in this release and these are the edges of it.
+
+- **It has been connected to exactly one real machine, once.** A Windows 11
+  host, on 2026-08-24, reaching the desktop through NLA. That run found four
+  faults in an hour that two thousand passing tests never could, because the
+  mock server is built from the same reading of the specification as the client
+  and agrees with every misreading. Expect more of them on hosts that differ:
+  older Windows, a domain, a gateway, xrdp. `docs/RDP_SPEC_NOTES.md` names the
+  two places where being wrong shows up as subtly wrong pixels rather than an
+  error, and neither is settled.
+- **H.264 is not used.** The client advertises graphics capability versions 8
+  and 8.1, which contain no H.264, so a server will not send it. Everything
+  else in the graphics channel is used.
+- **Kerberos is not reachable from a running session.** The implementation is
+  complete and tested against the RFC vectors, but the session does not yet
+  perform the name lookup that finds a domain controller, and it is behind a
+  build feature. A Kerberos only domain still fails today.
+- **Audio is decoded and not played.** Where playback should happen is not
+  decided yet.
+- TLS 1.0 and 1.1, for Windows 7 and Server 2008 R2 hosts, is built but the
+  handshake is not implemented, and the feature is off.
+- Not planned: RemoteApp, printer and smart card redirection, drive
+  redirection, audio input, and the RD Gateway.
 
 ## [0.12.0] - 2026-08-23
 
