@@ -196,6 +196,95 @@ fn a_first_pass_and_two_upgrades_converge_on_the_simple_tile() {
     assert_eq!(state.live_tiles(), 1);
 }
 
+/// A replacing pass overwrites every coefficient the tile held, which is the
+/// property [`super::state::TileState::adopt`] relies on when it skips the
+/// zero fill `restart` does.
+///
+/// Refine one tile across a first pass and two upgrades, then send a
+/// `WBT_TILE_SIMPLE` of entirely different content into the same store and
+/// require the picture a store that never saw the gradient produces, byte for
+/// byte. A replacing pass that left any of the refined coefficients behind
+/// changes this picture.
+#[test]
+fn a_simple_tile_replaces_whatever_the_store_held() {
+    let refined = enc::planes(&gradient(), &QUANT);
+    let replacing = enc::planes(&flat([30, 144, 255]), &QUANT);
+    let coarse = [4u8; 10];
+    let fine = [0u8; 10];
+    let progs = [coarse, fine];
+
+    let simple = enc::message(&[enc::tile_simple(0, 0, &replacing)], &QUANT, &[], None);
+    let want = decode_one(&simple).0;
+
+    let mut state = ProgressiveState::new();
+    let mut scratch = RfxScratch::new();
+    let mut buf = vec![0u8; dst_len(64, 64)];
+    for msg in [
+        enc::message(
+            &[enc::tile_first(0, 0, &refined, 0, &coarse)],
+            &QUANT,
+            &progs,
+            None,
+        ),
+        enc::message(
+            &[enc::tile_upgrade(0, 0, &refined, 1, &coarse, &fine)],
+            &QUANT,
+            &progs,
+            None,
+        ),
+        simple.clone(),
+    ] {
+        let mut v = view(&mut buf, 64, 64);
+        decode_message(&msg, &mut state, &mut scratch, &mut v).unwrap();
+    }
+    assert_eq!(buf, want, "a simple tile did not replace the refined one");
+    assert_eq!(state.live_tiles(), 1);
+}
+
+/// `RFX_TILE_DIFFERENCE` (MS-RDPEGFX 2.2.4.2.1.6.1): the coefficients are
+/// added to what the tile holds rather than replacing it. The reference
+/// encoder never sets the flag, so the block is one it built with the bit
+/// flipped, which is also the only way a fuzzer reaches this branch with a
+/// decodable body.
+///
+/// Sent once into a fresh store it is the same picture as the replacing
+/// version, because a fresh tile is zeros. Sent twice it doubles every
+/// coefficient, and the second picture differs. Both halves matter: the first
+/// says the flag is not simply ignored, the second says the addition happens.
+#[test]
+fn a_difference_pass_adds_to_the_store_rather_than_replacing_it() {
+    let planes = enc::planes(&gradient(), &QUANT);
+    let plain = enc::message(&[enc::tile_simple(0, 0, &planes)], &QUANT, &[], None);
+    let want = decode_one(&plain).0;
+
+    // Block header, three quantization indices, `xIdx` and `yIdx`, then
+    // `flags` (MS-RDPEGFX 2.2.4.2.1.6.1).
+    let mut diff = plain.clone();
+    let flags = enc::first_tile_offset(&plain) + 6 + 3 + 2 + 2;
+    assert_eq!(diff[flags], 0);
+    diff[flags] = 0x01;
+
+    let mut state = ProgressiveState::new();
+    let mut scratch = RfxScratch::new();
+    let mut buf = vec![0u8; dst_len(64, 64)];
+    {
+        let mut v = view(&mut buf, 64, 64);
+        decode_message(&diff, &mut state, &mut scratch, &mut v).unwrap();
+    }
+    assert_eq!(
+        buf, want,
+        "a difference against zeros is not the tile itself"
+    );
+
+    let once = buf.clone();
+    {
+        let mut v = view(&mut buf, 64, 64);
+        decode_message(&diff, &mut state, &mut scratch, &mut v).unwrap();
+    }
+    assert_ne!(buf, once, "the second difference pass changed nothing");
+    assert_eq!(state.live_tiles(), 1);
+}
+
 /// A first pass on its own is visibly coarser than a simple tile, which is
 /// what says the progressive quantization is being applied at all. A decoder
 /// that ignored `quality` would pass the convergence test above and fail this
