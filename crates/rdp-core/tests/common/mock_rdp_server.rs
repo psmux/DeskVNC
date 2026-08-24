@@ -925,6 +925,12 @@ async fn serve(
         }],
     };
     let mut body = Vec::new();
+    // The two octet `updateType` a fast path body carries before the slow path
+    // body proper (MS-RDPBCGR 2.2.9.1.2.1.2). `encode_body` writes the body
+    // without it, and a real Windows host sends it, so the mock has to too:
+    // omitting it is how this server came to agree with a decoder that was
+    // skipping the field.
+    Writer::new(&mut body).u16(rdp_pdu::update::slowpath::update_type::BITMAP);
     GraphicsUpdate::Bitmap(bitmap)
         .encode_body(&mut Writer::new(&mut body))
         .expect("the mock encodes what the client parses");

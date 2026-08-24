@@ -16,7 +16,7 @@
 //! `RDP_DOMAIN` and `RDP_PORT` are optional. `RUST_LOG` defaults to a level
 //! that prints the diagnostic frame dumps, which is the point of running it.
 
-use remote_core::{ConnectOptions, Credentials, ProtocolOptions, SessionEvent};
+use remote_core::{ConnectOptions, Credentials, SessionEvent};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -46,82 +46,65 @@ async fn main() {
     };
 
     let (events_tx, mut events_rx) = mpsc::channel::<SessionEvent>(256);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    let cancel = tokio_util::sync::CancellationToken::new();
 
-    // Print every event as it arrives, so the phase the sequence reached is
-    // visible even when the failure is a disconnect rather than an error.
-    // `SessionEvent` derives `Debug`, so this needs no match that would go
-    // stale every time a variant is added.
-    //
-    // This task also answers the certificate prompt, because the sequence
-    // parks on it and a probe with nobody to answer just hangs. Approving
-    // whatever the host presents is right here and wrong anywhere else: the
-    // job is to reach the next phase and report what happened, and the
-    // approval is not written to any pin store.
-    let printer = tokio::spawn(async move {
-        while let Some(ev) = events_rx.recv().await {
-            println!("  event: {ev:?}");
-            if let SessionEvent::CertificatePrompt {
+    // Drive the real session, the same entry point the application uses, so
+    // this exercises the whole path and not just the connection sequence. An
+    // earlier version of this probe stopped at `Connected` and therefore
+    // proved nothing about the first frame, which is where the next fault was.
+    let handle = rdp_core::RdpSession::spawn("probe".to_owned(), options, events_tx);
+
+    let mut frames = 0usize;
+    let mut cursors = 0usize;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+
+    while let Some(ev) = events_rx.recv().await {
+        match &ev {
+            // The picture. Counted rather than printed: a busy desktop sends
+            // hundreds and the interesting fact is that any arrived at all.
+            SessionEvent::FramebufferUpdate { .. } => {
+                frames += 1;
+                if frames == 1 {
+                    println!("  FIRST FRAME received");
+                }
+            }
+            SessionEvent::CursorUpdate(_) => cursors += 1,
+            SessionEvent::CertificatePrompt {
                 fingerprint,
+                subject,
                 scheme,
                 ..
-            } = ev
-            {
-                println!("  (probe approves {fingerprint} for this run only)");
-                let _ = cmd_tx
+            } => {
+                println!("  certificate prompt: {subject} {fingerprint}");
+                println!("  (probe approves it for this run only)");
+                let _ = handle
                     .send(remote_core::ClientCommand::TrustCertificate {
-                        fingerprint,
+                        fingerprint: fingerprint.clone(),
                         permanent: false,
-                        scheme,
+                        scheme: *scheme,
                     })
                     .await;
             }
+            SessionEvent::StateChanged(state) => {
+                println!("  state: {state:?}");
+                if matches!(state, remote_core::SessionState::Disconnected { .. }) {
+                    break;
+                }
+            }
+            other => println!("  event: {other:?}"),
         }
-    });
-
-    let outcome = run(options, events_tx, cmd_rx, cancel).await;
-    match outcome {
-        Ok(()) => println!("\nreached Connected"),
-        Err(e) => println!("\nstopped: {e}"),
-    }
-    drop(printer);
-}
-
-/// The connect itself, kept separate so the error is one value to report.
-async fn run(
-    options: ConnectOptions,
-    events: mpsc::Sender<SessionEvent>,
-    mut commands: mpsc::Receiver<remote_core::ClientCommand>,
-    cancel: tokio_util::sync::CancellationToken,
-) -> rdp_core::Result<()> {
-    let ProtocolOptions::Rdp(rdp) = options.protocol.clone() else {
-        unreachable!("ConnectOptions::rdp builds the RDP half")
-    };
-    let mut warnings = Vec::new();
-    let opts = rdp_core::options::ResolvedOptions::resolve(&options, &rdp, &mut warnings)
-        .map_err(|e| rdp_core::RdpError::Protocol(e.to_string()))?;
-    for w in &warnings {
-        println!("  warning: {w}");
+        if std::time::Instant::now() > deadline {
+            println!("  (20 seconds elapsed, stopping)");
+            let _ = handle.send(remote_core::ClientCommand::Disconnect).await;
+            break;
+        }
     }
 
-    let stream = rdp_core::transport::open_stream(&options, &events).await?;
-
-    // Trust on first use with no stored pin: the probe approves whatever the
-    // host presents, because its job is to reach the next phase and report,
-    // not to make a trust decision on anybody's behalf.
-    let pins = remote_core::CertPins::default();
-    let mut creds = options.credentials.clone();
-    let prompt = rdp_core::connection::Prompt {
-        commands: &mut commands,
-        cancel: &cancel,
-        ask: &mut Default::default(),
-    };
-    let arc = None;
-    let (_connected, _framer) =
-        rdp_core::connection::connect(stream, &opts, &mut creds, &pins, arc, &events, Some(prompt))
-            .await?;
-    Ok(())
+    println!("\nframes: {frames}, cursor updates: {cursors}");
+    if frames > 0 {
+        println!("the picture arrived");
+    } else {
+        println!("NO FRAME ARRIVED");
+    }
 }
 
 fn env_or_exit(key: &str) -> String {

@@ -73,7 +73,7 @@ by `paletteCount <= 127`. A one bit suite depth is implausibly small for a field
 the specification bothers to name, so this is the reading most likely to be
 wrong.
 
-### 1.4 Does `updateType` appear twice in a slow path bitmap update?
+### 1.4 SETTLED: `updateType` is on the wire in both paths
 
 `crates/rdp-pdu/src/update/slowpath.rs`.
 
@@ -81,11 +81,27 @@ wrong.
 says the slow path and fast path bodies are the same bytes, and lists no such
 field. One of those puts two extra bytes on every slow path bitmap update.
 
-The code follows `04`, for two reasons: the fast path update codes `0x0` to
-`0x3` are numerically identical to the slow path `updateType` values, which is
-the whole point of a shared body, and the field only looks doubled because
-MS-RDPBCGR describes the nesting twice. A test pins the decision. A capture from
-a real server settles it.
+The code followed `04` and it was wrong, which a capture has now settled.
+
+A Windows 11 host (DESKTOP-H21K47C, 2026-08-24) begins its first fast path
+bitmap update `01 00 a2 00`: `UPDATETYPE_BITMAP`, then 162 rectangles. The
+argument for `04` was that the fast path update codes `0x0` to `0x3` are
+numerically identical to the slow path `updateType` values, so the field only
+looked doubled. The identity is real and the field is on the wire anyway.
+MS-RDPBCGR 2.2.9.1.2.1.1 to 2.2.9.1.2.1.3 say why: the fast path body is the
+slow path structure minus its *share data header*, and `updateType` was never
+part of that header.
+
+Reading it without the field made the first rectangle `destLeft = 162,
+destRight = 0`, which is inverted, so every session died on its first tile with
+a message about a malformed bitmap. The decoder, the encoder, the size
+calculation and the mock server all now carry the field, and the real twelve
+octet prefix is a test vector in `crates/rdp-pdu/src/update/fastpath.rs`.
+
+Worth keeping as a lesson rather than only a fix: the mock server omitted the
+field too, so 2,000 tests agreed with the decoder about bytes no server sends.
+That is the failure mode section 1 of this file exists to name, and it took one
+real connection to find four more of them.
 
 ### 1.5 Server Redirection field order, and where the packet starts
 
