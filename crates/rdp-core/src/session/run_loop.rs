@@ -444,7 +444,17 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             let Some(complete) = reassembler.push(update.header, update.data.as_slice())? else {
                 continue;
             };
-            match FastPathUpdate::decode_body(complete.update_code, complete.data)? {
+            let fp = FastPathUpdate::decode_body(complete.update_code, complete.data).inspect_err(
+                |e| {
+                    tracing::error!(
+                        error = %e,
+                        update_code = complete.update_code,
+                        body = %crate::connection::mcs::hex_dump(complete.data),
+                        "a fast path update did not parse"
+                    );
+                },
+            )?;
+            match fp {
                 FastPathUpdate::Graphics(update) => {
                     route_graphics(graphics, &update, &mut rects)?;
                 }
@@ -1314,6 +1324,12 @@ mod tests {
     #[test]
     fn a_fast_path_bitmap_update_becomes_a_framebuffer_update() {
         let mut body = Vec::new();
+        // A fast path body carries its own two octet `updateType` before the
+        // slow path body proper (MS-RDPBCGR 2.2.9.1.2.1.2), and
+        // `GraphicsUpdate::encode_body` writes the body without it. A real
+        // Windows host sends it; these fixtures have to as well or they are
+        // testing bytes no server produces.
+        Writer::new(&mut body).u16(rdp_pdu::update::slowpath::update_type::BITMAP);
         rdp_pdu::update::slowpath::GraphicsUpdate::Bitmap(bitmap_update())
             .encode_body(&mut Writer::new(&mut body))
             .expect("encodes");
@@ -1657,6 +1673,12 @@ mod tests {
     #[tokio::test]
     async fn pending_updates_from_the_connection_sequence_are_drawn_first() {
         let mut body = Vec::new();
+        // A fast path body carries its own two octet `updateType` before the
+        // slow path body proper (MS-RDPBCGR 2.2.9.1.2.1.2), and
+        // `GraphicsUpdate::encode_body` writes the body without it. A real
+        // Windows host sends it; these fixtures have to as well or they are
+        // testing bytes no server produces.
+        Writer::new(&mut body).u16(rdp_pdu::update::slowpath::update_type::BITMAP);
         rdp_pdu::update::slowpath::GraphicsUpdate::Bitmap(bitmap_update())
             .encode_body(&mut Writer::new(&mut body))
             .expect("encodes");

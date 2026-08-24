@@ -562,10 +562,40 @@ impl<'a> FastPathUpdate<'a> {
     pub fn decode_body(update_code: u8, data: &'a [u8]) -> PduResult<Self> {
         let mut r = Reader::new(data);
         let update = match update_code {
-            update_code::ORDERS
-            | update_code::BITMAP
-            | update_code::PALETTE
-            | update_code::SYNCHRONIZE => Self::Graphics(GraphicsUpdate::decode_body(
+            update_code::ORDERS | update_code::BITMAP | update_code::PALETTE => {
+                // The fast path body still carries its own two octet
+                // `updateType`, even though the four bit update code in the
+                // header already said the same thing (MS-RDPBCGR 2.2.9.1.2.1.1
+                // to 2.2.9.1.2.1.3: the body is the slow path structure minus
+                // its share data header, and `updateType` is not part of that
+                // header).
+                //
+                // It was skipped here, on the argument that the update codes
+                // and the update types are numerically identical so the field
+                // only looked doubled. The identity is real and the field is
+                // on the wire anyway. A Windows 11 host's first bitmap update
+                // (DESKTOP-H21K47C, 2026-08-24) begins `01 00 a2 00`, which is
+                // `UPDATETYPE_BITMAP` and then 162 rectangles; reading it as
+                // 1 rectangle at `destLeft = 162` made the first tile of every
+                // session a malformed one. `docs/RDP_SPEC_NOTES.md` §1.4
+                // recorded the two readings and this is the capture that
+                // settles it.
+                let at = r.offset();
+                let declared = r.u16(Self::NAME)?;
+                if declared != u16::from(update_code) {
+                    return Err(PduError::InvalidField {
+                        context: Self::NAME,
+                        field: "updateType",
+                        value: u64::from(declared),
+                        offset: at,
+                    });
+                }
+                Self::Graphics(GraphicsUpdate::decode_body(&mut r, declared, false)?)
+            }
+            // The synchronize body is empty or two pad octets, and
+            // `GraphicsUpdate::decode_body` already tolerates both, so there
+            // is nothing to read a type from.
+            update_code::SYNCHRONIZE => Self::Graphics(GraphicsUpdate::decode_body(
                 &mut r,
                 u16::from(update_code),
                 false,
@@ -639,7 +669,9 @@ impl<'a> FastPathUpdate<'a> {
             // update code has already said everything the slow path's two
             // pad bytes say.
             Self::Graphics(GraphicsUpdate::Synchronize) => 0,
-            Self::Graphics(update) => update.body_size(),
+            // Two for the `updateType` the body carries, which `encode_body`
+            // writes and `decode_body` reads.
+            Self::Graphics(update) => 2 + update.body_size(),
             Self::SurfaceCommands(payload) => payload.len(),
             Self::Pointer(PointerUpdate::System(_)) => 0,
             Self::Pointer(pointer) => pointer.body_size(),
@@ -650,7 +682,13 @@ impl<'a> FastPathUpdate<'a> {
     pub fn encode_body(&self, w: &mut Writer<'_>) -> PduResult<()> {
         match self {
             Self::Graphics(GraphicsUpdate::Synchronize) => Ok(()),
-            Self::Graphics(update) => update.encode_body(w),
+            Self::Graphics(update) => {
+                // Symmetric with `decode_body`: the two octet `updateType`
+                // is part of the fast path body, so a mock server that omits
+                // it does not encode what a real one sends.
+                w.u16(update.update_type());
+                update.encode_body(w)
+            }
             Self::SurfaceCommands(payload) => {
                 w.bytes(payload.as_slice());
                 Ok(())
@@ -697,6 +735,60 @@ mod tests {
         update.encode_body(&mut Writer::new(&mut buf)).unwrap();
         assert_eq!(buf.len(), update.body_size());
         buf
+    }
+
+    /// The first bitmap update a real Windows 11 host sends, header included,
+    /// transcribed from the frame that broke this decoder
+    /// (DESKTOP-H21K47C, 2026-08-24).
+    ///
+    /// It is `01 00` then `a2 00`: the two octet `updateType` the fast path
+    /// body was assumed not to carry, then 162 rectangles. Read without the
+    /// type field the first rectangle is `destLeft = 162, destRight = 0`,
+    /// which is inverted, so every session died on its first tile.
+    #[test]
+    fn a_real_fast_path_bitmap_update_carries_its_update_type() {
+        // The first twelve octets exactly as they arrived. This is the
+        // evidence: `01 00` is the `updateType` this decoder used to skip.
+        let real_prefix = hex::decode("0100a200000000003f003f00").expect("valid hex");
+        assert_eq!(
+            &real_prefix[..2],
+            &[0x01, 0x00],
+            "updateType = UPDATETYPE_BITMAP"
+        );
+        assert_eq!(&real_prefix[2..4], &[0xa2, 0x00], "numberRectangles = 162");
+
+        // The same bytes with the count reduced to one, so the vector can be
+        // one tile rather than the 162 the host actually sent. Everything
+        // before and after the count is untouched.
+        let body = hex::decode(concat!(
+            "0100",     // updateType = UPDATETYPE_BITMAP, as sent
+            "0100",     // numberRectangles, 162 in the capture, 1 here
+            "0000",     // destLeft   = 0,  as sent
+            "0000",     // destTop    = 0,  as sent
+            "3f00",     // destRight  = 63, as sent, inclusive
+            "3f00",     // destBottom = 63, as sent, inclusive
+            "4000",     // width  = 64,     as sent
+            "4000",     // height = 64,     as sent
+            "2000",     // bitsPerPixel = 32, as sent
+            "0104",     // flags, as sent
+            "0400",     // bitmapLength, 385 in the capture, 4 here
+            "00000000", // four payload octets standing in for the tile
+        ))
+        .expect("valid hex");
+
+        let update = FastPathUpdate::decode_body(update_code::BITMAP, &body)
+            .expect("a real bitmap update decodes");
+        let FastPathUpdate::Graphics(GraphicsUpdate::Bitmap(bitmap)) = update else {
+            panic!("update code 1 is a bitmap update")
+        };
+        assert_eq!(bitmap.rectangles.len(), 1);
+        let first = &bitmap.rectangles[0];
+        assert_eq!(first.dest.left, 0);
+        assert_eq!(first.dest.right, 63, "inclusive, so a 64 pixel wide tile");
+        assert_eq!(first.dest.width(), Some(64));
+        assert_eq!(first.width, 64);
+        assert_eq!(first.height, 64);
+        assert_eq!(first.bits_per_pixel, 32);
     }
 
     #[test]
