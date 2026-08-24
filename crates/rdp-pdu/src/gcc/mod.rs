@@ -267,9 +267,35 @@ fn read_connect_data<'a>(r: &mut Reader<'a>, context: &'static str) -> PduResult
             offset: at,
         });
     }
-    let len = per::read_length_determinant(r, context)?;
-    check_user_data_len(r, len, context)?;
-    r.take(len, context)
+    let at = r.offset();
+    let declared = per::read_length_determinant(r, context)?;
+    check_user_data_len(r, declared, context)?;
+
+    // The declared length is read and then deliberately not used as the bound.
+    //
+    // A real Windows host understates it. Measured against Windows 11
+    // (DESKTOP-H21K47C, 2026-08-24) the server's `connectPDU` said 42 where
+    // the content was 60, and the missing 18 are exactly its own
+    // `TS_UD_SC_NET` (12) and `TS_UD_SC_MCS_MSGCHANNEL` (6): the length covers
+    // the response up to the security block and not the two blocks appended
+    // after it. Honouring it truncates the reader mid `userData` and the
+    // failure reads as a malformed response from a server that is fine.
+    //
+    // Taking the rest is bounded twice over and so is not a licence to read
+    // anything: this reader is already the MCS `userData` OCTET STRING, whose
+    // length the Connect Response gave and which `MAX_GCC_USER_DATA` has
+    // already capped. The inner `userData` length determinant is checked
+    // against what is actually present a few lines below.
+    let available = r.remaining();
+    if declared != available {
+        tracing::debug!(
+            declared,
+            available,
+            offset = at,
+            "the gcc connectPDU length disagrees with the bytes present, using the bytes"
+        );
+    }
+    r.take(available, context)
 }
 
 /// Require the next `expected.len()` bytes to equal `expected`.
