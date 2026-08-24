@@ -78,6 +78,19 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 - H.264 video from a Windows host reuses the decoder the browser already has
   and the picture path VNC already used, so there is no second video decoder in
   the application.
+- **RDP is reachable from the application.** Add a host, choose Windows Remote
+  Desktop, and the port and the fields change to suit it. Quick connect takes
+  `rdp://host`. Saved RDP hosts connect, prompt for a certificate the first
+  time, and show a picture.
+- Dropped RDP connections retry on the same ladder VNC has always used, rather
+  than a second one written beside it. The desktop follows the window when you
+  resize it, a redirected connection follows the redirect, and audio is carried
+  behind a build feature.
+- A message for the case a domain user actually hits: a host whose policy
+  refuses NTLM now says which two Group Policy settings to change, in the words
+  an administrator sees, and does not ask for the password again. Asking again
+  would have spent three attempts against a lockout counter for a password that
+  was never wrong.
 
 ### Changed
 
