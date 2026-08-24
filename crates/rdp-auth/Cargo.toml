@@ -47,11 +47,33 @@ cbc = { workspace = true }      # the CBC half of AES-CTS
 cipher = { workspace = true }
 subtle = { workspace = true }   # constant time compares (PRDRDP/12 §9.8)
 
+# Kerberos, phase 3, behind the `kerberos` feature. Neither is a workspace
+# dependency: `[workspace.dependencies]` in the root manifest has no `cts` and
+# no `pbkdf2` entry, and the root manifest is not this crate's to edit, so both
+# carry their version here. Promoting them is one line in each place and is the
+# right end state (PRDRDP/11 §3.3 and §3.9.2).
+#
+# cts: CBC with ciphertext stealing, RFC 3962 §5. RustCrypto, the same
+# repository as `cbc`. 0.6.0 rather than 0.7.0 because 0.6 is on `cipher` 0.4,
+# the generation `aes` 0.8 and `cbc` 0.1 in this workspace already use, and its
+# MSRV of 1.81 is under ours. Its single block case does not follow RFC 3962 §5
+# and `kerberos/crypto.rs` routes around it; the comment there is the whole
+# story and `tests/vectors_kerberos.rs` holds the branch.
+cts = { workspace = true, optional = true }
+# pbkdf2: RFC 3962 §4 string-to-key. 0.12.2 and not the 0.13.0 already in the
+# lock underneath `russh`: 0.13 is on `digest` 0.11 and this crate is the
+# `digest` 0.10 generation, so an `Hmac<Sha1>` of ours cannot be passed to it
+# (PRDRDP/11 §3.3). `default-features = false` with `hmac` back on is exactly
+# `pbkdf2_hmac` and none of the `password-hash` surface.
+pbkdf2 = { workspace = true, optional = true }
+
 [features]
 default = []
-# Kerberos: phase 3 (D10). It does not build until PRDRDP/11 §3.9.2's
-# ciphertext stealing escalation is answered, and nothing is blocked today.
-kerberos = []
+# Kerberos: phase 3 (D10). PRDRDP/11 §3.9.2's ciphertext stealing escalation is
+# answered in `kerberos/crypto.rs`: option 1, take `cts` and dispatch the
+# single block case to `cbc`, with both arms library calls and no cipher mode
+# written here.
+kerberos = ["dep:cts", "dep:pbkdf2"]
 
 [dev-dependencies]
 hex = { workspace = true }

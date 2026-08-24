@@ -13,6 +13,13 @@
 //! is nothing to negotiate, and PRDRDP/14 §4.8 puts a raw NTLM token in
 //! `negoTokens` until Kerberos arrives.
 //!
+//! [`kerberos`] is phase 3 and is behind the `kerberos` cargo feature: the AS
+//! and TGS exchanges of RFC 4120, the AES encryption profile of RFC 3962, the
+//! GSS-API framing of RFC 4121, and a [`GssMechanism`] that plugs into the
+//! two modules above without either of them changing. It is what a domain
+//! joined host under a Kerberos only policy needs, which NTLMv2 cannot serve
+//! at all.
+//!
 //! ## No hand written cryptography
 //!
 //! This crate parses bytes controlled by a remote peer, so `#![forbid(unsafe_code)]`
@@ -64,6 +71,7 @@ pub mod credssp;
 pub mod error;
 pub mod gss;
 pub mod identity;
+pub mod kerberos;
 pub mod ntlm;
 pub mod spnego;
 
@@ -72,6 +80,8 @@ pub use credssp::{CredSspClient, CredSspConfig, MechanismId, MechanismSet};
 pub use error::{AuthError, Class};
 pub use gss::{GssMechanism, GssStep};
 pub use identity::{service_principal_name, split_qualified_username, Identity};
+#[cfg(feature = "kerberos")]
+pub use kerberos::{KerberosClient, KerberosConfig};
 pub use ntlm::{NtlmClient, NtlmConfig, NtlmSession};
 pub use spnego::SpnegoClient;
 

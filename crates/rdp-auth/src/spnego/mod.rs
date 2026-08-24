@@ -282,11 +282,25 @@ impl SpnegoClient {
                 // the mech list can be computed and travels with it.
                 let mic = self.outgoing_mic()?;
                 self.state = State::Established;
+                // An empty inner token means the mechanism finished with
+                // nothing left to send, which is what mutual authentication
+                // Kerberos looks like once the AP-REP has been checked. The
+                // `GssMechanism` seam has no way to say that (`GssStep::
+                // Complete` is refused by CredSSP), so the mechanism says it
+                // with an empty `FinalToken` and this is where that is turned
+                // back into the absence RFC 4178 §4.2.2 describes.
+                //
+                // The difference is on the wire: `Some(vec![])` encodes a
+                // present, zero length `responseToken [2]`, and Windows omits
+                // the field. An acceptor is entitled to read a present empty
+                // token as a mechanism token it should feed to the mechanism,
+                // which then has nothing to make of it.
+                let response_token = (!token.is_empty()).then_some(token);
                 Ok(GssStep::FinalToken(
                     NegTokenResp {
                         neg_state: Some(NegState::AcceptIncomplete),
                         supported_mech: None,
-                        response_token: Some(token),
+                        response_token,
                         mech_list_mic: mic,
                     }
                     .encode(),
@@ -511,6 +525,123 @@ mod tests {
 
     fn client(mechs: Vec<Box<dyn GssMechanism>>) -> SpnegoClient {
         SpnegoClient::new(mechs).unwrap()
+    }
+
+    /// A mechanism that finishes with nothing left to send, which is what
+    /// mutual authentication Kerberos looks like after the AP-REP is checked.
+    /// The seam has no way to say "done, no token" (`GssStep::Complete` is
+    /// refused by CredSSP), so it says it with an empty `FinalToken`.
+    struct FinishesSilently {
+        sent: bool,
+    }
+
+    impl GssMechanism for FinishesSilently {
+        fn oid(&self) -> &'static [u8] {
+            oid::KRB5
+        }
+        fn method_name(&self) -> &'static str {
+            "nla-kerberos"
+        }
+        fn step(&mut self, _input: &[u8]) -> Result<GssStep, AuthError> {
+            if self.sent {
+                Ok(GssStep::FinalToken(Vec::new()))
+            } else {
+                self.sent = true;
+                Ok(GssStep::Token(b"ap-req".to_vec()))
+            }
+        }
+        fn is_complete(&self) -> bool {
+            self.sent
+        }
+        fn wrap(&mut self, _: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Err(AuthError::UnexpectedToken)
+        }
+        fn unwrap(&mut self, _: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, AuthError> {
+            Err(AuthError::UnexpectedToken)
+        }
+        fn mic(&mut self, _: &[u8]) -> Result<Vec<u8>, AuthError> {
+            Ok(b"mic".to_vec())
+        }
+        fn verify_mic(&mut self, _: &[u8], _: &[u8]) -> Result<(), AuthError> {
+            Ok(())
+        }
+    }
+
+    /// A `responseToken` that is present and empty is not the same thing as an
+    /// absent one, and Windows sends the absent form. An acceptor is entitled
+    /// to read a present empty token as a mechanism token to feed onward, and
+    /// the mechanism has nothing to make of it.
+    ///
+    /// This is the one wire difference the Kerberos lane flagged as the most
+    /// likely source of an interop failure, so it is pinned here rather than
+    /// left to a capture to discover.
+    #[test]
+    fn a_mechanism_that_finishes_silently_omits_the_response_token() {
+        let mut spnego = client(vec![Box::new(FinishesSilently { sent: false })]);
+        let GssStep::Token(_init) = spnego.step(&[]).unwrap() else {
+            panic!("the first step produces the NegTokenInit")
+        };
+
+        // The acceptor answers, and the mechanism finishes with nothing to
+        // say. What goes back carries the MIC and no responseToken.
+        let reply = NegTokenResp {
+            neg_state: Some(NegState::AcceptIncomplete),
+            supported_mech: None,
+            response_token: Some(b"ap-rep".to_vec()),
+            mech_list_mic: None,
+        }
+        .encode();
+        let GssStep::FinalToken(out) = spnego.step(&reply).unwrap() else {
+            panic!("the mechanism finished, so this is the final token")
+        };
+
+        let parsed = NegTokenResp::decode(&out).expect("a NegTokenResp");
+        assert_eq!(
+            parsed.response_token, None,
+            "an empty inner token is an absent responseToken, not a present empty one"
+        );
+        // No MIC here, and that is right rather than a gap: RFC 4178 §5 makes
+        // one required when the mechanism used was not the first offered, and
+        // this exchange offered exactly one. `outgoing_mic` encodes that rule.
+        // The point of this test is the token, not the MIC.
+        assert_eq!(
+            parsed.mech_list_mic, None,
+            "one mechanism, used optimistically, needs no mechListMIC"
+        );
+    }
+
+    /// The same finish, with a second mechanism offered so a MIC IS required.
+    /// The `responseToken` must still be absent, and the MIC must still ride
+    /// with it: omitting the token must not take the MIC with it.
+    #[test]
+    fn a_silent_finish_still_carries_the_mic_when_one_is_required() {
+        let mut spnego = client(vec![
+            Box::new(FinishesSilently { sent: false }),
+            Inner::boxed(oid::NTLMSSP, "nla-ntlm"),
+        ]);
+        let GssStep::Token(_init) = spnego.step(&[]).unwrap() else {
+            panic!("the first step produces the NegTokenInit")
+        };
+        let reply = NegTokenResp {
+            neg_state: Some(NegState::AcceptIncomplete),
+            supported_mech: None,
+            response_token: Some(b"ap-rep".to_vec()),
+            mech_list_mic: None,
+        }
+        .encode();
+        let GssStep::FinalToken(out) = spnego.step(&reply).unwrap() else {
+            panic!("the mechanism finished, so this is the final token")
+        };
+
+        let parsed = NegTokenResp::decode(&out).expect("a NegTokenResp");
+        assert_eq!(
+            parsed.response_token, None,
+            "still absent, not present empty"
+        );
+        assert!(
+            parsed.mech_list_mic.is_some(),
+            "two mechanisms were offered, so the MIC is required and must survive"
+        );
     }
 
     #[test]
