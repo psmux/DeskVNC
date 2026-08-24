@@ -94,7 +94,9 @@ pub async fn open_stream(
 /// # Errors
 ///
 /// [`RdpError::CertificateMismatch`] when the pinned key changed, which is a
-/// hard stop and never auto retried, and [`RdpError::Tls`] for anything else
+/// hard stop and never auto retried,
+/// [`RdpError::LegacyTlsUnavailable`] when the host profile asks for a
+/// backend this build does not have, and [`RdpError::Tls`] for anything else
 /// the handshake reports.
 pub async fn upgrade_tls(
     stream: BoxedStream,
@@ -106,10 +108,7 @@ pub async fn upgrade_tls(
         // Silently ignoring the setting would mean a user who turned it on to
         // reach a Server 2008 R2 host sees the same failure with no clue that
         // the switch did nothing.
-        return Err(RdpError::Tls(format!(
-            "{server_name}: the TLS 1.0 and 1.1 backend is not compiled into this build \
-             (AGENT_BRIEF V3-B, PRDRDP/03 §4.7.2)"
-        )));
+        return Err(RdpError::LegacyTlsUnavailable(server_name.to_owned()));
     }
 
     let pin = pins.for_scheme(remote_core::PinScheme::RdpTls);

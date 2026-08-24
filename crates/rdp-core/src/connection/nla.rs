@@ -149,22 +149,34 @@ pub fn logon_identity(
 /// # Errors
 ///
 /// [`RdpError::CredentialsRequired`] when there is no user name or no
-/// password, and whatever `rdp-auth` makes of the configuration.
+/// password, and whatever `rdp-auth` makes of the configuration. Reaching
+/// that error from a session with a shell attached is a bug rather than a
+/// refusal: [`super::credentials::ensure`] runs first and asks the user
+/// (`crates/remote-core/src/events.rs:132`). It is still the answer for a
+/// headless caller, which has nobody to ask.
 pub fn credssp_client(
     creds: &Credentials,
     opts: &ResolvedOptions,
     identity: &ServerIdentity,
 ) -> Result<CredSspClient> {
-    let username = creds
-        .username
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-        .ok_or_else(|| RdpError::CredentialsRequired("no user name".to_owned()))?;
-    let password = creds
-        .password
-        .as_deref()
-        .ok_or_else(|| RdpError::CredentialsRequired("no password".to_owned()))?;
+    // One definition of "these credentials are unusable", shared with the
+    // gate, so the sentence the user is shown and the error the sequence
+    // returns cannot disagree about which half is missing.
+    if let Some(gap) = super::credentials::missing(creds) {
+        return Err(RdpError::CredentialsRequired(gap.to_owned()));
+    }
+    let (Some(username), Some(password)) = (
+        creds
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty()),
+        creds.password.as_deref(),
+    ) else {
+        // Unreachable: `missing` returned `None`, which is exactly the
+        // statement that both of these are present.
+        return Err(RdpError::CredentialsRequired("no credentials".to_owned()));
+    };
 
     let (user, domain) = logon_identity(username, creds, opts);
 

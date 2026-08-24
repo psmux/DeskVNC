@@ -40,9 +40,11 @@
 //! (PRDRDP/03 §2.6, D6).
 
 pub mod activate;
+pub mod credentials;
 pub mod mcs;
 pub mod negotiate;
 pub mod nla;
+pub mod prompt;
 pub mod trust;
 
 use remote_core::{Credentials, SessionEvent, SessionState};
@@ -56,10 +58,11 @@ use crate::transport::framer::{Framed, Framer};
 use crate::transport::{self, TlsUpgrade};
 
 pub use activate::Activated;
+pub use credentials::{Ask, MAX_CREDENTIAL_PROMPTS};
 pub use mcs::{ChannelMap, McsConnected};
 pub use negotiate::SecurityProtocol;
 pub use nla::ServerIdentity;
-pub use trust::TrustPrompt;
+pub use prompt::Prompt;
 
 /// What the connection sequence hands the run loop, and nothing it does not.
 #[derive(Debug)]
@@ -126,25 +129,39 @@ pub async fn negotiate_security<S: AsyncRead + AsyncWrite + Unpin>(
 /// land in the user's existing Windows session rather than a new one
 /// (MS-RDPBCGR 2.2.4.3, PRDRDP/06 §5.5).
 ///
+/// `creds` is taken by `&mut` because the credential gate replaces it with
+/// whatever the user typed, and the caller keeps that for the connection
+/// after this one: see [`credentials`]. With `prompt` as `None` nothing is
+/// ever written to it.
+///
 /// # Errors
 ///
-/// As [`nla::authenticate`], [`mcs::connect`] and [`activate::activate`],
-/// plus [`RdpError::Redirected`] when a broker sent us elsewhere before the
-/// share existed, which is not a failure (MS-RDPBCGR 1.3.8).
+/// As [`credentials::ensure`], [`nla::authenticate`], [`mcs::connect`] and
+/// [`activate::activate`], plus [`RdpError::Redirected`] when a broker sent
+/// us elsewhere before the share existed, which is not a failure
+/// (MS-RDPBCGR 1.3.8).
 #[allow(clippy::too_many_arguments)]
 pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     framer: &mut Framer<S>,
     opts: &ResolvedOptions,
-    creds: &Credentials,
+    creds: &mut Credentials,
     selected: SecurityProtocol,
     identity: Option<&ServerIdentity>,
     trust: TrustDecision,
     arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
     events: &mpsc::Sender<SessionEvent>,
+    prompt: Option<Prompt<'_>>,
 ) -> Result<Connected> {
     let mut method = selected.method();
 
     if selected.wants_credssp() {
+        // Ask for whatever CredSSP needs and does not have, before the state
+        // says `Authenticating` and long before a token goes out. Only this
+        // branch asks: a plain TLS connection needs no credential at connect
+        // time, because the server's own logon screen collects it
+        // (MS-RDPBCGR 5.4.5.1, and `SecurityProtocol::wants_credssp`).
+        credentials::ensure(creds, events, prompt).await?;
+
         // The method reaches the UI before the first token goes out, so a
         // user staring at a failed logon has a clue which half of the stack
         // to suspect (PRDRDP/00 R12).
@@ -240,11 +257,11 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
 pub async fn connect(
     stream: BoxedStream,
     opts: &ResolvedOptions,
-    creds: &Credentials,
+    creds: &mut Credentials,
     pins: &remote_core::CertPins,
     arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
     events: &mpsc::Sender<SessionEvent>,
-    prompt: Option<TrustPrompt<'_>>,
+    mut prompt: Option<Prompt<'_>>,
 ) -> Result<(Connected, Framer<BoxedStream>)> {
     let received = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut framer = Framer::new(stream, received.clone());
@@ -256,10 +273,12 @@ pub async fn connect(
     let (stream, _empty) = framer.into_inner();
     let upgrade = transport::upgrade_tls(stream, &opts.server_name, pins, opts.legacy_tls).await?;
     let trust = upgrade.decision.clone();
-    // The prompt gates CredSSP, so it happens before the identity is built and
-    // long before a credential is encrypted under the server's key
-    // (PRDRDP/00 R13, PRDRDP/03 §5.4).
-    trust::approve(&trust, events, prompt).await?;
+    // The certificate prompt gates CredSSP, so it happens before the identity
+    // is built and long before a credential is encrypted under the server's
+    // key (PRDRDP/00 R13, PRDRDP/03 §5.4). It is reborrowed rather than moved
+    // because the credential gate inside `after_upgrade` asks down the same
+    // channel afterwards, and there is only one receiver to lend.
+    trust::approve(&trust, events, prompt.as_mut().map(Prompt::reborrow)).await?;
     let identity = ServerIdentity::from_upgrade(&upgrade)?;
 
     let TlsUpgrade { stream, .. } = upgrade;
@@ -273,6 +292,7 @@ pub async fn connect(
         trust,
         arc,
         events,
+        prompt,
     )
     .await?;
     Ok((connected, framer))

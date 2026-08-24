@@ -118,10 +118,10 @@ A captured broker redirection settles both.
 
 `crates/rdp-codecs/src/progressive/`, `crates/rdp-core/src/channels/egfx/`.
 
-This was the highest live interop risk in the tree and half of it is closed.
-The half that is closed: `rdp_codecs::progressive` is a decoder now, compiled
-by default, and the entry the earlier version of this section carried, that it
-was a stub behind an off by default feature, is gone.
+This was the highest live interop risk in the tree and it is closed. The
+decoder half: `rdp_codecs::progressive` is a decoder now, compiled by default,
+and the entry the earlier version of this section carried, that it was a stub
+behind an off by default feature, is gone.
 
 The reasoning for the feature gate, recorded because the gate still exists.
 Progressive is available from EGFX capability version 8, which is what we
@@ -133,13 +133,23 @@ save a session. It costs 17.9 KiB in a linked, LTO'd release binary that calls
 both RemoteFX entry points, measured, which is 4.5 percent, and one more fuzz
 target out of ten. `--no-default-features` still turns it off.
 
-**The half that is open is the routing.** `rdp-core` has to send codec id
-`0x0009` to `progressive::decode_message` and give each surface a
-`ProgressiveState` that lives as long as the surface. Until it does, the
-session still stops with a named refusal and the decoder underneath it is
-unreachable. `rdp_pdu::vc::egfx::codec_id` still does not define `0x0009`, so
-the session names it locally with a citation; that constant belongs in
-`rdp-pdu`.
+**The routing half is closed too.** `crates/rdp-core/src/channels/egfx/decode.rs`
+sends codec id `0x0009` to `progressive::decode_message`, and the
+`ProgressiveState` it hands over is a field of `Surface`, so it is created with
+the surface, dropped with it, and refit when the geometry moves. The scratch is
+RemoteFX's, shared because `progressive::scratch_len` is
+`remotefx::scratch_len` and neither holds anything between calls.
+`rdp_pdu::vc::egfx::codec_id` still does not define `0x0009`, so `rdp-core`
+names it locally with a citation (`decode::CAPROGRESSIVE`); that constant
+belongs in `rdp-pdu`.
+
+What is not implemented is §4.9.4's cross context eviction, and it is a
+deliberate omission rather than a gap. The per surface store is bounded by that
+surface's own tile grid, `ceil(w/64) * ceil(h/64) * 24 KiB`, which is 47.8 MiB
+at 4K; across the session it is bounded at one and a half times
+`MAX_SURFACE_BYTES`, because a tile costs 24 KiB of coefficients for 16 KiB of
+pixels. There is nothing an eviction could free that the surface budget has not
+already refused.
 
 `PRDRDP/04 §4.9` says progressive rides `WIRE_TO_SURFACE_2`, on the grounds
 that it is the one codec with persistent state and that PDU is the one

@@ -461,7 +461,21 @@ export type SessionState =
   | { state: "negotiating" }
   | { state: "connected" }
   | { state: "reconnecting"; attempt: number; next_retry_ms: number; reason: string }
-  | { state: "disconnected"; reason: string; can_retry: boolean };
+  | {
+      state: "disconnected";
+      reason: string;
+      can_retry: boolean;
+      /**
+       * A stable identifier for why the session ended, when the protocol has
+       * one. Match on this rather than on `reason`, which is a sentence for a
+       * person to read and may be reworded at any time.
+       *
+       * Absent for every VNC failure, which is why it is optional.
+       * The RDP side sends `nla-refused`, `ntlm-refused-by-policy`,
+       * `legacy-tls-unavailable`, `certificate-changed` and `not-implemented`.
+       */
+      symbol?: string;
+    };
 
 /**
  * `vnc_core::RttSource`, serde `rename_all = "kebab-case"`. Says which

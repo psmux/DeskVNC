@@ -76,12 +76,13 @@ async fn run_sequence(
         connection::after_upgrade(
             &mut framer,
             &opts,
-            &options.credentials,
+            &mut options.credentials,
             selected,
             None,
             TrustDecision::VerifiedByCa,
             None,
             &events,
+            None,
         )
         .await
     })
@@ -581,12 +582,13 @@ async fn credssp_without_a_certificate_is_refused_rather_than_started() {
         connection::after_upgrade(
             &mut framer,
             &opts,
-            &options.credentials,
+            &mut options.credentials,
             selected,
             None,
             TrustDecision::VerifiedByCa,
             None,
             &events,
+            None,
         )
         .await
     })
@@ -653,7 +655,7 @@ async fn run_session_steps(
     Result<RunOutcome, RdpError>,
 ) {
     let server = MockRdpServer::start(config).await;
-    let options = options_for(server.addr);
+    let mut options = options_for(server.addr);
     let rdp = rdp_half(&options);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
@@ -710,12 +712,13 @@ async fn run_session_steps(
         let connected = connection::after_upgrade(
             &mut framer,
             &opts,
-            &options.credentials,
+            &mut options.credentials,
             selected,
             None,
             TrustDecision::VerifiedByCa,
             None,
             &events,
+            None,
         )
         .await
         .expect("the connection sequence completed");
@@ -917,6 +920,7 @@ async fn a_spawned_session_reports_its_failure_through_the_event_stream() {
             if let SessionEvent::StateChanged(remote_core::SessionState::Disconnected {
                 reason,
                 can_retry,
+                ..
             }) = event
             {
                 last = Some((reason, can_retry));
@@ -957,7 +961,7 @@ async fn run_sequence_with_trust(
     Result<Connected, RdpError>,
 ) {
     let server = MockRdpServer::start(MockConfig::default()).await;
-    let options = options_for(server.addr);
+    let mut options = options_for(server.addr);
     let rdp = rdp_half(&options);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
@@ -991,9 +995,10 @@ async fn run_sequence_with_trust(
         connection::trust::approve(
             &gated,
             &events,
-            Some(connection::TrustPrompt {
+            Some(connection::Prompt {
                 commands: &mut command_rx,
                 cancel: &cancel,
+                ask: &mut connection::Ask::new(),
             }),
         )
         .await?;
@@ -1001,12 +1006,13 @@ async fn run_sequence_with_trust(
         connection::after_upgrade(
             &mut framer,
             &opts,
-            &options.credentials,
+            &mut options.credentials,
             selected,
             None,
             decision,
             None,
             &events,
+            None,
         )
         .await
     })
@@ -1421,5 +1427,227 @@ async fn a_clipboard_round_trip_goes_both_ways() {
             .any(|ids| ids.contains(&CF_UNICODETEXT)),
         "the offer names CF_UNICODETEXT: {:?}",
         recorded.clipboard_formats
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The credential prompt (PRD/10 §3.4, PRDRDP/00 R13)
+// ---------------------------------------------------------------------------
+
+/// Drive phase 1 and then the rest of the sequence with somebody there to
+/// answer for the credentials.
+///
+/// The mock answers the X.224 negotiation with `PROTOCOL_HYBRID`, which is
+/// what makes `SecurityProtocol::wants_credssp` true and the gate run at all.
+/// What the mock cannot do is TLS, so `identity` is `None` and CredSSP is
+/// refused for having nothing to bind to (MS-CSSP 3.1.5); under
+/// `NlaPolicy::AllowFallback`, which `common::options_for` sets, that is not
+/// a failure and the sequence carries on over plain TLS. So a run that
+/// reaches `Connected` is a run that went through the gate and out the other
+/// side, which is the property these tests are for.
+///
+/// Each answer is sent only once the client has actually emitted
+/// `SessionEvent::CredentialsRequired`, so a gate that did not park would
+/// deadlock rather than pass.
+async fn run_sequence_with_credentials(
+    stored: Credentials,
+    answers: Vec<ClientCommand>,
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<Connected, RdpError>,
+) {
+    let server = MockRdpServer::start(MockConfig {
+        negotiation: Negotiation::Select(rdp_pdu::x224::security_protocol::HYBRID),
+        ..MockConfig::default()
+    })
+    .await;
+    let mut options = options_for(server.addr);
+    options.credentials = stored;
+    let rdp = rdp_half(&options);
+    let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
+
+    let (events, mut event_rx) = mpsc::channel(256);
+    let (command_tx, mut command_rx) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+
+    let collector = tokio::spawn(async move {
+        let mut collected: Vec<SessionEvent> = Vec::new();
+        let mut answers = answers.into_iter();
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, SessionEvent::CredentialsRequired(_)) {
+                if let Some(answer) = answers.next() {
+                    let _ = command_tx.send(answer).await;
+                }
+            }
+            collected.push(event);
+        }
+        collected
+    });
+
+    let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let stream = TcpStream::connect(server.addr)
+            .await
+            .expect("the mock is up");
+        let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
+        let selected =
+            connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
+        assert_eq!(selected, SecurityProtocol::Hybrid);
+
+        connection::after_upgrade(
+            &mut framer,
+            &opts,
+            &mut options.credentials,
+            selected,
+            None,
+            TrustDecision::VerifiedByCa,
+            None,
+            &events,
+            Some(connection::Prompt {
+                commands: &mut command_rx,
+                cancel: &cancel,
+                ask: &mut connection::Ask::new(),
+            }),
+        )
+        .await
+    })
+    .await
+    .expect("the sequence finished inside the timeout");
+
+    drop(events);
+    let drained = collector.await.expect("the collector finished");
+    (server, drained, result)
+}
+
+/// Every credential prompt the run raised, in order.
+fn prompts(events: &[SessionEvent]) -> Vec<remote_core::CredentialRequest> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::CredentialsRequired(request) => Some(request.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The blocker this lane exists for: a connect with no stored password asks
+/// for one and carries on, rather than failing with "credentials required"
+/// (`crates/remote-core/src/events.rs:132`).
+#[tokio::test]
+async fn a_connect_with_no_stored_password_asks_and_carries_on() {
+    let (server, events, result) = run_sequence_with_credentials(
+        Credentials {
+            username: Some("alice".into()),
+            password: None,
+            domain: Some("CORP".into()),
+        },
+        vec![ClientCommand::ProvideCredentials {
+            // The shell folds its domain box into the user name, and
+            // `nla::logon_identity` splits it back out
+            // (`crates/remote-core/src/commands.rs:64`).
+            username: Some("CORP\\alice".into()),
+            password: "secret".into(),
+            save: true,
+        }],
+    )
+    .await;
+
+    let asked = prompts(&events);
+    assert_eq!(asked.len(), 1, "exactly one prompt: {events:?}");
+    assert_eq!(asked[0].attempt, 1);
+    assert_eq!(asked[0].error, None, "there was no previous attempt");
+    assert_eq!(
+        asked[0].kind,
+        remote_core::CredentialKind::UsernameAndPassword
+    );
+    assert!(!asked[0].truncates_password);
+    assert_eq!(asked[0].username_hint.as_deref(), Some("alice"));
+
+    // Past the gate: the sequence ran the phases after it and the mock saw
+    // the whole of them.
+    result.expect("the sequence continued past the prompt");
+    let recorded = server.recorded();
+    assert!(
+        recorded.client_blocks.is_some(),
+        "the MCS Connect Initial went out after the answer"
+    );
+    assert!(
+        recorded.client_info.is_some(),
+        "the Client Info PDU went out after the answer"
+    );
+}
+
+/// A dismissed prompt ends the attempt, and ends it before anything else
+/// reaches the server: the point of asking is that nothing is sent on a
+/// credential nobody supplied.
+#[tokio::test]
+async fn a_dismissed_credential_prompt_ends_the_attempt_and_sends_nothing_more() {
+    for answer in [ClientCommand::CancelCredentials, ClientCommand::Disconnect] {
+        let (server, events, result) =
+            run_sequence_with_credentials(Credentials::default(), vec![answer]).await;
+
+        assert_eq!(prompts(&events).len(), 1, "{events:?}");
+        let err = result.expect_err("dismissed");
+        assert!(matches!(err, RdpError::CredentialsRequired(_)), "{err}");
+        assert!(err.to_string().contains("dismissed"), "{err}");
+        // Not transient, so the backoff ladder does not walk straight back
+        // into the same dialog.
+        assert!(err.needs_user_action());
+        assert!(!err.is_transient());
+
+        let recorded = server.recorded();
+        assert!(
+            recorded.connection_request.is_some(),
+            "phase 1 did happen, so the next assertion means something"
+        );
+        assert!(
+            recorded.client_blocks.is_none(),
+            "no MCS Connect Initial after a dismissed prompt"
+        );
+        assert!(recorded.joins.is_empty(), "no channel joins either");
+        assert!(recorded.client_info.is_none(), "and no Client Info PDU");
+    }
+}
+
+/// An answer the gate cannot start CredSSP with is refused and asked again,
+/// with the count the UI shows and the reason it shows beside it. The user
+/// who cleared the user name box gets told what is missing rather than
+/// watching the attempt die.
+#[tokio::test]
+async fn a_refused_answer_is_asked_again_with_the_attempt_and_the_reason() {
+    let (server, events, result) = run_sequence_with_credentials(
+        Credentials::default(),
+        vec![
+            // The user name box was left empty, which CredSSP cannot build an
+            // identity from (MS-CSSP 3.1.5).
+            ClientCommand::ProvideCredentials {
+                username: None,
+                password: "secret".into(),
+                save: false,
+            },
+            ClientCommand::ProvideCredentials {
+                username: Some("CORP\\alice".into()),
+                password: "secret".into(),
+                save: false,
+            },
+        ],
+    )
+    .await;
+
+    let asked = prompts(&events);
+    assert_eq!(asked.len(), 2, "{events:?}");
+    assert_eq!(asked[0].attempt, 1);
+    assert_eq!(asked[0].error, None);
+    assert_eq!(asked[1].attempt, 2, "the second prompt counts itself");
+    assert_eq!(
+        asked[1].error.as_deref(),
+        Some("no user name"),
+        "and carries why the last answer was refused"
+    );
+
+    result.expect("the second answer got the sequence moving again");
+    assert!(
+        server.recorded().client_info.is_some(),
+        "the sequence ran the phases after the gate"
     );
 }

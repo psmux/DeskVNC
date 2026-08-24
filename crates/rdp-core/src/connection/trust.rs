@@ -1,5 +1,9 @@
-//! The trust on first use gate, and the prompt that makes it answerable
+//! The trust on first use gate, and the question it parks the sequence on
 //! (PRDRDP/00 R13, PRDRDP/03 §5.4).
+//!
+//! The channel the question travels down is [`super::prompt::Prompt`], which
+//! started life in this file as `TrustPrompt` and moved out when the
+//! credential gate needed the same three borrows ([`super::credentials`]).
 //!
 //! # Why this is its own file
 //!
@@ -39,25 +43,11 @@
 
 use remote_core::{ClientCommand, PinScheme, SessionEvent};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 use vnc_transport::TrustDecision;
 
 use crate::error::{RdpError, Result};
 
-/// What the sequence needs to raise a prompt and wait for its answer.
-///
-/// Borrowed rather than owned because the receiver belongs to the session
-/// task's supervisor for the whole session and is only lent to the connection
-/// sequence: nothing else reads it while the sequence runs, which is the same
-/// arrangement `vnc-core` makes for its credential prompt
-/// (`crates/vnc-core/src/session/connection.rs:315`, `serve_credential_ask`).
-pub struct TrustPrompt<'a> {
-    /// The command channel the shell answers on.
-    pub commands: &'a mut mpsc::Receiver<ClientCommand>,
-    /// Cancelled when the window is gone, so a dialog nobody will ever
-    /// answer does not hold the attempt open.
-    pub cancel: &'a CancellationToken,
-}
+use super::prompt::Prompt;
 
 /// Act on what the trust on first use verifier decided, asking the user when
 /// there is somebody to ask.
@@ -79,7 +69,7 @@ pub struct TrustPrompt<'a> {
 pub async fn approve(
     trust: &TrustDecision,
     events: &mpsc::Sender<SessionEvent>,
-    prompt: Option<TrustPrompt<'_>>,
+    prompt: Option<Prompt<'_>>,
 ) -> Result<()> {
     match trust {
         TrustDecision::VerifiedByCa | TrustDecision::PinnedMatch => Ok(()),
@@ -113,7 +103,7 @@ async fn ask(
     fingerprint: &str,
     subject: &str,
     events: &mpsc::Sender<SessionEvent>,
-    prompt: TrustPrompt<'_>,
+    prompt: Prompt<'_>,
 ) -> Result<()> {
     tracing::info!(
         %fingerprint,
@@ -131,7 +121,9 @@ async fn ask(
     )
     .await?;
 
-    let TrustPrompt { commands, cancel } = prompt;
+    let Prompt {
+        commands, cancel, ..
+    } = prompt;
     loop {
         let cmd = tokio::select! {
             biased;
@@ -213,6 +205,8 @@ fn same_key(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::credentials::Ask;
+    use tokio_util::sync::CancellationToken;
 
     fn unknown() -> TrustDecision {
         TrustDecision::Unknown {
@@ -299,9 +293,10 @@ mod tests {
         approve(
             &unknown(),
             &events,
-            Some(TrustPrompt {
+            Some(Prompt {
                 commands: &mut commands,
                 cancel: &cancel,
+                ask: &mut Ask::new(),
             }),
         )
         .await
@@ -328,9 +323,10 @@ mod tests {
             let err = approve(
                 &unknown(),
                 &events,
-                Some(TrustPrompt {
+                Some(Prompt {
                     commands: &mut commands,
                     cancel: &cancel,
+                    ask: &mut Ask::new(),
                 }),
             )
             .await
@@ -366,9 +362,10 @@ mod tests {
         let err = approve(
             &unknown(),
             &events,
-            Some(TrustPrompt {
+            Some(Prompt {
                 commands: &mut commands,
                 cancel: &cancel,
+                ask: &mut Ask::new(),
             }),
         )
         .await
@@ -381,9 +378,10 @@ mod tests {
         let err = approve(
             &unknown(),
             &events,
-            Some(TrustPrompt {
+            Some(Prompt {
                 commands: &mut commands,
                 cancel: &cancel,
+                ask: &mut Ask::new(),
             }),
         )
         .await
@@ -422,9 +420,10 @@ mod tests {
         approve(
             &unknown(),
             &events,
-            Some(TrustPrompt {
+            Some(Prompt {
                 commands: &mut commands,
                 cancel: &cancel,
+                ask: &mut Ask::new(),
             }),
         )
         .await

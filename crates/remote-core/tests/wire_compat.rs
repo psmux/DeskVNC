@@ -57,10 +57,23 @@ fn session_state_keeps_its_tag_and_its_inner_field_names() {
     let d = SessionState::Disconnected {
         reason: "x".into(),
         can_retry: true,
+        symbol: None,
     };
     assert_eq!(
         to_json(&d),
         r#"{"state":"disconnected","reason":"x","can_retry":true}"#
+    );
+    // The symbol is serialized only when there is one, so every RFB
+    // disconnect is the object it was before the field existed and the UI
+    // reads `symbol` as optional (`ui/src/lib/types.ts:464`).
+    let d = SessionState::Disconnected {
+        reason: "x".into(),
+        can_retry: false,
+        symbol: Some("nla-refused".into()),
+    };
+    assert_eq!(
+        to_json(&d),
+        r#"{"state":"disconnected","reason":"x","can_retry":false,"symbol":"nla-refused"}"#
     );
     assert_eq!(
         to_json(&SessionState::Connected),

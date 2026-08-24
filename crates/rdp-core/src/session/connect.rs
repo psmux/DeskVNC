@@ -89,33 +89,7 @@ pub async fn run_once(
         None => None,
     };
 
-    let stream = crate::transport::open_stream(options, events).await?;
-
-    // The connection sequence is straight line `await` code and is
-    // deliberately not cancellation safe, so it is raced against the token
-    // rather than being polled inside a `select!` alongside anything else:
-    // cancelling it drops the whole attempt and the whole stream with it.
-    //
-    // The one thing it does await on is the user: an unpinned server key
-    // parks the sequence on a `ClientCommand::TrustCertificate` answer, which
-    // is why the command receiver is lent down here rather than being read
-    // only by the pump (`crate::connection::trust`). Nothing else reads it
-    // while the sequence runs.
-    let connect = connection::connect(
-        stream,
-        &opts,
-        &options.credentials,
-        &options.cert_pins,
-        arc,
-        events,
-        Some(connection::TrustPrompt { commands, cancel }),
-    );
-    let result = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(RdpError::Cancelled),
-        result = connect => result,
-    };
-    let (connected, framer) = match result {
+    let (connected, framer) = match establish(options, &opts, arc, events, commands, cancel).await {
         Ok(pair) => pair,
         // A broker can redirect before the session is up (MS-RDPBCGR 1.3.8),
         // in which case there is no pump to run: the attempt is over and the
@@ -147,6 +121,100 @@ pub async fn run_once(
         cancel,
     )
     .await
+}
+
+/// Open a connection and run the sequence on it, asking the user for
+/// credentials when the sequence needs them and re-asking when the server
+/// rejects what they typed.
+///
+/// # Why the re-ask opens a second socket
+///
+/// It has to. MS-CSSP 3.1.5 has the client fail immediately on the error code
+/// the server returns, and by then the server has finished with the exchange;
+/// a second `TSRequest` on that TLS session goes to a peer that has stopped
+/// listening, so a rejected password would turn into a dropped connection
+/// rather than a second try. The credentials therefore live here, above the
+/// sequence, and a rejection goes round this loop rather than round one
+/// inside [`connection::connect`].
+///
+/// # What is not retried, and why that matters more than what is
+///
+/// Only credentials the *user* supplied, which is what
+/// [`connection::Ask::prompted`] reports. A stored password the server
+/// rejects fails once, opening exactly one TCP connection: replaying a saved
+/// credential is how an Active Directory account gets locked, and the user
+/// finds out when they cannot sign in to their own laptop. The count is
+/// bounded by [`connection::MAX_CREDENTIAL_PROMPTS`] on top of that.
+///
+/// The loop lives inside a single supervisor iteration and never returns a
+/// transient error, so [`RdpError::AuthFailed`] still reaches the supervisor
+/// as a terminal failure. `vnc-core` draws the same two lines in the same
+/// place (`crates/vnc-core/src/session/connection.rs:366`).
+async fn establish(
+    options: &ConnectOptions,
+    opts: &ResolvedOptions,
+    arc: Option<rdp_pdu::rdp::client_info::ArcClientPrivatePacket>,
+    events: &mpsc::Sender<SessionEvent>,
+    commands: &mut mpsc::Receiver<ClientCommand>,
+    cancel: &CancellationToken,
+) -> Result<(connection::Connected, Framer<vnc_transport::BoxedStream>)> {
+    // Cloned rather than borrowed because the gate replaces them with what
+    // the user types, and what they type has to survive into the next turn of
+    // this loop. The profile is never rewritten: a password the server
+    // rejected is not one to remember, and the keychain is the shell's
+    // (`crates/remote-core/src/commands.rs:64`).
+    let mut creds = options.credentials.clone();
+    let mut ask = connection::Ask::new();
+
+    loop {
+        let stream = crate::transport::open_stream(options, events).await?;
+
+        // The connection sequence is straight line `await` code and is
+        // deliberately not cancellation safe, so it is raced against the
+        // token rather than being polled inside a `select!` alongside
+        // anything else: cancelling it drops the whole attempt and the whole
+        // stream with it.
+        //
+        // The one thing it does await on is the user. An unpinned server key
+        // parks the sequence on a `ClientCommand::TrustCertificate` answer
+        // and a missing password parks it on a
+        // `ClientCommand::ProvideCredentials` one, which is why the command
+        // receiver is lent down here rather than being read only by the pump
+        // (`crate::connection::prompt`). Nothing else reads it while the
+        // sequence runs.
+        let result = {
+            let connect = connection::connect(
+                stream,
+                opts,
+                &mut creds,
+                &options.cert_pins,
+                arc,
+                events,
+                Some(connection::Prompt {
+                    commands,
+                    cancel,
+                    ask: &mut ask,
+                }),
+            );
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(RdpError::Cancelled),
+                result = connect => result,
+            }
+        };
+
+        match result {
+            Ok(pair) => return Ok(pair),
+            Err(e @ RdpError::AuthFailed(_)) if ask.prompted() && ask.may_ask_again() => {
+                tracing::info!(
+                    prompts = ask.raised(),
+                    "the server rejected the credentials the user supplied; asking again"
+                );
+                ask.refused(e.user_message());
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Split the stream, start the writer task, and pump.

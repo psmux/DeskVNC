@@ -76,19 +76,16 @@ use surface::SurfaceStore;
 /// `RDPGFX_CAPS_FLAG_SMALL_CACHE` both shrink the cache the server may use
 /// (MS-RDPEGFX 2.2.3.1), and we would rather have the 100 MB.
 ///
-/// What this does not buy us is protection from RemoteFX Progressive, which
-/// is available from version 8 and which this build cannot decode. There is
-/// no capability bit that declines it, so the refusal is at the codec id and
-/// it is loud: see [`CODEC_CAPROGRESSIVE`].
+/// What version 8 does bring with it is RemoteFX Progressive, and there is no
+/// capability bit that declines it: `RDPGFX_CAPS_FLAG_AVC_DISABLED` exists
+/// only from version 10 and has no progressive equivalent at any version. So
+/// a server may send that codec id whatever we advertise, and this build
+/// decodes it (`decode::CAPROGRESSIVE`, `docs/RDP_SPEC_NOTES.md` §1.6).
 const ADVERTISED: [u32; 2] = [caps_version::V8, caps_version::V8_1];
 
-/// `RDPGFX_CODECID_CAPROGRESSIVE` (MS-RDPEGFX 2.2.2.1).
-///
-/// Not in `rdp_pdu::vc::egfx::codec_id`, which lists the eight ids it needs.
-/// It is named here so the refusal can say "progressive" rather than
-/// "0x0009", because it is the one unsupported codec a Windows server is
-/// likely to actually send.
-pub const CODEC_CAPROGRESSIVE: u16 = 0x0009;
+/// `RDPGFX_CODECID_CAPROGRESSIVE` (MS-RDPEGFX 2.2.2.1), re-exported from the
+/// module that routes it so the name has one definition.
+pub use decode::CAPROGRESSIVE as CODEC_CAPROGRESSIVE;
 
 /// The graphics channel.
 ///
@@ -128,6 +125,7 @@ impl std::fmt::Debug for Egfx {
             .field("confirmed", &self.confirmed)
             .field("surfaces", &self.surfaces.len())
             .field("surface_bytes", &self.surfaces.bytes())
+            .field("progressive_bytes", &self.surfaces.progressive_bytes())
             .field("cache_entries", &self.cache.len())
             .field("cache_bytes", &self.cache.bytes())
             .field("open_frame", &self.open_frame)
@@ -344,26 +342,24 @@ impl Egfx {
                 dest_rect,
                 bitmap_data,
             } => {
-                if codec_id == CODEC_CAPROGRESSIVE {
-                    return Err(RdpError::Protocol(
-                        "the server sent a RemoteFX Progressive rectangle; this build has no \
-                         progressive decoder (MS-RDPEGFX 2.2.2.1, PRDRDP/04 §4.9, the \
-                         `progressive` feature of rdp-codecs)"
-                            .to_owned(),
-                    ));
-                }
                 let Self {
                     surfaces, decoders, ..
                 } = self;
                 let surface = surfaces.get_mut(surface_id, "a wire to surface command")?;
                 let has_alpha = surface.has_alpha;
-                let mut dst = surface.view(dest_rect, "a wire to surface command")?;
+                // The progressive tile store and the destination come out of
+                // the surface together, because the decoder needs both at
+                // once and the destination already borrows the surface
+                // (MS-RDPEGFX 2.2.4.2).
+                let (progressive, mut dst) =
+                    surface.progressive_view(dest_rect, "a wire to surface command")?;
                 decode::wire_to_surface(
                     codec_id,
                     pixel_format,
                     has_alpha,
                     bitmap_data.as_slice(),
                     decoders,
+                    progressive,
                     &mut dst,
                 )?;
                 self.damaged(surface_id, dest_rect)
