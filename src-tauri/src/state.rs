@@ -57,17 +57,30 @@ pub struct PendingWindow {
 /// stay distinct if they are distinct profiles. Ad-hoc connects (Nearby band,
 /// quick connect) have no profile, so they fall back to the endpoint, which is
 /// also what makes two Nearby tiles for one machine collapse onto one window.
+///
+/// The endpoint variant carries the protocol as well as the address and the
+/// port. Two protocols on one box normally use different ports, so the key
+/// was already unique in practice, but "in practice" was doing load bearing
+/// work in a de-duplication rule: somebody who has genuinely put RDP on 5900
+/// would otherwise have their VNC window focused instead of getting a
+/// connection (PRDRDP/07 §4.12). `Profile` needs no protocol, a profile
+/// already carries one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MachineKey {
     Profile(String),
-    Endpoint { address: String, port: u16 },
+    Endpoint {
+        protocol: ProtocolKind,
+        address: String,
+        port: u16,
+    },
 }
 
 impl MachineKey {
-    pub fn new(profile_id: Option<&str>, address: &str, port: u16) -> Self {
+    pub fn new(protocol: ProtocolKind, profile_id: Option<&str>, address: &str, port: u16) -> Self {
         match profile_id.map(str::trim).filter(|id| !id.is_empty()) {
             Some(id) => MachineKey::Profile(id.to_string()),
             None => MachineKey::Endpoint {
+                protocol,
                 address: normalize_address(address),
                 port,
             },
@@ -109,36 +122,55 @@ pub const OPENING_GRACE: std::time::Duration = std::time::Duration::from_secs(15
 /// so the secret can never leak into a log line or a crash report.
 #[derive(Clone)]
 pub struct PendingCredentialSave {
+    /// Which protocol proved this credential, so the merge knows which
+    /// fields of the blob it belongs in.
+    pub protocol: ProtocolKind,
     pub username: Option<String>,
+    /// Logon domain. `None` on every VNC path, and on an RDP logon with a
+    /// local account or a UPN in `username`.
+    pub domain: Option<String>,
     pub password: String,
 }
 
 impl std::fmt::Debug for PendingCredentialSave {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PendingCredentialSave")
+            .field("protocol", &self.protocol)
             .field("username", &self.username)
+            // Printed rather than redacted: a wrong or missing domain is the
+            // commonest reason an NLA logon is refused, and a support log
+            // that hides it hides the answer. It is configuration, not a
+            // secret; the password below is the secret.
+            .field("domain", &self.domain)
             .field("password", &"***")
             .finish()
     }
 }
 
 impl PendingCredentialSave {
-    /// Map onto the at-rest blob. A username means an identity-carrying method
-    /// (VeNCrypt `*Plain`, Apple DH, MSLogonII, RA2 subtype 1), so it goes in
-    /// the `vencrypt_*` pair; password-only methods use `vnc_password`.
-    /// Any other field already stored for the host (e.g. an SSH passphrase) is
+    /// Map onto the at-rest blob, dispatching on the protocol that proved it.
+    ///
+    /// The per protocol rules live on [`vnc_store::StoredCredentials`]
+    /// (`set_rdp_identity`, `set_vnc_credential`) rather than here, so the
+    /// dialog write and the post-connect write cannot disagree about which
+    /// fields belong to which protocol. Any other field already stored for
+    /// the host (an SSH passphrase, the other protocol's password) is
     /// preserved by merging into `existing`.
     pub fn merge_into(
         &self,
         existing: Option<vnc_store::StoredCredentials>,
     ) -> vnc_store::StoredCredentials {
         let mut creds = existing.unwrap_or_default();
-        match &self.username {
-            Some(user) if !user.is_empty() => {
-                creds.vencrypt_user = Some(user.clone());
-                creds.vencrypt_pass = Some(self.password.clone());
-            }
-            _ => creds.vnc_password = Some(self.password.clone()),
+        match self.protocol {
+            ProtocolKind::Rdp => creds.set_rdp_identity(
+                self.username.as_deref(),
+                self.domain.as_deref(),
+                &self.password,
+            ),
+            // `ProtocolKind` is `#[non_exhaustive]`, and VNC is the shape
+            // every protocol this build does not know about would be stored
+            // as today, which is the safe reading of "some password".
+            _ => creds.set_vnc_credential(self.username.as_deref(), &self.password),
         }
         creds
     }
@@ -157,7 +189,10 @@ pub struct ProtocolRegistry {
 impl ProtocolRegistry {
     pub fn new() -> Self {
         Self {
-            drivers: vec![Arc::new(VncDriver::new())],
+            drivers: vec![
+                Arc::new(VncDriver::new()),
+                Arc::new(rdp_core::RdpDriver::new()),
+            ],
         }
     }
 
@@ -197,9 +232,23 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
+    /// Which protocol this session speaks.
+    ///
+    /// Read off the handle rather than stored a second time on the entry:
+    /// `SessionHandle::kind` is set by the driver that spawned the task, so
+    /// the two can never disagree.
+    pub fn protocol(&self) -> ProtocolKind {
+        self.handle.kind
+    }
+
     /// Which machine this session is talking to (see [`MachineKey`]).
     pub fn machine_key(&self) -> MachineKey {
-        MachineKey::new(self.profile_id.as_deref(), &self.address, self.port)
+        MachineKey::new(
+            self.protocol(),
+            self.profile_id.as_deref(),
+            &self.address,
+            self.port,
+        )
     }
 
     /// Is this session still worth focusing?
@@ -427,24 +476,27 @@ mod protocol_registry_tests {
         assert_eq!(driver.default_port(), 5900);
     }
 
-    /// A protocol this build cannot speak is a `None`, never a panic: the
-    /// caller turns it into a message the user can read.
     #[test]
-    fn an_unbuilt_protocol_is_absent_rather_than_fatal() {
-        assert!(ProtocolRegistry::new().get(ProtocolKind::Rdp).is_none());
+    fn the_rdp_driver_is_registered_and_answers_on_3389() {
+        let registry = ProtocolRegistry::new();
+        let driver = registry
+            .get(ProtocolKind::Rdp)
+            .expect("this build speaks RDP");
+        assert_eq!(driver.kind(), ProtocolKind::Rdp);
+        assert_eq!(driver.default_port(), 3389);
     }
 
-    /// The registry is what a second protocol changes, so pin its size: a
-    /// driver added without a decision here fails this test.
+    /// The registry is what a third protocol changes, so pin its membership:
+    /// a driver added without a decision here fails this test.
     #[test]
-    fn one_protocol_is_registered_today() {
+    fn two_protocols_are_registered_today() {
         let registry = ProtocolRegistry::new();
         let built: Vec<_> = ProtocolKind::ALL
             .iter()
             .copied()
             .filter(|k| registry.get(*k).is_some())
             .collect();
-        assert_eq!(built, vec![ProtocolKind::Vnc]);
+        assert_eq!(built, vec![ProtocolKind::Vnc, ProtocolKind::Rdp]);
     }
 }
 
@@ -469,6 +521,17 @@ mod tests {
             address: &str,
             port: u16,
         ) -> &mut Self {
+            self.add_kind(ProtocolKind::Vnc, id, profile_id, address, port)
+        }
+
+        fn add_kind(
+            &mut self,
+            kind: ProtocolKind,
+            id: &str,
+            profile_id: Option<&str>,
+            address: &str,
+            port: u16,
+        ) -> &mut Self {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
             self.keepalive.push(rx);
             self.sessions.insert(
@@ -476,7 +539,7 @@ mod tests {
                 SessionEntry {
                     handle: SessionHandle {
                         id: id.to_string(),
-                        kind: ProtocolKind::Vnc,
+                        kind,
                         commands: tx,
                         cancel: tokio_util::sync::CancellationToken::new(),
                     },
@@ -514,7 +577,7 @@ mod tests {
     fn a_saved_profile_identifies_the_machine_even_if_its_address_changed() {
         let reg = one("s1", Some("host-a"), "10.0.0.5", 5900);
         // Same profile, new address (DHCP moved it), still the same machine.
-        let key = MachineKey::new(Some("host-a"), "10.0.0.99", 5901);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-a"), "10.0.0.99", 5901);
         assert_eq!(
             find_live_session(&reg.sessions, &key, ALL_WINDOWS_EXIST),
             Some(ExistingWindow {
@@ -527,7 +590,7 @@ mod tests {
     #[test]
     fn different_profiles_at_one_endpoint_are_different_machines() {
         let reg = one("s1", Some("host-a"), "10.0.0.5", 5900);
-        let key = MachineKey::new(Some("host-b"), "10.0.0.5", 5900);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-b"), "10.0.0.5", 5900);
         assert_eq!(
             find_live_session(&reg.sessions, &key, ALL_WINDOWS_EXIST),
             None
@@ -538,14 +601,30 @@ mod tests {
     fn ad_hoc_sessions_fall_back_to_address_and_port() {
         let reg = one("s1", None, "Studio.local", 5900);
         // Case and the mDNS trailing dot must not split one machine in two.
-        let same = MachineKey::new(None, "studio.local.", 5900);
+        let same = MachineKey::new(ProtocolKind::Vnc, None, "studio.local.", 5900);
         assert!(find_live_session(&reg.sessions, &same, ALL_WINDOWS_EXIST).is_some());
+    }
+
+    /// Someone who has genuinely put RDP on 5900 must get a connection, not
+    /// the VNC window they already had open at that address (PRDRDP/07 §4.12).
+    #[test]
+    fn two_protocols_at_one_endpoint_are_two_machines() {
+        let mut reg = Registry::default();
+        reg.add_kind(ProtocolKind::Vnc, "s1", None, "10.0.0.5", 5900);
+        let rdp = MachineKey::new(ProtocolKind::Rdp, None, "10.0.0.5", 5900);
+        assert_eq!(
+            find_live_session(&reg.sessions, &rdp, ALL_WINDOWS_EXIST),
+            None
+        );
+
+        let vnc = MachineKey::new(ProtocolKind::Vnc, None, "10.0.0.5", 5900);
+        assert!(find_live_session(&reg.sessions, &vnc, ALL_WINDOWS_EXIST).is_some());
     }
 
     #[test]
     fn a_different_port_is_a_different_machine() {
         let reg = one("s1", None, "10.0.0.5", 5900);
-        let other = MachineKey::new(None, "10.0.0.5", 5901);
+        let other = MachineKey::new(ProtocolKind::Vnc, None, "10.0.0.5", 5901);
         assert_eq!(
             find_live_session(&reg.sessions, &other, ALL_WINDOWS_EXIST),
             None
@@ -558,7 +637,7 @@ mod tests {
         // ad-hoc session; it gets its own window rather than hijacking the
         // profile's.
         let reg = one("s1", Some("host-a"), "10.0.0.5", 5900);
-        let adhoc = MachineKey::new(None, "10.0.0.5", 5900);
+        let adhoc = MachineKey::new(ProtocolKind::Vnc, None, "10.0.0.5", 5900);
         assert_eq!(
             find_live_session(&reg.sessions, &adhoc, ALL_WINDOWS_EXIST),
             None
@@ -569,7 +648,7 @@ mod tests {
     fn a_dead_but_unreaped_session_does_not_block_reconnecting() {
         let mut reg = one("s1", Some("host-a"), "10.0.0.5", 5900);
         reg.kill("s1");
-        let key = MachineKey::new(Some("host-a"), "10.0.0.5", 5900);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-a"), "10.0.0.5", 5900);
         assert_eq!(
             find_live_session(&reg.sessions, &key, ALL_WINDOWS_EXIST),
             None
@@ -579,7 +658,7 @@ mod tests {
     #[test]
     fn a_session_whose_window_is_gone_does_not_block_reconnecting() {
         let reg = one("s1", Some("host-a"), "10.0.0.5", 5900);
-        let key = MachineKey::new(Some("host-a"), "10.0.0.5", 5900);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-a"), "10.0.0.5", 5900);
         assert_eq!(find_live_session(&reg.sessions, &key, NO_WINDOWS), None);
     }
 
@@ -588,7 +667,7 @@ mod tests {
         let mut reg = Registry::default();
         reg.add("s1", Some("host-a"), "10.0.0.5", 5900)
             .add("s2", None, "10.0.0.7", 5900);
-        let third = MachineKey::new(Some("host-c"), "10.0.0.9", 5900);
+        let third = MachineKey::new(ProtocolKind::Vnc, Some("host-c"), "10.0.0.9", 5900);
         assert_eq!(
             find_live_session(&reg.sessions, &third, ALL_WINDOWS_EXIST),
             None
@@ -602,13 +681,79 @@ mod tests {
             .add("s2", Some("host-a"), "10.0.0.5", 5900);
         let earlier = reg.sessions["s1"].started_at - std::time::Duration::from_secs(5);
         reg.sessions.get_mut("s1").unwrap().started_at = earlier;
-        let key = MachineKey::new(Some("host-a"), "10.0.0.5", 5900);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-a"), "10.0.0.5", 5900);
         assert_eq!(
             find_live_session(&reg.sessions, &key, ALL_WINDOWS_EXIST)
                 .map(|w| w.session_id)
                 .as_deref(),
             Some("s2")
         );
+    }
+
+    /// An RDP save fills the three `rdp_*` fields and leaves everything else
+    /// alone. The SSH passphrase is the one that used to be lost.
+    #[test]
+    fn an_rdp_save_leaves_the_other_secrets_alone() {
+        let mut existing = vnc_store::StoredCredentials::default();
+        existing.set_vnc_credential(None, "vnc-pass");
+        existing.ssh_passphrase = Some("ssh-pass".into());
+
+        let merged = PendingCredentialSave {
+            protocol: ProtocolKind::Rdp,
+            username: Some("alice".into()),
+            domain: Some("CORP".into()),
+            password: "rdp-pass".into(),
+        }
+        .merge_into(Some(existing));
+
+        assert_eq!(merged.rdp_user.as_deref(), Some("alice"));
+        assert_eq!(merged.rdp_domain.as_deref(), Some("CORP"));
+        assert_eq!(merged.rdp_password.as_deref(), Some("rdp-pass"));
+        assert_eq!(merged.vnc_password.as_deref(), Some("vnc-pass"));
+        assert_eq!(merged.ssh_passphrase.as_deref(), Some("ssh-pass"));
+    }
+
+    /// The VNC rule is unchanged: a username means an identity-carrying
+    /// method, so it lands in the `vencrypt_*` pair, and no RDP field moves.
+    #[test]
+    fn a_vnc_save_still_splits_on_the_username() {
+        let named = PendingCredentialSave {
+            protocol: ProtocolKind::Vnc,
+            username: Some("bob".into()),
+            domain: None,
+            password: "pw".into(),
+        }
+        .merge_into(None);
+        assert_eq!(named.vencrypt_user.as_deref(), Some("bob"));
+        assert_eq!(named.vencrypt_pass.as_deref(), Some("pw"));
+        assert!(named.rdp_password.is_none());
+
+        let anonymous = PendingCredentialSave {
+            protocol: ProtocolKind::Vnc,
+            username: None,
+            domain: None,
+            password: "pw".into(),
+        }
+        .merge_into(None);
+        assert_eq!(anonymous.vnc_password.as_deref(), Some("pw"));
+        assert!(anonymous.vencrypt_user.is_none());
+    }
+
+    /// The password never reaches a log line. The domain deliberately does:
+    /// it is the commonest reason an NLA logon is refused.
+    #[test]
+    fn the_pending_save_prints_its_domain_and_hides_its_password() {
+        let text = format!(
+            "{:?}",
+            PendingCredentialSave {
+                protocol: ProtocolKind::Rdp,
+                username: Some("alice".into()),
+                domain: Some("CORP".into()),
+                password: "hunter2".into(),
+            }
+        );
+        assert!(text.contains("CORP"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
     }
 
     fn pending(id: &str, key: MachineKey, age: std::time::Duration) -> (String, PendingWindow) {
@@ -624,7 +769,7 @@ mod tests {
 
     #[test]
     fn a_window_that_is_still_booting_counts_as_already_open() {
-        let key = MachineKey::new(Some("host-a"), "10.0.0.5", 5900);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-a"), "10.0.0.5", 5900);
         let opening: HashMap<_, _> = vec![pending(
             "s1",
             key.clone(),
@@ -642,7 +787,7 @@ mod tests {
 
     #[test]
     fn a_window_that_never_connected_stops_blocking_after_the_grace_period() {
-        let key = MachineKey::new(Some("host-a"), "10.0.0.5", 5900);
+        let key = MachineKey::new(ProtocolKind::Vnc, Some("host-a"), "10.0.0.5", 5900);
         let opening: HashMap<_, _> = vec![pending("s1", key.clone(), OPENING_GRACE * 2)]
             .into_iter()
             .collect();

@@ -21,7 +21,8 @@ use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use vnc_core::{
-    ClientCommand, ConnectOptions, ProtocolKind, QualityPreset, SessionEvent, SessionState,
+    ClientCommand, ConnectOptions, ProtocolEvent, ProtocolKind, ProtocolOptions, QualityPreset,
+    RdpEvent, SessionEvent, SessionState,
 };
 
 use crate::state::{AppState, ExistingWindow, MachineKey, PendingCredentialSave, SessionEntry};
@@ -106,19 +107,86 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         SessionEvent::Error(message) => json!({ "type": "error", "message": message }),
         // Binary channel traffic, not JSON.
         SessionEvent::FramebufferUpdate { .. } | SessionEvent::CursorUpdate(_) => return None,
-        // Audio goes to the audio device, not to the webview, so it never
-        // becomes JSON. Kept as its own arm rather than folded into the line
-        // above, because the two are dropped for different reasons.
+        // The samples go to the audio device, never to the webview: a JSON
+        // array of PCM is the audio equivalent of shipping a whole
+        // framebuffer across IPC. What the UI is told is the FORMAT, and it
+        // is told once per change rather than once per packet, which needs
+        // state this function does not have; `forward_events` does it.
         SessionEvent::Audio(_) => return None,
-        // No protocol emits one yet. When RDP does, this arm is the single
-        // readable place where somebody has to decide what the UI sees
-        // (PRDRDP/02 §9.4 has the mapping).
+        SessionEvent::Protocol(ProtocolEvent::Rdp(event)) => rdp_event_json(event)?,
+        // A protocol this build's `remote-core` knows about and this match
+        // does not. Dropped rather than guessed at, and the compiler makes
+        // adding one a decision here rather than a silent omission.
         SessionEvent::Protocol(_) => return None,
     };
     if let serde_json::Value::Object(map) = &mut value {
         map.insert("sessionId".into(), json!(session_id));
     }
     Some(value)
+}
+
+/// Flatten one `RdpEvent` into the JSON the webview sees.
+///
+/// The field names on the Rust side are `remote-core`'s and this function
+/// does not reshape them; it renames two for the wire (`username` becomes
+/// `user`, `session_id` becomes `remoteSessionId`) and adds nothing. Every
+/// string in here is SERVER SUPPLIED, so the UI renders it as text and never
+/// as HTML, exactly as it already does for `desktop-name`.
+///
+/// The ERRINFO table is not restated here or in TypeScript: `rdp-pdu` owns
+/// it, the driver has already turned the code into a symbol and a sentence,
+/// and this passes all three through so a bug report can carry the raw value.
+fn rdp_event_json(event: &RdpEvent) -> Option<serde_json::Value> {
+    use serde_json::json;
+    Some(match event {
+        RdpEvent::LogonInfo {
+            domain,
+            username,
+            session_id,
+        } => json!({
+            "type": "logon-info",
+            "domain": domain,
+            "user": username,
+            "remoteSessionId": session_id,
+        }),
+        RdpEvent::LogonError {
+            notification_type,
+            notification_data,
+            message,
+        } => json!({
+            "type": "logon-error",
+            "notificationType": notification_type,
+            "notificationData": notification_data,
+            "message": message,
+        }),
+        RdpEvent::ErrorInfo {
+            code,
+            symbol,
+            message,
+        } => json!({
+            "type": "error-info",
+            "code": code,
+            "symbol": symbol,
+            "message": message,
+        }),
+        RdpEvent::Redirected { target, session_id } => json!({
+            // Plumbing for the connecting overlay only: the driver performs
+            // the redirect itself, the UI just stops naming the old host.
+            "type": "redirect",
+            "target": target,
+            "remoteSessionId": session_id,
+        }),
+        // Deliberately payloadless: the cookie is a bearer secret and the
+        // UI's only legitimate interest is "a fast reconnect is possible now".
+        RdpEvent::AutoReconnectArmed => json!({ "type": "auto-reconnect-armed" }),
+        RdpEvent::LicenseWarning { message } => {
+            json!({ "type": "license-warning", "message": message })
+        }
+        // A variant added to `remote-core` since this was written. Ignored
+        // rather than half rendered; the UI ignores unknown `type` values for
+        // the same reason.
+        _ => return None,
+    })
 }
 
 /// Everything the event-forwarding task needs to settle a "remember this
@@ -229,11 +297,13 @@ fn credential_home(save_requested: bool, session: Option<&SessionEntry>) -> Cred
 /// closure: the credential must not be written under an id the hosts table
 /// does not have yet, and the Library must not be told about a host before it
 /// can read it back.
+#[allow(clippy::too_many_arguments)] // internal plumbing fan-out, not an API
 fn adopt_session_host(
     app: &AppHandle,
     ctx: &CredentialSaveCtx,
     sessions: &Arc<Mutex<HashMap<String, SessionEntry>>>,
     session_id: &str,
+    protocol: ProtocolKind,
     address: String,
     port: u16,
     pending: PendingCredentialSave,
@@ -244,7 +314,11 @@ fn adopt_session_host(
     let sessions = sessions.clone();
     let session_id = session_id.to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        let profile = match store.adopt_endpoint(&address, port) {
+        // The session's own protocol, not a default: quick connecting to
+        // `rdp://box`, ticking remember and getting a saved host that says
+        // VNC would be a bug, and the profile would then dial the wrong
+        // protocol for ever after.
+        let profile = match store.adopt_endpoint_for(protocol, &address, port) {
             Ok(profile) => profile,
             Err(e) => {
                 tracing::warn!(session = %session_id, "could not save a host for this session: {e}");
@@ -278,38 +352,90 @@ fn adopt_session_host(
                 "profileId": profile.id,
                 "address": profile.address,
                 "port": profile.port,
+                "protocol": profile.protocol,
             }),
         );
     });
 }
 
+/// Whether reaching `Connected` is proof that the credential was accepted.
+///
+/// For VNC it always is: every RFB security type either authenticates or
+/// fails the handshake. For RDP it is only true when CredSSP ran. With NLA
+/// off the credentials go out in the Client Info PDU and Windows evaluates
+/// them inside the session, so the connection completes whether the password
+/// was right or wrong, and writing it to the keychain there would store a
+/// password nothing has ever accepted (PRDRDP/00 R14). Such a session settles
+/// later, on the server's own logon notification, or not at all.
+///
+/// The method strings are `remote-core`'s stable identifiers, `nla-ntlm`,
+/// `nla-kerberos` and `tls` (PRDRDP/00 R12), so the test is a prefix rather
+/// than a list this file has to keep in step with phase 3.
+fn connected_proves_the_credential(protocol: ProtocolKind, auth_method: Option<&str>) -> bool {
+    match protocol {
+        ProtocolKind::Rdp => auth_method.is_some_and(|m| m.starts_with("nla")),
+        _ => true,
+    }
+}
+
+/// Write whatever this session asked to remember, now that something has
+/// proved it. Called from at most one place per session.
+fn persist_now(
+    app: &AppHandle,
+    ctx: &CredentialSaveCtx,
+    sessions: &Arc<Mutex<HashMap<String, SessionEntry>>>,
+    session_id: &str,
+) {
+    let pending = ctx.pending.lock().remove(session_id);
+    let (home, protocol) = {
+        let sessions = sessions.lock();
+        let entry = sessions.get(session_id);
+        (
+            credential_home(pending.is_some(), entry),
+            entry.map(SessionEntry::protocol).unwrap_or_default(),
+        )
+    };
+    match (home, pending) {
+        (CredentialHome::Profile(profile_id), Some(pending)) => {
+            persist_credentials(ctx, profile_id, pending)
+        }
+        (CredentialHome::AdoptEndpoint { address, port }, Some(pending)) => adopt_session_host(
+            app, ctx, sessions, session_id, protocol, address, port, pending,
+        ),
+        // Nothing asked for, or nothing left to attribute it to.
+        _ => {}
+    }
+}
+
 /// React to a state change for the pending-credential lifecycle.
 ///
-/// `Connected` is the ONLY state that persists anything; every terminal state
-/// drops the intent without touching the keychain.
+/// `Connected` is the only state that persists anything, and for RDP only
+/// when NLA proved the credential; every terminal state drops the intent
+/// without touching the keychain.
 fn settle_pending_credentials(
     app: &AppHandle,
     ctx: &CredentialSaveCtx,
     sessions: &Arc<Mutex<HashMap<String, SessionEntry>>>,
     session_id: &str,
     state: &SessionState,
+    auth_method: Option<&str>,
 ) {
     match state {
         SessionState::Connected => {
-            let pending = ctx.pending.lock().remove(session_id);
-            let home = {
-                let sessions = sessions.lock();
-                credential_home(pending.is_some(), sessions.get(session_id))
-            };
-            match (home, pending) {
-                (CredentialHome::Profile(profile_id), Some(pending)) => {
-                    persist_credentials(ctx, profile_id, pending)
-                }
-                (CredentialHome::AdoptEndpoint { address, port }, Some(pending)) => {
-                    adopt_session_host(app, ctx, sessions, session_id, address, port, pending)
-                }
-                // Nothing asked for, or nothing left to attribute it to.
-                _ => {}
+            let protocol = sessions
+                .lock()
+                .get(session_id)
+                .map(SessionEntry::protocol)
+                .unwrap_or_default();
+            if connected_proves_the_credential(protocol, auth_method) {
+                persist_now(app, ctx, sessions, session_id);
+            } else {
+                // Held, not dropped: the logon notification may still arrive
+                // and prove it. The event stream closing drops it unwritten.
+                tracing::debug!(
+                    session = %session_id,
+                    "connected without network level authentication, waiting for a logon before saving"
+                );
             }
         }
         SessionState::Disconnected { .. } => {
@@ -330,6 +456,7 @@ struct SessionEndpoint {
     profile_id: Option<String>,
     address: String,
     port: u16,
+    protocol: ProtocolKind,
 }
 
 /// The kebab-case tag of a `SessionState`, exactly as serde spells it in the
@@ -354,9 +481,26 @@ fn forward_events(
     channel: Channel<InvokeResponseBody>,
 ) {
     tauri::async_runtime::spawn(async move {
+        // Two facts this task remembers across events, because the pure
+        // `event_json` cannot: how the session authenticated (which decides
+        // whether reaching `Connected` proved the password) and the audio
+        // format last announced (so a format event is emitted on change
+        // rather than once per 20 ms packet).
+        let mut auth_method: Option<String> = None;
+        let mut audio_format: Option<(u32, u8)> = None;
         while let Some(event) = rx.recv().await {
+            if let SessionEvent::StateChanged(SessionState::Authenticating { method }) = &event {
+                auth_method = Some(method.clone());
+            }
             if let SessionEvent::StateChanged(state) = &event {
-                settle_pending_credentials(&app, &creds_ctx, &sessions, &session_id, state);
+                settle_pending_credentials(
+                    &app,
+                    &creds_ctx,
+                    &sessions,
+                    &session_id,
+                    state,
+                    auth_method.as_deref(),
+                );
                 // Any state transition means the handshake moved on, so an
                 // outstanding prompt is no longer answerable.
                 if !matches!(state, SessionState::Authenticating { .. }) {
@@ -386,9 +530,33 @@ fn forward_events(
                         "profileId": endpoint.profile_id,
                         "address": endpoint.address,
                         "port": endpoint.port,
+                        "protocol": endpoint.protocol,
                         "stats": stats,
                     }),
                 );
+            }
+            // A non-NLA RDP session cannot prove its password by connecting,
+            // so the server's own logon notification is what settles it.
+            if let SessionEvent::Protocol(ProtocolEvent::Rdp(RdpEvent::LogonInfo { .. })) = &event {
+                persist_now(&app, &creds_ctx, &sessions, &session_id);
+            }
+            // The samples never become JSON; the format does, once, and again
+            // only if the server changes it.
+            if let SessionEvent::Audio(packet) = &event {
+                let now = (packet.sample_rate, packet.channels);
+                if audio_format != Some(now) {
+                    audio_format = Some(now);
+                    let _ = app.emit_to(
+                        &window_label,
+                        "session://event",
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "type": "audio-format",
+                            "sampleRate": packet.sample_rate,
+                            "channels": packet.channels,
+                        }),
+                    );
+                }
             }
             // Record the question so a window that subscribed late can still
             // ask for it (see AppState::pending_prompts).
@@ -475,7 +643,29 @@ pub enum SessionConnectOutcome {
     },
 }
 
-/// Connect to a VNC server.
+/// Resolve which protocol this connect is for, from the explicit argument,
+/// then the profile, then VNC.
+///
+/// A value this build does not know is a hard error, never a fallback.
+/// Falling back to VNC would send an RFB handshake at an endpoint the user
+/// configured for something else, which is the same class of mistake the cert
+/// pin loop already refuses to make.
+fn resolve_protocol(
+    explicit: Option<&str>,
+    profile: Option<&vnc_store::HostProfile>,
+) -> Result<ProtocolKind, String> {
+    match explicit.or(profile.map(|p| p.protocol.as_str())) {
+        None => Ok(ProtocolKind::Vnc),
+        Some(raw) => ProtocolKind::parse(raw).ok_or_else(|| {
+            format!(
+                "This computer was saved with a connection type this version of the app \
+                 does not support ({raw}). It was probably added by a newer version."
+            )
+        }),
+    }
+}
+
+/// Connect to a remote desktop.
 ///
 /// `on_event` is the binary channel that will receive framebuffer/cursor
 /// data; control events go to the *invoking window* via `session://event`,
@@ -506,6 +696,12 @@ pub async fn connect_session(
     address: String,
     port: u16,
     session_id: Option<String>,
+    // Which protocol to speak, for an ad-hoc connect that has no profile to
+    // read it from (quick connect typed `rdp://box`). Absent means "ask the
+    // profile, then VNC", so a webview build that predates this argument
+    // still invokes successfully. A plain comment, not a doc comment: rustc
+    // allows no doc comment on a function parameter.
+    protocol: Option<String>,
     ignore_stored_credentials: Option<bool>,
     accept_ssh_host_key: Option<String>,
     on_event: Channel<InvokeResponseBody>,
@@ -525,17 +721,27 @@ pub async fn connect_session(
     // the moment it asks for the disconnect.
     reap_existing_session(&state, &id).await?;
 
-    let mut options = ConnectOptions::vnc(address, port);
+    // The profile is read once, up front, because the protocol comes out of
+    // it and the protocol decides the shape of everything below.
+    let profile = match &profile_id {
+        Some(pid) => {
+            let store = state.store.clone();
+            let lookup = pid.clone();
+            super::blocking(move || store.get_host(&lookup)).await?
+        }
+        None => None,
+    };
+    let kind = resolve_protocol(protocol.as_deref(), profile.as_ref())?;
+    let driver = state
+        .protocols
+        .get(kind)
+        .ok_or_else(|| format!("this build cannot speak {kind}"))?
+        .clone();
 
-    // Auto lossless refresh (PRD/09 §3.2): after motion stops, repaint the
-    // regions that were JPEG-compressed at full quality. Global preference, // on a metered link the user may prefer to keep the saved bandwidth.
-    options.vnc_mut().lossless_refresh = state
-        .store
-        .get_setting("lossless_refresh")
-        .ok()
-        .flatten()
-        .map(|v| v != "false")
-        .unwrap_or(true);
+    let mut options = match kind {
+        ProtocolKind::Rdp => ConnectOptions::rdp(address, port),
+        _ => ConnectOptions::vnc(address, port),
+    };
 
     // Trust-on-first-use pins.
     //
@@ -574,25 +780,62 @@ pub async fn connect_session(
     // until the tunnel (when there is one) is up.
     let mut ssh_tunnel_raw: Option<String> = None;
 
-    if let Some(pid) = &profile_id {
-        // Saved-profile settings.
-        let store = state.store.clone();
-        let lookup = pid.clone();
-        if let Some(profile) = super::blocking(move || store.get_host(&lookup)).await? {
-            options.quality = parse_quality(&profile.quality_pref);
-            options.view_only = profile.view_only;
-            options.vnc_mut().security_pref = profile.security_pref.clone();
-            ssh_tunnel_raw = profile.ssh_tunnel;
-        }
+    // Common settings every protocol reads the same way.
+    if let Some(profile) = &profile {
+        options.quality = parse_quality(&profile.quality_pref);
+        options.view_only = profile.view_only;
+        ssh_tunnel_raw = profile.ssh_tunnel.clone();
+    }
 
-        // Stored credentials, loaded in Rust on a blocking thread (keychain
-        // IO is synchronous); never routed through the webview. VeNCrypt
-        // user/pass wins when present; the plain VNC password is the
-        // fallback (vnc-core picks what the negotiated security type needs).
-        //
-        // Skipped entirely when the caller asked to be prompted: `vnc-core`
-        // only prompts for a secret it does not already have, so leaving the
-        // stored one in place here is exactly what suppresses the dialog.
+    // The protocol specific half.
+    match kind {
+        ProtocolKind::Rdp => {
+            // A blob that will not parse FAILS the connect. Substituting
+            // defaults would turn a deliberate "network level authentication
+            // required" into whatever this build happens to default to.
+            let settings = vnc_store::RdpSettings::parse(
+                profile.as_ref().and_then(|p| p.rdp_settings.as_deref()),
+            )
+            .map_err(|e| format!("This computer's Remote Desktop settings could not be read: {e}"))?
+            .unwrap_or_default();
+            if settings.options.gateway.is_some() {
+                return Err("This computer is set up to connect through an RD Gateway, \
+                            which this version of the app cannot use yet."
+                    .into());
+            }
+            let mut rdp = settings.options;
+            // The name for SNI, the certificate pin and (from phase 3) the
+            // Kerberos service name is the address the user configured, never
+            // the socket we end up dialling: an SSH tunnel hands back a
+            // loopback endpoint, and two tunnelled servers would then collide
+            // on one pin key.
+            rdp.server_name.get_or_insert_with(|| options.host.clone());
+            *options.rdp_mut() = rdp;
+        }
+        _ => {
+            let vnc = options.vnc_mut();
+            vnc.security_pref = profile.as_ref().and_then(|p| p.security_pref.clone());
+            // Auto lossless refresh (PRD/09 §3.2): after motion stops, repaint
+            // the regions that were JPEG-compressed at full quality. Global
+            // preference, on a metered link the user may prefer to keep the
+            // saved bandwidth.
+            vnc.lossless_refresh = state
+                .store
+                .get_setting("lossless_refresh")
+                .ok()
+                .flatten()
+                .map(|v| v != "false")
+                .unwrap_or(true);
+        }
+    }
+
+    // Stored credentials, loaded in Rust on a blocking thread (keychain IO is
+    // synchronous); never routed through the webview.
+    //
+    // Skipped entirely when the caller asked to be prompted: a driver only
+    // prompts for a secret it does not already have, so leaving the stored
+    // one in place here is exactly what suppresses the dialog.
+    if let Some(pid) = &profile_id {
         if ignore_stored_credentials == Some(true) {
             tracing::info!(profile = %pid, "ignoring the stored password for this attempt");
         } else {
@@ -600,12 +843,29 @@ pub async fn connect_session(
             let lookup = pid.clone();
             match super::blocking(move || credentials.load(&lookup)).await {
                 Ok(Some(stored)) => {
-                    options.credentials = vnc_core::Credentials {
-                        username: stored.vencrypt_user,
-                        password: stored.vencrypt_pass.or(stored.vnc_password),
-                        // RFB has no logon domain. The RDP credential fields
-                        // arrive with the protocol.
-                        domain: None,
+                    options.credentials = match kind {
+                        ProtocolKind::Rdp => vnc_core::Credentials {
+                            username: stored.rdp_user,
+                            password: stored.rdp_password,
+                            // The profile's configured domain wins over the
+                            // stored one: the blob is where a domain typed at
+                            // a prompt lands, the setting is where the user
+                            // deliberately put one.
+                            domain: options
+                                .rdp_options()
+                                .and_then(|r| r.domain.clone())
+                                .filter(|d| !d.is_empty())
+                                .or(stored.rdp_domain),
+                        },
+                        // VeNCrypt user/pass wins when present; the plain VNC
+                        // password is the fallback (vnc-core picks what the
+                        // negotiated security type needs). RFB has no logon
+                        // domain.
+                        _ => vnc_core::Credentials {
+                            username: stored.vencrypt_user,
+                            password: stored.vencrypt_pass.or(stored.vnc_password),
+                            domain: None,
+                        },
                     };
                 }
                 Ok(None) => {}
@@ -637,13 +897,22 @@ pub async fn connect_session(
         .await?
         {
             TunnelOutcome::Ready(connector) => {
-                tracing::info!(session = %id, "rfb stream will run over the ssh tunnel");
+                tracing::info!(session = %id, "the session will run over the ssh tunnel");
                 options.connector = Some(connector);
-                // The SSH layer already encrypts and authenticates this path,
-                // and the classic tunnelled setup is a loopback-only server
-                // offering security type None; refusing it here would make
-                // the recommended configuration unusable.
-                options.vnc_mut().allow_insecure = true;
+                // VNC ONLY. The SSH layer already encrypts and authenticates
+                // this path, and the classic tunnelled setup is a
+                // loopback-only server offering security type None; refusing
+                // it here would make the recommended configuration unusable.
+                //
+                // That reasoning does not transfer to RDP. Network level
+                // authentication authenticates the SERVER, and an SSH gateway
+                // proves the identity of the gateway, not of the Windows
+                // machine reached through it, which may be a different box.
+                // So an RDP session still does full TLS and NLA inside the
+                // tunnel.
+                if let ProtocolOptions::Vnc(vnc) = &mut options.protocol {
+                    vnc.allow_insecure = true;
+                }
             }
             TunnelOutcome::HostKeyPrompt {
                 host,
@@ -676,15 +945,6 @@ pub async fn connect_session(
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(256);
     let address = options.host.clone();
-    // Hard coded to VNC for now: the `protocol` column that decides this
-    // arrives with the store migration. The lookup is what matters, because
-    // it is the line a second protocol changes.
-    let kind = ProtocolKind::Vnc;
-    let driver = state
-        .protocols
-        .get(kind)
-        .ok_or_else(|| format!("this build cannot speak {kind}"))?
-        .clone();
     let handle = driver
         .spawn(id.clone(), options, event_tx)
         .map_err(|e| e.to_string())?;
@@ -716,6 +976,7 @@ pub async fn connect_session(
             "profileId": &profile_id,
             "address": &address,
             "port": port,
+            "protocol": kind,
         }),
     );
     forward_events(
@@ -733,6 +994,7 @@ pub async fn connect_session(
             profile_id,
             address,
             port,
+            protocol: kind,
         },
         event_rx,
         on_event,
@@ -1040,22 +1302,37 @@ pub async fn provide_credentials(
     state: State<'_, AppState>,
     session_id: String,
     username: Option<String>,
+    // Logon domain. `None` for every VNC method, and for an RDP logon with
+    // no domain (a local account, or a UPN in `username`). Being an
+    // `Option`, a webview build that omits the key still invokes
+    // successfully; that is the whole compatibility story for this command.
+    domain: Option<String>,
     password: String,
     save: bool,
 ) -> Result<(), String> {
     // Resolve the sender first so an unknown session id rejects *before* the
     // secret is copied anywhere.
-    let sender = state.command_sender(&session_id)?;
+    let (sender, protocol) = {
+        let sessions = state.sessions.lock();
+        let entry = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("unknown session: {session_id}"))?;
+        (entry.handle.commands.clone(), entry.protocol())
+    };
 
     // The question has been answered; a late-subscribing window must not be
     // handed a stale prompt.
     state.pending_prompts.lock().remove(&session_id);
 
+    let domain = domain.filter(|d| !d.trim().is_empty());
+
     if save {
         state.pending_credentials.lock().insert(
             session_id.clone(),
             PendingCredentialSave {
+                protocol,
                 username: username.clone(),
+                domain: domain.clone(),
                 password: password.clone(),
             },
         );
@@ -1066,7 +1343,7 @@ pub async fn provide_credentials(
 
     let result = sender
         .send(ClientCommand::ProvideCredentials {
-            username,
+            username: qualified_username(protocol, username, domain.as_deref()),
             password,
             save,
         })
@@ -1076,6 +1353,33 @@ pub async fn provide_credentials(
         state.pending_credentials.lock().remove(&session_id);
     }
     result
+}
+
+/// Fold a separate domain back into the user name for the wire.
+///
+/// `ClientCommand::ProvideCredentials` carries no domain field, and the RDP
+/// driver already splits a down-level `DOMAIN\user` before it builds the
+/// CredSSP identity, so `DOMAIN\user` is the one shape that survives the
+/// existing command unchanged. The keychain still stores the two separately,
+/// which is what the host editor shows and what the next connect reads.
+///
+/// A name that already carries a domain is left alone, and so is a UPN: an
+/// RDP server accepts `alice@corp.example` with an empty domain, and pinning
+/// a NetBIOS domain in front of one fails against Entra ID and against any
+/// forest whose NetBIOS name is not the DNS label.
+fn qualified_username(
+    protocol: ProtocolKind,
+    username: Option<String>,
+    domain: Option<&str>,
+) -> Option<String> {
+    let (ProtocolKind::Rdp, Some(domain), Some(user)) = (protocol, domain, username.as_deref())
+    else {
+        return username;
+    };
+    if user.contains('\\') || user.contains('@') || user.is_empty() {
+        return username;
+    }
+    Some(format!("{domain}\\{user}"))
 }
 
 /// Dismiss a `credentials-required` prompt: abandon the connection attempt and
@@ -1118,6 +1422,8 @@ pub struct ActiveSession {
     pub profile_id: Option<String>,
     pub address: String,
     pub port: u16,
+    /// `"vnc"` or `"rdp"`. A webview that predates this field ignores it.
+    pub protocol: ProtocolKind,
 }
 
 /// Every session that is currently live, for the Library to seed its
@@ -1140,6 +1446,7 @@ pub fn list_active_sessions(state: State<'_, AppState>) -> Result<Vec<ActiveSess
             profile_id: entry.profile_id.clone(),
             address: entry.address.clone(),
             port: entry.port,
+            protocol: entry.protocol(),
         })
         .collect())
 }
@@ -1271,6 +1578,9 @@ pub struct SessionTabParams {
     pub address: String,
     pub port: u16,
     pub name: String,
+    /// Unconditionally present, unlike the window's query key: this is a
+    /// fresh JSON payload with no legacy readers.
+    pub protocol: ProtocolKind,
 }
 
 /// What [`open_session_window`] did.
@@ -1333,6 +1643,9 @@ pub async fn open_session_window(
     address: Option<String>,
     port: Option<u16>,
     title: Option<String>,
+    // The protocol for an ad-hoc connect. A saved host resolves it from the
+    // profile, exactly as it already resolves address, port and name.
+    protocol: Option<String>,
     force_new: Option<bool>,
     as_tab: Option<bool>,
 ) -> Result<SessionWindowOutcome, String> {
@@ -1350,6 +1663,7 @@ pub async fn open_session_window(
     let mut resolved_address = address;
     let mut resolved_port = port;
     let mut name = title;
+    let mut resolved_protocol = protocol;
     if let Some(pid) = &profile_id {
         let store = state.store.clone();
         let lookup = pid.clone();
@@ -1359,15 +1673,25 @@ pub async fn open_session_window(
         resolved_address.get_or_insert(profile.address);
         resolved_port.get_or_insert(profile.port);
         name.get_or_insert(profile.friendly_name);
+        resolved_protocol.get_or_insert(profile.protocol);
     }
+    let kind = resolve_protocol(resolved_protocol.as_deref(), None)?;
 
     let address = resolved_address.ok_or("open_session_window needs a profileId or an address")?;
-    let port = resolved_port.unwrap_or(5900);
+    // The registry answers "what port does this protocol default to", so 5900
+    // and 3389 live on the protocol rather than as literals here.
+    let port = resolved_port.unwrap_or_else(|| {
+        state
+            .protocols
+            .get(kind)
+            .map(|d| d.default_port())
+            .unwrap_or_else(|| kind.default_port())
+    });
     let name = name
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| address.clone());
 
-    let key = MachineKey::new(profile_id.as_deref(), &address, port);
+    let key = MachineKey::new(kind, profile_id.as_deref(), &address, port);
 
     // One window per machine, unless the user opted out (globally or for this
     // one call). Reading the setting here, not in the webview, is what makes
@@ -1432,6 +1756,7 @@ pub async fn open_session_window(
                 address,
                 port,
                 name,
+                protocol: kind,
             }),
         });
     }
@@ -1442,6 +1767,7 @@ pub async fn open_session_window(
         address: &address,
         port,
         name: &name,
+        protocol: kind,
     };
     state.note_opening_window(&id, key, windows::session_label(&id));
     if let Err(e) = windows::open_session_window(&app, &params, &name) {
@@ -1742,6 +2068,122 @@ mod tests {
     #[test]
     fn a_session_that_is_already_gone_persists_nothing() {
         assert_eq!(credential_home(true, None), CredentialHome::Nowhere);
+    }
+
+    fn profile(protocol: &str) -> vnc_store::HostProfile {
+        vnc_store::HostProfile {
+            protocol: protocol.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Mirrors `an_unknown_scheme_is_ignored_rather_than_guessed_at` but
+    /// asserts `Err`, because the consequence of guessing is different: an
+    /// ignored pin is a prompt, a guessed protocol is an RFB handshake sent
+    /// at an endpoint the user configured for something else.
+    #[test]
+    fn an_unknown_protocol_string_is_refused_rather_than_guessed_at() {
+        let err = resolve_protocol(None, Some(&profile("spice")))
+            .expect_err("a protocol this build cannot speak must not fall back to VNC");
+        assert!(err.contains("spice"), "the message names it: {err}");
+        assert!(
+            err.contains("newer version"),
+            "and says where it came from: {err}"
+        );
+        assert!(resolve_protocol(Some("spice"), None).is_err());
+    }
+
+    /// The three sources, in order.
+    #[test]
+    fn the_protocol_comes_from_the_argument_then_the_profile_then_vnc() {
+        // Nothing said at all: every migrated row is VNC.
+        assert_eq!(resolve_protocol(None, None), Ok(ProtocolKind::Vnc));
+        // The profile, for a saved host.
+        assert_eq!(
+            resolve_protocol(None, Some(&profile("rdp"))),
+            Ok(ProtocolKind::Rdp)
+        );
+        // The argument, for an ad-hoc connect, and it wins.
+        assert_eq!(
+            resolve_protocol(Some("rdp"), Some(&profile("vnc"))),
+            Ok(ProtocolKind::Rdp)
+        );
+    }
+
+    /// Reaching `Connected` proves a VNC password. It proves an RDP one only
+    /// when CredSSP ran: with NLA off Windows evaluates the credentials
+    /// inside the session and the connection completes either way.
+    #[test]
+    fn only_an_nla_session_proves_an_rdp_password_by_connecting() {
+        assert!(connected_proves_the_credential(ProtocolKind::Vnc, None));
+        assert!(connected_proves_the_credential(
+            ProtocolKind::Vnc,
+            Some("VNC Authentication")
+        ));
+        assert!(connected_proves_the_credential(
+            ProtocolKind::Rdp,
+            Some("nla-ntlm")
+        ));
+        assert!(
+            connected_proves_the_credential(ProtocolKind::Rdp, Some("nla-kerberos")),
+            "phase 3 must not need a second edit here"
+        );
+        assert!(!connected_proves_the_credential(
+            ProtocolKind::Rdp,
+            Some("tls")
+        ));
+        assert!(!connected_proves_the_credential(ProtocolKind::Rdp, None));
+    }
+
+    /// The domain is folded into the user name because the command carries no
+    /// domain field, and the driver splits a down-level name before it builds
+    /// the CredSSP identity.
+    #[test]
+    fn a_domain_qualifies_a_bare_name_and_leaves_a_upn_alone() {
+        let q = |u: &str, d: Option<&str>| {
+            qualified_username(ProtocolKind::Rdp, Some(u.to_string()), d)
+        };
+        assert_eq!(q("alice", Some("CORP")).as_deref(), Some("CORP\\alice"));
+        // A UPN is accepted with an empty domain; pinning a NetBIOS name in
+        // front of one fails against Entra ID.
+        assert_eq!(
+            q("alice@corp.example", Some("CORP")).as_deref(),
+            Some("alice@corp.example")
+        );
+        // Already qualified: the user's own spelling wins.
+        assert_eq!(
+            q("OTHER\\alice", Some("CORP")).as_deref(),
+            Some("OTHER\\alice")
+        );
+        assert_eq!(q("alice", None).as_deref(), Some("alice"));
+        // VNC never qualifies anything.
+        assert_eq!(
+            qualified_username(ProtocolKind::Vnc, Some("alice".into()), Some("CORP")).as_deref(),
+            Some("alice")
+        );
+    }
+
+    /// A quick connect to `rdp://box` that remembers its password must mint
+    /// an RDP profile. One that says VNC would dial the wrong protocol for
+    /// ever after.
+    #[test]
+    fn an_adopted_host_is_created_with_the_sessions_own_protocol() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = vnc_store::Store::open(Some(dir.path().to_path_buf())).expect("open");
+
+        let adopted = store
+            .adopt_endpoint_for(ProtocolKind::Rdp, "box.corp.example", 3389)
+            .expect("adopt");
+        assert_eq!(adopted.protocol, "rdp");
+        assert_eq!(adopted.port, 3389);
+
+        // And the same address under the other protocol is a different host,
+        // not a second row for the same one.
+        let vnc = store
+            .adopt_endpoint_for(ProtocolKind::Vnc, "box.corp.example", 5900)
+            .expect("adopt");
+        assert_ne!(vnc.id, adopted.id);
+        assert_eq!(vnc.protocol, "vnc");
     }
 }
 

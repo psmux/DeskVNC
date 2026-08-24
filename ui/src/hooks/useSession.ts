@@ -13,7 +13,12 @@ import {
   safeInvoke,
   safeListen,
 } from "../lib/tauri";
-import { mockCredentialRequest, mockThumbnailKey, saveMockThumbnail } from "../lib/mock";
+import {
+  mockCredentialRequest,
+  mockDisconnectReason,
+  mockThumbnailKey,
+  saveMockThumbnail,
+} from "../lib/mock";
 import {
   MSG_CURSOR,
   MSG_FRAMEBUFFER,
@@ -25,6 +30,7 @@ import {
 import type {
   CredentialRequest,
   PinScheme,
+  ProtocolKind,
   QualityPreset,
   RemoteScreen,
   SessionConnectOutcome,
@@ -32,6 +38,7 @@ import type {
   SessionState,
   SessionStats,
 } from "../lib/types";
+import { DEFAULT_PORT, isProtocolKind } from "../lib/types";
 
 export interface SessionBridge {
   onFrame: (msg: FrameMessage) => void;
@@ -58,6 +65,12 @@ export interface SessionParams {
   address: string | null;
   port: number;
   name: string;
+  /**
+   * Which protocol this session speaks. The window's query string carries it
+   * only when it is not VNC, so an absent key reads as `"vnc"` and every URL
+   * an older build produced still parses.
+   */
+  protocol: ProtocolKind;
 }
 
 /**
@@ -119,10 +132,16 @@ export interface SessionApi {
   dismissSshHostKeyPrompt: () => void;
   /**
    * Answer the credentials prompt. `username` is null for password-only
-   * methods; `save` asks the shell to remember it *if* the server accepts it.
-   * The password goes JS → Rust and is never read back.
+   * methods, `domain` for everything except an RDP logon that has one; `save`
+   * asks the shell to remember it *if* the server accepts it. The password
+   * goes JS → Rust and is never read back.
    */
-  submitCredentials: (username: string | null, password: string, save: boolean) => void;
+  submitCredentials: (
+    username: string | null,
+    domain: string | null,
+    password: string,
+    save: boolean,
+  ) => void;
   /** Dismiss the credentials prompt and abandon the connection attempt. */
   dismissCredentialPrompt: () => void;
   /**
@@ -186,13 +205,38 @@ function wireQuality(preset: QualityPreset): string {
 
 export function readSessionParams(): SessionParams {
   const q = new URLSearchParams(window.location.search);
+  const protocol: ProtocolKind = isProtocolKind(q.get("protocol")) ? "rdp" : "vnc";
   return {
     sessionId: q.get("sessionId"),
     profileId: q.get("profileId"),
     address: q.get("address"),
-    port: parseInt(q.get("port") ?? "5900", 10) || 5900,
+    port: parseInt(q.get("port") ?? String(DEFAULT_PORT[protocol]), 10) || DEFAULT_PORT[protocol],
     name: q.get("name") ?? q.get("address") ?? "remote computer",
+    protocol,
   };
+}
+
+/**
+ * Copy for the connecting overlay's `authenticating` stage.
+ *
+ * The wire values are stable identifiers the workspace owns, not sentences,
+ * so this maps them to copy the UI owns. An unrecognised one is shown
+ * verbatim rather than as a blank, which is what already happens for a VNC
+ * method this build has never heard of.
+ */
+export function authMethodLabel(method: string): string {
+  switch (method) {
+    case "nla-ntlm":
+      return "CredSSP, NTLM";
+    // Spelled out rather than abbreviated: this is a downgrade the user chose
+    // to allow, and it should read like one.
+    case "tls":
+      return "TLS only, no network level authentication";
+    case "nla-kerberos":
+      return "CredSSP, Kerberos";
+    default:
+      return method;
+  }
 }
 
 export function useSession(params: SessionParams, bridge: SessionBridge): SessionApi {
@@ -227,6 +271,13 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     if (!inTauri()) {
       // Browser dev: run a small synthetic session so the screen is explorable.
       // `?mockCreds=…` additionally parks it on the auth prompt (see mock.ts).
+      // `?mockError=…` parks it on a terminal failure instead, so the
+      // disconnect copy is reviewable without the server that produces it.
+      const mockReason = mockDisconnectReason();
+      if (mockReason) {
+        setState({ state: "disconnected", reason: mockReason, can_retry: true });
+        return;
+      }
       const mockCreds = mockCredentialRequest();
       if (mockCreds) {
         return runMockAuth(mockCreds, mockAuthRef, bridgeRef, {
@@ -397,6 +448,7 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           profileId: params.profileId,
           address: params.address,
           port: params.port,
+          protocol: params.protocol,
           // Retrying after a rejected password must not replay it, ask.
           ignoreStoredCredentials: repromptRef.current,
           // Answers a previous ssh-host-key-prompt outcome, once.
@@ -622,7 +674,7 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
   }, []);
 
   const submitCredentials = useCallback(
-    (username: string | null, password: string, save: boolean): void => {
+    (username: string | null, domain: string | null, password: string, save: boolean): void => {
       // Optimistically close the dialog: the handshake resumes now, and a
       // rejection comes back as a fresh `credentials-required` with a higher
       // `attempt`, which reopens it with the reason shown.
@@ -633,7 +685,7 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
         mockAuthRef.current.submit(username, password);
         return;
       }
-      void provideCredentials(sid(), username, password, save).catch((err: unknown) => {
+      void provideCredentials(sid(), username, domain, password, save).catch((err: unknown) => {
         setState({
           state: "disconnected",
           reason: err instanceof Error ? err.message : String(err),

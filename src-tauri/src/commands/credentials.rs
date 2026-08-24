@@ -68,10 +68,29 @@ pub async fn save_password(
 /// Whether a credential exists for this host (drives the key icon in the
 /// library). The blob is loaded on the Rust side purely for the existence
 /// check, only the boolean crosses the IPC boundary.
+///
+/// `protocol` narrows the question to "a credential this protocol could
+/// use". Without it the answer is "any credential at all", which is what the
+/// key icon has always meant and which stays the behaviour when the argument
+/// is absent. With two protocols the coarse answer starts lying: a host with
+/// only an SSH passphrase, or with only a VNC password on a profile that has
+/// since been switched to RDP, would claim to have what it needs.
 #[tauri::command]
-pub async fn has_password(state: State<'_, AppState>, host_id: String) -> Result<bool, String> {
+pub async fn has_password(
+    state: State<'_, AppState>,
+    host_id: String,
+    protocol: Option<vnc_store::ProtocolKind>,
+) -> Result<bool, String> {
     let credentials = state.credentials.clone();
-    super::blocking(move || credentials.load(&host_id).map(|c| c.is_some())).await
+    super::blocking(move || {
+        credentials
+            .load(&host_id)
+            .map(|blob| match (blob, protocol) {
+                (Some(creds), Some(kind)) => creds.has_for(kind),
+                (blob, _) => blob.is_some(),
+            })
+    })
+    .await
 }
 
 #[tauri::command]

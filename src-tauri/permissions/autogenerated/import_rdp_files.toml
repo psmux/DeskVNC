@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-rdp-files"
+description = "Enables the import_rdp_files command without any pre-configured scope."
+commands.allow = ["import_rdp_files"]
+
+[[permission]]
+identifier = "deny-import-rdp-files"
+description = "Denies the import_rdp_files command without any pre-configured scope."
+commands.deny = ["import_rdp_files"]

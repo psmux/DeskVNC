@@ -104,7 +104,7 @@ export function Onboarding({
                 ) : null}
                 {discovered.length === 0 ? (
                   <p className="text-center text-xs text-tertiary">
-                    {scan.running ? "Scanning your network…" : "Nothing found yet, some VNC servers don't advertise themselves. You can add one manually later."}
+                    {scan.running ? "Scanning your network…" : "Nothing found yet, some computers don't advertise themselves. You can add one manually later."}
                   </p>
                 ) : (
                   <ul className="max-h-40 space-y-1 overflow-y-auto">

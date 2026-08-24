@@ -101,6 +101,14 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   // Store-backed (not localStorage): Rust reads these at connect time.
   const [losslessRefresh, setLosslessRefresh] = useAppSetting("lossless_refresh", true);
   const [deepNames, setDeepNames] = useAppSetting("probe_other_services", true);
+  const [probeRdp, setProbeRdp] = useAppSetting("probe_rdp", true);
+  // Defaults for NEW Remote Desktop hosts. They live in the Rust key-value
+  // table rather than the webview so the connect path can read them later
+  // without a round trip through JS.
+  const [rdpMultiMonitor, setRdpMultiMonitor] = useAppSetting("rdp_default_multi_monitor", false);
+  const [rdpDynamicRes, setRdpDynamicRes] = useAppSetting("rdp_default_dynamic_resolution", true);
+  const [rdpAudio, setRdpAudio] = useAppSetting("rdp_default_audio", true);
+  const [rdpClipboard, setRdpClipboard] = useAppSetting("rdp_default_redirect_clipboard", true);
   const [multipleSessions, setMultipleSessions] = useAppSetting(ALLOW_MULTIPLE_SESSIONS_KEY, false);
   const [clipboardAuto, setClipboardAuto] = usePref(PREF_CLIPBOARD_AUTO, true);
   const [clipboardOnFocus, setClipboardOnFocus] = usePref(PREF_CLIPBOARD_ON_FOCUS, true);
@@ -249,6 +257,38 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="During movement the image is compressed hard so it stays instant; a moment after things settle, the affected area is repainted at full quality. Turn this off on a metered connection to keep the saved bandwidth."
                   value={losslessRefresh}
                   onChange={setLosslessRefresh}
+                />
+                {/*
+                  Defaults for new Remote Desktop hosts, not a switch that
+                  reaches into existing ones. There is deliberately nothing
+                  here about network level authentication or legacy TLS: those
+                  are per host, off by default, and a global switch would let
+                  one bad server quietly lower the bar for every other one.
+                */}
+                <SectionHeading>Remote Desktop defaults</SectionHeading>
+                <Toggle
+                  label="Use all my monitors for new Remote Desktop connections"
+                  description="New hosts start with every local monitor attached. Existing hosts keep whatever you set on them."
+                  value={rdpMultiMonitor}
+                  onChange={setRdpMultiMonitor}
+                />
+                <Toggle
+                  label="Match the remote resolution to the window"
+                  description="The remote desktop resizes as you resize the window, instead of being scaled."
+                  value={rdpDynamicRes}
+                  onChange={setRdpDynamicRes}
+                />
+                <Toggle
+                  label="Play remote sound on this computer"
+                  description="Sound from the remote computer is redirected here rather than left playing there."
+                  value={rdpAudio}
+                  onChange={setRdpAudio}
+                />
+                <Toggle
+                  label="Share my clipboard with Remote Desktop connections"
+                  description="Copy and paste text in both directions."
+                  value={rdpClipboard}
+                  onChange={setRdpClipboard}
                 />
                 <Toggle
                   label="Reconnect until I close the window"
@@ -454,12 +494,20 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
               <>
                 <Toggle
                   label="Look up names from other services"
-                  description="Some Windows machines block every name service. Reading the name they publish on RDP or RPC names them anyway, but it means connecting briefly to ports unrelated to VNC, which strict network monitoring may flag. Turn off to use name services only."
+                  description="Some Windows machines block every name service. Reading the name they publish on RDP or RPC names them anyway, but it means connecting briefly to ports you are not connecting through, which strict network monitoring may flag. Turn off to use name services only."
                   value={deepNames}
                   onChange={setDeepNames}
                 />
                 <Toggle
+                  label="Look for Remote Desktop while scanning"
+                  description="Also tries port 3389 on each address, so a Windows machine that runs no VNC server still appears. One extra connection per address, at the same polite rate as the rest of the scan."
+                  value={probeRdp}
+                  onChange={setProbeRdp}
+                />
+                <Toggle
                   label="Discover computers automatically (mDNS/Bonjour)"
+                  // Unchanged, and deliberately: mDNS discovery really is VNC
+                  // only. There is no Bonjour service for Remote Desktop.
                   description="Listen for VNC servers advertising themselves on your local network"
                   value={mdnsEnabled}
                   onChange={setMdnsEnabled}
@@ -523,6 +571,15 @@ function Choice<T extends string>({
         ))}
       </div>
     </div>
+  );
+}
+
+/** A quiet divider heading for a group of related toggles. */
+function SectionHeading({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <p className="border-t border-subtle pt-4 text-2xs font-semibold uppercase tracking-wider text-tertiary">
+      {children}
+    </p>
   );
 }
 

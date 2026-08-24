@@ -172,6 +172,9 @@ pub fn run() {
             commands::hosts::set_app_setting,
             // native menu
             commands::menu::sync_session_menu,
+            // .rdp file import
+            commands::rdpfile::import_rdp_file,
+            commands::rdpfile::import_rdp_files,
             // credentials
             commands::credentials::save_password,
             commands::credentials::has_password,

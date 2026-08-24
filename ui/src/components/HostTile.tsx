@@ -1,12 +1,28 @@
 /** Host tiles for the Library grid: saved hosts and the discovered-but-unsaved band. */
 import { useEffect, useState, type ReactNode } from "react";
 import type { DiscoveredHost, HostProfile, OsHint } from "../lib/types";
-import { hostMac, isWindowsNameSource, nameSourceLabel, resolvedOsHint } from "../lib/types";
+import {
+  DEFAULT_PORT,
+  hostMac,
+  hostProtocol,
+  isWindowsNameSource,
+  nameSourceLabel,
+  protocolLabel,
+  resolvedOsHint,
+} from "../lib/types";
 import { classNames, colorFromId, formatBps } from "../lib/util";
 import { useHosts } from "../state/HostsContext";
 import { useSessions, type TileActivity } from "../state/SessionsContext";
 import { IconKey, IconMonitor, IconZap, IconEdit, IconLock, IconAlert, IconPlus } from "./icons";
 
+/**
+ * The OS badge.
+ *
+ * "Remote" is the honest fallback: we do not know the operating system, and
+ * the old fallback said "VNC", which is a protocol name standing in for one.
+ * That became wrong the moment a Windows machine reached over RDP had no OS
+ * hint, and the protocol has its own badge now.
+ */
 export function osLabel(os: OsHint | null): string {
   switch (os) {
     case "macos":
@@ -18,12 +34,35 @@ export function osLabel(os: OsHint | null): string {
     case "qemu":
       return "QEMU";
     default:
-      return "VNC";
+      return "Remote";
   }
 }
 
-function addressLabel(host: { address: string; port: number }): string {
-  return host.port === 5900 ? host.address : `${host.address}:${host.port}`;
+/** The address, with the port hidden when it is this protocol's default. */
+export function addressLabel(host: {
+  address: string;
+  port: number;
+  protocol?: string | null;
+}): string {
+  const dflt = DEFAULT_PORT[hostProtocol(host)];
+  return host.port === dflt ? host.address : `${host.address}:${host.port}`;
+}
+
+/**
+ * The protocol badge, shown on every tile once the library holds more than
+ * one protocol and on none at all before that.
+ *
+ * One rule, no surprises, and it disappears entirely for the VNC-only user
+ * who is the majority today. A per tile "only badge the unusual one" rule
+ * reads as cleverness and leaves the user guessing what the unbadged tiles
+ * are.
+ */
+export function ProtocolBadge({ protocol }: { protocol: string }): ReactNode {
+  return (
+    <span className="shrink-0 rounded-sm bg-inset px-1.5 py-px text-2xs font-medium text-tertiary">
+      {protocolLabel(protocol)}
+    </span>
+  );
 }
 
 function OnlineDot({ online }: { online: boolean | null | undefined }): ReactNode {
@@ -187,6 +226,7 @@ export function HostTile({
   onEdit,
   onWake,
   onContextMenu,
+  showProtocol,
 }: {
   host: HostProfile;
   selected: boolean;
@@ -195,6 +235,9 @@ export function HostTile({
   onEdit: () => void;
   onWake: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  /** True when the library holds more than one protocol; see
+   *  {@link ProtocolBadge} for why it is all-or-nothing. */
+  showProtocol?: boolean;
 }): ReactNode {
   const { thumbnailUrl, requestThumbnail } = useHosts();
   const { forKey, livePreviews } = useSessions();
@@ -305,6 +348,7 @@ export function HostTile({
           <span className="shrink-0 rounded-sm bg-inset px-1.5 py-px text-2xs font-medium text-tertiary">
             {osLabel(host.osHint)}
           </span>
+          {showProtocol ? <ProtocolBadge protocol={host.protocol} /> : null}
           {/* Non-default ports are shown here as they are in the list view, two hosts on one machine are otherwise indistinguishable. */}
           <span className="mono min-w-0 flex-1 truncate" title={addressLabel(host)}>
             {addressLabel(host)}
@@ -394,7 +438,7 @@ export function DiscoveredTile({
   // What the machine actually is, and why we believe it: a name answered over
   // NetBIOS / MS-RPC / RDP is proof of Windows and outranks the `osHint`
   // substring guess. Both inputs may be missing entirely (older event, mDNS-only
-  // host), which resolves to the neutral "VNC" badge rather than crashing.
+  // host), which resolves to the neutral "Remote" badge rather than crashing.
   const os = resolvedOsHint(host);
   const proven = isWindowsNameSource(host.nameSource);
   const via = nameSourceLabel(host.nameSource);
@@ -402,7 +446,9 @@ export function DiscoveredTile({
     ? `Windows, name resolved via ${via}, which only a Windows machine answers`
     : os === "unknown"
       ? "Operating system not identified"
-      : `${osLabel(os)}, inferred from the VNC server it runs`;
+      // Protocol neutral, and more accurate than it was: the inference has
+      // always used NetBIOS and RDP certificates as well as the RFB banner.
+      : `${osLabel(os)}, inferred from what it answers on the network`;
 
   // The MAC is not tile furniture: it is unreadable at a glance and only
   // matters at the moment you save the host (it becomes the Wake-on-LAN
@@ -456,6 +502,7 @@ export function DiscoveredTile({
           >
             {osLabel(os)}
           </span>
+          {host.protocol === "rdp" ? <ProtocolBadge protocol="rdp" /> : null}
           <span
             className="mono min-w-0 flex-1 truncate text-secondary"
             title={addressTitle}

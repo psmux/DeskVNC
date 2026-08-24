@@ -10,6 +10,47 @@
  *   session:// and discovery:// events                -> src-tauri/src/commands/
  */
 
+/**
+ * `remote_core::ProtocolKind`, serde `rename_all = "kebab-case"`, which for
+ * these two spells them exactly as they are written here.
+ */
+export type ProtocolKind = "vnc" | "rdp";
+
+/**
+ * The port a bare hostname gets, per protocol. The one place these two
+ * numbers live on this side; `address.ts` re-exports them under its own
+ * names for the callers that already import those.
+ */
+export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389 };
+
+/** The two protocols, in the order the UI offers them. */
+export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp"];
+
+/**
+ * Is this a protocol this build knows? A profile written by a newer version
+ * carries a string we have never seen, and it must stay identifiable rather
+ * than being quietly relabelled.
+ */
+export function isProtocolKind(value: unknown): value is ProtocolKind {
+  return value === "vnc" || value === "rdp";
+}
+
+/**
+ * The badge text for a protocol. An unrecognised value is shown verbatim
+ * (upper-cased) so a host saved by a newer build is identifiable rather than
+ * mislabelled as one of ours.
+ */
+export function protocolLabel(p: string): string {
+  return p === "vnc" ? "VNC" : p === "rdp" ? "RDP" : p.toUpperCase();
+}
+
+/** How the protocol selector names each one, for someone who does not know
+ *  the acronyms: this is what a Mac or Linux desktop calls it, and what the
+ *  Windows settings pane calls it. */
+export function protocolName(p: ProtocolKind): string {
+  return p === "rdp" ? "RDP (Windows Remote Desktop)" : "VNC / screen sharing";
+}
+
 export type OsHint = "macos" | "windows" | "linux" | "qemu" | "unknown";
 /**
  * How discovery arrived at a host's display name. Three of these are only ever
@@ -62,6 +103,14 @@ export interface HostProfile {
   tags: string[];
   createdAt: number;
   updatedAt: number;
+  /**
+   * Which protocol to speak. Rows written before RDP existed read `"vnc"`.
+   * Typed as a plain string because the Rust column is one: a value a newer
+   * build wrote must survive being listed, edited and saved by this one.
+   */
+  protocol: string;
+  /** RDP-only options as a JSON blob; `null` for a VNC host. See `rdp.ts`. */
+  rdpSettings: string | null;
 
   // ---- UI-local only: NOT columns in the hosts table, NOT sent by Rust ----
   /** Client-side flag; the backend has no `favorite` column yet. */
@@ -70,14 +119,20 @@ export interface HostProfile {
   online?: boolean | null;
 }
 
-/** A blank profile with every required field present, ready to override. */
-export function blankHostProfile(): HostProfile {
+/**
+ * A blank profile with every required field present, ready to override.
+ *
+ * The default argument is what makes the protocol safe to add here: every
+ * existing zero-argument call site keeps producing exactly what it produced
+ * before, a VNC profile on 5900.
+ */
+export function blankHostProfile(protocol: ProtocolKind = "vnc"): HostProfile {
   const now = Math.floor(Date.now() / 1000);
   return {
     id: "",
     friendlyName: "",
     address: "",
-    port: 5900,
+    port: DEFAULT_PORT[protocol],
     groupId: null,
     osHint: "unknown",
     serverHint: null,
@@ -100,7 +155,24 @@ export function blankHostProfile(): HostProfile {
     tags: [],
     createdAt: now,
     updatedAt: now,
+    protocol,
+    // Deliberately null for a new RDP host too: an untouched settings object
+    // stores as NULL, the Rust side applies its own defaults, and the column
+    // only fills once the user changes something.
+    rdpSettings: null,
   };
+}
+
+/** The protocol a profile speaks, or `"vnc"` for a row that predates the
+ *  column. Never guesses at an unrecognised value; callers that must show
+ *  something use {@link protocolLabel} on the raw string instead. */
+export function hostProtocol(h: { protocol?: string | null }): ProtocolKind {
+  return isProtocolKind(h.protocol) ? h.protocol : "vnc";
+}
+
+/** The port to show and to default to for a host, given its protocol. */
+export function defaultPortFor(h: { protocol?: string | null }): number {
+  return DEFAULT_PORT[hostProtocol(h)];
 }
 
 /**
@@ -111,7 +183,7 @@ export function blankHostProfile(): HostProfile {
  */
 export interface SshTunnelSettings {
   enabled: boolean;
-  /** SSH gateway host; empty means "the profile's VNC address". */
+  /** SSH gateway host; empty means "the profile's own address". */
   host: string;
   port: number;
   /** Remote user; empty means "same as the local user". */
@@ -213,6 +285,8 @@ export interface HistoryEntry {
   durationS: number | null;
   securityType: string | null;
   disconnectReason: string | null;
+  /** `"vnc"` or `"rdp"`; rows written before the column read `"vnc"`. */
+  protocol: string;
 }
 
 /** Mirrors `vnc_store::StoredCredentials`, write-only across IPC. */
@@ -221,6 +295,11 @@ export interface StoredCredentials {
   vencryptUser?: string | null;
   vencryptPass?: string | null;
   sshPassphrase?: string | null;
+  /** Bare `sAMAccountName` with the domain beside it, or a UPN like
+   *  `alice@corp.example` with `rdpDomain` left null. Stored as typed. */
+  rdpUser?: string | null;
+  rdpDomain?: string | null;
+  rdpPassword?: string | null;
 }
 
 /** Where secrets live; mirrors `vnc_store::CredentialBackend`. */
@@ -255,8 +334,53 @@ export interface DiscoveredHost {
    * guessing behind `osHint`. Read it through `resolvedOsHint()`.
    */
   nameSource?: NameSource | null;
+  /**
+   * What answers on THIS row's port, not what the machine runs. A machine
+   * running both protocols produces two rows and the interface joins them.
+   * Optional for the same reason as `mac`: an older shell sends no such key.
+   */
+  protocol?: ProtocolKind | null;
+  /** What the X.224 negotiation learned; `null` for a VNC row. */
+  rdp?: RdpCaps | null;
   /** Always null from the shell; the UI de-dupes against its own host list. */
   savedHostId: string | null;
+}
+
+/**
+ * `vnc_discovery::RdpCaps`. Everything the Connection Confirm said and
+ * nothing inferred beyond it.
+ *
+ * There is deliberately no TLS version in here and there cannot be: the
+ * probe never completes a handshake, so the only honest way to learn that a
+ * server tops out at TLS 1.1 is to fail a connection to it.
+ */
+export interface RdpCaps {
+  /** The server speaks TLS on this port. */
+  tls: boolean;
+  /** Network level authentication is available. */
+  nla: boolean;
+  /**
+   * Whether it is *required*, which one negotiation cannot answer: a server
+   * permitting both picks the stronger, which proves availability and says
+   * nothing about whether TLS alone would have been refused. `null` means
+   * "not asked", and an unprobed host must read that way rather than as an
+   * optimistic `false`.
+   */
+  nlaRequired: boolean | null;
+  /** The server can do EGFX, so the H.264 path is available for this host. */
+  gfx: boolean;
+  extendedClientData: boolean;
+  restrictedAdmin: boolean;
+  redirectedAuth: boolean;
+  /**
+   * The server offered no negotiation data at all, so it speaks only
+   * standard RDP security, which this client does not support. Such a host
+   * is listed and marked rather than hidden: "there is an RDP server here
+   * that this app cannot talk to" is more useful than silence.
+   */
+  standardOnly: boolean;
+  failureCode: number | null;
+  selectedProtocol: number;
 }
 
 /** Name sources only a Windows host can answer. */
@@ -318,14 +442,15 @@ export function hostMac(host: { mac?: string | null } | null | undefined): strin
 
 /**
  * Which server key a trust-on-first-use pin describes (`PinScheme` in
- * crates/vnc-core/src/types.rs).
+ * crates/remote-core/src/pins.rs).
  *
- * "tls" is a VeNCrypt X.509 certificate, "ra2" a RealVNC RSA key. One server
- * can offer both, and the fingerprints are unrelated, so a prompt says which
- * one it is about and the answer must carry the same value back untouched.
- * This never reaches the user; it is routing, not copy.
+ * "tls" is a VeNCrypt X.509 certificate, "ra2" a RealVNC RSA key, "rdp-tls"
+ * an RDP server's own certificate. One host can offer all three, and the
+ * fingerprints are unrelated, so a prompt says which one it is about and the
+ * answer must carry the same value back untouched. This never reaches the
+ * user; it is routing, not copy.
  */
-export type PinScheme = "tls" | "ra2";
+export type PinScheme = "tls" | "ra2" | "rdp-tls";
 
 /** SessionState mirrors the serde repr: tag = "state", kebab-case. */
 export type SessionState =
@@ -397,6 +522,18 @@ export interface CredentialRequest {
 }
 
 /**
+ * Whether this prompt should offer a separate logon domain field.
+ *
+ * Driven by the session's protocol rather than by a field on the request:
+ * `CredentialRequest` in `remote-core` carries no `needsDomain` today, and
+ * the UI already knows which protocol it is connecting, so asking the
+ * protocol needs no IPC change and cannot fall out of step with it.
+ */
+export function promptNeedsDomain(protocol: ProtocolKind): boolean {
+  return protocol === "rdp";
+}
+
+/**
  * One monitor of a multi-head remote desktop, in framebuffer coordinates
  * (`vnc_core::proto::messages::Screen`, minus the spec's unused `flags`).
  * Only servers speaking ExtendedDesktopSize describe their monitors; an
@@ -444,6 +581,32 @@ export type SessionEvent =
   | { type: "credentials-required"; request: CredentialRequest }
   | { type: "stats"; stats: SessionStats }
   | { type: "error"; message: string }
+  /**
+   * Who the server says is signed in. Flattened by the shell from the
+   * driver's typed event; both strings are server supplied, render as text.
+   * There is deliberately no auto-reconnect flag here: the cookie has its
+   * own payloadless event below, because it is a bearer secret.
+   */
+  | { type: "logon-info"; user: string; domain: string; remoteSessionId: number }
+  | {
+      type: "logon-error";
+      notificationType: number;
+      notificationData: number;
+      message: string;
+    }
+  /**
+   * The server ended the session and said why. `symbol` is the
+   * specification's constant name, empty when the driver did not recognise
+   * `code`; the sentence is `message`, derived in Rust, so the UI owns no
+   * code table.
+   */
+  | { type: "error-info"; code: number; symbol: string; message: string }
+  | { type: "redirect"; target: string; remoteSessionId: number }
+  | { type: "auto-reconnect-armed" }
+  | { type: "license-warning"; message: string }
+  /** Once per session, and again only if the server changes format. The
+   *  samples themselves never cross IPC. */
+  | { type: "audio-format"; sampleRate: number; channels: number }
   | { type: "ended"; durationS: number };
 
 export type SessionEventPayload = SessionEvent & { sessionId: string };
