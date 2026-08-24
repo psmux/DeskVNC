@@ -30,10 +30,19 @@ hex = { workspace = true }
 rdp-codecs = { path = ".", features = ["encode"] }
 
 [features]
-default = []
-# Progressive RemoteFX (MS-RDPEGFX 2.2.4.2, 3.3.7). Phase 3 (D10). It is a
-# second, larger RemoteFX decoder with its own tile state, and compiling it
-# into a phase 1 binary is dead weight the fuzzer also has to cover.
+# `progressive` is on by default. It used to be off, on the argument that a
+# phase 1 binary does not need a phase 3 codec and the fuzzer would have to
+# cover it anyway. docs/RDP_SPEC_NOTES.md §1.6 overtook that: progressive is
+# available from EGFX capability version 8, which is what we advertise, and
+# nothing declines it, so a server may send RDPGFX_CODECID_CAPROGRESSIVE and
+# a client without a decoder ends the session. A feature that is off cannot
+# save a session. Measured cost of turning it on: 17.9 KiB in a linked,
+# LTO'd release binary that calls both entry points, which is 4.5 percent,
+# and one more fuzz target out of ten.
+default = ["progressive"]
+# Progressive RemoteFX (MS-RDPEGFX 2.2.4.2, 3.3.7). Left as a feature so
+# `--no-default-features` gives back a binary without the tile store, for a
+# build that has other reasons to refuse the codec.
 progressive = []
 # Minimal reference encoders, one legal form of each construct, used to build
 # bench fixtures and round trip tests (PRDRDP/04 §11.4). Never shipped: the

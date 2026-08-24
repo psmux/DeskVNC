@@ -76,8 +76,12 @@ const MAX_SUB: usize = 32;
 /// extension MS-RDPRFX 3.1.8.1.4 specifies. Getting them wrong shows up as a
 /// one pixel bright or dark line down the left edge and along the top of
 /// every tile, which tiles the whole frame into a visible 64 pixel grid.
+///
+/// `pub(crate)` so [`crate::progressive::dwt`] can assert that its general
+/// kernel, which also serves uneven half lengths, is this exact function when
+/// the halves match.
 #[inline]
-fn row_1d(l: &[i16], h: &[i16], out: &mut [i16]) {
+pub(crate) fn row_1d(l: &[i16], h: &[i16], out: &mut [i16]) {
     let n = l.len();
     debug_assert_eq!(h.len(), n);
     debug_assert_eq!(out.len(), 2 * n);

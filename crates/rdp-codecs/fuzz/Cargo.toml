@@ -68,6 +68,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_progressive"
+path = "fuzz_targets/fuzz_progressive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_nscodec"
 path = "fuzz_targets/fuzz_nscodec.rs"
 test = false
