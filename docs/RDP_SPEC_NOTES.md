@@ -114,25 +114,102 @@ out of the middle of a password.
 
 A captured broker redirection settles both.
 
-### 1.6 Nothing declines RemoteFX Progressive, and we cannot decode it
+### 1.6 Nothing declines RemoteFX Progressive, and now we decode it
 
-`crates/rdp-core/src/channels/egfx/`, `crates/rdp-codecs/src/progressive.rs`.
+`crates/rdp-codecs/src/progressive/`, `crates/rdp-core/src/channels/egfx/`.
 
-This is a live interop risk rather than an ambiguity, and it is the one most
-likely to be hit by the first real Windows host.
+This was the highest live interop risk in the tree and half of it is closed.
+The half that is closed: `rdp_codecs::progressive` is a decoder now, compiled
+by default, and the entry the earlier version of this section carried, that it
+was a stub behind an off by default feature, is gone.
 
-Progressive RemoteFX is available from EGFX capability version 8, which is what
-we advertise. There is no capability bit that says "do not send it":
+The reasoning for the feature gate, recorded because the gate still exists.
+Progressive is available from EGFX capability version 8, which is what we
+advertise. There is no capability bit that says "do not send it":
 `RDPGFX_CAPS_FLAG_AVC_DISABLED` exists only from version 10, and there is no
-progressive equivalent at any version. `rdp_codecs::progressive` is a stub
-behind an off by default feature, because progressive is phase 3.
+progressive equivalent at any version. So a server may legitimately send
+`RDPGFX_CODECID_CAPROGRESSIVE` at any time, and a feature that is off cannot
+save a session. It costs 17.9 KiB in a linked, LTO'd release binary that calls
+both RemoteFX entry points, measured, which is 4.5 percent, and one more fuzz
+target out of ten. `--no-default-features` still turns it off.
 
-So a server may legitimately send `RDPGFX_CODECID_CAPROGRESSIVE` and the session
-will stop with a named refusal. Nothing is corrupted and nothing is silent, but
-the session ends. The fix is implementing the decoder, not a protocol trick.
+**The half that is open is the routing.** `rdp-core` has to send codec id
+`0x0009` to `progressive::decode_message` and give each surface a
+`ProgressiveState` that lives as long as the surface. Until it does, the
+session still stops with a named refusal and the decoder underneath it is
+unreachable. `rdp_pdu::vc::egfx::codec_id` still does not define `0x0009`, so
+the session names it locally with a citation; that constant belongs in
+`rdp-pdu`.
 
-Related: `rdp_pdu::vc::egfx::codec_id` does not define `0x0009`, so the session
-names it locally with a citation. That constant belongs in `rdp-pdu`.
+`PRDRDP/04 §4.9` says progressive rides `WIRE_TO_SURFACE_2`, on the grounds
+that it is the one codec with persistent state and that PDU is the one
+carrying a `codecContextId`. That is the reading to be careful with when the
+routing is written. `RDPGFX_WIRE_TO_SURFACE_PDU_2` carries no destination
+rectangle at all, and a progressive region's tiles are placed by tile index
+against a surface origin, so a decoder handed only a context id has nowhere to
+put them. The decoder here takes a `DstView` and tile indices, which is what
+`WIRE_TO_SURFACE_1` provides. If a real server turns out to use
+`WIRE_TO_SURFACE_2` for `0x0009`, the codec does not change but the caller has
+to synthesise the rectangle from the surface. A capture settles it.
+
+### 1.6.1 The progressive wavelet has the same two readings as §1.2, plus a third question
+
+`crates/rdp-codecs/src/progressive/dwt.rs`.
+
+Progressive with `RFX_DWT_REDUCE_EXTRAPOLATE` clear runs
+`remotefx::dwt::inverse_2d` itself, so it inherits §1.2 exactly: if the
+doubled high pass is wrong there it is wrong here, by the same factor, and a
+test asserts the two kernels are the same function so it stays one edit.
+
+With the flag set, which is what Windows sends, there is a second question of
+the same shape. The halves are 33 and 31 rather than 32 and 32, and the
+missing high pass coefficient has to be supplied by the decoder. The module
+takes the extrapolation to be linear, `X[64] = 2*X[63] - X[62]`, which makes
+that coefficient identically zero for every input and is therefore the only
+extension under which dropping it loses nothing. The band sizes that follow
+are the only ones that sum to 4096, three sums with no slack, and a test
+carries the arithmetic. It is still a reconstruction rather than a
+transcription. MS-RDPEGFX 4.1.2 settles it, and `PRDRDP/09 §2.4.1` warns that
+that example is small, so a capture from an xrdp 0.10 GFX session is the second
+source and the one likely to arrive first.
+
+The failure mode is the §1.2 one: choosing wrong does not corrupt the picture,
+it renders one row and one column of every tile at the wrong amplitude, which
+tiles the frame into a faint 64 pixel grid.
+
+### 1.6.2 The SRL value width is derived, not transcribed
+
+`crates/rdp-codecs/src/progressive/srl.rs`.
+
+An upgrade pass codes a coefficient that becomes non zero as a sign bit and
+`numBits` magnitude bits, where `numBits` is the difference between the two
+bit positions. That width is forced: a coefficient insignificant at the old
+position has a magnitude below `2^numBits` at the new one and at least one, so
+`numBits` bits hold every legal value and no fewer do. The competing reading,
+that the leading one is implied and only `numBits - 1` bits are sent, cannot
+represent a magnitude of one at `numBits` of three, so it is ruled out.
+
+What is **not** forced and is a straight guess is the order: sign first, then
+magnitude, and the run coder's terminating value read after its remainder
+bits. It is written that way because RLGR1's run mode does it that way and SRL
+is RLGR1's run mode with a different terminating symbol. A wrong order does
+not fail cleanly. It desynchronises the SRL stream from its first non zero
+coefficient onward and the tile refines into noise, so it would look like a
+wavelet bug rather than a bitstream one.
+
+The three tile block headers are the other guess in the same file's
+neighbourhood: 22 bytes for `WBT_TILE_SIMPLE`, 23 for `WBT_TILE_FIRST` with
+its `quality` byte, and 26 for `WBT_TILE_UPGRADE` with six lengths and no
+`flags`. That one does fail cleanly, which is why it is listed second: the
+declared blob lengths are taken out of the block before anything is decoded,
+so a header that is the wrong size makes almost every real tile a truncation
+error naming the tile body rather than a wrong picture.
+
+MS-RDPEGFX 4.1.2 is the vector for both, and `PRDRDP/09 §2.4.1` says that
+example is small. The practical second source is a capture from an xrdp 0.10
+GFX session, which is the only easily available live progressive traffic;
+`PRDRDP/09 §2.4.1` already asks for that capture to be taken in phase 2, so it
+may arrive before the document does.
 
 ### 1.7 Golden vectors we could not source
 
@@ -160,6 +237,8 @@ recorded here so the design set can be corrected.
 | `PRDRDP/05 §5.2` | The compressed drdynvc variants use the RDP 6.1 bulk compressor | MS-RDPEDYC uses RDP 8.0. Following this sends the payload to the wrong decompressor. |
 | `PRDRDP/13 §6.4` | An uncompressed segment is `Literal(payload)` | The flags byte is not decoration. `PACKET_AT_FRONT` and `PACKET_FLUSHED` instruct the RDP 8.0 history window, and an uncompressed segment still contributes to it, so dropping them decodes the next compressed segment against a wrong history. |
 | `PRDRDP/04 §4.6.5` | The RemoteFX inverse DWT is unmodified 5/3 | See §1.2 above. |
+| `PRDRDP/04 §4.9.2` | An upgrade pass shifts the retained coefficients before adding the refinement | Nothing is shifted. A tile's stored coefficients are already at the final scale, because each pass was dequantized by its own bit position less one when it arrived, and a refinement is added at the new, smaller shift: `m_new << (posNew - 1)` is `m_old << (posOld - 1)` plus `v << (posNew - 1)`. Following the text multiplies every retained coefficient by `2^numBits` on every pass. |
+| `PRDRDP/04 §4.9.3` | SRL is "a run of zeros with a Golomb style escape, then a sign bit per non zero value" | A sign bit alone cannot carry a value. A coefficient that becomes non zero in this pass also needs its magnitude, `numBits` bits of it, and the width is forced rather than chosen (§1.6.2). |
 
 ### 2.2 Signatures that cannot compile or cannot fire
 
@@ -185,6 +264,15 @@ recorded here so the design set can be corrected.
   (sixteen `ConnectOptions::new` sites named, 32 present).
 * `PRDRDP/13 §4.8.3`'s Window List capability set totals 11 bytes, not the 12 a
   reader assumes from its neighbours.
+* `PRDRDP/04 §4.9.4`'s progressive tile is 25.5 KiB and is 24 KiB. Its
+  `BitSet4096` per component cannot carry what the SRL pass needs, which is a
+  three way answer per coefficient: still zero, positive, or negative. The
+  retained coefficient already carries it, because dequantization is a left
+  shift, so it maps zero to zero and preserves sign, and a refinement only ever
+  adds magnitude in the direction a coefficient already points. So the bitsets
+  are 1.5 KiB per tile of state that duplicates the state next to it. The
+  surface totals in `§4.9.4`, `§11.1` and `§11.3` follow: 12.7, 22.9 and
+  50.8 MiB become 11.95, 21.6 and 47.8.
 * `PRDRDP/13 §5.6.2`'s palette update is 774 bytes, not 772, which matches
   neither the slow path nor the body alone.
 * `PRDRDP/04 §6.4` to `§6.6` cite pointer subsections that are off by one from
@@ -219,6 +307,14 @@ recorded here so the design set can be corrected.
   the input target. Both cannot hold at once.
 * `PRDRDP/04 §2.3`'s stride formula divides bits by eight before rounding, so it
   yields zero for a four pixel wide 1 bpp bitmap.
+* `PRDRDP/04 §4.9.5` budgets progressive at 250 MPix/s for a first pass and
+  that one holds: measured 277 MPix/s at 1080p, 7.5 ms. What `§11.2` has no row
+  for is the pass that costs the most. `WBT_TILE_SIMPLE` measures 202 MPix/s,
+  because a whole tile's coefficients are non zero where a coarse first pass's
+  are mostly zero, so the entropy stage does several times the work for the
+  same pixels. A server that stops sending upgrades and starts sending simple
+  tiles gets slower, not faster, and the table would attribute the regression
+  to nothing.
 
 ## 3. Contradictions needing an owner's decision
 
