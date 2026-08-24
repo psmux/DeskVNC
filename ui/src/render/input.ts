@@ -192,6 +192,9 @@ export class SessionInput {
   private keyView = new DataView(this.keyBuf.buffer);
   private wheelBuf = new Uint8Array(KIND_POINTER_LEN * 2);
   private wheelView = new DataView(this.wheelBuf.buffer);
+  /** Press and release of a synthesised click, which travel as one packet. */
+  private clickBuf = new Uint8Array(KIND_POINTER_LEN * 2);
+  private clickView = new DataView(this.clickBuf.buffer);
 
   constructor(canvas: HTMLCanvasElement, opts: SessionInputOptions) {
     this.canvas = canvas;
@@ -519,11 +522,29 @@ export class SessionInput {
     }
   };
 
-  /** Right button pressed and released at one point, as a context gesture. */
+  /**
+   * Right button pressed and released at one point, as a context gesture.
+   *
+   * Both halves go in ONE packet, exactly as the wheel does. Two separate
+   * `sendPointer` calls are two independent IPC requests, and nothing
+   * guarantees the shell handles them in the order they were issued: land the
+   * release first and the remote is left holding the right button, so the
+   * click does nothing until some later pointer event happens to carry a mask
+   * without that bit. A press and its release that belong to one gesture must
+   * never be able to overtake each other.
+   */
   private sendRightClick(x: number, y: number): void {
     const right = 1 << 2;
-    this.sendPointer(x, y, this.buttonMask | right);
-    this.sendPointer(x, y, this.buttonMask);
+    const v = this.clickView;
+    v.setUint8(0, KIND_POINTER);
+    v.setUint16(1, x, true);
+    v.setUint16(3, y, true);
+    v.setUint16(5, this.buttonMask | right, true);
+    v.setUint8(7, KIND_POINTER);
+    v.setUint16(8, x, true);
+    v.setUint16(10, y, true);
+    v.setUint16(12, this.buttonMask, true);
+    this.dispatch(this.clickBuf);
   }
 
   /**

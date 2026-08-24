@@ -93,6 +93,25 @@ describe("context-menu gestures", () => {
     ]);
   });
 
+  it("sends the press and release as one packet, so they cannot arrive reversed", () => {
+    // Two invokes are two independent IPC requests with no ordering
+    // guarantee between them. Reversed, the remote is left holding the right
+    // button and the click does nothing until a later event happens to carry
+    // a mask without that bit, which is the "nothing happened, then ages
+    // later it did" this gesture was reported with.
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new MouseEvent("contextmenu", { clientX: 120, clientY: 80, bubbles: true }),
+    );
+    vi.advanceTimersByTime(100);
+
+    expect(sent).toHaveLength(1);
+    expect(pointers(sent)).toEqual([
+      { x: 120, y: 80, mask: RIGHT },
+      { x: 120, y: 80, mask: 0 },
+    ]);
+  });
+
   it("does not double up when a real right button already covered the gesture", () => {
     // A physical right button fires pointerdown and then contextmenu for one
     // gesture; synthesising on top of that would right-click twice.

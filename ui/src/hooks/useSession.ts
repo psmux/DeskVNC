@@ -39,6 +39,7 @@ import type {
   SessionStats,
 } from "../lib/types";
 import { DEFAULT_PORT, isProtocolKind } from "../lib/types";
+import { createSerialQueue } from "../lib/serialQueue";
 
 export interface SessionBridge {
   onFrame: (msg: FrameMessage) => void;
@@ -528,16 +529,32 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
 
   const sid = (): string => sessionIdRef.current;
 
+  /**
+   * Input goes out one packet at a time, in the order it was produced.
+   *
+   * Two `invoke` calls are two independent IPC requests, and reversing a press
+   * and its release leaves the remote holding a button the user let go of. See
+   * `createSerialQueue`. The cost is one queued round trip, against a 16 ms
+   * frame budget for input that is already coalesced per frame.
+   */
+  const inputQueue = useRef(createSerialQueue());
+
   const sendInput = useCallback((packet: Uint8Array): void => {
     if (!inTauri()) return;
-    // Raw binary body; session id rides in an invoke header (see FRAME_FORMAT notes).
-    invoke("send_input", packet, { headers: { "x-session-id": sessionIdRef.current } }).catch(
-      (err: unknown) => {
-        if (!inputWarned.current) {
-          inputWarned.current = true;
-          console.warn("send_input failed:", err);
-        }
-      },
+    // A COPY: the caller reuses its scratch buffers between events, and this
+    // packet may not be handed to `invoke` until a previous one has landed.
+    const body = packet.slice();
+    const sessionId = sessionIdRef.current;
+    inputQueue.current(() =>
+      // Raw binary body; session id rides in an invoke header (see FRAME_FORMAT notes).
+      invoke("send_input", body, { headers: { "x-session-id": sessionId } }).catch(
+        (err: unknown) => {
+          if (!inputWarned.current) {
+            inputWarned.current = true;
+            console.warn("send_input failed:", err);
+          }
+        },
+      ),
     );
   }, []);
 

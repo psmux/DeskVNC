@@ -10,6 +10,19 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A right click could do nothing, and then take effect much later.** Input
+  packets were sent as independent IPC requests, and nothing made the shell
+  handle two of them in the order they were issued. A press and its release
+  milliseconds apart, which is what a trackpad tap and a synthesised context
+  click both are, could therefore land reversed, leaving the remote holding a
+  button the user had already let go of: the click appeared to do nothing, and
+  only came out later when some unrelated pointer event happened to carry a
+  mask without that bit. Input is now queued so no packet can overtake
+  another, and a synthesised right click travels as a single packet the way a
+  wheel click already did.
+
 ### Added
 
 - **The groundwork for a second protocol, and the first working pieces of an
