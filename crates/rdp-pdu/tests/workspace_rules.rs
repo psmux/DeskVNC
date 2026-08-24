@@ -247,7 +247,14 @@ fn only_the_ruled_crates_reach_into_the_rdp_set() {
         };
         // Inside the set, and the shell, which reaches rdp-core through the
         // registry (D2, PRDRDP/02 §4.4).
-        if LEAVES.iter().any(|(l, _)| *l == name) || name == "rdp-core" || name == "src-tauri" {
+        //
+        // The shell is `deskvncviewer`, not `src-tauri`. That is the package
+        // name in `src-tauri/Cargo.toml`; the directory is called something
+        // else. This exemption was written against the directory name and so
+        // matched nothing, which nobody noticed until the shell actually took
+        // the dependency and the rule fired on the one crate it was written to
+        // allow.
+        if LEAVES.iter().any(|(l, _)| *l == name) || name == "rdp-core" || name == "deskvncviewer" {
             continue;
         }
         let text = std::fs::read_to_string(&manifest).expect("read manifest");
