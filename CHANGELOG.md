@@ -10,6 +10,42 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-08-25
+
+### Fixed
+
+- **RDP colours, properly this time.** 0.13.2 fixed the width of the planar
+  colour loss reconstruction and 0.13.3 shipped with the amount still wrong,
+  which left hard edged patches of roughly the complementary hue across the
+  most saturated parts of the picture: teal blotches on a red face, a teal band
+  along the sand.
+
+  The shift is one less than the colour loss level, and the non lifting form of
+  the transform goes with it. The lifting form carries two halvings of its own
+  and needs the full level; pairing it with the eight bit reconstruction
+  introduced in 0.13.2 meant every chroma sample in the top half of its range
+  overflowed and wrapped, flipping its sign.
+
+  The check that passed 0.13.3 could not see this. A wrap stays inside 0 to
+  255, so nothing clamped: it reported zero clamped tiles while 15.72% of its
+  chroma was sign flipped. The check that does see it is that a correct scale
+  never discards a set bit. Measured live: 2,474,934 of 15,745,024 chroma bytes
+  lost a bit before, 0 of 15,728,640 after. There is now a test for that
+  invariant that needs no server.
+
+  Verified on the desktop icons rather than the wallpaper, because their
+  colours are known: Chrome's blue centre and red arc, blue Edge, blue Recycle
+  Bin arrows, a red Core Temp bulb, a blue ASUS gear, orange OpenVPN, a yellow
+  folder. Every one of them was wrong before, in ways the photograph hid.
+  Cross checked against FreeRDP, which agrees.
+
+- **NSCodec's colour transform had the same two faults**, plus the sign of Co,
+  which it defines the opposite way round from the planar codec. Its encoder
+  here is rewritten as the inverse of the corrected decoder, rounding to
+  nearest rather than truncating. Still unverified against a real NSCodec
+  server: this crate's encoder is the only thing it has been checked against,
+  which is precisely the weakness that hid both planar faults.
+
 ## [0.13.3] - 2026-08-25
 
 ### Fixed
@@ -1084,7 +1120,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.13.4...HEAD
+[0.13.4]: https://github.com/psmux/DeskVNC/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/psmux/DeskVNC/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/psmux/DeskVNC/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/psmux/DeskVNC/compare/v0.13.0...v0.13.1
