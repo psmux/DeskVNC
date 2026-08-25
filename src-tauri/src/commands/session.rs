@@ -506,6 +506,21 @@ fn forward_events(
                 if !matches!(state, SessionState::Authenticating { .. }) {
                     creds_ctx.prompts.lock().remove(&session_id);
                 }
+                // Forget the button mask `send_input` sheds motion against.
+                //
+                // A reconnect keeps this registry entry but builds the
+                // backend's input state from scratch, and input queued while
+                // the session was down is discarded, so the cached mask can
+                // outlive the only thing that made it true. A real press whose
+                // mask happened to match it would then look like pure motion
+                // and be dropped under backpressure. `-1` is no mask at all,
+                // so the next pointer event is state changing whatever it
+                // carries.
+                if let Some(entry) = sessions.lock().get(&session_id) {
+                    entry
+                        .last_pointer_mask
+                        .store(-1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // App-wide mirror for the Library's connected-machine tracking
                 //, only the tag; anyone who needs the full state owns the
                 // session window and hears `session://event`.
