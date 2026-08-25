@@ -10,6 +10,63 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-25
+
+Minor rather than patch: the stored per-host Remote Desktop settings gain a
+field and lose one, and the `connect_session` IPC call takes two more
+arguments.
+
+### Added
+
+- **A resolution setting for Remote Desktop connections**, in the connection
+  dialog, the View menu and Preferences. One control with three choices: match
+  this window when connecting, match it and keep matching, or a fixed size from
+  1280 by 720 up to 3840 by 2160, or one you type. They are one setting rather
+  than a size plus a "follow the window" switch because they are not
+  independent: a fixed size that also tracked the window would stop being fixed
+  as soon as the window moved.
+
+  The default is to match the window when connecting and then leave the desktop
+  alone, which is what Windows' own client does. A desktop that resizes every
+  time you drag a window edge rearranges that machine's icons each time.
+
+### Fixed
+
+- **Every Remote Desktop session connected at 1024 by 768**, whatever the
+  window size. The size was a constant with a comment saying the real one
+  arrived from the shell "once the window exists"; that hand off was never
+  built, so nothing ever wrote it. The shell now measures the window and the
+  session asks for a desktop that fits it.
+
+- **A 4K desktop could not be reached.** The connection request cannot carry a
+  height above 2048, so a 3840 by 2160 desktop was silently cut to 2048. It now
+  connects at the size the request can carry and asks for the rest over the
+  Display Update channel, which has room for it.
+
+- **Preferences' Remote Desktop defaults did nothing.** Every one of them had a
+  switch, a row in the store and no consumer, so turning one on changed nothing
+  and the next host still arrived with the built-in defaults. Sound, clipboard,
+  multiple monitors and the new resolution setting all apply to new hosts now.
+
+- **The floating toolbar refused to resize an RDP desktop**, saying the Display
+  Update channel was not supported yet. It has been for several releases, and
+  the View menu never refused the same thing, so the two disagreed.
+
+- **A resize asked for before the Display Update channel opened was lost.**
+  Harmless while dragging a window, since another follows, and wrong for a size
+  that is only ever asked for once.
+
+### Changed
+
+- The per-host "Match the remote resolution to this window" checkbox and the
+  matching preference are replaced by the resolution setting. Existing profiles
+  keep their behaviour: a host with the box ticked becomes "match this window,
+  and keep matching".
+
+- `.rdp` import understands `desktopwidth`, `desktopheight` and `dynamic
+  resolution` together, the way mstsc treats them. The first two were parsed,
+  range checked and then discarded because no field held them.
+
 ## [0.13.4] - 2026-08-25
 
 ### Fixed
@@ -1120,7 +1177,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.13.4...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/psmux/DeskVNC/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/psmux/DeskVNC/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/psmux/DeskVNC/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/psmux/DeskVNC/compare/v0.13.1...v0.13.2
