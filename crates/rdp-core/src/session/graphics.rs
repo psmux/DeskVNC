@@ -111,9 +111,7 @@ impl Graphics {
     pub fn reset(&mut self, desktop: (u16, u16)) {
         self.desktop = desktop;
         self.palette = Palette::default();
-        for slot in &mut self.pointers {
-            *slot = None;
-        }
+        self.pointers.fill(None);
     }
 
     /// Replace the session palette from a `TS_UPDATE_PALETTE`
