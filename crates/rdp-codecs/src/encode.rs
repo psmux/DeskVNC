@@ -727,32 +727,45 @@ pub fn rfx_first_tile_offset(msg: &[u8]) -> usize {
 // NSCodec (MS-RDPNSC)
 // ---------------------------------------------------------------------------
 
-/// RGB to the YCoCg triple `nscodec` stores, chosen so the decoder's lifting
-/// form reconstructs blue and the luma exactly and loses only the bits the
-/// colour loss level throws away.
+/// RGB to the YCoCg triple `nscodec` stores, written as the algebraic inverse
+/// of the decoder rather than as the textbook forward transform.
 ///
-/// It is written as the algebraic inverse of `planar::ycocg_to_rgb` rather
-/// than as the textbook forward transform, because the textbook forward
-/// followed by that particular inverse drifts: the decoder reconstructs from
-/// the *quantized* chroma, so the encoder has to choose the luma from the
-/// quantized chroma as well or the round trip error grows with the colour
-/// loss level instead of staying bounded by it.
-fn rgb_to_ycocg(px: [u8; 3], cll: u8) -> (u8, u8, u8) {
+/// `shift` is `ColorLossLevel - 1`, matching `planar::chroma`.
+///
+/// The decoder reconstructs from the *quantized* chroma, so the encoder has to
+/// choose the luma from the quantized chroma as well or the round trip error
+/// grows with the colour loss level instead of staying bounded by it. Picking
+/// `Y = G - Cg` after quantizing makes green exact and leaves red and blue
+/// with an error of at most one and a half quantization steps.
+///
+/// The clamp is to what `shift` can carry, `8 - shift` bits, not to the whole
+/// of `i8`. The decoder shifts back inside eight bits, so a wider value would
+/// lose its top bits there and come back with the wrong sign.
+fn rgb_to_ycocg(px: [u8; 3], shift: u32) -> (u8, u8, u8) {
     let r = i32::from(px[0]);
     let g = i32::from(px[1]);
     let b = i32::from(px[2]);
-    let shift = u32::from(cll);
 
-    let co_full = r - b;
-    let co_q = (co_full >> shift).clamp(-128, 127);
-    let co = co_q << shift;
+    // Round to nearest rather than truncate: truncation biases every sample
+    // towards zero, which desaturates the whole image as the level rises.
+    fn div_round(n: i32, d: i32) -> i32 {
+        if n >= 0 {
+            (n + d / 2) / d
+        } else {
+            (n - d / 2) / d
+        }
+    }
 
-    let t = b + (co >> 1);
-    let cg_full = g - t;
-    let cg_q = (cg_full >> shift).clamp(-128, 127);
+    let lo = -(1i32 << (7 - shift));
+    let hi = (1i32 << (7 - shift)) - 1;
+
+    // Co is (R - B) / 2 and Cg is (2G - R - B) / 4, each then divided by the
+    // quantization step, so the two divisors fold together.
+    let co_q = div_round(r - b, 1 << (shift + 1)).clamp(lo, hi);
+    let cg_q = div_round(2 * g - r - b, 1 << (shift + 2)).clamp(lo, hi);
+
     let cg = cg_q << shift;
-
-    let y = (t + (cg >> 1)).clamp(0, 255);
+    let y = (g - cg).clamp(0, 255);
     (y as u8, co_q as u8, cg_q as u8)
 }
 
@@ -848,7 +861,7 @@ fn nsc_build(
     for row in 0..h {
         for col in 0..luma_w {
             let src = px[row * w + col.min(w - 1)];
-            y[row * luma_w + col] = rgb_to_ycocg(src, cll).0;
+            y[row * luma_w + col] = rgb_to_ycocg(src, u32::from(cll) - 1).0;
         }
     }
     for cy in 0..chroma_h {
@@ -858,7 +871,7 @@ fn nsc_build(
             } else {
                 (cx.min(w - 1), cy.min(h - 1))
             };
-            let (_, c1, c2) = rgb_to_ycocg(px[sy * w + sx], cll);
+            let (_, c1, c2) = rgb_to_ycocg(px[sy * w + sx], u32::from(cll) - 1);
             co[cy * chroma_w + cx] = c1;
             cg[cy * chroma_w + cx] = c2;
         }

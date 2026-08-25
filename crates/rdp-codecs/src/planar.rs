@@ -247,29 +247,22 @@ fn decode_plane(
     Ok(())
 }
 
-/// The inverse YCoCg transform, in its reversible lifting form
-/// (MS-RDPEGDI 3.1.9.2), on chroma a caller has already scaled.
+/// The inverse YCoCg transform, on chroma the caller has already scaled
+/// (MS-RDPEGDI 3.1.9.2, MS-RDPNSC 3.1.8.1.2).
 ///
-/// The two codecs that share this reach their `co` and `cg` differently, and
-/// the difference is not cosmetic, so it stays at the call sites where it can
-/// be read: see [`planar_chroma`] and NSCodec's own scaling in `nscodec.rs`.
+/// This is the plain form, `T = Y - Cg; R = T - Co; G = Y + Cg; B = T + Co`,
+/// not the reversible lifting form. The two are algebraically the same
+/// transform at different chroma scales, and choosing between them is not a
+/// matter of taste once the scale is fixed: see [`chroma`] for why the scale
+/// is what it is, and `docs/RDP_SPEC_NOTES.md` §1.8 for how it was settled.
 ///
-/// PRDRDP/04 §4.5.5 records the shift amount as ambiguous, `cll` or `cll - 1`,
-/// and asks for it to be settled against a specification vector. For the
-/// lifting form it is `cll`, and the algebra settles it without one:
-/// implementations that write the transform in its non lifting form,
-/// `T = Y - Cg; G = Y + Cg; B = T + Co; R = T - Co`, shift by `cll - 1`,
-/// because that form has no halving of its own and folds the two `>> 1` of the
-/// lifting form into the shift. Substituting `Cg' = (Cg << cll) >> 1` into
-/// their `T` and `G` gives exactly the `t` and `g` below, so the two agree
-/// only when the lifting form shifts by `cll`.
+/// NSCodec defines Co with the opposite sign and negates it at the call site
+/// rather than growing a flag here.
 #[inline(always)]
 pub(crate) fn ycocg_to_rgb_scaled(y: u8, co: i16, cg: i16) -> (u8, u8, u8) {
     let y = i16::from(y);
-    let t = y - (cg >> 1);
-    let g = cg + t;
-    let b = t - (co >> 1);
-    let r = co + b;
+    let t = y - cg;
+    let (r, g, b) = (t - co, y + cg, t + co);
     // Clamping with `clamp` rather than with branches lowers to a pair of
     // packing instructions on both x86-64 and aarch64 (PRDRDP/04 §4.6.8
     // rule four).
@@ -280,33 +273,40 @@ pub(crate) fn ycocg_to_rgb_scaled(y: u8, co: i16, cg: i16) -> (u8, u8, u8) {
     )
 }
 
-/// Undo the planar codec's colour loss, in eight bits rather than in sixteen.
+/// Undo a codec's colour loss: shift back inside eight bits, then read signed.
 ///
-/// The encoder reduced Co and Cg with an arithmetic right shift by `cll`, so
-/// the byte on the wire carries `8 - cll` meaningful bits and, above them,
-/// whatever the shift left behind. Shifting back in the same eight bits pushes
-/// that leftover off the top; the result is a signed byte and is read as one
-/// only then.
+/// `shift` is one less than the colour loss field on the wire, for both codecs
+/// that use this. The planar `ColorLossLevel` counts the bits the encoder
+/// discarded and the non lifting form above folds one halving of its own into
+/// the scale; NSCodec's field runs from 1 with 1 meaning no loss. They arrive
+/// at the same arithmetic from different definitions.
 ///
-/// Widening to `i16` first and shifting there is the obvious way to write it
-/// and it is wrong. It keeps the leftover bits and scales them by `1 << cll`
-/// as though they were signal. A Windows 11 host sends `cll` of 3, where a
-/// stored `0x12` means -112 and the widen first reading makes it +144. Every
-/// strongly coloured pixel then leaves 0..=255 and clamps, which paints large
-/// areas of the desktop in flat primaries.
+/// Two things here are easy to get wrong and both produce a picture that looks
+/// almost right.
 ///
-/// The reading is checkable rather than a matter of taste: converting a real
-/// 8 bit RGB pixel to YCoCg and back cannot leave the range, so a decode that
-/// clamps at all has misread the stream. Against a Windows 11 host over a full
-/// session, 1125 of 1921 tiles clamped under the widen first reading and none
-/// under this one.
+/// The shift happens in eight bits and the result is read as signed only
+/// afterwards. Widening to `i16` first keeps the bits the encoder's own shift
+/// left above the meaningful ones and scales them as though they were signal.
 ///
-/// NSCodec does not share this. Its stored chroma uses the whole signed byte
-/// already, so an eight bit reconstruction would throw away its top bit; it
-/// widens first. See `docs/RDP_SPEC_NOTES.md` §1.8.
+/// And the shift is `field - 1`, not `field`. Shifting one place too far
+/// doubles every chroma sample, so any sample in the top half of its range
+/// overflows eight bits and wraps, which flips its sign. That is not a subtle
+/// error in a corner: against a Windows 11 host at `ColorLossLevel` 3, 15.7%
+/// of all chroma bytes wrapped, and each one became a hard edged patch of
+/// roughly the complementary hue in the most saturated parts of the image.
+/// At `field - 1` not one byte of 15,728,640 lost a bit, which is the check
+/// worth keeping: a correct scale never discards a set bit, so any loss at all
+/// means the scale is wrong.
 #[inline(always)]
-pub(crate) fn planar_chroma(v: u8, cll: u8) -> i16 {
-    i16::from((v << cll) as i8)
+pub(crate) fn chroma(v: u8, shift: u8) -> i16 {
+    i16::from((v << shift) as i8)
+}
+
+/// The shift for a planar `ColorLossLevel`. Zero means the planes are RGB and
+/// never reach the transform, so the saturation is a guard, not a case.
+#[inline(always)]
+pub(crate) fn planar_shift(cll: u8) -> u8 {
+    cll.saturating_sub(1)
 }
 
 fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstView<'_>) {
@@ -343,11 +343,9 @@ fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstV
                 .zip(d.chunks_exact_mut(4))
                 .enumerate()
             {
-                let (r, g, b) = ycocg_to_rgb_scaled(
-                    yy,
-                    planar_chroma(co[x >> 1], geom.cll),
-                    planar_chroma(cg[x >> 1], geom.cll),
-                );
+                let s = planar_shift(geom.cll);
+                let (r, g, b) =
+                    ycocg_to_rgb_scaled(yy, chroma(co[x >> 1], s), chroma(cg[x >> 1], s));
                 put::<BGRA>(o, r, g, b, 0xFF);
             }
         } else {
@@ -362,11 +360,8 @@ fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstV
                 .zip(&cgp[..w])
                 .zip(d.chunks_exact_mut(4))
             {
-                let (r, g, b) = ycocg_to_rgb_scaled(
-                    yy,
-                    planar_chroma(co, geom.cll),
-                    planar_chroma(cg, geom.cll),
-                );
+                let s = planar_shift(geom.cll);
+                let (r, g, b) = ycocg_to_rgb_scaled(yy, chroma(co, s), chroma(cg, s));
                 put::<BGRA>(o, r, g, b, 0xFF);
             }
         }
@@ -640,56 +635,95 @@ mod tests {
 
     /// The inverse colour transform, hand computed at `cll = 1`.
     ///
-    /// At `cll = 1` a stored chroma byte carries seven meaningful bits, so it
-    /// is shifted back inside eight bits and read as signed there.
+    /// `cll` of 1 is a shift of 0, so the stored bytes are the chroma.
     ///
-    /// Pixel 0: Y = 100, Co = 0, Cg = 0. `t = 100`, `g = 100`, `b = 100`,
-    /// `r = 100`, so a neutral grey survives untouched.
+    /// Pixel 0: Y = 128, Co = 0, Cg = 0. `T = 128` and every channel is 128,
+    /// so a neutral grey survives untouched.
     ///
-    /// Pixel 1: Y = 100, Co byte `0x3F`, Cg byte `0x40`. Shifted by one those
-    /// are `0x7E`, which is +126, and `0x80`, which is -128. `t = 100 + 64 =
-    /// 164`, `g = -128 + 164 = 36`, `b = 164 - 63 = 101` and
-    /// `r = 126 + 101 = 227`. Nothing clamps, which is the point: a YCoCg
+    /// Pixel 1: Y = 128, Co byte `0x20` which is +32, Cg byte `0xF0` which is
+    /// -16. `T = 128 + 16 = 144`, `R = 144 - 32 = 112`, `G = 128 - 16 = 112`
+    /// and `B = 144 + 32 = 176`. Nothing clamps, which is the point: a YCoCg
     /// triple that came from a real pixel always converts back in range.
     #[test]
     fn ycocg_inverse_matches_the_hand_computed_pixels() {
         let src = [
-            HDR_NA | 0x01, // cll = 1
-            100,
-            100, // Y
+            HDR_NA | 0x01, // cll = 1, so a shift of 0
+            128,
+            128, // Y
             0,
-            0x3F, // Co
+            0x20, // Co
             0,
-            0x40, // Cg
+            0xF0, // Cg
         ];
         let mut out = vec![0u8; dst_len(2, 1)];
         let mut v = view(&mut out, 2, 1, RowOrder::TopDown);
         decode(&src, false, &mut PlanarScratch::new(), &mut v).unwrap();
-        assert_eq!(&out[0..4], &[100, 100, 100, 0xFF]);
-        assert_eq!(&out[4..8], &[227, 36, 101, 0xFF]);
+        assert_eq!(&out[0..4], &[128, 128, 128, 0xFF]);
+        assert_eq!(&out[4..8], &[112, 112, 176, 0xFF]);
     }
 
-    /// Undoing the colour loss is an eight bit operation.
+    /// The colour loss is undone by `cll - 1` places, inside eight bits.
     ///
-    /// These are the values a Windows 11 host actually sent: `cll = 3`, and a
-    /// tile of flat blue water whose first pixel is Y = 96 with stored chroma
-    /// `0x12` and `0x3B`. Shifting inside eight bits gives `0x90`, which is
-    /// -112, and `0xD8`, which is -40, and the pixel comes out a mid blue.
+    /// These are the bytes a Windows 11 host actually sent: `cll = 3`, and a
+    /// tile of flat water whose first pixel is Y = 96 with stored chroma
+    /// `0x12` and `0x3B`. At a shift of two those are `0x48`, which is +72,
+    /// and `0xEC`, which is -20, and the pixel comes out a mid blue.
     ///
-    /// Widening to `i16` before the shift instead reads those bytes as +144
-    /// and +472, which drives green past 255 and red and blue below zero. The
-    /// pixel clamps to pure green, and so did roughly half the desktop.
+    /// Both ways of getting this wrong were shipped, and both look almost
+    /// right. Shifting one place too far doubles every sample, so `0x12`
+    /// overflows eight bits and comes back as -112: the sign flips, and the
+    /// pixel turns roughly complementary. Widening to `i16` before shifting
+    /// instead keeps the bits above the meaningful ones, and `0x3B` reads as
+    /// +472, which no 8 bit pixel can produce.
     #[test]
-    fn colour_loss_is_undone_in_eight_bits_not_sixteen() {
-        let px = ycocg_to_rgb_scaled(96, planar_chroma(0x12, 3), planar_chroma(0x3B, 3));
+    fn colour_loss_is_undone_by_one_less_than_the_level() {
+        assert_eq!((chroma(0x12, 2), chroma(0x3B, 2)), (72, -20));
         assert_eq!(
-            (planar_chroma(0x12, 3), planar_chroma(0x3B, 3)),
-            (-112, -40)
+            ycocg_to_rgb_scaled(96, chroma(0x12, 2), chroma(0x3B, 2)),
+            (44, 76, 188)
         );
-        assert_eq!(px, (60, 76, 172));
-        // The same bytes under the widen first reading, for contrast.
-        let (co, cg) = (i16::from(0x12u8) << 3, i16::from(0x3Bu8) << 3);
-        assert_eq!((co, cg), (144, 472));
+
+        // One place too far: +72 becomes -112, a sign flip rather than a
+        // rounding error.
+        assert_eq!(chroma(0x12, 3), -112);
+        // Widening first: outside anything an 8 bit pixel can produce.
+        assert_eq!(i16::from(0x3Bu8) << 2, 236);
+        assert_eq!(i16::from(0x3Bu8) << 3, 472);
+    }
+
+    /// A correct scale never discards a set bit.
+    ///
+    /// This is the property that settled the transform, and it is worth a test
+    /// of its own because it needs no reference picture and no server. The
+    /// encoder can only emit a quantized chroma that fits in `8 - shift` bits;
+    /// shifting it back by `shift` must therefore land inside eight bits
+    /// exactly. Shifting one place too far, which is what shipped in 0.13.3,
+    /// breaks this for every value in the top half of the range and flips its
+    /// sign rather than merely rounding it.
+    #[test]
+    fn the_shift_never_discards_a_bit_the_encoder_could_have_set() {
+        for shift in 0..=6u8 {
+            let span = 1i32 << (7 - shift);
+            for q in -span..span {
+                let byte = q as i8 as u8;
+                assert_eq!(
+                    chroma(byte, shift),
+                    (q << shift) as i16,
+                    "shift {shift}, quantized {q} came back wrong"
+                );
+            }
+        }
+    }
+
+    /// The planar colour loss level is a count of discarded bits and the
+    /// non lifting transform folds one halving into the scale, so the shift is
+    /// one less than the field. Zero is guarded rather than meaningful: those
+    /// planes are RGB and never reach the transform.
+    #[test]
+    fn the_planar_shift_is_one_less_than_the_level() {
+        assert_eq!(planar_shift(3), 2);
+        assert_eq!(planar_shift(1), 0);
+        assert_eq!(planar_shift(0), 0);
     }
 
     /// Chroma subsampling replicates 2 by 2. A 4 by 2 bitmap has a 2 by 1
@@ -697,10 +731,9 @@ mod tests {
     /// chroma sample covers two columns.
     ///
     /// With Y = 100 and Cg = 0 everywhere, and a Co byte of 64 for the left
-    /// sample and 0 for the right: at `cll = 1` that byte shifts to `0x80`,
-    /// which is -128, so the left two pixels are `t = 100`, `g = 100`,
-    /// `b = 100 + 64 = 164`, `r = -128 + 164 = 36`, and the right two are
-    /// grey.
+    /// sample and 0 for the right: `cll = 1` is a shift of 0, so that byte is
+    /// +64 and the left two pixels are `T = 100`, `R = 100 - 64 = 36`,
+    /// `G = 100` and `B = 100 + 64 = 164`, while the right two are grey.
     #[test]
     fn chroma_subsampling_replicates_two_by_two() {
         let mut src = vec![HDR_NA | HDR_CS | 0x01];

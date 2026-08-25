@@ -46,7 +46,7 @@
 
 use remote_pixel::{put, DstView, OutFormat};
 
-use crate::planar::ycocg_to_rgb_scaled;
+use crate::planar::{chroma, ycocg_to_rgb_scaled};
 use crate::{DecodeError, Reader};
 
 /// `NSCODEC_BITMAP_STREAM`'s fixed header (MS-RDPNSC 2.2).
@@ -327,18 +327,16 @@ pub(crate) fn emit_row<const BGRA: bool>(
         .enumerate()
     {
         let cx = x >> shift;
-        // Widen before shifting, which is the opposite of what the planar
-        // codec needs. MS-RDPNSC 2.2 defines ColorLossLevel over 1 to 7 with
-        // 1 meaning no loss, and at that level the stored chroma is a full
-        // signed byte, so there are no spare high bits for an eight bit shift
-        // to discard: doing it in eight bits would drop the sign. Not checked
-        // against a real NSCodec server, only against this crate's encoder;
-        // see `docs/RDP_SPEC_NOTES.md` §1.8.
-        let (r, gg, b) = ycocg_to_rgb_scaled(
-            yv,
-            i16::from(co[cx] as i8) << g.cll,
-            i16::from(cg[cx] as i8) << g.cll,
-        );
+        // MS-RDPNSC 2.2 defines ColorLossLevel over 1 to 7 with 1 meaning no
+        // loss, so the bits discarded are one fewer than the field, the same
+        // arithmetic the planar codec arrives at from the other direction.
+        //
+        // The negation is the one real difference between the two: NSCodec's
+        // Co carries the opposite sign, `R = Y + Co - Cg` against planar's
+        // `R = Y - Cg - Co`. Negating here keeps the shared transform free of
+        // a flag.
+        let sh = g.cll - 1;
+        let (r, gg, b) = ycocg_to_rgb_scaled(yv, -chroma(co[cx], sh), chroma(cg[cx], sh));
         put::<BGRA>(o, r, gg, b, if g.has_alpha { av } else { 0xFF });
     }
 }
