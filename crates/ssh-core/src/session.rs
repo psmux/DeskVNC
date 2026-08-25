@@ -276,7 +276,12 @@ async fn wait_backoff(
                     terminal.cols = cols;
                     terminal.rows = rows;
                 }
-                Some(SshCommand::Input(_)) => {}
+                // Nothing is asking, so an answer arriving here is stale
+                // (the dialog was answered twice, or after a timeout). Drop
+                // it rather than treating it as an error.
+                Some(SshCommand::Input(_))
+                | Some(SshCommand::ProvideCredentials { .. })
+                | Some(SshCommand::CancelCredentials) => {}
             },
         }
     }
@@ -310,11 +315,53 @@ async fn run_once(
     // `interactive` rather than the sidecar profile: a human staring at a
     // frozen prompt must not wait 90 seconds for the transport to admit the
     // peer is gone. This is the hang detection.
-    let ssh = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return Err(Error::Cancelled),
-        r = connect_and_authenticate_with(&options.ssh, verifier.clone(), Keepalive::interactive())
-            => r?,
+    //
+    // The loop exists for the ad-hoc case. A Quick Connect target has no
+    // profile, so it has no stored account and no secret: without an ask, the
+    // only auth that could ever succeed is an agent, and a machine with no
+    // agent identities just failed. So a refused authentication asks the user
+    // and tries again with what they give, exactly as the RFB handshake does.
+    let mut cfg = options.ssh.clone();
+    let mut attempt: u32 = 0;
+    let ssh = loop {
+        let dialing =
+            connect_and_authenticate_with(&cfg, verifier.clone(), Keepalive::interactive());
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            r = dialing => r,
+        };
+
+        match outcome {
+            Ok(handle) => break handle,
+            // Only an authentication refusal is worth asking about. A refused
+            // dial, a timeout or a changed host key are not things a password
+            // fixes, and prompting for one would be a dialog that cannot help.
+            Err(e @ (ssh_transport::Error::Auth { .. } | ssh_transport::Error::Agent(_))) => {
+                attempt += 1;
+                let hint = (!cfg.username.is_empty()).then(|| cfg.username.clone());
+                let Some((username, password)) = ask_for_credentials(
+                    events,
+                    commands,
+                    cancel,
+                    "SSH",
+                    attempt,
+                    Some(e.to_string()),
+                    hint,
+                )
+                .await
+                else {
+                    // Asked and declined. Stopping is right: retrying would be
+                    // a loop with a dialog in it.
+                    return Err(Error::Transport(e));
+                };
+                if let Some(user) = username {
+                    cfg.username = user;
+                }
+                cfg.auth = ssh_transport::SshAuth::Password(password);
+            }
+            Err(e) => return Err(Error::Transport(e)),
+        }
     };
 
     let found = pty::probe_multiplexer(&ssh, &options.multiplexer).await?;
@@ -394,6 +441,56 @@ async fn run_once(
         .await;
 
     outcome
+}
+
+/// Ask the user for credentials and wait for the answer.
+///
+/// Returns `None` when the ask was declined, cancelled, or the shell went
+/// away, which the caller turns into a stopped session: they were asked and
+/// said no, so retrying would be a loop with a dialog in it.
+///
+/// Pumps `commands` directly, the same receiver the supervisor owns and that
+/// nothing else reads while the session is unconnected. That is the same
+/// shape `vnc-core`'s `serve_credential_ask` uses, for the same reason: the
+/// handshake has to block on a human without blocking the runtime.
+async fn ask_for_credentials(
+    events: &mpsc::Sender<SshEvent>,
+    commands: &mut mpsc::Receiver<SshCommand>,
+    cancel: &CancellationToken,
+    method: &str,
+    attempt: u32,
+    error: Option<String>,
+    username_hint: Option<String>,
+) -> Option<(Option<String>, String)> {
+    emit(
+        events,
+        SshEvent::CredentialsRequired {
+            method: method.to_string(),
+            attempt,
+            error,
+            username_hint,
+        },
+    )
+    .await
+    .ok()?;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return None,
+            cmd = commands.recv() => match cmd {
+                None
+                | Some(SshCommand::CancelCredentials)
+                | Some(SshCommand::Disconnect) => return None,
+                Some(SshCommand::ProvideCredentials { username, password }) => {
+                    return Some((username.filter(|u| !u.trim().is_empty()), password));
+                }
+                // Keystrokes, resizes and reconnect requests are meaningless
+                // before a shell exists. Drop them and keep waiting.
+                Some(_) => continue,
+            },
+        }
+    }
 }
 
 /// The byte pump: remote output out, keystrokes and resizes in.
@@ -532,8 +629,11 @@ async fn pump(
                         }
                     }
                 }
-                // Already connected; nothing to do.
-                Some(SshCommand::ReconnectNow) => {}
+                // Already connected; nothing to do. A credential answer this
+                // late is stale for the same reason.
+                Some(SshCommand::ReconnectNow)
+                | Some(SshCommand::ProvideCredentials { .. })
+                | Some(SshCommand::CancelCredentials) => {}
             },
         }
     }

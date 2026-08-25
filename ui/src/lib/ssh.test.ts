@@ -19,6 +19,12 @@ describe("parseSshSettings", () => {
     expect(parseSshSettings('{"multiplexer":"tmux"}')?.multiplexer).toBe("tmux");
   });
 
+  it("falls back to agent on an auth value it does not know, the same tolerant rule as multiplexer", () => {
+    expect(parseSshSettings('{"auth":"nonsense"}')?.auth).toBe("agent");
+    expect(parseSshSettings('{"auth":"password"}')?.auth).toBe("password");
+    expect(parseSshSettings('{"auth":"key-file"}')?.auth).toBe("key-file");
+  });
+
   it("reads a v higher than this build understands rather than refusing", () => {
     // Unlike `vnc_store::SshSettings::parse`, which errors on a blob newer
     // than it knows (PRDRDP/08 §2.4 style rule), this reader never guesses at
@@ -44,6 +50,17 @@ describe("serializeSshSettings", () => {
     expect(parseSshSettings(text)).toEqual(s);
   });
 
+  it("round trips auth and keyPath", () => {
+    const s = {
+      ...blankSshSettings(),
+      auth: "key-file" as const,
+      keyPath: "/Users/alice/.ssh/id_ed25519",
+    };
+    const text = serializeSshSettings(s);
+    expect(text).not.toBeNull();
+    expect(parseSshSettings(text)).toEqual(s);
+  });
+
   it("re-emits a field this build has never heard of", () => {
     // The editor parses into a typed object and writes a fresh one, so
     // without this a UI predating a field drops it on every save.
@@ -63,6 +80,8 @@ describe("serializeSshSettings", () => {
 describe("blankSshSettings", () => {
   it("matches the Rust defaults", () => {
     const b = blankSshSettings();
+    expect(b.auth).toBe("agent");
+    expect(b.keyPath).toBeNull();
     expect(b.term).toBe("xterm-256color");
     expect(b.cols).toBe(80);
     expect(b.rows).toBe(24);

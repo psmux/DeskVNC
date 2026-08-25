@@ -27,7 +27,7 @@ import {
   RDP_MAX_DIM,
   RDP_MIN_DIM,
 } from "../lib/rdp";
-import type { MultiplexerKind, SshSettings } from "../lib/ssh";
+import type { MultiplexerKind, SshAuthKind, SshSettings } from "../lib/ssh";
 import { blankSshSettings, parseSshSettings } from "../lib/ssh";
 import { sshDefaults } from "../lib/sshDefaults";
 import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
@@ -848,6 +848,49 @@ function SshOptionsSection({
 
   return (
     <div className="space-y-4">
+      {/*
+        Sits above the multiplexer, above everything else in this section,
+        because it decides whether the connection works at all: the bug this
+        control fixes was a host with a saved password and no running
+        ssh-agent, which failed with an agent error even though a perfectly
+        good password was sitting in the keychain, because nothing on this
+        side ever told the Rust side to use it. Agent stays the default,
+        because it is the only one that needs nothing stored here.
+      */}
+      <Field
+        label="Authentication"
+        hint={
+          ssh.auth === "password"
+            ? "Uses the Password field above, kept in your system keychain, never in a file."
+            : ssh.auth === "key-file"
+              ? "The key file is read at connect time and never sent to the interface."
+              : "Uses your running ssh-agent, Pageant, or the Windows OpenSSH pipe. Stores nothing."
+        }
+      >
+        <Select
+          value={ssh.auth}
+          onChange={(e) => onChange({ auth: e.target.value as SshAuthKind })}
+        >
+          <option value="agent">SSH agent (recommended)</option>
+          <option value="password">Password</option>
+          <option value="key-file">Key file</option>
+        </Select>
+      </Field>
+
+      {ssh.auth === "key-file" ? (
+        <Field label="Private key path" hint="An OpenSSH private key on this computer">
+          <input
+            className="field mono"
+            value={ssh.keyPath ?? ""}
+            placeholder="~/.ssh/id_ed25519"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+            onChange={(e) => onChange({ keyPath: e.target.value || null })}
+          />
+        </Field>
+      ) : null}
+
       {/*
         This is the most consequential control in the section: it decides
         whether the remote work survives a dropped connection at all, so the

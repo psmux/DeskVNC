@@ -78,6 +78,26 @@ pub enum SshEvent {
     ResetTerminal(Vec<u8>),
     /// A line for the session log, never for the terminal itself.
     Notice(String),
+
+    /// The session needs credentials from the user and is PAUSED until they
+    /// arrive.
+    ///
+    /// This is what makes an ad-hoc connect possible at all. A saved profile
+    /// carries its account and secret, but a Quick Connect target has no
+    /// profile to carry anything, so without an ask the only auth that could
+    /// ever work is an agent, and a machine with no agent identities simply
+    /// failed. The session must ask rather than fail (PRD/10 §3.4 says the
+    /// same thing for VNC).
+    CredentialsRequired {
+        /// Which method is being attempted, for the dialog's title.
+        method: String,
+        /// 1-based. Greater than 1 means a previous attempt was rejected.
+        attempt: u32,
+        /// Why the previous attempt failed, when there was one.
+        error: Option<String>,
+        /// Prefill for the username field.
+        username_hint: Option<String>,
+    },
 }
 
 /// What the UI asks of a running session.
@@ -94,6 +114,15 @@ pub enum SshCommand {
     ReconnectNow,
     /// End the session. The shell is asked to exit, then the carrier closes.
     Disconnect,
+
+    /// The user answered a [`SshEvent::CredentialsRequired`] ask.
+    ProvideCredentials {
+        username: Option<String>,
+        password: String,
+    },
+    /// The user dismissed the credential dialog. Ends the session rather than
+    /// retrying: they were asked and declined.
+    CancelCredentials,
 }
 
 #[cfg(test)]
