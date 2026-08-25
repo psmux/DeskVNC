@@ -156,12 +156,32 @@ pub async fn probe_multiplexer(ssh: &SshHandle, mux: &MultiplexerConfig) -> Resu
     Ok(Detected::plain(ShellDialect::Unknown))
 }
 
+/// The one line typed into the login shell, or `None` for a bare shell.
+///
+/// A startup command runs *inside* the multiplexer when there is one, so it
+/// is as persistent as everything else in the session: tmux takes it as the
+/// new session's command. It is ignored when `-A` attaches to a session that
+/// already exists, which is right, because that session already has whatever
+/// the user was doing in it, and replacing that with a fresh command would
+/// destroy the very thing the multiplexer is there to protect.
+///
+/// Split out from [`open`] so it can be tested without a live connection.
+fn shell_line(attach: Option<String>, startup: Option<&str>) -> Option<String> {
+    match (attach, startup.map(str::trim).filter(|c| !c.is_empty())) {
+        (Some(attach), Some(startup)) => Some(format!("{attach} {startup}")),
+        (Some(attach), None) => Some(attach),
+        (None, Some(startup)) => Some(startup.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Open a channel, request a PTY, and start the shell or the attach command.
 pub async fn open(
     ssh: &SshHandle,
     term: &TerminalOptions,
     mux: &MultiplexerConfig,
     found: &Detected,
+    startup_command: Option<&str>,
 ) -> Result<PtySession> {
     let (cols, rows) = term.clamped();
 
@@ -218,15 +238,30 @@ pub async fn open(
 
     let used_mux = command.is_some().then(|| found.kind.unwrap_or(mux.kind));
 
-    match &command {
-        Some(cmd) => channel
-            .exec(true, cmd.as_bytes())
+    let command = shell_line(command, startup_command);
+
+    // Always a login shell, never `exec` of the attach command, and this is
+    // the difference between detaching and being hung up on.
+    //
+    // `exec`ing `tmux attach` ties the SSH session's life to tmux: the moment
+    // the user detaches, tmux exits, the channel closes and the connection
+    // goes with it. That is what `ssh -t host tmux attach` does, and it is
+    // not what anyone wants from a terminal. Running a shell and *typing* the
+    // attach into it gives the behaviour of `ssh host` followed by `tmux
+    // attach`: detaching drops back to the remote prompt with the connection
+    // still up, and the user can reattach, start something else, or leave.
+    channel
+        .request_shell(true)
+        .await
+        .map_err(|e| Error::ShellRefused(e.to_string()))?;
+
+    // A leading space so shells honouring `HISTCONTROL=ignorespace` keep this
+    // out of the user's history. It is our command, not theirs.
+    if let Some(line) = command.as_deref() {
+        channel
+            .data(format!(" {line}\n").as_bytes())
             .await
-            .map_err(|e| Error::ShellRefused(e.to_string()))?,
-        None => channel
-            .request_shell(true)
-            .await
-            .map_err(|e| Error::ShellRefused(e.to_string()))?,
+            .map_err(|e| Error::ShellRefused(e.to_string()))?;
     }
 
     Ok(PtySession {
@@ -255,6 +290,43 @@ mod tests {
         // Without ISIG, Ctrl-C arrives as a literal 0x03 and nothing is
         // interrupted, which is the other half of a terminal feeling broken.
         assert_eq!(get(Pty::ISIG), Some(1), "Ctrl-C must still signal");
+    }
+
+    /// A startup command with a multiplexer has to run inside it, or it dies
+    /// with the connection and the whole point of the multiplexer is lost.
+    #[test]
+    fn a_startup_command_runs_inside_the_multiplexer() {
+        let line = shell_line(
+            Some("tmux new-session -A -s work".into()),
+            Some("tail -f /var/log/syslog"),
+        )
+        .unwrap();
+        assert_eq!(line, "tmux new-session -A -s work tail -f /var/log/syslog");
+    }
+
+    /// Without a multiplexer it is simply what the shell runs.
+    #[test]
+    fn a_startup_command_alone_is_the_command() {
+        assert_eq!(shell_line(None, Some("htop")).as_deref(), Some("htop"));
+    }
+
+    /// A blank one is not a command. Sending an empty line would just print a
+    /// second prompt, which looks like a glitch.
+    #[test]
+    fn a_blank_startup_command_is_not_sent() {
+        assert_eq!(shell_line(None, None), None);
+        assert_eq!(shell_line(None, Some("   ")), None);
+        assert_eq!(
+            shell_line(Some("tmux new-session -A -s work".into()), Some("  ")).as_deref(),
+            Some("tmux new-session -A -s work")
+        );
+    }
+
+    /// Nothing configured at all means a bare login shell, with nothing typed
+    /// into it.
+    #[test]
+    fn a_plain_profile_types_nothing() {
+        assert_eq!(shell_line(None, None), None);
     }
 
     /// RFC 4254 §8 lists the speed opcodes as ones a client sends; a few
