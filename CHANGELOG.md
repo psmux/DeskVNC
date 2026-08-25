@@ -10,6 +10,33 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-08-25
+
+### Fixed
+
+- **A pointer press could be dropped after a reconnect.** The shell decides
+  whether a pointer event is safe to shed under backpressure by comparing it
+  to the last button mask it saw, and that cache survived a reconnect the
+  backend's input state did not. A real press whose mask matched the stale
+  value was classified as stale motion and dropped if the queue was full. It
+  is now forgotten on any state change. Same family as the stuck button fixed
+  in 0.13.2.
+
+- **RDP reported no frame rate and no rectangles.** The stats overlay showed 0
+  for both, and a throughput figure that was neither a rate nor in the right
+  unit: the byte delta since the last tick went into a field that means bits
+  per second, so it read eight times low against a VNC session and drifted
+  with any late tick. Frames are now counted where every graphics path
+  converges, so the legacy bitmap updates, the surface bits and the graphics
+  pipeline are all covered, and rates divide by the time actually elapsed.
+  Decode time is still reported as 0 rather than guessed at.
+
+- **CI was red on `main`.** Rust 1.98 became stable and its clippy carries two
+  lints the previous toolchain did not, so the test gate had been failing on
+  every platform since v0.13.1. Both are cleared, and the gate was rerun
+  against 1.98 itself rather than a newer local toolchain that does not raise
+  them.
+
 ## [0.13.2] - 2026-08-25
 
 ### Fixed
@@ -42,21 +69,6 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   releasing everything now releases held buttons as well as keys, and turning
   view only on no longer remembers a mask it never sent.
 
-  The shell's own copy of the button mask, which decides whether a pointer
-  event is safe to shed when the queue is full, is now forgotten on any state
-  change. It survived a reconnect that the backend's input state did not, so a
-  real press could be mistaken for stale motion and dropped.
-
-- **RDP reported no frame rate and no rectangles.** The stats overlay showed 0
-  for both, and a throughput figure that was neither a rate nor in the right
-  unit: the byte delta since the last tick went into a field that means bits
-  per second, reading eight times low against a VNC session. Frames are now
-  counted where every graphics path converges, and rates divide by the time
-  actually elapsed. Decode time is still reported as 0 rather than guessed at.
-
-- **CI was red on `main`.** Rust 1.98 became stable and its clippy found two
-  lints the pinned build had not seen, so the test gate had been failing since
-  v0.13.1. Both are fixed and the gate now runs clean on 1.98.
 
 ## [0.13.1] - 2026-08-24
 
@@ -1072,7 +1084,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.13.3...HEAD
+[0.13.3]: https://github.com/psmux/DeskVNC/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/psmux/DeskVNC/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/psmux/DeskVNC/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/psmux/DeskVNC/compare/v0.12.0...v0.13.0
