@@ -10,6 +10,38 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-26
+
+Minor rather than patch under the sub-1.0 rule in this file's own header:
+the `ssh_settings` blob gains two more fields and there is a new command.
+
+### Added
+
+- **Connect straight into WSL.** A Windows host can be set to enter a WSL
+  distribution instead of its native shell, and attach to tmux **inside**
+  the distribution.
+
+  That last word is the whole point. The multiplexer a WSL user cares
+  about lives in the distribution, not on the Windows side, so the probe
+  runs in there too. A probe that asked Windows whether it had tmux would
+  be answering for the wrong machine, and would answer "no" on a box
+  whose WSL has had tmux for years.
+
+  The distribution can be detected rather than typed: where a host has
+  saved credentials, the editor asks it which ones it has and offers
+  them. Where it cannot ask, for a host with no WSL or no saved
+  credential, a name can be typed instead, and a blank one means the
+  default distribution. None of that is treated as an error, because
+  none of it is one.
+
+- **An SSH host tile shows its terminal.** It fell back to the
+  hashed-colour placeholder before, because a terminal has no framebuffer
+  to snapshot. The visible buffer is now drawn to an image and stored the
+  same way a desktop's thumbnail is, so an SSH host looks alive in the
+  Library like every other host. The store's existing downscale is reused
+  rather than a second one invented.
+
+
 ## [0.16.1] - 2026-08-26
 
 Patch rather than minor: nothing stored changes shape and no command or
