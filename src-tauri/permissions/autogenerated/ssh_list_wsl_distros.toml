@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ssh-list-wsl-distros"
+description = "Enables the ssh_list_wsl_distros command without any pre-configured scope."
+commands.allow = ["ssh_list_wsl_distros"]
+
+[[permission]]
+identifier = "deny-ssh-list-wsl-distros"
+description = "Denies the ssh_list_wsl_distros command without any pre-configured scope."
+commands.deny = ["ssh_list_wsl_distros"]

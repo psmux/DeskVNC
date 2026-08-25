@@ -70,7 +70,9 @@ pub mod session;
 pub use error::{Error, Result};
 pub use events::{SshCommand, SshEvent, TerminalState};
 pub use modes::ModeTracker;
-pub use multiplexer::{Detected, MultiplexerConfig, MultiplexerKind, ShellDialect};
+pub use multiplexer::{
+    parse_wsl_distros, Detected, MultiplexerConfig, MultiplexerKind, ShellDialect, WSL_LIST_COMMAND,
+};
 pub use options::{ReconnectPolicy, SshTermOptions, TerminalOptions, DEFAULT_TERM};
 pub use session::SshSession;
 pub mod multiplexer;

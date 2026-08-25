@@ -62,6 +62,15 @@ export interface SshSettings {
   customCommand: string | null;
   fallbackToShell: boolean;
   startupCommand: string | null;
+  /** Drop straight into WSL on a Windows host, instead of its native shell.
+   *  This changes where the multiplexer above is looked for: with this on,
+   *  `tmux`/`psmux`/etc. are searched for *inside* the distribution, not on
+   *  Windows, because that is where a WSL user's actual work lives. */
+  wsl: boolean;
+  /** Which distribution to enter. `null` or empty means the Windows default
+   *  (`wsl.exe` with no `-d`), which is what a machine with one distro
+   *  installed wants. */
+  wslDistro: string | null;
 
   /** UI-only: not in `remote_core::SshOptions`, only the store's JSON column
    *  and the host editor read these. */
@@ -87,6 +96,8 @@ export function blankSshSettings(): SshSettings {
     customCommand: null,
     fallbackToShell: true,
     startupCommand: null,
+    wsl: false,
+    wslDistro: null,
     fontSize: 13,
     scrollback: 10_000,
   };
@@ -95,7 +106,8 @@ export function blankSshSettings(): SshSettings {
 /** Every key this module owns, so anything else can be set aside verbatim. */
 const KNOWN_KEYS: readonly string[] = [
   "v", "auth", "keyPath", "term", "cols", "rows", "multiplexer", "sessionName",
-  "customCommand", "fallbackToShell", "startupCommand", "fontSize", "scrollback",
+  "customCommand", "fallbackToShell", "startupCommand", "wsl", "wslDistro",
+  "fontSize", "scrollback",
 ];
 
 /**
@@ -170,6 +182,8 @@ export function parseSshSettings(raw: string | null | undefined): SshSettings | 
     customCommand: nullableStr(o.customCommand),
     fallbackToShell: bool(o.fallbackToShell, blank.fallbackToShell),
     startupCommand: nullableStr(o.startupCommand),
+    wsl: bool(o.wsl, blank.wsl),
+    wslDistro: nullableStr(o.wslDistro),
     fontSize: num(o.fontSize, blank.fontSize),
     scrollback: num(o.scrollback, blank.scrollback),
     ...(Object.keys(unknown).length > 0 ? { unknown } : {}),

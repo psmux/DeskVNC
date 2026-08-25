@@ -60,6 +60,20 @@ pub struct PtySession {
 /// than losing persistence is refusing to open a terminal at all. The caller
 /// decides what to do about it.
 async fn run_probe(ssh: &SshHandle, script: &str) -> Option<String> {
+    run_probe_raw(ssh, script)
+        .await
+        .map(|out| String::from_utf8_lossy(&out).into_owned())
+}
+
+/// As [`run_probe`], but without the UTF-8 conversion.
+///
+/// `wsl.exe -l -q` answers in UTF-16LE, so its output must reach the parser
+/// as bytes. Going through `String::from_utf8_lossy` first would replace
+/// anything non-ASCII with U+FFFD before the decoder ever saw it, and the
+/// damage would be invisible: ASCII distro names happen to survive the round
+/// trip, so it would look correct right up until someone had a name that did
+/// not.
+async fn run_probe_raw(ssh: &SshHandle, script: &str) -> Option<Vec<u8>> {
     let mut channel = match ssh.channel_open_session().await {
         Ok(c) => c,
         Err(e) => {
@@ -90,7 +104,20 @@ async fn run_probe(ssh: &SshHandle, script: &str) -> Option<String> {
             break;
         }
     }
-    Some(String::from_utf8_lossy(&out).into_owned())
+    Some(out)
+}
+
+/// Ask a Windows host which WSL distributions it has.
+///
+/// Returns an empty list rather than an error for a host with no WSL, no
+/// `wsl.exe`, or nothing installed: "none" is a perfectly good answer to this
+/// question and the UI shows a plain name field for it, so failing the call
+/// would turn an ordinary state into an error dialog.
+pub async fn list_wsl_distros(ssh: &SshHandle) -> Vec<String> {
+    match run_probe_raw(ssh, crate::multiplexer::WSL_LIST_COMMAND).await {
+        Some(out) => crate::multiplexer::parse_wsl_distros(&out),
+        None => Vec::new(),
+    }
 }
 
 /// Ask the far side what it has, in whichever shell dialect it speaks.

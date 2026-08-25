@@ -747,6 +747,21 @@ pub struct SshOptions {
     /// land straight in a log tail or a REPL. Runs *inside* the multiplexer
     /// when there is one, so it is still persistent.
     pub startup_command: Option<String>,
+
+    /// Drop straight into WSL on a Windows host, rather than into its native
+    /// shell.
+    ///
+    /// This changes where *everything* runs, not just the first command. The
+    /// multiplexer a WSL user cares about is the one inside the distribution,
+    /// not one on the Windows side, so the probe has to run in there too. A
+    /// probe that asked Windows whether it had tmux would answer "no" on a
+    /// machine whose WSL has had tmux for years.
+    pub wsl: bool,
+
+    /// Which distribution to enter. `None` or empty uses the Windows default
+    /// (`wsl.exe` with no `-d`), which is what most machines want and what a
+    /// user who has only ever installed one distro expects.
+    pub wsl_distro: Option<String>,
 }
 
 impl Default for SshOptions {
@@ -762,6 +777,8 @@ impl Default for SshOptions {
             custom_command: None,
             fallback_to_shell: true,
             startup_command: None,
+            wsl: false,
+            wsl_distro: None,
         }
     }
 }

@@ -249,6 +249,7 @@ pub fn run() {
             commands::files::files_local_remove,
             // remote shell (pty over the same ssh carrier)
             commands::ssh::ssh_probe,
+            commands::ssh::ssh_list_wsl_distros,
             commands::ssh::ssh_connect,
             commands::ssh::ssh_send,
             commands::ssh::ssh_resize,
