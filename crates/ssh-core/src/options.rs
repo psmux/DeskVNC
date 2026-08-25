@@ -83,6 +83,14 @@ pub struct SshTermOptions {
     /// multiplexer when there is one, so it stays persistent across a drop.
     #[serde(default)]
     pub startup_command: Option<String>,
+
+    /// Authentication methods to try, in order.
+    ///
+    /// Derived from the profile and the stored credential rather than sent
+    /// by anyone, hence `skip`: it holds secrets and must never arrive from,
+    /// or travel back to, the webview.
+    #[serde(skip)]
+    pub auth_methods: Vec<SshAuth>,
 }
 
 impl SshTermOptions {
@@ -120,28 +128,64 @@ impl SshTermOptions {
             .map(str::to_string)
             .unwrap_or_else(local_username);
 
-        let auth = match ssh.auth {
-            SshAuthKind::Password => SshAuth::Password(creds.password.clone().unwrap_or_default()),
-            SshAuthKind::KeyFile => SshAuth::KeyFile {
-                path: ssh.key_path.clone().unwrap_or_default().into(),
-                // The same field carries an account password for
-                // `Password` and a key passphrase here. They unlock
-                // different things, but only one of them is ever in play
-                // for a given profile, so one slot is enough and the auth
-                // kind says which it is.
-                passphrase: creds.password.clone().filter(|p| !p.is_empty()),
-            },
-            // Covers `Agent` and any kind a newer build adds: an agent needs
-            // nothing stored, so it is the safe reading of a value this build
-            // does not recognise.
-            _ => SshAuth::Agent,
+        // Authentication is a preference ORDER, not an exclusive choice.
+        //
+        // Every real SSH client works this way, and the alternative is what
+        // caused a reported failure: a host with a password saved in the
+        // keychain refused to connect with "the ssh agent holds no
+        // identities", because the profile's auth kind was still on its
+        // default of Agent and nothing tried anything else. The user had done
+        // everything right and the client simply refused to look at what it
+        // already held.
+        //
+        // So the configured kind goes first, and whatever else there is
+        // material for follows it. A method with nothing behind it (a
+        // password auth with no stored password) is left out rather than
+        // attempted and refused, which would burn an attempt against servers
+        // that count them.
+        let password = creds.password.clone().filter(|p| !p.is_empty());
+        let key_path = ssh.key_path.clone().filter(|p| !p.trim().is_empty());
+
+        let as_password = || password.clone().map(SshAuth::Password);
+        let as_key = || {
+            key_path.clone().map(|path| SshAuth::KeyFile {
+                path: path.into(),
+                // One slot carries an account password or a key passphrase;
+                // the auth kind is what says which, and only one is ever in
+                // play for a given profile.
+                passphrase: password.clone(),
+            })
         };
+
+        let mut auth_methods: Vec<SshAuth> = Vec::new();
+        match ssh.auth {
+            SshAuthKind::Password => {
+                auth_methods.extend(as_password());
+                auth_methods.extend(as_key());
+                auth_methods.push(SshAuth::Agent);
+            }
+            SshAuthKind::KeyFile => {
+                auth_methods.extend(as_key());
+                auth_methods.push(SshAuth::Agent);
+                auth_methods.extend(as_password());
+            }
+            // Covers Agent and anything a newer build adds: an agent needs
+            // nothing stored, so it is the safe reading of an unknown value.
+            _ => {
+                auth_methods.push(SshAuth::Agent);
+                auth_methods.extend(as_key());
+                auth_methods.extend(as_password());
+            }
+        }
+
+        let auth = auth_methods.first().cloned().unwrap_or(SshAuth::Agent);
 
         let mut cfg = SshConfig::new(options.host.clone(), username);
         cfg.port = options.port;
         cfg.auth = auth;
 
         let mut out = Self::new(cfg);
+        out.auth_methods = auth_methods;
         out.terminal.term = ssh.term.clone();
         let (cols, rows) = ssh.clamped();
         out.terminal.cols = cols;
@@ -166,6 +210,7 @@ impl SshTermOptions {
             multiplexer: MultiplexerConfig::default(),
             reconnect: ReconnectPolicy::default(),
             startup_command: None,
+            auth_methods: Vec::new(),
         }
     }
 }
@@ -235,6 +280,77 @@ mod tests {
             ssh_transport::SshAuth::Password(p) => assert_eq!(p, "hunter2"),
             other => panic!("expected password auth, got {other:?}"),
         }
+    }
+
+    /// The reported failure: a host with a password in the keychain refused
+    /// to connect with "the ssh agent holds no identities", because the
+    /// profile's auth kind was still the default and nothing tried anything
+    /// else. A stored password must always be reachable.
+    #[test]
+    fn a_stored_password_is_tried_even_when_the_profile_says_agent() {
+        use remote_core::options::ConnectOptions;
+
+        let mut o = ConnectOptions::ssh("box.local", 22);
+        // Left at the default, which is Agent.
+        o.credentials = remote_core::credentials::Credentials {
+            username: Some("gj".into()),
+            password: Some("hunter2".into()),
+            domain: None,
+        };
+
+        let built = SshTermOptions::from_connect_options(&o);
+        assert!(
+            matches!(built.ssh.auth, ssh_transport::SshAuth::Agent),
+            "the configured method still goes first"
+        );
+        assert!(
+            built.auth_methods.iter().any(|m| matches!(
+                m,
+                ssh_transport::SshAuth::Password(p) if p == "hunter2"
+            )),
+            "the stored password must be reachable: {:?}",
+            built.auth_methods
+        );
+    }
+
+    /// A method with nothing behind it is left out rather than attempted and
+    /// refused, which would burn an attempt against a server that counts them.
+    #[test]
+    fn a_method_with_no_material_is_not_offered() {
+        use remote_core::options::ConnectOptions;
+
+        let o = ConnectOptions::ssh("box.local", 22);
+        let built = SshTermOptions::from_connect_options(&o);
+        assert_eq!(built.auth_methods.len(), 1, "{:?}", built.auth_methods);
+        assert!(matches!(
+            built.auth_methods[0],
+            ssh_transport::SshAuth::Agent
+        ));
+    }
+
+    /// The configured choice is a preference, not a suggestion: it goes first.
+    #[test]
+    fn the_configured_method_is_tried_first() {
+        use remote_core::options::{ConnectOptions, SshAuthKind};
+
+        let mut o = ConnectOptions::ssh("box.local", 22);
+        o.ssh_mut().auth = SshAuthKind::Password;
+        o.credentials = remote_core::credentials::Credentials {
+            username: Some("gj".into()),
+            password: Some("hunter2".into()),
+            domain: None,
+        };
+        let built = SshTermOptions::from_connect_options(&o);
+        assert!(matches!(
+            built.auth_methods.first(),
+            Some(ssh_transport::SshAuth::Password(_))
+        ));
+        // And the agent is still there behind it, for a host that would take
+        // either.
+        assert!(built
+            .auth_methods
+            .iter()
+            .any(|m| matches!(m, ssh_transport::SshAuth::Agent)));
     }
 
     #[test]

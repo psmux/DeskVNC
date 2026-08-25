@@ -323,6 +323,12 @@ async fn run_once(
     // and tries again with what they give, exactly as the RFB handshake does.
     let mut cfg = options.ssh.clone();
     let mut attempt: u32 = 0;
+    // Every method the profile has material for, in preference order. The
+    // first is already on `cfg`; the rest are tried before the user is asked
+    // for anything, because a client that holds a working password and asks
+    // for one anyway is worse than useless.
+    let mut fallbacks: std::collections::VecDeque<ssh_transport::SshAuth> =
+        options.auth_methods.iter().skip(1).cloned().collect();
     let ssh = loop {
         let dialing =
             connect_and_authenticate_with(&cfg, verifier.clone(), Keepalive::interactive());
@@ -337,6 +343,16 @@ async fn run_once(
             // Only an authentication refusal is worth asking about. A refused
             // dial, a timeout or a changed host key are not things a password
             // fixes, and prompting for one would be a dialog that cannot help.
+            // An agent with no identities, or a refused method, is a reason
+            // to try the next one rather than to give up. Only when nothing
+            // is left is the user asked.
+            Err(ssh_transport::Error::Auth { .. } | ssh_transport::Error::Agent(_))
+                if !fallbacks.is_empty() =>
+            {
+                let next = fallbacks.pop_front().expect("checked non-empty");
+                tracing::debug!("ssh authentication did not succeed; trying the next method");
+                cfg.auth = next;
+            }
             Err(e @ (ssh_transport::Error::Auth { .. } | ssh_transport::Error::Agent(_))) => {
                 attempt += 1;
                 let hint = (!cfg.username.is_empty()).then(|| cfg.username.clone());
@@ -359,13 +375,24 @@ async fn run_once(
                     cfg.username = user;
                 }
                 cfg.auth = ssh_transport::SshAuth::Password(password);
+                // The user has just told us what to use, so stop cycling
+                // through the profile's other methods: retrying an agent that
+                // already failed would only produce a second dialog.
+                fallbacks.clear();
             }
             Err(e) => return Err(Error::Transport(e)),
         }
     };
 
     let found = pty::probe_multiplexer(&ssh, &options.multiplexer).await?;
-    let session = pty::open(&ssh, &*terminal, &options.multiplexer, &found).await?;
+    let session = pty::open(
+        &ssh,
+        &*terminal,
+        &options.multiplexer,
+        &found,
+        options.startup_command.as_deref(),
+    )
+    .await?;
     let mut channel = session.channel;
 
     if session.multiplexer.is_none()
