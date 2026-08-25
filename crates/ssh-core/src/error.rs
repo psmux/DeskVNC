@@ -31,6 +31,21 @@ pub enum Error {
     #[error("the remote shell exited with status {0}")]
     ShellExited(u32),
 
+    /// The user detached from the multiplexer (`Ctrl-B D` and friends).
+    ///
+    /// Told apart from [`Error::ShellExited`] on purpose. Detaching makes the
+    /// attach command exit cleanly, so at the protocol level the two are
+    /// identical, but they mean opposite things to the person watching:
+    /// `exit` ended the work, a detach deliberately left it running. Saying
+    /// "the remote shell exited" for a detach reads as a failure and hides
+    /// the useful fact, which is that the session is still there and one
+    /// click gets it back.
+    ///
+    /// Never auto-reconnected. Reattaching a user who just asked to detach
+    /// would make detaching impossible.
+    #[error("Detached from your {0} session. It is still running on the remote machine.")]
+    Detached(String),
+
     /// The link stopped answering. This is the hang that plain `ssh` leaves
     /// you sitting in front of, caught by the keepalive probes instead.
     #[error("the connection stopped responding")]
@@ -77,6 +92,7 @@ impl RetryClassify for Error {
             // lose their work.
             Error::Unresponsive | Error::ShellRefused(_) => true,
             Error::ShellExited(_)
+            | Error::Detached(_)
             | Error::PtyRefused(_)
             | Error::Config(_)
             | Error::Cancelled
@@ -104,6 +120,7 @@ impl RetryClassify for Error {
             Error::PtyRefused(_) => Some("ssh-pty-refused"),
             Error::ShellRefused(_) => Some("ssh-shell-refused"),
             Error::ShellExited(_) => Some("ssh-shell-exited"),
+            Error::Detached(_) => Some("ssh-detached"),
             Error::Unresponsive => Some("ssh-unresponsive"),
             Error::Config(_) => Some("ssh-bad-config"),
             _ => None,
@@ -169,6 +186,27 @@ mod tests {
             classify(&e, &ReconnectPolicy::default(), 0),
             Decision::Stop { can_retry: false }
         );
+    }
+
+    /// Detaching is a deliberate act, so reattaching the user immediately
+    /// would make it impossible to detach at all. It stops, and offers a way
+    /// back, which is what `can_retry` is for.
+    #[test]
+    fn a_detach_stops_the_session_but_offers_a_way_back() {
+        let policy = ReconnectPolicy::default();
+        let e = Error::Detached("psmux".into());
+        assert_eq!(classify(&e, &policy, 0), Decision::Stop { can_retry: true });
+        assert_eq!(e.symbol(), Some("ssh-detached"));
+    }
+
+    /// The message must say the work is still there. Reporting a detach as
+    /// "the remote shell exited" reads as a failure and buries the one fact
+    /// the user needs.
+    #[test]
+    fn a_detach_says_the_session_is_still_running() {
+        let msg = Error::Detached("psmux".into()).user_message();
+        assert!(msg.contains("psmux"), "{msg}");
+        assert!(msg.contains("still running"), "{msg}");
     }
 
     /// A dropped socket is the ordinary case: reconnect, quietly.

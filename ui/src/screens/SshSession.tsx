@@ -149,6 +149,33 @@ export function SshSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Tell the remote how big the terminal actually is, once there is a remote
+   * to tell.
+   *
+   * `fit()` runs the moment the terminal mounts, which fires `onResize` and
+   * sends a resize immediately. The session is still connecting at that point
+   * (a TCP dial, a key exchange, authentication, the multiplexer probe and a
+   * pty request all have to finish first), so that first resize reaches a
+   * session that does not exist yet and is dropped. Nothing resent it, so the
+   * pty kept whatever size the profile was saved with, usually 80x24, and a
+   * full-screen program drew into the top-left corner of a much larger window
+   * for the rest of the session.
+   *
+   * Resending on `connected` also covers the reconnect case, where the far
+   * side is a brand new pty that has never been told anything.
+   */
+  useEffect(() => {
+    if (session.state.state !== "connected") return;
+    const term = termRef.current;
+    if (!term) return;
+    session.sendTerminalResize(term.cols, term.rows);
+    // `session` is deliberately not a dependency: it is rebuilt on every
+    // render, and this must fire on the transition into `connected`, not on
+    // every render that happens while connected.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.state.state]);
+
   // Live theme: re-read the tokens whenever the app's theme actually
   // changes, not only once at mount (Preferences ▸ Appearance while a
   // session window is open).

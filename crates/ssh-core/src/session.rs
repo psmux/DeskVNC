@@ -419,6 +419,7 @@ async fn run_once(
         cancel,
         &mut tracker,
         &mut geometry,
+        session.multiplexer.map(|m| m.label()),
     )
     .await;
 
@@ -501,6 +502,10 @@ async fn pump(
     cancel: &CancellationToken,
     tracker: &mut ModeTracker,
     geometry: &mut (u16, u16),
+    // The multiplexer that was attached, if any. Its label is what turns a
+    // clean exit into a "detached" rather than an "exited": see
+    // `Error::Detached`.
+    multiplexer: Option<&'static str>,
 ) -> Result<()> {
     let mut exit_status_seen: Option<u32> = None;
 
@@ -588,7 +593,17 @@ async fn pump(
                             let _ = emit(events, SshEvent::Output(std::mem::take(&mut pending)))
                                 .await;
                         }
-                        return Err(Error::ShellExited(exit_status_seen.unwrap_or(0)));
+                        let status = exit_status_seen.unwrap_or(0);
+                        // Detaching makes the attach command exit cleanly, so
+                        // at this level a detach and an `exit` are the same
+                        // event. They mean opposite things to the user, and
+                        // the multiplexer is what tells them apart: with one
+                        // attached, a status of 0 means the session is still
+                        // running on the remote and one click gets it back.
+                        return Err(match (multiplexer, status) {
+                            (Some(mux), 0) => Error::Detached(mux.to_string()),
+                            _ => Error::ShellExited(status),
+                        });
                     }
                     _ => {}
                 }

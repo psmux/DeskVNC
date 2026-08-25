@@ -1083,7 +1083,16 @@ copy edit a silent behaviour change. Known values: `ssh-timeout`,
 `ssh-auth-failed`, `ssh-key-unreadable`, `ssh-agent-unavailable`,
 `ssh-host-key-unknown`, `ssh-host-key-changed`, `ssh-host-key-rejected`,
 `ssh-connect-failed`, `ssh-pty-refused`, `ssh-shell-refused`,
-`ssh-shell-exited`, `ssh-unresponsive`, `ssh-bad-config`. Treat an unknown
+`ssh-shell-exited`, `ssh-detached`, `ssh-unresponsive`, `ssh-bad-config`.
+
+`ssh-detached` is worth telling apart from `ssh-shell-exited`. Detaching from
+a multiplexer makes the attach command exit cleanly, so at the protocol level
+the two are the same event, but they mean opposite things: `exit` ended the
+work, a detach deliberately left it running. A UI that sees `ssh-detached`
+should say the session is still on the remote and offer to reattach, not
+report a failure. The session deliberately does not reconnect itself here:
+reattaching someone who just asked to detach would make detaching
+impossible. Treat an unknown
 `symbol` as no symbol and fall back to `reason`.
 
 ### Reconnect
