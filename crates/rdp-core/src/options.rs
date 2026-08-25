@@ -30,6 +30,17 @@ pub const MIN_SCALE_FACTOR: u32 = 100;
 /// The upper end of the same range.
 pub const MAX_SCALE_FACTOR: u32 = 500;
 
+/// `TS_UD_CS_CORE.desktopWidth` and `desktopHeight` are bounded at 1 to 4096
+/// and 1 to 2048 (MS-RDPBCGR 2.2.1.3.2). A larger desktop is reachable, but
+/// only after connect and only through MS-RDPEDISP, whose monitor layout
+/// carries a much wider range.
+pub const MAX_CORE_DESKTOP_WIDTH: u16 = 4096;
+/// The height half of the same bound.
+pub const MAX_CORE_DESKTOP_HEIGHT: u16 = 2048;
+/// The size a caller that measured no window asks for, which is the block
+/// `ClientCoreData::default` sends.
+pub const DEFAULT_DESKTOP: (u16, u16) = (1024, 768);
+
 /// US English, the layout `TS_UD_CS_CORE.keyboardLayout` gets when the
 /// profile says 0 and we cannot read one off the host.
 pub const KEYBOARD_LAYOUT_US: u32 = 0x0000_0409;
@@ -99,9 +110,13 @@ pub struct ResolvedOptions {
     pub keyboard_layout: u32,
     /// `TS_UD_CS_CORE.highColorDepth`, with `Auto` resolved.
     pub color_depth: ColorDepthBits,
-    /// The desktop size to request. MS-RDPBCGR 2.2.1.3.2 bounds
-    /// `desktopWidth` at 1 to 4096 and `desktopHeight` at 1 to 2048.
+    /// The desktop size to put in the Client Core Data, already clamped to
+    /// what MS-RDPBCGR 2.2.1.3.2 can carry: 1 to 4096 by 1 to 2048.
     pub desktop: (u16, u16),
+    /// The size actually wanted, before that clamp. Equal to [`Self::desktop`]
+    /// unless the user asked for a desktop too tall for the connection
+    /// request, in which case MS-RDPEDISP delivers the rest.
+    pub desktop_wanted: (u16, u16),
     /// `desktopScaleFactor`, clamped to [`MIN_SCALE_FACTOR`] to
     /// [`MAX_SCALE_FACTOR`].
     pub scale_factor: u32,
@@ -249,17 +264,41 @@ impl ResolvedOptions {
         }
         channels.push(CHANNEL_CLIPRDR);
 
+        // The size to ask for in the Client Core Data, and the size actually
+        // wanted, which are not always the same number.
+        //
+        // `desktopWidth` and `desktopHeight` are bounded well below a modern
+        // display: 4096 by 2048 cannot express 3840 by 2160. A larger desktop
+        // is still reachable, because MS-RDPEDISP's monitor layout carries a
+        // far wider range, so the connect asks for the clamped size and the
+        // display control channel asks for the real one as soon as it is up.
+        // Refusing the size outright, or silently connecting at 1024 by 768,
+        // would both be worse than a desktop that is briefly too small.
+        let wanted = rdp
+            .resolution
+            .size(rdp.window_size)
+            .unwrap_or(DEFAULT_DESKTOP);
+        let desktop = (
+            wanted.0.clamp(1, MAX_CORE_DESKTOP_WIDTH),
+            wanted.1.clamp(1, MAX_CORE_DESKTOP_HEIGHT),
+        );
+        if desktop != wanted {
+            warnings.push(format!(
+                "a {} by {} desktop is larger than the connection request can carry, \
+                 connecting at {} by {} and asking for the full size over the display \
+                 control channel",
+                wanted.0, wanted.1, desktop.0, desktop.1
+            ));
+        }
+
         Ok(Self {
             server_name,
             client_name,
             domain,
             keyboard_layout,
             color_depth,
-            // MS-RDPBCGR 2.2.1.3.2 bounds the pair, and 1024 by 768 is the
-            // block `ClientCoreData::default` sends
-            // (`crates/rdp-pdu/src/gcc/client.rs:206`). The real size arrives
-            // from the shell in phase 1b, once the window exists.
-            desktop: (1024, 768),
+            desktop,
+            desktop_wanted: wanted,
             scale_factor,
             nla: rdp.nla,
             legacy_tls: rdp.legacy_tls,
@@ -335,6 +374,7 @@ fn resolve_color_depth(depth: RdpColorDepth, quality: QualityPreset) -> ColorDep
 #[cfg(test)]
 mod tests {
     use super::*;
+    use remote_core::RdpResolution;
 
     fn options() -> (ConnectOptions, RdpOptions) {
         let opts = ConnectOptions::rdp("server.example", 3389);
@@ -356,6 +396,70 @@ mod tests {
         assert_eq!(r.color_depth, ColorDepthBits::Bpp32);
         assert_eq!(r.scale_factor, 100);
         assert!(!r.send_mstshash_cookie, "PRDRDP/00 R29 defaults it off");
+    }
+
+    /// The window's size reaches the wire, which is the whole point: every
+    /// session used to connect at a hardcoded 1024 by 768 no matter how large
+    /// the window was, because the hand off from the shell was never built.
+    #[test]
+    fn the_measured_window_is_what_the_connection_asks_for() {
+        let (opts, mut rdp) = options();
+        rdp.window_size = Some((1712, 1067));
+
+        for mode in [RdpResolution::WindowAtConnect, RdpResolution::FollowWindow] {
+            rdp.resolution = mode;
+            let r = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+            assert_eq!(r.desktop, (1712, 1067), "{mode:?}");
+            assert_eq!(r.desktop_wanted, (1712, 1067), "{mode:?}");
+        }
+    }
+
+    /// A fixed size ignores the window entirely.
+    #[test]
+    fn a_fixed_resolution_beats_the_window() {
+        let (opts, mut rdp) = options();
+        rdp.window_size = Some((800, 600));
+        rdp.resolution = RdpResolution::Fixed {
+            width: 1920,
+            height: 1080,
+        };
+        let r = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+        assert_eq!(r.desktop, (1920, 1080));
+        assert!(!rdp.resolution.follows_window(), "and it does not track it");
+    }
+
+    /// `desktopHeight` stops at 2048, which cannot express a 4K display. The
+    /// connection asks for what it can carry and records the rest, so the
+    /// display control channel can ask again once it is up. Connecting at
+    /// 1024 by 768 instead, or refusing, would both be worse.
+    #[test]
+    fn a_desktop_too_tall_for_the_connection_request_is_clamped_and_remembered() {
+        let (opts, mut rdp) = options();
+        rdp.resolution = RdpResolution::Fixed {
+            width: 3840,
+            height: 2160,
+        };
+        let mut warnings = Vec::new();
+        let r = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect("valid");
+        assert_eq!(r.desktop, (3840, 2048), "clamped to what the field holds");
+        assert_eq!(r.desktop_wanted, (3840, 2160), "and the real size is kept");
+        assert!(
+            warnings.iter().any(|w| w.contains("display control")),
+            "the user is told why, got {warnings:?}"
+        );
+    }
+
+    /// A caller that measured nothing gets the specification's own default
+    /// rather than a zero sized desktop. A window that has not been laid out
+    /// yet reports zero, and that must not reach the wire.
+    #[test]
+    fn nothing_measured_falls_back_to_the_default_size() {
+        let (opts, mut rdp) = options();
+        for window in [None, Some((0, 0)), Some((1280, 0))] {
+            rdp.window_size = window;
+            let r = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+            assert_eq!(r.desktop, DEFAULT_DESKTOP, "{window:?}");
+        }
     }
 
     /// The one quality knob the legacy RDP path has. A preset that turns

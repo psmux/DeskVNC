@@ -244,11 +244,15 @@ pub struct RdpOptions {
     /// specification caps the list at 16 entries.
     pub monitors: MonitorPolicy,
 
-    /// Ask the server to follow the window size while the session runs, using
-    /// the Display Update Virtual Channel (MS-RDPEDISP,
-    /// DISPLAYCONTROL_MONITOR_LAYOUT_PDU). When false the desktop size is
-    /// fixed at connect time and the client scales.
-    pub dynamic_resolution: bool,
+    /// What desktop size to ask for, and whether to keep asking.
+    pub resolution: RdpResolution,
+
+    /// The window's size in physical pixels, as the shell measured it.
+    ///
+    /// `None` means nothing measured it, which is the case for a headless
+    /// caller such as an example or a test; the resolver then falls back to
+    /// the specification's own default rather than inventing one.
+    pub window_size: Option<(u16, u16)>,
 
     /// Windows keyboard layout identifier (KLID), MS-RDPBCGR 2.2.1.3.2
     /// `keyboardLayout`. 0 means "let the client pick from the host OS".
@@ -305,7 +309,8 @@ impl Default for RdpOptions {
             codecs: CodecSet::default(),
             audio: AudioMode::PlayLocally,
             monitors: MonitorPolicy::Primary,
-            dynamic_resolution: true,
+            resolution: RdpResolution::default(),
+            window_size: None,
             keyboard_layout: 0,
             // The driver fills this from the OS hostname when it is empty.
             client_name: String::new(),
@@ -421,6 +426,48 @@ pub enum MonitorPolicy {
     /// Monitor indices into the server's reported layout. MS-RDPBCGR caps a
     /// monitor list at 16 entries (2.2.1.3.6); the driver truncates.
     Selected(Vec<u32>),
+}
+
+/// What desktop size an RDP session asks the server for.
+///
+/// The three are one choice rather than a size plus a flag, because the two
+/// are not independent: a fixed size that also tracked the window would stop
+/// being fixed the moment the window moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", tag = "mode")]
+pub enum RdpResolution {
+    /// Connect at the window's size and send a new monitor layout whenever it
+    /// changes (MS-RDPEDISP, DISPLAYCONTROL_MONITOR_LAYOUT_PDU).
+    FollowWindow,
+    /// Connect at the window's size and leave the desktop there. The client
+    /// scales afterwards, which is what mstsc does and why it is the default:
+    /// a desktop that reflows every time a window edge moves rearranges the
+    /// icons of the machine on the other end.
+    #[default]
+    WindowAtConnect,
+    /// A fixed size, whatever the window does.
+    Fixed { width: u16, height: u16 },
+}
+
+impl RdpResolution {
+    /// Whether a window resize should reach the server.
+    #[must_use]
+    pub const fn follows_window(self) -> bool {
+        matches!(self, Self::FollowWindow)
+    }
+
+    /// The size to ask for, given what the shell measured.
+    ///
+    /// Zero in either axis is treated as nothing measured: a window that has
+    /// not been laid out yet reports zero, and asking a server for a desktop
+    /// no pixels wide is worse than asking for the default.
+    #[must_use]
+    pub fn size(self, window: Option<(u16, u16)>) -> Option<(u16, u16)> {
+        match self {
+            Self::Fixed { width, height } => Some((width, height)),
+            Self::FollowWindow | Self::WindowAtConnect => window.filter(|(w, h)| *w > 0 && *h > 0),
+        }
+    }
 }
 
 /// TS_EXTENDED_INFO_PACKET `performanceFlags`, MS-RDPBCGR 2.2.1.11.1.1.1.

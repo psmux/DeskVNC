@@ -58,7 +58,19 @@ pub async fn run_once(
     // profile's (PRDRDP/05 §5.4). The display control channel re-applies it
     // once the session is up; this is the connect time half.
     if let Some((width, height)) = settings.requested_size {
-        opts.desktop = (width, height);
+        opts.desktop_wanted = (width, height);
+        opts.desktop = (
+            width.clamp(1, crate::options::MAX_CORE_DESKTOP_WIDTH),
+            height.clamp(1, crate::options::MAX_CORE_DESKTOP_HEIGHT),
+        );
+    }
+    // A desktop taller than the connection request can carry is asked for
+    // again over MS-RDPEDISP, which has room for it, as soon as the display
+    // control channel comes up. Seeding the same field the user's own resizes
+    // use means the existing re-apply path carries it and nothing new has to
+    // know about the clamp.
+    if opts.desktop_wanted != opts.desktop {
+        settings.requested_size = Some(opts.desktop_wanted);
     }
     // A redirection told us to present its `LoadBalanceInfo` as the routing
     // token of the next Connection Request (MS-RDPBCGR 3.2.5.3.1). It is

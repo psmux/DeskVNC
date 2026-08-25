@@ -146,6 +146,10 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
     let mut gateway_host: Option<String> = None;
     let mut gateway_enabled = true;
 
+    // `dynamic resolution` and the `desktopwidth`/`desktopheight` pair are one
+    // choice between them, so both are collected and resolved together below.
+    let mut dynamic_resolution: Option<bool> = None;
+
     for (key, (kind, value)) in &settings {
         let key = key.as_str();
         let kind = *kind;
@@ -237,7 +241,10 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
             },
             "dynamic resolution" => match flag(kind, value) {
                 Some(on) => {
-                    rdp.options.dynamic_resolution = on;
+                    // Resolved after the loop: whether the desktop follows the
+                    // window and what size it starts at are one setting here,
+                    // and the size arrives from two other keys.
+                    dynamic_resolution = Some(on);
                     out.mapped.push(key.into());
                 }
                 None => out.ignored.push(key.into()),
@@ -447,6 +454,20 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
             )),
         }
     }
+
+    // mstsc treats these as one setting. `dynamic resolution:i:1` means the
+    // desktop tracks the window and the size keys are only where it starts;
+    // with it off, or absent, an explicit size is a fixed one. Neither present
+    // leaves the profile default alone.
+    rdp.options.resolution = match (dynamic_resolution, out.desktop_size) {
+        (Some(true), _) => remote_core::RdpResolution::FollowWindow,
+        (_, Some((w, h))) => remote_core::RdpResolution::Fixed {
+            width: w as u16,
+            height: h as u16,
+        },
+        (Some(false), None) => remote_core::RdpResolution::WindowAtConnect,
+        (None, None) => rdp.options.resolution,
+    };
 
     if let Some(host) = gateway_host {
         if gateway_enabled {

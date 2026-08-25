@@ -680,6 +680,28 @@ fn resolve_protocol(
     }
 }
 
+/// The viewport in physical pixels: what the webview measured, or the window.
+///
+/// Zero in either axis means nothing useful was measured, which is what a
+/// window that has not been laid out reports, so it is treated as absent
+/// rather than passed on as a desktop no pixels wide.
+fn viewport(
+    window: &tauri::WebviewWindow,
+    width: Option<u16>,
+    height: Option<u16>,
+) -> Option<(u16, u16)> {
+    let measured = match (width, height) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => window.inner_size().ok().map(|s| {
+            (
+                u16::try_from(s.width).unwrap_or(u16::MAX),
+                u16::try_from(s.height).unwrap_or(u16::MAX),
+            )
+        }),
+    };
+    measured.filter(|(w, h)| *w > 0 && *h > 0)
+}
+
 /// Connect to a remote desktop.
 ///
 /// `on_event` is the binary channel that will receive framebuffer/cursor
@@ -719,6 +741,14 @@ pub async fn connect_session(
     protocol: Option<String>,
     ignore_stored_credentials: Option<bool>,
     accept_ssh_host_key: Option<String>,
+    // The viewport in physical pixels, so an RDP session can ask for a desktop
+    // that fits it instead of the specification's 1024 by 768. The webview
+    // measures this because it knows where the canvas actually is; the window
+    // is the fallback for a caller that did not, and is close enough because
+    // the session view is full bleed. Absent from both leaves the size to the
+    // profile, which is what a fixed resolution wants anyway.
+    viewport_width: Option<u16>,
+    viewport_height: Option<u16>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<SessionConnectOutcome, String> {
     let id = match session_id {
@@ -825,6 +855,7 @@ pub async fn connect_session(
             // loopback endpoint, and two tunnelled servers would then collide
             // on one pin key.
             rdp.server_name.get_or_insert_with(|| options.host.clone());
+            rdp.window_size = viewport(&window, viewport_width, viewport_height);
             *options.rdp_mut() = rdp;
         }
         _ => {
