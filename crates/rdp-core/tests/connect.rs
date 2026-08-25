@@ -868,7 +868,14 @@ async fn an_input_command_reaches_the_server_as_a_fast_path_event() {
                 code: 0x1e
             },
             // The disconnect releases what is held, or the key repeats into
-            // the remote session forever (PRDRDP/05 §2.11).
+            // the remote session forever (PRDRDP/05 §2.11). The button is
+            // held too, and goes up first so the modifier state the server
+            // saw when it went down is still in place.
+            FastPathInputEvent::Mouse {
+                flags: pointer_flags::BUTTON1_LEFT,
+                x: 100,
+                y: 200
+            },
             FastPathInputEvent::Scancode {
                 flags: keyboard_flags::RELEASE,
                 code: 0x1e

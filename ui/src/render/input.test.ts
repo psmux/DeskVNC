@@ -260,3 +260,110 @@ describe("edge auto-scroll", () => {
     expect(panned).toEqual([]);
   });
 });
+
+describe("a button that is never let go of", () => {
+  // `PointerEvent.button` is -1 on pointercancel and on lostpointercapture,
+  // which matches no button we forward, so the release path used to take its
+  // "not a button we care about" early return and the bit stayed set for the
+  // rest of the session.
+  //
+  // A stuck right button is not a small thing. The next right press ORs a bit
+  // that is already set, so the mask does not change and the backend computes
+  // no transition: the click does nothing. The release that follows clears it
+  // and arrives on its own, long after the gesture. And in between, a left
+  // press goes out as left AND right together, so the desktop opens a context
+  // menu when the user left-clicked.
+
+  it("releases the button when the pointer is cancelled", () => {
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 2, buttons: 2, clientX: 5, clientY: 5 }),
+    );
+    // pointercancel carries button -1 and buttons 0.
+    canvas.dispatchEvent(
+      new PointerEvent("pointercancel", { button: -1, buttons: 0, clientX: 5, clientY: 5 }),
+    );
+
+    expect(pointers(sent)).toEqual([
+      { x: 5, y: 5, mask: RIGHT },
+      { x: 5, y: 5, mask: 0 },
+    ]);
+  });
+
+  it("releases the button when pointer capture is taken away", () => {
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 2, buttons: 2, clientX: 5, clientY: 5 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("lostpointercapture", { button: -1, buttons: 0, clientX: 5, clientY: 5 }),
+    );
+
+    expect(pointers(sent).at(-1)).toEqual({ x: 5, y: 5, mask: 0 });
+  });
+
+  it("corrects a mask that drifted, on the next move", () => {
+    // The backstop for a release that happens where we get no event at all,
+    // such as outside the window. `buttons` is a live set carried on every
+    // event, so the very next move puts it right.
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 2, buttons: 2, clientX: 5, clientY: 5 }),
+    );
+    sent.length = 0;
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { buttons: 0, clientX: 40, clientY: 40 }),
+    );
+
+    expect(pointers(sent)[0]).toEqual({ x: 40, y: 40, mask: 0 });
+  });
+
+  it("does not turn a left click into a right click after a cancel", () => {
+    // The reported symptom, end to end.
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 2, buttons: 2, clientX: 5, clientY: 5 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointercancel", { button: -1, buttons: 0, clientX: 5, clientY: 5 }),
+    );
+    sent.length = 0;
+
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 5, clientY: 5 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointerup", { button: 0, buttons: 0, clientX: 5, clientY: 5 }),
+    );
+
+    expect(pointers(sent)).toEqual([
+      { x: 5, y: 5, mask: 1 },
+      { x: 5, y: 5, mask: 0 },
+    ]);
+  });
+
+  it("does not wedge pointer input when a pan is cancelled", () => {
+    // onPointerUp only ended a pan for `e.button === panButton`, and no pan
+    // button is -1, so a cancelled pan left `panning` set. Every later press
+    // then took the pan early return and nothing reached the remote at all.
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        button: 1,
+        buttons: 4,
+        altKey: true,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointercancel", { button: -1, buttons: 0, clientX: 5, clientY: 5 }),
+    );
+    sent.length = 0;
+
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 9, clientY: 9 }),
+    );
+    expect(pointers(sent)).toEqual([{ x: 9, y: 9, mask: 1 }]);
+  });
+});

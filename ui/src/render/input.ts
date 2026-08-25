@@ -259,6 +259,10 @@ export class SessionInput {
     c.addEventListener("pointermove", this.onPointerMove);
     c.addEventListener("pointerup", this.onPointerUp);
     c.addEventListener("pointercancel", this.onPointerUp);
+    // Capture can be taken away without a pointerup ever arriving: an OS
+    // gesture claims the pointer, or the canvas is replaced under us. Both
+    // land here, and both used to leave a button held down forever.
+    c.addEventListener("lostpointercapture", this.onPointerUp);
     c.addEventListener("wheel", this.onWheel, { passive: false });
     c.addEventListener("contextmenu", this.onContextMenu);
     c.addEventListener("pointerleave", this.onPointerLeave);
@@ -283,6 +287,7 @@ export class SessionInput {
     c.removeEventListener("pointermove", this.onPointerMove);
     c.removeEventListener("pointerup", this.onPointerUp);
     c.removeEventListener("pointercancel", this.onPointerUp);
+    c.removeEventListener("lostpointercapture", this.onPointerUp);
     c.removeEventListener("wheel", this.onWheel);
     c.removeEventListener("contextmenu", this.onContextMenu);
     c.removeEventListener("pointerleave", this.onPointerLeave);
@@ -461,7 +466,11 @@ export class SessionInput {
       this.syncLastPoint(e);
       return;
     }
-    this.buttonMask |= 1 << bit;
+    // `buttons` outranks our running total. If a release went missing while
+    // the pointer was off the canvas, this is where it is noticed. The bit
+    // for this press is forced on because a browser need not have folded it
+    // into `buttons` yet.
+    this.buttonMask = SessionInput.buttonsToMask(e.buttons) | (1 << bit);
     // A real right button press cancels the contextmenu-synthesised click
     // that would otherwise duplicate this gesture (see onContextMenu).
     if (bit === 2) this.lastRightButtonAt = performance.now();
@@ -475,7 +484,11 @@ export class SessionInput {
     // to early-return for ANY button while panning, so releasing the left
     // button during a middle-drag pan never reached the mask update below and
     // buttonMask kept bit 0 set, a permanently "stuck" left button.
-    if (this.panning && e.button === this.panButton) {
+    // `e.button` is -1 on pointercancel and lostpointercapture, which no pan
+    // button can equal, so a cancelled pan used to leave `panning` set and
+    // every later press took the early return below: pointer input stopped
+    // entirely until the session was reattached.
+    if (this.panning && (e.button === this.panButton || e.button < 0)) {
       this.panning = false;
       this.panButton = -1;
       this.syncLastPoint(e);
@@ -487,14 +500,52 @@ export class SessionInput {
     }
     const bit = e.button === 0 ? 0 : e.button === 1 ? 1 : e.button === 2 ? 2 : -1;
     if (bit < 0) {
-      this.syncLastPoint(e);
+      // A cancel, a lost capture, or a button we do not forward. The first two
+      // carry `buttons` of 0, so this is what releases what was held.
+      const q = this.syncLastPoint(e);
+      this.reconcileButtons(e, q.x, q.y);
       return;
     }
-    this.buttonMask &= ~(1 << bit);
+    this.buttonMask = SessionInput.buttonsToMask(e.buttons) & ~(1 << bit);
     const p = this.syncLastPoint(e);
     this.sendPointer(p.x, p.y, this.buttonMask);
     e.preventDefault();
   };
+
+  /**
+   * The buttons the browser says are really held, in our wire order.
+   *
+   * `PointerEvent.buttons` is a live set carried on every event, so it is
+   * right even when a transition was never delivered. `button` reports only
+   * the one that changed and is -1 on `pointercancel` and
+   * `lostpointercapture`, which is what let a stuck button survive. The bit
+   * order is not ours: 1 is left, 2 is RIGHT and 4 is middle, against our
+   * bit 0 left, bit 1 middle, bit 2 right.
+   */
+  private static buttonsToMask(buttons: number): number {
+    return (
+      (buttons & 1 ? 1 << 0 : 0) | (buttons & 4 ? 1 << 1 : 0) | (buttons & 2 ? 1 << 2 : 0)
+    );
+  }
+
+  /**
+   * Put `buttonMask` back in step with the browser, and tell the remote if it
+   * had drifted.
+   *
+   * Any divergence is a button the remote believes is held and the user is not
+   * holding. That is not a cosmetic error: with the right button stuck, the
+   * next right press is no transition at all so it does nothing, its release
+   * arrives much later as an unpaired up, and an ordinary left click reaches
+   * the desktop as a left press underneath a held right button, which is a
+   * context menu. Correcting it on the very next pointer event keeps the
+   * window in which that can happen to a single event.
+   */
+  private reconcileButtons(e: PointerEvent, x: number, y: number): void {
+    const held = SessionInput.buttonsToMask(e.buttons);
+    if (held === this.buttonMask) return;
+    this.buttonMask = held;
+    this.sendPointer(x, y, held);
+  }
 
   private onPointerMove = (e: PointerEvent): void => {
     if (this.panning) {
@@ -509,6 +560,10 @@ export class SessionInput {
     this.updateEdgeScroll();
     if (this.viewOnly) return;
     const p = this.fbPoint(e);
+    // Before the early return below, so a mask that drifted is corrected even
+    // while the pointer sits still. This is the backstop for a release that
+    // happened somewhere we get no event at all, such as outside the window.
+    this.reconcileButtons(e, p.x, p.y);
     if (p.x === this.lastX && p.y === this.lastY) return;
     this.lastX = p.x;
     this.lastY = p.y;
