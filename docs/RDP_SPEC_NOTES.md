@@ -245,41 +245,71 @@ in the tree that is hand computed from a published field table says so in its
 comment and shows the arithmetic. None of them is presented as a transcription.
 They should be replaced when the documents are in hand.
 
-### 1.8 SETTLED: the planar colour loss is undone in eight bits, not sixteen
+### 1.8 SETTLED: the planar colour loss shift, and the width it happens in
 
-`crates/rdp-codecs/src/planar.rs`.
+`crates/rdp-codecs/src/planar.rs`, `crates/rdp-codecs/src/nscodec.rs`.
 
 `PRDRDP/04 §4.5.5` gives the reconstruction as a left shift of Co and Cg by the
-colour loss level and leaves the width of the arithmetic unstated. Reading the
-stored byte as signed and then shifting in `i16` is the obvious way to write it
-and produces a picture that is wrong in a way no test we owned could see: our
-own encoder made the same assumption, so the round trip agreed with itself.
+colour loss level and records the amount as ambiguous, `cll` or `cll - 1`,
+asking for a vector to settle it. It leaves the width of the arithmetic
+unstated as well. Both were got wrong, in two separate releases, and each
+mistake produced a picture that looked almost right.
 
 A Windows 11 host (DESKTOP-H21K47C, 2026-08-25) sends every 32 bpp tile with
 `FormatHeader` `0x33`: `cll = 3`, no chroma subsampling, run length coded, no
-alpha. A tile of flat blue water decodes to `Y = 96` with stored chroma `0x12`
-and `0x3B`. Widening first reads those as +144 and +472. There is no 8 bit RGB
-pixel whose Cg is 472, and the transform drives green past 255 and red and blue
-below zero, so the pixel clamps to pure green. Large areas of the desktop came
-out in flat primaries.
+alpha.
 
-The encoder's right shift by `cll` leaves `8 - cll` meaningful bits in the byte
-and whatever the shift pushed above them. Undoing it in the same eight bits
-drops that leftover, and only the result is signed: `0x12 << 3` is `0x90`,
-which is -112, and `0x3B << 3` is `0xD8`, which is -40. The tile is then a mid
-blue and the desktop matches the host.
+**The width.** The encoder's arithmetic right shift leaves `8 - cll`
+meaningful bits in the stored byte and whatever it pushed above them.
+Reconstruction has to happen in the same eight bits so that leftover falls off
+the top, and the result is read as signed only then. Widening to `i16` first
+keeps it and scales it as though it were signal: a stored `0x3B` reads as +472,
+which no 8 bit RGB pixel can produce. Fixed in 0.13.2.
 
-What settles it is a property rather than a preference. Converting a real 8 bit
-RGB pixel to YCoCg and back cannot leave `0..=255`, so any clamp at all means
-the stream was misread. Over a full session, 1125 of 1921 tiles clamped under
-the widen first reading and 0 of 1920 clamped under this one.
+**The amount.** It is `cll - 1`, not `cll`, and the non lifting form
+`T = Y - Cg; R = T - Co; G = Y + Cg; B = T + Co` goes with it. The lifting form
+carries two halvings of its own and would need `cll`; the two are the same
+transform written at different chroma scales. 0.13.2 shipped the lifting form
+at `cll`, which is self consistent and still wrong, because the eight bit
+reconstruction it now shared cannot hold a value twice as large: every sample
+in the top half of its range overflowed and wrapped, flipping its sign. Fixed
+in 0.13.4.
 
-NSCodec is deliberately not changed to match. Its `ColorLossLevel` is defined
-over 1 to 7 with 1 meaning no loss, and at that level the stored chroma already
-uses the whole signed byte, so an eight bit shift would drop its sign. It
-widens first. That is unverified against a real NSCodec server: this crate's
-encoder is the only thing it has been checked against, which is exactly the
-weakness that hid the planar bug, and it stays open until a capture settles it.
+**What settles it, without a vector.** A correct scale never discards a set
+bit, because the encoder can only emit what its own quantization produced. That
+is measurable on a live session and needs no reference picture:
+
+| reading | chroma bytes losing a set bit |
+| --- | --- |
+| widen to `i16`, shift `cll` | clamped instead: 1125 of 1921 tiles |
+| eight bit, shift `cll` (0.13.3) | 2,474,934 of 15,745,024 (15.72%) |
+| eight bit, shift `cll - 1` | 0 of 15,728,640 |
+
+The failure mode is worth recording because it is not the one the clamp test
+catches. A wrap does not leave `0..=255`, so nothing clamps and the earlier
+check passed: 0.13.3 reported zero clamped tiles while 15.72% of its chroma was
+sign flipped. It showed as hard edged patches of roughly the complementary hue
+in the most saturated parts of the image, and nowhere else, because only large
+samples overflow.
+
+`the_shift_never_discards_a_bit_the_encoder_could_have_set` pins the invariant
+without a server.
+
+**Cross checked against FreeRDP**, which is the only independent implementation
+to hand and interoperates with Windows: `libfreerdp/primitives/prim_YCoCg.c`
+casts to `INT8` after the shift (`(INT16)((INT8)(raw << cll))`) and computes
+`cll` as `shift - 1` where `libfreerdp/codec/planar.c` passes the level itself.
+`libfreerdp/codec/nsc.c` does the same with `ColorLossLevel - 1`.
+
+**NSCodec differs in one thing only**, and it is not the scale. Its
+`ColorLossLevel` runs from 1 with 1 meaning no loss, so its shift is also
+`field - 1`; the two definitions meet at the same arithmetic. But its Co has
+the opposite sign, `R = Y + Co - Cg` against planar's `R = Y - Cg - Co`. This
+tree negates at the NSCodec call site and shares the rest. Still not verified
+against a real NSCodec server, only against this crate's own encoder, which is
+exactly the weakness that hid both planar faults: our encoder made the same
+assumption as our decoder, so the round trip agreed with itself at every colour
+loss level while the picture was wrong.
 
 ## 2. Confirmed errors in the design documents
 
