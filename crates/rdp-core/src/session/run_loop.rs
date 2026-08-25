@@ -33,7 +33,7 @@
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rdp_pdu::mcs::DomainMcsPdu;
@@ -139,6 +139,13 @@ pub struct RunLoop<R> {
     /// running total (`crates/vnc-core/src/session/run_loop.rs` does the same).
     last_received: u64,
     last_sent: u64,
+    /// When the last stats tick ran, so a rate is per second elapsed rather
+    /// than per tick. The interval is one second and its ticks are not
+    /// guaranteed to arrive on time, so the two are not the same number.
+    last_tick_at: Option<Instant>,
+    /// Frames and rectangles handed to the renderer since the last tick.
+    frames_since_tick: u32,
+    rects_decoded: u64,
 }
 
 impl<R: AsyncRead + Unpin> RunLoop<R> {
@@ -177,6 +184,9 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             sent,
             last_received: 0,
             last_sent: 0,
+            last_tick_at: None,
+            frames_since_tick: 0,
+            rects_decoded: 0,
         }
     }
 
@@ -321,6 +331,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     self.send(Outbound::Frame(bytes)).await?;
                 }
                 for event in produced {
+                    self.count_frame(&event);
                     remote_core::emit(events, event).await?;
                 }
             }
@@ -337,6 +348,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     self.send(Outbound::Frame(bytes)).await?;
                 }
                 for event in produced {
+                    self.count_frame(&event);
                     remote_core::emit(events, event).await?;
                 }
             }
@@ -973,6 +985,19 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         )
     }
 
+    /// Count a frame on its way to the renderer.
+    ///
+    /// Every graphics path ends up emitting its `FramebufferUpdate` through
+    /// the two loops in `act`, so counting here catches the legacy bitmap
+    /// updates, the surface bits and the graphics pipeline alike, and cannot
+    /// miss one the way a counter next to any single decoder would.
+    fn count_frame(&mut self, event: &SessionEvent) {
+        if let SessionEvent::FramebufferUpdate { rects, .. } = event {
+            self.frames_since_tick += 1;
+            self.rects_decoded += rects.len() as u64;
+        }
+    }
+
     /// Emit one [`remote_core::SessionStats`], and flush anything the second
     /// timer this loop deliberately does not have would have flushed.
     async fn tick(&mut self, events: &mpsc::Sender<SessionEvent>) -> Result<()> {
@@ -986,17 +1011,35 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
         self.vc.flush_pending_resize(ctx, &mut out)?;
         self.flush_channel(out).await?;
 
+        // Seconds since the last tick, not the interval it was asked for. A
+        // tick that arrives late would otherwise report a rate that is too
+        // high by however late it was.
+        let now = Instant::now();
+        let dt_s = self
+            .last_tick_at
+            .map(|then| now.duration_since(then).as_secs_f64())
+            .filter(|dt| *dt > 0.0)
+            .unwrap_or(1.0);
+        self.last_tick_at = Some(now);
+
         let received = self.received.load(Ordering::Relaxed);
         let sent = self.sent.load(Ordering::Relaxed);
         let stats = remote_core::SessionStats {
             bytes_received: received,
             bytes_sent: sent,
-            throughput_bps: (received.saturating_sub(self.last_received)) as f64,
-            throughput_up_bps: (sent.saturating_sub(self.last_sent)) as f64,
+            // Bits per second, which is what the field means and what the
+            // VNC loop reports into it. This used to pass the byte delta
+            // straight through, so the same overlay read eight times low for
+            // an RDP session and was not a rate at all.
+            throughput_bps: (received.saturating_sub(self.last_received)) as f64 * 8.0 / dt_s,
+            throughput_up_bps: (sent.saturating_sub(self.last_sent)) as f64 * 8.0 / dt_s,
+            fps: (f64::from(self.frames_since_tick) / dt_s) as f32,
+            rects_decoded: self.rects_decoded,
             ..Default::default()
         };
         self.last_received = received;
         self.last_sent = sent;
+        self.frames_since_tick = 0;
         remote_core::emit(events, SessionEvent::Stats(stats)).await?;
         Ok(())
     }
