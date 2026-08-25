@@ -216,7 +216,6 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         channels = opts.channels.len(),
         "sending the mcs connect initial"
     );
-    tracing::debug!(frame = %hex_dump(&frame), "the mcs connect initial as encoded");
     framer.write_pdu(&frame).await?;
 
     let response = with_timeout(

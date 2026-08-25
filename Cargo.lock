@@ -4809,6 +4809,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "image",
  "md-5",
  "parking_lot",
  "rdp-auth",

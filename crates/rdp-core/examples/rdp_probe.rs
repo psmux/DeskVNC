@@ -55,17 +55,42 @@ async fn main() {
 
     let mut frames = 0usize;
     let mut cursors = 0usize;
+    let (mut fb_w, mut fb_h) = (0usize, 0usize);
+    let mut fb: Vec<u8> = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
 
     while let Some(ev) = events_rx.recv().await {
         match &ev {
             // The picture. Counted rather than printed: a busy desktop sends
             // hundreds and the interesting fact is that any arrived at all.
-            SessionEvent::FramebufferUpdate { .. } => {
+            SessionEvent::FramebufferUpdate { rects, .. } => {
                 frames += 1;
                 if frames == 1 {
                     println!("  FIRST FRAME received");
                 }
+                // Blit into a framebuffer so the result can be written out and
+                // looked at. Judging a decoder by whether frames arrive is how
+                // a picture that arrives and is wrong gets shipped.
+                for r in rects {
+                    if let remote_core::RectPayload::Rgba(px) = &r.payload {
+                        blit(
+                            &mut fb,
+                            fb_w,
+                            fb_h,
+                            r.rect.x,
+                            r.rect.y,
+                            r.rect.width,
+                            r.rect.height,
+                            px,
+                        );
+                    }
+                }
+            }
+            SessionEvent::DesktopResize { width, height } => {
+                fb_w = *width as usize;
+                fb_h = *height as usize;
+                fb = vec![0u8; fb_w * fb_h * 4];
+                println!("  desktop {fb_w}x{fb_h}");
             }
             SessionEvent::CursorUpdate(_) => cursors += 1,
             SessionEvent::CertificatePrompt {
@@ -99,6 +124,17 @@ async fn main() {
         }
     }
 
+    if fb_w > 0 && frames > 0 {
+        let path = std::env::var("RDP_PNG").unwrap_or_else(|_| "/tmp/rdp_frame.png".into());
+        match image::RgbaImage::from_raw(fb_w as u32, fb_h as u32, fb) {
+            Some(img) => match img.save(&path) {
+                Ok(()) => println!("  wrote {path}"),
+                Err(e) => println!("  could not write {path}: {e}"),
+            },
+            None => println!("  framebuffer was the wrong size for an image"),
+        }
+    }
+
     println!("\nframes: {frames}, cursor updates: {cursors}");
     if frames > 0 {
         println!("the picture arrived");
@@ -114,5 +150,27 @@ fn env_or_exit(key: &str) -> String {
             eprintln!("{key} must be set. See this example's module comment.");
             std::process::exit(2);
         }
+    }
+}
+
+/// Copy one decoded rectangle into the framebuffer, clipped to it.
+#[allow(clippy::too_many_arguments)]
+fn blit(fb: &mut [u8], fb_w: usize, fb_h: usize, x: u16, y: u16, w: u16, h: u16, px: &[u8]) {
+    let (x, y, w, h) = (x as usize, y as usize, w as usize, h as usize);
+    if w == 0 || h == 0 || px.len() < w * h * 4 {
+        return;
+    }
+    for row in 0..h {
+        let dy = y + row;
+        if dy >= fb_h {
+            break;
+        }
+        let cols = w.min(fb_w.saturating_sub(x));
+        if cols == 0 {
+            break;
+        }
+        let src = &px[row * w * 4..row * w * 4 + cols * 4];
+        let start = (dy * fb_w + x) * 4;
+        fb[start..start + cols * 4].copy_from_slice(src);
     }
 }

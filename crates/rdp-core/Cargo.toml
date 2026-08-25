@@ -61,3 +61,6 @@ hex = { workspace = true }
 # The interop probe example prints the diagnostic frame dumps, which is the
 # whole reason to run it against a real server.
 tracing-subscriber = { workspace = true }
+# The interop probe writes the frame it decoded to a PNG, because the only way
+# to know a decoder is right is to look at what it produced.
+image = { workspace = true }
