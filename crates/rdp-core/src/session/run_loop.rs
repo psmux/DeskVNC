@@ -254,6 +254,24 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             self.act(signal, events).await?;
         }
 
+        // A desktop taller than the connection request could carry was asked
+        // for at the clamped size; this asks for the rest. The display control
+        // channel is not open yet, and does not need to be: the request is
+        // held and sent when the channel reports its capabilities.
+        if self.opts.desktop_wanted != self.opts.desktop {
+            let (width, height) = self.opts.desktop_wanted;
+            let ctx = self.channel_ctx();
+            let mut out = Outbox::new();
+            self.vc.resize(
+                u32::from(width),
+                u32::from(height),
+                self.opts.scale_factor,
+                ctx,
+                &mut out,
+            )?;
+            self.flush_channel(out).await?;
+        }
+
         let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
         stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         stats_tick.reset(); // do not fire immediately

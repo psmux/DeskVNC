@@ -68,7 +68,7 @@ export const MOCK_HOSTS: HostProfile[] = [
       v: 1,
       clipboard: true, microphone: false, consoleSession: false, restrictedAdmin: false,
       domain: "CORP", nla: "required", legacyTls: false, colorDepth: "bpp32",
-      audio: "play-locally", monitors: "all", dynamicResolution: true,
+      audio: "play-locally", monitors: "all", resolution: { mode: "window-at-connect" },
     }),
     groupId: "g-office", osHint: "windows", serverHint: "Windows Remote Desktop",
     qualityPref: "auto", scalingMode: "aspect-fit",

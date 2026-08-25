@@ -18,8 +18,15 @@ import {
   parseSshTunnel,
   protocolName,
 } from "../lib/types";
-import type { RdpSettings } from "../lib/rdp";
-import { blankRdpSettings, parseRdpSettings } from "../lib/rdp";
+import type { RdpResolution, RdpSettings } from "../lib/rdp";
+import { rdpDefaults } from "../lib/rdpDefaults";
+import {
+  blankRdpSettings,
+  parseRdpSettings,
+  RDP_FIXED_SIZES,
+  RDP_MAX_DIM,
+  RDP_MIN_DIM,
+} from "../lib/rdp";
 import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
@@ -103,11 +110,18 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     // the draft, both for a brand-new host and for a saved one that has none.
     wolMac: h?.wolMac ?? prefill?.wolMac ?? null,
     macFromDiscovery: !h?.wolMac && Boolean(prefill?.wolMac),
-    rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? blankRdpSettings()) : null,
+    // A new host starts from the Preferences defaults; a saved one is read
+    // back verbatim, because its own settings are the answer.
+    rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? newRdpSettings()) : null,
     rdpUser: "",
     rdpDomain: "",
     portTouched: portWasTouched(h),
   };
+}
+
+/** A blank set of RDP settings with the Preferences defaults applied. */
+function newRdpSettings(): RdpSettings {
+  return { ...blankRdpSettings(), ...rdpDefaults() };
 }
 
 /** Either of the Security disclosure's switches is already on. */
@@ -163,7 +177,7 @@ export function HostDialog({
     set({
       protocol: to,
       port: portOnProtocolChange(d.protocol, to, d.port, d.portTouched === true),
-      rdp: to === "rdp" ? (d.rdp ?? blankRdpSettings()) : d.rdp,
+      rdp: to === "rdp" ? (d.rdp ?? newRdpSettings()) : d.rdp,
       // Prefilled, not forced: xrdp on Linux exists, and so does a Mac with
       // an RDP server on it.
       osHint: to === "rdp" && d.osHint === "unknown" ? "windows" : d.osHint,
@@ -616,11 +630,7 @@ function RdpOptionsSection({
         label="Use all of my monitors"
         hint="Makes the Displays menu list the remote monitors instead of just the one."
       />
-      <Check
-        checked={rdp.dynamicResolution}
-        onChange={(dynamicResolution) => onChange({ dynamicResolution })}
-        label="Match the remote resolution to this window"
-      />
+      <ResolutionField value={rdp.resolution} onChange={(resolution) => onChange({ resolution })} />
       <Check
         checked={rdp.clipboard}
         onChange={(clipboard) => onChange({ clipboard })}
@@ -889,6 +899,85 @@ function SshTunnelSection({
         </>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * The size of the remote desktop, as opposed to how it is scaled once it
+ * arrives.
+ *
+ * One control rather than a size plus a "follow the window" checkbox: the two
+ * are not independent, and a fixed size that also tracked the window would
+ * stop being fixed as soon as the window moved.
+ */
+function ResolutionField({
+  value,
+  onChange,
+}: {
+  value: RdpResolution;
+  onChange: (v: RdpResolution) => void;
+}): ReactNode {
+  const listed =
+    value.mode === "fixed" &&
+    RDP_FIXED_SIZES.some(([w, h]) => w === value.width && h === value.height);
+  const selected =
+    value.mode === "fixed" ? (listed ? `${value.width}x${value.height}` : "custom") : value.mode;
+
+  const pick = (v: string): void => {
+    if (v === "follow-window" || v === "window-at-connect") return onChange({ mode: v });
+    if (v === "custom") {
+      // Seed the boxes from whatever is on screen, so switching to Custom
+      // does not blank the fields the user was just looking at.
+      const [w, h] = value.mode === "fixed" ? [value.width, value.height] : [1920, 1080];
+      return onChange({ mode: "fixed", width: w, height: h });
+    }
+    const [w, h] = v.split("x").map(Number);
+    onChange({ mode: "fixed", width: w, height: h });
+  };
+
+  const custom = value.mode === "fixed" && !listed;
+  // Held as a number so a half typed value does not snap; the profile is only
+  // written when the dialog is saved, and the range is checked on read.
+  const dim = (n: number, set: (v: number) => void, label: string): ReactNode => (
+    <input
+      className="field"
+      type="number"
+      min={RDP_MIN_DIM}
+      max={RDP_MAX_DIM}
+      value={n}
+      aria-label={label}
+      onChange={(e) => set(Number(e.target.value) || 0)}
+    />
+  );
+
+  return (
+    <Field
+      label="Resolution"
+      hint={
+        value.mode === "follow-window"
+          ? "The remote desktop resizes as you resize this window. Windows rearranges its icons each time."
+          : value.mode === "window-at-connect"
+            ? "The remote desktop is sized to this window when you connect, then left alone."
+            : "The remote desktop is always this size. This window scales it to fit."
+      }
+    >
+      <Select value={selected} onChange={(e) => pick(e.target.value)}>
+        <option value="window-at-connect">Match this window when connecting</option>
+        <option value="follow-window">Match this window, and keep matching</option>
+        {RDP_FIXED_SIZES.map(([w, h]) => (
+          <option key={`${w}x${h}`} value={`${w}x${h}`}>
+            {w} x {h}
+          </option>
+        ))}
+        <option value="custom">Custom...</option>
+      </Select>
+      {custom && value.mode === "fixed" ? (
+        <div className="mt-2 grid grid-cols-2 gap-3">
+          {dim(value.width, (width) => onChange({ ...value, width }), "Width in pixels")}
+          {dim(value.height, (height) => onChange({ ...value, height }), "Height in pixels")}
+        </div>
+      ) : null}
+    </Field>
   );
 }
 

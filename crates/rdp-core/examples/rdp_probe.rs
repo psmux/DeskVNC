@@ -40,6 +40,18 @@ async fn main() {
     println!("connecting to {host}:{port} as {user}");
 
     let mut options = ConnectOptions::rdp(&host, port);
+    // `RDP_SIZE=1920x1080` asks for a desktop of that size, the way a host
+    // profile with a fixed resolution does. Without it the probe measures no
+    // window, so the resolver falls back to the specification's own default.
+    if let Some((w, h)) = std::env::var("RDP_SIZE").ok().and_then(|s| {
+        let (w, h) = s.split_once('x')?;
+        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+    }) {
+        options.rdp_mut().resolution = remote_core::RdpResolution::Fixed {
+            width: w,
+            height: h,
+        };
+    }
     options.credentials = match &domain {
         Some(d) => Credentials::domain_user_pass(d, &user, &pass),
         None => Credentials::user_pass(&user, &pass),

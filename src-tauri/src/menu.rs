@@ -33,6 +33,24 @@ const PROJECT_URL: &str = "https://github.com/psmux/DeskVNC";
 /// from the library window where nothing is connected at all.
 const HIDE_TOOLBAR: &str = "menu:hide-toolbar";
 
+/// The fixed sizes the Resolution submenu offers.
+///
+/// These are the tokens the rows carry, matching the item ids above and
+/// `RDP_FIXED_SIZES` in `ui/src/lib/rdp.ts`. Three lists rather than one
+/// because the menu is built in Rust before any session exists, the ids have
+/// to be literals, and the dialog is built in the webview. They are kept in
+/// step by hand; a size in only one of them is a row that does nothing rather
+/// than a crash.
+const RESOLUTIONS: &[&str] = &[
+    "1280x720",
+    "1366x768",
+    "1600x900",
+    "1920x1080",
+    "2560x1440",
+    "3440x1440",
+    "3840x2160",
+];
+
 /// Live handles into the parts of the menu that mirror a session.
 ///
 /// Everything here is `Send + Sync` (tauri's menu wrappers hop to the main
@@ -40,6 +58,8 @@ const HIDE_TOOLBAR: &str = "menu:hide-toolbar";
 pub struct SessionMenu {
     /// Rebuilt from the webview's monitor list; see [`rebuild_displays`].
     displays: Submenu<Wry>,
+    /// Disabled unless the session is one whose desktop size can be chosen.
+    resolution: Submenu<Wry>,
     /// Every check item in the menu, by id.
     checks: HashMap<&'static str, CheckMenuItem<Wry>>,
     /// Plain items that do nothing without a session in front.
@@ -125,6 +145,10 @@ pub struct SessionMenuState {
     displays: Vec<DisplayEntry>,
     /// The selected monitor, or `None` for the whole desktop.
     display_id: Option<i64>,
+    /// `connect`, `follow`, a `WIDTHxHEIGHT` pair, or empty for a session
+    /// whose desktop size is not the user's to choose.
+    #[serde(default)]
+    resolution: String,
 }
 
 /// The payload of `sync_session_menu`.
@@ -232,6 +256,30 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
     gated_menus.push(displays.clone());
 
+    // The size of the remote desktop, as opposed to how it is scaled once it
+    // arrives. Remote Desktop only: RFB has no equivalent that a user chooses,
+    // so the submenu is disabled for a VNC session rather than offering
+    // choices that would do nothing.
+    let resolution = SubmenuBuilder::new(app, "Resolution")
+        .item(&check!(
+            "menu:res:connect",
+            "Match This Window When Connecting"
+        ))
+        .item(&check!(
+            "menu:res:follow",
+            "Match This Window, and Keep Matching"
+        ))
+        .separator()
+        .item(&check!("menu:res:1280x720", "1280 x 720"))
+        .item(&check!("menu:res:1366x768", "1366 x 768"))
+        .item(&check!("menu:res:1600x900", "1600 x 900"))
+        .item(&check!("menu:res:1920x1080", "1920 x 1080"))
+        .item(&check!("menu:res:2560x1440", "2560 x 1440"))
+        .item(&check!("menu:res:3440x1440", "3440 x 1440"))
+        .item(&check!("menu:res:3840x2160", "3840 x 2160"))
+        .build()?;
+    gated_menus.push(resolution.clone());
+
     let pointers = SubmenuBuilder::new(app, "Pointers")
         .item(&check!("menu:remote-cursor", "Show the Remote Pointer"))
         .separator()
@@ -283,6 +331,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .item(&check!("menu:edge-pan", "Pan by Moving to Edges"))
         .separator()
         .item(&displays)
+        .item(&resolution)
         .item(&pointers)
         .separator()
         .item(&toggle_toolbar)
@@ -420,6 +469,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     app.manage(Mutex::new(SessionMenu {
         displays,
+        resolution,
         checks,
         gated_items,
         gated_menus,
@@ -481,6 +531,11 @@ pub fn sync(app: &AppHandle, update: MenuSync) {
         &s.gray_levels.to_string(),
     );
     menu.radio("menu:cursor:", &["standard", "dot", "off"], &s.local_cursor);
+    let mut rows: Vec<&str> = vec!["connect", "follow"];
+    rows.extend_from_slice(RESOLUTIONS);
+    menu.radio("menu:res:", &rows, &s.resolution);
+    let _ = menu.resolution.set_enabled(!s.resolution.is_empty());
+
     menu.check("menu:remote-cursor", s.show_remote_cursor);
     menu.check("menu:view-only", s.view_only);
     menu.check("menu:passthrough", s.passthrough);

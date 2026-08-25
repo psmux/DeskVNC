@@ -26,6 +26,9 @@ import { CredentialPrompt } from "../components/CredentialPrompt";
 import { SshHostKeyPrompt } from "../components/SshHostKeyPrompt";
 import { DropOverlay, FilePanel } from "../components/FilePanel";
 import { useFiles } from "../hooks/useFiles";
+import type { RdpResolution } from "../lib/rdp";
+import { parseRdpSettings } from "../lib/rdp";
+import { encodeResolution } from "../lib/rdpDefaults";
 import { ToastShelf } from "../components/primitives";
 import { useToasts } from "../state/ToastContext";
 import { useSettings } from "../state/SettingsContext";
@@ -246,6 +249,13 @@ function SessionView({
   const [stored] = useState(() => readViewPrefs(prefsKey));
 
   const [scalingMode, setScalingModeState] = useState<ScalingMode>(stored.scalingMode);
+  // The remote desktop's size, as opposed to how it is scaled once it arrives.
+  // RDP only, and `null` until the profile has been read (or forever, for VNC,
+  // whose remote size is driven by the scaling mode). Changing it here lasts
+  // for this session; the profile stays the answer for the next connect.
+  const [resolution, setResolution] = useState<RdpResolution | null>(null);
+  const resolutionRef = useRef<RdpResolution | null>(null);
+  resolutionRef.current = resolution;
   const [zoom, setZoomState] = useState(stored.zoom);
   const [quality, setQualityState] = useState<QualityPreset>(stored.quality);
   const [bwLevels, setBwLevelsState] = useState(stored.bwLevels);
@@ -438,7 +448,11 @@ function SessionView({
     // Remote-resize mode: debounce ~500ms, request the window's physical pixels
     let resizeTimer = 0;
     const scheduleRemoteResize = (): void => {
-      if (modeRef.current !== "remote-resize") return;
+      // For RDP the resolution setting is the authority; for VNC, whose remote
+      // size has no setting of its own, the scaling mode still is.
+      const rdp = resolutionRef.current;
+      const follows = rdp ? rdp.mode === "follow-window" : modeRef.current === "remote-resize";
+      if (!follows) return;
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         sessionRef.current.requestResize(canvas.width, canvas.height);
@@ -686,6 +700,52 @@ function SessionView({
    * session without multiple monitors negotiated really is one display, and
    * cutting it in half would be inventing monitors that are not there.
    */
+  /**
+   * Change the remote desktop's size for this session.
+   *
+   * A fixed size and "match the window" both need one request sent now;
+   * "match at connect" is the absence of one, and deliberately leaves the
+   * desktop at whatever size it already has rather than snapping it back.
+   */
+  const applyResolution = useCallback(
+    (next: RdpResolution): void => {
+      setResolution(next);
+      if (next.mode === "fixed") {
+        session.requestResize(next.width, next.height);
+      } else if (next.mode === "follow-window") {
+        const c = canvasRef.current;
+        if (c) session.requestResize(c.width, c.height);
+      }
+    },
+    [session],
+  );
+
+  // Seed the resolution from the host profile. The shell already used it to
+  // size the connection; this copy is what decides whether a window resize
+  // reaches the server afterwards, and what the menu shows as current.
+  useEffect(() => {
+    if (params.protocol !== "rdp") return;
+    const id = params.profileId;
+    if (!id) {
+      // An ad-hoc connect has no profile, so it gets the same default a new
+      // one would: sized at connect, then left alone.
+      setResolution({ mode: "window-at-connect" });
+      return;
+    }
+    let cancelled = false;
+    void safeInvoke<{ rdpSettings?: string | null } | null>("get_host", { hostId: id }, null).then(
+      (host) => {
+        if (cancelled) return;
+        setResolution(parseRdpSettings(host?.rdpSettings ?? null)?.resolution ?? {
+          mode: "window-at-connect",
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [params.protocol, params.profileId]);
+
   const guessDisplays = params.protocol !== "rdp";
   useEffect(() => {
     if (!guessDisplays || layoutKnown || session.state.state !== "connected") return;
@@ -1404,6 +1464,14 @@ function SessionView({
         break;
       case "menu:scale-remote":
         setScalingModeState("remote-resize");
+        // On RDP the resolution setting owns this, so the two do not disagree.
+        if (params.protocol === "rdp") applyResolution({ mode: "follow-window" });
+        break;
+      case "menu:res:connect":
+        applyResolution({ mode: "window-at-connect" });
+        break;
+      case "menu:res:follow":
+        applyResolution({ mode: "follow-window" });
         break;
       case "menu:zoom-in":
         zoomBy(1.25);
@@ -1499,6 +1567,13 @@ function SessionView({
           setBwLevelsState(Number(id.slice("menu:gray:".length)));
         } else if (id.startsWith("menu:display:")) {
           chooseDisplay(Number(id.slice("menu:display:".length)));
+        } else {
+          // The fixed sizes share one shape, so they are matched rather than
+          // listed a second time here.
+          const size = /^menu:res:(\d+)x(\d+)$/.exec(id);
+          if (size) {
+            applyResolution({ mode: "fixed", width: Number(size[1]), height: Number(size[2]) });
+          }
         }
     }
   };
@@ -1526,8 +1601,12 @@ function SessionView({
       layoutKnown,
       displays: orderedDisplays.map((o, i) => ({ id: o.id, label: displayLabel(o, i) })),
       displayId,
+      // Empty for VNC, whose remote size follows the scaling mode and is not a
+      // choice of its own.
+      resolution: resolution ? encodeResolution(resolution) : "",
     }),
     [
+      resolution,
       scalingMode,
       quality,
       bwLevels,

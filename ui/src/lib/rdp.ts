@@ -30,6 +30,33 @@ export type AudioMode = "play-locally" | "leave-at-server" | "off";
  *  that carries a list of indices into the server's reported layout. */
 export type MonitorPolicy = "primary" | "all" | { selected: number[] };
 
+/**
+ * What desktop size an RDP session asks the server for.
+ *
+ * The shape matches `RdpResolution` in `crates/remote-core/src/options.rs`,
+ * which is serde-tagged on `mode`. A test there pins the exact JSON, because
+ * this reader and that writer are two halves of one contract.
+ */
+export type RdpResolution =
+  | { mode: "follow-window" }
+  | { mode: "window-at-connect" }
+  | { mode: "fixed"; width: number; height: number };
+
+/** The sizes offered in the picker, plus whatever a profile already holds. */
+export const RDP_FIXED_SIZES: readonly (readonly [number, number])[] = [
+  [1280, 720],
+  [1366, 768],
+  [1600, 900],
+  [1920, 1080],
+  [2560, 1440],
+  [3440, 1440],
+  [3840, 2160],
+];
+
+/** MS-RDPEDISP's monitor layout bounds; the connect request clamps further. */
+export const RDP_MIN_DIM = 200;
+export const RDP_MAX_DIM = 8192;
+
 /** `remote_core::CodecSet`. Every codec on by default; this exists to work
  *  around a server whose encoder is broken, not as a tuning knob.
  *  `uncompressed` is present so the list reads completely and is never
@@ -78,7 +105,7 @@ export interface RdpSettings {
   codecs: CodecSet;
   audio: AudioMode;
   monitors: MonitorPolicy;
-  dynamicResolution: boolean;
+  resolution: RdpResolution;
   keyboardLayout: number;
   clientName: string;
   performance: PerformanceFlags;
@@ -137,7 +164,7 @@ export function blankRdpSettings(): RdpSettings {
     codecs: blankCodecSet(),
     audio: "play-locally",
     monitors: "primary",
-    dynamicResolution: true,
+    resolution: { mode: "window-at-connect" },
     keyboardLayout: 0,
     clientName: "",
     performance: blankPerformanceFlags(),
@@ -154,7 +181,7 @@ export function blankRdpSettings(): RdpSettings {
 const KNOWN_KEYS: readonly string[] = [
   "v", "clipboard", "microphone", "consoleSession", "restrictedAdmin",
   "serverName", "domain", "nla", "legacyTls", "colorDepth", "codecs", "audio",
-  "monitors", "dynamicResolution", "keyboardLayout", "clientName",
+  "monitors", "resolution", "dynamicResolution", "keyboardLayout", "clientName",
   "performance", "gateway", "autologon", "kdcProxyUrl", "sendMstshashCookie",
   "allowAutoReconnect", "desktopScaleFactor",
 ];
@@ -214,6 +241,33 @@ function readPerformance(v: unknown): PerformanceFlags {
   return out;
 }
 
+/**
+ * Read the resolution, migrating a profile written before it existed.
+ *
+ * `dynamicResolution` was the old boolean and nothing in Rust ever read it, so
+ * it never did anything; it still says what the user meant, and honouring it
+ * is better than resetting every existing profile to the default.
+ */
+function readResolution(v: unknown, legacyDynamic: unknown): RdpResolution {
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if (o.mode === "follow-window") return { mode: "follow-window" };
+    if (o.mode === "window-at-connect") return { mode: "window-at-connect" };
+    if (o.mode === "fixed") {
+      const w = Math.round(num(o.width, 0));
+      const h = Math.round(num(o.height, 0));
+      // An out of range pair is not a fixed size anyone can use, so it falls
+      // back rather than being clamped into something the user never chose.
+      if (w >= RDP_MIN_DIM && w <= RDP_MAX_DIM && h >= RDP_MIN_DIM && h <= RDP_MAX_DIM) {
+        return { mode: "fixed", width: w, height: h };
+      }
+    }
+  }
+  return legacyDynamic === true
+    ? { mode: "follow-window" }
+    : { mode: "window-at-connect" };
+}
+
 function readMonitors(v: unknown): MonitorPolicy {
   if (v === "all") return "all";
   if (v && typeof v === "object" && Array.isArray((v as { selected?: unknown }).selected)) {
@@ -268,7 +322,7 @@ export function parseRdpSettings(raw: string | null | undefined): RdpSettings | 
     codecs: readCodecs(o.codecs),
     audio: oneOf(o.audio, ["play-locally", "leave-at-server", "off"] as const, "play-locally"),
     monitors: readMonitors(o.monitors),
-    dynamicResolution: bool(o.dynamicResolution, blank.dynamicResolution),
+    resolution: readResolution(o.resolution, o.dynamicResolution),
     keyboardLayout: num(o.keyboardLayout, 0),
     clientName: str(o.clientName, ""),
     performance: readPerformance(o.performance),
