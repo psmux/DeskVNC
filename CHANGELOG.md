@@ -10,6 +10,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-25
+
+Minor rather than patch under the sub-1.0 rule in this file's own header:
+the host store gains an `ssh_settings` column and two credential fields,
+and the IPC contract gains SSH commands, events and a binary message
+type.
+
 ### Added
 
 - **SSH is a third protocol**, alongside VNC and Remote Desktop. A host
