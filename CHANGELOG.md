@@ -10,6 +10,81 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+- **SSH is a third protocol**, alongside VNC and Remote Desktop. A host
+  profile can speak it, so an SSH machine gets a tile in the Library, an
+  `ssh://` address in Quick Connect, its own session window or tab, and the
+  same connection history and reconnect behaviour as any other session. It
+  goes through the same `connect_session` and the same session registry, so
+  it inherits all of that rather than growing a parallel copy of it.
+
+  Per-host settings cover which multiplexer to attach to and under what
+  session name, a startup command to run instead of the login shell, and the
+  terminal's font size and scrollback.
+
+- **psmux and tmux are both first class, on Linux and on Windows.** The
+  default is to detect rather than assume: the app asks the far side what it
+  actually has, in one round trip, and takes the best of psmux, tmux, zellij
+  or screen. psmux ranks ahead of tmux, and because it speaks tmux's command
+  language the two share one implementation rather than two that could drift.
+
+  A Windows machine running OpenSSH Server is a first-class target here, not
+  an afterthought. Its default shell may be `cmd.exe` or PowerShell, where a
+  POSIX probe does not fail loudly, it fails *silently*: the shell errors, the
+  answer is unrecognisable, and the session quietly opens a plain shell on
+  exactly the machine the user most wanted persistence on. So the question is
+  asked in a second dialect when the first goes unanswered, and "nothing is
+  installed" is kept distinct from "I did not understand the reply".
+
+  A remote with none of them still gets a working terminal. It is told once,
+  quietly, that this session will not survive a disconnect.
+
+- **A remote shell**, as its own module (`ssh-core`) over the SSH connection
+  the Files panel and the tunnel already use. It is built around the four
+  things that make running `ssh` in a window irritating:
+
+  - **It reconnects by itself.** On the same backoff ladder as a VNC session
+    (250 ms doubling to a 15 second cap, with jitter), so this is one set of
+    numbers to reason about rather than two. "Reconnect now" skips the wait
+    and resets the counter, for when you know the network is back.
+
+  - **It notices a hang instead of sitting in one.** A link whose peer went
+    away without closing the socket looks identical to an idle one, and TCP
+    will happily wait minutes before admitting it. Keepalive probes every five
+    seconds, three misses, so a dead link is called in about fifteen seconds
+    and reconnected through.
+
+  - **Your work is still there afterwards.** Reconnecting on its own gets you
+    a fresh empty shell, which just makes the loss quicker to find: the remote
+    PTY died with the link and took everything under it. So the session
+    attaches to a multiplexer instead (`tmux` by default, `screen`, `zellij`
+    or a command of your own), whose session belongs to the remote machine and
+    outlives any one connection. Where the multiplexer is not installed it
+    opens a plain shell and says so, rather than refusing to connect.
+
+  - **A session cut mid-`tmux` no longer wrecks the terminal.** Programs like
+    `tmux`, `vim` and `htop` switch the terminal into mouse reporting and
+    bracketed paste and are expected to switch it back on exit. A severed link
+    never gives them the chance, which is why moving the mouse then prints
+    escape garbage at the prompt and pasting arrives wrapped in control codes.
+    The session now tracks which of those modes the remote turned on and sends
+    exactly what undoes them whenever the link goes away.
+
+  Host keys are trust-on-first-use against the **same** pin store as the Files
+  panel and the tunnel, so trusting a machine once covers all three; a changed
+  key is the same hard stop it is everywhere else.
+
+### Changed
+
+- **The SSH connection code moved into its own crate**, `ssh-transport`
+  (dialling, host-key pinning, authentication, tunnelling, the reachability
+  probe). It was inside `vnc-files`, which would have meant a terminal
+  depending on a file-transfer crate to open a socket. Nothing on the wire
+  changed and no behaviour changed: `vnc-files` re-exports every name it used
+  to export, and the file-transfer IPC shape is identical, which is what the
+  `#[serde(flatten)]` on `FileTransferConfig` is there to preserve.
+
 ## [0.14.0] - 2026-08-25
 
 Minor rather than patch: the stored per-host Remote Desktop settings gain a

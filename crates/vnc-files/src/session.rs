@@ -4,28 +4,27 @@
 //! connection (PRD/08 §2.1), so a VNC reconnect does not disturb an in-flight
 //! transfer and vice versa.
 //!
-//! Host-key verification happens in [`ClientHandler::check_server_key`] and is
-//! strictly trust-on-first-use: an unknown key aborts the connect with
-//! [`Error::HostKeyUnknown`] so the shell can prompt, and a *changed* key
-//! aborts with [`Error::HostKeyChanged`], which is a hard stop with no
-//! "continue anyway" path.
+//! Dialling, host-key verification and authentication all belong to the
+//! carrier, [`ssh_transport::connect`]. What is left here is the SFTP half:
+//! the subsystem request and the transfer loops. The host-key outcomes still
+//! reach this crate as [`Error::HostKeyUnknown`] and [`Error::HostKeyChanged`],
+//! converted from the carrier's own error in `crate::error`, so the shell's
+//! prompt-or-hard-stop logic is unchanged.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
-use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::{HashAlg, PublicKey};
 use russh_sftp::client::SftpSession as RawSftp;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
+use ssh_transport::connect::{connect_and_authenticate, ClientHandler};
+use ssh_transport::hostkey::HostKeyVerifier;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{host_port, resolver_host, FileTransferConfig, SshAuth};
+use crate::config::{host_port, FileTransferConfig};
 use crate::error::{Error, Result};
-use crate::hostkey::{HostKeyDecision, HostKeyVerifier};
 use crate::path;
 use crate::transfer::{
     ConflictOutcome, ConflictPolicy, Direction, FileJob, ProgressThrottle, TransferEvent,
@@ -63,43 +62,6 @@ pub struct RemoteEntry {
     /// Permission bits (`0o7777` masked; the file-type bits are stripped).
     pub mode: u32,
     pub is_symlink: bool,
-}
-
-// ---------------------------------------------------------------------------
-// SSH handler
-// ---------------------------------------------------------------------------
-
-pub(crate) struct ClientHandler {
-    host: String,
-    port: u16,
-    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
-    decision: Arc<Mutex<Option<HostKeyDecision>>>,
-}
-
-// russh 0.62 declares `Handler` with return-position `impl Future` rather than
-// `#[async_trait]`, so a plain `async fn` in the impl is what matches now.
-impl russh::client::Handler for ClientHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKey,
-    ) -> std::result::Result<bool, Self::Error> {
-        let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
-        let key_type = server_public_key.algorithm().as_str().to_string();
-        let decision = self
-            .verifier
-            .verify(&self.host, self.port, &key_type, &fingerprint);
-        let accept = matches!(decision, HostKeyDecision::Trusted);
-        if !accept {
-            tracing::warn!(
-                host = %self.host, port = self.port, %key_type,
-                "ssh host key not accepted: {decision:?}"
-            );
-        }
-        *self.decision.lock() = Some(decision);
-        Ok(accept)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,17 +110,17 @@ impl SftpSession {
         cfg: FileTransferConfig,
         verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
     ) -> Result<Self> {
-        let mut ssh = connect_and_authenticate(&cfg, verifier).await?;
+        let mut ssh = connect_and_authenticate(&cfg.ssh, verifier).await?;
 
         let sftp = open_sftp_subsystem(&mut ssh).await?;
 
-        tracing::info!(endpoint = %cfg.endpoint(), auth = cfg.auth.label(), "sftp sidecar connected");
+        tracing::info!(endpoint = %cfg.endpoint(), auth = cfg.ssh.auth.label(), "sftp sidecar connected");
         Ok(Self {
             sftp,
             ssh,
-            host: cfg.host,
-            port: cfg.port,
-            username: cfg.username,
+            host: cfg.ssh.host,
+            port: cfg.ssh.port,
+            username: cfg.ssh.username,
             conflict: cfg.conflict,
         })
     }
@@ -697,82 +659,6 @@ impl SftpSession {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Authentication
-// ---------------------------------------------------------------------------
-
-/// Dial the SSH server, verify its host key (TOFU) and authenticate. The
-/// shared front half of both SSH consumers: the SFTP sidecar above and the
-/// RFB tunnel in [`crate::tunnel`].
-///
-/// The host-key outcomes come back as the dedicated error variants
-/// ([`Error::HostKeyUnknown`] / [`Error::HostKeyChanged`]) so the shell can
-/// prompt or hard-stop; everything else is a plain connect failure. Boxed for
-/// the region reason documented on [`BoxFuture`].
-pub(crate) fn connect_and_authenticate<'a>(
-    cfg: &'a FileTransferConfig,
-    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
-) -> BoxFuture<'a, Result<russh::client::Handle<ClientHandler>>> {
-    Box::pin(connect_and_authenticate_inner(cfg, verifier))
-}
-
-async fn connect_and_authenticate_inner(
-    cfg: &FileTransferConfig,
-    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
-) -> Result<russh::client::Handle<ClientHandler>> {
-    let decision = Arc::new(Mutex::new(None));
-    let handler = ClientHandler {
-        host: cfg.host.clone(),
-        port: cfg.port,
-        verifier,
-        decision: decision.clone(),
-    };
-
-    let ssh_config = Arc::new(russh::client::Config {
-        inactivity_timeout: None,
-        keepalive_interval: Some(Duration::from_secs(30)),
-        ..Default::default()
-    });
-
-    let connecting =
-        russh::client::connect(ssh_config, (resolver_host(&cfg.host), cfg.port), handler);
-    let mut ssh = match tokio::time::timeout(cfg.connect_timeout(), connecting).await {
-        Err(_) => return Err(Error::Timeout),
-        Ok(Ok(handle)) => handle,
-        Ok(Err(e)) => {
-            // A failed connect is usually a network problem, but if the
-            // handler rejected the key we have a much better answer.
-            return Err(match decision.lock().take() {
-                Some(HostKeyDecision::Unknown {
-                    key_type,
-                    fingerprint,
-                }) => Error::HostKeyUnknown {
-                    host: cfg.host.clone(),
-                    port: cfg.port,
-                    key_type,
-                    fingerprint,
-                },
-                Some(HostKeyDecision::Changed {
-                    expected, actual, ..
-                }) => Error::HostKeyChanged {
-                    host: cfg.host.clone(),
-                    port: cfg.port,
-                    expected,
-                    actual,
-                },
-                _ => Error::Connect {
-                    host: cfg.host.clone(),
-                    port: cfg.port,
-                    reason: e.to_string(),
-                },
-            });
-        }
-    };
-
-    authenticate(&mut ssh, cfg).await?;
-    Ok(ssh)
-}
-
 /// Open an SSH channel and start the `sftp` subsystem on it.
 ///
 /// The body is deliberately a **boxed** future with an explicit `+ Send`
@@ -795,171 +681,6 @@ fn open_sftp_subsystem<'a>(
             .await
             .map_err(Error::sftp)
     })
-}
-
-/// Boxed for the same reason as [`open_sftp_subsystem`]: russh's
-/// `authenticate_*` futures hold `&mpsc::Sender<client::Msg>` across an await,
-/// which is not higher-ranked `Send`. Pinning the region here keeps
-/// `SftpSession::connect`'s future `Send`, which Tauri commands require.
-fn authenticate<'a>(
-    ssh: &'a mut russh::client::Handle<ClientHandler>,
-    cfg: &'a FileTransferConfig,
-) -> BoxFuture<'a, Result<()>> {
-    Box::pin(authenticate_inner(ssh, cfg))
-}
-
-async fn authenticate_inner(
-    ssh: &mut russh::client::Handle<ClientHandler>,
-    cfg: &FileTransferConfig,
-) -> Result<()> {
-    let ok = match &cfg.auth {
-        // russh 0.62 returns `AuthResult` (which can also report "accepted but
-        // more factors required") instead of a bare bool. Only outright
-        // success counts here.
-        SshAuth::Password(password) => ssh
-            .authenticate_password(cfg.username.clone(), password.clone())
-            .await
-            .map_err(Error::ssh)?
-            .success(),
-        SshAuth::KeyFile { path, passphrase } => {
-            let path = path.clone();
-            let passphrase = passphrase.clone();
-            let display = path.display().to_string();
-            // Reading and decrypting a key is blocking, CPU-bound work.
-            let key = tokio::task::spawn_blocking(move || {
-                russh::keys::load_secret_key(&path, passphrase.as_deref())
-            })
-            .await
-            .map_err(|e| Error::Other(e.to_string()))?
-            .map_err(|e| Error::Key {
-                path: display,
-                reason: e.to_string(),
-            })?;
-            authenticate_with_key(ssh, &cfg.username, Arc::new(key)).await?
-        }
-        SshAuth::Agent => authenticate_with_agent(ssh, &cfg.username).await?,
-    };
-    if !ok {
-        return Err(Error::Auth {
-            user: cfg.username.clone(),
-        });
-    }
-    Ok(())
-}
-
-/// RSA keys need an explicit signature hash: `ssh-rsa` (SHA-1) is refused by
-/// every current OpenSSH, so try SHA-512 then SHA-256 before giving up.
-fn authenticate_with_key<'a>(
-    ssh: &'a mut russh::client::Handle<ClientHandler>,
-    username: &'a str,
-    key: Arc<russh::keys::PrivateKey>,
-) -> BoxFuture<'a, Result<bool>> {
-    Box::pin(authenticate_with_key_inner(ssh, username, key))
-}
-
-async fn authenticate_with_key_inner(
-    ssh: &mut russh::client::Handle<ClientHandler>,
-    username: &str,
-    key: Arc<russh::keys::PrivateKey>,
-) -> Result<bool> {
-    let hashes: &[Option<HashAlg>] = if key.algorithm().is_rsa() {
-        &[Some(HashAlg::Sha512), Some(HashAlg::Sha256), None]
-    } else {
-        &[None]
-    };
-    for hash in hashes {
-        // `PrivateKeyWithHashAlg::new` is infallible as of russh 0.62; it used
-        // to return a Result.
-        let with_hash = PrivateKeyWithHashAlg::new(key.clone(), *hash);
-        match ssh
-            .authenticate_publickey(username.to_string(), with_hash)
-            .await
-        {
-            Ok(result) if result.success() => return Ok(true),
-            Ok(_) => continue,
-            Err(e) => return Err(Error::ssh(e)),
-        }
-    }
-    Ok(false)
-}
-
-fn authenticate_with_agent<'a>(
-    ssh: &'a mut russh::client::Handle<ClientHandler>,
-    username: &'a str,
-) -> BoxFuture<'a, Result<bool>> {
-    Box::pin(authenticate_with_agent_inner(ssh, username))
-}
-
-async fn authenticate_with_agent_inner(
-    ssh: &mut russh::client::Handle<ClientHandler>,
-    username: &str,
-) -> Result<bool> {
-    let mut agent = connect_agent().await?;
-    let identities = agent
-        .request_identities()
-        .await
-        .map_err(|e| Error::Agent(e.to_string()))?;
-    if identities.is_empty() {
-        return Err(Error::Agent("the ssh agent holds no identities".into()));
-    }
-    for identity in identities {
-        // russh 0.62 hands back `AgentIdentity`, which may wrap a certificate
-        // rather than a bare key, and `authenticate_publickey_with` now takes
-        // the public key plus an explicit signature hash. `None` lets the
-        // agent pick, which is what we want for every algorithm it holds.
-        let key = identity.public_key().into_owned();
-        // Boxed for the region reason documented on `BoxFuture`.
-        let attempt: BoxFuture<
-            '_,
-            std::result::Result<russh::client::AuthResult, russh::AgentAuthError>,
-        > = Box::pin(ssh.authenticate_publickey_with(username.to_string(), key, None, &mut agent));
-        match attempt.await {
-            Ok(result) if result.success() => return Ok(true),
-            Ok(_) => continue,
-            Err(e) => {
-                tracing::debug!("agent identity rejected: {e}");
-                continue;
-            }
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(unix)]
-async fn connect_agent() -> Result<
-    russh::keys::agent::client::AgentClient<
-        Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin + 'static>,
-    >,
-> {
-    russh::keys::agent::client::AgentClient::connect_env()
-        .await
-        .map(|c| c.dynamic())
-        .map_err(|e| Error::Agent(format!("SSH_AUTH_SOCK: {e}")))
-}
-
-/// Windows has two agents in the wild: the OpenSSH service on a named pipe and
-/// Pageant. Try the pipe first, then fall back.
-#[cfg(windows)]
-async fn connect_agent() -> Result<
-    russh::keys::agent::client::AgentClient<
-        Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin + 'static>,
-    >,
-> {
-    use russh::keys::agent::client::AgentClient;
-    const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
-    match AgentClient::connect_named_pipe(OPENSSH_PIPE).await {
-        Ok(client) => Ok(client.dynamic()),
-        Err(e) => {
-            tracing::debug!("openssh agent pipe unavailable: {e}");
-            // russh 0.62 made `connect_pageant` fallible; it used to return the
-            // client directly. Pageant is the fallback, so a failure here means
-            // neither agent is reachable.
-            let pageant = AgentClient::connect_pageant()
-                .await
-                .map_err(|e| Error::Agent(format!("no SSH agent available: {e}")))?;
-            Ok(pageant.dynamic())
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

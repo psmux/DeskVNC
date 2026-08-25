@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ssh-reconnect-now"
+description = "Enables the ssh_reconnect_now command without any pre-configured scope."
+commands.allow = ["ssh_reconnect_now"]
+
+[[permission]]
+identifier = "deny-ssh-reconnect-now"
+description = "Denies the ssh_reconnect_now command without any pre-configured scope."
+commands.deny = ["ssh_reconnect_now"]

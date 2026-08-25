@@ -13,7 +13,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
-import { hostProtocol, protocolLabel } from "../lib/types";
+import { DEFAULT_PORT, PROTOCOLS, hostProtocol, protocolLabel, protocolName } from "../lib/types";
 import { formatTarget, parseConnectTarget, presetProtocol } from "../lib/address";
 import { classNames, fuzzyMatch, modKeyLabel } from "../lib/util";
 import { IconArrowRight, IconClock, IconMonitor, IconZap } from "./icons";
@@ -26,6 +26,23 @@ function sameAddress(a: string, b: string): boolean {
       .replace(/\.+$/, "")
       .replace(/[A-Z]/g, (c) => c.toLowerCase()); // ASCII only, as Rust does
   return norm(a) === norm(b);
+}
+
+/**
+ * The protocol the chip flips to on a click, wrapping through `PROTOCOLS` in
+ * the order the protocol picker itself uses (vnc -> rdp -> ssh -> vnc).
+ *
+ * A two-state flip stopped making sense once a third protocol existed:
+ * "the other protocol" is only well defined between two. A cycle keeps the
+ * chip a single click-to-correct button rather than opening a second
+ * floating panel next to the one the suggestion list already owns below the
+ * field, so the fix is the tooltip, not the control: it names the SPECIFIC
+ * protocol one more click lands on, rather than leaving "the other one"
+ * ambiguous among three.
+ */
+function nextProtocol(p: ProtocolKind): ProtocolKind {
+  const i = PROTOCOLS.indexOf(p);
+  return PROTOCOLS[(i + 1) % PROTOCOLS.length];
 }
 
 interface Suggestion {
@@ -163,9 +180,12 @@ export function QuickConnect({
               key: "typed",
               kind: "address",
               label: `Connect to ${typedLabel}`,
-              // An ad-hoc RDP row says so; a VNC row keeps naming its port,
-              // which is the thing worth reading there.
-              sub: resolved === "rdp" ? "" : port === 5900 ? "" : `port ${port}`,
+              // Silent on a protocol's OWN default port (5900 for VNC, 3389
+              // for RDP, 22 for SSH); named otherwise, which is the thing
+              // worth reading there. `resolved === "rdp" ? "" : port === 5900`
+              // used to special-case VNC's default by number, which read an
+              // SSH target on its own default port 22 as "an odd port".
+              sub: port === DEFAULT_PORT[resolved] ? "" : `port ${port}`,
               protocol: resolved,
               run: () => {
                 onConnectAddress(resolved, address, port);
@@ -391,7 +411,10 @@ export function QuickConnect({
         The chip is the answer to "which protocol is this about to speak", and
         it is a button because the answer is sometimes a guess. `box:3389` with
         no saved host is the case it exists for: the guess is visible before
-        Enter and one click corrects it.
+        Enter and one click corrects it. With three protocols the button
+        cycles rather than flips, and the tooltip names the protocol one more
+        click reaches, so "the other protocol" never has to mean one of two
+        unnamed alternatives.
       */}
       {trimmed !== "" && parsed.ok ? (
         <button
@@ -400,11 +423,11 @@ export function QuickConnect({
           title={
             savedMatch
               ? `${savedMatch.friendlyName} is saved as ${protocolLabel(resolved)}`
-              : "Click to connect with the other protocol instead"
+              : `Click to connect with ${protocolName(nextProtocol(resolved))} instead`
           }
           disabled={savedMatch !== null}
           onPointerDown={(e) => e.preventDefault()}
-          onClick={() => setFlipped(resolved === "rdp" ? "vnc" : "rdp")}
+          onClick={() => setFlipped(nextProtocol(resolved))}
         >
           {protocolLabel(resolved)}
         </button>

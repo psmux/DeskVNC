@@ -1,130 +1,29 @@
 //! Connection configuration for the SFTP sidecar.
 //!
+//! The SSH half lives in [`ssh_transport::SshConfig`]; this adds only what the
+//! *file* feature needs on top. It is `#[serde(flatten)]`ed rather than nested
+//! so the IPC shape is unchanged from before the extraction: the webview still
+//! sends one flat object and never learns the carrier was factored out. See
+//! IPC_CONTRACT.md "Files".
+//!
 //! SECURITY: `SshAuth` carries secrets. It deserializes (JS → Rust) but
 //! deliberately does **not** serialize, so a password or passphrase can never
 //! be handed back to the webview, the same invariant `StoredCredentials`
-//! holds for VNC passwords (see IPC_CONTRACT.md "Credentials").
+//! holds for VNC passwords.
 
-use std::path::PathBuf;
-
-/// Default SSH port; also the default file-transfer port when a host profile
-/// does not override it.
-pub const DEFAULT_SSH_PORT: u16 = 22;
-
-/// Join a host and port into the usual `host:port` form.
-///
-/// A bare IPv6 literal has to be bracketed first: `::1` and `22` would
-/// otherwise concatenate to `::1:22`, which is ambiguous with the address
-/// itself, so anything reading it back gets the wrong answer and a human
-/// reading it in a log cannot tell where the address ends. A DNS name can
-/// never contain a colon, so a colon means "IPv6 literal", and a leading `[`
-/// means the caller already bracketed it (users do type `[::1]`, and
-/// double-bracketing would be just as wrong).
-///
-/// Deliberately a local copy of `vnc_transport::tcp`'s rule rather than a
-/// shared helper: `vnc-files` does not otherwise depend on `vnc-transport`,
-/// and one six-line string function is not worth a crate edge.
-pub fn host_port(host: &str, port: u16) -> String {
-    if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    }
-}
-
-/// The host as a resolver wants it, with any user-typed brackets removed.
-///
-/// `russh::client::connect` and `TcpStream::connect` take `(host, port)` as a
-/// tuple, which parses the host as an `IpAddr` and otherwise resolves it as a
-/// DNS name. `[::1]` is neither, so a bracketed literal would fail every
-/// lookup. Brackets only exist to delimit an address inside a *joined*
-/// string, so they have no business here. `vnc-transport` accepts both
-/// spellings for the VNC connection; the sidecar has to accept the same ones
-/// or a profile connects but its Files panel does not.
-pub fn resolver_host(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host)
-}
-
-/// The canonical form of a host, for deciding whether two spellings mean the
-/// same machine.
-///
-/// Deliberately the same rule as `vnc_store::normalize_address` (trim, drop
-/// the trailing dot mDNS puts on a fully-qualified name, ASCII-lowercase),
-/// plus the bracket stripping this crate needs because a user-typed `[::1]`
-/// now reaches the sidecar: `host_port` re-adds the brackets wherever a joined
-/// string is wanted, so carrying them in an identity would split one machine
-/// into two. "The same machine" has to mean the same thing on both sides of
-/// the app or a profile pins its host key twice.
-///
-/// Copied rather than shared for the reason given on [`host_port`]: `vnc-files`
-/// has no other need of `vnc-store`, and one line is not worth a crate edge.
-pub fn canonical_host(host: &str) -> String {
-    resolver_host(host.trim())
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
-}
-
-/// How to authenticate the SSH sidecar connection.
-///
-/// Adjacently tagged so the JS side sends `{ kind, value }`:
-/// `{"kind":"password","value":"…"}`,
-/// `{"kind":"key-file","value":{"path":"…","passphrase":"…"}}`,
-/// `{"kind":"agent"}`.
-#[derive(Clone, serde::Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
-pub enum SshAuth {
-    Password(String),
-    #[serde(rename_all = "camelCase")]
-    KeyFile {
-        path: PathBuf,
-        #[serde(default)]
-        passphrase: Option<String>,
-    },
-    /// ssh-agent (unix socket), Pageant or the Windows OpenSSH named pipe.
-    Agent,
-}
-
-impl SshAuth {
-    /// Short, secret-free label for logs and the UI.
-    pub fn label(&self) -> &'static str {
-        match self {
-            SshAuth::Password(_) => "password",
-            SshAuth::KeyFile { .. } => "key",
-            SshAuth::Agent => "agent",
-        }
-    }
-}
-
-/// `Debug` never prints secrets, these values end up in tracing spans.
-impl std::fmt::Debug for SshAuth {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SshAuth::Password(_) => f.write_str("Password(<redacted>)"),
-            SshAuth::KeyFile { path, passphrase } => f
-                .debug_struct("KeyFile")
-                .field("path", path)
-                .field("passphrase", &passphrase.as_ref().map(|_| "<redacted>"))
-                .finish(),
-            SshAuth::Agent => f.write_str("Agent"),
-        }
-    }
-}
+pub use ssh_transport::config::{
+    canonical_host, host_port, resolver_host, SshAuth, SshConfig, DEFAULT_SSH_PORT,
+};
 
 /// Everything needed to open the sidecar. Built in Rust from the host profile
 /// plus the keychain; the webview supplies host/port/user/auth-kind only.
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileTransferConfig {
-    pub host: String,
-    #[serde(default = "default_ssh_port")]
-    pub port: u16,
-    pub username: String,
-    pub auth: SshAuth,
-    /// Connect + authenticate deadline, milliseconds.
-    #[serde(default = "default_connect_timeout_ms")]
-    pub connect_timeout_ms: u64,
+    /// Where to dial, who to be, how long to wait. Flattened, so the wire
+    /// shape stays `{host, port, username, auth, connectTimeoutMs, …}`.
+    #[serde(flatten)]
+    pub ssh: SshConfig,
     /// Where the file panel and drag-and-drop uploads start (PRD/08 §3.1).
     /// `None` means "the remote user's home directory".
     #[serde(default)]
@@ -134,35 +33,23 @@ pub struct FileTransferConfig {
     pub conflict: crate::transfer::ConflictPolicy,
 }
 
-fn default_ssh_port() -> u16 {
-    DEFAULT_SSH_PORT
-}
-
-fn default_connect_timeout_ms() -> u64 {
-    15_000
-}
-
 impl FileTransferConfig {
     /// Minimal config: password-less agent auth against the VNC host.
     pub fn new(host: impl Into<String>, username: impl Into<String>) -> Self {
         Self {
-            host: host.into(),
-            port: DEFAULT_SSH_PORT,
-            username: username.into(),
-            auth: SshAuth::Agent,
-            connect_timeout_ms: default_connect_timeout_ms(),
+            ssh: SshConfig::new(host, username),
             default_remote_dir: None,
             conflict: crate::transfer::ConflictPolicy::default(),
         }
     }
 
     pub fn connect_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.connect_timeout_ms.clamp(1_000, 120_000))
+        self.ssh.connect_timeout()
     }
 
     /// `user@host:port`, for logs and window titles. Never contains secrets.
     pub fn endpoint(&self) -> String {
-        format!("{}@{}", self.username, host_port(&self.host, self.port))
+        self.ssh.endpoint()
     }
 }
 
@@ -170,7 +57,11 @@ impl FileTransferConfig {
 mod tests {
     use super::*;
     use crate::transfer::ConflictPolicy;
+    use std::path::PathBuf;
 
+    /// The whole point of `#[serde(flatten)]` here: this is the exact JSON the
+    /// webview sent before the SSH half moved into its own crate, and it must
+    /// keep deserializing unchanged.
     #[test]
     fn deserializes_the_camelcase_ipc_shape() {
         let cfg: FileTransferConfig = serde_json::from_str(
@@ -185,23 +76,26 @@ mod tests {
                }"#,
         )
         .unwrap();
-        assert_eq!(cfg.host, "example.local");
-        assert_eq!(cfg.port, 2222);
+        assert_eq!(cfg.ssh.host, "example.local");
+        assert_eq!(cfg.ssh.port, 2222);
         assert_eq!(cfg.connect_timeout().as_millis(), 5000);
         assert_eq!(cfg.default_remote_dir.as_deref(), Some("~/Desktop"));
         assert_eq!(cfg.conflict, ConflictPolicy::Overwrite);
-        assert_eq!(cfg.auth.label(), "password");
+        assert_eq!(cfg.ssh.auth.label(), "password");
         assert_eq!(cfg.endpoint(), "testuser@example.local:2222");
     }
 
+    /// Defaults have to survive the flatten too. `serde(flatten)` routes
+    /// through a content buffer, which is exactly where a missing field with a
+    /// `default` fn is easiest to get wrong.
     #[test]
     fn port_and_timeout_have_defaults() {
         let cfg: FileTransferConfig = serde_json::from_str(
             r#"{ "host": "h", "username": "u", "auth": { "kind": "agent" } }"#,
         )
         .unwrap();
-        assert_eq!(cfg.port, DEFAULT_SSH_PORT);
-        assert_eq!(cfg.connect_timeout_ms, 15_000);
+        assert_eq!(cfg.ssh.port, DEFAULT_SSH_PORT);
+        assert_eq!(cfg.ssh.connect_timeout_ms, 15_000);
         assert_eq!(cfg.conflict, ConflictPolicy::Resume);
         assert!(cfg.default_remote_dir.is_none());
     }
@@ -215,7 +109,7 @@ mod tests {
                                       "passphrase": "s3cret" } } }"#,
         )
         .unwrap();
-        match &cfg.auth {
+        match &cfg.ssh.auth {
             SshAuth::KeyFile { path, passphrase } => {
                 assert_eq!(path, &PathBuf::from("/home/user/.ssh/id_ed25519"));
                 assert_eq!(passphrase.as_deref(), Some("s3cret"));
@@ -234,87 +128,13 @@ mod tests {
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
-
-        let key: SshAuth = serde_json::from_str(
-            r#"{ "kind": "key-file", "value": { "path": "/k", "passphrase": "pp" } }"#,
-        )
-        .unwrap();
-        let rendered = format!("{key:?}");
-        assert!(!rendered.contains("pp"), "{rendered}");
-    }
-
-    /// Guards the one property every host+port join in this crate depends on:
-    /// the result can be read back apart again, whatever spelling of the
-    /// address the profile happens to hold.
-    #[test]
-    fn a_bare_ipv6_literal_is_bracketed_before_the_port_is_appended() {
-        assert_eq!(host_port("::1", 22), "[::1]:22");
-        assert_eq!(host_port("fe80::1", 22), "[fe80::1]:22");
-        assert_eq!(host_port("2001:db8::5", 2222), "[2001:db8::5]:2222");
-
-        // Already bracketed, IPv4 and DNS names must pass through untouched.
-        assert_eq!(host_port("[::1]", 22), "[::1]:22");
-        assert_eq!(host_port("192.0.2.10", 22), "192.0.2.10:22");
-        assert_eq!(
-            host_port("files.example.com", 2222),
-            "files.example.com:2222"
-        );
     }
 
     #[test]
     fn the_endpoint_label_survives_an_ipv6_host() {
         let mut cfg = FileTransferConfig::new("::1", "u");
         assert_eq!(cfg.endpoint(), "u@[::1]:22");
-        cfg.host = "[fe80::1]".into();
+        cfg.ssh.host = "[fe80::1]".into();
         assert_eq!(cfg.endpoint(), "u@[fe80::1]:22");
-    }
-
-    /// The mirror image: brackets are punctuation for a joined string, and a
-    /// resolver that is handed host and port separately must never see them.
-    #[test]
-    fn brackets_are_stripped_before_the_host_reaches_a_resolver() {
-        assert_eq!(resolver_host("[::1]"), "::1");
-        assert_eq!(resolver_host("[2001:db8::5]"), "2001:db8::5");
-
-        assert_eq!(resolver_host("::1"), "::1");
-        assert_eq!(resolver_host("192.0.2.10"), "192.0.2.10");
-        assert_eq!(resolver_host("files.example.com"), "files.example.com");
-    }
-
-    /// One machine, one spelling: whatever a profile or an mDNS record calls
-    /// a host, everything keyed on it has to agree they are the same box.
-    #[test]
-    fn every_spelling_of_one_machine_canonicalises_to_the_same_string() {
-        assert_eq!(canonical_host("[::1]"), "::1");
-        assert_eq!(canonical_host("::1"), "::1");
-        assert_eq!(canonical_host("[FE80::1]"), "fe80::1");
-
-        assert_eq!(canonical_host("studio.local."), "studio.local");
-        assert_eq!(canonical_host("Studio.Local"), "studio.local");
-        assert_eq!(canonical_host("  studio.local.  "), "studio.local");
-
-        // Different machines must stay different.
-        assert_ne!(canonical_host("::1"), canonical_host("::2"));
-        assert_ne!(canonical_host("studio.local"), canonical_host("den.local"));
-    }
-
-    /// The rule is `vnc_store::normalize_address` plus bracket stripping; if
-    /// the two ever drift, the VNC side and the sidecar disagree about which
-    /// machine a profile points at.
-    #[test]
-    fn canonicalisation_matches_the_store_rule_for_unbracketed_hosts() {
-        for host in ["studio.local.", "Studio.Local", " den.local ", "192.0.2.10"] {
-            let store_rule = host.trim().trim_end_matches('.').to_ascii_lowercase();
-            assert_eq!(canonical_host(host), store_rule, "{host}");
-        }
-    }
-
-    #[test]
-    fn timeouts_are_clamped_to_something_sane() {
-        let mut cfg = FileTransferConfig::new("h", "u");
-        cfg.connect_timeout_ms = 0;
-        assert_eq!(cfg.connect_timeout().as_millis(), 1_000);
-        cfg.connect_timeout_ms = u64::MAX;
-        assert_eq!(cfg.connect_timeout().as_millis(), 120_000);
     }
 }

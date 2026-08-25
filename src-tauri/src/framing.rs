@@ -34,33 +34,76 @@
 //!   [u16 hotspot_x][u16 hotspot_y][w*h*4 bytes RGBA]
 //! ```
 //!
+//! ## msg_type = 3, PTY bytes
+//!
+//! Raw terminal output, remote to webview. Unlike a framebuffer rect this
+//! has no natural record boundary of its own: a shell can emit one byte or
+//! sixty-four kilobytes in a single read, so the header exists only to say
+//! how many payload bytes follow. Kept binary end to end (see `ssh.rs` for
+//! why the older base64-in-JSON path still exists for the ordinary case);
+//! this channel exists for the fast-scrolling case, where base64's 33%
+//! inflation, JSON string escaping, and a `serde_json::Value` allocation
+//! per chunk actually show up.
+//!
+//! ```text
+//!   [u8 msg_type=3][u8 stream][u16 reserved=0][u32 len][payload...]
+//! stream: 0 = normal output, 1 = terminal reset (see
+//!   crates/ssh-core/src/modes.rs: the bytes that undo whatever DEC private
+//!   modes, alternate screen, etc. a dead session left on. Distinct from
+//!   output so the webview can apply it even mid-escape-sequence without
+//!   it being mistaken for something the remote program actually printed.)
+//! ```
+//! The header is 8 bytes (not 6) so `payload` starts on a 4-byte boundary
+//! even though nothing in `len`'s own encoding requires it, matching the
+//! rect and cursor headers above.
+//!
 //! ## Input events (JS -> Rust, `send_input` raw body)
 //!
 //! ```text
 //! kind 0 pointer:      [u8 0][u16 x][u16 y][u16 button_mask]        (7 bytes)
 //! kind 1 key:          [u8 1][u8 down][u32 keysym][u32 keycode]     (10 bytes)
 //! kind 2 release-all:  [u8 2]                                        (1 byte)
+//! kind 3 terminal input: [u8 3][u32 len][payload...]      (5 + len bytes)
+//! kind 4 terminal resize: [u8 4][u16 cols][u16 rows]                (5 bytes)
 //! ```
 
+use bytes::Bytes;
 use vnc_core::{ClientCommand, CursorShape, DecodedRect, Rect, RectPayload};
 
 pub const MSG_FRAME: u8 = 1;
 pub const MSG_CURSOR: u8 = 2;
+pub const MSG_PTY: u8 = 3;
 
 pub const FMT_RGBA: u8 = 0;
 pub const FMT_JPEG: u8 = 1;
 pub const FMT_COPY_RECT: u8 = 2;
 pub const FMT_H264: u8 = 3;
 
+/// `msg_type = 3` `stream` value: ordinary bytes read from the PTY.
+pub const PTY_STREAM_OUTPUT: u8 = 0;
+/// `msg_type = 3` `stream` value: a synthesized terminal-reset sequence, not
+/// remote output. See the module-level doc comment above and
+/// `crates/ssh-core/src/modes.rs`.
+pub const PTY_STREAM_RESET: u8 = 1;
+
 const FRAME_HEADER_LEN: usize = 12;
 const RECT_HEADER_LEN: usize = 14;
 /// `[u32 flags][u32 context_id][u32 ctx_flags]` ahead of the Annex-B data.
 const H264_PREFIX_LEN: usize = 12;
+const PTY_HEADER_LEN: usize = 8;
 
 /// `ctx_flags` bit 0: the webview must rebuild this context's `VideoDecoder`.
 pub const H264_CTX_RESET: u32 = 1 << 0;
 /// `ctx_flags` bit 1: the payload contains an IDR access unit.
 pub const H264_CTX_KEYFRAME: u32 = 1 << 1;
+
+/// Largest single terminal-input payload we will decode.
+///
+/// 64 KiB is generous for a paste (a whole source file, easily) while
+/// keeping a hostile or buggy webview from making the shell allocate an
+/// unbounded amount of memory off one `send_input` call: without a cap, a
+/// `len` field is just a promise the sender can lie about arbitrarily far.
+const MAX_TERMINAL_INPUT_LEN: usize = 64 * 1024;
 
 /// Encode one coalesced framebuffer update (msg_type = 1).
 pub fn encode_frame(rects: &[DecodedRect], damage: &Rect) -> Vec<u8> {
@@ -146,6 +189,18 @@ pub fn encode_cursor(shape: &CursorShape) -> Vec<u8> {
     out
 }
 
+/// Encode a chunk of PTY bytes (msg_type = 3). `stream` is
+/// [`PTY_STREAM_OUTPUT`] or [`PTY_STREAM_RESET`].
+pub fn encode_pty(stream: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PTY_HEADER_LEN + payload.len());
+    out.push(MSG_PTY);
+    out.push(stream);
+    out.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
 /// Decode a `send_input` body into session commands.
 ///
 /// Rejects the whole body on the first malformed event so a bad frontend
@@ -186,6 +241,42 @@ pub fn decode_input(body: &[u8]) -> Result<Vec<ClientCommand>, String> {
             2 => {
                 commands.push(ClientCommand::ReleaseAllKeys);
                 i += 1;
+            }
+            3 => {
+                // terminal input: [u32 len][payload...]
+                if body.len() < i + 5 {
+                    return Err("truncated terminal input length".into());
+                }
+                let len = u32::from_le_bytes([body[i + 1], body[i + 2], body[i + 3], body[i + 4]])
+                    as usize;
+                // Checked before touching `body` again: a caller that lies
+                // about `len` must not get the chance to make us slice past
+                // the end of the buffer, and must not get an unbounded
+                // allocation even if the body happens to be that long.
+                if len > MAX_TERMINAL_INPUT_LEN {
+                    return Err(format!(
+                        "terminal input payload too large: {len} bytes (max {MAX_TERMINAL_INPUT_LEN})"
+                    ));
+                }
+                let payload_start = i + 5;
+                if body.len() < payload_start + len {
+                    return Err("truncated terminal input payload".into());
+                }
+                let payload = &body[payload_start..payload_start + len];
+                commands.push(ClientCommand::TerminalInput(Bytes::copy_from_slice(
+                    payload,
+                )));
+                i = payload_start + len;
+            }
+            4 => {
+                // terminal resize: [u16 cols][u16 rows]
+                if body.len() < i + 5 {
+                    return Err("truncated terminal resize event".into());
+                }
+                let cols = u16::from_le_bytes([body[i + 1], body[i + 2]]);
+                let rows = u16::from_le_bytes([body[i + 3], body[i + 4]]);
+                commands.push(ClientCommand::ResizeTerminal { cols, rows });
+                i += 5;
             }
             other => return Err(format!("unknown input event kind: {other}")),
         }
@@ -371,5 +462,178 @@ mod tests {
                 "the padded layout must not decode to the intended pointer"
             ),
         }
+    }
+
+    #[test]
+    fn pty_frame_roundtrip_layout() {
+        let payload = b"hello from the shell\n";
+        let buf = encode_pty(PTY_STREAM_OUTPUT, payload);
+
+        assert_eq!(buf[0], MSG_PTY);
+        assert_eq!(buf[1], PTY_STREAM_OUTPUT);
+        assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0); // reserved
+        assert_eq!(
+            u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            payload.len() as u32
+        );
+        assert_eq!(buf.len(), PTY_HEADER_LEN + payload.len());
+        assert_eq!(&buf[PTY_HEADER_LEN..], &payload[..]);
+    }
+
+    #[test]
+    fn pty_reset_stream_is_distinguishable_from_output_stream() {
+        let payload = b"\x1b[!p\x1b(B\x1b[0m\x1b[r";
+        let output = encode_pty(PTY_STREAM_OUTPUT, payload);
+        let reset = encode_pty(PTY_STREAM_RESET, payload);
+
+        assert_eq!(output[1], PTY_STREAM_OUTPUT);
+        assert_eq!(reset[1], PTY_STREAM_RESET);
+        assert_ne!(output[1], reset[1]);
+        // Everything else about the two frames is identical: only the
+        // `stream` byte tells the webview this is a reset, not output.
+        assert_eq!(output[0], reset[0]);
+        assert_eq!(&output[PTY_HEADER_LEN..], &reset[PTY_HEADER_LEN..]);
+    }
+
+    #[test]
+    fn pty_empty_payload_encodes_and_decodes_cleanly() {
+        let buf = encode_pty(PTY_STREAM_OUTPUT, &[]);
+        assert_eq!(buf.len(), PTY_HEADER_LEN);
+        assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), 0);
+    }
+
+    #[test]
+    fn terminal_input_decodes_to_client_command_with_exact_payload() {
+        let payload = b"echo hi\n";
+        let mut body = vec![3u8];
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+
+        let cmds = decode_input(&body).expect("valid terminal input body");
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            ClientCommand::TerminalInput(bytes) => assert_eq!(&bytes[..], &payload[..]),
+            other => panic!("expected TerminalInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_resize_decodes_to_cols_and_rows() {
+        let mut body = vec![4u8];
+        body.extend_from_slice(&80u16.to_le_bytes());
+        body.extend_from_slice(&24u16.to_le_bytes());
+
+        let cmds = decode_input(&body).expect("valid resize body");
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            cmds[0],
+            ClientCommand::ResizeTerminal { cols: 80, rows: 24 }
+        ));
+    }
+
+    /// A terminal-input event sandwiched between a pointer and a key event
+    /// must not desynchronize the walk: the loop has to advance by exactly
+    /// `5 + len` bytes for kind 3, not some fixed width.
+    #[test]
+    fn several_commands_concatenated_including_a_terminal_one_all_decode() {
+        let mut body = vec![0u8]; // pointer
+        body.extend_from_slice(&5u16.to_le_bytes());
+        body.extend_from_slice(&6u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+
+        body.push(3); // terminal input, 3-byte payload
+        let payload = b"ls\n";
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+
+        body.push(1); // key
+        body.push(1);
+        body.extend_from_slice(&0x61u32.to_le_bytes()); // keysym 'a'
+        body.extend_from_slice(&0u32.to_le_bytes());
+
+        body.push(4); // resize
+        body.extend_from_slice(&132u16.to_le_bytes());
+        body.extend_from_slice(&43u16.to_le_bytes());
+
+        let cmds = decode_input(&body).expect("valid concatenated body");
+        assert_eq!(cmds.len(), 4);
+        assert!(matches!(
+            cmds[0],
+            ClientCommand::Pointer {
+                x: 5,
+                y: 6,
+                button_mask: 0
+            }
+        ));
+        match &cmds[1] {
+            ClientCommand::TerminalInput(bytes) => assert_eq!(&bytes[..], &payload[..]),
+            other => panic!("expected TerminalInput, got {other:?}"),
+        }
+        assert!(matches!(
+            cmds[2],
+            ClientCommand::Key {
+                keysym: 0x61,
+                keycode: None,
+                down: true
+            }
+        ));
+        assert!(matches!(
+            cmds[3],
+            ClientCommand::ResizeTerminal {
+                cols: 132,
+                rows: 43
+            }
+        ));
+    }
+
+    #[test]
+    fn truncated_terminal_input_body_returns_err_not_panic() {
+        // kind byte plus a full u32 len, but the promised payload is missing
+        // entirely.
+        let mut body = vec![3u8];
+        body.extend_from_slice(&10u32.to_le_bytes());
+        assert!(decode_input(&body).is_err());
+
+        // kind byte with not even a full length field.
+        assert!(decode_input(&[3, 1, 0]).is_err());
+    }
+
+    #[test]
+    fn terminal_input_len_larger_than_remaining_body_returns_err_not_panic() {
+        let mut body = vec![3u8];
+        body.extend_from_slice(&100u32.to_le_bytes()); // claims 100 bytes
+        body.extend_from_slice(b"only nine"); // actually provides 9
+        assert!(decode_input(&body).is_err());
+    }
+
+    #[test]
+    fn oversized_terminal_input_payload_is_rejected() {
+        let mut body = vec![3u8];
+        let len = (MAX_TERMINAL_INPUT_LEN + 1) as u32;
+        body.extend_from_slice(&len.to_le_bytes());
+        // Don't bother actually allocating the (huge) claimed payload: the
+        // length check must reject this before the body is even sliced.
+        assert!(decode_input(&body).is_err());
+    }
+
+    /// The whole point of a binary channel over base64 JSON: raw 0xff bytes
+    /// and embedded NUL bytes, neither of which survives a JSON string,
+    /// must come through byte-exact.
+    #[test]
+    fn binary_payload_with_0xff_bytes_and_embedded_nulls_survives_exactly() {
+        let payload: Vec<u8> = vec![0xFF, 0x00, 0x01, 0xFF, 0x00, 0x80, 0xFF, 0x00];
+        let mut body = vec![3u8];
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(&payload);
+
+        let cmds = decode_input(&body).expect("valid binary payload");
+        match &cmds[0] {
+            ClientCommand::TerminalInput(bytes) => assert_eq!(&bytes[..], &payload[..]),
+            other => panic!("expected TerminalInput, got {other:?}"),
+        }
+
+        // Same bytes through encode_pty, the outbound direction.
+        let buf = encode_pty(PTY_STREAM_OUTPUT, &payload);
+        assert_eq!(&buf[PTY_HEADER_LEN..], &payload[..]);
     }
 }

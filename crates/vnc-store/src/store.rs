@@ -117,6 +117,22 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE hosts ADD COLUMN rdp_settings TEXT;
     ALTER TABLE history ADD COLUMN protocol TEXT NOT NULL DEFAULT 'vnc';
     "#,
+    // SSH joins VNC and RDP as a protocol a profile can speak, and like RDP it
+    // needs a settings blob of its own: which multiplexer to attach to, the
+    // session name, a startup command, the terminal's appearance.
+    //
+    // Nullable with no default, exactly like `rdp_settings`, because NULL and
+    // `"{}"` must stay different: "not an SSH profile" is not "an SSH profile
+    // with nothing set". A `DEFAULT '{}'` would erase that on every existing
+    // row.
+    //
+    // The `protocol` column itself needs nothing: it is free text and the
+    // store deliberately never validates it, so `'ssh'` already stores and
+    // reads back. That is the same property that keeps a row written by a
+    // newer build listable and deletable rather than stranded.
+    r#"
+    ALTER TABLE hosts ADD COLUMN ssh_settings TEXT;
+    "#,
 ];
 
 /// The canonical form of a host address, for deciding whether two spellings
@@ -245,9 +261,9 @@ impl Store {
                 security_pref, quality_pref, color_depth, scaling_mode, keyboard_mode,
                 passthrough, view_only, ssh_tunnel, wol_mac, wol_broadcast, network_id,
                 cert_pin, has_password, thumbnail_at, last_connected, connect_count,
-                created_at, updated_at, protocol, rdp_settings
+                created_at, updated_at, protocol, rdp_settings, ssh_settings
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                       ?19,?20,?21,?22,?23,?24,?25,?26,?27)
+                       ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
              ON CONFLICT(id) DO UPDATE SET
                 friendly_name=excluded.friendly_name, address=excluded.address,
                 port=excluded.port, group_id=excluded.group_id, os_hint=excluded.os_hint,
@@ -260,7 +276,8 @@ impl Store {
                 cert_pin=excluded.cert_pin, has_password=excluded.has_password,
                 thumbnail_at=excluded.thumbnail_at, last_connected=excluded.last_connected,
                 connect_count=excluded.connect_count, updated_at=excluded.updated_at,
-                protocol=excluded.protocol, rdp_settings=excluded.rdp_settings",
+                protocol=excluded.protocol, rdp_settings=excluded.rdp_settings,
+                ssh_settings=excluded.ssh_settings",
             params![
                 profile.id,
                 profile.friendly_name,
@@ -293,6 +310,7 @@ impl Store {
                 now,
                 profile.protocol,
                 profile.rdp_settings,
+                profile.ssh_settings,
             ],
         )?;
         tx.execute("DELETE FROM host_tags WHERE host_id = ?1", [&profile.id])?;
@@ -880,6 +898,7 @@ fn host_from_row(row: &Row<'_>) -> rusqlite::Result<HostProfile> {
             .get::<_, Option<String>>("protocol")?
             .unwrap_or_else(|| ProtocolKind::Vnc.as_str().to_string()),
         rdp_settings: row.get("rdp_settings")?,
+        ssh_settings: row.get("ssh_settings")?,
     })
 }
 
@@ -952,6 +971,7 @@ mod tests {
             for (table, column) in [
                 ("hosts", "protocol"),
                 ("hosts", "rdp_settings"),
+                ("hosts", "ssh_settings"),
                 ("history", "protocol"),
             ] {
                 let found: i64 = conn
@@ -1642,7 +1662,9 @@ mod tests {
             MIGRATIONS.len(),
             "the database must be fully migrated"
         );
-        assert_eq!(MIGRATIONS.len(), 3);
+        // Bump deliberately when a migration is added, so that adding one
+        // is a decision recorded here rather than a silent schema drift.
+        assert_eq!(MIGRATIONS.len(), 4);
 
         let got = store
             .get_host("host-uuid-1")
@@ -1748,6 +1770,8 @@ mod tests {
                     rdp_user: Some(sentinels[4].to_string()),
                     rdp_domain: Some(sentinels[5].to_string()),
                     rdp_password: Some(sentinels[6].to_string()),
+                    ssh_user: None,
+                    ssh_password: None,
                 },
             )
             .unwrap();

@@ -30,7 +30,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use vnc_files::{
     Error as FilesError, FileTransferConfig, HostKeyStore, RemoteEntry, SftpSession, SshAuth,
-    TransferEvent, TransferQueue, MAX_CONCURRENT_TRANSFERS,
+    SshConfig, TransferEvent, TransferQueue, MAX_CONCURRENT_TRANSFERS,
 };
 
 /// Filename of the SSH host-key pin store inside the app data directory.
@@ -317,11 +317,13 @@ pub async fn files_connect(
         config.username.clone()
     };
     let cfg = FileTransferConfig {
-        host: config.host.clone(),
-        port: config.port,
-        username,
-        auth,
-        connect_timeout_ms: 15_000,
+        ssh: SshConfig {
+            host: config.host.clone(),
+            port: config.port,
+            username,
+            auth,
+            connect_timeout_ms: 15_000,
+        },
         default_remote_dir: config.default_remote_dir.clone(),
         conflict: config.conflict,
     };

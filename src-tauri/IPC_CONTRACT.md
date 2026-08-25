@@ -87,9 +87,9 @@ const url = buf.byteLength ? URL.createObjectURL(new Blob([buf], { type: "image/
 `passthrough`, `viewOnly`, `sshTunnel`, `wolMac`, `wolBroadcast`, `networkId`,
 `certPin`, `hasPassword`, `thumbnailAt`, `lastConnected`, `connectCount`,
 `tags` (tag ids joined from `host_tags`), `createdAt`, `updatedAt`,
-`protocol`, `rdpSettings`.
+`protocol`, `rdpSettings`, `sshSettings`.
 
-`protocol` is `"vnc"` (the default) or `"rdp"`. It is text rather than an
+`protocol` is `"vnc"` (the default), `"rdp"` or `"ssh"`. It is text rather than an
 enum so a protocol a future build adds is a row and not a schema change, and
 so a value this build does not recognise stays listable, editable and
 deletable rather than becoming a tile that vanished. `connect_session`
@@ -127,6 +127,49 @@ protocol }` (the three `?` fields are nullable). `protocol` is `"vnc"` or
 they were. For an RDP row the `securityType` vocabulary is `nla-ntlm`, `tls`
 and, from phase 3, `nla-kerberos`, the same tokens the `authenticating`
 state carries.
+
+### The `sshSettings` blob
+
+camelCase JSON, mirroring `vnc_store::SshSettings`, which flattens
+`remote_core::SshOptions` into itself so the blob is one flat field list. Same
+rules as [`rdpSettings`](#the-rdpsettings-blob): `null` and `"{}"` are
+different and must stay different, the store never parses it, and a parse
+failure **fails the connect** rather than substituting defaults. That last
+rule matters more here than for RDP: silently defaulting would turn a
+deliberate "attach to this named tmux session" into "start a fresh shell",
+which loses the user's work in exactly the situation the setting exists to
+protect.
+
+```jsonc
+{ "v": 1,
+  // Which multiplexer to attach to on the far side. This is the setting that
+  // decides whether a reconnect returns the user to their work or to an empty
+  // prompt: an SSH connection owns the remote PTY, so when the link dies the
+  // PTY is destroyed and everything under it gets SIGHUP. Only a multiplexer,
+  // whose session belongs to the remote machine, survives that.
+  //
+  // "auto" (the default) asks the far side what it has and takes the best
+  // answer, falling back to a plain login shell when it has nothing. That is
+  // the only setting that is right across a mixed fleet.
+  "multiplexer": "auto",   // auto | none | psmux | tmux | screen | zellij | custom
+  "sessionName": "deskvnc",
+  "customCommand": null,   // for "custom"; `{session}` is substituted
+  "fallbackToShell": true, // ignored by "auto", which treats "nothing installed"
+                           // as an answer rather than a failure
+  "startupCommand": null,  // runs instead of the login shell, inside the multiplexer
+  "term": "xterm-256color",
+  "cols": 80, "rows": 24,
+  // Store-only, the UI's business rather than the protocol's.
+  "fontSize": 13, "scrollback": 10000 }
+```
+
+**`sessionName` is validated, not cosmetic.** It is pasted into a command line
+the remote shell parses, so anything outside `[A-Za-z0-9_-]` (max 64, non
+empty) is rejected by the shell before a session is spawned. Quoting it
+correctly for an unidentified shell is not attempted: the POSIX and Windows
+dialects quote differently, and that mismatch is exactly where an injection
+would hide. The UI must apply the same rule so the user sees the error in the
+form rather than as a failed connect.
 
 ### The `rdpSettings` blob
 
@@ -347,6 +390,33 @@ reached through it, which may be a different box. An RDP session still does
 full TLS and NLA inside the tunnel, and the name used for SNI, the
 certificate pin and the Kerberos service name is the address on the profile,
 never the loopback endpoint the tunnel hands back.
+
+### SSH session events
+
+Emitted on `session://event` for a session whose protocol is `"ssh"`. The
+terminal's *bytes* are not here: they travel on the binary channel as
+`msg_type = 3` for the same reason framebuffer rectangles do, because base64
+in a JSON envelope costs a third more bytes plus escaping plus a `Value`
+allocation per chunk, which a fast-scrolling build log turns into the
+bottleneck.
+
+```jsonc
+{ "sessionId": "…", "type": "ssh-attached",
+  // null for a plain login shell, either because that is what was asked for
+  // or because the remote had no multiplexer (an `ssh-notice` says which).
+  "multiplexer": "psmux",
+  // true ONLY when the attach found a session that was already running, which
+  // is the case where the user's work survived a drop. Creating one and
+  // reporting `true` would tell the user nothing was lost when it was.
+  "resumed": true }
+
+{ "sessionId": "…", "type": "ssh-notice",
+  "message": "No terminal multiplexer was found on the remote machine, …" }
+```
+
+An `ssh-notice` is a line for the UI's status area, never for the terminal
+itself. Writing one into the emulator would corrupt whatever the remote was
+drawing.
 
 ### `set_quality`
 
@@ -897,6 +967,136 @@ flat shape: `sessionId` sits alongside a kebab-case `type` discriminator.
 
 Exactly one terminal event (`completed`/`failed`/`cancelled`) per `id`. At most
 3 transfers run at once; files inside one folder tree run sequentially.
+
+---
+
+## Remote shell, `commands/ssh.rs`
+
+A PTY over the **same SSH carrier** as the SFTP sidecar and the RFB tunnel
+(`ssh-transport`), supervised by `ssh-core`. Commands live on the session
+window only.
+
+### There are two ways into a terminal, and they are not the same one
+
+1. **The sidecar**, documented in this section: a terminal opened *beside* a
+   running VNC or RDP session from its toolbar, over its own SSH connection.
+   Its own commands (`ssh_connect` and friends), its own `ssh://event`
+   channel, its own session-id namespace. Use it for a shell next to a remote
+   desktop.
+2. **The protocol**, documented under [Sessions](#sessions-commandssessionrs):
+   a host profile whose `protocol` is `"ssh"`, opened through the ordinary
+   `connect_session` like any VNC or RDP session, appearing in the Library
+   with its own tile and in the session registry with its own window or tab.
+   Terminal bytes ride the **binary** channel (`msg_type = 3`, see
+   `FRAME_FORMAT.md`), not `ssh://event`.
+
+Both run on `ssh-core` and both verify host keys against the same pin store,
+so trusting a machine once covers the terminal, the Files panel and the
+tunnel alike. They differ only in lifecycle and transport, and a reader who
+conflates them will look for terminal output on the wrong channel.
+
+| Command | JS call | Returns |
+|---|---|---|
+| `ssh_probe` | `invoke("ssh_probe", { host, port?, timeoutMs? })` | `boolean`, never rejects; `port` defaults to 22 |
+| `ssh_connect` | `invoke("ssh_connect", { sessionId, windowLabel, config })` | `SshConnectOutcome` |
+| `ssh_send` | `invoke("ssh_send", { sessionId, data })` | `void`; `data` is **base64** |
+| `ssh_resize` | `invoke("ssh_resize", { sessionId, cols, rows })` | `void` |
+| `ssh_reconnect_now` | `invoke("ssh_reconnect_now", { sessionId })` | `void` |
+| `ssh_disconnect` | `invoke("ssh_disconnect", { sessionId })` | `void` |
+
+`config` is `SshConnectRequest`: `{ host, port?, username?, auth?, keyPath?,
+profileId?, cols?, rows?, multiplexer?, acceptHostKey? }`. An empty `username`
+means "the same user as here". As everywhere else, **the webview picks an auth
+kind, never a secret**: the password or passphrase is read from the keychain in
+Rust and never travels back to JS.
+
+### Why `data` is base64
+
+PTY traffic is bytes, not text. A chunk routinely ends in the middle of a UTF-8
+sequence, and control bytes are ordinary content, so neither survives a JSON
+string. The framebuffer path solves the same problem with the binary framing in
+`FRAME_FORMAT.md`, which earns its keep at megabytes per second; a terminal is
+orders of magnitude quieter, so it rides the normal event channel instead.
+Decode to a `Uint8Array` and hand it straight to the emulator.
+
+### `SshConnectOutcome`
+
+```jsonc
+{ "status": "ready", "endpoint": "gj@box.local:22" }
+{ "status": "host-key-prompt", "host": "…", "port": 22,
+  "keyType": "ssh-ed25519", "fingerprint": "SHA256:…" }
+{ "status": "host-key-changed", "host": "…", "port": 22,
+  "expected": "SHA256:…", "actual": "SHA256:…" }
+```
+
+Same three-way shape and the same rules as `files_connect`, against the **same**
+pin store, so trusting a machine once covers its terminal, its Files panel and
+its tunnel alike. `host-key-prompt` is first contact: show the fingerprint and,
+if the user accepts, call `ssh_connect` again with `acceptHostKey` set to it.
+`host-key-changed` is a **HARD STOP** (PRD/08 §4, PRD/10 §4.3): there is
+deliberately no way to accept it and the UI must offer none.
+
+### `ssh://event`
+
+Per-session, emitted to the session's window. Flat payload, `sessionId`
+alongside a kebab-case `type`, same conventions as `files://event`.
+
+| `type` | Extra fields |
+|---|---|
+| `output` | `data` (base64 PTY bytes) |
+| `reset` | `data` (base64); see below |
+| `bell` | none |
+| `notice` | `message`, a line for the UI's status area, never for the terminal |
+| `state` | the `TerminalState` fields, flattened |
+
+`reset` is **not** `output` and the distinction is load bearing. Those bytes are
+the app's own correction after a link died: a remote `tmux` or `vim` switches
+the terminal into mouse reporting (`CSI ? 1000 h`, `?1002h`, `?1006h`),
+bracketed paste (`?2004h`) and the alternate screen (`?1049h`), and is expected
+to switch them back on exit. A severed link never gives it the chance, so the
+local emulator is left reporting every mouse movement as escape garbage at the
+prompt. `ssh-core`'s `modes::ModeTracker` watches what the remote turned on and
+emits exactly what undoes it. Write these bytes to the emulator like output, but
+never log or replay them as something the server said.
+
+### `TerminalState`
+
+```jsonc
+{ "sessionId": "…", "type": "state", "state": "connecting", "endpoint": "gj@box:22" }
+{ "sessionId": "…", "type": "state", "state": "connected", "endpoint": "gj@box:22",
+  "multiplexer": "tmux", "resumed": true }
+{ "sessionId": "…", "type": "state", "state": "reconnecting", "attempt": 2,
+  "delayMs": 500, "reason": "the connection stopped responding" }
+{ "sessionId": "…", "type": "state", "state": "disconnected",
+  "reason": "…", "canRetry": true, "symbol": "ssh-unresponsive" }
+```
+
+`multiplexer` is `null` for a plain login shell, either because that is what was
+asked for or because the multiplexer was missing and the session fell back (a
+`notice` says so when it does). `resumed` is true only when the attach found a
+session that was **already running**, which is the case where the user's work
+survived a drop; creating one reports `false`.
+
+`symbol` is a stable identifier for the failure so the UI can match on the kind
+of problem and supply its own sentence. Matching on `reason` instead makes every
+copy edit a silent behaviour change. Known values: `ssh-timeout`,
+`ssh-auth-failed`, `ssh-key-unreadable`, `ssh-agent-unavailable`,
+`ssh-host-key-unknown`, `ssh-host-key-changed`, `ssh-host-key-rejected`,
+`ssh-connect-failed`, `ssh-pty-refused`, `ssh-shell-refused`,
+`ssh-shell-exited`, `ssh-unresponsive`, `ssh-bad-config`. Treat an unknown
+`symbol` as no symbol and fall back to `reason`.
+
+### Reconnect
+
+The session reconnects itself on the shared `remote-core` backoff ladder
+(250 ms doubling to a 15 s cap, ±20% jitter), so `reconnecting` events arrive
+without the UI asking. `ssh_reconnect_now` skips the remaining delay **and**
+resets the attempt counter, for a user who knows the network is back.
+
+Keystrokes sent while disconnected are dropped, deliberately: replaying a buffer
+of them into a shell that reappears minutes later is how half a command gets
+run. A resize sent while disconnected **is** kept and applied to the next
+connection.
 
 ---
 

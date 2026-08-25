@@ -502,7 +502,9 @@ export function DiscoveredTile({
           >
             {osLabel(os)}
           </span>
-          {host.protocol === "rdp" ? <ProtocolBadge protocol="rdp" /> : null}
+          {host.protocol && host.protocol !== "vnc" ? (
+            <ProtocolBadge protocol={host.protocol} />
+          ) : null}
           <span
             className="mono min-w-0 flex-1 truncate text-secondary"
             title={addressTitle}

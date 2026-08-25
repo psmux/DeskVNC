@@ -5,12 +5,15 @@
  * ── Wire format (all multi-byte fields LITTLE-ENDIAN) ──────────────────────
  * Byte-exact contract: src-tauri/FRAME_FORMAT.md §"Input events", decoded by
  * `framing::decode_input`. There is NO padding byte after `kind`.
- *   Pointer : u8 kind=0 | u16 x | u16 y | u16 buttonMask              (7 bytes)
- *   Key     : u8 kind=1 | u8 down | u32 keysym | u32 keycode(0=none) (10 bytes)
+ *   Pointer  : u8 kind=0 | u16 x | u16 y | u16 buttonMask              (7 bytes)
+ *   Key      : u8 kind=1 | u8 down | u32 keysym | u32 keycode(0=none) (10 bytes)
  *   ReleaseAll : u8 kind=2                                            (1 byte)
- * Packets may be concatenated in one buffer (e.g. wheel press+release).
- * The whole buffer is the raw invoke body; the session id travels in the
- * `x-session-id` invoke header (see Session.tsx / sendInputFactory).
+ *   TerminalInput  : u8 kind=3 | u32 len | len bytes of payload  (5 + len bytes)
+ *   TerminalResize : u8 kind=4 | u16 cols | u16 rows                  (5 bytes)
+ * Packets may be concatenated in one buffer (e.g. wheel press+release, or a
+ * terminal input chunk followed by a resize). The whole buffer is the raw
+ * invoke body; the session id travels in the `x-session-id` invoke header
+ * (see Session.tsx / sendInputFactory).
  *
  * Button mask bits: 0=left 1=middle 2=right 3=wheel-up 4=wheel-down
  *                   5=wheel-left 6=wheel-right
@@ -138,6 +141,60 @@ const KIND_KEY = 1;
 const KIND_RELEASE_ALL = 2;
 const KIND_POINTER_LEN = 7;
 const KIND_KEY_LEN = 10;
+const KIND_TERMINAL_INPUT = 3;
+const KIND_TERMINAL_RESIZE = 4;
+
+/**
+ * Same cap `framing::decode_input` enforces (`MAX_TERMINAL_INPUT_LEN`): a
+ * `len` above this fails the WHOLE `send_input` body, not just this event, so
+ * a paste larger than one chunk has to be split before it ever reaches the
+ * wire rather than relied on the backend to reject gracefully.
+ */
+const MAX_TERMINAL_INPUT_LEN = 64 * 1024;
+
+/**
+ * Encode one terminal-input event (kind 3): raw bytes to write to the remote
+ * PTY, keystrokes, a paste, an IME commit. A body over the 64 KiB cap is
+ * split into several kind-3 events concatenated in the returned buffer
+ * (`decode_input` walks a body as a sequence of events, so this is still one
+ * `send_input` call), rather than sent whole and rejected by the decoder.
+ */
+export function encodeTerminalInput(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength <= MAX_TERMINAL_INPUT_LEN) return encodeTerminalInputChunk(bytes);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (let off = 0; off < bytes.byteLength; off += MAX_TERMINAL_INPUT_LEN) {
+    const chunk = encodeTerminalInputChunk(bytes.subarray(off, off + MAX_TERMINAL_INPUT_LEN));
+    chunks.push(chunk);
+    total += chunk.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
+}
+
+function encodeTerminalInputChunk(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5 + bytes.byteLength);
+  new DataView(out.buffer).setUint32(1, bytes.byteLength, true);
+  out[0] = KIND_TERMINAL_INPUT;
+  out.set(bytes, 5);
+  return out;
+}
+
+/** Encode a terminal-resize event (kind 4): the new grid size in character
+ *  cells, not pixels, 80 columns is not 80 pixels. */
+export function encodeTerminalResize(cols: number, rows: number): Uint8Array {
+  const out = new Uint8Array(5);
+  const view = new DataView(out.buffer);
+  view.setUint8(0, KIND_TERMINAL_RESIZE);
+  view.setUint16(1, cols, true);
+  view.setUint16(3, rows, true);
+  return out;
+}
 
 export class SessionInput {
   private canvas: HTMLCanvasElement;

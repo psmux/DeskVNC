@@ -27,7 +27,7 @@ import { usePaneVisible } from "./Pane";
 import {
   IconActivity, IconCamera, IconChevronDown, IconClipboard, IconEye, IconFile,
   IconGripVertical, IconKeyboard, IconMaximize, IconMonitor, IconPin, IconPower,
-  IconCursor, IconRefresh, IconSearch,
+  IconCursor, IconRefresh, IconSearch, IconTerminal,
 } from "./icons";
 
 type Edge = "top" | "bottom" | "left" | "right";
@@ -167,6 +167,9 @@ export interface SessionToolbarProps {
    * hidden, so "why can't I send files?" has an answer (PRD/08 §5).
    */
   filesAvailable: boolean | null;
+  /** Open a remote shell (ssh-core). Same reachability gate as `onFiles`. */
+  onTerminal: () => void;
+  terminalAvailable: boolean | null;
   onFullscreen: () => void;
   onViewOnly: (v: boolean) => void;
   onScreenshot: () => void;
@@ -613,6 +616,20 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           onClick={props.onFiles}
         >
           <IconFile size={15} />
+        </ToolButton>
+
+        <ToolButton
+          label={
+            props.terminalAvailable === true
+              ? "Terminal (SSH)"
+              : props.terminalAvailable === null
+                ? "Checking whether SSH is available on this computer…"
+                : "Terminal needs SSH on the remote computer, and it isn't reachable on this one"
+          }
+          disabled={props.terminalAvailable !== true}
+          onClick={props.onTerminal}
+        >
+          <IconTerminal size={15} />
         </ToolButton>
 
         <Divider />

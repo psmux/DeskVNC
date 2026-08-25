@@ -78,6 +78,13 @@
     "allow-files-local-rename",
     "allow-files-local-remove",
 
+    "allow-ssh-probe",
+    "allow-ssh-connect",
+    "allow-ssh-send",
+    "allow-ssh-resize",
+    "allow-ssh-reconnect-now",
+    "allow-ssh-disconnect",
+
     "allow-capture-start",
     "allow-capture-stop",
     "allow-capture-status",

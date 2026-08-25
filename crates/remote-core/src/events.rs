@@ -166,6 +166,47 @@ pub struct AudioPacket {
 #[non_exhaustive]
 pub enum ProtocolEvent {
     Rdp(RdpEvent),
+    Ssh(SshEvent),
+}
+
+/// News from a remote shell.
+///
+/// The byte-carrying variants use [`bytes::Bytes`] rather than `Vec<u8>`
+/// deliberately. PTY output arrives as many small reads, and this event
+/// travels channel to channel to the webview encoder; `Bytes` is refcounted,
+/// so each hop is a pointer bump rather than a memcpy of the payload. On a
+/// fast-scrolling build log that is the difference between a terminal that
+/// keeps up and one that falls behind its own output.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum SshEvent {
+    /// Bytes from the remote PTY, in order. Already coalesced by the session,
+    /// so one of these is a batch rather than a single read.
+    Output(bytes::Bytes),
+
+    /// Bytes the *client* must write to its own terminal to undo whatever
+    /// private modes a dead session left switched on.
+    ///
+    /// Deliberately not [`SshEvent::Output`]. This is the app's own
+    /// correction, not something the server said, so a UI that logs or
+    /// replays output must be able to tell them apart. Without it, a session
+    /// cut while tmux had mouse reporting on leaves the terminal spraying
+    /// escape sequences at the prompt on every mouse move, which is the most
+    /// common complaint about running ssh in a window.
+    ResetTerminal(bytes::Bytes),
+
+    /// The shell is up. `multiplexer` is `None` for a plain login shell,
+    /// either by choice or because the host had none. `resumed` is true only
+    /// when the attach found a session that was **already running**, which is
+    /// the case where the user's work survived a drop, and it must never be
+    /// guessed.
+    Attached {
+        multiplexer: Option<crate::options::MultiplexerKind>,
+        resumed: bool,
+    },
+
+    /// A line for the UI's status area, never for the terminal itself.
+    Notice(String),
 }
 
 /// News from an RDP session. Nothing produces one before phase 1.

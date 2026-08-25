@@ -572,3 +572,162 @@ export async function pickLocalDirectory(
 export async function forgetCertificate(host: string, port: number): Promise<void> {
   await safeInvoke<null>("forget_certificate", { host, port }, null);
 }
+
+// ---------------------------------------------------------------------------
+// Remote shell (ssh-core)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which terminal multiplexer to attach to on the far side.
+ *
+ * This is what makes reconnecting worth anything. With `none`, a dropped link
+ * destroys the remote PTY and everything running under it, so reconnecting
+ * gets you a fresh empty shell. With a multiplexer the session belongs to a
+ * daemon on the remote machine and survives the drop, so reattaching puts you
+ * back in front of the same work.
+ */
+export type MultiplexerKind = "none" | "tmux" | "screen" | "zellij" | "custom";
+
+export interface MultiplexerConfig {
+  kind?: MultiplexerKind;
+  /** letters, digits, dashes and underscores only, the shell rejects the rest */
+  sessionName?: string;
+  /** for `custom`; `{session}` is substituted */
+  customCommand?: string | null;
+  /** open a plain login shell when the multiplexer is not installed */
+  fallbackToShell?: boolean;
+}
+
+export interface SshConnectConfig {
+  host: string;
+  port?: number;
+  /** empty means "the same user as here" */
+  username?: string;
+  auth?: SshAuthKind;
+  /** private key path for `key-file` auth (chosen in the native dialog) */
+  keyPath?: string | null;
+  /** host profile whose keychain entry holds the secret, never the secret itself */
+  profileId?: string | null;
+  cols?: number;
+  rows?: number;
+  multiplexer?: MultiplexerConfig;
+}
+
+/**
+ * Result of `ssh_connect`. Same three-way shape as `filesConnect`, and for
+ * the same reason: a host key is a decision for the user, not an error.
+ *
+ * `host-key-prompt` is first contact: show the fingerprint and, if the user
+ * accepts, call `sshConnect` again with `acceptHostKey` set to it.
+ * `host-key-changed` is a **hard stop**, there is deliberately no way to
+ * accept it.
+ */
+export type SshConnectOutcome =
+  | { status: "ready"; endpoint: string }
+  | { status: "host-key-prompt"; host: string; port: number; keyType: string; fingerprint: string }
+  | { status: "host-key-changed"; host: string; port: number; expected: string; actual: string };
+
+/** The session's own view of where it is. */
+export type SshTerminalState =
+  | { state: "connecting"; endpoint: string }
+  | {
+      state: "connected";
+      endpoint: string;
+      /** null for a plain login shell, either by choice or by fallback */
+      multiplexer: MultiplexerKind | null;
+      /** true when this attach found work already running, rather than starting fresh */
+      resumed: boolean;
+    }
+  | { state: "reconnecting"; attempt: number; delayMs: number; reason: string }
+  | { state: "disconnected"; reason: string; canRetry: boolean; symbol: string | null };
+
+/**
+ * `ssh://event`, per-session terminal traffic. Flat payload, `sessionId`
+ * alongside a kebab-case `type`, same as `files://event`.
+ *
+ * `data` is base64 because a PTY carries bytes, not text: a chunk can end
+ * mid-UTF-8 and control bytes are ordinary content. Decode to a `Uint8Array`
+ * and hand it to the emulator, never to `JSON.parse` or a string API.
+ *
+ * `reset` is the important one and it is deliberately not `output`. Those
+ * bytes are the *shell's* correction after a link died, undoing mouse
+ * reporting, bracketed paste and the alternate screen that the remote never
+ * got the chance to switch off. Write them to the emulator exactly like
+ * output, but never log or replay them as if the server had said them.
+ */
+export type SshEventPayload =
+  | { sessionId: string; type: "output"; data: string }
+  | { sessionId: string; type: "reset"; data: string }
+  | { sessionId: string; type: "bell" }
+  | { sessionId: string; type: "notice"; message: string }
+  | ({ sessionId: string; type: "state" } & SshTerminalState);
+
+/** Is SSH reachable? Drives the enabled state of the Terminal button. */
+export function sshProbe(host: string, port?: number): Promise<boolean> {
+  return safeInvoke<boolean>("ssh_probe", { host, port: port ?? 22, timeoutMs: 1500 }, false);
+}
+
+/**
+ * Open a supervised remote shell. `windowLabel` is the window that will
+ * receive this session's `ssh://event` traffic.
+ */
+export function sshConnect(
+  sessionId: string,
+  windowLabel: string,
+  config: SshConnectConfig,
+  acceptHostKey?: string,
+): Promise<SshConnectOutcome> {
+  return mustInvoke<SshConnectOutcome>("ssh_connect", {
+    sessionId,
+    windowLabel,
+    config: { ...config, acceptHostKey: acceptHostKey ?? null },
+  });
+}
+
+/** Send keystrokes. Bytes in, base64 on the wire. */
+export function sshSend(sessionId: string, bytes: Uint8Array): Promise<null> {
+  return safeInvoke<null>("ssh_send", { sessionId, data: bytesToBase64(bytes) }, null);
+}
+
+export function sshResize(sessionId: string, cols: number, rows: number): Promise<null> {
+  return safeInvoke<null>("ssh_resize", { sessionId, cols, rows }, null);
+}
+
+/** Skip the remaining reconnect backoff and retry now. */
+export function sshReconnectNow(sessionId: string): Promise<null> {
+  return safeInvoke<null>("ssh_reconnect_now", { sessionId }, null);
+}
+
+export function sshDisconnect(sessionId: string): Promise<null> {
+  return safeInvoke<null>("ssh_disconnect", { sessionId }, null);
+}
+
+/** Subscribe to this window's terminal traffic. */
+export function listenSsh(handler: (event: SshEventPayload) => void): Promise<UnlistenFn> {
+  return safeListen<SshEventPayload>("ssh://event", handler);
+}
+
+/**
+ * base64 without going through a string of code points.
+ *
+ * `btoa(String.fromCharCode(...bytes))` is the usual one-liner and it is
+ * wrong twice over: spreading a large array blows the argument limit, and any
+ * byte above 0x7f becomes a multi-byte character that `btoa` then rejects.
+ * Terminal input hits both the moment somebody pastes.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** The inverse, for `output` and `reset` payloads. */
+export function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
+}

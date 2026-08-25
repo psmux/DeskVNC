@@ -114,6 +114,16 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         // state this function does not have; `forward_events` does it.
         SessionEvent::Audio(_) => return None,
         SessionEvent::Protocol(ProtocolEvent::Rdp(event)) => rdp_event_json(event)?,
+        // Terminal bytes never become JSON. They go out on the binary channel
+        // (`framing::encode_pty`) for the same reason framebuffer rectangles
+        // do: base64 in a JSON envelope costs a third more bytes plus escaping
+        // plus a `Value` allocation per chunk, and a fast-scrolling build log
+        // makes that the bottleneck. `forward_events` routes them.
+        SessionEvent::Protocol(ProtocolEvent::Ssh(
+            remote_core::events::SshEvent::Output(_)
+            | remote_core::events::SshEvent::ResetTerminal(_),
+        )) => return None,
+        SessionEvent::Protocol(ProtocolEvent::Ssh(event)) => ssh_event_json(event.clone())?,
         // A protocol this build's `remote-core` knows about and this match
         // does not. Dropped rather than guessed at, and the compiler makes
         // adding one a decision here rather than a silent omission.
@@ -136,6 +146,37 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
 /// The ERRINFO table is not restated here or in TypeScript: `rdp-pdu` owns
 /// it, the driver has already turned the code into a symbol and a sentence,
 /// and this passes all three through so a bug report can carry the raw value.
+/// The SSH news that is small enough, and rare enough, to be JSON.
+///
+/// Only the metadata: which multiplexer got attached, whether it resumed real
+/// work, and the occasional notice. The byte streams are handled above.
+fn ssh_event_json(event: remote_core::events::SshEvent) -> Option<serde_json::Value> {
+    use remote_core::events::SshEvent;
+    Some(match event {
+        SshEvent::Attached {
+            multiplexer,
+            resumed,
+        } => serde_json::json!({
+            "type": "ssh-attached",
+            // `null` for a plain login shell, either by choice or because the
+            // host had no multiplexer. The UI tells those apart by the notice
+            // that accompanies the second case.
+            "multiplexer": multiplexer.map(|m| serde_json::to_value(m).ok()).unwrap_or(None),
+            // True only when the attach found a session already running, which
+            // is the case where the user's work survived a drop.
+            "resumed": resumed,
+        }),
+        SshEvent::Notice(message) => {
+            serde_json::json!({ "type": "ssh-notice", "message": message })
+        }
+        // Handled on the binary channel by the caller.
+        SshEvent::Output(_) | SshEvent::ResetTerminal(_) => return None,
+        // A variant a newer `remote-core` added. Dropped rather than guessed
+        // at, the same rule the outer match follows.
+        _ => return None,
+    })
+}
+
 fn rdp_event_json(event: &RdpEvent) -> Option<serde_json::Value> {
     use serde_json::json;
     Some(match event {
@@ -596,6 +637,35 @@ fn forward_events(
                         tracing::warn!(session = %session_id, "cursor channel send failed: {e}");
                     }
                 }
+                // Terminal bytes take the same binary path as pixels
+                // (msg_type 3), and for the same reason: base64 in a JSON
+                // envelope costs a third more bytes plus escaping plus a
+                // `Value` allocation per chunk, which a fast-scrolling build
+                // log turns into the bottleneck. The session has already
+                // coalesced these, so one message is a batch of PTY reads.
+                SessionEvent::Protocol(ProtocolEvent::Ssh(
+                    remote_core::events::SshEvent::Output(data),
+                )) => {
+                    let bytes = framing::encode_pty(framing::PTY_STREAM_OUTPUT, &data);
+                    if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
+                        tracing::warn!(session = %session_id, "pty channel send failed: {e}");
+                    }
+                }
+                // The mode reset travels on its own stream id, not as output.
+                // These bytes are the app's correction for a dead session
+                // (see `ssh_core::modes`), not something the server said, so a
+                // UI that logs or replays output must be able to tell them
+                // apart. Without them, a link cut while tmux had mouse
+                // reporting on leaves the terminal spraying escape sequences
+                // at the prompt on every mouse move.
+                SessionEvent::Protocol(ProtocolEvent::Ssh(
+                    remote_core::events::SshEvent::ResetTerminal(data),
+                )) => {
+                    let bytes = framing::encode_pty(framing::PTY_STREAM_RESET, &data);
+                    if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
+                        tracing::warn!(session = %session_id, "pty reset send failed: {e}");
+                    }
+                }
                 other => {
                     if let Some(payload) = event_json(&session_id, &other) {
                         let _ = app.emit_to(&window_label, "session://event", payload);
@@ -785,6 +855,7 @@ pub async fn connect_session(
 
     let mut options = match kind {
         ProtocolKind::Rdp => ConnectOptions::rdp(address, port),
+        ProtocolKind::Ssh => ConnectOptions::ssh(address, port),
         _ => ConnectOptions::vnc(address, port),
     };
 
@@ -834,6 +905,19 @@ pub async fn connect_session(
 
     // The protocol specific half.
     match kind {
+        ProtocolKind::Ssh => {
+            // Same rule as RDP below: a blob that will not parse FAILS the
+            // connect rather than falling back to defaults. Silently
+            // substituting them would turn a deliberate "attach to this named
+            // tmux session" into "start a fresh shell", which loses the user's
+            // work in exactly the situation the setting exists to protect.
+            let settings = vnc_store::SshSettings::parse(
+                profile.as_ref().and_then(|p| p.ssh_settings.as_deref()),
+            )
+            .map_err(|e| format!("This computer's terminal settings could not be read: {e}"))?
+            .unwrap_or_default();
+            *options.ssh_mut() = settings.options;
+        }
         ProtocolKind::Rdp => {
             // A blob that will not parse FAILS the connect. Substituting
             // defaults would turn a deliberate "network level authentication
@@ -902,6 +986,18 @@ pub async fn connect_session(
                                 .and_then(|r| r.domain.clone())
                                 .filter(|d| !d.is_empty())
                                 .or(stored.rdp_domain),
+                        },
+                        // SSH has no logon domain. The username is the
+                        // remote account; an empty one means "the same user
+                        // as here", which the driver resolves, so it is left
+                        // empty rather than guessed at here.
+                        ProtocolKind::Ssh => vnc_core::Credentials {
+                            username: stored.ssh_user,
+                            // The account password, not the key passphrase:
+                            // those unlock different things and conflating
+                            // them would offer a passphrase as a password.
+                            password: stored.ssh_password,
+                            domain: None,
                         },
                         // VeNCrypt user/pass wins when present; the plain VNC
                         // password is the fallback (vnc-core picks what the

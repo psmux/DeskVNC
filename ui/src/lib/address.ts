@@ -14,18 +14,24 @@
  * - `vnc://office:5901/`  -> office:5901
  * - `rdp://box`            -> box:3389
  * - `rdp://alice@box`      -> box:3389, user alice
- * - `alice@box`            -> box:3389, user alice
+ * - `ssh://box`            -> box:22
+ * - `ssh://alice@box`      -> box:22, user alice
+ * - `alice@box`            -> box:5900, user alice  (no port typed, so nothing
+ *                             names a protocol; see `presetProtocol` for how
+ *                             a caller decides what badge to preset)
  *
  * A protocol is only ever reported when the input NAMED one. `box:3389` comes
- * back with a null protocol, because the parser's job is to say what was
- * typed and 3389 is a port like any other; who resolves that null, and how,
- * is QuickConnect's decision and not the parser's.
+ * back with a null protocol, and so does `alice@box`, because the parser's
+ * job is to say what was typed and a user name is not a protocol; who
+ * resolves that null, and how, is QuickConnect's decision and not the
+ * parser's.
  */
 
 import { DEFAULT_PORT, type ProtocolKind } from "./types";
 
 export const DEFAULT_VNC_PORT = DEFAULT_PORT.vnc;
 export const DEFAULT_RDP_PORT = DEFAULT_PORT.rdp;
+export const DEFAULT_SSH_PORT = DEFAULT_PORT.ssh;
 
 /**
  * Display numbers stop here: `host:99` is display 99, `host:100` is port 100.
@@ -56,7 +62,8 @@ export interface Target extends Endpoint {
    * `box:3389` still reaches an RDP host saved on that port.
    */
   protocol: ProtocolKind | null;
-  /** User name carried in the address (`rdp://alice@box`). Never a password. */
+  /** User name carried in the address (`rdp://alice@box`, `ssh://alice@box`,
+   *  or bare `alice@box`). Never a password. */
   username: string | null;
 }
 
@@ -119,6 +126,9 @@ function readScheme(raw: string): { protocol: ProtocolKind | null; rest: string;
   if (/^(?:rdps?):\/\//i.test(raw)) {
     return { protocol: "rdp", rest: raw.replace(/^(?:rdps?):\/\//i, ""), url: true };
   }
+  if (/^ssh:\/\//i.test(raw)) {
+    return { protocol: "ssh", rest: raw.replace(/^ssh:\/\//i, ""), url: true };
+  }
   if (/^(?:vncs?|rfb):\/\//i.test(raw)) {
     return { protocol: "vnc", rest: raw.replace(/^(?:vncs?|rfb):\/\//i, ""), url: true };
   }
@@ -152,7 +162,7 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
     raw = raw.replace(/[/?#].*$/, "");
   }
 
-  // Userinfo. An RDP scheme CAPTURES it, split at the LAST `@`, so
+  // Userinfo. An RDP or SSH scheme CAPTURES it, split at the LAST `@`, so
   // `rdp://alice@corp.example@box` yields user `alice@corp.example` and host
   // `box`. Splitting at the first would mangle a UPN, which is the commonest
   // form a domain user types. The VNC schemes keep discarding userinfo, so
@@ -160,15 +170,25 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
   const at = raw.lastIndexOf("@");
   if (at >= 0) {
     if (protocol === "vnc") {
+      // VeNCrypt asks for a username at its own prompt, so userinfo on a
+      // `vnc://` link carries no meaning and is discarded exactly as it
+      // always was.
       raw = raw.slice(at + 1);
     } else {
-      // A bare `user@host` with no scheme means RDP. Nothing regresses: the
-      // parser used to reject `@` outright, and a user name in an address bar
-      // has no VNC meaning, since VeNCrypt asks at the prompt instead.
+      // Capture the userinfo for RDP, SSH, or no scheme at all. Nothing
+      // regresses: the parser used to reject `@` outright for anything but a
+      // `vnc://` link.
+      //
+      // Userinfo alone no longer decides `protocol`, though. It used to force
+      // RDP, which connected `alice@box` somewhere the user never asked for:
+      // `user@host` is the single most common way to write an SSH target,
+      // not an RDP one, and the shape of the address gives no way to tell
+      // the two apart. So a bare `user@host` reports no protocol at all,
+      // exactly like `box:3389` already does, leaving it to the caller (via
+      // `presetProtocol`, once a port is known) to decide what to preset.
       const user = raw.slice(0, at);
       raw = raw.slice(at + 1);
       if (user !== "") username = user;
-      protocol = "rdp";
     }
   }
 
@@ -176,11 +196,13 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
   if (/\s/.test(raw)) return { ok: false, error: "An address cannot contain spaces" };
   if (/[/?#@]/.test(raw)) return { ok: false, error: "An address cannot contain / ? # or @" };
 
-  // Display numbers are a VNC convention and do not exist for RDP, so
-  // `rdp://box:1` is port 1 and not 3390.
-  const resolved = protocol ?? assume ?? null;
-  const displayNumbers = resolved !== "rdp";
-  const fallbackPort = DEFAULT_PORT[resolved ?? "vnc"];
+  // Display numbers are a VNC convention and do not exist for RDP or SSH, so
+  // `rdp://box:1` is port 1 and not 3390, and `ssh://box:1` is port 1 and not
+  // 5901. Absent any other information, "vnc" is the existing default this
+  // falls back to, unchanged from before RDP or SSH existed.
+  const resolved = protocol ?? assume ?? "vnc";
+  const displayNumbers = resolved === "vnc";
+  const fallbackPort = DEFAULT_PORT[resolved];
 
   const done = (result: AddressResult): TargetResult =>
     result.ok
@@ -260,8 +282,9 @@ export function parseConnectAddress(input: string): AddressResult {
  * stores these strings and re-parses them later, so anything that does not
  * survive the round trip connects somewhere the user never went. That is why
  * a low VNC port uses the explicit form: `office:42` would read back as
- * display 42, which is port 5942. And it is why an RDP target always carries
- * its scheme, even on the default port: a bare `box` reads back as VNC.
+ * display 42, which is port 5942. And it is why an RDP or SSH target always
+ * carries its scheme, even on the default port: a bare `box` reads back as
+ * VNC, and a bare `user@host` reads back with no protocol at all.
  */
 export function formatTarget(
   protocol: ProtocolKind,
@@ -275,6 +298,12 @@ export function formatTarget(
     return port === DEFAULT_RDP_PORT
       ? `rdp://${user}${host}`
       : `rdp://${user}${host}:${port}`;
+  }
+  if (protocol === "ssh") {
+    const user = username ? `${username}@` : "";
+    return port === DEFAULT_SSH_PORT
+      ? `ssh://${user}${host}`
+      : `ssh://${user}${host}:${port}`;
   }
   if (isIpv6Literal(address)) {
     return port === DEFAULT_VNC_PORT ? host : `${host}:${port}`;
@@ -292,15 +321,20 @@ export function formatEndpoint(address: string, port: number): string {
  * The protocol to offer when the input named none and no saved profile
  * matched.
  *
- * Port 3389 presets RDP, and the chip shows it before Enter so the user can
- * flip it in one click. The hard rule this exists for: ambiguity never
- * resolves silently to VNC against port 3389. What must not ship is a
- * connect that sends an RFB handshake at 3389 without having said so.
+ * Port 3389 presets RDP and port 22 presets SSH, and the chip shows it before
+ * Enter so the user can flip it in one click. The hard rule this exists for:
+ * ambiguity never resolves silently to VNC against one of those ports. What
+ * must not ship is a connect that sends an RFB handshake at 3389 or 22
+ * without having said so.
  *
  * The inference lives here rather than in the parser on purpose. The parser
  * reports what the input NAMED; presetting is a separate, visible, reversible
- * decision made one layer up.
+ * decision made one layer up. That is also why `alice@box` alone does not
+ * end up here presetting SSH: with no port typed, there is nothing for this
+ * function to look at, so the parser's null protocol stands until the user
+ * adds one.
  */
 export function presetProtocol(target: { port: number }): ProtocolKind {
+  if (target.port === DEFAULT_SSH_PORT) return "ssh";
   return target.port === DEFAULT_RDP_PORT ? "rdp" : "vnc";
 }

@@ -495,6 +495,8 @@ mod tests {
             rdp_user: Some("rdp-user-sentinel".into()),
             rdp_domain: Some("corp.example".into()),
             rdp_password: Some("rdp-pass-sentinel".into()),
+            ssh_user: None,
+            ssh_password: None,
         }
     }
 

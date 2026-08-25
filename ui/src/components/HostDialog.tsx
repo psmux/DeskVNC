@@ -27,6 +27,9 @@ import {
   RDP_MAX_DIM,
   RDP_MIN_DIM,
 } from "../lib/rdp";
+import type { MultiplexerKind, SshSettings } from "../lib/ssh";
+import { blankSshSettings, parseSshSettings } from "../lib/ssh";
+import { sshDefaults } from "../lib/sshDefaults";
 import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
@@ -79,6 +82,20 @@ export interface HostDraft {
   /** Logon domain, part of the stored credential rather than the profile
    *  blob's `domain`. Blank means "leave what is stored alone". */
   rdpDomain: string;
+  /** Parsed `sshSettings` blob; `null` for a non-SSH host. */
+  ssh: SshSettings | null;
+  /**
+   * SSH account name, written on save alongside the password as
+   * `StoredCredentials.sshUser`.
+   *
+   * Seeded BLANK even for a saved host, for the same reason `rdpUser` is:
+   * there is no `get_password`, so blank carries the "leave what is stored
+   * alone" affordance rather than "connect as nobody". An empty value here
+   * is also a legitimate END state, not just a placeholder: the Rust side
+   * reads a blank `sshUser` as "the same account as this computer", so a
+   * host that never sets this field is not missing anything.
+   */
+  sshUser: string;
   /**
    * UI-only: the user has deliberately set the port, so switching protocol
    * must not move it. Never persisted.
@@ -115,6 +132,8 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? newRdpSettings()) : null,
     rdpUser: "",
     rdpDomain: "",
+    ssh: protocol === "ssh" ? (parseSshSettings(h?.sshSettings) ?? newSshSettings()) : null,
+    sshUser: "",
     portTouched: portWasTouched(h),
   };
 }
@@ -124,10 +143,52 @@ function newRdpSettings(): RdpSettings {
   return { ...blankRdpSettings(), ...rdpDefaults() };
 }
 
+/** A blank set of SSH settings with the Preferences defaults applied. */
+function newSshSettings(): SshSettings {
+  return { ...blankSshSettings(), ...sshDefaults() };
+}
+
 /** Either of the Security disclosure's switches is already on. */
 function securityIsOn(d: HostDraft): boolean {
   return d.protocol === "rdp" && (d.rdp?.nla === "allow-fallback" || d.rdp?.legacyTls === true);
 }
+
+/**
+ * What a protocol offers, so a field can ask "does this protocol have
+ * this?" instead of "is this RDP?".
+ *
+ * A gate built around one protocol reads correctly for two: `!isRdp` meant
+ * "the VNC-only field" back when RDP was the only other option. It reads
+ * wrong for three, because SSH is not RDP either, and `!isRdp` would let a
+ * VNC-only control reappear for it. Keying the lookup on every member of
+ * `ProtocolKind` means TypeScript checks it against the type, so a fourth
+ * protocol added without a row here is a compile error rather than a field
+ * that silently reappears for it.
+ */
+interface ProtocolCaps {
+  /**
+   * Has a remote desktop picture. Quality, scaling, keyboard mode, the RFB
+   * security type, the "capture system shortcuts" default, and (through
+   * `RdpOptionsSection`) the display and resolution settings all describe
+   * how a picture is drawn or controlled. None of it means anything to a
+   * terminal, which has neither a picture nor a cursor.
+   */
+  graphical: boolean;
+  /** RFB security type negotiation, VNC's own. RDP negotiates its own
+   *  security below (see `SecuritySection`), and SSH's transport security
+   *  is not a setting this app exposes a knob for. */
+  rfbSecurity: boolean;
+  /** A logon account name field. */
+  username: boolean;
+  /** A separate logon domain field, alongside username. */
+  domain: boolean;
+}
+
+const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
+  vnc: { graphical: true, rfbSecurity: true, username: false, domain: false },
+  rdp: { graphical: true, rfbSecurity: false, username: true, domain: true },
+  ssh: { graphical: false, rfbSecurity: false, username: true, domain: false },
+};
 
 export function HostDialog({
   draft: initial,
@@ -162,9 +223,18 @@ export function HostDialog({
 
   const set = (patch: Partial<HostDraft>): void => setD((prev) => ({ ...prev, ...patch }));
 
+  // `isRdp` still names one protocol on purpose: it only selects between the
+  // two GRAPHICAL protocols' own quirks (RdpOptionsSection, SecuritySection,
+  // the wording of a shared hint), inside sections already gated on
+  // `caps.graphical` so SSH never reaches them. Anything that decides
+  // whether a field exists AT ALL for a protocol goes through `caps` instead.
   const isRdp = d.protocol === "rdp";
+  const isSsh = d.protocol === "ssh";
+  const caps = PROTOCOL_CAPS[d.protocol];
   const rdp = d.rdp ?? blankRdpSettings();
   const setRdp = (patch: Partial<RdpSettings>): void => set({ rdp: { ...rdp, ...patch } });
+  const ssh = d.ssh ?? blankSshSettings();
+  const setSsh = (patch: Partial<SshSettings>): void => set({ ssh: { ...ssh, ...patch } });
 
   /**
    * Switching protocol reorganises the form, so it also has to move the port,
@@ -178,6 +248,7 @@ export function HostDialog({
       protocol: to,
       port: portOnProtocolChange(d.protocol, to, d.port, d.portTouched === true),
       rdp: to === "rdp" ? (d.rdp ?? newRdpSettings()) : d.rdp,
+      ssh: to === "ssh" ? (d.ssh ?? newSshSettings()) : d.ssh,
       // Prefilled, not forced: xrdp on Linux exists, and so does a Mac with
       // an RDP server on it.
       osHint: to === "rdp" && d.osHint === "unknown" ? "windows" : d.osHint,
@@ -311,51 +382,80 @@ export function HostDialog({
           </Field>
         </div>
 
-        {/* An RDP logon is user first, so the name field sits above the
-            password rather than beside the security type. */}
-        {isRdp ? (
-          <div className="grid grid-cols-2 gap-3">
+        {/*
+          The logon fields are driven by capability, not by protocol name:
+          RDP needs a user name and, for a directory account, a domain; SSH
+          needs only a user name, and treats a blank one as "the same account
+          as this computer" rather than as something it has to guess; VNC has
+          no concept of a logon account at all, so nothing renders here. A
+          logon is user first, so the name field sits above the password
+          rather than beside the security type.
+        */}
+        {caps.username ? (
+          caps.domain ? (
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label="User name"
+                hint={
+                  d.hasPassword && !d.rdpUser
+                    ? "Leave blank to keep the saved one."
+                    : "The account to sign in with"
+                }
+              >
+                <input
+                  className="field"
+                  value={d.rdpUser}
+                  placeholder={d.hasPassword ? "(unchanged)" : "Administrator"}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  onChange={(e) => set({ rdpUser: e.target.value })}
+                />
+              </Field>
+              {/*
+                The hint is doing real work. Splitting a UPN into a domain is
+                the classic way to break an Entra ID sign-in, and nothing in
+                this app will do it for the user, so the field has to say when
+                to leave itself empty.
+              */}
+              <Field
+                label="Domain"
+                hint="Leave blank for a local account, or if your user name is already an email-style name like you@company.com."
+              >
+                <input
+                  className="field"
+                  value={d.rdpDomain}
+                  placeholder="Optional"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  onChange={(e) => set({ rdpDomain: e.target.value })}
+                />
+              </Field>
+            </div>
+          ) : (
             <Field
               label="User name"
               hint={
-                d.hasPassword && !d.rdpUser
+                d.hasPassword && !d.sshUser
                   ? "Leave blank to keep the saved one."
-                  : "The account to sign in with"
+                  : "Leave blank to sign in as the same user as this computer"
               }
             >
               <input
                 className="field"
-                value={d.rdpUser}
-                placeholder={d.hasPassword ? "(unchanged)" : "Administrator"}
+                value={d.sshUser}
+                placeholder={d.hasPassword ? "(unchanged)" : "Same as this computer"}
                 autoComplete="off"
                 autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
-                onChange={(e) => set({ rdpUser: e.target.value })}
+                onChange={(e) => set({ sshUser: e.target.value })}
               />
             </Field>
-            {/*
-              The hint is doing real work. Splitting a UPN into a domain is
-              the classic way to break an Entra ID sign-in, and nothing in
-              this app will do it for the user, so the field has to say when
-              to leave itself empty.
-            */}
-            <Field
-              label="Domain"
-              hint="Leave blank for a local account, or if your user name is already an email-style name like you@company.com."
-            >
-              <input
-                className="field"
-                value={d.rdpDomain}
-                placeholder="Optional"
-                autoComplete="off"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                onChange={(e) => set({ rdpDomain: e.target.value })}
-              />
-            </Field>
-          </div>
+          )
         ) : null}
 
         <Field
@@ -446,77 +546,90 @@ export function HostDialog({
           </button>
           {advanced ? (
             <div className="space-y-4 border-t border-subtle p-3">
-              <div className="grid grid-cols-2 gap-3">
-                {/* RFB security types mean nothing to RDP; the Security
-                    disclosure below is what takes their place there. */}
-                {isRdp ? null : (
-                  <Field label="Security type" hint="Auto negotiates the strongest supported">
-                    <Select
-                      value={d.securityPref ?? "auto"}
-                      onChange={(e) => set({ securityPref: e.target.value === "auto" ? null : e.target.value })}
+              {/*
+                Security type, Quality, Scaling and Keyboard mode all describe
+                a remote PICTURE: how it is negotiated, compressed, fitted to
+                the window, and typed into. None of that exists for a
+                terminal, so the whole block is gated on `caps.graphical`
+                rather than repeating that gate on every field inside it.
+              */}
+              {caps.graphical ? (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* RFB security types are VNC's own negotiation; RDP's
+                        equivalent is the Security disclosure below. */}
+                    {caps.rfbSecurity ? (
+                      <Field label="Security type" hint="Auto negotiates the strongest supported">
+                        <Select
+                          value={d.securityPref ?? "auto"}
+                          onChange={(e) =>
+                            set({ securityPref: e.target.value === "auto" ? null : e.target.value })
+                          }
+                        >
+                          <option value="auto">Auto</option>
+                          <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
+                          <option value="ra2">RSA-AES (RA2)</option>
+                          <option value="apple-dh">Apple Screen Sharing</option>
+                          <option value="vncauth">VNC password only</option>
+                          <option value="none">None</option>
+                        </Select>
+                      </Field>
+                    ) : null}
+                    <Field
+                      label="Quality"
+                      hint={
+                        isRdp
+                          ? "Auto adapts to network conditions. Lower settings turn off wallpaper and effects on the remote desktop."
+                          : "Auto adapts to network conditions"
+                      }
                     >
-                      <option value="auto">Auto</option>
-                      <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
-                      <option value="ra2">RSA-AES (RA2)</option>
-                      <option value="apple-dh">Apple Screen Sharing</option>
-                      <option value="vncauth">VNC password only</option>
-                      <option value="none">None</option>
-                    </Select>
-                  </Field>
-                )}
-                <Field
-                  label="Quality"
-                  hint={
-                    isRdp
-                      ? "Auto adapts to network conditions. Lower settings turn off wallpaper and effects on the remote desktop."
-                      : "Auto adapts to network conditions"
-                  }
-                >
-                  <Select
-                    value={d.qualityPref}
-                    onChange={(e) => set({ qualityPref: e.target.value as QualityPreset })}
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="high">High</option>
-                    <option value="medium">Medium</option>
-                    <option value="low">Low</option>
-                    {/*
-                      Black and White is a shader in this app, not a wire
-                      setting, so the toolbar keeps offering it live for both
-                      protocols. As a STORED default for an RDP host it would
-                      quietly mean "low quality, plus a grey screen on every
-                      connect", which is not what choosing a saved default is
-                      for.
-                    */}
-                    {isRdp ? null : <option value="bw">Black &amp; White</option>}
-                  </Select>
-                </Field>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Scaling" hint="How the remote screen fits the window">
-                  <Select
-                    value={d.scalingMode}
-                    onChange={(e) => set({ scalingMode: e.target.value as ScalingMode })}
-                  >
-                    <option value="aspect-fit">Aspect fit</option>
-                    <option value="fit">Fit to window</option>
-                    <option value="actual">Actual size (1:1)</option>
-                    <option value="remote-resize">Remote resize</option>
-                  </Select>
-                </Field>
-                <Field label="Keyboard mode" hint="How keystrokes are translated">
-                  <Select
-                    value={d.keyboardMode}
-                    onChange={(e) => set({ keyboardMode: e.target.value })}
-                  >
-                    <option value="auto">Auto</option>
-                    {/* RDP has no concept of a keysym. */}
-                    {isRdp ? null : <option value="keysym">Keysym</option>}
-                    <option value="unicode">Unicode</option>
-                    <option value="scancode">Scancode</option>
-                  </Select>
-                </Field>
-              </div>
+                      <Select
+                        value={d.qualityPref}
+                        onChange={(e) => set({ qualityPref: e.target.value as QualityPreset })}
+                      >
+                        <option value="auto">Auto</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                        {/*
+                          Black and White is a shader in this app, not a wire
+                          setting, so the toolbar keeps offering it live for
+                          both graphical protocols. As a STORED default for an
+                          RDP host it would quietly mean "low quality, plus a
+                          grey screen on every connect", which is not what
+                          choosing a saved default is for.
+                        */}
+                        {isRdp ? null : <option value="bw">Black &amp; White</option>}
+                      </Select>
+                    </Field>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Scaling" hint="How the remote screen fits the window">
+                      <Select
+                        value={d.scalingMode}
+                        onChange={(e) => set({ scalingMode: e.target.value as ScalingMode })}
+                      >
+                        <option value="aspect-fit">Aspect fit</option>
+                        <option value="fit">Fit to window</option>
+                        <option value="actual">Actual size (1:1)</option>
+                        <option value="remote-resize">Remote resize</option>
+                      </Select>
+                    </Field>
+                    <Field label="Keyboard mode" hint="How keystrokes are translated">
+                      <Select
+                        value={d.keyboardMode}
+                        onChange={(e) => set({ keyboardMode: e.target.value })}
+                      >
+                        <option value="auto">Auto</option>
+                        {/* RDP has no concept of a keysym. */}
+                        {isRdp ? null : <option value="keysym">Keysym</option>}
+                        <option value="unicode">Unicode</option>
+                        <option value="scancode">Scancode</option>
+                      </Select>
+                    </Field>
+                  </div>
+                </>
+              ) : null}
               <Field
                 label="MAC address (for Wake-on-LAN)"
                 hint={
@@ -534,22 +647,28 @@ export function HostDialog({
                   onChange={(e) => set({ wolMac: e.target.value || null, macFromDiscovery: false })}
                 />
               </Field>
-              <label className="flex items-start gap-2.5 text-sm text-primary">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 accent-(--accent)"
-                  checked={d.passthrough}
-                  onChange={(e) => set({ passthrough: e.target.checked })}
-                />
-                <span>
-                  Capture system shortcuts by default
-                  <span className="block text-xs text-tertiary">
-                    {isRdp
-                      ? "Sends shortcuts like Alt+Tab and the Windows key to the remote computer"
-                      : "Sends shortcuts like Cmd+Tab / Alt+Tab to the remote computer"}
+              {/* Waking a sleeping machine is orthogonal to how you talk to it
+                  once it is up, so this stays available for every protocol;
+                  "capture system shortcuts" is not, since a terminal has no
+                  window to steal a shortcut away from. */}
+              {caps.graphical ? (
+                <label className="flex items-start gap-2.5 text-sm text-primary">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 accent-(--accent)"
+                    checked={d.passthrough}
+                    onChange={(e) => set({ passthrough: e.target.checked })}
+                  />
+                  <span>
+                    Capture system shortcuts by default
+                    <span className="block text-xs text-tertiary">
+                      {isRdp
+                        ? "Sends shortcuts like Alt+Tab and the Windows key to the remote computer"
+                        : "Sends shortcuts like Cmd+Tab / Alt+Tab to the remote computer"}
+                    </span>
                   </span>
-                </span>
-              </label>
+                </label>
+              ) : null}
               {isRdp ? <RdpOptionsSection rdp={rdp} onChange={setRdp} /> : null}
               {isRdp ? (
                 <SecuritySection
@@ -559,12 +678,25 @@ export function HostDialog({
                   onChange={setRdp}
                 />
               ) : null}
-              <SshTunnelSection
-                tunnel={d.sshTunnel}
-                passphrase={d.sshPassphrase}
-                onChange={(sshTunnel) => set({ sshTunnel })}
-                onPassphrase={(sshPassphrase) => set({ sshPassphrase })}
-              />
+              {isSsh ? <SshOptionsSection ssh={ssh} onChange={setSsh} /> : null}
+              {/*
+                This tunnel wraps a GRAPHICAL session (VNC or RDP) inside an
+                SSH login, so it can reach a server that only listens on the
+                remote machine's own loopback. On an SSH host profile that
+                reads as tunnelling SSH through SSH, which is not a real
+                setting, the profile IS the SSH connection already. The two
+                features sharing the words "SSH tunnel" is a naming
+                collision, not a relationship, so it is worth spelling out
+                here rather than leaving the omission to look accidental.
+              */}
+              {!isSsh ? (
+                <SshTunnelSection
+                  tunnel={d.sshTunnel}
+                  passphrase={d.sshPassphrase}
+                  onChange={(sshTunnel) => set({ sshTunnel })}
+                  onPassphrase={(sshPassphrase) => set({ sshPassphrase })}
+                />
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -675,6 +807,159 @@ function RdpOptionsSection({
             ))}
           </div>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** `[A-Za-z0-9_-]`, 1 to 64 characters, matching the Rust side exactly.
+ *  The name is pasted onto a remote command line to attach or create the
+ *  multiplexer session, so anything else is a shell-injection surface, not
+ *  a cosmetic preference, and this has to refuse what the Rust side refuses. */
+const SESSION_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** `null` when the session name is fine to save. */
+function sessionNameError(name: string): string | null {
+  if (name.trim() === "") return "Required";
+  if (name.length > 64) return "64 characters or fewer";
+  if (!SESSION_NAME_RE.test(name)) return "Only letters, numbers, underscore and hyphen";
+  return null;
+}
+
+/**
+ * The SSH-only options, inside Advanced, shown only for the SSH protocol.
+ *
+ * Mirrors {@link RdpOptionsSection}'s shape: everything here is an ordinary
+ * preference, not a security decision, so it lives in one flat block rather
+ * than behind its own disclosure.
+ */
+function SshOptionsSection({
+  ssh,
+  onChange,
+}: {
+  ssh: SshSettings;
+  onChange: (patch: Partial<SshSettings>) => void;
+}): ReactNode {
+  // Touched on blur rather than checked from the first keystroke, the same
+  // rule the address field uses: typing a fresh name a character at a time
+  // must not flash red before the user has finished it.
+  const [nameTouched, setNameTouched] = useState(false);
+  const nameError = nameTouched ? sessionNameError(ssh.sessionName) : null;
+
+  return (
+    <div className="space-y-4">
+      {/*
+        This is the most consequential control in the section: it decides
+        whether the remote work survives a dropped connection at all, so the
+        hint says that in plain language rather than naming the mechanism
+        and leaving the stakes implicit. psmux is named beside tmux, not
+        after it, because it is not a fallback for tmux, it is the author's
+        own tmux-compatible multiplexer for Windows and the one most likely
+        to be the only option on a Windows box.
+      */}
+      <Field
+        label="Terminal multiplexer"
+        hint="Auto finds tmux or psmux on the remote machine, so your work survives a dropped connection. Without one, a disconnect ends your session."
+      >
+        <Select
+          value={ssh.multiplexer}
+          onChange={(e) => onChange({ multiplexer: e.target.value as MultiplexerKind })}
+        >
+          <option value="auto">Auto (recommended)</option>
+          <option value="psmux">psmux</option>
+          <option value="tmux">tmux</option>
+          <option value="screen">screen</option>
+          <option value="zellij">zellij</option>
+          <option value="none">None, always a plain shell</option>
+          <option value="custom">Custom command</option>
+        </Select>
+      </Field>
+
+      <Field
+        label="Session name"
+        error={nameError}
+        hint="This is placed on the remote command line to attach or create the session, so only letters, numbers, underscore and hyphen are accepted, up to 64 characters."
+      >
+        <input
+          className="field mono"
+          value={ssh.sessionName}
+          maxLength={64}
+          spellCheck={false}
+          autoCapitalize="none"
+          autoCorrect="off"
+          onBlur={() => setNameTouched(true)}
+          onChange={(e) => onChange({ sessionName: e.target.value })}
+        />
+      </Field>
+
+      {ssh.multiplexer === "custom" ? (
+        <Field
+          label="Custom command"
+          hint="Runs on the remote machine instead of attaching to tmux, psmux or another multiplexer. {session} is replaced with the session name above."
+        >
+          <input
+            className="field mono"
+            value={ssh.customCommand ?? ""}
+            placeholder="tmux new -A -s {session}"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+            onChange={(e) => onChange({ customCommand: e.target.value || null })}
+          />
+        </Field>
+      ) : null}
+
+      <Field
+        label="Startup command"
+        hint="Runs once connected, instead of your login shell. Leave blank to sign in normally."
+      >
+        <input
+          className="field mono"
+          value={ssh.startupCommand ?? ""}
+          placeholder="Optional"
+          spellCheck={false}
+          autoCapitalize="none"
+          autoCorrect="off"
+          onChange={(e) => onChange({ startupCommand: e.target.value || null })}
+        />
+      </Field>
+
+      {/*
+        Meaningless under Auto: Auto already treats "nothing installed" as an
+        answer (fall back on its own) rather than a failure, so there is
+        nothing here for this switch to decide. It only means something once
+        the multiplexer is pinned to something that might not be there.
+      */}
+      {ssh.multiplexer !== "auto" ? (
+        <Check
+          checked={ssh.fallbackToShell}
+          onChange={(fallbackToShell) => onChange({ fallbackToShell })}
+          label="Fall back to a plain shell"
+          hint="If the chosen multiplexer is not installed on the remote machine, connect with an ordinary shell instead of refusing to connect."
+        />
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Font size">
+          <input
+            className="field"
+            type="number"
+            min={8}
+            max={32}
+            value={ssh.fontSize}
+            onChange={(e) => onChange({ fontSize: Number(e.target.value) || ssh.fontSize })}
+          />
+        </Field>
+        <Field label="Scrollback" hint="Lines kept for scrolling back">
+          <input
+            className="field"
+            type="number"
+            min={0}
+            max={1_000_000}
+            value={ssh.scrollback}
+            onChange={(e) => onChange({ scrollback: Number(e.target.value) || 0 })}
+          />
+        </Field>
       </div>
     </div>
   );

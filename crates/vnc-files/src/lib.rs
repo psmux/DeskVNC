@@ -18,7 +18,7 @@
 //!
 //! let pins = Arc::new(Mutex::new(HostKeyStore::new()));
 //! let mut cfg = FileTransferConfig::new("living-room.local", "user");
-//! cfg.auth = SshAuth::Agent;
+//! cfg.ssh.auth = SshAuth::Agent;
 //!
 //! // First connect fails with `Error::HostKeyUnknown`; the UI prompts, the
 //! // shell calls `HostKeyStore::trust`, and this call is retried.
@@ -34,36 +34,36 @@
 //! | module | responsibility |
 //! |---|---|
 //! | [`path`] | **the security boundary**, normalises and rejects untrusted server paths |
-//! | [`hostkey`] | SSH host-key TOFU, same shape as the TLS pinning in `vnc-transport` |
-//! | [`config`] | connection config; secrets deserialize in, never out |
+//! | [`config`] | the file half of the connection config, over `ssh-transport`'s |
 //! | [`transfer`] | events, progress throttling, resume offsets, conflict rules |
 //! | [`queue`] | concurrency limit + per-item cancellation |
-//! | [`session`] | the live SSH+SFTP connection and the transfer loops |
-//! | [`tunnel`] | SSH tunnelling for the RFB stream, `direct-tcpip` channels |
-//! | [`probe`] | "is SSH reachable?", for enabling the Files button |
+//! | [`session`] | the live SFTP connection and the transfer loops |
+//!
+//! The SSH carrier itself (dial, host-key TOFU, authentication, tunnelling,
+//! reachability probe) lives in `ssh-transport`, which `ssh-core` also builds
+//! on. The names below are re-exported so a consumer of this crate does not
+//! have to name both.
 
 #![forbid(unsafe_code)]
 
 pub mod config;
 pub mod error;
-pub mod hostkey;
 pub mod path;
-pub mod probe;
 pub mod queue;
 pub mod session;
 pub mod transfer;
-pub mod tunnel;
 
 pub use config::{
-    canonical_host, host_port, resolver_host, FileTransferConfig, SshAuth, DEFAULT_SSH_PORT,
+    canonical_host, host_port, resolver_host, FileTransferConfig, SshAuth, SshConfig,
+    DEFAULT_SSH_PORT,
 };
 pub use error::{Error, Result};
-pub use hostkey::{HostKeyDecision, HostKeyPin, HostKeyStore, HostKeyVerifier};
-pub use probe::probe_ssh;
 pub use queue::{TransferQueue, MAX_CONCURRENT_TRANSFERS};
 pub use session::{RemoteEntry, SftpSession};
+pub use ssh_transport::{
+    probe_ssh, HostKeyDecision, HostKeyPin, HostKeyStore, HostKeyVerifier, SshTunnel, TunnelStream,
+};
 pub use transfer::{
     eta_secs, ConflictOutcome, ConflictPolicy, Direction, TransferEvent, TransferPlan,
     LARGE_TRANSFER_WARN_BYTES, PROGRESS_EVENTS_PER_SEC,
 };
-pub use tunnel::{SshTunnel, TunnelStream};

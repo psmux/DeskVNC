@@ -6,6 +6,8 @@
 //!   fallback (Argon2id + XChaCha20-Poly1305) when no keychain is available.
 //! - [`RdpSettings`]: the typed form of the `hosts.rdp_settings` blob, which
 //!   the store itself never parses (PRDRDP/08 §2.4).
+//! - [`SshSettings`]: the typed form of the `hosts.ssh_settings` blob, on the
+//!   same terms as [`RdpSettings`].
 //! - [`parse_rdp_file`]: reads a Microsoft `.rdp` file into a draft profile.
 //!   It writes nothing; the draft goes to the host editor and the user saves
 //!   it (PRDRDP/08 §5.4).
@@ -26,6 +28,7 @@ mod error;
 pub(crate) mod models;
 mod rdp;
 mod rdpfile;
+mod ssh;
 mod store;
 mod thumbs;
 
@@ -34,6 +37,7 @@ pub use error::{Error, Result};
 pub use models::{CertPin, Group, HistoryEntry, HostProfile, StoredCredentials, Tag};
 pub use rdp::RdpSettings;
 pub use rdpfile::{parse_rdp_file, RdpImport, MAX_RDP_FILE_BYTES, MAX_RDP_SETTINGS_BYTES};
+pub use ssh::SshSettings;
 pub use store::{normalize_address, Store};
 
 /// The protocol identity types, re-exported so a caller that already depends

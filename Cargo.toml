@@ -5,6 +5,10 @@ members = [
     # depend on no protocol crate (PRDRDP/01 §2.2, PRDRDP/02 §3).
     "crates/remote-core",
     "crates/remote-pixel",
+    # The SSH carrier and everything that rides it. `ssh-transport` depends on
+    # no feature crate; `vnc-files` and `ssh-core` both sit on top of it.
+    "crates/ssh-transport",
+    "crates/ssh-core",
     # The RDP set (AGENT_BRIEF D12, PRDRDP/12 §2).
     "crates/rdp-pdu",
     "crates/rdp-codecs",

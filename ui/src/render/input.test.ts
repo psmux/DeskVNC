@@ -6,7 +6,7 @@
  * rather than that a method was called.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionInput } from "./input";
+import { encodeTerminalInput, encodeTerminalResize, SessionInput } from "./input";
 import type { WebGLRenderer } from "./WebGLRenderer";
 
 const KIND_POINTER = 0;
@@ -72,6 +72,53 @@ function setup() {
   input.attach();
   return { canvas, input, sent, zoomed, panned, panRoom };
 }
+
+describe("terminal input/resize encoding", () => {
+  // Byte-exact contract: src-tauri/FRAME_FORMAT.md "Input events, continued",
+  // decoded by `framing::decode_input` kinds 3 and 4.
+
+  it("encodes terminal input as kind 3 with a u32 little-endian length prefix", () => {
+    const payload = new TextEncoder().encode("echo hi\n");
+    const packet = encodeTerminalInput(payload);
+    const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+
+    expect(packet.byteLength).toBe(5 + payload.byteLength);
+    expect(view.getUint8(0)).toBe(3);
+    expect(view.getUint32(1, true)).toBe(payload.byteLength);
+    expect(Array.from(packet.slice(5))).toEqual(Array.from(payload));
+  });
+
+  it("splits a payload over the 64 KiB cap into several concatenated kind-3 events", () => {
+    // `framing::decode_input` rejects the WHOLE body if one event's `len`
+    // exceeds MAX_TERMINAL_INPUT_LEN, so a large paste has to be pre-split
+    // into events the decoder accepts individually.
+    const big = new Uint8Array(64 * 1024 + 10).fill(65);
+    const packet = encodeTerminalInput(big);
+    const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+
+    let at = 0;
+    let recovered = 0;
+    while (at < packet.byteLength) {
+      expect(view.getUint8(at)).toBe(3);
+      const len = view.getUint32(at + 1, true);
+      expect(len).toBeLessThanOrEqual(64 * 1024);
+      recovered += len;
+      at += 5 + len;
+    }
+    expect(at).toBe(packet.byteLength);
+    expect(recovered).toBe(big.byteLength);
+  });
+
+  it("encodes terminal resize as kind 4 with little-endian cols/rows", () => {
+    const packet = encodeTerminalResize(80, 24);
+    const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+
+    expect(packet.byteLength).toBe(5);
+    expect(view.getUint8(0)).toBe(4);
+    expect(view.getUint16(1, true)).toBe(80);
+    expect(view.getUint16(3, true)).toBe(24);
+  });
+});
 
 describe("context-menu gestures", () => {
   beforeEach(() => vi.useFakeTimers());

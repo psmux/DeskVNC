@@ -1,0 +1,27 @@
+[package]
+name = "ssh-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The remote shell: a PTY on the SSH carrier, a supervisor that keeps it up,
+# and the terminal-state bookkeeping that stops a dropped link from wrecking
+# the local terminal.
+
+[dependencies]
+ssh-transport = { path = "../ssh-transport" }
+remote-core = { path = "../remote-core" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+russh = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }
+serde_json = { workspace = true }
