@@ -11,9 +11,10 @@ every platform we ship.
 | Direction | Data | Mechanism |
 |---|---|---|
 | Rust → JS | framebuffer updates, cursor shapes | `tauri::ipc::Channel` passed as the `onEvent` argument of `connect_session`; each message arrives as an `ArrayBuffer` (`InvokeResponseBody::Raw`) |
+| Rust → JS | PTY bytes | same binary `msg_type`-prefixed format as the row above, over the session's own `tauri::ipc::Channel` |
 | Rust → JS | control events (state, resize, clipboard, bell, cert prompt, stats, errors) | JSON event `session://event` emitted to the session's window via `emit_to` |
 | Rust → JS | discovery events | JSON event `discovery://event` (app-wide), `discovery://scan-complete` when a scan ends |
-| JS → Rust | pointer/key input | `invoke("send_input", <ArrayBuffer>, { headers: { "x-session-id": id } })`, raw body, format below |
+| JS → Rust | pointer/key input, terminal input, terminal resize | `invoke("send_input", <ArrayBuffer>, { headers: { "x-session-id": id } })`, raw body, format below |
 | JS → Rust | thumbnail capture | `invoke("capture_thumbnail", <ArrayBuffer of raw RGBA8888>, { headers: { "x-session-id": id, "x-width": w, "x-height": h } })`, body length must be exactly `w*h*4`; Rust does the downscale + PNG encode |
 
 Every channel message starts with a 1-byte `msg_type`. Unknown `msg_type`
@@ -146,4 +147,68 @@ Nothing in this file changes for RDP. Decoded RDP bitmaps arrive as rect
 format 0 (RGBA), an EGFX AVC420 frame as rect format 3 (H.264 Annex B), and
 a pointer shape as `msg_type = 2`, exactly as for VNC. There is one path for
 pixels and there is not going to be a second.
+
+## msg_type = 3, PTY bytes
+
+Raw terminal output for a remote shell session, remote to webview. Where the
+framebuffer and cursor messages above describe a screen, this one describes
+a byte stream with no record boundary of its own: a shell read can hand back
+one byte or sixty-four kilobytes, so the header's only job is to say how
+many payload bytes follow.
+
+```
+  [u8  msg_type = 3]
+  [u8  stream]
+  [u16 reserved  = 0]
+  [u32 len]
+  [len bytes of payload]
+```
+
+`stream`:
+
+| Value | Meaning |
+|---|---|
+| 0 | normal output, bytes read from the PTY, verbatim |
+| 1 | a terminal reset: the bytes the client must write to undo whatever DEC private modes, alternate screen, or bracketed paste a dead session left switched on (see `crates/ssh-core/src/modes.rs`). Kept on a separate `stream` value, not folded into output, so the webview can apply it unconditionally on reconnect without it being mistaken for something the remote program actually printed |
+
+The header is 8 bytes, one longer than the 7 a `msg_type`, `stream`, and
+`len` alone would need, so `payload` starts 4-byte aligned, matching the
+rect and cursor headers above.
+
+This message exists because base64-in-JSON (see the JSON control events
+below and `src-tauri/src/commands/ssh.rs`) is fine for ordinary typing and
+command output, but costs a real amount of CPU and bandwidth on a
+fast-scrolling stream such as a build log: roughly 33% size inflation from
+base64 itself, JSON string escaping on top of that, and a `serde_json::Value`
+allocation per chunk. This channel is the same fix the framebuffer path
+already uses for the same reason, applied to PTY bytes.
+
+## Input events (JS → Rust, body of `send_input`), continued
+
+Two more event kinds, for a remote shell session, added after the pointer,
+key, and release-all kinds documented above:
+
+```
+kind 3, terminal input:
+  [u8 kind = 3] [u32 len] [len bytes of payload]
+    payload    raw bytes to write to the PTY (keystrokes, a paste, an
+               IME commit); may contain any byte value, including NUL
+    len        capped at 64 KiB (65536); a larger len is rejected, so a
+               hostile or buggy webview cannot make the shell allocate
+               without bound off a single event
+
+kind 4, terminal resize (5 bytes total):
+  [u8 kind = 4] [u16 cols] [u16 rows]
+    cols, rows  new terminal size in character cells, not pixels; this is
+                deliberately not expressed as a pixel resize, 80 columns is
+                not 80 pixels and reusing the desktop-resize path would be a
+                silent unit mismatch
+```
+
+These follow the same bounds-checking rule as kinds 0-2: every length is
+checked against what remains of the body before any slicing happens, a
+truncated or lying `len` returns an error rather than panicking or reading
+out of bounds, and they participate in the same concatenated-events loop, so
+a terminal-input event can appear between, say, two pointer events in one
+`send_input` call.
 

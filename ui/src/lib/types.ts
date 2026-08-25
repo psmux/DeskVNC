@@ -12,19 +12,19 @@
 
 /**
  * `remote_core::ProtocolKind`, serde `rename_all = "kebab-case"`, which for
- * these two spells them exactly as they are written here.
+ * these three spells them exactly as they are written here.
  */
-export type ProtocolKind = "vnc" | "rdp";
+export type ProtocolKind = "vnc" | "rdp" | "ssh";
 
 /**
- * The port a bare hostname gets, per protocol. The one place these two
- * numbers live on this side; `address.ts` re-exports them under its own
- * names for the callers that already import those.
+ * The port a bare hostname gets, per protocol. The one place these numbers
+ * live on this side; `address.ts` re-exports them under its own names for
+ * the callers that already import those.
  */
-export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389 };
+export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, ssh: 22 };
 
-/** The two protocols, in the order the UI offers them. */
-export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp"];
+/** The three protocols, in the order the UI offers them. */
+export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
 
 /**
  * Is this a protocol this build knows? A profile written by a newer version
@@ -32,7 +32,7 @@ export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp"];
  * than being quietly relabelled.
  */
 export function isProtocolKind(value: unknown): value is ProtocolKind {
-  return value === "vnc" || value === "rdp";
+  return value === "vnc" || value === "rdp" || value === "ssh";
 }
 
 /**
@@ -41,14 +41,28 @@ export function isProtocolKind(value: unknown): value is ProtocolKind {
  * mislabelled as one of ours.
  */
 export function protocolLabel(p: string): string {
-  return p === "vnc" ? "VNC" : p === "rdp" ? "RDP" : p.toUpperCase();
+  return p === "vnc" ? "VNC" : p === "rdp" ? "RDP" : p === "ssh" ? "SSH" : p.toUpperCase();
 }
 
-/** How the protocol selector names each one, for someone who does not know
- *  the acronyms: this is what a Mac or Linux desktop calls it, and what the
- *  Windows settings pane calls it. */
+/**
+ * How the protocol selector names each one, for someone who does not know
+ * the acronyms: this is what a Mac or Linux desktop calls it, and what the
+ * Windows settings pane calls it.
+ *
+ * Written as a lookup keyed on every member of `ProtocolKind` rather than a
+ * chain of ternaries, on purpose: TypeScript checks the object literal
+ * against the type, so adding a fourth protocol without a row here is a
+ * compile error instead of it silently reading whatever the last branch
+ * happened to fall through to.
+ */
+const PROTOCOL_NAMES: Record<ProtocolKind, string> = {
+  rdp: "RDP (Windows Remote Desktop)",
+  ssh: "SSH terminal",
+  vnc: "VNC / screen sharing",
+};
+
 export function protocolName(p: ProtocolKind): string {
-  return p === "rdp" ? "RDP (Windows Remote Desktop)" : "VNC / screen sharing";
+  return PROTOCOL_NAMES[p];
 }
 
 export type OsHint = "macos" | "windows" | "linux" | "qemu" | "unknown";
@@ -109,8 +123,10 @@ export interface HostProfile {
    * build wrote must survive being listed, edited and saved by this one.
    */
   protocol: string;
-  /** RDP-only options as a JSON blob; `null` for a VNC host. See `rdp.ts`. */
+  /** RDP-only options as a JSON blob; `null` for a non-RDP host. See `rdp.ts`. */
   rdpSettings: string | null;
+  /** SSH-only options as a JSON blob; `null` for a non-SSH host. See `ssh.ts`. */
+  sshSettings: string | null;
 
   // ---- UI-local only: NOT columns in the hosts table, NOT sent by Rust ----
   /** Client-side flag; the backend has no `favorite` column yet. */
@@ -156,10 +172,11 @@ export function blankHostProfile(protocol: ProtocolKind = "vnc"): HostProfile {
     createdAt: now,
     updatedAt: now,
     protocol,
-    // Deliberately null for a new RDP host too: an untouched settings object
-    // stores as NULL, the Rust side applies its own defaults, and the column
-    // only fills once the user changes something.
+    // Deliberately null for a new RDP or SSH host too: an untouched settings
+    // object stores as NULL, the Rust side applies its own defaults, and the
+    // column only fills once the user changes something.
     rdpSettings: null,
+    sshSettings: null,
   };
 }
 

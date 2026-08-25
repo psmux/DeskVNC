@@ -140,3 +140,7 @@ export const IconWindows = (p: IconProps): ReactNode => (
 export const IconTabs = (p: IconProps): ReactNode => (
   <Icon {...p}><rect x="2" y="8" width="20" height="12" rx="2" /><path d="M2 8V6a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v2" /><path d="M13 8V6a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v2" /></Icon>
 );
+/** Shell prompt: a chevron about to type, on a frame. */
+export const IconTerminal = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m6 9 4 3-4 3" /><path d="M13 15h5" /></Icon>
+);

@@ -187,11 +187,15 @@ pub struct ProtocolRegistry {
 }
 
 impl ProtocolRegistry {
-    pub fn new() -> Self {
+    pub fn new(host_keys: Arc<Mutex<ssh_transport::HostKeyStore>>) -> Self {
         Self {
             drivers: vec![
                 Arc::new(VncDriver::new()),
                 Arc::new(rdp_core::RdpDriver::new()),
+                // SSH is the only driver that needs anything from the shell
+                // to construct: its trust decision reads the shared pin
+                // store, so it cannot make its own.
+                Arc::new(ssh_core::SshDriver::new(host_keys)),
             ],
         }
     }
@@ -201,11 +205,9 @@ impl ProtocolRegistry {
     }
 }
 
-impl Default for ProtocolRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// No `Default`: the registry cannot be built without the shared host-key pin
+// store, and inventing an empty one here would give the SSH driver a private
+// store that trusts nothing the user already trusted.
 
 /// A live VNC session known to the shell.
 pub struct SessionEntry {
@@ -332,7 +334,17 @@ impl DiscoveryState {
 }
 
 impl AppState {
-    pub fn new(store: Arc<vnc_store::Store>, credentials: Arc<vnc_store::CredentialStore>) -> Self {
+    /// `host_keys` is the app's single SSH host-key pin store, owned by
+    /// `FilesState` and shared here so the SSH protocol driver verifies
+    /// against the same pins as the Files panel and the RFB tunnel. Trusting
+    /// a machine once has to cover all three; a second store would prompt the
+    /// user again the first time they opened a terminal on a host they had
+    /// already trusted.
+    pub fn new(
+        store: Arc<vnc_store::Store>,
+        credentials: Arc<vnc_store::CredentialStore>,
+        host_keys: Arc<Mutex<ssh_transport::HostKeyStore>>,
+    ) -> Self {
         Self {
             store,
             credentials,
@@ -341,7 +353,7 @@ impl AppState {
             pending_credentials: Arc::new(Mutex::new(HashMap::new())),
             pending_prompts: Arc::new(Mutex::new(HashMap::new())),
             opening_windows: Arc::new(Mutex::new(HashMap::new())),
-            protocols: Arc::new(ProtocolRegistry::new()),
+            protocols: Arc::new(ProtocolRegistry::new(host_keys)),
         }
     }
 
@@ -466,9 +478,15 @@ impl AppState {
 mod protocol_registry_tests {
     use super::*;
 
+    /// A registry for tests. The pin store is empty, which is exactly right:
+    /// these assert which drivers are built, not what any of them trusts.
+    fn test_registry() -> ProtocolRegistry {
+        ProtocolRegistry::new(Arc::new(Mutex::new(ssh_transport::HostKeyStore::new())))
+    }
+
     #[test]
     fn the_vnc_driver_is_registered_and_answers_on_5900() {
-        let registry = ProtocolRegistry::new();
+        let registry = test_registry();
         let driver = registry
             .get(ProtocolKind::Vnc)
             .expect("this build speaks VNC");
@@ -477,8 +495,18 @@ mod protocol_registry_tests {
     }
 
     #[test]
+    fn the_ssh_driver_is_registered_and_answers_on_22() {
+        let registry = test_registry();
+        let driver = registry
+            .get(ProtocolKind::Ssh)
+            .expect("this build speaks SSH");
+        assert_eq!(driver.kind(), ProtocolKind::Ssh);
+        assert_eq!(driver.default_port(), 22);
+    }
+
+    #[test]
     fn the_rdp_driver_is_registered_and_answers_on_3389() {
-        let registry = ProtocolRegistry::new();
+        let registry = test_registry();
         let driver = registry
             .get(ProtocolKind::Rdp)
             .expect("this build speaks RDP");
@@ -489,14 +517,17 @@ mod protocol_registry_tests {
     /// The registry is what a third protocol changes, so pin its membership:
     /// a driver added without a decision here fails this test.
     #[test]
-    fn two_protocols_are_registered_today() {
-        let registry = ProtocolRegistry::new();
+    fn three_protocols_are_registered_today() {
+        let registry = test_registry();
         let built: Vec<_> = ProtocolKind::ALL
             .iter()
             .copied()
             .filter(|k| registry.get(*k).is_some())
             .collect();
-        assert_eq!(built, vec![ProtocolKind::Vnc, ProtocolKind::Rdp]);
+        assert_eq!(
+            built,
+            vec![ProtocolKind::Vnc, ProtocolKind::Rdp, ProtocolKind::Ssh]
+        );
     }
 }
 

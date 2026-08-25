@@ -197,6 +197,15 @@ fn main() {
             "capture_status",
             "capture_permission_granted",
             "capture_request_permission",
+            // remote shell, a pty over the same SSH carrier as the sidecar.
+            // `ssh_send` carries keystrokes, so it is as sensitive as
+            // `send_input` and stays its own grantable command.
+            "ssh_probe",
+            "ssh_connect",
+            "ssh_send",
+            "ssh_resize",
+            "ssh_reconnect_now",
+            "ssh_disconnect",
         ]),
     ))
     .expect("failed to run tauri-build");

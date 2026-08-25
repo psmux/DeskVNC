@@ -216,6 +216,19 @@ impl HostKeyStore {
     }
 }
 
+/// An already-erased verifier, so a caller holding one can pass it anywhere
+/// an `impl HostKeyVerifier` is wanted.
+///
+/// Without this, a component that stores `Arc<dyn HostKeyVerifier>` (because
+/// it was handed one and must keep it) cannot hand it on to a constructor
+/// taking `impl HostKeyVerifier`, even though it plainly is one. That comes up
+/// wherever a driver holds the shared pin store and spawns sessions from it.
+impl HostKeyVerifier for Arc<dyn HostKeyVerifier + Send + Sync + 'static> {
+    fn verify(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) -> HostKeyDecision {
+        (**self).verify(host, port, key_type, fingerprint)
+    }
+}
+
 /// The shape the shell actually holds: a shared, mutable pin store.
 impl HostKeyVerifier for Arc<Mutex<HostKeyStore>> {
     fn verify(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) -> HostKeyDecision {

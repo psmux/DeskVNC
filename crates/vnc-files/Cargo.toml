@@ -8,6 +8,7 @@ license.workspace = true
 # File transfer over an SSH/SFTP sidecar channel (PRD/08).
 
 [dependencies]
+ssh-transport = { path = "../ssh-transport" }
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }

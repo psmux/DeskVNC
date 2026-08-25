@@ -6,7 +6,7 @@
 //! injected into `vnc_core::ConnectOptions`, and every connection attempt,
 //! including the supervisor's automatic reconnects, then runs over a
 //! `direct-tcpip` channel instead of a local TCP socket (see
-//! `vnc_files::tunnel`).
+//! `ssh_transport::tunnel`).
 //!
 //! SECURITY INVARIANTS (same as the SFTP sidecar, `commands/files.rs`):
 //! - The webview only ever picks an auth *kind*; passwords/passphrases are
@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
+use ssh_transport::{Error as SshError, SshConfig, SshTunnel};
 use tauri::{AppHandle, Manager};
-use vnc_files::{Error as FilesError, FileTransferConfig, SshTunnel};
 use vnc_transport::{BoxedStream, ConnectFuture, StreamConnector, TransportError};
 
 use crate::commands::files::{build_auth, local_username, AuthKind, FilesState};
@@ -116,7 +116,9 @@ pub async fn establish(
         settings.host.trim().to_string()
     };
 
-    let mut cfg = FileTransferConfig::new(gateway, username);
+    // The tunnel rides the bare carrier: it wants somewhere to dial and an
+    // identity, and none of the file-panel settings mean anything to it.
+    let mut cfg = SshConfig::new(gateway, username);
     cfg.port = settings.port;
     cfg.auth = auth;
 
@@ -125,7 +127,7 @@ pub async fn establish(
 
     let tunnel = match SshTunnel::connect(cfg.clone(), pins.clone()).await {
         Ok(tunnel) => tunnel,
-        Err(FilesError::HostKeyUnknown {
+        Err(SshError::HostKeyUnknown {
             host,
             port,
             key_type,
@@ -148,7 +150,7 @@ pub async fn establish(
             }
         }
         // HARD STOP. Never promptable, never retried (PRD/08 §4, PRD/10 §4.3).
-        Err(FilesError::HostKeyChanged {
+        Err(SshError::HostKeyChanged {
             host,
             port,
             expected,
@@ -191,7 +193,7 @@ impl StreamConnector for TunnelConnector {
             let stream = match tokio::time::timeout(timeout, opening).await {
                 Err(_) => return Err(TransportError::Timeout),
                 Ok(Ok(stream)) => stream,
-                Ok(Err(FilesError::Timeout)) => return Err(TransportError::Timeout),
+                Ok(Err(SshError::Timeout)) => return Err(TransportError::Timeout),
                 Ok(Err(e)) => return Err(TransportError::Io(std::io::Error::other(e.to_string()))),
             };
             Ok(Box::pin(stream) as BoxedStream)

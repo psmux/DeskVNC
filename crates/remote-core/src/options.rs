@@ -78,6 +78,11 @@ impl ConnectOptions {
         Self::with_protocol(host, port, ProtocolOptions::Rdp(RdpOptions::default()))
     }
 
+    /// Options for a remote shell.
+    pub fn ssh(host: impl Into<String>, port: u16) -> Self {
+        Self::with_protocol(host, port, ProtocolOptions::Ssh(SshOptions::default()))
+    }
+
     fn with_protocol(host: impl Into<String>, port: u16, protocol: ProtocolOptions) -> Self {
         Self {
             host: host.into(),
@@ -106,6 +111,27 @@ impl ConnectOptions {
     }
 
     /// The RDP half, or `None` when these are not RDP options.
+    /// The SSH half, or `None` when these are not SSH options.
+    pub fn ssh_options(&self) -> Option<&SshOptions> {
+        match &self.protocol {
+            ProtocolOptions::Ssh(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// The SSH half, for a driver that has already checked the kind.
+    ///
+    /// Panics when these are not SSH options, exactly as [`Self::rdp_mut`]
+    /// does: reaching it means the registry handed a driver another
+    /// protocol's options, which `spawn` rejects with `OptionsMismatch`
+    /// before anything gets this far.
+    pub fn ssh_mut(&mut self) -> &mut SshOptions {
+        match &mut self.protocol {
+            ProtocolOptions::Ssh(o) => o,
+            other => panic!("ssh_mut on {:?} options", other.kind()),
+        }
+    }
+
     pub fn rdp_options(&self) -> Option<&RdpOptions> {
         match &self.protocol {
             ProtocolOptions::Rdp(r) => Some(r),
@@ -149,6 +175,7 @@ impl ConnectOptions {
 pub enum ProtocolOptions {
     Vnc(VncOptions),
     Rdp(RdpOptions),
+    Ssh(SshOptions),
 }
 
 impl ProtocolOptions {
@@ -156,6 +183,7 @@ impl ProtocolOptions {
         match self {
             ProtocolOptions::Vnc(_) => ProtocolKind::Vnc,
             ProtocolOptions::Rdp(_) => ProtocolKind::Rdp,
+            ProtocolOptions::Ssh(_) => ProtocolKind::Ssh,
         }
     }
 }
@@ -608,5 +636,115 @@ mod tests {
             height: 1080,
         };
         assert_eq!(f.size(None), Some((1920, 1080)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSH
+// ---------------------------------------------------------------------------
+
+/// Which terminal multiplexer to attach to on the far side.
+///
+/// This is the setting that decides whether a reconnect returns the user to
+/// their work or to an empty prompt. An SSH connection owns the remote PTY:
+/// when the link dies the PTY is destroyed, `SIGHUP` goes to everything under
+/// it, and the shell dies with the socket. Reconnecting automatically does not
+/// change that, it just gets the user to a fresh prompt faster. Only moving
+/// the shell's lifetime onto the remote machine preserves anything, which is
+/// what all of these do.
+///
+/// Lives here rather than in `ssh-core` for the same reason [`RdpOptions`]
+/// does rather than in `rdp-core`: it is serialized into a host profile
+/// column, so the store and the host editor need the type without depending
+/// on the protocol implementation. `ssh-core` owns the *behaviour* (probing
+/// for it, building its command line); this is only the data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MultiplexerKind {
+    /// Ask the far side what it has and use the best of it, falling back to a
+    /// plain login shell when it has nothing. The default, and the only
+    /// setting that is right across a mixed fleet.
+    #[default]
+    Auto,
+    /// A plain login shell. Honest about the cost: a drop loses the session.
+    None,
+    /// psmux, the tmux-compatible multiplexer that runs natively on Windows
+    /// (<https://github.com/psmux/psmux>). Speaks tmux's command language.
+    Psmux,
+    Tmux,
+    Screen,
+    Zellij,
+    /// A command supplied by the user. `{session}` is substituted.
+    Custom,
+}
+
+/// The default `TERM`.
+///
+/// `xterm-256color` is the widest-compatible name that still gets colour: it
+/// is in every terminfo database going back decades, so a remote `vim` or
+/// `htop` finds an entry and renders properly. Advertising a name the remote
+/// has never heard of (`alacritty`, `xterm-kitty`) makes ncurses fall back to
+/// dumb-terminal behaviour, which reads to the user as a bug in us.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Everything a remote shell needs beyond where to dial and who to be.
+///
+/// Data only, and the same rules as [`RdpOptions`]: serialized into the
+/// `hosts.ssh_settings` column, so every field is `#[serde(default)]` and no
+/// field holds a secret. The password, passphrase and key path travel in
+/// [`ConnectOptions::credentials`], which is not serializable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SshOptions {
+    /// What to advertise as `TERM`.
+    pub term: String,
+    /// Initial geometry, in character cells. The UI overwrites both before
+    /// the shell starts; 80x24 is the VT100 default and the only size every
+    /// remote program is guaranteed to cope with.
+    pub cols: u16,
+    pub rows: u16,
+    /// Which multiplexer to attach to, or how to find one.
+    pub multiplexer: MultiplexerKind,
+    /// The session to attach to or create. One name per profile means the
+    /// user returns to the same place every time.
+    pub session_name: String,
+    /// The command template for [`MultiplexerKind::Custom`].
+    pub custom_command: Option<String>,
+    /// Open a plain login shell when nothing suitable is installed, rather
+    /// than failing the connection. Ignored by `Auto`, which treats "nothing
+    /// installed" as a valid answer rather than a failure.
+    pub fallback_to_shell: bool,
+    /// A command to run instead of the login shell, for a profile that should
+    /// land straight in a log tail or a REPL. Runs *inside* the multiplexer
+    /// when there is one, so it is still persistent.
+    pub startup_command: Option<String>,
+}
+
+impl Default for SshOptions {
+    fn default() -> Self {
+        Self {
+            term: DEFAULT_TERM.to_string(),
+            cols: 80,
+            rows: 24,
+            multiplexer: MultiplexerKind::Auto,
+            session_name: "deskvnc".to_string(),
+            custom_command: None,
+            fallback_to_shell: true,
+            startup_command: None,
+        }
+    }
+}
+
+impl SshOptions {
+    /// Geometry clamped to what a `pty-req` and every remote program can
+    /// actually represent.
+    ///
+    /// The zero is the dangerous one: a webview measuring a hidden or
+    /// not-yet-laid-out element reports 0x0, and a PTY zero columns wide makes
+    /// remote programs divide by zero or spin. One by one is useless but
+    /// harmless, which is the right direction to be wrong in.
+    pub fn clamped(&self) -> (u16, u16) {
+        (self.cols.clamp(1, 10_000), self.rows.clamp(1, 10_000))
     }
 }

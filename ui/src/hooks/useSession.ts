@@ -27,6 +27,7 @@ import {
   parseFrameMessage,
   type FrameMessage,
 } from "../render/frameProtocol";
+import { encodeTerminalInput, encodeTerminalResize } from "../render/input";
 import type {
   CredentialRequest,
   PinScheme,
@@ -46,7 +47,29 @@ export interface SessionBridge {
   onDesktopResize: (width: number, height: number) => void;
   onCursorShape: (w: number, h: number, hx: number, hy: number, rgba: Uint8Array) => void;
   onCursorPosition: (x: number, y: number) => void;
+  /**
+   * PTY bytes for a remote shell (msg_type 3). `stream` 0 is ordinary output;
+   * 1 is a terminal-mode reset the client must apply exactly like output but
+   * never log or replay as something the server said (FRAME_FORMAT.md). A VNC
+   * or RDP session never receives this message type, so a bridge that ignores
+   * it is not losing anything.
+   */
+  onPty: (stream: number, bytes: Uint8Array) => void;
 }
+
+/**
+ * `ssh-attached` and `ssh-notice` are not yet part of `SessionEvent` in
+ * `lib/types.ts` (owned elsewhere); the shapes here are the ones
+ * `ssh_event_json` in `commands/session.rs` actually emits. Widening the
+ * listener's payload type locally, rather than editing that union, keeps this
+ * file's PTY wiring self-contained until the two land there.
+ */
+type SshOnlyEvent =
+  | { type: "ssh-attached"; multiplexer: string | null; resumed: boolean }
+  | { type: "ssh-notice"; message: string };
+
+/** `SessionEventPayload`, widened by `SshOnlyEvent` for the listener below. */
+type SessionOrSshEventPayload = SessionEventPayload | (SshOnlyEvent & { sessionId: string });
 
 export interface CertPromptState {
   fingerprint: string;
@@ -108,7 +131,20 @@ export interface SessionApi {
   credentialRequest: CredentialRequest | null;
   remoteClipboard: string | null;
   bellTick: number;
+  /**
+   * Set once `ssh-attached` arrives; null before then, and for every non-SSH
+   * session. `resumed` is the one worth interrupting for: it means the attach
+   * found a session already running, so the user's work survived a drop.
+   */
+  sshAttached: { multiplexer: string | null; resumed: boolean } | null;
+  /** Most recent `ssh-notice` line, for a status area, never the terminal. */
+  sshNotice: string | null;
   sendInput: (packet: Uint8Array) => void;
+  /** Bytes to write to the remote PTY (kind 3); split and queued the same way
+   *  pointer/key packets are, see `sendInput`. */
+  sendTerminalInput: (bytes: Uint8Array) => void;
+  /** New terminal grid size in character cells (kind 4). */
+  sendTerminalResize: (cols: number, rows: number) => void;
   disconnect: () => void;
   reconnectNow: () => void;
   setQuality: (preset: QualityPreset) => void;
@@ -204,9 +240,29 @@ function wireQuality(preset: QualityPreset): string {
   return preset === "bw" ? "black-and-white" : preset;
 }
 
+/** `msg_type = 3`, PTY bytes: FRAME_FORMAT.md's "msg_type = 3, PTY bytes". */
+const MSG_PTY = 3;
+const PTY_HEADER_LEN = 8;
+
+/**
+ * Parse one PTY-bytes channel message. Returns null on a truncated header or
+ * a `len` that overruns the buffer, the same "drop the whole message" rule
+ * `parseFrameMessage` follows for a malformed frame, rather than reading past
+ * the buffer or handing the terminal a truncated escape sequence.
+ */
+function parsePtyMessage(buffer: ArrayBuffer): { stream: number; bytes: Uint8Array } | null {
+  if (buffer.byteLength < PTY_HEADER_LEN) return null;
+  const dv = new DataView(buffer);
+  const stream = dv.getUint8(1);
+  const len = dv.getUint32(4, true);
+  if (buffer.byteLength < PTY_HEADER_LEN + len) return null;
+  return { stream, bytes: new Uint8Array(buffer, PTY_HEADER_LEN, len) };
+}
+
 export function readSessionParams(): SessionParams {
   const q = new URLSearchParams(window.location.search);
-  const protocol: ProtocolKind = isProtocolKind(q.get("protocol")) ? "rdp" : "vnc";
+  const rawProtocol = q.get("protocol");
+  const protocol: ProtocolKind = isProtocolKind(rawProtocol) ? rawProtocol : "vnc";
   return {
     sessionId: q.get("sessionId"),
     profileId: q.get("profileId"),
@@ -250,6 +306,10 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
   const [credentialRequest, setCredentialRequest] = useState<CredentialRequest | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<string | null>(null);
   const [bellTick, setBellTick] = useState(0);
+  const [sshAttached, setSshAttached] = useState<{ multiplexer: string | null; resumed: boolean } | null>(
+    null,
+  );
+  const [sshNotice, setSshNotice] = useState<string | null>(null);
   const [connectNonce, setConnectNonce] = useState(0);
 
   const bridgeRef = useRef(bridge);
@@ -319,13 +379,25 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           }
           break;
         }
+        case MSG_PTY: {
+          const msg = parsePtyMessage(data);
+          // Same reasoning as the frame case: a parse failure drops the
+          // WHOLE message rather than half-applying it, so the corruption on
+          // screen (or the escape sequence never written) is explained here.
+          if (!msg) {
+            console.warn(`[render] pty message failed to parse (${data.byteLength}B), dropped`);
+            break;
+          }
+          bridgeRef.current.onPty(msg.stream, msg.bytes);
+          break;
+        }
         default:
           break; // unknown msg_type, ignore
       }
     };
 
     // `session://event` payloads are FLAT: `{ sessionId, type, ...fields }`.
-    const listening = safeListen<SessionEventPayload>("session://event", (ev) => {
+    const listening = safeListen<SessionOrSshEventPayload>("session://event", (ev) => {
       if (cancelled || !ev || typeof ev !== "object") return;
       if (ev.sessionId && sessionIdRef.current && ev.sessionId !== sessionIdRef.current) return;
       switch (ev.type) {
@@ -361,6 +433,12 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           break;
         case "bell":
           setBellTick((n) => n + 1);
+          break;
+        case "ssh-attached":
+          setSshAttached({ multiplexer: ev.multiplexer, resumed: ev.resumed });
+          break;
+        case "ssh-notice":
+          setSshNotice(ev.message);
           break;
         case "certificate-prompt":
           setCertPrompt({
@@ -546,11 +624,8 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
    */
   const inputQueue = useRef(createSerialQueue());
 
-  const sendInput = useCallback((packet: Uint8Array): void => {
-    if (!inTauri()) return;
-    // A COPY: the caller reuses its scratch buffers between events, and this
-    // packet may not be handed to `invoke` until a previous one has landed.
-    const body = packet.slice();
+  /** Shared by every `send_input` sender below: queue, invoke, warn once. */
+  const enqueueInput = useCallback((body: Uint8Array): void => {
     const sessionId = sessionIdRef.current;
     inputQueue.current(() =>
       // Raw binary body; session id rides in an invoke header (see FRAME_FORMAT notes).
@@ -564,6 +639,32 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
       ),
     );
   }, []);
+
+  const sendInput = useCallback(
+    (packet: Uint8Array): void => {
+      if (!inTauri()) return;
+      // A COPY: the caller reuses its scratch buffers between events, and this
+      // packet may not be handed to `invoke` until a previous one has landed.
+      enqueueInput(packet.slice());
+    },
+    [enqueueInput],
+  );
+
+  const sendTerminalInput = useCallback(
+    (bytes: Uint8Array): void => {
+      if (!inTauri()) return;
+      enqueueInput(encodeTerminalInput(bytes));
+    },
+    [enqueueInput],
+  );
+
+  const sendTerminalResize = useCallback(
+    (cols: number, rows: number): void => {
+      if (!inTauri()) return;
+      enqueueInput(encodeTerminalResize(cols, rows));
+    },
+    [enqueueInput],
+  );
 
   const disconnect = useCallback((): void => {
     void safeInvoke("disconnect_session", { sessionId: sid() }, null);
@@ -740,13 +841,16 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
     setCredentialRequest(null);
     setStats(null);
     setScreens([]);
+    setSshAttached(null);
+    setSshNotice(null);
     setState({ state: "connecting" });
     setConnectNonce((n) => n + 1);
   }, []);
 
   return {
     state, desktopName, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
-    sendInput, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
+    sshAttached, sshNotice,
+    sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
     dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
     submitCredentials, dismissCredentialPrompt, retryConnect,

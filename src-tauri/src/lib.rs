@@ -69,11 +69,23 @@ pub fn run() {
 
             let store = Arc::new(vnc_store::Store::open(Some(data_dir.clone()))?);
             let credentials = Arc::new(vnc_store::CredentialStore::new(data_dir.clone()));
-            app.manage(AppState::new(store, credentials));
+            // The pin store is built first and shared, because three
+            // features verify against it: the Files panel, the RFB tunnel and
+            // the SSH protocol driver. One store is the invariant, so it is
+            // constructed once here rather than by whichever of them happens
+            // to start first.
+            let files_state = commands::files::FilesState::new(data_dir);
+            let host_keys = files_state.host_key_verifier();
+            app.manage(AppState::new(store, credentials, host_keys));
             // File-transfer sidecars live in their own managed state so the
-            // SFTP registry and the SSH host-key pin store stay independent of
-            // the VNC session registry (PRD/08 §2.1).
-            app.manage(commands::files::FilesState::new(data_dir));
+            // SFTP registry stays independent of the session registry
+            // (PRD/08 §2.1).
+            app.manage(files_state);
+            // Remote shells. Separate registry again, but deliberately no
+            // separate host-key store: `SshState` borrows `FilesState`'s, so
+            // trusting a machine once covers its terminal, its Files panel
+            // and its RFB tunnel alike.
+            app.manage(commands::ssh::SshState::new());
             // Native shortcut capture (PRD/06 §3 Tier 2). Constructing the
             // backend installs nothing and prompts for nothing, capture is
             // strictly opt-in, per session, from the toolbar toggle.
@@ -123,6 +135,10 @@ pub fn run() {
                     // …and cancel any file transfers that window owned.
                     if let Some(files) = window.try_state::<commands::files::FilesState>() {
                         files.shutdown_for_window(window.label());
+                    }
+                    // …and end any remote shells it owned.
+                    if let Some(ssh) = window.try_state::<commands::ssh::SshState>() {
+                        ssh.shutdown_for_window(window.label());
                     }
                 }
                 // Capture is only ever held while the window that asked for it
@@ -231,6 +247,13 @@ pub fn run() {
             commands::files::files_local_mkdir,
             commands::files::files_local_rename,
             commands::files::files_local_remove,
+            // remote shell (pty over the same ssh carrier)
+            commands::ssh::ssh_probe,
+            commands::ssh::ssh_connect,
+            commands::ssh::ssh_send,
+            commands::ssh::ssh_resize,
+            commands::ssh::ssh_reconnect_now,
+            commands::ssh::ssh_disconnect,
             // native keyboard capture (shortcut pass-through)
             commands::capture::capture_start,
             commands::capture::capture_stop,
@@ -253,6 +276,9 @@ pub fn run() {
                 }
                 if let Some(files) = app.try_state::<commands::files::FilesState>() {
                     files.shutdown_all();
+                }
+                if let Some(ssh) = app.try_state::<commands::ssh::SshState>() {
+                    ssh.shutdown_all();
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }

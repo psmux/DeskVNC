@@ -30,13 +30,18 @@ pub enum ProtocolKind {
     #[default]
     Vnc,
     Rdp,
+    /// A remote shell on a PTY. Unlike the other two this carries a byte
+    /// stream rather than a framebuffer, which is why its payload travels as
+    /// `ProtocolEvent::Ssh` rather than through the pixel variants.
+    Ssh,
 }
 
 impl ProtocolKind {
     /// Every protocol, for callers that must handle all of them. A slice
     /// rather than the fixed array `PinScheme::ALL` uses, so adding one is a
     /// one line change.
-    pub const ALL: &'static [ProtocolKind] = &[ProtocolKind::Vnc, ProtocolKind::Rdp];
+    pub const ALL: &'static [ProtocolKind] =
+        &[ProtocolKind::Vnc, ProtocolKind::Rdp, ProtocolKind::Ssh];
 
     /// The stored spelling. Matches the serde representation and the
     /// `hosts.protocol` column.
@@ -44,6 +49,7 @@ impl ProtocolKind {
         match self {
             ProtocolKind::Vnc => "vnc",
             ProtocolKind::Rdp => "rdp",
+            ProtocolKind::Ssh => "ssh",
         }
     }
 
@@ -54,6 +60,7 @@ impl ProtocolKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "vnc" => Some(ProtocolKind::Vnc),
             "rdp" => Some(ProtocolKind::Rdp),
+            "ssh" => Some(ProtocolKind::Ssh),
             _ => None,
         }
     }
@@ -65,6 +72,8 @@ impl ProtocolKind {
         match self {
             ProtocolKind::Vnc => 5900,
             ProtocolKind::Rdp => 3389,
+            // RFC 4253 §4: the SSH transport runs on TCP 22.
+            ProtocolKind::Ssh => 22,
         }
     }
 
@@ -203,7 +212,7 @@ mod protocol_kind_tests {
 
     #[test]
     fn an_unknown_protocol_does_not_degrade_into_a_known_one() {
-        for junk in ["", "vnc2", "spice", "ssh"] {
+        for junk in ["", "vnc2", "spice", "telnet", "sftp"] {
             assert_eq!(ProtocolKind::parse(junk), None, "{junk:?}");
         }
     }
@@ -212,6 +221,7 @@ mod protocol_kind_tests {
     fn default_ports_are_the_registered_ones() {
         assert_eq!(ProtocolKind::Vnc.default_port(), 5900);
         assert_eq!(ProtocolKind::Rdp.default_port(), 3389);
+        assert_eq!(ProtocolKind::Ssh.default_port(), 22);
         assert_eq!(ProtocolKind::default(), ProtocolKind::Vnc);
     }
 }

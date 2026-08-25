@@ -82,6 +82,54 @@ pub enum Error {
 /// Crate result alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Carrier failures keep their identity as they cross into this crate.
+///
+/// The variants are duplicated rather than the whole enum being replaced by
+/// `#[from] ssh_transport::Error`, deliberately. The shell matches on
+/// `Error::HostKeyUnknown { .. }` and `Error::HostKeyChanged { .. }` to decide
+/// between a fingerprint prompt and a hard stop
+/// (`src-tauri/src/commands/files.rs`), and a wrapped variant would make every
+/// one of those sites match on a nested enum instead. Keeping the mapping flat
+/// meant the extraction changed no call site above this crate at all.
+impl From<ssh_transport::Error> for Error {
+    fn from(e: ssh_transport::Error) -> Self {
+        use ssh_transport::Error as T;
+        match e {
+            T::Io(e) => Error::Io(e),
+            T::Ssh(m) => Error::Ssh(m),
+            T::Connect { host, port, reason } => Error::Connect { host, port, reason },
+            T::Timeout => Error::Timeout,
+            T::Auth { user } => Error::Auth { user },
+            T::Key { path, reason } => Error::Key { path, reason },
+            T::Agent(m) => Error::Agent(m),
+            T::HostKeyUnknown {
+                host,
+                port,
+                key_type,
+                fingerprint,
+            } => Error::HostKeyUnknown {
+                host,
+                port,
+                key_type,
+                fingerprint,
+            },
+            T::HostKeyChanged {
+                host,
+                port,
+                expected,
+                actual,
+            } => Error::HostKeyChanged {
+                host,
+                port,
+                expected,
+                actual,
+            },
+            T::HostKeyRejected => Error::HostKeyRejected,
+            T::Other(m) => Error::Other(m),
+        }
+    }
+}
+
 impl Error {
     /// True for the two host-key outcomes the UI has to render specially.
     pub fn is_host_key_issue(&self) -> bool {

@@ -76,6 +76,20 @@ pub struct HostProfile {
     /// "not an RDP profile" is not "an RDP profile with nothing set".
     #[serde(default)]
     pub rdp_settings: Option<String>,
+
+    /// SSH-only options as JSON, `None` for a profile that is not SSH.
+    ///
+    /// The same shape and the same rules as
+    /// [`HostProfile::rdp_settings`]: the store never parses it, so a blob a
+    /// newer build wrote cannot break the library, and `None` is meaningfully
+    /// different from `"{}"` ("not an SSH profile" is not "an SSH profile with
+    /// nothing set").
+    ///
+    /// `#[serde(default)]` is load bearing, not decoration: `save_host`
+    /// deserializes a **whole** `HostProfile`, so without it a webview build
+    /// predating this field would fail every save with "invalid args".
+    #[serde(default)]
+    pub ssh_settings: Option<String>,
 }
 
 impl HostProfile {
@@ -133,6 +147,7 @@ impl Default for HostProfile {
             updated_at: now,
             protocol: vnc_protocol(),
             rdp_settings: None,
+            ssh_settings: None,
         }
     }
 }
@@ -257,6 +272,24 @@ pub struct StoredCredentials {
     /// RDP password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rdp_password: Option<String>,
+
+    // The SSH pair carries no snake_case alias for the same reason the RDP
+    // fields do not: neither existed before the camelCase switch, so no blob
+    // written then can contain one.
+    /// SSH account name, when it differs from the local user. `None` means
+    /// "the same user as here", the overwhelmingly common case on a personal
+    /// machine and better than making the user retype it.
+    ///
+    /// Distinct from [`StoredCredentials::ssh_passphrase`], which unlocks a
+    /// private key and is not an account at all. A profile can legitimately
+    /// hold one, the other, both or neither: agent auth needs neither, an
+    /// encrypted key needs the passphrase, password auth needs this pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<String>,
+
+    /// SSH password, for a host that allows password authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_password: Option<String>,
 }
 
 impl StoredCredentials {
@@ -285,6 +318,16 @@ impl StoredCredentials {
         self.rdp_password = Some(password.to_string());
     }
 
+    /// Record an SSH credential the server accepted.
+    ///
+    /// Deliberately not folded into the passphrase: that unlocks a key file,
+    /// this is an account password. Writing one into the other's field would
+    /// have an agent-auth profile reporting a password it does not hold.
+    pub fn set_ssh_identity(&mut self, user: Option<&str>, password: &str) {
+        self.ssh_user = non_empty(user);
+        self.ssh_password = Some(password.to_string());
+    }
+
     /// Record a VNC credential the server accepted.
     ///
     /// A username means an identity-carrying method (VeNCrypt `*Plain`, Apple
@@ -309,6 +352,10 @@ impl StoredCredentials {
         match protocol {
             ProtocolKind::Rdp => self.rdp_password.is_some(),
             ProtocolKind::Vnc => self.vnc_password.is_some() || self.vencrypt_pass.is_some(),
+            // A key passphrase counts as a stored credential just as much as
+            // a password: reporting otherwise would make the UI prompt for
+            // something the vault already holds.
+            ProtocolKind::Ssh => self.ssh_password.is_some() || self.ssh_passphrase.is_some(),
             // `ProtocolKind` is `#[non_exhaustive]`. A protocol this build
             // does not know has no field here, so it has no credential here.
             _ => false,
@@ -372,6 +419,8 @@ impl zeroize::Zeroize for StoredCredentials {
             &mut self.rdp_user,
             &mut self.rdp_domain,
             &mut self.rdp_password,
+            &mut self.ssh_user,
+            &mut self.ssh_password,
         ] {
             if let Some(value) = field.as_mut() {
                 value.zeroize();
@@ -491,6 +540,8 @@ mod tests {
             rdp_user: Some("leak-5".into()),
             rdp_domain: Some("leak-6".into()),
             rdp_password: Some("leak-7".into()),
+            ssh_user: None,
+            ssh_password: None,
         };
         let rendered = format!("{creds:?}");
         for i in 1..=7 {
@@ -600,6 +651,8 @@ mod tests {
             rdp_user: Some("leak-5".into()),
             rdp_domain: Some("leak-6".into()),
             rdp_password: Some("leak-7".into()),
+            ssh_user: None,
+            ssh_password: None,
         };
         creds.zeroize();
         assert_eq!(
@@ -626,6 +679,8 @@ mod tests {
             rdp_domain: Some("d".repeat(255)),
             // Windows caps an interactive logon password at 127.
             rdp_password: Some("w".repeat(127)),
+            ssh_user: None,
+            ssh_password: None,
         };
         let len = serde_json::to_string(&creds).unwrap().len();
         assert!(

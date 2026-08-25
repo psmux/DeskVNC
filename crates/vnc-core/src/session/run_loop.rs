@@ -1585,6 +1585,14 @@ impl RunLoop {
             ClientCommand::ProvideCredentials { .. } | ClientCommand::CancelCredentials => {
                 tracing::debug!("credential command received while connected; ignoring");
             }
+            // A terminal command reaching a framebuffer session means the
+            // shell routed one to the wrong protocol. Ignored rather than
+            // treated as a protocol error: it is a routing bug, not a wire
+            // problem, and killing the user's session over it would be the
+            // worse outcome.
+            ClientCommand::TerminalInput(_) | ClientCommand::ResizeTerminal { .. } => {
+                tracing::debug!("terminal command received by a framebuffer session; ignoring");
+            }
             cmd @ (ClientCommand::Pointer { .. }
             | ClientCommand::Key { .. }
             | ClientCommand::ReleaseAllKeys) => {

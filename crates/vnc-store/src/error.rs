@@ -47,6 +47,13 @@ pub enum Error {
     )]
     RdpSettingsTooNew { found: u32, max: u32 },
 
+    #[error(
+        "this profile's SSH settings are version {found}, and this build \
+         understands up to version {max}: the profile was written by a newer \
+         version of the app"
+    )]
+    SshSettingsTooNew { found: u32, max: u32 },
+
     #[error("this .rdp file cannot be imported: {0}")]
     RdpFileRefused(String),
 

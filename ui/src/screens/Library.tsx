@@ -14,6 +14,8 @@ import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/S
 import { useToasts } from "../state/ToastContext";
 import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
 import { serializeRdpSettings } from "../lib/rdp";
+import { serializeSshSettings } from "../lib/ssh";
+import { loadSshDefaults } from "../lib/sshDefaults";
 import {
   hostMac,
   hostProtocol,
@@ -263,10 +265,14 @@ export function Library({
   // Browser dev only: stand in for "this machine was connected to once
   // already" so a Nearby tile can be seen with a real picture (see mock.ts).
   const mock = useMockData();
-  // The Preferences defaults a new Remote Desktop host starts with, cached
-  // once so building a draft stays synchronous. See `lib/rdpDefaults.ts`.
+  // The Preferences defaults a new Remote Desktop or SSH host starts with,
+  // cached once so building a draft stays synchronous. See `lib/rdpDefaults.ts`
+  // and `lib/sshDefaults.ts`. A default with no reader here is worse than no
+  // default at all, since Preferences would look like it works while a new
+  // SSH host quietly never sees the multiplexer the user picked.
   useEffect(() => {
     void loadRdpDefaults();
+    void loadSshDefaults();
   }, []);
 
   useEffect(() => {
@@ -607,6 +613,7 @@ export function Library({
         // once the user actually changes something and the Rust side keeps
         // applying its own defaults.
         rdpSettings: draft.protocol === "rdp" ? serializeRdpSettings(draft.rdp) : null,
+        sshSettings: draft.protocol === "ssh" ? serializeSshSettings(draft.ssh) : null,
       });
       const id = saved?.id ?? draft.id;
       if (id) {
@@ -618,6 +625,32 @@ export function Library({
             domain: draft.rdpDomain,
             password: draft.password,
           });
+        } else if (draft.protocol === "ssh") {
+          // `save_password` (Rust) already carries `sshUser` / `sshPassword`
+          // fields alongside the existing `sshPassphrase` (see
+          // `StoredCredentials` in crates/vnc-store/src/models.rs), and
+          // `connect_session` reads exactly this pair for SSH account
+          // password auth. There is no `saveSshCredentials` wrapper in
+          // HostsContext yet, only `savePassword` (hardcoded to
+          // `vncPassword`) and `saveSshPassphrase` (hardcoded to
+          // `sshPassphrase`), and HostsContext.tsx is outside this change's
+          // scope, so this calls the command directly with `safeInvoke`,
+          // already imported here, rather than adding a new context method.
+          // Only non-empty fields are sent, matching `saveRdpCredentials`'s
+          // own rule: an empty box means "keep what is stored", not "erase
+          // it", and a merge on the Rust side is what makes that true.
+          const payload: Record<string, string> = {};
+          if (draft.sshUser.trim()) payload.sshUser = draft.sshUser.trim();
+          if (draft.password) payload.sshPassword = draft.password;
+          if (Object.keys(payload).length > 0) {
+            await safeInvoke("save_password", { hostId: id, creds: payload }, null);
+            // `saveRdpCredentials` flips `hasPassword` in local state itself
+            // after a write like this one, which needs `setHosts` and so
+            // lives in HostsContext.tsx, outside this change's scope. A
+            // refresh gets the library's key icon to the same correct end
+            // state by re-reading it from the backend instead.
+            if (payload.sshPassword) await refresh();
+          }
         } else if (draft.password) {
           await savePassword(id, draft.password);
         }
@@ -627,7 +660,7 @@ export function Library({
       setHostDialog(null);
       push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
     },
-    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, push],
+    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push],
   );
 
   const paletteActions = useMemo((): PaletteAction[] => {

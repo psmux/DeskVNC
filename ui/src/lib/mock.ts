@@ -75,6 +75,24 @@ export const MOCK_HOSTS: HostProfile[] = [
     hasPassword: true, tags: ["t-prod"],
     lastConnected: now - 7200, connectCount: 9, online: true,
   },
+  // A third protocol alongside the VNC and RDP fixtures above, so dev mode
+  // exercises it too: the SSH badge on the tile, the address label hiding 22
+  // the same way the RDP one hides 3389, and the parsed blob filling the
+  // terminal editor.
+  {
+    ...blankHostProfile("ssh"),
+    id: "h-ssh", friendlyName: "Build server", address: "10.0.0.55", port: 22,
+    sshSettings: JSON.stringify({
+      v: 1,
+      term: "xterm-256color", cols: 80, rows: 24, multiplexer: "tmux",
+      sessionName: "work", customCommand: null, fallbackToShell: true,
+      startupCommand: null, fontSize: 13, scrollback: 10_000,
+    }),
+    groupId: "g-lab", osHint: "linux", serverHint: "OpenSSH",
+    qualityPref: "auto", scalingMode: "fit",
+    hasPassword: false, tags: ["t-dev"],
+    lastConnected: now - 1800, connectCount: 31, online: true,
+  },
 ];
 
 /**
@@ -139,6 +157,17 @@ export const MOCK_DISCOVERED: DiscoveredHost[] = [
       extendedClientData: true, restrictedAdmin: false, redirectedAuth: false,
       standardOnly: false, failureCode: null, selectedProtocol: 3,
     },
+    savedHostId: null,
+  },
+  // An SSH-only machine on the standard port, the third protocol's equivalent
+  // of the RDP-only fixture above: it must render the SSH badge (any protocol
+  // other than VNC does, not just RDP) with no `rdp` caps object at all.
+  {
+    id: "10.0.0.90:22", name: "build-agent-3", address: "10.0.0.90", port: 22,
+    osHint: "linux", serverHint: "OpenSSH", securityHint: null,
+    security: "unverified", securityTypes: [], source: "scan",
+    mac: null, nameSource: "reverse-dns",
+    protocol: "ssh",
     savedHostId: null,
   },
 ];

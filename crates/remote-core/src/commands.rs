@@ -71,4 +71,24 @@ pub enum ClientCommand {
     /// Reset backoff and retry immediately (network came back / user clicked).
     ReconnectNow,
     Disconnect,
+
+    /// Keystrokes and pastes for a remote shell, already encoded as the bytes
+    /// the PTY should receive.
+    ///
+    /// Not expressible as [`ClientCommand::Key`]: that carries a keysym and a
+    /// keycode for a framebuffer protocol to translate, and it has nowhere to
+    /// put a multi-byte character or a pasted block. A terminal's input is
+    /// simply bytes.
+    TerminalInput(bytes::Bytes),
+
+    /// The terminal was resized, in **character cells**.
+    ///
+    /// Deliberately separate from [`ClientCommand::RequestResize`], which is
+    /// in pixels and asks a remote *desktop* to change resolution. Reusing it
+    /// would be a silent unit mismatch: 80 columns is not 80 pixels, and
+    /// nothing in the type system would catch it.
+    ResizeTerminal {
+        cols: u16,
+        rows: u16,
+    },
 }

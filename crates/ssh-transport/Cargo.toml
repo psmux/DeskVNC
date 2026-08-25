@@ -1,0 +1,21 @@
+[package]
+name = "ssh-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The SSH carrier, shared by every feature that needs one: the SFTP sidecar
+# (`vnc-files`), the RFB tunnel, and the remote shell (`ssh-core`).
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+russh = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+serde_json = { workspace = true }

@@ -8,10 +8,10 @@
 //! session as its byte stream, so there is no forwarded port on 127.0.0.1 for
 //! another local process to race us to.
 //!
-//! Host-key verification and authentication are exactly the SFTP sidecar's
-//! (`session::connect_and_authenticate`): the same TOFU pin store answers for
-//! both features, so trusting a machine once covers its tunnel and its Files
-//! panel alike.
+//! Host-key verification and authentication are the carrier's
+//! ([`crate::connect::connect_and_authenticate`]): one TOFU pin store answers
+//! for every feature, so trusting a machine once covers its tunnel, its Files
+//! panel and its terminal alike.
 //!
 //! The auto-reconnect supervisor calls [`SshTunnel::open_stream`] again after
 //! a drop. A dead SSH carrier is re-dialled then, verified against the pin
@@ -24,14 +24,10 @@ use std::sync::Arc;
 use russh::client::Msg;
 use russh::ChannelStream;
 
-use crate::config::{host_port, FileTransferConfig};
+use crate::config::{host_port, SshConfig};
+use crate::connect::{connect_and_authenticate, BoxFuture, ClientHandler};
 use crate::error::{Error, Result};
 use crate::hostkey::HostKeyVerifier;
-use crate::session::{connect_and_authenticate, ClientHandler};
-
-/// A `Send` future with a concrete region; see the twin alias in `session.rs`
-/// for why russh futures need boxing at these boundaries.
-type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// The stream a tunnelled VNC connection runs over.
 pub type TunnelStream = ChannelStream<Msg>;
@@ -41,7 +37,7 @@ pub type TunnelStream = ChannelStream<Msg>;
 /// Cheap to share behind an `Arc`; `open_stream` takes `&self` and serialises
 /// redials internally.
 pub struct SshTunnel {
-    cfg: FileTransferConfig,
+    cfg: SshConfig,
     verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
     /// `None` after the carrier died; re-dialled on the next `open_stream`.
     /// A tokio mutex because it is held across the redial await, which also
@@ -64,7 +60,7 @@ impl SshTunnel {
     /// passphrase or an unknown host key surfaces before a session is
     /// spawned, where the shell can still prompt (`Error::HostKeyUnknown`)
     /// or hard-stop (`Error::HostKeyChanged`).
-    pub async fn connect(cfg: FileTransferConfig, verifier: impl HostKeyVerifier) -> Result<Self> {
+    pub async fn connect(cfg: SshConfig, verifier: impl HostKeyVerifier) -> Result<Self> {
         let verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static> = Arc::new(verifier);
         let ssh = connect_and_authenticate(&cfg, verifier.clone()).await?;
         tracing::info!(gateway = %cfg.endpoint(), auth = cfg.auth.label(), "ssh tunnel established");

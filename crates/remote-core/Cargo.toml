@@ -10,6 +10,8 @@ license.workspace = true
 # on none of them. PRDRDP/02 §3.1.
 
 [dependencies]
+# Terminal output is handed straight to the shell without a copy per chunk.
+bytes = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
