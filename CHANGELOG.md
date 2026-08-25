@@ -10,6 +10,46 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-08-26
+
+Patch: behaviour only. Nothing stored changes shape and no command or
+event gains a field.
+
+### Fixed
+
+- **Detaching from tmux or psmux hung up the connection.** `Ctrl-B D`
+  ended the whole session instead of returning to the remote prompt.
+
+  The attach command was run as the SSH command itself, which ties the
+  connection's life to the multiplexer: the moment it exits, the channel
+  closes and the connection goes with it. That is what
+  `ssh -t host tmux attach` does, and it is not what anyone wants from a
+  terminal. A login shell now starts and the attach is typed into it, so
+  detaching behaves like `ssh host` followed by `tmux attach`: back at
+  the remote prompt, still connected, free to reattach or do something
+  else.
+
+  The previous release only changed the wording of the message. The
+  session still ended, which is not a fix.
+
+- **A saved SSH password was ignored unless the profile also said to use
+  one.** A host with a password in the keychain still failed with "the
+  ssh agent holds no identities", because authentication was an
+  exclusive choice and the default was the agent.
+
+  Every real SSH client treats authentication as a preference order, and
+  this one now does too: the configured method is tried first, then
+  whatever else there is material for. Saving a password is enough to
+  make it work, whatever the setting says. A method with nothing behind
+  it is skipped rather than attempted and refused, which would burn a
+  try against servers that count them.
+
+- **A profile's startup command never ran.** It was stored and read and
+  then never reached the far side. It now runs inside the multiplexer,
+  so it is as persistent as the rest of the session, and is covered by
+  tests.
+
+
 ## [0.17.0] - 2026-08-26
 
 Minor rather than patch under the sub-1.0 rule in this file's own header:
