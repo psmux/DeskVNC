@@ -39,6 +39,7 @@ import { useHostDragSelect, type DropTarget } from "../hooks/useHostDragSelect";
 import { HostTile, DiscoveredTile, addressLabel, osLabel } from "../components/HostTile";
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
+import { loadRdpDefaults } from "../lib/rdpDefaults";
 import { QuickConnect } from "../components/QuickConnect";
 import { ContextMenu, Dialog, EmptyState, Select, TileSkeleton, type MenuItem } from "../components/primitives";
 import {
@@ -262,6 +263,12 @@ export function Library({
   // Browser dev only: stand in for "this machine was connected to once
   // already" so a Nearby tile can be seen with a real picture (see mock.ts).
   const mock = useMockData();
+  // The Preferences defaults a new Remote Desktop host starts with, cached
+  // once so building a draft stays synchronous. See `lib/rdpDefaults.ts`.
+  useEffect(() => {
+    void loadRdpDefaults();
+  }, []);
+
   useEffect(() => {
     if (mock) seedMockThumbnails();
   }, [mock]);

@@ -32,6 +32,9 @@ export interface SessionMenuState {
   layoutKnown: boolean;
   displays: { id: number; label: string }[];
   displayId: number | null;
+  /** `connect`, `follow`, a `WIDTHxHEIGHT` pair, or empty when the session's
+   *  desktop size is not the user's to choose, which greys the submenu. */
+  resolution: string;
 }
 
 /**

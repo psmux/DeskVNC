@@ -702,23 +702,21 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                 </span>
               </div>
               {/*
-                Disabled with a reason rather than hidden, the rule the Files
-                button already sets, which exists so "why can't I do this?"
-                has an answer. Asking a Windows host to resize needs the
-                Display Update channel, which this version does not speak
-                yet.
+                This was disabled for RDP with a note saying the Display Update
+                channel was not spoken yet. It is: MS-RDPEDISP has been
+                implemented and tested for a while, and the native View menu
+                never gated the same row, so the two disagreed.
               */}
               <MenuRow
                 selected={props.scalingMode === "remote-resize"}
-                disabled={props.protocol === "rdp"}
                 onClick={() => props.onScalingMode("remote-resize")}
               >
                 Remote resize (match window)
               </MenuRow>
               {props.protocol === "rdp" ? (
                 <p className="px-2.5 pb-1 text-2xs text-tertiary">
-                  Resizing the remote desktop to the window is not available for
-                  Remote Desktop connections yet.
+                  View, then Resolution, also sets the remote desktop to a fixed
+                  size.
                 </p>
               ) : null}
               <MenuRow

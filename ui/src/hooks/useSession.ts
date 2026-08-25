@@ -454,6 +454,13 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           ignoreStoredCredentials: repromptRef.current,
           // Answers a previous ssh-host-key-prompt outcome, once.
           acceptSshHostKey,
+          // The viewport in physical pixels, so an RDP session can ask for a
+          // desktop that fits rather than the specification's 1024 by 768.
+          // The canvas is not mounted yet at this point, and the session view
+          // is full bleed, so the window is both the available measure and the
+          // right one.
+          viewportWidth: Math.round(window.innerWidth * window.devicePixelRatio),
+          viewportHeight: Math.round(window.innerHeight * window.devicePixelRatio),
           onEvent: channel,
         });
         repromptRef.current = false;

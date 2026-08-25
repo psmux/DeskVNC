@@ -18,6 +18,14 @@ import {
 } from "../lib/prefs";
 import { readViewDefaults, writeViewDefaults, type ViewPrefs } from "../lib/viewPrefs";
 import type { QualityPreset, ScalingMode } from "../lib/types";
+import type { RdpResolution } from "../lib/rdp";
+import { RDP_FIXED_SIZES } from "../lib/rdp";
+import {
+  decodeResolution,
+  encodeResolution,
+  RDP_DEFAULT_KEYS,
+  setRdpDefault,
+} from "../lib/rdpDefaults";
 import { classNames } from "../lib/util";
 import { IconX } from "../components/icons";
 
@@ -84,6 +92,42 @@ function useAppSetting(key: string, initial: boolean): [boolean, (v: boolean) =>
   return [v, set];
 }
 
+/**
+ * The resolution a new Remote Desktop host starts with.
+ *
+ * `useAppSetting` only carries booleans and this is a choice of several, so it
+ * gets its own reader. It writes through the in-memory cache as well as the
+ * store, so a host added straight after changing this picks it up without a
+ * restart.
+ */
+function useRdpResolutionDefault(): [RdpResolution, (v: RdpResolution) => void] {
+  const [v, setV] = useState<RdpResolution>({ mode: "window-at-connect" });
+  useEffect(() => {
+    let cancelled = false;
+    void safeInvoke<string | null>(
+      "get_app_setting",
+      { key: RDP_DEFAULT_KEYS.resolution },
+      null,
+    ).then((raw) => {
+      const parsed = decodeResolution(raw);
+      if (!cancelled && parsed) setV(parsed);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const set = useCallback((next: RdpResolution) => {
+    setV(next);
+    setRdpDefault("resolution", next);
+    void safeInvoke(
+      "set_app_setting",
+      { key: RDP_DEFAULT_KEYS.resolution, value: encodeResolution(next) },
+      null,
+    );
+  }, []);
+  return [v, set];
+}
+
 export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [tab, setTab] = useState<Tab>("General");
   const { settings, update } = useSettings();
@@ -106,7 +150,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   // table rather than the webview so the connect path can read them later
   // without a round trip through JS.
   const [rdpMultiMonitor, setRdpMultiMonitor] = useAppSetting("rdp_default_multi_monitor", false);
-  const [rdpDynamicRes, setRdpDynamicRes] = useAppSetting("rdp_default_dynamic_resolution", true);
+  const [rdpResolution, setRdpResolution] = useRdpResolutionDefault();
   const [rdpAudio, setRdpAudio] = useAppSetting("rdp_default_audio", true);
   const [rdpClipboard, setRdpClipboard] = useAppSetting("rdp_default_redirect_clipboard", true);
   const [multipleSessions, setMultipleSessions] = useAppSetting(ALLOW_MULTIPLE_SESSIONS_KEY, false);
@@ -270,25 +314,52 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   label="Use all my monitors for new Remote Desktop connections"
                   description="New hosts start with every local monitor attached. Existing hosts keep whatever you set on them."
                   value={rdpMultiMonitor}
-                  onChange={setRdpMultiMonitor}
+                  onChange={(on) => {
+                    setRdpDefault("monitors", on ? "all" : "primary");
+                    setRdpMultiMonitor(on);
+                  }}
                 />
-                <Toggle
-                  label="Match the remote resolution to the window"
-                  description="The remote desktop resizes as you resize the window, instead of being scaled."
-                  value={rdpDynamicRes}
-                  onChange={setRdpDynamicRes}
-                />
+                <label className="block">
+                  <span className="text-sm text-primary">Resolution for new Remote Desktop hosts</span>
+                  <span className="mt-0.5 block text-xs text-tertiary">
+                    Matching the window when connecting is what Windows' own client does. Making it
+                    keep matching resizes the remote desktop every time you resize this one, which
+                    rearranges that machine's icons each time.
+                  </span>
+                  <select
+                    className="field mt-1.5"
+                    value={encodeResolution(rdpResolution)}
+                    onChange={(e) => {
+                      const next = decodeResolution(e.target.value);
+                      if (next) setRdpResolution(next);
+                    }}
+                  >
+                    <option value="window-at-connect">Match the window when connecting</option>
+                    <option value="follow-window">Match the window, and keep matching</option>
+                    {RDP_FIXED_SIZES.map(([w, h]) => (
+                      <option key={`${w}x${h}`} value={`${w}x${h}`}>
+                        {w} x {h}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <Toggle
                   label="Play remote sound on this computer"
                   description="Sound from the remote computer is redirected here rather than left playing there."
                   value={rdpAudio}
-                  onChange={setRdpAudio}
+                  onChange={(on) => {
+                    setRdpDefault("audio", on ? "play-locally" : "leave-at-server");
+                    setRdpAudio(on);
+                  }}
                 />
                 <Toggle
                   label="Share my clipboard with Remote Desktop connections"
                   description="Copy and paste text in both directions."
                   value={rdpClipboard}
-                  onChange={setRdpClipboard}
+                  onChange={(on) => {
+                    setRdpDefault("clipboard", on);
+                    setRdpClipboard(on);
+                  }}
                 />
                 <Toggle
                   label="Reconnect until I close the window"

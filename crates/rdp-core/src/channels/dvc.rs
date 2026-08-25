@@ -226,6 +226,13 @@ pub struct DvcMux {
     dvc: Vec<u8>,
     /// The static channel chunk, reused across frames.
     chunk: Vec<u8>,
+    /// A size asked for before the display control channel existed.
+    ///
+    /// The server opens that channel some way into the session, and a resize
+    /// arriving first used to be logged and dropped. That is fine for a window
+    /// the user is dragging, which will ask again, and wrong for the size a
+    /// session was configured with, which is asked for exactly once.
+    deferred_resize: Option<(u32, u32, u32)>,
 }
 
 impl DvcMux {
@@ -236,6 +243,9 @@ impl DvcMux {
     }
 
     /// Forget every open channel and every partial message.
+    ///
+    /// A held resize deliberately survives: it was asked for and never
+    /// delivered, and the channels are about to be reopened.
     ///
     /// A deactivation tears the share down and the server reopens its
     /// channels on the new one (PRDRDP/05 §5.1 rule 6).
@@ -302,7 +312,8 @@ impl DvcMux {
             .iter()
             .position(|c| matches!(c.kind, DynKind::Display(_)))
         else {
-            tracing::debug!("a resize with no display control channel to send it on");
+            tracing::debug!("a resize before the display control channel, holding it");
+            self.deferred_resize = Some((width, height, scale_percent));
             return Ok(());
         };
         let Self { open, replies, .. } = self;
@@ -473,6 +484,12 @@ impl DvcMux {
                 kind: DynKind::Display(DisplayControl::new()),
                 reassembler: DvcReassembler::with_cap(DISPLAY_REASSEMBLY_CAP),
             });
+            // Anything asked for while there was nowhere to send it. The
+            // channel holds it again until the capability PDU arrives, so this
+            // is a hand off rather than a send.
+            if let Some((width, height, scale)) = self.deferred_resize.take() {
+                self.resize(width, height, scale, static_id, ctx, out)?;
+            }
             return Ok(());
         }
 
@@ -963,6 +980,62 @@ mod tests {
         // status was going to be (MS-RDPEGFX 3.3.5.1).
         assert_eq!(out.frames.len(), 2, "the status, then the advertisement");
         assert_eq!(egfx_payloads(&out).len(), 1);
+    }
+
+    /// A size asked for before the display control channel exists is held,
+    /// not dropped.
+    ///
+    /// The server opens that channel some way into the session. A resize
+    /// arriving first used to be logged and thrown away, which is harmless for
+    /// a window being dragged, because another will follow, and wrong for the
+    /// size a session was configured with, which is asked for exactly once. A
+    /// desktop too tall for the connection request depends entirely on this.
+    #[test]
+    fn a_resize_before_the_display_channel_is_held_until_it_opens() {
+        let mut mux = DvcMux::new();
+        let mut out = Outbox::new();
+        mux.message(
+            &from_server(&DvcPdu::Capabilities {
+                version: dvc_version::V3,
+                priority_charges: None,
+            }),
+            STATIC_ID,
+            ctx(),
+            &mut out,
+        )
+        .expect("capabilities");
+
+        let mut out = Outbox::new();
+        mux.resize(3840, 2160, 100, STATIC_ID, ctx(), &mut out)
+            .expect("held");
+        assert!(out.frames.is_empty(), "nowhere to send it yet");
+
+        // Opening the channel hands it on. MS-RDPEDISP 1.3.1 still holds it
+        // back until the capability PDU, so what is asserted is that the
+        // request survived, not that it went out.
+        let mut out = Outbox::new();
+        mux.message(
+            &from_server(&DvcPdu::CreateRequest {
+                channel_id: 6,
+                channel_name: DISPLAY_CHANNEL_NAME.to_owned(),
+            }),
+            STATIC_ID,
+            ctx(),
+            &mut out,
+        )
+        .expect("accepted");
+        assert_eq!(creation_statuses(&out), vec![(6, creation_status::SUCCESS)]);
+
+        assert_eq!(
+            mux.deferred_resize, None,
+            "the held size was handed to the channel, not still waiting"
+        );
+
+        // And a later resize now has somewhere to go, so nothing is held.
+        let mut again = Outbox::new();
+        mux.resize(1920, 1080, 100, STATIC_ID, ctx(), &mut again)
+            .expect("a later resize has a channel now");
+        assert_eq!(mux.deferred_resize, None);
     }
 
     /// The regression the socket test caught.

@@ -540,3 +540,73 @@ impl ReconnectPolicy {
         std::time::Duration::from_millis(jittered.max(0.0) as u64)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The webview parses this blob, so its shape is a contract and not an
+    /// implementation detail. `ui/src/lib/rdp.ts` carries the matching reader,
+    /// and a change here without a change there is a setting that silently
+    /// reverts to its default the next time a profile is opened.
+    #[test]
+    fn the_resolution_serialises_the_way_the_webview_reads_it() {
+        let json = |r: RdpResolution| serde_json::to_string(&r).expect("serialises");
+        assert_eq!(
+            json(RdpResolution::FollowWindow),
+            r#"{"mode":"follow-window"}"#
+        );
+        assert_eq!(
+            json(RdpResolution::WindowAtConnect),
+            r#"{"mode":"window-at-connect"}"#
+        );
+        assert_eq!(
+            json(RdpResolution::Fixed {
+                width: 1920,
+                height: 1080
+            }),
+            r#"{"mode":"fixed","width":1920,"height":1080}"#
+        );
+
+        // And back, because the webview writes it too.
+        let back: RdpResolution =
+            serde_json::from_str(r#"{"mode":"fixed","width":2560,"height":1440}"#).expect("parses");
+        assert_eq!(
+            back,
+            RdpResolution::Fixed {
+                width: 2560,
+                height: 1440
+            }
+        );
+    }
+
+    /// Only one of the three tracks the window, and the default is not it.
+    #[test]
+    fn only_follow_window_tracks_the_window() {
+        assert!(RdpResolution::FollowWindow.follows_window());
+        assert!(!RdpResolution::WindowAtConnect.follows_window());
+        assert!(!RdpResolution::Fixed {
+            width: 1920,
+            height: 1080
+        }
+        .follows_window());
+        assert!(!RdpResolution::default().follows_window());
+    }
+
+    /// A window that has not been laid out reports zero, and a desktop no
+    /// pixels wide must never reach the wire.
+    #[test]
+    fn a_zero_sized_window_is_treated_as_nothing_measured() {
+        let m = RdpResolution::WindowAtConnect;
+        assert_eq!(m.size(Some((1712, 1067))), Some((1712, 1067)));
+        assert_eq!(m.size(Some((0, 1067))), None);
+        assert_eq!(m.size(Some((1712, 0))), None);
+        assert_eq!(m.size(None), None);
+        // A fixed size does not consult the window at all.
+        let f = RdpResolution::Fixed {
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(f.size(None), Some((1920, 1080)));
+    }
+}
