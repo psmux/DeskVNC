@@ -157,6 +157,13 @@ protect.
   "fallbackToShell": true, // ignored by "auto", which treats "nothing installed"
                            // as an answer rather than a failure
   "startupCommand": null,  // runs instead of the login shell, inside the multiplexer
+  "startupCommand": null, // runs instead of the login shell, inside the multiplexer
+  // Enter WSL on a Windows host instead of its native shell. This changes
+  // WHERE the multiplexer is looked for: a WSL user's tmux lives inside the
+  // distribution, so the probe runs in there too. Probing Windows would
+  // answer for the wrong machine.
+  "wsl": false,
+  "wslDistro": null,      // null or empty means the Windows default distro
   "term": "xterm-256color",
   "cols": 80, "rows": 24,
   // Store-only, the UI's business rather than the protocol's.
@@ -998,6 +1005,7 @@ conflates them will look for terminal output on the wrong channel.
 | Command | JS call | Returns |
 |---|---|---|
 | `ssh_probe` | `invoke("ssh_probe", { host, port?, timeoutMs? })` | `boolean`, never rejects; `port` defaults to 22 |
+| `ssh_list_wsl_distros` | `invoke("ssh_list_wsl_distros", { config })` | `string[]`, **never rejects**; empty when the question cannot be answered |
 | `ssh_connect` | `invoke("ssh_connect", { sessionId, windowLabel, config })` | `SshConnectOutcome` |
 | `ssh_send` | `invoke("ssh_send", { sessionId, data })` | `void`; `data` is **base64** |
 | `ssh_resize` | `invoke("ssh_resize", { sessionId, cols, rows })` | `void` |
@@ -1018,6 +1026,23 @@ string. The framebuffer path solves the same problem with the binary framing in
 `FRAME_FORMAT.md`, which earns its keep at megabytes per second; a terminal is
 orders of magnitude quieter, so it rides the normal event channel instead.
 Decode to a `Uint8Array` and hand it straight to the emulator.
+
+### `ssh_list_wsl_distros`
+
+`config` is the same `SshConnectRequest` shape `ssh_connect` takes. It
+connects, runs `wsl.exe -l -q`, and returns the installed distribution names.
+
+**It returns an empty array rather than rejecting** whenever the question
+cannot be answered: the host has no WSL, no `wsl.exe`, no saved credential, or
+a host key not yet trusted. Every one of those is an ordinary state, not a
+failure, and this feeds a Detect button in a settings form: a rejection there
+would raise an error dialog for something that is not wrong. The editor shows
+a plain name field when the list comes back empty.
+
+Note for anyone reimplementing the parse: `wsl.exe -l -q` writes **UTF-16LE**,
+not UTF-8, even when every character in it is ASCII. Read as UTF-8 it becomes
+a string with a NUL between each letter, which parses without error and then
+matches nothing.
 
 ### `SshConnectOutcome`
 

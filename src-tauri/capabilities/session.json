@@ -79,6 +79,7 @@
     "allow-files-local-remove",
 
     "allow-ssh-probe",
+    "allow-ssh-list-wsl-distros",
     "allow-ssh-connect",
     "allow-ssh-send",
     "allow-ssh-resize",

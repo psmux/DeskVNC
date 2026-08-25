@@ -30,6 +30,7 @@ import {
 import type { MultiplexerKind, SshAuthKind, SshSettings } from "../lib/ssh";
 import { blankSshSettings, parseSshSettings } from "../lib/ssh";
 import { sshDefaults } from "../lib/sshDefaults";
+import { sshListWslDistros } from "../lib/tauri";
 import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
@@ -678,7 +679,16 @@ export function HostDialog({
                   onChange={setRdp}
                 />
               ) : null}
-              {isSsh ? <SshOptionsSection ssh={ssh} onChange={setSsh} /> : null}
+              {isSsh ? (
+                <SshOptionsSection
+                  ssh={ssh}
+                  onChange={setSsh}
+                  host={d.address}
+                  port={d.port}
+                  username={d.sshUser}
+                  profileId={d.id ?? null}
+                />
+              ) : null}
               {/*
                 This tunnel wraps a GRAPHICAL session (VNC or RDP) inside an
                 SSH login, so it can reach a server that only listens on the
@@ -827,6 +837,38 @@ function sessionNameError(name: string): string | null {
 }
 
 /**
+ * `is_safe_distro_name` in `crates/ssh-core/src/multiplexer.rs`, mirrored
+ * exactly: real distro names carry dots (`Ubuntu-22.04`, `openSUSE-Leap-15.5`)
+ * so this is looser than {@link SESSION_NAME_RE}, but the name still reaches
+ * the remote inside a command line, so anything a shell would treat as
+ * punctuation stays out.
+ */
+const DISTRO_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** `null` when a typed distribution name is fine to save. Empty is legal, it
+ *  means the Windows default, so only a non-empty, invalid name is an error. */
+function distroNameError(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed === "") return null;
+  if (trimmed.length > 64) return "64 characters or fewer";
+  if (!DISTRO_NAME_RE.test(trimmed)) return "Only letters, numbers, dot, underscore and hyphen";
+  return null;
+}
+
+/**
+ * ssh.ts's `SshAuthKind` has a `"password"` member because that is a real
+ * choice in the host editor; the connect config's own `SshAuthKind` (in
+ * tauri.ts) does not, because "password" and "key-file passphrase" are the
+ * same thing to the Rust side once they are looked up: whatever is sitting
+ * in this profile's keychain entry, which is what `"stored"` fetches. Without
+ * this mapping the Detect button would send a value `ssh_list_wsl_distros`
+ * does not know and the request would fail to deserialize.
+ */
+function toDetectAuth(auth: SshAuthKind): "stored" | "key-file" | "agent" {
+  return auth === "password" ? "stored" : auth;
+}
+
+/**
  * The SSH-only options, inside Advanced, shown only for the SSH protocol.
  *
  * Mirrors {@link RdpOptionsSection}'s shape: everything here is an ordinary
@@ -836,15 +878,51 @@ function sessionNameError(name: string): string | null {
 function SshOptionsSection({
   ssh,
   onChange,
+  host,
+  port,
+  username,
+  profileId,
 }: {
   ssh: SshSettings;
   onChange: (patch: Partial<SshSettings>) => void;
+  /** The draft's own connection fields, so Detect can ask about the machine
+   *  this profile actually points at rather than a stale or saved one. */
+  host: string;
+  port: number;
+  username: string;
+  profileId: string | null;
 }): ReactNode {
   // Touched on blur rather than checked from the first keystroke, the same
   // rule the address field uses: typing a fresh name a character at a time
   // must not flash red before the user has finished it.
   const [nameTouched, setNameTouched] = useState(false);
   const nameError = nameTouched ? sessionNameError(ssh.sessionName) : null;
+
+  // `null` means Detect has never run this dialog session: show the free-text
+  // field with no "could not read" line, since nothing has actually failed
+  // yet. `[]` means it ran and came back empty, which is an ordinary answer,
+  // not an error, so the free-text field stays but says why.
+  const [distros, setDistros] = useState<string[] | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [distroTouched, setDistroTouched] = useState(false);
+  const distroError = distroTouched ? distroNameError(ssh.wslDistro ?? "") : null;
+
+  const detectDistros = async (): Promise<void> => {
+    setDetecting(true);
+    try {
+      const found = await sshListWslDistros({
+        host,
+        port,
+        username,
+        auth: toDetectAuth(ssh.auth),
+        keyPath: ssh.keyPath,
+        profileId,
+      });
+      setDistros(found);
+    } finally {
+      setDetecting(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -888,6 +966,69 @@ function SshOptionsSection({
             autoCorrect="off"
             onChange={(e) => onChange({ keyPath: e.target.value || null })}
           />
+        </Field>
+      ) : null}
+
+      {/*
+        Sits directly after Authentication and before the multiplexer below,
+        because it decides WHERE the multiplexer is looked for, not just
+        whether one is used: with this on, tmux/psmux/etc. are searched for
+        inside the WSL distribution, not on Windows. The reader needs that
+        before reading the multiplexer control, or the multiplexer choice
+        looks like it is about the Windows side when it may not be.
+      */}
+      <Check
+        checked={ssh.wsl}
+        onChange={(wsl) => onChange({ wsl })}
+        label="Connect inside WSL"
+        hint="On a Windows host, land inside the Windows Subsystem for Linux instead of PowerShell, and look for the multiplexer there instead of on Windows."
+      />
+
+      {ssh.wsl ? (
+        <Field
+          label="Distribution"
+          error={distroError}
+          hint={
+            distros !== null && distros.length === 0
+              ? "The list of installed distributions could not be read, so type a name instead. Leave blank for the default distribution."
+              : "Leave blank for the default distribution."
+          }
+        >
+          <div className="flex gap-2">
+            {distros !== null && distros.length > 0 ? (
+              <Select
+                value={ssh.wslDistro ?? ""}
+                onChange={(e) => onChange({ wslDistro: e.target.value || null })}
+              >
+                <option value="">Default distribution</option>
+                {distros.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <input
+                className="field mono"
+                value={ssh.wslDistro ?? ""}
+                placeholder="Default distribution"
+                maxLength={64}
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                onBlur={() => setDistroTouched(true)}
+                onChange={(e) => onChange({ wslDistro: e.target.value || null })}
+              />
+            )}
+            <button
+              type="button"
+              className="btn-secondary shrink-0 disabled:opacity-40"
+              disabled={detecting}
+              onClick={() => void detectDistros()}
+            >
+              {detecting ? "Detecting…" : "Detect"}
+            </button>
+          </div>
         </Field>
       ) : null}
 

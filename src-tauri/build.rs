@@ -201,6 +201,7 @@ fn main() {
             // `ssh_send` carries keystrokes, so it is as sensitive as
             // `send_input` and stays its own grantable command.
             "ssh_probe",
+            "ssh_list_wsl_distros",
             "ssh_connect",
             "ssh_send",
             "ssh_resize",

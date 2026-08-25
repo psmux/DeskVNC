@@ -668,6 +668,21 @@ export function sshProbe(host: string, port?: number): Promise<boolean> {
 }
 
 /**
+ * Which WSL distributions does this host have installed?
+ *
+ * Connects, asks `wsl.exe -l -q`, and drops the connection. Routed through
+ * `safeInvoke`, not `mustInvoke`: an empty list is the *documented* answer
+ * for every ordinary case (no WSL, no `wsl.exe`, the host key not trusted
+ * yet, credentials not held), not a failure, and this is a Detect button in a
+ * settings form, not a connect attempt, so nothing here should ever surface
+ * an error dialog. The host editor already knows what to do with an empty
+ * answer: fall back to a free-text distribution field.
+ */
+export function sshListWslDistros(config: SshConnectConfig): Promise<string[]> {
+  return safeInvoke<string[]>("ssh_list_wsl_distros", { config }, []);
+}
+
+/**
  * Open a supervised remote shell. `windowLabel` is the window that will
  * receive this session's `ssh://event` traffic.
  */

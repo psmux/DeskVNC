@@ -187,6 +187,63 @@ pub async fn ssh_probe(host: String, port: u16, timeout_ms: Option<u64>) -> Resu
     Ok(ssh_transport::probe_ssh(&host, port, timeout).await)
 }
 
+/// Which WSL distributions does this host have?
+///
+/// Connects, asks, and drops the connection. Returns an empty list rather
+/// than an error whenever the question cannot be answered: a host with no
+/// WSL, no `wsl.exe`, or credentials we do not hold is an ordinary state, and
+/// the host editor answers it by showing a plain name field instead of a
+/// picker. Failing the call would turn that into an error dialog for
+/// something that is not wrong.
+#[tauri::command]
+pub async fn ssh_list_wsl_distros(
+    app: AppHandle,
+    files: State<'_, FilesState>,
+    config: SshConnectRequest,
+) -> Result<Vec<String>, String> {
+    let auth = build_auth(
+        &app,
+        config.auth,
+        config.key_path.as_deref(),
+        config.profile_id.as_deref(),
+    )
+    .await?;
+    let username = if config.username.trim().is_empty() {
+        local_username()?
+    } else {
+        config.username.clone()
+    };
+
+    let cfg = SshConfig {
+        host: config.host.clone(),
+        port: config.port,
+        username,
+        auth,
+        connect_timeout_ms: 15_000,
+    };
+
+    let handle = match ssh_transport::connect_and_authenticate_with(
+        &cfg,
+        Arc::new(files.host_key_verifier()),
+        ssh_transport::Keepalive::interactive(),
+    )
+    .await
+    {
+        Ok(h) => h,
+        // Includes an untrusted host key. The list is a convenience, and the
+        // real connect is where a fingerprint prompt belongs, so this stays
+        // quiet rather than raising a dialog from a settings form.
+        Err(e) => {
+            tracing::debug!("could not list wsl distributions: {e}");
+            return Ok(Vec::new());
+        }
+    };
+
+    let distros = ssh_core::pty::list_wsl_distros(&handle).await;
+    drop(handle);
+    Ok(distros)
+}
+
 /// Open a supervised remote shell and start pumping its output to `window`.
 #[tauri::command]
 pub async fn ssh_connect(

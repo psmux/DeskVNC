@@ -25,6 +25,12 @@ describe("parseSshSettings", () => {
     expect(parseSshSettings('{"auth":"key-file"}')?.auth).toBe("key-file");
   });
 
+  it("reads a missing wsl as false, the same tolerant rule as every other flag", () => {
+    expect(parseSshSettings("{}")?.wsl).toBe(false);
+    expect(parseSshSettings('{"sessionName":"work"}')?.wsl).toBe(false);
+    expect(parseSshSettings('{"wsl":true}')?.wsl).toBe(true);
+  });
+
   it("reads a v higher than this build understands rather than refusing", () => {
     // Unlike `vnc_store::SshSettings::parse`, which errors on a blob newer
     // than it knows (PRDRDP/08 §2.4 style rule), this reader never guesses at
@@ -61,6 +67,13 @@ describe("serializeSshSettings", () => {
     expect(parseSshSettings(text)).toEqual(s);
   });
 
+  it("round trips wsl and wslDistro", () => {
+    const s = { ...blankSshSettings(), wsl: true, wslDistro: "Ubuntu-22.04" };
+    const text = serializeSshSettings(s);
+    expect(text).not.toBeNull();
+    expect(parseSshSettings(text)).toEqual(s);
+  });
+
   it("re-emits a field this build has never heard of", () => {
     // The editor parses into a typed object and writes a fresh one, so
     // without this a UI predating a field drops it on every save.
@@ -90,6 +103,8 @@ describe("blankSshSettings", () => {
     expect(b.customCommand).toBeNull();
     expect(b.fallbackToShell).toBe(true);
     expect(b.startupCommand).toBeNull();
+    expect(b.wsl).toBe(false);
+    expect(b.wslDistro).toBeNull();
     expect(b.fontSize).toBe(13);
     expect(b.scrollback).toBe(10_000);
   });

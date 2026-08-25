@@ -156,6 +156,22 @@ pub fn is_safe_session_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Is `name` usable as a WSL distribution name?
+///
+/// It reaches the remote inside a command line, so the same rule as
+/// [`is_safe_session_name`] applies, loosened only where real distro names
+/// need it: the ones Microsoft ships and the ones people make are full of
+/// dots and dashes (`Ubuntu-22.04`, `openSUSE-Leap-15.5`). Spaces and
+/// everything a shell would treat as punctuation stay out, which is what
+/// keeps this from being an injection point.
+pub fn is_safe_distro_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 /// How to get to a persistent remote session.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +185,12 @@ pub struct MultiplexerConfig {
     /// The command template for [`MultiplexerKind::Custom`].
     #[serde(default)]
     pub custom_command: Option<String>,
+    /// Enter WSL before doing anything else, on a Windows host.
+    #[serde(default)]
+    pub wsl: bool,
+    /// Which distribution. `None` or empty means the Windows default.
+    #[serde(default)]
+    pub wsl_distro: Option<String>,
     /// Open a plain login shell when nothing suitable is installed, instead
     /// of failing the connection.
     ///
@@ -196,6 +218,8 @@ impl Default for MultiplexerConfig {
             kind: MultiplexerKind::default(),
             session_name: default_session_name(),
             custom_command: None,
+            wsl: false,
+            wsl_distro: None,
             fallback_to_shell: default_true(),
         }
     }
@@ -226,6 +250,43 @@ impl Detected {
 }
 
 impl MultiplexerConfig {
+    /// The `wsl.exe ...  --` prefix for this config, or an empty string.
+    ///
+    /// `--` is load bearing: without it `wsl.exe` parses everything after it
+    /// as its own switches, so a command starting with a dash is swallowed
+    /// rather than run. With it, the rest is handed to the distribution
+    /// verbatim.
+    fn wsl_prefix(&self) -> String {
+        if !self.wsl {
+            return String::new();
+        }
+        match self.wsl_distro.as_deref().map(str::trim) {
+            Some(d) if !d.is_empty() => format!("wsl.exe -d {d} -- "),
+            // No distro named: the Windows default, which is what a machine
+            // with one installed distro wants and what the user who never
+            // chose expects.
+            _ => "wsl.exe -- ".to_string(),
+        }
+    }
+
+    /// Wrap a POSIX script so it runs inside WSL.
+    ///
+    /// `sh -c "..."` with **double** quotes on purpose. The script below is
+    /// full of single quotes (grep patterns), and the outer layer here is a
+    /// Windows command line, which understands double quotes. Single quotes
+    /// mean nothing to it, so they pass through to `sh` intact, which is
+    /// exactly what is wanted. The scripts contain no double quote, no `%`
+    /// and no backtick, so nothing on either side of the boundary expands
+    /// something it should not; the session name is restricted to
+    /// `[A-Za-z0-9_-]` and the distro to that plus dots, which is what keeps
+    /// that true.
+    fn in_wsl(&self, script: String) -> String {
+        if !self.wsl {
+            return script;
+        }
+        format!("{}sh -c \"{script}\"", self.wsl_prefix())
+    }
+
     /// Validate the session name once, up front.
     ///
     /// Called before a session is spawned so a bad name is an error the user
@@ -247,6 +308,16 @@ impl MultiplexerConfig {
                 "{:?} is not a usable session name: use letters, digits, dashes and underscores",
                 self.session_name
             )));
+        }
+        if self.wsl {
+            if let Some(d) = self.wsl_distro.as_deref().map(str::trim) {
+                if !d.is_empty() && !is_safe_distro_name(d) {
+                    return Err(Error::Config(format!(
+                        "{d:?} is not a usable WSL distribution name: use letters, digits, \
+                         dashes, underscores and dots"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -272,7 +343,15 @@ impl MultiplexerConfig {
             // not", which is the entire reconnect story in one flag. Without
             // -A a reconnect either errors with "duplicate session" or
             // silently starts a second one beside the user's work.
-            return Ok(Some(format!("{bin} new-session -A -s {s}")));
+            //
+            // No `sh -c` wrapper here, unlike the probe: this is a single
+            // command with no shell syntax in it, so handing it straight to
+            // `wsl.exe --` is both simpler and one less quoting layer to get
+            // wrong.
+            return Ok(Some(format!(
+                "{}{bin} new-session -A -s {s}",
+                self.wsl_prefix()
+            )));
         }
 
         Ok(Some(match kind {
@@ -280,8 +359,10 @@ impl MultiplexerConfig {
             // creates. Without -D a half-dead previous connection still
             // holding the session makes every reattach fail, which is the
             // common case after a link drop.
-            MultiplexerKind::Screen => format!("screen -DR {s}"),
-            MultiplexerKind::Zellij => format!("zellij attach --create {s}"),
+            MultiplexerKind::Screen => format!("{}screen -DR {s}", self.wsl_prefix()),
+            MultiplexerKind::Zellij => {
+                format!("{}zellij attach --create {s}", self.wsl_prefix())
+            }
             MultiplexerKind::Custom => self
                 .custom_command
                 .as_deref()
@@ -372,7 +453,7 @@ impl MultiplexerConfig {
             ));
         }
         script.push_str("echo end");
-        Some(script)
+        Some(self.in_wsl(script))
     }
 
     /// The same question in `cmd.exe`, for a Windows host running OpenSSH
@@ -388,6 +469,14 @@ impl MultiplexerConfig {
     /// PowerShell as the default shell also runs this correctly, because it
     /// treats the whole thing as a command line and `where.exe` resolves.
     pub fn windows_probe(&self) -> Option<String> {
+        // Pointless when the session is headed into WSL: the POSIX probe
+        // above already runs inside the distribution, which is where the
+        // multiplexer lives. Asking `cmd.exe` whether *Windows* has tmux
+        // would answer for the wrong machine and, worse, answer "no" on a
+        // box whose WSL has had it for years.
+        if self.wsl {
+            return None;
+        }
         let candidates = self.candidates();
         if candidates.is_empty() {
             return None;
@@ -489,6 +578,48 @@ impl MultiplexerConfig {
             None => Detected::plain(ShellDialect::Unknown),
         })
     }
+}
+
+/// The command that lists installed WSL distributions.
+///
+/// `-l -q` is the quiet list: names only, no header, no "(Default)" marker.
+/// Note what the caller has to deal with: `wsl.exe` writes this as
+/// **UTF-16LE**, not UTF-8, even when everything around it is ASCII. Reading
+/// it as UTF-8 gives a string with a NUL between every character, which looks
+/// like a working parse until the names silently fail to match anything. See
+/// [`parse_wsl_distros`].
+pub const WSL_LIST_COMMAND: &str = "wsl.exe -l -q";
+
+/// Read the output of [`WSL_LIST_COMMAND`].
+///
+/// Handles the UTF-16LE that `wsl.exe` actually emits, and plain UTF-8 for
+/// the case where something in the chain has already converted it. The
+/// giveaway for UTF-16 is the NUL bytes between ASCII characters, which no
+/// UTF-8 listing would contain.
+///
+/// Unrecognisable names are dropped rather than returned: this feeds a picker
+/// whose value ends up on a command line, so anything that would not survive
+/// [`is_safe_distro_name`] has no business being offered.
+pub fn parse_wsl_distros(raw: &[u8]) -> Vec<String> {
+    // A NUL in the first few bytes means UTF-16LE. Checking the content
+    // rather than looking for a byte order mark, because `wsl.exe` does not
+    // always emit one.
+    let text = if raw.iter().take(16).any(|b| *b == 0) {
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+
+    text.lines()
+        .map(|l| l.trim().trim_end_matches('\r'))
+        .filter(|l| !l.is_empty())
+        .filter(|l| is_safe_distro_name(l))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -744,6 +875,202 @@ mod tests {
             ..MultiplexerConfig::default()
         };
         assert!(c.validate().is_err());
+    }
+
+    fn wsl_cfg(distro: Option<&str>) -> MultiplexerConfig {
+        MultiplexerConfig {
+            kind: MultiplexerKind::Tmux,
+            session_name: "work".into(),
+            wsl: true,
+            wsl_distro: distro.map(str::to_string),
+            ..MultiplexerConfig::default()
+        }
+    }
+
+    /// The whole point of the option: land inside the distribution and attach
+    /// there, not on the Windows side.
+    #[test]
+    fn wsl_attaches_to_tmux_inside_the_distribution() {
+        let cmd = wsl_cfg(Some("Ubuntu"))
+            .attach_command(Some(MultiplexerKind::Tmux))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cmd, "wsl.exe -d Ubuntu -- tmux new-session -A -s work");
+    }
+
+    /// No distro named means the Windows default, which is what a machine
+    /// with one installed distro wants.
+    #[test]
+    fn wsl_without_a_distro_uses_the_default_one() {
+        for cfg in [wsl_cfg(None), wsl_cfg(Some("")), wsl_cfg(Some("   "))] {
+            let cmd = cfg
+                .attach_command(Some(MultiplexerKind::Tmux))
+                .unwrap()
+                .unwrap();
+            assert_eq!(cmd, "wsl.exe -- tmux new-session -A -s work");
+        }
+    }
+
+    /// `--` is load bearing: without it `wsl.exe` reads what follows as its
+    /// own switches and the command is swallowed rather than run.
+    #[test]
+    fn every_wsl_command_separates_its_arguments() {
+        let cfg = wsl_cfg(Some("Ubuntu"));
+        for kind in [
+            MultiplexerKind::Tmux,
+            MultiplexerKind::Screen,
+            MultiplexerKind::Zellij,
+        ] {
+            let cmd = cfg.attach_command(Some(kind)).unwrap().unwrap();
+            assert!(cmd.contains(" -- "), "{kind:?} lost the separator: {cmd}");
+        }
+        assert!(cfg.posix_probe().unwrap().contains(" -- "));
+    }
+
+    /// The multiplexer a WSL user cares about lives inside the distribution,
+    /// so that is where the probe has to look. Probing Windows would answer
+    /// for the wrong machine, and would answer "no" on a box whose WSL has
+    /// had tmux for years.
+    #[test]
+    fn the_probe_runs_inside_wsl_and_the_windows_dialect_is_skipped() {
+        let cfg = wsl_cfg(Some("Ubuntu"));
+        let probe = cfg.posix_probe().unwrap();
+        assert!(
+            probe.starts_with("wsl.exe -d Ubuntu -- sh -c \""),
+            "{probe}"
+        );
+        assert!(probe.contains("command -v tmux"), "{probe}");
+        assert!(
+            cfg.windows_probe().is_none(),
+            "the cmd.exe dialect is meaningless once we are headed into WSL"
+        );
+    }
+
+    /// The quoting boundary is the thing most likely to break here: the outer
+    /// layer is a Windows command line, the inner one is `sh`. Double quotes
+    /// outside so the script's own single quotes survive, and nothing inside
+    /// that either layer would expand.
+    #[test]
+    fn the_wrapped_probe_survives_both_command_line_parsers() {
+        // `Auto` on purpose: the single quotes this is really about live in
+        // the screen and zellij patterns, and a tmux-only probe would have
+        // none to preserve, so it would pass without proving anything.
+        let probe = MultiplexerConfig {
+            kind: MultiplexerKind::Auto,
+            session_name: "work".into(),
+            wsl: true,
+            wsl_distro: Some("Ubuntu".into()),
+            ..MultiplexerConfig::default()
+        }
+        .posix_probe()
+        .unwrap();
+        let inner = probe
+            .split_once("sh -c \"")
+            .expect("wrapped in sh -c")
+            .1
+            .trim_end_matches('"');
+        assert!(
+            !inner.contains('"'),
+            "an inner quote would end the outer one: {inner}"
+        );
+        assert!(
+            !inner.contains('%'),
+            "a Windows variable would expand: {inner}"
+        );
+        assert!(
+            !inner.contains('`'),
+            "a backtick would be read as a command: {inner}"
+        );
+        // Single quotes are exactly what must survive, so assert they do.
+        assert!(inner.contains('\''), "the grep patterns lost their quoting");
+    }
+
+    /// A distro name reaches a command line, so it gets the same treatment as
+    /// a session name, loosened only for the dots real distro names carry.
+    #[test]
+    fn a_distro_name_can_never_carry_shell_metacharacters() {
+        for evil in [
+            "a; rm -rf /",
+            "a`id`",
+            "a$(id)",
+            "a b",
+            "a\"b",
+            "a|b",
+            "a&b",
+            "%PATH%",
+        ] {
+            assert!(!is_safe_distro_name(evil), "{evil:?} must be rejected");
+            assert!(
+                wsl_cfg(Some(evil)).validate().is_err(),
+                "{evil:?} must not reach a command line"
+            );
+        }
+        // An empty name is not an attack, it is "the default distribution",
+        // so it validates and drops the `-d` switch entirely.
+        assert!(wsl_cfg(Some("")).validate().is_ok());
+        // The real ones must still work.
+        for ok in [
+            "Ubuntu",
+            "Ubuntu-22.04",
+            "openSUSE-Leap-15.5",
+            "kali-linux",
+            "Debian",
+        ] {
+            assert!(is_safe_distro_name(ok), "{ok:?} is a real distro name");
+            assert!(wsl_cfg(Some(ok)).validate().is_ok(), "{ok:?}");
+        }
+    }
+
+    /// Without WSL nothing changes, which is what keeps every existing
+    /// profile working exactly as it did.
+    #[test]
+    fn a_non_wsl_profile_is_untouched() {
+        let cfg = cfg(MultiplexerKind::Tmux);
+        let cmd = cfg
+            .attach_command(Some(MultiplexerKind::Tmux))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cmd, "tmux new-session -A -s work");
+        assert!(!cfg.posix_probe().unwrap().contains("wsl.exe"));
+        assert!(cfg.windows_probe().is_some());
+    }
+
+    /// `wsl.exe` writes its listing as UTF-16LE even when every character in
+    /// it is ASCII. Read as UTF-8 it becomes a string with a NUL between
+    /// every letter, which parses without error and then matches nothing,
+    /// which is the worst kind of wrong.
+    #[test]
+    fn the_distro_listing_is_read_as_the_utf16_it_actually_is() {
+        let mut raw = Vec::new();
+        for ch in "Ubuntu\r\nDebian\r\n".encode_utf16() {
+            raw.extend_from_slice(&ch.to_le_bytes());
+        }
+        assert_eq!(parse_wsl_distros(&raw), vec!["Ubuntu", "Debian"]);
+    }
+
+    /// Plain UTF-8 still works, for the case where something in the chain has
+    /// already converted it.
+    #[test]
+    fn a_utf8_listing_is_read_too() {
+        assert_eq!(
+            parse_wsl_distros(b"Ubuntu-22.04\nkali-linux\n"),
+            vec!["Ubuntu-22.04", "kali-linux"]
+        );
+    }
+
+    /// The listing feeds a picker whose value ends up on a command line, so
+    /// a name that would not survive validation is dropped rather than
+    /// offered.
+    #[test]
+    fn an_unusable_name_is_never_offered_in_the_list() {
+        let raw = b"Ubuntu\nmy distro\nevil;rm -rf /\nDebian\n";
+        assert_eq!(parse_wsl_distros(raw), vec!["Ubuntu", "Debian"]);
+    }
+
+    #[test]
+    fn an_empty_listing_is_not_an_error() {
+        assert!(parse_wsl_distros(b"").is_empty());
+        assert!(parse_wsl_distros(b"\r\n  \r\n").is_empty());
     }
 
     #[test]

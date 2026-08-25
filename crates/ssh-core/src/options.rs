@@ -150,6 +150,8 @@ impl SshTermOptions {
             kind: crate::driver::from_core_kind(ssh.multiplexer),
             session_name: ssh.session_name.clone(),
             custom_command: ssh.custom_command.clone(),
+            wsl: ssh.wsl,
+            wsl_distro: ssh.wsl_distro.clone(),
             fallback_to_shell: ssh.fallback_to_shell,
         };
         out.startup_command = ssh.startup_command.clone();

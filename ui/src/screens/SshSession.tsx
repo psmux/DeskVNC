@@ -23,6 +23,7 @@ import {
   type SessionParams,
 } from "../hooks/useSession";
 import { buildTheme, createTerminal, watchTerminalResize, watchThemeChanges } from "../components/SshTerminal";
+import { captureTerminalThumbnail } from "../render/TerminalThumbnail";
 import { ConnectingOverlay, DisconnectedOverlay, ReconnectOverlay } from "../components/SessionOverlays";
 import { CertPrompt } from "../components/CertPrompt";
 import { CredentialPrompt } from "../components/CredentialPrompt";
@@ -32,6 +33,28 @@ import { useToasts } from "../state/ToastContext";
 import { classNames } from "../lib/util";
 import { inTauri, safeInvoke } from "../lib/tauri";
 import type { SessionState } from "../lib/types";
+
+/**
+ * Delay between the session reaching `connected` and the settle capture, so
+ * the shell has actually drawn a prompt instead of a blank grid. Matches
+ * `Session.tsx`'s `THUMBNAIL_SETTLE_MS`, kept as its own constant here since
+ * that file's is not exported and the two capture paths (framebuffer vs.
+ * terminal buffer) have nothing else in common to share.
+ */
+const THUMBNAIL_SETTLE_MS = 1200;
+
+/**
+ * Budget for the last-chance capture raced against an explicit close (tab or
+ * window): long enough for the invoke to land, short enough that a stuck
+ * capture cannot wedge the close. Matches `Session.tsx`'s
+ * `CAPTURE_CLOSE_BUDGET_MS`, kept local for the same reason as the constant
+ * above.
+ */
+const CAPTURE_CLOSE_BUDGET_MS = 700;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 export interface SshSessionProps {
   /** Connection parameters. Omit in a session window, where the URL has them. */
@@ -123,6 +146,64 @@ export function SshSession({
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
+  // ---------------------------------------------------------- library thumbnail
+  //
+  // Same policy as `Session.tsx`'s VNC/RDP capture (PRD/03 §3.1): once a
+  // short while after `connected`, so the shell has drawn a prompt, and once
+  // more as a last chance on the way out. Never on every frame or on a
+  // timer: terminal output can be continuous and a capture per burst would
+  // be waste.
+
+  // A prompt on top of the terminal means the buffer may be showing a
+  // credential or host-key dialog rather than the shell; never store that.
+  const promptUp =
+    session.credentialRequest !== null ||
+    session.certPrompt !== null ||
+    session.sshHostKeyPrompt !== null;
+  const promptUpRef = useRef(promptUp);
+  promptUpRef.current = promptUp;
+
+  /**
+   * Reads the terminal's buffer and hands the pixels to the shell.
+   * Resolves true only if a capture actually happened, so callers that only
+   * get one shot (the exit paths below) can tell whether they used it.
+   */
+  const captureThumb = useCallback(async (): Promise<boolean> => {
+    if (promptUpRef.current) return false;
+    const term = termRef.current;
+    if (!term) return false;
+    const frame = captureTerminalThumbnail(term);
+    if (!frame) return false;
+    await sessionRef.current.captureThumbnail(frame.width, frame.height, frame.pixels);
+    return true;
+  }, []);
+
+  // Debounced to once per session: the settle timer is armed by the first
+  // `connected` transition and never re-arms, so a flapping reconnect cannot
+  // turn into a capture per attempt.
+  const settledCapture = useRef(false);
+  useEffect(() => {
+    if (session.state.state !== "connected") return;
+    if (settledCapture.current) return;
+    const t = window.setTimeout(() => {
+      settledCapture.current = true;
+      void captureThumb();
+    }, THUMBNAIL_SETTLE_MS);
+    return () => window.clearTimeout(t);
+  }, [session.state.state, captureThumb]);
+
+  // The exit capture for a session that drops (or is disconnected) while the
+  // window stays open: the terminal is still mounted at this point, unlike
+  // the unmount cleanup below, so this is the only chance to catch that case.
+  const exitCaptured = useRef(false);
+  useEffect(() => {
+    if (session.state.state !== "disconnected") return;
+    if (exitCaptured.current) return;
+    void captureThumb().then((captured) => {
+      if (captured) exitCaptured.current = true;
+    });
+  }, [session.state.state, captureThumb]);
+
   // ------------------------------------------------------------- terminal
 
   useEffect(() => {
@@ -139,6 +220,12 @@ export function SshSession({
     const stopResizeWatch = watchTerminalResize(container, fit);
 
     return () => {
+      // BEFORE dispose(): a disposed terminal has no buffer to read. The
+      // read itself (inside `captureThumb`, up to its first `await`) runs
+      // synchronously, so calling this without awaiting still reads the
+      // buffer here, ahead of `term.dispose()` two lines down; only the
+      // invoke that follows keeps running after this cleanup returns.
+      if (!exitCaptured.current) void captureThumb();
       cancelWebgl();
       stopResizeWatch();
       dData.dispose();
@@ -230,22 +317,38 @@ export function SshSession({
 
   // ------------------------------------------------------------- close
 
+  // Both branches grab the last-chance capture BEFORE tearing the session
+  // down: `capture_thumbnail` resolves which host the pixels belong to from
+  // the live session registry, and that entry goes away with the session, so
+  // a capture that started after `disconnect_session` would find nothing to
+  // attach to. Raced against a budget so a stuck invoke cannot wedge the tab
+  // or window open; `exitCaptured` is still latched on the unraced promise,
+  // so the terminal effect's own unmount capture (below) does not repeat it.
   const dismiss = useCallback((): void => {
+    const captured = captureThumb().then((ok) => {
+      if (ok) exitCaptured.current = true;
+      return ok;
+    });
     if (embedded) {
-      onClose?.();
+      void Promise.race([captured, delay(CAPTURE_CLOSE_BUDGET_MS)])
+        .catch(() => undefined)
+        .finally(() => onClose?.());
       return;
     }
     if (!inTauri()) {
       window.location.search = "";
       return;
     }
-    void safeInvoke("disconnect_session", { sessionId: params.sessionId }, null).finally(() => {
-      void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-        const win = getCurrentWindow();
-        void win.close().catch(() => void win.destroy());
+    void Promise.race([captured, delay(CAPTURE_CLOSE_BUDGET_MS)])
+      .catch(() => undefined)
+      .then(() => safeInvoke("disconnect_session", { sessionId: params.sessionId }, null))
+      .finally(() => {
+        void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+          const win = getCurrentWindow();
+          void win.close().catch(() => void win.destroy());
+        });
       });
-    });
-  }, [embedded, onClose, params.sessionId]);
+  }, [embedded, onClose, params.sessionId, captureThumb]);
 
   // ------------------------------------------------------------- render
 
