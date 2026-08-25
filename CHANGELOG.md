@@ -10,6 +10,41 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-08-26
+
+Patch rather than minor: nothing stored changes shape and no command or
+event gains a field. The one contract addition is a new value in the
+`symbol` vocabulary, which the contract already specifies is to be
+ignored when unrecognised, so it cannot break a webview that predates it.
+
+### Fixed
+
+- **A terminal used only the top-left corner of its window.** The remote
+  stayed at the size the profile was saved with, usually 80 by 24, so a
+  full-screen program drew into a small box and left the rest of the
+  window empty.
+
+  The terminal measures itself the moment it appears and sends its size
+  immediately, but the session is still connecting then: a dial, a key
+  exchange, authentication, the multiplexer probe and a pty request all
+  have to finish first. That first message arrived before there was
+  anything to receive it and was dropped, and nothing sent another. The
+  size is now sent again once the session connects, which also covers a
+  reconnect, where the far side is a new pty that has never been told
+  anything.
+
+- **Detaching from tmux or psmux looked like a failure.** `Ctrl-B D`
+  reported "the remote shell exited", because detaching makes the attach
+  command exit cleanly and at that level a detach and typing `exit` are
+  the same event.
+
+  They mean opposite things to the person watching, and the multiplexer
+  is what tells them apart: with one attached, a clean exit means the
+  session is still running on the remote. It now says so. It deliberately
+  does not reconnect on its own, because reattaching someone who has just
+  asked to detach would make detaching impossible.
+
+
 ## [0.16.0] - 2026-08-26
 
 Minor rather than patch under the sub-1.0 rule in this file's own header:
