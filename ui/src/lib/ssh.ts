@@ -35,8 +35,25 @@ export type MultiplexerKind =
  *  in every terminfo database going back decades. */
 export const DEFAULT_TERM = "xterm-256color";
 
+/** `remote_core::SshAuthKind`, serde `rename_all = "kebab-case"`, which for
+ *  every one of these spells it exactly as written here. The default,
+ *  `"agent"`, is the one setting that needs nothing stored; a profile that
+ *  wants a password or a key file has to say so explicitly, which is the
+ *  gap this type closes: without it the dialog had no way to ask for
+ *  anything but agent auth, so a host with a password and no running agent
+ *  failed to connect with no way to fix it here. */
+export type SshAuthKind = "agent" | "password" | "key-file";
+
 export interface SshSettings {
   v: number;
+  /** How to authenticate. The secret itself never lives here: a password
+   *  travels through `HostDraft.password` into the keychain, exactly like
+   *  the RDP and VNC password fields already do. */
+  auth: SshAuthKind;
+  /** Private key path for `auth: "key-file"`. A path, not a key: the file is
+   *  read on the Rust side at connect time and its contents never cross the
+   *  IPC boundary. */
+  keyPath: string | null;
   term: string;
   cols: number;
   rows: number;
@@ -60,6 +77,8 @@ export interface SshSettings {
 export function blankSshSettings(): SshSettings {
   return {
     v: SSH_SETTINGS_V,
+    auth: "agent",
+    keyPath: null,
     term: DEFAULT_TERM,
     cols: 80,
     rows: 24,
@@ -75,8 +94,8 @@ export function blankSshSettings(): SshSettings {
 
 /** Every key this module owns, so anything else can be set aside verbatim. */
 const KNOWN_KEYS: readonly string[] = [
-  "v", "term", "cols", "rows", "multiplexer", "sessionName", "customCommand",
-  "fallbackToShell", "startupCommand", "fontSize", "scrollback",
+  "v", "auth", "keyPath", "term", "cols", "rows", "multiplexer", "sessionName",
+  "customCommand", "fallbackToShell", "startupCommand", "fontSize", "scrollback",
 ];
 
 /**
@@ -113,6 +132,8 @@ const MULTIPLEXER_KINDS: readonly MultiplexerKind[] = [
   "auto", "none", "psmux", "tmux", "screen", "zellij", "custom",
 ];
 
+const SSH_AUTH_KINDS: readonly SshAuthKind[] = ["agent", "password", "key-file"];
+
 /**
  * Read a stored blob. Tolerant of missing fields; a blob that is not an
  * object at all reads as "no settings", because the editor just needs
@@ -139,6 +160,8 @@ export function parseSshSettings(raw: string | null | undefined): SshSettings | 
 
   return {
     v: num(o.v, SSH_SETTINGS_V),
+    auth: oneOf(o.auth, SSH_AUTH_KINDS, "agent"),
+    keyPath: nullableStr(o.keyPath),
     term: str(o.term, blank.term),
     cols: num(o.cols, blank.cols),
     rows: num(o.rows, blank.rows),

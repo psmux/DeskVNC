@@ -679,6 +679,27 @@ pub enum MultiplexerKind {
     Custom,
 }
 
+/// How to authenticate an SSH session.
+///
+/// Only the *kind*, never the secret. The password, passphrase and the
+/// contents of a key file travel in [`ConnectOptions::credentials`], which is
+/// not serializable; this enum is stored in the host profile's
+/// `ssh_settings` column, which is. Keeping them apart is what stops a
+/// secret reaching the webview or a log through a settings blob.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SshAuthKind {
+    /// ssh-agent, Pageant, or the Windows OpenSSH named pipe. The default,
+    /// because it is the only one that needs nothing stored.
+    #[default]
+    Agent,
+    /// An account password, held in the keychain.
+    Password,
+    /// A private key file, with its passphrase (if any) in the keychain.
+    KeyFile,
+}
+
 /// The default `TERM`.
 ///
 /// `xterm-256color` is the widest-compatible name that still gets colour: it
@@ -697,6 +718,13 @@ pub const DEFAULT_TERM: &str = "xterm-256color";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SshOptions {
+    /// How to authenticate. The secret itself is never here, see
+    /// [`SshAuthKind`].
+    pub auth: SshAuthKind,
+    /// Private key path for [`SshAuthKind::KeyFile`]. A path, not a key: the
+    /// file is read on the Rust side at connect time and its contents never
+    /// cross the IPC boundary.
+    pub key_path: Option<String>,
     /// What to advertise as `TERM`.
     pub term: String,
     /// Initial geometry, in character cells. The UI overwrites both before
@@ -724,6 +752,8 @@ pub struct SshOptions {
 impl Default for SshOptions {
     fn default() -> Self {
         Self {
+            auth: SshAuthKind::Agent,
+            key_path: None,
             term: DEFAULT_TERM.to_string(),
             cols: 80,
             rows: 24,

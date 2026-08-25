@@ -129,6 +129,10 @@ async fn pump_commands(
             ClientCommand::ResizeTerminal { cols, rows } => SshCommand::Resize { cols, rows },
             ClientCommand::ReconnectNow => SshCommand::ReconnectNow,
             ClientCommand::Disconnect => SshCommand::Disconnect,
+            ClientCommand::ProvideCredentials {
+                username, password, ..
+            } => SshCommand::ProvideCredentials { username, password },
+            ClientCommand::CancelCredentials => SshCommand::CancelCredentials,
             // Everything else in `ClientCommand` is pointer, keysym, pixel
             // format or quality: meaningless to a PTY. Dropped rather than
             // guessed at, and silently, because the shell sends some of them
@@ -197,6 +201,24 @@ async fn pump_events(
             // The terminal bell is a first-class `SessionEvent`; VNC has one
             // too, and the UI already knows what to do with it.
             SshEvent::Bell => SessionEvent::Bell,
+            // Reuses the shell's existing credential dialog rather than
+            // growing an SSH-specific one: the shell already knows how to
+            // show this, prefill it, and answer with `ProvideCredentials`.
+            SshEvent::CredentialsRequired {
+                method,
+                attempt,
+                error,
+                username_hint,
+            } => SessionEvent::CredentialsRequired(remote_core::credentials::CredentialRequest {
+                method,
+                kind: remote_core::credentials::CredentialKind::UsernameAndPassword,
+                attempt,
+                error,
+                // SSH passwords are not DES-truncated the way legacy VNC
+                // authentication is, so the UI must not warn about it.
+                truncates_password: false,
+                username_hint,
+            }),
         };
 
         if outgoing.send(translated).await.is_err() {

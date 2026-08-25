@@ -411,6 +411,20 @@ fn spawn_event_pump(
                     "type": "notice",
                     "message": message,
                 }),
+                // The sidecar terminal is opened from a session that already
+                // holds a credential, so an ask here means that credential was
+                // refused. Reported as a notice rather than answered: this
+                // entry point has no dialog of its own, and the session-level
+                // terminal (the SSH *protocol*) is the one with the full
+                // prompt flow. Surfacing it tells the user why the shell did
+                // not open instead of leaving them with a blank panel.
+                SshEvent::CredentialsRequired { method, error, .. } => serde_json::json!({
+                    "type": "notice",
+                    "message": match error {
+                        Some(why) => format!("{method} authentication was refused: {why}"),
+                        None => format!("{method} authentication is required"),
+                    },
+                }),
                 SshEvent::StateChanged(state) => {
                     let mut v = serde_json::to_value(&state)
                         .unwrap_or_else(|_| serde_json::json!({ "state": "disconnected" }));

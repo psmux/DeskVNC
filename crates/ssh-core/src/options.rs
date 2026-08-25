@@ -1,6 +1,6 @@
 //! What to open, how big, and what to run once it is open.
 
-use ssh_transport::SshConfig;
+use ssh_transport::{SshAuth, SshConfig};
 
 pub use crate::multiplexer::{
     is_safe_session_name, Detected, MultiplexerConfig, MultiplexerKind, ShellDialect,
@@ -90,17 +90,58 @@ impl SshTermOptions {
     ///
     /// The two halves come from different places by design: where to dial and
     /// who to be are common to every protocol and live on `ConnectOptions`,
-    /// while the terminal and multiplexer settings are the SSH half, stored
-    /// in the host profile's `ssh_settings` column.
+    /// while the terminal and multiplexer settings are the SSH half, stored in
+    /// the host profile's `ssh_settings` column.
     ///
-    /// Credentials are deliberately *not* read here. `ConnectOptions` carries
-    /// them in a non-serializable field and the shell turns them into an
-    /// [`ssh_transport::SshAuth`] before this is called, so a secret never
-    /// passes through an options struct that could be logged or serialized.
+    /// **The credentials are read here, and that is the point.** An earlier
+    /// version of this function did not, and left a comment claiming the shell
+    /// had already turned them into an [`SshAuth`]. Nothing did, so every
+    /// profile connected as `Agent` with an empty username and a machine with
+    /// no agent identities reported "the ssh agent holds no identities" no
+    /// matter what the user had typed. The auth *kind* comes from the profile
+    /// and the *secret* from `ConnectOptions::credentials`, which is the split
+    /// that keeps secrets out of anything serializable.
     pub fn from_connect_options(options: &remote_core::options::ConnectOptions) -> Self {
+        use remote_core::options::SshAuthKind;
+
         let ssh = options.ssh_options().cloned().unwrap_or_default();
-        let mut out = Self::new(SshConfig::new(options.host.clone(), String::new()));
-        out.ssh.port = options.port;
+        let creds = &options.credentials;
+
+        // An empty username means "the same account as here", which is the
+        // overwhelmingly common case on a personal machine and much better
+        // than making the user retype it. Resolved here rather than left
+        // empty, because an empty SSH username is not a default, it is a
+        // protocol error the server rejects.
+        let username = creds
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(local_username);
+
+        let auth = match ssh.auth {
+            SshAuthKind::Password => SshAuth::Password(creds.password.clone().unwrap_or_default()),
+            SshAuthKind::KeyFile => SshAuth::KeyFile {
+                path: ssh.key_path.clone().unwrap_or_default().into(),
+                // The same field carries an account password for
+                // `Password` and a key passphrase here. They unlock
+                // different things, but only one of them is ever in play
+                // for a given profile, so one slot is enough and the auth
+                // kind says which it is.
+                passphrase: creds.password.clone().filter(|p| !p.is_empty()),
+            },
+            // Covers `Agent` and any kind a newer build adds: an agent needs
+            // nothing stored, so it is the safe reading of a value this build
+            // does not recognise.
+            _ => SshAuth::Agent,
+        };
+
+        let mut cfg = SshConfig::new(options.host.clone(), username);
+        cfg.port = options.port;
+        cfg.auth = auth;
+
+        let mut out = Self::new(cfg);
         out.terminal.term = ssh.term.clone();
         let (cols, rows) = ssh.clamped();
         out.terminal.cols = cols;
@@ -125,6 +166,18 @@ impl SshTermOptions {
             startup_command: None,
         }
     }
+}
+
+/// The account this machine is logged in as, for an SSH profile that did not
+/// name one.
+///
+/// `USER` on unix, `USERNAME` on Windows. An empty result is left empty
+/// rather than guessed at: the server's rejection names the account it was
+/// offered, which is a far better clue than a username we invented.
+fn local_username() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -154,6 +207,83 @@ mod tests {
         // Detection, not an assumption: this is what makes a mixed fleet work.
         assert_eq!(o.multiplexer.kind, MultiplexerKind::Auto);
         assert!(o.reconnect.enabled);
+    }
+
+    /// The bug this pins: `from_connect_options` used to ignore
+    /// `ConnectOptions::credentials` entirely, so a profile with a saved
+    /// username and password still connected as `Agent` with an empty user,
+    /// and a machine with no agent identities failed with "the ssh agent
+    /// holds no identities" whatever the user had typed.
+    #[test]
+    fn a_password_profile_actually_uses_the_password() {
+        use remote_core::options::{ConnectOptions, SshAuthKind};
+
+        let mut o = ConnectOptions::ssh("box.local", 22);
+        o.ssh_mut().auth = SshAuthKind::Password;
+        o.credentials = remote_core::credentials::Credentials {
+            username: Some("gj".into()),
+            password: Some("hunter2".into()),
+            domain: None,
+        };
+
+        let built = SshTermOptions::from_connect_options(&o);
+        assert_eq!(built.ssh.username, "gj");
+        assert_eq!(built.ssh.port, 22);
+        match &built.ssh.auth {
+            ssh_transport::SshAuth::Password(p) => assert_eq!(p, "hunter2"),
+            other => panic!("expected password auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_file_profile_carries_the_path_and_passphrase() {
+        use remote_core::options::{ConnectOptions, SshAuthKind};
+
+        let mut o = ConnectOptions::ssh("box.local", 22);
+        o.ssh_mut().auth = SshAuthKind::KeyFile;
+        o.ssh_mut().key_path = Some("/home/gj/.ssh/id_ed25519".into());
+        o.credentials = remote_core::credentials::Credentials {
+            username: Some("gj".into()),
+            password: Some("pp".into()),
+            domain: None,
+        };
+
+        match &SshTermOptions::from_connect_options(&o).ssh.auth {
+            ssh_transport::SshAuth::KeyFile { path, passphrase } => {
+                assert_eq!(path.to_string_lossy(), "/home/gj/.ssh/id_ed25519");
+                assert_eq!(passphrase.as_deref(), Some("pp"));
+            }
+            other => panic!("expected key-file auth, got {other:?}"),
+        }
+    }
+
+    /// Agent stays the default, and needs no stored secret to work.
+    #[test]
+    fn an_agent_profile_needs_no_credentials() {
+        use remote_core::options::ConnectOptions;
+
+        let o = ConnectOptions::ssh("box.local", 22);
+        let built = SshTermOptions::from_connect_options(&o);
+        assert!(matches!(built.ssh.auth, ssh_transport::SshAuth::Agent));
+    }
+
+    /// An empty username is not a default, it is something the server
+    /// rejects. A profile that names no account means "the same one as here".
+    #[test]
+    fn an_unnamed_account_falls_back_to_the_local_user() {
+        use remote_core::options::ConnectOptions;
+
+        let mut o = ConnectOptions::ssh("box.local", 22);
+        o.credentials = remote_core::credentials::Credentials {
+            username: Some("   ".into()),
+            password: None,
+            domain: None,
+        };
+        let built = SshTermOptions::from_connect_options(&o);
+        let expected = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default();
+        assert_eq!(built.ssh.username, expected);
     }
 
     #[test]
