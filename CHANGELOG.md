@@ -10,6 +10,38 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-08-25
+
+### Fixed
+
+- **RDP colours were wrong.** Large areas of the remote desktop came out in
+  flat, blown out primaries over a picture that was otherwise sharp and
+  correctly placed, and changing the colour depth made no difference. A
+  Windows 11 host sends every 32 bpp tile with a colour loss level of 3, which
+  leaves five meaningful bits in each stored chroma byte; the reconstruction
+  has to happen in eight bits so the rest falls off the top, and this did it
+  in sixteen and kept it. A stored `0x12` means -112 and was read as +144, so
+  every strongly coloured pixel left the 0 to 255 range and clamped.
+
+  Converting a real pixel to YCoCg and back cannot leave that range, so a
+  decode that clamps has misread the stream. Against a real host, 1125 of 1921
+  tiles clamped before this and none after. The client's own encoder made the
+  same assumption, so the round trip test agreed with the fault; the new test
+  uses the bytes the host actually sent.
+
+- **A cancelled pointer left a button held down.** On both VNC and RDP the
+  right button would stop working, then start arriving long after the gesture,
+  and then ordinary left clicks would open context menus. All three are one
+  stuck bit: `pointercancel` and `lostpointercapture` report no button, so the
+  release path ignored them and the bit survived for the rest of the session.
+  A left press then travelled as left and right together.
+
+  Button state now follows what the browser reports as actually held, on every
+  event, so a mask that drifts is corrected on the next one. A cancelled pan
+  had the same hole and stopped pointer input entirely. On the RDP side,
+  releasing everything now releases held buttons as well as keys, and turning
+  view only on no longer remembers a mask it never sent.
+
 ## [0.13.1] - 2026-08-24
 
 ### Fixed
@@ -1024,7 +1056,10 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/psmux/DeskVNC/compare/v0.13.1...v0.13.2
+[0.13.1]: https://github.com/psmux/DeskVNC/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/psmux/DeskVNC/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/psmux/DeskVNC/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/psmux/DeskVNC/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/psmux/DeskVNC/compare/v0.9.1...v0.10.0
