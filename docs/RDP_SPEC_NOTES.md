@@ -245,6 +245,42 @@ in the tree that is hand computed from a published field table says so in its
 comment and shows the arithmetic. None of them is presented as a transcription.
 They should be replaced when the documents are in hand.
 
+### 1.8 SETTLED: the planar colour loss is undone in eight bits, not sixteen
+
+`crates/rdp-codecs/src/planar.rs`.
+
+`PRDRDP/04 §4.5.5` gives the reconstruction as a left shift of Co and Cg by the
+colour loss level and leaves the width of the arithmetic unstated. Reading the
+stored byte as signed and then shifting in `i16` is the obvious way to write it
+and produces a picture that is wrong in a way no test we owned could see: our
+own encoder made the same assumption, so the round trip agreed with itself.
+
+A Windows 11 host (DESKTOP-H21K47C, 2026-08-25) sends every 32 bpp tile with
+`FormatHeader` `0x33`: `cll = 3`, no chroma subsampling, run length coded, no
+alpha. A tile of flat blue water decodes to `Y = 96` with stored chroma `0x12`
+and `0x3B`. Widening first reads those as +144 and +472. There is no 8 bit RGB
+pixel whose Cg is 472, and the transform drives green past 255 and red and blue
+below zero, so the pixel clamps to pure green. Large areas of the desktop came
+out in flat primaries.
+
+The encoder's right shift by `cll` leaves `8 - cll` meaningful bits in the byte
+and whatever the shift pushed above them. Undoing it in the same eight bits
+drops that leftover, and only the result is signed: `0x12 << 3` is `0x90`,
+which is -112, and `0x3B << 3` is `0xD8`, which is -40. The tile is then a mid
+blue and the desktop matches the host.
+
+What settles it is a property rather than a preference. Converting a real 8 bit
+RGB pixel to YCoCg and back cannot leave `0..=255`, so any clamp at all means
+the stream was misread. Over a full session, 1125 of 1921 tiles clamped under
+the widen first reading and 0 of 1920 clamped under this one.
+
+NSCodec is deliberately not changed to match. Its `ColorLossLevel` is defined
+over 1 to 7 with 1 meaning no loss, and at that level the stored chroma already
+uses the whole signed byte, so an eight bit shift would drop its sign. It
+widens first. That is unverified against a real NSCodec server: this crate's
+encoder is the only thing it has been checked against, which is exactly the
+weakness that hid the planar bug, and it stays open until a capture settles it.
+
 ## 2. Confirmed errors in the design documents
 
 Each of these was found by implementing against the document, and each is a case
