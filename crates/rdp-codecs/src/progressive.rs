@@ -413,9 +413,7 @@ fn decode_tile(
     // Whether the scratch already holds exactly what the store now holds, so
     // [`draw`] can run the wavelet where the coefficients already are. It is
     // true for the common pass and false for the two that accumulate.
-    let in_scratch;
-
-    match block_type {
+    let in_scratch = match block_type {
         WBT_TILE_UPGRADE => {
             let quality = usize::from(b.u8()?);
             let prog = tables.prog(quality)?;
@@ -461,7 +459,7 @@ fn decode_tile(
                 tile.set_bit_pos(c, new);
             }
             frame.upgrades += 1;
-            in_scratch = false;
+            false
         }
         _ => {
             let flags = b.u8()?;
@@ -546,9 +544,9 @@ fn decode_tile(
             for (c, p) in pos.into_iter().enumerate() {
                 tile.set_bit_pos(c, p);
             }
-            in_scratch = !difference;
+            !difference
         }
-    }
+    };
 
     frame.decoded += 1;
     draw(state, scratch, &place, in_scratch, clip, dst, frame);
