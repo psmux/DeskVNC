@@ -10,6 +10,44 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-26
+
+Minor rather than patch under the sub-1.0 rule in this file's own header:
+the `ssh_settings` blob gains two fields. The release exists for the fix
+below, which made SSH host profiles unusable in 0.15.0.
+
+### Fixed
+
+- **An SSH profile ignored its username and password.** Adding a host with
+  an account and a password, then connecting, failed with "no ssh agent is
+  available: the ssh agent holds no identities" whatever had been typed.
+
+  The shell loaded the saved credential correctly and then the conversion
+  into the session's own options threw it away, so every SSH connection was
+  attempted as agent authentication with an empty user name. The comment on
+  that function asserted the shell had already turned the credential into an
+  `SshAuth`; nothing did, and the claim is what made the gap look deliberate.
+  The credential is now read where the comment said it already was, and four
+  tests pin it, one of them named for this failure.
+
+- **An SSH profile had no way to say how to authenticate.** There was no
+  setting for it at all, so agent was not merely the default, it was the only
+  possibility. Profiles now choose between the agent, a password from the
+  keychain, and a key file, and the host editor asks first, above the
+  multiplexer, because it decides whether the connection works at all.
+
+- **Quick Connect could not open an SSH session.** An ad-hoc target has no
+  profile, so it has no stored account and no secret, and without a way to
+  ask, the only authentication that could ever succeed was an agent. A
+  refused authentication now asks, reusing the credential dialog the other
+  protocols already use, and retries with the answer. Only an authentication
+  refusal asks: a refused dial or a changed host key are not things a
+  password fixes, and a dialog for either would be one that cannot help.
+
+  An empty user name now resolves to the local account rather than being
+  sent as empty, which a server rejects outright.
+
+
 ## [0.15.0] - 2026-08-25
 
 Minor rather than patch under the sub-1.0 rule in this file's own header:
