@@ -252,13 +252,48 @@ impl Input {
         events
     }
 
-    /// Release every key we believe is held (PRDRDP/05 §2.11).
+    /// Release every key and every button we believe is held
+    /// (PRDRDP/05 §2.11).
     ///
-    /// Called on blur and before a disconnect. A key the server thinks is held
-    /// when the window loses focus repeats into the remote session forever.
+    /// Called on blur, on turning view only on, and before a disconnect. A key
+    /// the server thinks is held when the window loses focus repeats into the
+    /// remote session forever.
+    ///
+    /// The buttons matter for the same reason and were missing. This used to
+    /// release keys only and leave `last_mask` alone, so a button held at the
+    /// moment focus went away stayed held on the server, and `last_mask` kept
+    /// claiming it was: the next press of that button was no longer a
+    /// transition, so it produced nothing at all, and the release after it
+    /// arrived on its own. A right button stuck that way turns an ordinary
+    /// left click into a left press underneath a held right button, which the
+    /// desktop shows as a context menu.
     #[must_use]
     pub fn release_all(&mut self) -> Vec<FastPathInputEvent> {
-        let mut events = Vec::with_capacity(self.keys_down.len() + 2);
+        let mut events = Vec::with_capacity(self.keys_down.len() + 5);
+        // Buttons before keys: a modifier that is still held while the button
+        // goes up is what the server saw when it went down, so the gesture
+        // ends the way it began.
+        let (x, y) = self.last_pos.unwrap_or((0, 0));
+        for (bit, kind) in [
+            (0u16, ButtonKind::Left),
+            (1, ButtonKind::Middle),
+            (2, ButtonKind::Right),
+        ] {
+            if self.last_mask & (1 << bit) != 0 {
+                events.push(button_event(kind, false, x, y));
+            }
+        }
+        if self.wants_mousex() {
+            for (bit, flag) in [
+                (8u16, pointer_x_flags::BUTTON1_BACK),
+                (9, pointer_x_flags::BUTTON2_FORWARD),
+            ] {
+                if self.last_mask & (1 << bit) != 0 {
+                    events.push(FastPathInputEvent::MouseX { flags: flag, x, y });
+                }
+            }
+        }
+        self.last_mask = 0;
         // Sorted, so the wire is reproducible and a capture file diff means
         // something. A `HashSet` iterates in an order that changes per run.
         let mut held: Vec<u16> = self.keys_down.drain().collect();
@@ -287,6 +322,10 @@ impl Input {
     #[must_use]
     pub fn pointer(&mut self, x: u16, y: u16, mask: u16) -> Vec<FastPathInputEvent> {
         if self.view_only {
+            // Nothing goes out, so nothing is held: remembering a mask we
+            // never sent would make the first press after view only is turned
+            // off compute its transitions against a fiction.
+            self.last_mask = 0;
             return Vec::new();
         }
         let (max_x, max_y) = self.desktop;
@@ -552,6 +591,71 @@ mod tests {
                 code: 0x54
             }],
             "alt+sysrq keeps working"
+        );
+    }
+
+    /// A button held when everything is released does not stay held, and is
+    /// pressable again afterwards.
+    ///
+    /// Releasing keys only was the whole of this method, and it left
+    /// `last_mask` claiming the button was down. The next press then computed
+    /// no transition and sent nothing, so the button appeared dead, and its
+    /// release arrived later on its own. On the right button that reads as an
+    /// ordinary left click opening a context menu.
+    #[test]
+    fn releasing_everything_releases_a_held_button_too() {
+        let mut i = input();
+        let _ = i.pointer(10, 10, 0b100);
+
+        assert_eq!(
+            i.release_all(),
+            vec![FastPathInputEvent::Mouse {
+                flags: pointer_flags::BUTTON2_RIGHT,
+                x: 10,
+                y: 10
+            }],
+            "the held right button goes up"
+        );
+
+        assert_eq!(
+            i.pointer(10, 10, 0b100),
+            vec![FastPathInputEvent::Mouse {
+                flags: pointer_flags::DOWN | pointer_flags::BUTTON2_RIGHT,
+                x: 10,
+                y: 10
+            }],
+            "and pressing it again is a fresh press, not a no-op"
+        );
+    }
+
+    /// View only remembers nothing, because it sends nothing.
+    ///
+    /// Holding a button while view only is on and letting go before it is
+    /// turned off used to leave `last_mask` set from a press that never went
+    /// out. The first real press afterwards then carried a release for a
+    /// button the server never saw go down.
+    #[test]
+    fn view_only_does_not_remember_a_mask_it_never_sent() {
+        let mut i = input();
+        i.set_view_only(true);
+        assert!(i.pointer(10, 10, 0b100).is_empty());
+        i.set_view_only(false);
+
+        assert_eq!(
+            i.pointer(10, 10, 0b001),
+            vec![
+                FastPathInputEvent::Mouse {
+                    flags: pointer_flags::MOVE,
+                    x: 10,
+                    y: 10
+                },
+                FastPathInputEvent::Mouse {
+                    flags: pointer_flags::DOWN | pointer_flags::BUTTON1_LEFT,
+                    x: 10,
+                    y: 10
+                }
+            ],
+            "a left press, with no phantom right release in front of it"
         );
     }
 
