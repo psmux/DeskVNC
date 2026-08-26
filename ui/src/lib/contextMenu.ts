@@ -1,0 +1,90 @@
+/**
+ * Suppress the webview's native context menu everywhere it does not belong.
+ *
+ * ## The bug this fixes
+ *
+ * Clicking a tab would occasionally pop up a "Paste" menu. The click had
+ * nothing to do with it: a secondary click anywhere in the window produced it,
+ * and a secondary click is easy to make by accident, since Ctrl+click and a
+ * two-finger trackpad tap both count as one on macOS.
+ *
+ * What made it a *paste* menu is where the focus was. Both kinds of session
+ * keep a focused, editable element to own keyboard input: a VNC or RDP session
+ * has the transparent composition overlay in `render/input.ts` (a `textarea`
+ * sized over the canvas, which dictation and IME need in the accessibility
+ * tree), and an SSH session has xterm's own helper textarea. A webview offers
+ * the editing menu based on the **focused** element, not the clicked one, so
+ * with either of those focused the menu appeared over the tab strip, the
+ * toolbar, anywhere. It only happened with a session open, which is also the
+ * only time there are tabs to click, hence "occasionally".
+ *
+ * ## The rule
+ *
+ * A desktop app should not show a browser's context menu for its chrome. It
+ * should show one in a real text field, where Cut, Copy, Paste and the spell
+ * checker are exactly what the user wants. So: allow it for a genuine,
+ * user-facing text field, and suppress it everywhere else.
+ *
+ * The hidden capture elements are deliberately excluded. They are editable for
+ * the accessibility tree's benefit, not because anyone types into them
+ * directly, and their own paste handling already has a path
+ * (`render/input.ts` cancels paste on the overlay, and the terminal has
+ * clipboard support of its own).
+ */
+
+/** Marks an element that is editable for machinery, not for a human. */
+const CAPTURE_ATTRIBUTE = "data-remote-capture";
+
+/** xterm's hidden input element, which exists for the same reason. */
+const TERMINAL_HELPER_CLASS = "xterm-helper-textarea";
+
+/**
+ * Should the webview's own context menu be allowed for this event target?
+ *
+ * Pure and exported so the rule can be tested without a webview: the failure
+ * this guards against is invisible in a unit test otherwise, because jsdom has
+ * no native menu to observe.
+ */
+export function allowsNativeContextMenu(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+
+  // A field the user is actually typing into. `closest` rather than a tag
+  // check on the target itself, because a click can land on a child of a
+  // contenteditable region.
+  const editable = target.closest<HTMLElement>(
+    "input, textarea, [contenteditable=''], [contenteditable='true']",
+  );
+  if (!editable) return false;
+
+  // The session's keyboard-capture elements are editable for the
+  // accessibility tree, not for a person. Offering Paste over them is the
+  // whole bug.
+  if (editable.hasAttribute(CAPTURE_ATTRIBUTE)) return false;
+  if (editable.classList.contains(TERMINAL_HELPER_CLASS)) return false;
+
+  // A disabled or read-only field has nothing to offer either.
+  if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) {
+    if (editable.disabled || editable.readOnly) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Install the suppressor. Returns the undo, for symmetry with the other
+ * listeners this app installs; in practice it lives for the window's lifetime.
+ *
+ * Bubble phase, not capture, and it respects `defaultPrevented`: the session
+ * canvas forwards a right click to the remote desktop and handles the event
+ * itself, so anything already dealt with is left alone rather than
+ * second-guessed.
+ */
+export function installContextMenuSuppressor(root: Window = window): () => void {
+  const onContextMenu = (e: Event): void => {
+    if (e.defaultPrevented) return;
+    if (allowsNativeContextMenu(e.target)) return;
+    e.preventDefault();
+  };
+  root.addEventListener("contextmenu", onContextMenu);
+  return () => root.removeEventListener("contextmenu", onContextMenu);
+}
