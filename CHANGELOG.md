@@ -10,6 +10,77 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-26
+
+Minor: a new SSH authentication format, and two user-visible changes to
+how a session looks in the Library. Nothing stored changes shape, no
+thumbnail already on disk needs rewriting, and no command or event gains
+a field: a PuTTY key is named by the same `keyPath` an OpenSSH key
+already was.
+
+### Added
+
+- **PuTTY private keys (`.ppk`) now work anywhere a key file is
+  accepted.** Point "Private key path" at a `.ppk` and it connects. This
+  covers the remote shell, the SFTP file panel and the SSH tunnel, since
+  all three authenticate through the same place.
+
+  Versions 2 and 3 are both read, encrypted or not, for RSA, Ed25519 and
+  ECDSA on the NIST P-256, P-384 and P-521 curves. Version 3 keys go
+  through Argon2 as PuTTY specifies, with the parameters recorded in the
+  file rather than assumed. The format is detected by reading the file,
+  not by its extension, so a key that lost its suffix somewhere between
+  Windows and here still works.
+
+  The MAC every `.ppk` carries is verified before the key is used, which
+  is also what tells a wrong passphrase apart from a damaged file, so the
+  error says which one it was instead of guessing.
+
+  DSA (`ssh-dss`) keys are refused with a message explaining why: the
+  algorithm is obsolete, OpenSSH disabled it in 7.0 and removed it in
+  9.8, and nothing in this build can produce a DSA signature. Accepting
+  the file would only move the failure to the handshake, where nothing
+  would point at the algorithm.
+
+  Nothing new is vendored for this. The parser is about 400 lines in
+  `ssh-transport`, and the crypto it needs was already in the build.
+
+### Changed
+
+- **Library thumbnails for SSH sessions now carry the terminal's colour.**
+  A shell tile used to be flat theme foreground on theme background: the
+  thumbnail was drawn from the text of each row and every attribute the
+  cells carried was thrown away with it. Beside a VNC or RDP tile, which
+  is literal framebuffer pixels, it read as a grey wall of text and told
+  you very little about which machine you were looking at.
+
+  The capture now walks the visible grid cell by cell and paints what
+  each one says: foreground and background through all three of xterm's
+  colour modes (default, the 256 colour palette, 24-bit true colour),
+  plus inverse, bold, dim, italic, underline and strikethrough. The
+  sixteen ANSI slots come from the app's own theme, the same ones the
+  live terminal uses, so the tile and the session it came from agree.
+  Cells sharing a colour are batched into one fill, so a full grid still
+  costs a few dozen draws per row rather than one per cell.
+
+### Fixed
+
+- **A Library tile showed the desktop upside down while its session was
+  live.** With "Live previews" on, a connected VNC or RDP tile flipped
+  vertically the moment the first preview frame arrived, and flipped back
+  when the session ended and the saved thumbnail took over.
+
+  The two readbacks take different routes to the same pixels. The
+  thumbnail capture attaches the frame texture to a framebuffer object and
+  reads it with no draw, so rows come back in upload order, top-down. The
+  preview renders the frame through the quad program into a small target
+  first, to downscale it on the GPU. That draw maps the top of the desktop
+  to the top of clip space, which is what the screen wants, but
+  `readPixels` reads from the lower left, so the top scanline was the last
+  row returned and every preview came back mirrored. The preview draw now
+  samples the source bottom-up, which cancels the flip in the sampler
+  rather than paying for a row reversing copy after the read.
+
 ## [0.17.3] - 2026-08-26
 
 Patch: one fix. Nothing stored changes and no command or event gains a
