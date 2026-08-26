@@ -10,6 +10,27 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-08-26
+
+Patch: one fix. Nothing stored changes and no command or event gains a
+field.
+
+### Fixed
+
+- **A terminal opened, printed its attach command, and then sat there.**
+  The session connected, the prompt appeared, and the line that attaches
+  to tmux was typed out in full and never run, so nothing happened and
+  the terminal waited at the shell prompt.
+
+  The line was terminated with a line feed. A terminal sends a carriage
+  return when Enter is pressed, and that is what the shell on the far
+  side waits for. `cmd.exe` on a Windows host therefore never saw a
+  completed line at all. A POSIX shell only tolerated it because its line
+  discipline happened to be translating one to the other, so the same
+  code could look correct on one host and do nothing on another. The line
+  now ends the way a keypress ends it.
+
+
 ## [0.17.2] - 2026-08-26
 
 Patch: one frontend fix. Nothing stored changes and no command or event
