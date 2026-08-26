@@ -986,8 +986,10 @@ export class WebGLRenderer {
   }
 
   /**
-   * Downscaled RGBA8888 snapshot of the framebuffer, for the Library live
-   * preview poll (every 500 ms while previews are enabled). A full-res
+   * Downscaled, top-down RGBA8888 snapshot of the framebuffer, for the
+   * Library live preview poll (every 500 ms while previews are enabled).
+   * Same row order as `readFramebufferRGBA`, though it takes a different
+   * route to it; see the `u_uv` comment below. A full-res
    * `readFramebufferRGBA` is 33 MB at 4K and runs on the main thread; instead,
    * render `frameTex` through the existing quad program into a small FBO
    * (preserving aspect, capped to `maxWidth`) and read pixels from that,
@@ -1017,7 +1019,17 @@ export class WebGLRenderer {
     gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
     gl.uniform1f(this.uLevels, 0); // preview is always full color, independent of the on-screen B&W mode
     gl.uniform1f(this.uTexAlpha, 0);
-    gl.uniform4f(this.uUv, 0, 0, 1, 1); // the whole desktop, whatever monitor view is up
+    // The whole desktop, whatever monitor view is up, sampled BOTTOM-UP.
+    //
+    // Unlike `readFramebufferRGBA`, which reads the texture with no draw and
+    // therefore gets rows back in upload order, this path renders first. The
+    // vertex shader maps the top of the source to NDC +1 (`1.0 - p.y * 2.0`),
+    // which is correct on screen but is the LAST row `readPixels` returns,
+    // because GL reads from the lower-left. Sampling v from 1 down to 0
+    // cancels that on the way in, so the pixels come out top-down like every
+    // other path. The alternative, reversing rows after the read, costs a
+    // full copy for something the sampler does for nothing.
+    gl.uniform4f(this.uUv, 0, 1, 1, -1);
     gl.uniform4f(this.uRect, 0, 0, 1, 1);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
