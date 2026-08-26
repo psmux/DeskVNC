@@ -10,6 +10,34 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-08-26
+
+Patch: one frontend fix. Nothing stored changes and no command or event
+gains a field.
+
+### Fixed
+
+- **Clicking a tab occasionally showed a Paste menu.** The click was
+  never the cause: a secondary click anywhere in the window produced it,
+  and on macOS both Ctrl+click and a two-finger trackpad tap count as
+  one, so it was easy to do by accident.
+
+  What made it a *paste* menu was where the focus was. Both kinds of
+  session keep a focused, editable element to own keyboard input: a VNC
+  or RDP session has the transparent composition overlay that dictation
+  and IME need in the accessibility tree, and an SSH session has the
+  terminal's own hidden input. A webview picks its context menu from the
+  **focused** element rather than the clicked one, so with either of
+  those focused the editing menu appeared over the tab strip, the
+  toolbar, anywhere at all. It needed a session to be open, which is also
+  the only time there are tabs to click, which is why it seemed
+  intermittent.
+
+  The native menu is now suppressed everywhere except a genuine text
+  field, where Cut, Copy and Paste are the point. The session canvas
+  still owns the right click it forwards to the remote desktop.
+
+
 ## [0.17.1] - 2026-08-26
 
 Patch: behaviour only. Nothing stored changes shape and no command or
