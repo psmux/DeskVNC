@@ -175,6 +175,25 @@ fn shell_line(attach: Option<String>, startup: Option<&str>) -> Option<String> {
     }
 }
 
+/// One line, exactly as a person typing it would send it.
+///
+/// Two details, both of which have already gone wrong once:
+///
+/// The terminator is CR, not LF. Pressing Enter in a terminal transmits a
+/// carriage return, and that is what the shell on the far side waits for.
+/// Sending LF left the command sitting typed at the prompt and never run,
+/// which is precisely how it looked on a Windows host: `cmd.exe` never saw a
+/// completed line. A POSIX shell only tolerated LF because its line
+/// discipline happened to translate; sending what a keypress sends removes
+/// the dependence on that.
+///
+/// The leading space is for shells honouring `HISTCONTROL=ignorespace`. This
+/// is the app's command, not the user's, and it has no business in their
+/// history.
+fn typed_line(command: &str) -> String {
+    format!(" {command}\r")
+}
+
 /// Open a channel, request a PTY, and start the shell or the attach command.
 pub async fn open(
     ssh: &SshHandle,
@@ -257,9 +276,17 @@ pub async fn open(
 
     // A leading space so shells honouring `HISTCONTROL=ignorespace` keep this
     // out of the user's history. It is our command, not theirs.
+    //
+    // Terminated with CR, not LF, because this is a terminal: pressing Enter
+    // transmits carriage return, and that is what every shell on the far side
+    // is waiting for. Sending LF instead left the command sitting typed at the
+    // prompt, unexecuted, which is exactly how it looked: `cmd.exe` never
+    // treated it as a completed line, and a POSIX shell only did because its
+    // line discipline happened to be translating. Sending what a keypress
+    // sends removes the dependence on either.
     if let Some(line) = command.as_deref() {
         channel
-            .data(format!(" {line}\n").as_bytes())
+            .data(typed_line(line).as_bytes())
             .await
             .map_err(|e| Error::ShellRefused(e.to_string()))?;
     }
@@ -290,6 +317,27 @@ mod tests {
         // Without ISIG, Ctrl-C arrives as a literal 0x03 and nothing is
         // interrupted, which is the other half of a terminal feeling broken.
         assert_eq!(get(Pty::ISIG), Some(1), "Ctrl-C must still signal");
+    }
+
+    /// A terminal sends CR when Enter is pressed. Sending LF instead left the
+    /// attach command typed at the prompt and never executed, which is what a
+    /// Windows host actually did: the line was visible, the session was not
+    /// attached, and nothing happened.
+    #[test]
+    fn the_injected_line_ends_the_way_a_keypress_does() {
+        let line = typed_line("wsl.exe -- tmux new-session -A -s deskvnc");
+        assert!(line.ends_with('\r'), "must end with CR: {line:?}");
+        assert!(
+            !line.contains('\n'),
+            "a bare LF is not what Enter sends: {line:?}"
+        );
+    }
+
+    /// The app's command, not the user's, so it stays out of their history on
+    /// any shell that honours a leading space.
+    #[test]
+    fn the_injected_line_is_kept_out_of_shell_history() {
+        assert!(typed_line("tmux new-session -A -s work").starts_with(' '));
     }
 
     /// A startup command with a multiplexer has to run inside it, or it dies
