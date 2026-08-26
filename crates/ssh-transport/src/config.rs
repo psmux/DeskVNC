@@ -78,6 +78,12 @@ pub fn canonical_host(host: &str) -> String {
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
 pub enum SshAuth {
     Password(String),
+    /// A private key file on this machine. The format is detected from the
+    /// file's contents, not its name: OpenSSH containers and the older
+    /// PEM/PKCS#8 files go to russh, PuTTY `.ppk` files (v2 and v3) go to
+    /// [`crate::ppk`]. `passphrase` is ignored for a key that is not
+    /// encrypted, so a caller holding a stored secret need not know which
+    /// kind it has.
     #[serde(rename_all = "camelCase")]
     KeyFile {
         path: PathBuf,

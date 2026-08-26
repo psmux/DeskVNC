@@ -15,12 +15,13 @@
 //! connect fails, turning a useless network error into the exact prompt the
 //! situation calls for.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::{HashAlg, PublicKey};
+use russh::keys::{HashAlg, PrivateKey, PublicKey};
 
 use crate::config::{resolver_host, SshAuth, SshConfig};
 use crate::error::{Error, Result};
@@ -256,16 +257,17 @@ async fn authenticate_inner(ssh: &mut SshHandle, cfg: &SshConfig) -> Result<()> 
             let path = path.clone();
             let passphrase = passphrase.clone();
             let display = path.display().to_string();
-            // Reading and decrypting a key is blocking, CPU-bound work.
-            let key = tokio::task::spawn_blocking(move || {
-                russh::keys::load_secret_key(&path, passphrase.as_deref())
-            })
-            .await
-            .map_err(|e| Error::Other(e.to_string()))?
-            .map_err(|e| Error::Key {
-                path: display,
-                reason: e.to_string(),
-            })?;
+            // Reading and decrypting a key is blocking, CPU-bound work, and
+            // a v3 PPK deliberately makes it more so: Argon2 with PuTTY's
+            // default parameters is tens of milliseconds of pure CPU.
+            let key =
+                tokio::task::spawn_blocking(move || load_key_file(&path, passphrase.as_deref()))
+                    .await
+                    .map_err(|e| Error::Other(e.to_string()))?
+                    .map_err(|reason| Error::Key {
+                        path: display,
+                        reason,
+                    })?;
             authenticate_with_key(ssh, &cfg.username, Arc::new(key)).await?
         }
         SshAuth::Agent => authenticate_with_agent(ssh, &cfg.username).await?,
@@ -276,6 +278,30 @@ async fn authenticate_inner(ssh: &mut SshHandle, cfg: &SshConfig) -> Result<()> 
         });
     }
     Ok(())
+}
+
+/// Read a private key file in whichever format it is actually in.
+///
+/// PuTTY's `.ppk` is decided by content, not by the extension: these files
+/// get renamed, and a key that works in PuTTY should not stop working here
+/// because someone dropped the suffix. Everything else goes to russh, which
+/// covers the OpenSSH container and the older PEM/PKCS#8 files.
+///
+/// Returns the reason as a plain string because the two loaders have
+/// unrelated error types and the caller only ever shows this to a person.
+pub fn load_key_file(
+    path: &Path,
+    passphrase: Option<&str>,
+) -> std::result::Result<PrivateKey, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if crate::ppk::is_ppk(&bytes) {
+        return crate::ppk::load(&bytes, passphrase).map_err(|e| e.to_string());
+    }
+    russh::keys::decode_secret_key(
+        &String::from_utf8(bytes).map_err(|_| "not a text key file".to_string())?,
+        passphrase,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// RSA keys need an explicit signature hash: `ssh-rsa` (SHA-1) is refused by

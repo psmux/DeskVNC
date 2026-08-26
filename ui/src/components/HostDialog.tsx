@@ -956,7 +956,7 @@ function SshOptionsSection({
       </Field>
 
       {ssh.auth === "key-file" ? (
-        <Field label="Private key path" hint="An OpenSSH private key on this computer">
+        <Field label="Private key path" hint="An OpenSSH or PuTTY (.ppk) private key on this computer">
           <input
             className="field mono"
             value={ssh.keyPath ?? ""}
@@ -1340,7 +1340,7 @@ function SshTunnelSection({
             </Field>
           </div>
           {t.auth === "key-file" ? (
-            <Field label="Private key path" hint="An OpenSSH private key on this computer">
+            <Field label="Private key path" hint="An OpenSSH or PuTTY (.ppk) private key on this computer">
               <input
                 className="field mono"
                 value={t.keyPath ?? ""}

@@ -76,6 +76,23 @@ id_rsa*
 id_ed25519*
 id_ecdsa*
 known_hosts
+# SSH private keys in every container this project can read. Test fixtures are
+# GENERATED OUTSIDE THE TREE (see crates/ssh-transport/tests/ppk.rs), so any
+# key-shaped file appearing in here is a mistake, never a fixture. Do not add a
+# negation to whitelist one.
+*.ppk
+*.ppk.*
+*.priv
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+# Directories people reach for when they need "somewhere to put a test key".
+**/test-keys/
+**/testkeys/
+**/fixtures/keys/
+**/tests/keys/
+**/tests/ppk/
 secrets.*
 *.secret
 # Local credential vault written by vnc-store's encrypted-file fallback.

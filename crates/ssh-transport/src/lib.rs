@@ -60,15 +60,18 @@ pub mod config;
 pub mod connect;
 pub mod error;
 pub mod hostkey;
+pub mod ppk;
 pub mod probe;
 pub mod tunnel;
 
 pub use config::{canonical_host, host_port, resolver_host, SshAuth, SshConfig, DEFAULT_SSH_PORT};
+pub use connect::load_key_file;
 pub use connect::{
     connect_and_authenticate, connect_and_authenticate_with, BoxFuture, ClientHandler, Keepalive,
     SshHandle,
 };
 pub use error::{Error, Result};
 pub use hostkey::{HostKeyDecision, HostKeyPin, HostKeyStore, HostKeyVerifier};
+pub use ppk::{is_ppk, PpkError};
 pub use probe::probe_ssh;
 pub use tunnel::{SshTunnel, TunnelStream};

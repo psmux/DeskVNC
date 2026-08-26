@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "deskvncviewer"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4772,7 +4772,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-auth"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -4796,7 +4796,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-codecs"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "criterion",
  "hex",
@@ -4807,7 +4807,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-core"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "bytes",
  "futures",
@@ -4832,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-pdu"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "bytes",
  "hex",
@@ -4912,7 +4912,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote-core"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "bytes",
  "rand 0.10.2",
@@ -4927,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "remote-pixel"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "criterion",
 ]
@@ -5855,7 +5855,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-core"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -5914,15 +5914,24 @@ dependencies = [
 
 [[package]]
 name = "ssh-transport"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
+ "aes 0.8.4",
+ "argon2 0.5.3",
+ "base64 0.22.1",
+ "cbc 0.1.2",
+ "hex",
+ "hmac 0.12.1",
  "parking_lot",
  "russh",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -7157,7 +7166,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vnc-core"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "aes 0.8.4",
  "byteorder",
@@ -7194,7 +7203,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-discovery"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -7215,7 +7224,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-files"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -7237,7 +7246,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-input-capture"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "core-foundation",
  "core-graphics 0.24.0",
@@ -7254,7 +7263,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-store"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -7279,7 +7288,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-transport"
-version = "0.17.3"
+version = "0.18.0"
 dependencies = [
  "hex",
  "openssl",

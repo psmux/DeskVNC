@@ -16,6 +16,18 @@ serde = { workspace = true }
 russh = { workspace = true }
 parking_lot = { workspace = true }
 
+# PuTTY key (.ppk) support, see `src/ppk.rs`. Every one of these is already in
+# the build via russh; declaring them here adds no new third-party code.
+aes = { workspace = true }
+argon2 = { workspace = true }
+base64 = { workspace = true }
+cbc = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = { workspace = true }
