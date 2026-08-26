@@ -16,6 +16,7 @@ import { ToastShelf } from "./components/primitives";
 import { safeListen } from "./lib/tauri";
 import { syncSessionMenu } from "./lib/menuSync";
 import { PREF_HIDE_TOOLBAR, readBoolPref, writeBoolPref } from "./lib/prefs";
+import { installContextMenuSuppressor } from "./lib/contextMenu";
 
 /**
  * Tell the native menu that nothing is connected in the window in front.
@@ -64,6 +65,17 @@ export default function App(): ReactNode {
     () => new URLSearchParams(window.location.search).has("sessionId"),
     [],
   );
+
+  /**
+   * A desktop app should not show a browser's context menu over its own
+   * chrome. Installed here rather than per screen because the gesture is
+   * global and so is the cause: a session keeps a focused, editable element
+   * to own keyboard input, and a webview offers the editing menu for the
+   * FOCUSED element rather than the clicked one, so a stray Ctrl+click or
+   * two-finger tap anywhere produced a Paste menu over the tabs. Real text
+   * fields keep theirs, see `lib/contextMenu.ts`.
+   */
+  useEffect(() => installContextMenuSuppressor(), []);
 
   return (
     <SettingsProvider>
