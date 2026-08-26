@@ -28,6 +28,14 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
             libssl-dev libdbus-1-dev pkg-config
+          # `puttygen`, for the PuTTY key tests. Those fixtures are generated
+          # at test time and deliberately never committed (no private keys in
+          # this repository), so without this the tests skip instead of run.
+          sudo apt-get install -y putty-tools
+
+      - name: Install puttygen (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install putty
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,6 +56,7 @@ jobs:
           -p rdp-pdu -p rdp-codecs -p rdp-auth -p rdp-core
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
+          -p ssh-transport -p ssh-core
           --all-targets -- -D warnings
 
       - name: Test
@@ -57,6 +66,7 @@ jobs:
           -p rdp-pdu -p rdp-codecs -p rdp-auth -p rdp-core
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
+          -p ssh-transport -p ssh-core
 
   legacy-tls:
     name: legacy-tls (${{ matrix.os }})
