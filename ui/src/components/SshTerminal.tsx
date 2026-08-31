@@ -324,6 +324,9 @@ export function SshTerminal({
             case "ready":
               setPhase({ kind: "shell", state: null });
               break;
+            // Never a gateway: this terminal is a second connection to the
+            // machine the desktop session is already on, so the key it
+            // presents is that machine's own.
             case "host-key-prompt":
               setPhase({
                 kind: "host-key-prompt",
@@ -333,6 +336,7 @@ export function SshTerminal({
                   keyType: outcome.keyType,
                   fingerprint: outcome.fingerprint,
                   changed: false,
+                  gateway: false,
                 },
               });
               break;
@@ -345,6 +349,7 @@ export function SshTerminal({
                   fingerprint: outcome.actual,
                   changed: true,
                   expected: outcome.expected,
+                  gateway: false,
                 },
               });
               break;

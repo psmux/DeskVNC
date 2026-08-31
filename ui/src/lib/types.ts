@@ -259,8 +259,10 @@ export function serializeSshTunnel(t: SshTunnelSettings | null): string | null {
 
 /**
  * Mirrors `SessionConnectOutcome` in `commands/session.rs` (tagged on
- * `status`). The ssh variants only occur for a profile whose tunnel is
- * enabled, before any session exists.
+ * `status`). The ssh variants happen before any session exists: for a profile
+ * whose tunnel is enabled, and for a direct SSH session meeting a machine for
+ * the first time. `gateway` tells the two apart, because trusting the SSH
+ * server in front of a machine is not the same as trusting the machine.
  */
 export type SessionConnectOutcome =
   | { status: "started"; sessionId: string }
@@ -270,6 +272,7 @@ export type SessionConnectOutcome =
       port: number;
       keyType: string;
       fingerprint: string;
+      gateway: boolean;
     }
   | {
       status: "ssh-host-key-changed";
@@ -277,6 +280,7 @@ export type SessionConnectOutcome =
       port: number;
       expected: string;
       actual: string;
+      gateway: boolean;
     };
 
 /** Mirrors `vnc_store::Group`. */

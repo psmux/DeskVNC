@@ -487,10 +487,20 @@ export function mockCredentialRequest(): CredentialRequest | null {
  *   `nla-refused`           the server refuses network level authentication
  *   `legacy-tls`            the server offers nothing above TLS 1.1
  *   `legacy-tls-unavailable` this build cannot use those versions
+ *
+ * `?mockErrorText=<anything>` is the escape hatch, used verbatim. It is a
+ * separate parameter rather than a fallback on the one above, because
+ * `mockError` already means something else to `mockCredentialRequest` and
+ * quietly stealing its values would park the session on this panel instead
+ * of on the auth prompt. It is how a message that arrives from the core as
+ * one long unbreakable string (an SSH fingerprint, say) can be put in front
+ * of the panel that has to lay it out.
  */
 export function mockDisconnectReason(): string | null {
   if (!useMockData()) return null;
   const q = new URLSearchParams(window.location.search);
+  const verbatim = q.get("mockErrorText");
+  if (verbatim) return verbatim;
   switch (q.get("mockError")) {
     case "ntlm-policy":
       return "ntlm-refused-by-policy";

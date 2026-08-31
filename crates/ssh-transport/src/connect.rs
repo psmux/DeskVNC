@@ -176,7 +176,43 @@ pub fn connect_and_authenticate_with<'a>(
     Box::pin(connect_and_authenticate_inner(cfg, verifier, keepalive))
 }
 
+/// Decide the server's host key and nothing else: dial, let the key
+/// verification in the handler run, and drop the connection.
+///
+/// This exists so a caller can get the trust decision (and therefore the
+/// fingerprint to show somebody) BEFORE it commits to a session. It stops
+/// after the key exchange, which is where the host key is presented, so it
+/// costs no authentication attempt: no key is decrypted, no agent is asked,
+/// and no server's failed-auth counter moves. `Ok(())` means the key is
+/// already trusted.
+///
+/// Prefer it to a throwaway [`connect_and_authenticate`] when the only
+/// question is the host key.
+pub fn check_host_key<'a>(
+    cfg: &'a SshConfig,
+    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
+) -> BoxFuture<'a, Result<()>> {
+    Box::pin(async move {
+        // Dropping the handle tears the transport down; there is nothing to
+        // close politely, the connection never got past the handshake.
+        let _handle = connect_only(cfg, verifier, Keepalive::sidecar()).await?;
+        Ok(())
+    })
+}
+
 async fn connect_and_authenticate_inner(
+    cfg: &SshConfig,
+    verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
+    keepalive: Keepalive,
+) -> Result<SshHandle> {
+    let mut ssh = connect_only(cfg, verifier, keepalive).await?;
+    authenticate(&mut ssh, cfg).await?;
+    Ok(ssh)
+}
+
+/// The handshake half of a connect: everything up to and including the host
+/// key decision, with no authentication.
+async fn connect_only(
     cfg: &SshConfig,
     verifier: Arc<dyn HostKeyVerifier + Send + Sync + 'static>,
     keepalive: Keepalive,
@@ -198,7 +234,7 @@ async fn connect_and_authenticate_inner(
 
     let connecting =
         russh::client::connect(ssh_config, (resolver_host(&cfg.host), cfg.port), handler);
-    let mut ssh = match tokio::time::timeout(cfg.connect_timeout(), connecting).await {
+    let ssh = match tokio::time::timeout(cfg.connect_timeout(), connecting).await {
         Err(_) => return Err(Error::Timeout),
         Ok(Ok(handle)) => handle,
         Ok(Err(e)) => {
@@ -230,8 +266,6 @@ async fn connect_and_authenticate_inner(
             });
         }
     };
-
-    authenticate(&mut ssh, cfg).await?;
     Ok(ssh)
 }
 

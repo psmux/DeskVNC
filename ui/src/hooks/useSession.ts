@@ -98,10 +98,10 @@ export interface SessionParams {
 }
 
 /**
- * First contact (or a hard-stop change) of the SSH tunnel gateway's host key.
- * Unlike `CertPromptState` this happens BEFORE any session exists: the
- * shell's `connect_session` returned without spawning one, and accepting
- * re-invokes it with the fingerprint.
+ * First contact (or a hard-stop change) with an SSH host key. Unlike
+ * `CertPromptState` this happens BEFORE any session exists: the shell's
+ * `connect_session` returned without spawning one, and accepting re-invokes
+ * it with the fingerprint.
  */
 export interface SshHostKeyPromptState {
   host: string;
@@ -112,6 +112,8 @@ export interface SshHostKeyPromptState {
   /** A pinned key CHANGED: never acceptable from here. */
   changed: boolean;
   expected?: string;
+  /** The key belongs to a tunnel gateway, not to the machine being opened. */
+  gateway: boolean;
 }
 
 export interface SessionApi {
@@ -350,8 +352,9 @@ export function useSession(
     if (!inTauri()) {
       // Browser dev: run a small synthetic session so the screen is explorable.
       // `?mockCreds=…` additionally parks it on the auth prompt (see mock.ts).
-      // `?mockError=…` parks it on a terminal failure instead, so the
-      // disconnect copy is reviewable without the server that produces it.
+      // `?mockError=…` (or `?mockErrorText=…` for a message of your own)
+      // parks it on a terminal failure instead, so the disconnect copy is
+      // reviewable without the server that produces it.
       const mockReason = mockDisconnectReason();
       if (mockReason) {
         setState({ state: "disconnected", reason: mockReason, can_retry: true });
@@ -569,7 +572,8 @@ export function useSession(
         });
         repromptRef.current = false;
 
-        // The SSH gateway needs a trust decision before anything connects.
+        // An SSH host key needs a trust decision before anything connects,
+        // whether it belongs to a tunnel gateway or to the machine itself.
         // No session was spawned; the dialog re-runs the connect on accept.
         // State stays "connecting": the attempt is pending on the answer.
         if (outcome.status === "ssh-host-key-prompt") {
@@ -580,11 +584,12 @@ export function useSession(
               keyType: outcome.keyType,
               fingerprint: outcome.fingerprint,
               changed: false,
+              gateway: outcome.gateway,
             });
           }
           return;
         }
-        // Pinned gateway key CHANGED: hard stop, mirror of the sidecar rule.
+        // A pinned key CHANGED: hard stop, mirror of the sidecar rule.
         if (outcome.status === "ssh-host-key-changed") {
           if (!cancelled) {
             setSshHostKeyPrompt({
@@ -593,10 +598,13 @@ export function useSession(
               fingerprint: outcome.actual,
               expected: outcome.expected,
               changed: true,
+              gateway: outcome.gateway,
             });
             setState({
               state: "disconnected",
-              reason: "The SSH gateway's host key has changed.",
+              reason: outcome.gateway
+                ? "The SSH gateway's host key has changed."
+                : "This machine's SSH host key has changed.",
               can_retry: false,
             });
           }
@@ -816,13 +824,16 @@ export function useSession(
   }, [sshHostKeyPrompt]);
 
   const dismissSshHostKeyPrompt = useCallback((): void => {
+    const gateway = sshHostKeyPrompt?.gateway ?? true;
     setSshHostKeyPrompt(null);
     setState({
       state: "disconnected",
-      reason: "The SSH gateway's host key was not accepted.",
+      reason: gateway
+        ? "The SSH gateway's host key was not accepted."
+        : "This machine's SSH host key was not accepted.",
       can_retry: true,
     });
-  }, []);
+  }, [sshHostKeyPrompt]);
 
   const submitCredentials = useCallback(
     (username: string | null, domain: string | null, password: string, save: boolean): void => {
