@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "agent-lease"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "agent-perception"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "image",
  "limb-core",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "agent-plane"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -1417,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "deskvncviewer"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-perception",
  "anyhow",
@@ -1646,7 +1646,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dvv"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "limb-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-lease",
  "bytes",
@@ -4859,7 +4859,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-auth"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -4883,7 +4883,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-codecs"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "criterion",
  "hex",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "bytes",
  "futures",
@@ -4919,7 +4919,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-pdu"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "bytes",
  "hex",
@@ -4999,7 +4999,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "agent-lease",
  "bytes",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "remote-pixel"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "criterion",
 ]
@@ -5943,7 +5943,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -6002,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-transport"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "aes 0.8.4",
  "argon2 0.5.3",
@@ -7254,7 +7254,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vnc-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "aes 0.8.4",
  "byteorder",
@@ -7291,7 +7291,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-discovery"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -7312,7 +7312,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-files"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -7334,7 +7334,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-input-capture"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "core-foundation",
  "core-graphics 0.24.0",
@@ -7351,7 +7351,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-store"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -7376,7 +7376,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-transport"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "hex",
  "openssl",

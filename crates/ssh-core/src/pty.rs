@@ -8,10 +8,10 @@
 //! rather than guessing, and it is what makes falling back to a plain shell a
 //! deliberate, reported decision instead of a confusing error.
 //!
-//! Second, the PTY is requested with explicit terminal modes. Leaving
-//! `terminal_modes` empty means "server defaults", and the default on a good
-//! many sshd builds leaves `ECHO` and `ICANON` set in ways that fight a local
-//! terminal emulator doing its own line editing.
+//! Second, the PTY is requested with explicit terminal modes: the ordinary
+//! cooked, interactive set an `ssh` client sends, so the remote line
+//! discipline echoes and edits the way it would for someone at the keyboard.
+//! See [`terminal_modes`] for why that, and not a raw PTY, is correct here.
 
 use russh::client::Msg;
 use russh::{Channel, ChannelMsg, Pty};
@@ -21,24 +21,62 @@ use crate::multiplexer::{Detected, MultiplexerConfig, MultiplexerKind, ShellDial
 use crate::options::TerminalOptions;
 use ssh_transport::SshHandle;
 
-/// The terminal modes we ask for.
+/// The terminal modes we ask for: a conventional interactive terminal, the
+/// same cooked defaults every `ssh` client sends.
 ///
-/// `ECHO` and `ICANON` off is the definition of a raw PTY: the remote line
-/// discipline must not echo anything or buffer by lines, because the terminal
-/// emulator at the other end of this pipe is doing that job and doubling it up
-/// produces every character twice. `ISIG` stays *on* deliberately, that is
-/// what makes Ctrl-C reach the foreground program as `SIGINT` instead of
-/// arriving as a literal `0x03` byte nothing acts on.
+/// This used to ask for a **raw** PTY (`ECHO` and `ICANON` off), on the
+/// theory that the emulator at the other end of this pipe echoes locally and
+/// a remote echo would double every character. That theory is wrong for the
+/// terminal this app actually uses: xterm.js does not echo input, it only
+/// renders what the server sends back. So with the remote echo turned off,
+/// nothing echoed at all, and a plain login shell showed a blank line no
+/// matter what was typed. It was masked for a long time because the default
+/// profile attaches a multiplexer, and tmux/psmux draw their own screen and
+/// so echo regardless; only a session that fell back to a bare shell (a host
+/// with no multiplexer) exposed it.
 ///
-/// Everything else is left to the server. `TTY_OP_ISPEED` and `TTY_OP_OSPEED`
-/// are required by RFC 4254 §8 to be present, and 38400 is the conventional
-/// value every client sends; the numbers are meaningless on a pseudo-terminal
-/// but a few servers still sulk without them.
+/// The right model is the one `ssh` uses: the REMOTE line discipline echoes
+/// and cooks, exactly as it would for someone sitting at the machine, and the
+/// local side just ships keystrokes and paints what comes back. A full-screen
+/// program (an editor, tmux itself) turns the remote line discipline raw with
+/// its own `tcsetattr` when it starts, so these initial modes never fight it;
+/// they are only the starting state, and the starting state for a shell
+/// prompt is cooked.
+///
+/// The set below is what a Linux `ssh` encodes for an ordinary interactive
+/// terminal: echo on (with the erase/kill/ctrl refinements a person expects
+/// while editing a line), canonical input, signals on, `CR` mapped to `NL` on
+/// input so Enter submits, and output post-processing so a bare `NL` from a
+/// program still returns the cursor to the first column.
+///
+/// `TTY_OP_ISPEED` and `TTY_OP_OSPEED` are required by RFC 4254 §8 to be
+/// present, and 38400 is the conventional value every client sends; the
+/// numbers are meaningless on a pseudo-terminal but a few servers still sulk
+/// without them.
 fn terminal_modes() -> Vec<(Pty, u32)> {
     vec![
-        (Pty::ECHO, 0),
-        (Pty::ICANON, 0),
+        // Input: let Enter (CR) become a submitted line, and keep flow
+        // control and 8-bit/UTF-8 input intact.
+        (Pty::ICRNL, 1),
+        (Pty::IXON, 1),
+        (Pty::IMAXBEL, 1),
+        (Pty::IUTF8, 1),
+        // Local: echo what is typed, cook the line, and honour signals. The
+        // ECHOE/ECHOK/ECHOCTL/ECHOKE group is what makes Backspace rub a
+        // character out and Ctrl-C show as `^C` rather than a raw byte, which
+        // is what a person expects while editing a command.
         (Pty::ISIG, 1),
+        (Pty::ICANON, 1),
+        (Pty::ECHO, 1),
+        (Pty::ECHOE, 1),
+        (Pty::ECHOK, 1),
+        (Pty::ECHOCTL, 1),
+        (Pty::ECHOKE, 1),
+        (Pty::IEXTEN, 1),
+        // Output: post-process, mapping a bare `NL` to `CR`+`NL` so a program
+        // that prints `\n` still starts the next line at column zero.
+        (Pty::OPOST, 1),
+        (Pty::ONLCR, 1),
         (Pty::TTY_OP_ISPEED, 38_400),
         (Pty::TTY_OP_OSPEED, 38_400),
     ]
@@ -306,17 +344,32 @@ pub async fn open(
 mod tests {
     use super::*;
 
-    /// Doubling the line discipline is the classic "every character appears
-    /// twice" bug: the local emulator echoes, and so does the remote tty.
+    /// The PTY is cooked and interactive, like the one `ssh` asks for.
+    ///
+    /// The remote line discipline has to echo, because xterm.js does not: it
+    /// renders what the server sends and nothing else. With remote echo off,
+    /// a plain login shell showed a blank line for everything typed, the
+    /// original "invisible typing" report. It was hidden for a long time
+    /// because a multiplexer draws its own screen, so only a bare-shell
+    /// session ever surfaced it.
     #[test]
-    fn the_pty_is_raw_but_still_delivers_signals() {
+    fn the_pty_echoes_and_cooks_like_a_real_terminal() {
         let modes = terminal_modes();
         let get = |want: Pty| modes.iter().find(|(m, _)| *m == want).map(|(_, v)| *v);
-        assert_eq!(get(Pty::ECHO), Some(0), "remote echo must be off");
-        assert_eq!(get(Pty::ICANON), Some(0), "line buffering must be off");
+        assert_eq!(get(Pty::ECHO), Some(1), "the remote must echo what is typed");
+        assert_eq!(get(Pty::ICANON), Some(1), "the line must be cooked");
+        // CR from Enter has to become a submitted line, or nothing runs.
+        assert_eq!(get(Pty::ICRNL), Some(1), "Enter must submit the line");
+        // A bare LF from a program has to return to column zero, or output
+        // walks diagonally down the screen.
+        assert_eq!(get(Pty::OPOST), Some(1));
+        assert_eq!(get(Pty::ONLCR), Some(1));
         // Without ISIG, Ctrl-C arrives as a literal 0x03 and nothing is
         // interrupted, which is the other half of a terminal feeling broken.
         assert_eq!(get(Pty::ISIG), Some(1), "Ctrl-C must still signal");
+        // A full-screen program turns all of this off itself when it starts,
+        // so none of it fights an editor or tmux; these are only the state a
+        // shell prompt begins in.
     }
 
     /// A terminal sends CR when Enter is pressed. Sending LF instead left the
