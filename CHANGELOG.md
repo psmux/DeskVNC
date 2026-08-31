@@ -10,6 +10,45 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-31
+
+Minor: opening an SSH machine for the first time asks whether to trust it,
+instead of refusing and telling you why in a sentence with no button on it.
+
+### Added
+
+- **A Trust button on first contact with an SSH machine.** Connecting to a
+  machine nobody here has met before now shows its fingerprint, the command
+  to check it against on the server, and a button that trusts it and connects.
+  It is the same dialog the tunnel and the Files panel have always used, and
+  the same saved key: trust a machine once and its terminal, its files and its
+  tunnel are all covered.
+
+  The decision happens before the session starts, and only for a machine with
+  no saved key: that costs one key exchange with no sign-in attempt behind it,
+  and a machine you have connected to before costs nothing at all.
+
+  The dialog says "this machine" or "the SSH gateway" depending on which one
+  is presenting the key, because trusting the server in front of a machine is
+  not the same as trusting the machine.
+
+### Fixed
+
+- **An unknown host key was a dead end.** The message named the machine and
+  printed the fingerprint, and the only button was Close. Nothing anywhere in
+  the interface would have trusted the key, so the machine could not be opened
+  at all.
+
+- **Long text ran off the side of the disconnect panel.** An SSH fingerprint
+  is forty-odd characters with no space or hyphen in it, and nothing told the
+  panel it could break inside a word. The panel now wraps it, and does the
+  same for a long machine name in the title.
+
+- **Two SSH messages arrived as raw core text.** An untrusted key and a
+  changed key both landed in the panel verbatim, fingerprint and all. They now
+  say what happened and what to do about it: reconnect to see the fingerprint
+  and decide, or forget the saved key if you know it legitimately changed.
+
 ## [0.23.0] - 2026-08-31
 
 Minor: signing in to an SSH machine with a key is an ordinary thing to want,

@@ -94,6 +94,26 @@ describe("the disconnect copy", () => {
     expect(diagnose("ntlm-refused-by-policy")).not.toContain("Incorrect password");
   });
 
+  // The message the core actually sends, fingerprint and all. It used to
+  // arrive verbatim, so the user read a base64 blob and a colon.
+  it("turns an untrusted ssh host key into something to do about it", () => {
+    const text = diagnose(
+      "unknown ssh host key for 192.168.77.133:2222: ssh-ed25519 SHA256:uc22JZO9QG",
+    );
+    expect(text).toContain("Reconnect");
+    expect(text).not.toContain("SHA256");
+  });
+
+  it("says what a changed ssh host key means and what to do", () => {
+    const text = diagnose(
+      "the ssh host key for box.local:22 changed (expected SHA256:a, got SHA256:b)",
+    );
+    expect(text).toContain("different SSH identity");
+    expect(text).toContain("forget the saved key");
+    // Never the reassuring reading: a changed key is not a wrong password.
+    expect(text).not.toContain("Incorrect password");
+  });
+
   it("is still protocol neutral about a refused port", () => {
     expect(diagnose("connection refused")).toBe(
       "Connection refused, nothing is listening on that port.",

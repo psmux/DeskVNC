@@ -182,8 +182,17 @@ export function DisconnectedOverlay({
         aria-label={`Disconnected from ${name}`}
         className="w-96 max-w-[calc(100vw-32px)] rounded-lg border border-subtle bg-raised p-5 shadow-(--shadow-pop)"
       >
-        <p className="text-base font-semibold text-primary">Disconnected from {name}</p>
-        <p className="mt-2 text-sm text-secondary" role="alert">
+        {/*
+          Both lines break inside a word, which for once is the right kind of
+          ugly. A machine name can be a long unbroken string, and a disconnect
+          reason can carry an SSH fingerprint: forty-odd characters with no
+          space, no hyphen and nowhere for the browser to wrap, which is
+          exactly what ran off the side of this panel.
+        */}
+        <p className="text-base font-semibold break-words text-primary">
+          Disconnected from {name}
+        </p>
+        <p className="mt-2 text-sm break-words text-secondary" role="alert">
           {diagnose(reason)}
         </p>
         {authFailure ? (

@@ -770,8 +770,11 @@ fn forward_events(
 }
 
 /// What [`connect_session`] did. `Started` is the normal case; the two
-/// ssh-host-key variants only occur for a profile whose `ssh_tunnel` is
-/// enabled, before any session is spawned.
+/// ssh-host-key variants happen before any session is spawned, for a profile
+/// whose `ssh_tunnel` is enabled and for a direct SSH session on first
+/// contact. `gateway` says which: the machine you asked for, or the SSH
+/// server standing in front of it. The two need different words, because
+/// trusting a gateway is not trusting the machine behind it.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(
     tag = "status",
@@ -781,22 +784,26 @@ fn forward_events(
 pub enum SessionConnectOutcome {
     /// The session task is running; connect progress arrives as events.
     Started { session_id: String },
-    /// First contact with the SSH gateway's host key. Show the fingerprint
-    /// and, if the user accepts, call `connect_session` again with
-    /// `acceptSshHostKey` set to it.
+    /// First contact with an SSH host key. Show the fingerprint and, if the
+    /// user accepts, call `connect_session` again with `acceptSshHostKey`
+    /// set to it.
     SshHostKeyPrompt {
         host: String,
         port: u16,
         key_type: String,
         fingerprint: String,
+        /// The key belongs to a tunnel gateway rather than to the machine
+        /// this session is for.
+        gateway: bool,
     },
-    /// The pinned gateway key changed. **Hard stop**, deliberately not
-    /// acceptable from the UI (PRD/08 §4, PRD/10 §4.3).
+    /// A pinned key changed. **Hard stop**, deliberately not acceptable from
+    /// the UI (PRD/08 §4, PRD/10 §4.3).
     SshHostKeyChanged {
         host: String,
         port: u16,
         expected: String,
         actual: String,
+        gateway: bool,
     },
 }
 
@@ -1139,6 +1146,7 @@ pub async fn connect_session(
                     port,
                     key_type,
                     fingerprint,
+                    gateway: true,
                 })
             }
             TunnelOutcome::HostKeyChanged {
@@ -1152,8 +1160,23 @@ pub async fn connect_session(
                     port,
                     expected,
                     actual,
+                    gateway: true,
                 })
             }
+        }
+    }
+
+    // A direct SSH session verifies the host key inside its own run loop,
+    // where the only way out is a disconnect message. First contact with a
+    // machine therefore ended as an error string and a Close button, on a
+    // machine the user had every intention of trusting and no way to say so.
+    // Settle it here instead, the way the sidecar and the tunnel already do,
+    // so the answer is a fingerprint to check and a button that pins it.
+    if kind == ProtocolKind::Ssh && options.connector.is_none() {
+        if let Some(question) =
+            decide_ssh_host_key(&app, &options, accept_ssh_host_key.as_deref()).await
+        {
+            return Ok(question);
         }
     }
 
@@ -1215,6 +1238,86 @@ pub async fn connect_session(
         on_event,
     );
     Ok(SessionConnectOutcome::Started { session_id: id })
+}
+
+/// Settle a direct SSH session's host key before anything is spawned.
+///
+/// `None` means the key is trusted, either because it was already pinned or
+/// because the user has just said so, and the connect may go ahead. `Some` is
+/// a question for the user, and no session was spawned to ask it.
+///
+/// **It only dials for an endpoint with no pin.** That is the whole cost
+/// argument: the probe exists to learn a fingerprint nobody has seen yet, and
+/// once a pin exists the session's own connect checks it against the same
+/// store a moment later. So the ordinary case, a machine connected to before,
+/// pays nothing at all, and first contact pays one key exchange with no
+/// authentication attempt behind it (see `check_host_key`).
+///
+/// A changed key still reaches the session rather than this function, and
+/// that is correct: it is a hard stop with no button to offer, so there is
+/// nothing to gain by asking earlier.
+async fn decide_ssh_host_key(
+    app: &AppHandle,
+    options: &ConnectOptions,
+    accept: Option<&str>,
+) -> Option<SessionConnectOutcome> {
+    // The pin store belongs to the Files sidecar, which owns the one store
+    // the whole app shares. Without it there is no decision to make here and
+    // the session's own verifier still runs.
+    let files = app.try_state::<crate::commands::files::FilesState>()?;
+    let cfg = ssh_core::SshTermOptions::from_connect_options(options).ssh;
+    let store = files.host_key_verifier();
+    if store.lock().get(&cfg.host, cfg.port).is_some() {
+        return None;
+    }
+
+    match ssh_transport::check_host_key(&cfg, Arc::new(store)).await {
+        Ok(()) => None,
+        Err(ssh_transport::Error::HostKeyUnknown {
+            host,
+            port,
+            key_type,
+            fingerprint,
+        }) => {
+            if accept == Some(fingerprint.as_str()) {
+                files.trust_host_key(&host, port, &key_type, &fingerprint);
+                None
+            } else {
+                Some(SessionConnectOutcome::SshHostKeyPrompt {
+                    host,
+                    port,
+                    key_type,
+                    fingerprint,
+                    gateway: false,
+                })
+            }
+        }
+        // Only reachable by a race: the endpoint had no pin a moment ago, so
+        // something else pinned one while this probe was in flight (two
+        // windows opening the same machine on first contact). The ordinary
+        // changed-key stop happens inside the session, against the same
+        // store, and reads the same way to the user.
+        Err(ssh_transport::Error::HostKeyChanged {
+            host,
+            port,
+            expected,
+            actual,
+        }) => Some(SessionConnectOutcome::SshHostKeyChanged {
+            host,
+            port,
+            expected,
+            actual,
+            gateway: false,
+        }),
+        // Anything else is an ordinary connect failure: unreachable, refused,
+        // timed out. It belongs to the session, which has the reconnect
+        // supervision and the wording for it, so this stays quiet and lets
+        // the real attempt report it.
+        Err(e) => {
+            tracing::debug!(host = %cfg.host, port = cfg.port, "host key probe did not answer: {e}");
+            None
+        }
+    }
 }
 
 /// How long a reconnect waits for the previous incarnation of the same session
@@ -2054,6 +2157,35 @@ async fn send_command(
 
 #[cfg(test)]
 mod tests {
+    /// The IPC contract: kebab-case `status`, camelCase fields, and the
+    /// `gateway` flag the dialog picks its words from. A missing flag would
+    /// read as `undefined` in JS, which is falsy, so a tunnel prompt would
+    /// silently start calling itself the machine.
+    #[test]
+    fn the_host_key_prompt_names_whose_key_it_is() {
+        let v = serde_json::to_value(SessionConnectOutcome::SshHostKeyPrompt {
+            host: "box.local".into(),
+            port: 2222,
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:x".into(),
+            gateway: false,
+        })
+        .unwrap();
+        assert_eq!(v["status"], "ssh-host-key-prompt");
+        assert_eq!(v["keyType"], "ssh-ed25519");
+        assert_eq!(v["gateway"], false);
+
+        let changed = serde_json::to_value(SessionConnectOutcome::SshHostKeyChanged {
+            host: "box.local".into(),
+            port: 2222,
+            expected: "SHA256:a".into(),
+            actual: "SHA256:b".into(),
+            gateway: true,
+        })
+        .unwrap();
+        assert_eq!(changed["status"], "ssh-host-key-changed");
+        assert_eq!(changed["gateway"], true);
+    }
 
     fn stored_pin(host: &str, port: u16, scheme: &str, spki: &str) -> vnc_store::CertPin {
         vnc_store::CertPin {

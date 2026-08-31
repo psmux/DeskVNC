@@ -104,6 +104,33 @@ export function diagnose(reason: unknown): string {
     );
   }
 
+  // Both SSH host-key messages, above every generic arm below: the changed
+  // one contains "changed" and the unknown one names a key type, and either
+  // would otherwise fall through as the raw sentence from the core, which is
+  // a fingerprint and a colon and no advice at all.
+  //
+  // First contact normally never reaches here, it becomes the trust prompt
+  // before a session is spawned. When it does reach here (a terminal beside
+  // a session, a message that arrived some other way), reconnecting is what
+  // raises that prompt, so that is what this says to do.
+  if (r.includes("unknown ssh host key")) {
+    return (
+      "This machine has not been trusted yet, so the connection stopped " +
+      "rather than trusting it silently. Reconnect to see its fingerprint " +
+      "and decide."
+    );
+  }
+  if (r.includes("host key") && r.includes("changed")) {
+    return (
+      "This machine is presenting a different SSH identity than the one you " +
+      "trusted before. That can mean it was reinstalled, or that something " +
+      "is sitting in the middle of the connection, and there is no way to " +
+      "tell which from here, so the connection was refused. If you know the " +
+      "key legitimately changed, forget the saved key for this machine and " +
+      "connect again."
+    );
+  }
+
   // The diagnosis is about the port, not about which server ought to be on
   // it, so it does not name a protocol.
   if (r.includes("refused")) return "Connection refused, nothing is listening on that port.";

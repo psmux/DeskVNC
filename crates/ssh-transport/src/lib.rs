@@ -67,8 +67,8 @@ pub mod tunnel;
 pub use config::{canonical_host, host_port, resolver_host, SshAuth, SshConfig, DEFAULT_SSH_PORT};
 pub use connect::load_key_file;
 pub use connect::{
-    connect_and_authenticate, connect_and_authenticate_with, BoxFuture, ClientHandler, Keepalive,
-    SshHandle,
+    check_host_key, connect_and_authenticate, connect_and_authenticate_with, BoxFuture,
+    ClientHandler, Keepalive, SshHandle,
 };
 pub use error::{Error, Result};
 pub use hostkey::{HostKeyDecision, HostKeyPin, HostKeyStore, HostKeyVerifier};

@@ -366,18 +366,30 @@ must be called from the session window, not the library.
 
 Returns a `SessionConnectOutcome`, tagged on `status`:
 
-- `{ status: "started", sessionId }` — the session task is running; progress
-  arrives as events. This is the only outcome for a profile without an
-  enabled SSH tunnel.
-- `{ status: "ssh-host-key-prompt", host, port, keyType, fingerprint }` —
-  the profile's SSH tunnel gateway presented a key we have no pin for
-  (first contact). Show the fingerprint; if the user accepts, call
-  `connect_session` again with `acceptSshHostKey` set to that fingerprint.
-  No session was spawned.
-- `{ status: "ssh-host-key-changed", host, port, expected, actual }` — the
-  pinned gateway key changed. **Hard stop**: there is deliberately no way to
-  accept this from the UI; recovery is "Forget saved key" in the Files/host
-  UI, exactly as for the SFTP sidecar.
+- `{ status: "started", sessionId }`: the session task is running; progress
+  arrives as events. This is the only outcome for a VNC or RDP profile
+  without an enabled SSH tunnel, and for an SSH profile whose host key is
+  already pinned.
+- `{ status: "ssh-host-key-prompt", host, port, keyType, fingerprint, gateway }`:
+  an SSH server presented a key we have no pin for (first contact). Show the
+  fingerprint; if the user accepts, call `connect_session` again with
+  `acceptSshHostKey` set to that fingerprint. No session was spawned.
+- `{ status: "ssh-host-key-changed", host, port, expected, actual, gateway }`:
+  a pinned key changed. **Hard stop**: there is deliberately no way to accept
+  this from the UI; recovery is "Forget saved key" in the Files/host UI,
+  exactly as for the SFTP sidecar.
+
+`gateway` says whose key it is. `true` is the tunnel gateway standing in
+front of the machine, `false` is the machine itself, which is what a direct
+SSH session meets. The dialog needs the difference in words, because trusting
+a gateway says nothing about the machine behind it.
+
+For a direct SSH session the key is decided **before** the session spawns, and
+only when the endpoint has no pin yet: an unpinned endpoint costs one key
+exchange with no authentication behind it (`ssh_transport::check_host_key`), a
+pinned one costs nothing and is verified by the session's own connect. Without
+that step, first contact surfaced as a disconnect message with no way to
+accept it, because an SSH session verifies inside its own run loop.
 
 The tunnel itself is configured per host in the `hosts.ssh_tunnel` JSON blob
 (`{ enabled, host, port, user, auth, keyPath }`, camelCase; `auth` is the
