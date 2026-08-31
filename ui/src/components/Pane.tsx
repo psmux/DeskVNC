@@ -23,9 +23,34 @@ import { createContext, useContext, type ReactNode } from "react";
 
 const PaneVisibleContext = createContext(true);
 
-/** Is the surface this component sits on the one in front? */
+/**
+ * May the surface this component sits on claim the window?
+ *
+ * Named for what it originally answered, when one pane was on screen at a time
+ * and being on screen was the same as owning the keyboard. A split makes those
+ * two different questions, and this is the second one: everything that reads it
+ * binds a window-level listener or takes the focus, and there is one window.
+ * Several panes can be on screen at once, but only the focused one gets `true`.
+ */
 export function usePaneVisible(): boolean {
   return useContext(PaneVisibleContext);
+}
+
+/**
+ * Declare that everything inside belongs to the focused pane, or does not.
+ *
+ * The split view positions its panes itself and has no use for {@link Pane}'s
+ * own box, but the answer above still has to reach the dialogs and toolbars
+ * inside each one.
+ */
+export function PaneVisible({
+  value,
+  children,
+}: {
+  value: boolean;
+  children: ReactNode;
+}): ReactNode {
+  return <PaneVisibleContext.Provider value={value}>{children}</PaneVisibleContext.Provider>;
 }
 
 export function Pane({

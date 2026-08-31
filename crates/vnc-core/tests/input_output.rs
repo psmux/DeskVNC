@@ -337,6 +337,175 @@ async fn pointer_events_arrive_byte_correct() {
     handle.shutdown();
 }
 
+/// REGRESSION: the release path drained the held-key map and nothing else,
+/// and nothing anywhere remembered the pointer mask. A PointerEvent carries
+/// the WHOLE button state (RFB 3.8 §7.5.5), so the server goes on holding
+/// whatever it was last told: a button held at the moment focus went away
+/// stayed held, with no state anywhere to release it from. The interrupted
+/// drag then COMPLETED at wherever the next pointer event landed instead of
+/// being cancelled, which is how a dragged file ends up dropped somewhere
+/// nobody chose.
+///
+/// The order is half the fix: a modifier still held while the button goes up
+/// is what the server saw when it went down, so the gesture has to end the
+/// way it began. `rdp-core` learned this first, see `release_all` there.
+#[tokio::test]
+async fn releasing_input_lifts_a_held_button_before_it_lifts_keys() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // Ctrl held and the left button down, dragged across the desktop: the
+    // shape of a copy-drag in any file manager.
+    send(
+        &handle,
+        ClientCommand::Key {
+            keysym: 0xffe3,
+            keycode: None,
+            down: true,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 100,
+            y: 50,
+            button_mask: 1,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 220,
+            y: 140,
+            button_mask: 1,
+        },
+    )
+    .await;
+    // Focus goes away mid-drag. This is what blur sends.
+    send(&handle, ClientCommand::ReleaseAllKeys).await;
+    flush(&handle, &server, 2).await;
+
+    let msgs = server.messages();
+    let lift = msgs
+        .iter()
+        .position(|m| {
+            matches!(
+                m,
+                ClientMessage::PointerEvent {
+                    button_mask: 0,
+                    x: 220,
+                    y: 140,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!("no zero-mask PointerEvent: the button is still held on the server {msgs:?}")
+        });
+    let key_up = msgs
+        .iter()
+        .position(|m| matches!(m, ClientMessage::KeyEvent { down: false, .. }))
+        .expect("the held key must still be released");
+    assert!(
+        lift < key_up,
+        "the button must go up before the modifier does: {msgs:?}"
+    );
+
+    // At the last known position, not the origin: a lift somewhere else is a
+    // drag the user did not make, ending wherever we invented.
+    let masks: Vec<(u16, u16, u8)> = server.pointer_events();
+    assert_eq!(
+        masks.last(),
+        Some(&(220, 140, 0)),
+        "the button must be lifted where the user left it"
+    );
+    handle.shutdown();
+}
+
+/// The other half of the same fix: once the mask is cleared it must stay
+/// cleared, and a genuine press afterwards must still reach the server.
+///
+/// `rdp-core` documents the trap this guards: a stale mask there made the next
+/// press no longer a transition, so it produced nothing at all and only the
+/// release went out. RFB sends an absolute mask rather than transitions, so
+/// the press cannot be swallowed the same way, but a mask left set would make
+/// the next release send a button-up for a button nobody is holding.
+#[tokio::test]
+async fn a_cleared_button_mask_does_not_resurrect() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 10,
+            y: 20,
+            button_mask: 4,
+        },
+    )
+    .await;
+    send(&handle, ClientCommand::ReleaseAllKeys).await;
+    send(&handle, ClientCommand::ReleaseAllKeys).await;
+    flush(&handle, &server, 2).await;
+    assert_eq!(
+        server.pointer_events(),
+        vec![(10, 20, 4), (10, 20, 0)],
+        "a second release has nothing left to lift and must send nothing"
+    );
+
+    // ...and the next real press is still a press.
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 30,
+            y: 40,
+            button_mask: 1,
+        },
+    )
+    .await;
+    send(&handle, ClientCommand::ReleaseAllKeys).await;
+    flush(&handle, &server, 3).await;
+    assert_eq!(
+        server.pointer_events(),
+        vec![(10, 20, 4), (10, 20, 0), (30, 40, 1), (30, 40, 0)],
+        "a press after a release must still go out, and still be releasable"
+    );
+    handle.shutdown();
+}
+
+/// Turning view only on is one of the release path's callers, and it has to
+/// lift the button that was down when the switch was thrown: from that moment
+/// nothing else will ever be sent that could.
+#[tokio::test]
+async fn switching_view_only_on_mid_drag_lifts_the_button() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x: 64,
+            y: 32,
+            button_mask: 1,
+        },
+    )
+    .await;
+    send(&handle, ClientCommand::SetViewOnly(true)).await;
+    flush(&handle, &server, 2).await;
+
+    assert_eq!(
+        server.pointer_events(),
+        vec![(64, 32, 1), (64, 32, 0)],
+        "the drag must be cancelled, not left held on the server"
+    );
+    handle.shutdown();
+}
+
 #[tokio::test]
 async fn view_only_suppresses_all_input() {
     let server = MockServer::start(MockConfig::new()).await;

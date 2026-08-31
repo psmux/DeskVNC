@@ -34,8 +34,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{SshCommand, SshEvent, TerminalState};
+use crate::exec::ExecRequest;
 use crate::options::SshTermOptions;
 use crate::session::SshSession;
+use remote_core::intent::IntentKind;
 
 /// The remote-shell driver.
 ///
@@ -96,7 +98,17 @@ impl ProtocolDriver for SshDriver {
         // neither should be able to stall the other. A terminal that stops
         // accepting keystrokes because its output is backed up is exactly the
         // hang this crate exists to avoid.
-        tokio::spawn(pump_commands(session.clone(), commands_rx, cancel.clone()));
+        //
+        // The command pump takes a clone of the event sink because it has one
+        // thing to say: a refused agent intent (PRDAgentPlug/00 R28). It never
+        // awaits it in a hot path, so it cannot become the stall the two pump
+        // split exists to avoid.
+        tokio::spawn(pump_commands(
+            session.clone(),
+            commands_rx,
+            events.clone(),
+            cancel.clone(),
+        ));
         tokio::spawn(pump_events(session_events, events, cancel.clone()));
 
         Ok(SessionHandle {
@@ -108,10 +120,109 @@ impl ProtocolDriver for SshDriver {
     }
 }
 
+/// Why `pty_run` is still refused now that `exec` is not.
+///
+/// `00 R50a` is closed for `exec`: [`crate::exec`] opens a second channel per
+/// RFC 4254 §6.5 and reads the far side's own `exit-status` off it. `pty_run`
+/// is a different intent and the difference is the whole argument. It asks for
+/// a command to run on the PTY THE PERSON IS WATCHING, which means typing at
+/// their prompt and reading the scrollback for an answer, and a scrollback
+/// gives no exit status, no stderr split and no output bound: three of the five
+/// things `05 §4.1` requires. The only way to produce a status from it is to
+/// invent one, and an invented exit status is worse than a refusal because the
+/// agent acts on it (`00 R7`).
+///
+/// So the sentence names the intent that does work. An agent that wanted a
+/// command run wants `exec`, and an agent that genuinely wants to drive the
+/// person's own terminal wants `dvv_term_send`, which lowers to bytes that
+/// exist.
+const REFUSE_PTY_RUN: &str =
+    "pty_run would type at the terminal a person is watching and read the scrollback for an answer, which gives no exit status, no stderr split and no output bound: use exec, which runs on a channel of its own and returns the far side's real exit status, or send bytes if you meant to drive this terminal";
+
+/// Why `declare` is refused.
+///
+/// `05 §3.3`'s declared state is per limb and this crate holds none: every
+/// `exec` opens a fresh channel that starts in the user's home directory with a
+/// fresh environment and inherits nothing, which is exactly why the intent
+/// exists. Rather than remember state that would then be invisible in the
+/// session the person is looking at, the answer is `05 §3`'s: state the `cwd`
+/// and `env` on the request itself, which [`crate::exec::exec_line`]
+/// implements and honours.
+const REFUSE_DECLARE: &str =
+    "this session holds no declared state: every exec runs on a fresh channel that starts in the home directory with a fresh environment, so pass cwd and env on the run itself, where they take effect";
+
+/// What the command pump does with one [`ClientCommand`].
+///
+/// A separate type, and [`route`] a pure function, so the decision that
+/// matters here can be tested without a socket. Before `PRDAgentPlug/00 R28`
+/// this was a `match` ending in `_ => continue` inside the pump, and that arm
+/// is the one the requirement was written against: nothing outside the pump
+/// could see what it swallowed.
+#[derive(Debug)]
+enum Routed {
+    /// Translated into something the PTY session understands.
+    Session(SshCommand),
+    /// Not servable here, and the asker is told so.
+    Refuse(remote_core::intent::IntentRefused),
+    /// Meaningless to a PTY and safe to drop in silence, because a person is
+    /// watching this window and nothing is waiting on an answer.
+    Ignore,
+}
+
+/// Decide what one shell command means to a remote shell.
+fn route(cmd: ClientCommand) -> Routed {
+    match cmd {
+        ClientCommand::TerminalInput(bytes) => Routed::Session(SshCommand::Input(bytes.to_vec())),
+        ClientCommand::ResizeTerminal { cols, rows } => {
+            Routed::Session(SshCommand::Resize { cols, rows })
+        }
+        ClientCommand::ReconnectNow => Routed::Session(SshCommand::ReconnectNow),
+        ClientCommand::Disconnect => Routed::Session(SshCommand::Disconnect),
+        ClientCommand::ProvideCredentials {
+            username, password, ..
+        } => Routed::Session(SshCommand::ProvideCredentials { username, password }),
+        ClientCommand::CancelCredentials => Routed::Session(SshCommand::CancelCredentials),
+        // `00 R28`. This arm exists so the one below cannot have it. An intent
+        // is the one thing in this enum with somebody blocked on the far end
+        // of it: the shell fans a quality preset out to every session it owns
+        // and nothing is waiting to hear what happened, while an agent that
+        // issued an intent is not watching the window, it is waiting for a
+        // settlement, and silence is a wait with no end.
+        //
+        // Matched on the KIND rather than refused wholesale, which is `00 R50a`
+        // closing: `exec` is served now, and the two beside it are refused for
+        // reasons of their own rather than for want of a channel.
+        ClientCommand::Agent(intent) => match &intent.kind {
+            IntentKind::Exec { spec } => Routed::Session(SshCommand::Exec(ExecRequest {
+                id: intent.id,
+                name: intent.kind.name(),
+                spec: spec.clone(),
+            })),
+            IntentKind::PtyRun { .. } => Routed::Refuse(intent.refuse(REFUSE_PTY_RUN)),
+            IntentKind::Declare { .. } => Routed::Refuse(intent.refuse(REFUSE_DECLARE)),
+            // Everything else is an intent the plane lowers into ordinary
+            // commands and never sends whole, so one arriving here is a limb
+            // claiming `Support::Native` for something this driver never said
+            // it served. Answered with what it is rather than dropped, because
+            // the agent is still waiting either way.
+            other => Routed::Refuse(intent.refuse(format!(
+                "a remote shell does not serve {} natively",
+                other.name()
+            ))),
+        },
+        // Everything else in `ClientCommand` is pointer, keysym, pixel format
+        // or quality: meaningless to a PTY. Dropped rather than guessed at,
+        // and silently, because the shell sends some of them (a quality preset
+        // on connect, say) to every session it owns.
+        _ => Routed::Ignore,
+    }
+}
+
 /// Shell commands in, session commands out.
 async fn pump_commands(
     session: Arc<SshSession>,
     mut commands: mpsc::Receiver<ClientCommand>,
+    events: mpsc::Sender<SessionEvent>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -124,24 +235,36 @@ async fn pump_commands(
             },
         };
 
-        let translated = match cmd {
-            ClientCommand::TerminalInput(bytes) => SshCommand::Input(bytes.to_vec()),
-            ClientCommand::ResizeTerminal { cols, rows } => SshCommand::Resize { cols, rows },
-            ClientCommand::ReconnectNow => SshCommand::ReconnectNow,
-            ClientCommand::Disconnect => SshCommand::Disconnect,
-            ClientCommand::ProvideCredentials {
-                username, password, ..
-            } => SshCommand::ProvideCredentials { username, password },
-            ClientCommand::CancelCredentials => SshCommand::CancelCredentials,
-            // Everything else in `ClientCommand` is pointer, keysym, pixel
-            // format or quality: meaningless to a PTY. Dropped rather than
-            // guessed at, and silently, because the shell sends some of them
-            // (a quality preset on connect, say) to every session it owns.
-            _ => continue,
+        let translated = match route(cmd) {
+            Routed::Session(c) => c,
+            Routed::Refuse(refusal) => {
+                if events
+                    .send(SessionEvent::AgentRefused(refusal))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            Routed::Ignore => continue,
         };
 
         let stop = matches!(translated, SshCommand::Disconnect);
+        // Kept so the intent can still be answered if the session has gone.
+        // `00 R28` has no exception for "the queue was closed": an agent
+        // blocked on a settlement is blocked whatever killed the session, and
+        // the plane would otherwise wait out the whole deadline to learn it.
+        let asked = match &translated {
+            SshCommand::Exec(request) => Some(request.clone()),
+            _ => None,
+        };
         if session.send_command(translated).await.is_err() {
+            if let Some(request) = asked {
+                let refusal = request
+                    .refuse("the session ended before the command could be started: nothing ran");
+                let _ = events.send(SessionEvent::AgentRefused(refusal)).await;
+            }
             break;
         }
         if stop {
@@ -198,6 +321,14 @@ async fn pump_events(
             SshEvent::Notice(message) => {
                 SessionEvent::Protocol(ProtocolEvent::Ssh(OutEvent::Notice(message)))
             }
+            // Not a `ProtocolEvent::Ssh`, and `00 R28` says why: an exit
+            // status, a truncation notice and a refusal have the same shape on
+            // a Kubernetes exec stream and on an ADB shell, so filing them
+            // under one protocol guarantees a second copy the first time a non
+            // SSH limb needs them. They are `SessionEvent`'s own variants and
+            // travel as themselves.
+            SshEvent::AgentServed(served) => SessionEvent::AgentServed(*served),
+            SshEvent::AgentRefused(refusal) => SessionEvent::AgentRefused(*refusal),
             // The terminal bell is a first-class `SessionEvent`; VNC has one
             // too, and the UI already knows what to do with it.
             SshEvent::Bell => SessionEvent::Bell,
@@ -441,15 +572,132 @@ mod tests {
         }
     }
 
-    /// Mirrors the match inside `pump_commands`, which cannot be called
-    /// directly without a live session.
+    /// An intent of any shape, for the routing tests below.
+    fn intent(kind: remote_core::intent::IntentKind) -> ClientCommand {
+        use remote_core::intent::{AgentIntent, IntentId};
+
+        ClientCommand::Agent(AgentIntent {
+            id: IntentId(9),
+            grant: "att_test".into(),
+            deadline: Some(std::time::Duration::from_secs(5)),
+            fence: None,
+            kind,
+        })
+    }
+
+    fn a_spec(command: &str) -> remote_core::intent::CommandSpec {
+        remote_core::intent::CommandSpec {
+            command: command.into(),
+            cwd: None,
+            env: Vec::new(),
+            timeout: std::time::Duration::from_secs(5),
+            stdin: None,
+            max_output_bytes: None,
+        }
+    }
+
+    /// `PRDAgentPlug/00 R50a` closing. This used to assert a refusal, because
+    /// this crate owned one PTY channel and nothing routed a second one. It
+    /// routes one now, and the intent that reaches the session must carry the
+    /// id the agent is blocked on: an answer that cannot name its question is
+    /// not an answer.
+    #[test]
+    fn an_exec_intent_reaches_a_channel_of_its_own() {
+        use remote_core::intent::{IntentId, IntentKind, IntentName};
+
+        match route(intent(IntentKind::Exec {
+            spec: a_spec("whoami"),
+        })) {
+            Routed::Session(SshCommand::Exec(request)) => {
+                assert_eq!(request.id, IntentId(9));
+                assert_eq!(request.name, IntentName::Exec);
+                assert_eq!(request.spec.command, "whoami");
+            }
+            other => panic!("exec must reach the session now, got {other:?}"),
+        }
+    }
+
+    /// `PRDAgentPlug/00 R28`, on the pump the requirement names.
+    ///
+    /// The two intents this driver still declines must land on
+    /// [`Routed::Refuse`]. Landing on [`Routed::Ignore`] is the failure the
+    /// whole rule exists to stop: the agent is not watching this window, it is
+    /// blocked on a settlement, so a drop is not a lost message, it is a wait
+    /// with no end. Delete the `ClientCommand::Agent` arm in [`route`] and both
+    /// slide into the catch all below it, and this test says so.
+    #[test]
+    fn the_intents_this_driver_declines_are_refused_out_loud_and_never_dropped() {
+        use remote_core::intent::{IntentId, IntentKind, IntentName};
+
+        let cases = [
+            (
+                IntentKind::PtyRun {
+                    spec: a_spec("make"),
+                },
+                IntentName::PtyRun,
+                REFUSE_PTY_RUN,
+            ),
+            (
+                IntentKind::Declare {
+                    cwd: Some("/tmp".into()),
+                    env: Vec::new(),
+                },
+                IntentName::Declare,
+                REFUSE_DECLARE,
+            ),
+        ];
+
+        for (kind, name, reason) in cases {
+            match route(intent(kind)) {
+                Routed::Refuse(refusal) => {
+                    assert_eq!(refusal.id, IntentId(9));
+                    assert_eq!(refusal.name, name);
+                    assert_eq!(refusal.reason, reason);
+                }
+                Routed::Ignore => panic!("an intent must never be dropped in silence (00 R28)"),
+                Routed::Session(cmd) => panic!("{name} is not served here, got {cmd:?}"),
+            }
+        }
+    }
+
+    /// A refusal has to teach the agent what to do instead, or it is just a
+    /// wall. Both of these name the intent that works.
+    #[test]
+    fn a_refusal_points_at_the_intent_that_does_work() {
+        assert!(REFUSE_PTY_RUN.contains("exec"), "{REFUSE_PTY_RUN}");
+        assert!(REFUSE_DECLARE.contains("cwd and env"), "{REFUSE_DECLARE}");
+    }
+
+    /// The other half of the same rule: the silence is still allowed where it
+    /// was always right, so the fix did not turn a global setting broadcast
+    /// into an event storm.
+    #[test]
+    fn only_an_intent_gets_an_answer() {
+        assert!(matches!(
+            route(ClientCommand::SetQuality(
+                remote_core::options::QualityPreset::Low
+            )),
+            Routed::Ignore
+        ));
+        assert!(matches!(
+            route(ClientCommand::TerminalInput(b"ls\n".to_vec().into())),
+            Routed::Session(_)
+        ));
+    }
+
+    /// The real routing table, narrowed to what the tests above ask of it.
+    ///
+    /// This used to be a hand copy of the match inside `pump_commands`, which
+    /// could not be called without a live session. [`route`] is that match now,
+    /// so this is a wrapper and not a second table. The copy is worth naming:
+    /// it would have gone on answering `None` for `ClientCommand::Agent`,
+    /// which is the very drop the pump stopped doing, and the tests would have
+    /// agreed with it.
     fn translate_for_test(cmd: ClientCommand) -> Option<SshCommand> {
-        match cmd {
-            ClientCommand::TerminalInput(bytes) => Some(SshCommand::Input(bytes.to_vec())),
-            ClientCommand::ResizeTerminal { cols, rows } => Some(SshCommand::Resize { cols, rows }),
-            ClientCommand::ReconnectNow => Some(SshCommand::ReconnectNow),
-            ClientCommand::Disconnect => Some(SshCommand::Disconnect),
-            _ => None,
+        match route(cmd) {
+            Routed::Session(c) => Some(c),
+            Routed::Refuse(refusal) => panic!("a refusal is not a translation: {refusal}"),
+            Routed::Ignore => None,
         }
     }
 }

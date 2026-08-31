@@ -113,6 +113,19 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         // is told once per change rather than once per packet, which needs
         // state this function does not have; `forward_events` does it.
         SessionEvent::Audio(_) => return None,
+        // Addressed to the agent that issued the intent, not to the webview.
+        // The person at this window issued nothing and has nothing to do about
+        // it, and the agent plane reads the driver's event stream directly, so
+        // turning a refusal into a toast would be news for the wrong reader
+        // (PRDAgentPlug/00 R28). Dropped HERE and only here: the driver already
+        // answered, which is the requirement.
+        //
+        // A served answer is dropped here for the same reason and one more of
+        // its own: it carries what a remote machine printed, and remote output
+        // is data, never instruction (AGENT_BRIEF D6). Turning it into a toast
+        // would put a remote machine's bytes in our own UI for a person who
+        // asked for none of it (PRDAgentPlug/00 R51b).
+        SessionEvent::AgentRefused(_) | SessionEvent::AgentServed(_) => return None,
         SessionEvent::Protocol(ProtocolEvent::Rdp(event)) => rdp_event_json(event)?,
         // Terminal bytes never become JSON. They go out on the binary channel
         // (`framing::encode_pty`) for the same reason framebuffer rectangles
@@ -533,6 +546,46 @@ fn forward_events(
             if let SessionEvent::StateChanged(SessionState::Authenticating { method }) = &event {
                 auth_method = Some(method.clone());
             }
+            // Two facts the shell used to forward and forget. The agent plane
+            // has no window to hold them for it, and it needs both: it refuses
+            // an intent against a limb that is not connected, and it bounds
+            // every coordinate against the framebuffer size. See
+            // `crate::state::SessionFacts`.
+            match &event {
+                SessionEvent::StateChanged(state) => {
+                    if let Some(entry) = sessions.lock().get(&session_id) {
+                        entry.facts.lock().state = state.clone();
+                    }
+                }
+                SessionEvent::DesktopResize { width, height } => {
+                    if let Some(entry) = sessions.lock().get(&session_id) {
+                        entry.facts.lock().size = Some((*width, *height));
+                    }
+                    // A resize bumps the geometry generation, which is what
+                    // fences an agent's in flight coordinate against a screen
+                    // that changed under it (PRDAgentPlug/00 R10). A human
+                    // corrects a misplaced click in 50 ms without noticing; an
+                    // agent does not, because it is waiting for a result.
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.agent.note_resize(&session_id, *width, *height);
+                    }
+                }
+                // A driver's answer to an agent intent. This pump is the only
+                // reader of the session's event stream, and the party waiting
+                // for the answer is an `AttachedLimb` in the agent's own
+                // process on the far side of the socket, so without this arm
+                // the command really runs and the answer is dropped here:
+                // `dvv_run` would report a timeout for work that succeeded.
+                //
+                // `event_json` returns `None` for both variants and that stays
+                // right (`00 R50c`): they are addressed to the plane, not to
+                // the person watching the window, and a served answer carries
+                // a remote machine's own bytes.
+                SessionEvent::AgentServed(_) | SessionEvent::AgentRefused(_) => {
+                    crate::agent::server::note_agent_event(&session_id, &event);
+                }
+                _ => {}
+            }
             if let SessionEvent::StateChanged(state) = &event {
                 settle_pending_credentials(
                     &app,
@@ -624,6 +677,14 @@ fn forward_events(
             }
             match event {
                 SessionEvent::FramebufferUpdate { rects, damage } => {
+                    // The agent plane is the SECOND consumer of this stream and
+                    // it must stay second: the webview's frame is what a person
+                    // is looking at, so it goes first and is never delayed by
+                    // anything an agent asked for (PRDAgentPlug/03 §2.1). With
+                    // no mirror attached this is a lock and a length check.
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.agent.feed(&session_id, &rects);
+                    }
                     // Binary fast path; framing per FRAME_FORMAT.md (msg_type 1).
                     let bytes = framing::encode_frame(&rects, &damage);
                     if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
@@ -679,6 +740,17 @@ fn forward_events(
         // `Connected` dies here, unwritten.
         creds_ctx.pending.lock().remove(&session_id);
         let entry = sessions.lock().remove(&session_id);
+        // An attachment must not outlive the session it attached to: the id
+        // would otherwise still read as agent driven in a pane, and a later
+        // session that happened to reuse it would inherit somebody else's
+        // revocation.
+        if let Some(state) = app.try_state::<AppState>() {
+            state.agent.forget(&session_id);
+            let _ = app.emit(
+                crate::agent::AGENT_EVENT,
+                serde_json::json!({ "type": "detached", "sessionId": session_id }),
+            );
+        }
         let duration_s = entry.map(|e| e.started_at.elapsed().as_secs()).unwrap_or(0);
         let _ = app.emit_to(
             &window_label,
@@ -1103,6 +1175,7 @@ pub async fn connect_session(
             started_at: Instant::now(),
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
+            facts: Default::default(),
         },
     );
     // The window has stopped "opening", from here the registry entry above is
@@ -2160,6 +2233,7 @@ mod tests {
             started_at: Instant::now(),
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
+            facts: Default::default(),
         }
     }
 

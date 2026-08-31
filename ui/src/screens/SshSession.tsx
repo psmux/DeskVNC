@@ -61,8 +61,15 @@ export interface SshSessionProps {
   params?: SessionParams;
   /** Mounted as a tab rather than owning the window it is in. */
   embedded?: boolean;
-  /** This tab is the one on screen. Only meaningful when embedded. */
-  active?: boolean;
+  /**
+   * This view owns the keyboard.
+   *
+   * There is deliberately no `onScreen` counterpart, as there is on the
+   * framebuffer view. A terminal in a pane nobody is typing in keeps running
+   * and keeps taking output, and xterm draws itself; the only thing that
+   * follows the focus is the caret. Only meaningful when embedded.
+   */
+  focused?: boolean;
   /** Embedded: take this tab off the strip. */
   onClose?: () => void;
   /** Connection state changed, for the tab's status dot. */
@@ -109,12 +116,18 @@ function multiplexerLabel(kind: string | null): string {
 export function SshSession({
   params: paramsProp,
   embedded = false,
-  active = true,
+  focused: focusedProp = true,
   onClose,
   onState,
 }: SshSessionProps): ReactNode {
   const params = paramsProp ?? readSessionParams();
-  const visible = !embedded || active;
+  /**
+   * A terminal in a background pane keeps running and keeps taking output; the
+   * only thing that follows the focus is the caret. So unlike `SessionView`,
+   * which has a keyboard hook and a menu listener to arbitrate, this one needs
+   * the focused flag and nothing else.
+   */
+  const owns = !embedded || focusedProp;
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const { push } = useToasts();
@@ -274,12 +287,12 @@ export function SshSession({
     return watchThemeChanges(apply);
   }, []);
 
-  // Coming to the front takes the focus with it, same reasoning as
-  // `SessionView`'s equivalent effect: a background tab must not hold the
-  // keyboard, and switching to this one has to grab it back.
+  // Taking the focus takes the caret with it, same reasoning as
+  // `SessionView`'s equivalent effect: a pane nobody is typing into must not
+  // hold the keyboard, and clicking into this one has to grab it back.
   useEffect(() => {
-    if (visible) termRef.current?.focus();
-  }, [visible]);
+    if (owns) termRef.current?.focus();
+  }, [owns]);
 
   // A tab does not own the window title; the shell sets it from whichever
   // tab is in front.

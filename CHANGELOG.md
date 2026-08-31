@@ -10,6 +10,392 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-31
+
+Minor: signing in to an SSH machine with a key is an ordinary thing to want,
+and it stopped being an expert setting. The choice between a password and a
+key sits in the main form now, and choosing the key is a pick from a list or a
+Browse button instead of a path typed from memory.
+
+### Changed
+
+- **Password or key is the second thing you decide, right under the user
+  name.** It used to live inside Advanced, under a heading about ssh-agents,
+  which is a fine place for it if you already knew it was there. Most people
+  want one of two things, a password or a key, and now they are three buttons
+  at the top of the form beside the box the choice gives meaning to. The
+  passphrase box relabels itself when you pick a key, because it is the same
+  keychain slot either way and only the label was ever wrong.
+
+### Added
+
+- **The keys you already have, in a list.** The editor reads the names of the
+  private keys in your `.ssh` folder and offers them, with the algorithm and
+  the comment from the public half so two generated names are tellable apart.
+  A key that is protected says so, and the field says where to put the
+  passphrase. None of the key itself is read: the file is opened far enough to
+  tell a private key from a `known_hosts` and closed again, and it is still
+  the Rust side that reads it for real when you connect.
+
+- **A Browse button.** For the key on a USB stick, or anywhere else that is
+  not `.ssh`. The dialog opens at your `.ssh` folder, which macOS and Windows
+  both hide from an ordinary Open dialog. The path box is still there for
+  anyone who would rather type it, and it appears on its own for a path that
+  is not one of the listed keys, so a browsed path is always visible and
+  always editable.
+
+### Fixed
+
+- **`~/.ssh/id_ed25519` did not work when you typed it.** A shell expands the
+  `~` before a program ever sees it, and a path typed into a text box has no
+  shell in front of it, so the app went looking for a directory called `~` and
+  told you there was no such file. Every piece of SSH documentation writes the
+  path that way, including this app's own placeholder. It is expanded now.
+
+- **A terminal opened beside a session in a tab could not connect.** The
+  window that holds your tabs was never granted the remote-shell commands, so
+  the call was refused before it reached any code that could explain itself.
+  It only worked when the session had its own window.
+
+## [0.22.0] - 2026-08-29
+
+Minor: the three things an agent was told it could not do yet, it can do now.
+It opens a machine on its own, it gets an answer back from a command it ran,
+and it can read your machine library to know what there is to open. The
+connect instructions carry the real path to the binary instead of a
+placeholder, and there is a button that does the registration for you.
+
+### Added
+
+- **An agent can open one of your machines itself.** It names a saved machine
+  or an endpoint and the session opens as a tab in your window, with a pane, a
+  badge saying an agent is driving it, and the control that takes the wheel
+  back. It goes through the same call your click goes through, which is why it
+  looks like an ordinary session: it is one. The password comes out of the
+  keychain on the far side of that call, exactly as it does for a click, so an
+  agent names a machine and never a secret. It still cannot supply one and
+  still cannot read one.
+
+- **An agent can read your machine library.** What is saved and what discovery
+  has found, with the protocol and whether a credential is stored, never the
+  credential. It needs that capability on its grant, and without it the answer
+  is the refusal rather than an empty list, so an empty answer means the
+  library really is empty.
+
+- **A button that registers the server with Claude Code.** It runs the command
+  for you and says what came of it: registered, already registered, Claude
+  Code is not installed, it refused and here is what it said. The lines to
+  copy are still there, folded away, for anybody driving a different agent or
+  wanting to read what the button did.
+
+- **The connect instructions carry the real path.** An installed copy ships
+  `dvv` inside the bundle, signed and notarised with everything else, and
+  reports where it is, so every line in the modal is complete and runnable
+  with nothing left to edit. A development build has no bundle to read it out
+  of, says so in a sentence, and shows an obvious placeholder rather than
+  inventing a path that would be right on one machine and wrong everywhere
+  else.
+
+### Fixed
+
+- **A command an agent ran over SSH never answered.** The command ran, the
+  exit status came back from the far side, and the reply was dropped on the
+  way to the socket. The agent saw a timeout saying the command might still be
+  running, on a command that had already finished. It gets the real answer now.
+
+- **The tool descriptions claimed three things were not built.** They said
+  opening a machine, listing the library and reading a command's output all
+  reported not implemented. Two of those had been built and the sentence was
+  never updated, which is worse than a missing feature: an agent reads that
+  and does not try. The third is genuinely not served, and now says why and
+  what to use instead.
+
+## [0.21.0] - 2026-08-28
+
+Minor: an agent can reach the application over HTTP as well as over a pipe, a
+screenshot arrives as a picture rather than as text, and there is somewhere in
+the interface to find all of it. The IPC contract gains fields, which is what
+makes this a minor rather than a patch.
+
+### Added
+
+- **An AI Agents button, above Preferences, that gets somebody connected in
+  about a minute.** It is the one piece of agent interface that exists while
+  the plane is switched off, because the plane being invisible until you want
+  it is right and leaves exactly one problem: nobody can find it. So the modal
+  is the door. With the plane off it offers the switch and nothing else, on
+  purpose: registering an agent against a socket that does not exist teaches
+  people the feature is broken. With it on, it offers the lines to paste, a
+  command to check the result, and an honest list of what an agent can and
+  cannot do yet.
+
+- **Reach it over HTTP, not only over a pipe.** Some agents cannot spawn a
+  process: a hosted assistant, something in a container, something on another
+  machine you own. `dvv mcp --http` listens on `127.0.0.1:7333` and prints the
+  registration line with your token already in it.
+
+  It listens on loopback and asks for a token even there. That is not
+  belt and braces: any web page open in your browser can reach a port on your
+  own machine, so a local listener without a token is a service every site you
+  visit can drive. Requests carrying a browser `Origin` are refused for the
+  same reason. Binding anywhere other than loopback takes its own flag and
+  says plainly what it just exposed.
+
+- **A screenshot is a picture now.** Reading a desktop returns a real image
+  block, so a model can look at it, with the region, the dimensions and the
+  scale beside it: that is what turns a point on the picture back into a
+  coordinate on the remote. It used to arrive as several thousand characters
+  of text, which is not something anything can look at.
+
+- **A line saying who is driving what.** How many agents are connected, how
+  many machines they are holding right now, and how many sessions are open in
+  total, reading as "2 agents driving 5 of 11". Driving means an agent is
+  holding the controls, not merely watching, because those are different
+  things and only one of them is worth interrupting. It can be switched off
+  under Preferences ▸ Agents, and neither the line nor the tab exists at all
+  until the plane is on.
+
+### Fixed
+
+- **Reading only what changed re-read the whole screen.** The crop was taken
+  from a rectangle drawn around every change at once, so two small changes in
+  opposite corners covered everything between them, and asking for the cheap
+  read fetched a whole desktop. It now crops to the changes themselves.
+
+- **A screen read could not tell it was looking at a stale picture.** The
+  answer carried a fixed geometry number instead of the real one, so a read
+  taken across a resize looked current. It now carries the real one and a
+  stale read is refused by name.
+
+## [0.20.0] - 2026-08-28
+
+Minor: an AI agent can now drive the machines this application has open,
+over MCP or a command line, while a person watches and can take the wheel
+back at any moment. Nothing changes for anyone who does not switch it on,
+and it is off by default. The IPC contract gains commands and events, which
+is what makes this a minor rather than a patch.
+
+### Added
+
+- **An agent plane, and the application is the thing that already has your
+  machines open.** A new `dvv` binary speaks the Model Context Protocol on
+  its standard input and output, so an assistant that knows how to load an
+  MCP server can point, type, scroll and read on a real desktop or a real
+  terminal. `dvv doctor` prints the exact line to install it. The same
+  surface is a command line: `dvv limbs`, `dvv click`, `dvv type`,
+  `dvv screen`, `dvv watch`, all with `--json` for a script.
+
+  It attaches to the sessions DeskVNCViewer already has, rather than
+  dialling out on its own. That is deliberate. The credential stays in the
+  keychain, an agent cannot read one and cannot ask for one, and the
+  machine an agent is driving is a machine you opened and can see.
+
+  Off by default. With the setting off, no socket is created, no task is
+  spawned, and the build is the one that shipped before. Turning it on
+  needs no restart.
+
+- **Watch it happen, and take over without asking.** A pane an agent is
+  driving says so, in a badge that reads across a wall of twelve, and says
+  what the agent is doing right now. A strip along the bottom of the
+  library window shows every driven machine at once, including ones this
+  window has never had a pane for.
+
+  Clicking into a pane takes control. So does the stop button. Neither is a
+  request and neither needs the agent's cooperation: a person outranks an
+  agent, so the keyboard is released and the agent's next instruction is
+  refused before it reaches the wire. The badge clears on the same frame as
+  the click rather than after a round trip, because a stop button that
+  spins for two seconds is not a stop button.
+
+- **Several machines at once, of different kinds.** VNC, RDP and SSH limbs
+  are driven side by side, so an agent can read a build log in a terminal
+  and click through a dialog on a Windows box in the same task. The
+  concurrent limit is four, and it is four because that is what the shared
+  decode budget measures out at, not because four is a round number.
+
+- **A screenshot an agent can act on.** Reading a screen returns the changed
+  region by default rather than a whole frame, at native resolution, with
+  the exact transform needed to turn a coordinate in the image back into a
+  coordinate on the remote. Open H.264 is negotiated away first for any
+  session an agent is looking at, because the decoder that makes it fast
+  lives in the window and a picture assembled without it would be stale in
+  exactly the region that is moving.
+
+- **A command with a real exit code.** Running something on an SSH limb
+  opens a channel of its own, so the status is the one the remote's own
+  shell produced and delivered over SSH. A signal is reported as a signal
+  and never as a number. Output is bounded, and when it is cut the answer
+  says how many bytes and lines went missing rather than trimming in
+  silence.
+
+### Fixed
+
+- **A held mouse button survived losing focus on a VNC session.** The
+  release path let go of every key and no button, and the RFB protocol
+  holds the last button state it was told, so a drag interrupted by a
+  window losing focus finished wherever the pointer next went instead of
+  being cancelled. A file dragged at that moment landed somewhere nobody
+  chose. The RDP side had already been fixed; the VNC side now matches it,
+  including releasing buttons before keys so a gesture ends the way it
+  began.
+
+- **Closing one library window stopped the other one finding machines.**
+  Discovery held a single browse for the whole application, and the first
+  window to close cancelled it for every window still open, with no error
+  anywhere. The Nearby list simply stopped. It is now counted per window.
+
+- **A second network scan is refused by name.** It already refused, but the
+  message named nothing, so a caller could not tell which scan was in the
+  way. It now says which subnet, when it started, and which window owns it.
+
+- **The terminal bell never rang.** It was recognised, translated and
+  serialised, and never once produced. It now rings, and does not ring for
+  the `BEL` that ends a window title sequence, which shells write on every
+  prompt.
+
+## [0.19.0] - 2026-08-26
+
+Minor: a tab can now be divided into panes, so several machines are on
+screen at once. Nothing stored changes shape and no command gains a
+field, but a tab stops being a synonym for a session, which is a change
+to what the frontend means by both.
+
+### Added
+
+- **Split a tab into panes, and see several machines at once.** A tab
+  used to hold one session filling the window. It can now be divided,
+  the way tmux divides a terminal: split right, split down, split either
+  of the results again, and drag the dividers to give each machine the
+  room it needs. VNC, RDP and SSH mix freely, so a desktop can sit
+  beside a shell on the box serving it.
+
+  Splitting leaves an empty pane offering the two things anyone would
+  want in it. Either connect something new, by saved host or by typing
+  an address, or move a session that is already open, including one from
+  another tab. Moving does not reconnect: the viewer is mounted once and
+  the layout only decides where its box goes, so a machine dragged from
+  one pane to another does not drop a frame, let alone the connection.
+
+  `⌘⌥D` splits right and `⌘⌥⇧D` splits down. `⌘⌥` with an arrow key
+  moves to the pane in that direction, chosen by what is actually beside
+  it on screen rather than by how the splits happen to nest, which is
+  the difference between a shortcut you can aim and one you have to
+  think about. `⌘⌥W` closes a pane, `⌘⌥=` gives them all an equal share,
+  and the whole set is on the Window menu with the same accelerators.
+  The session toolbar grew two buttons for it.
+
+  Splitting a pane halves that pane and nothing else, so a fourth
+  machine does not rearrange the three already placed. Splitting twice
+  along the same axis gives one row of three rather than a row nested
+  inside a row, which is what makes dragging the middle divider move two
+  neighbours instead of reflowing half the layout.
+
+- **Ready made grids, and a group that remembers how you arranged it.**
+  Window ▸ Arrange lays the tab in front out as 2, 3, 4, 6, 8, 9 or 12
+  panes in one go, rather than splitting a wall of machines into
+  existence one divider at a time. Whatever is already connected is kept
+  and re-placed, and the rest of the panes come up empty.
+
+  A group in the sidebar answers a secondary click with **Open as grid**,
+  which connects every host in it at once and lays them out together. The
+  panes appear first and fill as each connection answers, since half a
+  dozen machines will not finish dialling in any particular order.
+
+  Arrange them how you like, then **Save this layout to group**. From
+  then on that group opens exactly as you left it, down to where the
+  dividers sat, and the menu says so. A group that has never been
+  arranged opens as an even grid in library order, which is the thing you
+  then rearrange and save, so an arrangement is something a group picks
+  up rather than something it has to be given first. **Forget saved
+  layout** puts it back to a plain grid.
+
+  What is remembered is the hosts, not the sessions, so it survives
+  quitting the app. A saved arrangement that has drifted from its group
+  (a host deleted, or new ones added) opens what still matches and says
+  that it did, rather than quietly opening the wrong set of machines.
+
+- **Each pane has a title bar once a tab holds more than one.** It names
+  the machine, carries its connection status, maximises that pane and
+  closes it. Drag it onto another pane and the two trade places, which is
+  a swap rather than an insert: both boxes stay exactly where they are,
+  so nothing else on screen jumps to make room. A single pane shows none
+  of this and stays full bleed.
+
+- **Maximise a pane and put it back**, from its title bar, by double
+  clicking that bar, with `⌘⌥Z`, or from Window ▸ Maximise Pane. The
+  layout underneath is untouched while a pane is blown up: the others
+  keep their boxes, so they keep their framebuffers and come back
+  instantly rather than reconnecting or redrawing from scratch.
+
+### Changed
+
+- **Only the pane you last clicked in holds the keyboard.** A window has
+  one keyboard, one menu bar, one clipboard and one drag-and-drop
+  target, and a split puts several sessions in front of you at once, so
+  those had to stop following "which session is on screen" and start
+  following "which pane has the focus". The focused pane is ringed in
+  the accent colour, the menu bar shows that session's settings, files
+  dropped on the window go to that machine, and the toolbar belongs to
+  it and stays inside it. Every other pane keeps drawing, keeps taking
+  frames, and stays connected.
+
+  A first click into an unfocused pane moves the focus and is not passed
+  on to the remote desktop. That is deliberate: the alternative is a
+  stray click landing on a machine you were not typing at a moment ago.
+
+- An RDP session opened into a pane asks the server for a desktop the
+  size of that pane, rather than the size of the whole window and then
+  resizing once the canvas measured itself.
+
+### Fixed
+
+- A shell keyboard shortcut ran twice for one keystroke whenever a
+  session had the keyboard. The session's own hook answers first and
+  calls `preventDefault`, but it does not stop the event, so it reached
+  the shell's listener as well. This never showed up while the only such
+  shortcuts were "switch to tab N", which lands in the same place
+  however many times it runs.
+
+- The toolbar's own button could not bring it back in a split. A pane
+  too narrow for the open bar puts it away, and that was written as an
+  override on what gets drawn rather than as a nudge: pressing the
+  chevron cleared the flag, the override put it straight back, and the
+  one control whose job is to recall the toolbar did nothing at all.
+  Narrowing a pane now collapses the bar once and then leaves it alone,
+  so asking for it works. In a pane it genuinely does not fit, an
+  expanded toolbar will overhang its neighbour, which is the lesser of
+  the two problems and is undone by collapsing it again.
+
+- **The session toolbar ran off the side of its pane, and off the side of
+  the window with it.** It is one flex row of two dozen controls, laid
+  out with nothing to stop it growing, and clamping its top-left corner
+  keeps the left of it on screen without keeping all of it on screen, so
+  the controls at the far end were simply out of reach. Given a width to
+  work within it now folds onto a second row, which the pill was always
+  able to do and was never asked to.
+
+- **A stray Paste menu came back over the tab strip.** The webview builds
+  its editing menu from whatever is FOCUSED rather than from what was
+  clicked, which is what `lib/contextMenu.ts` exists to deal with, and
+  splitting a pane started leaving a real search box focused for as long
+  as that pane sat empty. A field focused as a courtesy rather than by
+  choice now lets go when a secondary click lands somewhere else, and
+  when its pane stops being the one in use. A field the user deliberately
+  clicked into keeps both its focus and its menu.
+
+- The remote pointer could land somewhere other than where the mouse
+  was. The panes are laid out against a measured box, and that box was
+  measured with a `ResizeObserver`, which reports a change of size and
+  says nothing about a change of position. The tab strip appears the
+  moment the first session connects and pushes the whole layout down, so
+  the recorded origin could stay at the top of the window while the
+  panes really began below the strip. Pane rectangles are derived from
+  it, the canvas fills its pane, and the pointer is mapped through the
+  canvas's own rectangle, so the error carried all the way to the remote
+  desktop: clicks landed on whatever was under the offset position
+  rather than under the cursor. The box is now re-measured after every
+  render as well, which is what catches a move.
+
 ## [0.18.0] - 2026-08-26
 
 Minor: a new SSH authentication format, and two user-visible changes to

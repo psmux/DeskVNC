@@ -25,6 +25,16 @@ tauri-plugin-store = "2"
 os_info = { version = "3", default-features = false }
 
 remote-core = { path = "../crates/remote-core" }
+# The framebuffer mirrors the agent plane keeps, one per session that asked for
+# one: `MirrorSlot`, `DamageLog`, the perception ladder and the encode path
+# (PRDAgentPlug/00 R5, 00 R6). The shell is the second consumer of the
+# `SessionEvent` stream and this is what it feeds; see
+# `src-tauri/src/agent/mirror.rs`.
+agent-perception = { path = "../crates/agent-perception" }
+# `Timestamp`, and nothing else. `agent-perception` takes the time as an
+# argument rather than reading a clock, which is what makes an idle timeout
+# testable without a runtime, and the type that time is spelled in lives here.
+limb-core = { path = "../crates/limb-core" }
 # `ClientCommand::TerminalInput` carries a `bytes::Bytes`; framing.rs builds
 # one straight from the decoded PTY-input payload, no intermediate Vec copy.
 bytes = { workspace = true }

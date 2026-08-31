@@ -3,7 +3,7 @@
 //! All storage calls are synchronous SQLite (`vnc_store::Store`), so every
 //! command hops to `spawn_blocking` via [`super::blocking`].
 
-use tauri::State;
+use tauri::{AppHandle, State};
 use vnc_store::{Group, HistoryEntry, HostProfile, Tag};
 
 use crate::state::AppState;
@@ -174,8 +174,16 @@ pub async fn get_app_setting(
 }
 
 /// Write a global app setting.
+///
+/// One setting has an effect beyond being stored: `agent_plane_enabled` binds
+/// or unlinks the `dvvp.v1` socket. It is applied here rather than at the next
+/// launch so that switching the plane on is a switch and not a restart, and so
+/// that switching it off means the socket is gone at that moment rather than
+/// at the next one. `app` is injected by Tauri and is not part of the invoke
+/// surface, so the webview's call is unchanged.
 #[tauri::command]
 pub async fn set_app_setting(
+    app: AppHandle,
     state: State<'_, AppState>,
     key: String,
     value: String,
@@ -183,5 +191,9 @@ pub async fn set_app_setting(
     state
         .store
         .set_setting(&key, &value)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if key == crate::agent::AGENT_PLANE_ENABLED_KEY {
+        crate::commands::agent::apply(&app, crate::agent::plane_enabled(Some(&value)));
+    }
+    Ok(())
 }

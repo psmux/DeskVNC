@@ -1,0 +1,24 @@
+[package]
+name = "limb-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The contract a limb implements: intents an agent can issue, observations a limb emits, capabilities that gate both, and the identity a limb keeps across a reconnect."
+
+# `remote-core` is the only protocol dependency, and it is the protocol
+# NEUTRAL one. A limb crate depends on this; this depends on no limb
+# (PRDAgentPlug/02 §1). Nothing here may reach for tauri, a webview, or a
+# concrete protocol crate.
+[dependencies]
+remote-core = { path = "../remote-core" }
+agent-lease = { path = "../agent-lease" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+sha2 = { workspace = true }

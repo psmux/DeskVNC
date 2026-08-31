@@ -142,6 +142,43 @@ pub enum SessionEvent {
     Audio(AudioPacket),
     /// Protocol specific news the UI may want to show.
     Protocol(ProtocolEvent),
+
+    /// A [`ClientCommand::Agent`] reached a driver that will not serve it, and
+    /// nothing went on the wire.
+    ///
+    /// `PRDAgentPlug/00 R28` says an intent a driver cannot serve is ANSWERED,
+    /// never dropped, and this is the answer. It is deliberately not
+    /// [`SessionEvent::Error`]: an error is addressed to the person watching
+    /// the session and shows up as one, while a refusal is addressed to the
+    /// agent that asked, carries the [`IntentId`] the agent is waiting on, and
+    /// means nothing to a person who issued no intent. Reusing `Error` would
+    /// both spray a red toast at somebody uninvolved and force the plane to
+    /// parse a sentence to find the id.
+    ///
+    /// [`ClientCommand::Agent`]: crate::commands::ClientCommand::Agent
+    /// [`IntentId`]: crate::intent::IntentId
+    AgentRefused(crate::intent::IntentRefused),
+
+    /// A [`ClientCommand::Agent`] reached a driver that SERVED it, and this is
+    /// the answer.
+    ///
+    /// `PRDAgentPlug/00 R51b` is the gap this fills, and it is worth stating
+    /// plainly because the shape of the bug was odd:
+    /// [`SessionEvent::AgentRefused`] gave a driver a way to say no and there
+    /// was no way at all to say yes. A driver that genuinely served an intent
+    /// therefore had nothing to send, the plane heard nothing, and the intent
+    /// settled as `Outcome::TimedOut` when the deadline passed. The first
+    /// driver to implement a native intent looked exactly like a driver that
+    /// had failed, and the better it worked the more clearly it failed.
+    ///
+    /// Addressed to the plane, never to the pane, which is why `event_json`
+    /// drops it: the person at this window issued no intent and a command's
+    /// exit status is not news for them. The output inside is REMOTE CONTENT
+    /// (`AGENT_BRIEF` D6), so putting it in front of a person as a toast would
+    /// also be handing a remote machine a line in our own UI.
+    ///
+    /// [`ClientCommand::Agent`]: crate::commands::ClientCommand::Agent
+    AgentServed(crate::intent::IntentServed),
 }
 
 /// A block of decoded PCM, ready for playback.

@@ -33,10 +33,10 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, State};
-use tokio_util::sync::CancellationToken;
+use tauri::{AppHandle, Emitter, Manager, State};
 use vnc_discovery::{
     DiscoveredHost, Discovery, DiscoveryEvent, DiscoverySource, HostRegistry, LocalNetwork,
     ScanOptions, Subnet,
@@ -230,17 +230,34 @@ fn forward_events(app: AppHandle, mut rx: tokio::sync::mpsc::Receiver<DiscoveryE
     });
 }
 
-/// Start the passive mDNS browse (`_rfb._tcp` / `_ard._tcp`). Idempotent.
+/// Does a window with this label still exist?
+///
+/// Injected into [`crate::state::DiscoveryState`] rather than looked up there,
+/// the same way `state::find_live_session` takes it, so the subscription rules
+/// stay testable without a running Tauri app. Takes the handle by value
+/// (`AppHandle` is a cheap clone) so the closure borrows nothing and can sit
+/// alongside a later move of the handle.
+fn window_exists(app: AppHandle) -> impl Fn(&str) -> bool {
+    move |label: &str| app.get_webview_window(label).is_some()
+}
+
+/// Start the passive mDNS browse (`_rfb._tcp` / `_ard._tcp`).
+///
+/// Idempotent per window, which is the part that used to be wrong: the browse
+/// is one process-wide stream, but each Library window starts and stops it
+/// independently, so it is reference counted by window label (B2, see
+/// [`crate::state::DiscoveryState::subscribe_browse`]). `window` is injected by
+/// Tauri from the invoke context, it is not an argument the webview passes, so
+/// `invoke("start_discovery")` is unchanged.
 #[tauri::command]
-pub async fn start_discovery(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let cancel = {
-        let mut guard = state.discovery.browse_cancel.lock();
-        if guard.is_some() {
-            return Ok(()); // already browsing
-        }
-        let cancel = CancellationToken::new();
-        *guard = Some(cancel.clone());
-        cancel
+pub async fn start_discovery(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let exists = window_exists(app.clone());
+    let Some(cancel) = state.discovery.subscribe_browse(window.label(), &exists) else {
+        return Ok(()); // already browsing, this window joined the running one
     };
 
     refresh_local_network();
@@ -250,17 +267,26 @@ pub async fn start_discovery(app: AppHandle, state: State<'_, AppState>) -> Resu
     Ok(())
 }
 
-/// Stop the mDNS browse.
+/// Stop the mDNS browse for this window. The stream itself stops when the last
+/// window watching it has gone.
 #[tauri::command]
-pub async fn stop_discovery(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(token) = state.discovery.browse_cancel.lock().take() {
-        token.cancel();
-    }
+pub async fn stop_discovery(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let exists = window_exists(app);
+    let stopped = state.discovery.unsubscribe_browse(window.label(), &exists);
     // Forget what we found so the next browse re-emits `found` for everything
     // rather than silently suppressing it as a duplicate. The UI de-dupes
     // discovered entries by id, so a repeat `found` is harmless; a missing one
     // would leave the list empty.
-    if state.discovery.scan_cancel.lock().is_none() {
+    //
+    // Only once nothing is left reading the registry, though. This used to fire
+    // whenever any window closed, which threw away the de-duplication state a
+    // second Library window was still displaying against (and cancelled that
+    // window's browse outright, which is B2).
+    if stopped && !state.discovery.scan_is_running() {
         registry().lock().clear();
     }
     Ok(())
@@ -290,27 +316,53 @@ fn parse_subnet(s: &str) -> Result<Subnet, String> {
 /// The scan runs in the background; results stream via `discovery://event`
 /// and completion via `discovery://scan-complete`. Never started implicitly, /// only from an explicit user action in the UI (PRD/04 consent gate). The
 /// /22-size guard (`allow_large: false`) stays enforced in vnc-discovery.
+///
+/// # One scan at a time, and the second caller is told which one (B2)
+///
+/// A second `scan_network` is refused, by an error that names the scan already
+/// in flight. It is never allowed to take the first scan's place: the first
+/// caller has a scan on screen and no channel on which it could be told the
+/// scan was taken away, so results would just stop arriving and it would read
+/// as a quiet network. Two Library windows reach that today, and an agent plane
+/// that can start scans reaches it far more often.
+///
+/// Refusing was chosen over giving each caller its own independently cancelled
+/// scan because **the politeness budget is per call**:
+/// `vnc_discovery::scan::scan_subnet` builds its concurrency semaphore and its
+/// rate limiter inside the call (`crates/vnc-discovery/src/scan.rs`), so two
+/// scans at once is twice the connections per second aimed at a network the
+/// user does not necessarily own, and that cap is the whole of PRD/04 §4's
+/// consent argument. Per-caller scans would need one shared budget underneath
+/// them first, which is a change to vnc-discovery, not to the shell.
+///
+/// There is a second reason and it would be enough on its own: `scan-progress`
+/// and `discovery://scan-complete` are app-wide events carrying no scan id (see
+/// `IPC_CONTRACT.md`), so a window could not tell its own scan's progress from
+/// another window's without a payload change and matching frontend work.
+///
+/// The command surface is therefore unchanged. What changed is that the refusal
+/// now names the running scan (see `state::RunningScan::already_running_error`)
+/// so a caller can choose between waiting for it and going to stop it, which is
+/// what makes this loud rather than merely different.
 #[tauri::command]
 pub async fn scan_network(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     subnets: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let parsed: Vec<Subnet> = subnets
-        .unwrap_or_default()
+    let requested = subnets.unwrap_or_default();
+    let parsed: Vec<Subnet> = requested
         .iter()
         .map(|s| parse_subnet(s))
         .collect::<Result<_, _>>()?;
 
-    let cancel = {
-        let mut guard = state.discovery.scan_cancel.lock();
-        if guard.is_some() {
-            return Err("a network scan is already running".into());
-        }
-        let cancel = CancellationToken::new();
-        *guard = Some(cancel.clone());
-        cancel
-    };
+    // Parse first, claim second: a caller who asked for a malformed CIDR must
+    // get the parse error, not a complaint about somebody else's scan.
+    let (scan_id, cancel) =
+        state
+            .discovery
+            .begin_scan(window.label(), &requested, Instant::now())?;
 
     refresh_local_network();
     let (tx, rx) = tokio::sync::mpsc::channel::<DiscoveryEvent>(256);
@@ -347,7 +399,9 @@ pub async fn scan_network(
     let discovery_state = state.discovery.clone();
     tauri::async_runtime::spawn(async move {
         let result = Discovery::new().scan_subnet(options, tx, cancel).await;
-        discovery_state.scan_cancel.lock().take();
+        // By id, so a scan that finishes late cannot release a claim that is no
+        // longer its own, see `DiscoveryState::finish_scan`.
+        discovery_state.finish_scan(scan_id);
         let error = result.err().map(|e| e.to_string());
         if let Some(e) = &error {
             tracing::warn!("subnet scan failed: {e}");

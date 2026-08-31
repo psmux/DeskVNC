@@ -180,6 +180,10 @@ pub struct ModeTracker {
     /// `?25h`. A hidden cursor left behind reads as a terminal that has
     /// hung, which is exactly the kind of thing this module exists to fix.
     cursor_hidden: bool,
+    /// At least one genuine BEL has arrived since the last
+    /// [`ModeTracker::take_bell`]. Read the doc on that method for why the
+    /// bell is answered by this parser rather than by a byte scan of its own.
+    bell_pending: bool,
 }
 
 impl ModeTracker {
@@ -193,6 +197,7 @@ impl ModeTracker {
             csi_current_has_digits: false,
             active_modes: BTreeSet::new(),
             cursor_hidden: false,
+            bell_pending: false,
         }
     }
 
@@ -252,6 +257,31 @@ impl ModeTracker {
     /// alternate screen buffer (mode 47, 1047, or 1049)?
     pub fn in_alt_screen(&self) -> bool {
         self.active_modes.iter().copied().any(is_alt_screen_mode)
+    }
+
+    /// Did a real bell arrive since this was last asked? Clears the flag, so
+    /// each BEL is reported exactly once.
+    ///
+    /// The bell lives in this parser and not in a scan of its own because
+    /// telling a bell from a byte that merely looks like one needs the exact
+    /// state this parser already keeps. `ESC ] ... BEL` is an OSC string
+    /// terminated by BEL, and setting the window title is an OSC string,
+    /// which bash, zsh and fish all write on EVERY prompt. A scan for 0x07
+    /// therefore rings on every prompt the user ever sees. Two parsers
+    /// answering the same question could disagree; one cannot.
+    ///
+    /// Deliberately not reported: BEL inside a DCS, SOS, PM, or APC payload
+    /// (it is part of the string, not a control), and BEL arriving part way
+    /// through an escape or CSI sequence. Real programs do not put one there,
+    /// and treating a stray control byte in a half-parsed sequence as a bell
+    /// would ring on corrupted input, which is the failure mode that costs
+    /// the feature its credibility.
+    ///
+    /// Says nothing about HOW MANY bells arrived: `cat` of a binary file
+    /// delivers thousands in a single read, and the caller answers that with
+    /// [`crate::bell::BellLimiter`] rather than with a count.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell_pending)
     }
 
     /// The bytes to write to the local terminal to undo everything
@@ -348,11 +378,18 @@ impl ModeTracker {
     }
 
     fn on_ground(&mut self, byte: u8) {
-        if byte == 0x1b {
-            self.state = State::Escape;
+        match byte {
+            0x1b => self.state = State::Escape,
+            // BEL in ground state is the audible bell (ECMA-48 8.3.3), and
+            // ground state is the whole point: the same byte ends an OSC
+            // string (`ESC ] ... BEL`), which is a string terminator and not
+            // a sound. Reaching here means no string is open, so this one is
+            // real. See [`ModeTracker::take_bell`].
+            0x07 => self.bell_pending = true,
+            // CAN/SUB and ordinary text: nothing is in progress to abort or
+            // track, so there is nothing to do.
+            _ => {}
         }
-        // CAN/SUB and ordinary text: nothing is in progress to abort or
-        // track, so there is nothing to do.
     }
 
     fn on_escape(&mut self, byte: u8) {

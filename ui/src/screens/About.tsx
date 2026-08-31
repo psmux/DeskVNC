@@ -80,6 +80,15 @@ const SHORTCUTS: Array<[string, string]> = [
   [`${modKeyLabel}1…9`, "Jump to a tab (1 is the library)"],
   [`${modKeyLabel}⇧W`, "Close the current tab"],
   [`${modKeyLabel}⇧L`, "Back to the library"],
+  // Splitting a tab into panes. Every one carries Alt, because the plain
+  // pairs already mean something and a near miss here costs a connection.
+  [`${modKeyLabel}⌥D`, "Split the pane to the right"],
+  [`${modKeyLabel}⌥⇧D`, "Split the pane downwards"],
+  [`${modKeyLabel}⌥←↑↓→`, "Move to the pane in that direction"],
+  [`${modKeyLabel}⌥[ / ]`, "Previous / next pane"],
+  [`${modKeyLabel}⌥Z`, "Maximise the current pane, or restore it"],
+  [`${modKeyLabel}⌥=`, "Give every pane an equal share"],
+  [`${modKeyLabel}⌥W`, "Close the current pane"],
 ];
 
 const TROUBLESHOOTING: Array<[string, string]> = [

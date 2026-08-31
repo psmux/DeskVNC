@@ -24,6 +24,27 @@ echo "==> Building app bundle"
 # survive rebuilds. Keep Tauri out of it so there is exactly one signing step.
 env -u APPLE_SIGNING_IDENTITY cargo tauri build --bundles app
 
+# The agent binary the AI Agents modal tells people to run. Without it in the
+# bundle, every instruction that modal prints names a program that is not on
+# the machine, and `agent_status` has no path to answer with.
+#
+# Copied here rather than declared as tauri's `bundle.externalBin`, and the
+# difference is only in who does the copy: `tauri-build` copies a sidecar
+# during `cargo build` and FAILS the build when the file is not already
+# there, so declaring it would break `cargo build --workspace`,
+# `cargo test --workspace` and `cargo tauri dev` on a fresh checkout. The
+# resulting bundle is identical either way: `Contents/MacOS/dvv`, beside the
+# main executable, signed with it and removed with it.
+echo "==> Building the dvv agent binary"
+cargo build --release -p dvv
+cp target/release/dvv "$APP/Contents/MacOS/dvv"
+
+# Inside out, which is the order codesign requires: a nested Mach-O carries its
+# own signature and the bundle then seals it. Signing the bundle first would
+# leave dvv unsigned inside a sealed bundle, and notarization rejects that.
+echo "==> Signing the dvv agent binary"
+scripts/sign-macos.sh "$APP/Contents/MacOS/dvv"
+
 echo "==> Signing app bundle"
 scripts/sign-macos.sh "$APP"
 
@@ -58,6 +79,13 @@ echo "==> Staging"
 # signed; verify rather than assume.
 cp -R "$APP" "$STAGE/"
 codesign --verify --strict "$STAGE/DeskVNCViewer.app"
+
+# The agent binary, asserted rather than hoped for. Every line the AI Agents
+# modal prints names this path, and `agent_status` reads it to fill them in, so
+# a DMG that shipped without it would hand people instructions pointing at a
+# program that is not there. Running it is the check: a file that exists but
+# will not execute fails the same way from a user's point of view.
+"$STAGE/DeskVNCViewer.app/Contents/MacOS/dvv" version >/dev/null
 ln -s /Applications "$STAGE/Applications"
 
 echo "==> Creating $OUT"

@@ -296,7 +296,18 @@ export function authMethodLabel(method: string): string {
   }
 }
 
-export function useSession(params: SessionParams, bridge: SessionBridge): SessionApi {
+export function useSession(
+  params: SessionParams,
+  bridge: SessionBridge,
+  /**
+   * How much room this view will have, in CSS pixels, when it is something
+   * other than the whole window. A pane in a split knows its size before the
+   * viewer inside it mounts, and an RDP session that asked for the window's
+   * size would connect at a desktop twice the width of the quarter it is
+   * about to be shown in, then resize the moment the canvas measured itself.
+   */
+  available?: { width: number; height: number },
+): SessionApi {
   const [state, setState] = useState<SessionState>({ state: "connecting" });
   const [desktopName, setDesktopName] = useState(params.name);
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
@@ -314,6 +325,13 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
 
   const bridgeRef = useRef(bridge);
   bridgeRef.current = bridge;
+  /**
+   * Read rather than depended on: the pane's size changes with every divider
+   * drag, and the connect effect must not re-run (which is to say, reconnect)
+   * because a neighbour got wider. Only the value at connect time matters.
+   */
+  const availableRef = useRef(available);
+  availableRef.current = available;
   const sessionIdRef = useRef<string>(params.sessionId ?? "");
   const inputWarned = useRef(false);
   /** Set by `retryConnect({ reprompt: true })`; consumed by the next connect. */
@@ -534,11 +552,19 @@ export function useSession(params: SessionParams, bridge: SessionBridge): Sessio
           acceptSshHostKey,
           // The viewport in physical pixels, so an RDP session can ask for a
           // desktop that fits rather than the specification's 1024 by 768.
-          // The canvas is not mounted yet at this point, and the session view
-          // is full bleed, so the window is both the available measure and the
-          // right one.
-          viewportWidth: Math.round(window.innerWidth * window.devicePixelRatio),
-          viewportHeight: Math.round(window.innerHeight * window.devicePixelRatio),
+          // The canvas is not mounted yet at this point, so the measurement
+          // has to come from outside it: the pane's own box when there is one,
+          // and otherwise the window, which is what a full bleed session view
+          // is about to fill anyway.
+          // A pane that has not been measured yet reports zero, and asking for
+          // a zero by zero desktop is worse than asking for a slightly wrong
+          // one, so anything falsy falls back to the window.
+          viewportWidth: Math.round(
+            (availableRef.current?.width || window.innerWidth) * window.devicePixelRatio,
+          ),
+          viewportHeight: Math.round(
+            (availableRef.current?.height || window.innerHeight) * window.devicePixelRatio,
+          ),
           onEvent: channel,
         });
         repromptRef.current = false;

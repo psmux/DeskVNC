@@ -4,6 +4,7 @@ import { ToastProvider } from "./state/ToastContext";
 import { HostsProvider } from "./state/HostsContext";
 import { DiscoveryProvider } from "./state/DiscoveryContext";
 import { SessionsProvider } from "./state/SessionsContext";
+import { AgentActivityProvider, useAgentActivity } from "./state/AgentActivityContext";
 import { TabsProvider, useTabs } from "./state/TabsContext";
 import { Library } from "./screens/Library";
 import { Session } from "./screens/Session";
@@ -12,8 +13,11 @@ import { About } from "./screens/About";
 import { Onboarding } from "./screens/Onboarding";
 import { TabStrip, tabPanelId } from "./components/TabStrip";
 import { Pane } from "./components/Pane";
+import { SplitView } from "./components/SplitView";
+import { AgentWall } from "./components/AgentWall";
 import { ToastShelf } from "./components/primitives";
-import { safeListen } from "./lib/tauri";
+import { panes } from "./lib/layout";
+import { inTauri, safeListen } from "./lib/tauri";
 import { syncSessionMenu } from "./lib/menuSync";
 import { PREF_HIDE_TOOLBAR, readBoolPref, writeBoolPref } from "./lib/prefs";
 import { installContextMenuSuppressor } from "./lib/contextMenu";
@@ -86,10 +90,17 @@ export default function App(): ReactNode {
           <HostsProvider>
             <DiscoveryProvider>
               <SessionsProvider>
-                <TabsProvider>
-                  <MainShell />
-                  <ToastShelf />
-                </TabsProvider>
+                {/*
+                  Outside the tabs, because a lease is a fact about a machine
+                  rather than about the pane it happens to be shown in, and the
+                  plane may hold one for a limb this window has never mounted.
+                */}
+                <AgentActivityProvider>
+                  <TabsProvider>
+                    <MainShell />
+                    <ToastShelf />
+                  </TabsProvider>
+                </AgentActivityProvider>
               </SessionsProvider>
             </DiscoveryProvider>
           </HostsProvider>
@@ -107,15 +118,41 @@ function MainShell(): ReactNode {
   const [skippedOnboarding, setSkippedOnboarding] = useState(false);
   const {
     tabs,
+    summaries,
     activeId,
+    activeTab,
     close,
+    closePane,
     select,
     selectRelative,
     selectIndex,
+    selectSession,
     closeActive,
-    setTitle,
-    setState,
+    split,
+    arrange,
+    toggleZoom,
+    moveFocus,
+    cycleFocus,
+    evenOut,
   } = useTabs();
+  const { driving } = useAgentActivity();
+
+  /**
+   * Which tabs hold a machine an agent is driving.
+   *
+   * Worked out here rather than in `TabsContext` because a tab does not know
+   * about leases and a lease does not know about tabs; this is the one place
+   * that already has both. Empty, and free, until the plane is on.
+   */
+  const drivenTabIds = useMemo(
+    () =>
+      new Set(
+        tabs
+          .filter((t) => panes(t.root).some((p) => p.sessionId !== null && driving(p.sessionId)))
+          .map((t) => t.id),
+      ),
+    [tabs, driving],
+  );
 
   // `select` already refuses an id that is not open, so this only differs from
   // `activeId === null` for a tab closed in the same render. Belt and braces
@@ -124,6 +161,8 @@ function MainShell(): ReactNode {
   // Read inside the menu listener, which is registered once.
   const libraryInFrontRef = useRef(libraryInFront);
   libraryInFrontRef.current = libraryInFront;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
 
   // menu.rs emits `menu://action` for every custom item and expects the
   // frontend to route it. Items handled natively there (fullscreen, the Help
@@ -138,6 +177,28 @@ function MainShell(): ReactNode {
       else if (id === "menu:tab:prev") selectRelative(-1);
       else if (id === "menu:tab:close") closeActive();
       else if (id === "menu:tab:library") select(null);
+      // The pane items belong to the shell rather than to a session, the same
+      // way the tab items do: they act on the layout around a session, and the
+      // session in front has no idea what shape it is being shown in.
+      else if (id === "menu:pane:split-right") split("row");
+      else if (id === "menu:pane:split-down") split("column");
+      else if (id === "menu:pane:next") cycleFocus(1);
+      else if (id === "menu:pane:prev") cycleFocus(-1);
+      // The pane count rides in the id, so one branch covers every grid size.
+      else if (id.startsWith("menu:pane:grid:")) {
+        const count = Number(id.slice("menu:pane:grid:".length));
+        if (Number.isFinite(count) && count > 0) arrange(count);
+      }
+      else if (id === "menu:pane:zoom") {
+        const tab = activeTabRef.current;
+        if (tab) toggleZoom(tab.id, tab.focusedPaneId);
+      } else if (id === "menu:pane:even") {
+        const tab = activeTabRef.current;
+        if (tab) evenOut(tab.id);
+      } else if (id === "menu:pane:close") {
+        const tab = activeTabRef.current;
+        if (tab) closePane(tab.id, tab.focusedPaneId);
+      }
       else if (id === "menu:hide-toolbar" && libraryInFrontRef.current) {
         // A session mounted in a tab lives in THIS window and hears the same
         // event, so only one of us may act on it: with a session in front it
@@ -160,7 +221,7 @@ function MainShell(): ReactNode {
       cancelled = true;
       unlisten?.();
     };
-  }, [selectRelative, closeActive, select]);
+  }, [selectRelative, closeActive, select, split, cycleFocus, evenOut, closePane, arrange, toggleZoom]);
 
   /**
    * With the library in front there is no session for the View and Session
@@ -176,32 +237,115 @@ function MainShell(): ReactNode {
   }, [libraryInFront]);
 
   /**
-   * Cmd/Ctrl+1…9 selects a tab by position, 1 being the library.
+   * The shell's own keyboard: tabs, and the panes inside them.
    *
    * Handed to every mounted viewer as well as listened for here, because the
    * remote keyboard hook sits on `window` in the capture phase: once a session
    * is in front, this listener never sees the keystroke, and the viewer's
    * `onAppHotkey` is the only way through. It fires even with shortcut
    * pass-through switched on, deliberately, the same way the toolbar's own
-   * recall shortcut does: leaving no way back out of a tab would be a trap.
+   * recall shortcut does: leaving no way back out of a tab, or out of a pane,
+   * would be a trap.
+   *
+   * The pane chords all carry Alt on top of the platform modifier. The
+   * unadorned pairs are spoken for (Cmd/Ctrl+Shift+W closes a tab, Shift+D
+   * disconnects), and a chord that closed a pane when the user meant to close
+   * the tab is the kind of near miss that costs a connection.
+   *
+   * In the app itself the pane chords are NOT handled here: they are native
+   * menu accelerators, and `menu.rs` explains why that is the only thing that
+   * works while a session holds the keyboard. Handling them in both places
+   * would run each command twice wherever the OS lets the keystroke through to
+   * the page as well. The browser dev build has no native menu, so there it is
+   * this listener or nothing.
    */
-  const tabHotkey = useCallback(
+  const appHotkey = useCallback(
     (e: KeyboardEvent): boolean => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return false;
-      if (e.key < "1" || e.key > "9") return false;
-      selectIndex(Number(e.key) - 1);
-      return true;
+      // This is reached twice for one keystroke: once through a focused
+      // session's keyboard hook, which is where `onAppHotkey` leads, and once
+      // through the listener below. Whichever gets there first calls
+      // `preventDefault`, so this is how the other one knows to stand down.
+      // The guard lives here rather than in the listener because the two do
+      // not arrive in a fixed order: the hook sits on `window` in the capture
+      // phase and wins for a real keystroke, but an event dispatched at
+      // `window` itself is AT_TARGET for both, and then registration order
+      // decides. Pane commands are not idempotent, so "usually first" is not
+      // good enough.
+      if (e.defaultPrevented) return false;
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return false;
+
+      if (!e.altKey) {
+        if (e.key >= "1" && e.key <= "9") {
+          selectIndex(Number(e.key) - 1);
+          return true;
+        }
+        return false;
+      }
+
+      if (inTauri()) return false;
+
+      // With the library in front there is no layout to act on. Returning
+      // false rather than swallowing the chord matters: Cmd/Ctrl+Alt with an
+      // arrow key means something on both macOS and Windows, and eating it to
+      // do nothing is worse than not binding it at all.
+      const tab = activeTabRef.current;
+      if (!tab) return false;
+
+      switch (e.code) {
+        case "KeyD":
+          // Alt+Shift+D goes down, Alt+D goes right: one chord for "divide",
+          // and the shift says which way, rather than two to remember.
+          split(e.shiftKey ? "column" : "row");
+          return true;
+        case "KeyW":
+          closePane(tab.id, tab.focusedPaneId);
+          return true;
+        case "Equal":
+          evenOut(tab.id);
+          return true;
+        case "KeyZ":
+          toggleZoom(tab.id, tab.focusedPaneId);
+          return true;
+        case "ArrowLeft":
+          moveFocus("left");
+          return true;
+        case "ArrowRight":
+          moveFocus("right");
+          return true;
+        case "ArrowUp":
+          moveFocus("up");
+          return true;
+        case "ArrowDown":
+          moveFocus("down");
+          return true;
+        case "BracketRight":
+          cycleFocus(1);
+          return true;
+        case "BracketLeft":
+          cycleFocus(-1);
+          return true;
+        default:
+          return false;
+      }
     },
-    [selectIndex],
+    [selectIndex, split, closePane, evenOut, moveFocus, cycleFocus, toggleZoom],
   );
 
+  /**
+   * The shell's own listener, for keystrokes no session is holding.
+   *
+   * With a session focused this is the second of two routes to the same
+   * callback, and `appHotkey` refuses an event that has already been acted on,
+   * so the command runs once however the two happen to be ordered.
+   */
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (tabHotkey(e)) e.preventDefault();
+      if (appHotkey(e)) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tabHotkey]);
+  }, [appHotkey]);
 
   // The session toolbar is positioned against the viewport, not against its
   // pane, so it has to be told how much of the top the tab strip is using or
@@ -228,11 +372,12 @@ function MainShell(): ReactNode {
   }, [tabs.length > 0]);
 
   // The window title follows whatever is in front, the way it would if that
-  // session had a window of its own.
+  // session had a window of its own. In a split that is the focused pane's
+  // machine, which is what the strip is labelled with too.
   useEffect(() => {
-    const tab = tabs.find((t) => t.id === activeId);
-    document.title = tab ? tab.title : "DeskVNCViewer";
-  }, [tabs, activeId]);
+    const summary = summaries.find((t) => t.id === activeId);
+    document.title = summary ? summary.title : "DeskVNCViewer";
+  }, [summaries, activeId]);
 
   const showOnboarding = !settings.onboarded && !skippedOnboarding;
 
@@ -258,21 +403,22 @@ function MainShell(): ReactNode {
       {tabs.length > 0 ? (
         <div ref={stripRef}>
           <TabStrip
-            tabs={tabs}
+            tabs={summaries}
             activeId={activeId}
             onSelect={select}
             onClose={close}
             onSelectRelative={selectRelative}
+            drivenTabIds={drivenTabIds}
           />
         </div>
       ) : null}
 
       {/*
-        Every pane stays mounted and laid out; only the one in front is
-        painted. `visibility` rather than `display: none` on purpose: a hidden
-        pane still has to have a size, or its canvas would collapse to zero,
-        take the WebGL viewport with it, and have to rebuild the whole
-        framebuffer every time the user came back to that tab.
+        Two surfaces, not one per tab: the library, and the one the sessions
+        are laid out on. `SplitView` mounts every session in every tab at once
+        and positions each one from its tab's layout tree, which is what lets a
+        session be dragged from one pane to another, or from one tab to
+        another, without its connection noticing. See that file's header.
       */}
       <div className="relative min-h-0 flex-1">
         <Pane visible={libraryInFront} id={tabPanelId(null)} label="Library">
@@ -283,25 +429,21 @@ function MainShell(): ReactNode {
             onAutoAddHandled={() => setAutoAddDiscoveredId(null)}
           />
         </Pane>
-        {tabs.map((tab) => (
-          <Pane
-            key={tab.id}
-            visible={tab.id === activeId}
-            id={tabPanelId(tab.id)}
-            label={tab.title}
-          >
-            <Session
-              params={tab.params}
-              embedded
-              active={tab.id === activeId}
-              onClose={() => close(tab.id)}
-              onDesktopName={(name) => setTitle(tab.id, name)}
-              onState={(state) => setState(tab.id, state)}
-              onAppHotkey={tabHotkey}
-            />
-          </Pane>
-        ))}
+        <SplitView onAppHotkey={appHotkey} />
       </div>
+
+      {/*
+        Every machine an agent is driving, across every tab, in one row.
+
+        Below the panes rather than over them: the grid only ever draws the tab
+        in front, so anything painted on it can show a subset of the work at
+        best, and the whole point of this strip is that eight machines being
+        driven at once are visible at once. It takes no height at all until a
+        lease is actually held, which is why it needs no toggle and cannot be
+        put away, and why a person who never turns the plane on will never see
+        it. See the file header of `AgentWall`.
+      */}
+      <AgentWall onShowSession={selectSession} />
 
       {prefsOpen ? <Preferences onClose={() => setPrefsOpen(false)} /> : null}
       {aboutOpen ? <About onClose={() => setAboutOpen(false)} /> : null}

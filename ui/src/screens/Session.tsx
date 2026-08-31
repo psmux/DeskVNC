@@ -185,8 +185,32 @@ export interface SessionProps {
   params?: SessionParams;
   /** Mounted as a tab rather than owning the window it is in. */
   embedded?: boolean;
-  /** This tab is the one on screen. Only meaningful when embedded. */
-  active?: boolean;
+  /**
+   * This view is being painted: its tab is in front. Several may be at once,
+   * one per pane of a split. Only meaningful when embedded.
+   */
+  onScreen?: boolean;
+  /**
+   * This view owns the window: the keyboard, the native menu, file drops and
+   * the clipboard sync all belong to it.
+   *
+   * Separate from {@link onScreen} because a split shows several sessions at
+   * the same time and every one of those is a single, window-wide resource.
+   * Exactly one mounted view may hold this, and it is the one the user last
+   * clicked into. Only meaningful when embedded.
+   */
+  focused?: boolean;
+  /**
+   * The pane's rectangle in viewport coordinates, for the chrome that has to
+   * be positioned against the window rather than against this view's own box.
+   * Omitted when the session has the whole window.
+   */
+  frame?: { x: number; y: number; width: number; height: number };
+  /**
+   * Divide the pane this view is in. Omitted for a session in a window of its
+   * own, which has no pane and so shows no split controls.
+   */
+  onSplit?: (dir: "row" | "column") => void;
   /** Embedded: take this tab off the strip. */
   onClose?: () => void;
   /** The server told us what this desktop is called. */
@@ -223,7 +247,10 @@ export function Session(props: SessionProps = {}): ReactNode {
 function SessionView({
   params: paramsProp,
   embedded = false,
-  active = true,
+  onScreen: onScreenProp = true,
+  focused: focusedProp = true,
+  frame: frameProp,
+  onSplit,
   onClose,
   onDesktopName,
   onState,
@@ -231,11 +258,33 @@ function SessionView({
 }: SessionProps): ReactNode {
   const params = useMemo(() => paramsProp ?? readSessionParams(), [paramsProp]);
   /**
-   * Is this view the one the user is looking at? A session window always is.
-   * A background tab is mounted and still connected, but must not draw, must
-   * not hold the keyboard, and must not answer file drops.
+   * Two questions that used to be one, and are not the same once a tab can be
+   * split between several sessions at once.
+   *
+   * `painted` is about pixels: a view in a background tab is still connected
+   * and still taking frames into its texture, but it does not draw. Every pane
+   * of the tab in front is painted.
+   *
+   * `owns` is about the things there is only one of in a window: the keyboard,
+   * the native menu bar, the OS drag-and-drop session, the clipboard. Exactly
+   * one view may hold those, whatever is on screen beside it. A session in a
+   * window of its own is both, always.
    */
-  const visible = !embedded || active;
+  const painted = !embedded || onScreenProp;
+  const owns = !embedded || focusedProp;
+
+  /**
+   * The pane's box, pinned to its numbers rather than to the object carrying
+   * them. The shell rebuilds that object on every render, and it renders once
+   * a second for the bandwidth readout on every open session, so passing it
+   * straight through re-ran the toolbar's whole placement calculation on every
+   * tick of every pane for a rectangle that had not moved.
+   */
+  const frame = useMemo(
+    () => frameProp,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [frameProp?.x, frameProp?.y, frameProp?.width, frameProp?.height],
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<WebGLRenderer | null>(null);
@@ -364,7 +413,7 @@ function SessionView({
     [],
   );
 
-  const session = useSession(params, bridge);
+  const session = useSession(params, bridge, frame);
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
@@ -399,8 +448,12 @@ function SessionView({
           ? pushClipboardRef.current(false)
           : Promise.resolve("unchanged" as const),
       onAppHotkey: (e) => {
-        // The shell (the tab strip) gets first refusal: its shortcuts have to
-        // beat both this view's and the remote desktop's.
+        // Something has already acted on this. Claim it anyway rather than
+        // falling through: a consumed keystroke must not go on to reach the
+        // remote desktop as well.
+        if (e.defaultPrevented) return true;
+        // The shell (the tab strip, and the pane layout) gets first refusal:
+        // its shortcuts have to beat both this view's and the remote desktop's.
         if (appHotkeyRef.current?.(e)) return true;
         const mod = e.metaKey || e.ctrlKey;
         if (mod && e.shiftKey && e.code === "KeyM") {
@@ -503,15 +556,16 @@ function SessionView({
   const appHotkeyRef = useRef(onAppHotkey);
   appHotkeyRef.current = onAppHotkey;
 
-  // Only the view on screen owns the keyboard and the pointer. `detach()`
-  // releases whatever was still held, so a modifier held down through the
-  // switch does not stay down on the desktop being left behind.
+  // Only the focused view owns the keyboard and the pointer, which in a split
+  // is one of several views the user can see. `detach()` releases whatever was
+  // still held, so a modifier held down while the focus moves to the pane next
+  // door does not stay down on the desktop being left behind.
   useEffect(() => {
     const input = inputRef.current;
-    if (!viewReady || !input || !visible) return;
+    if (!viewReady || !input || !owns) return;
     input.attach();
     return () => input.detach();
-  }, [viewReady, visible]);
+  }, [viewReady, owns]);
 
   // Coming to the front takes the focus with it. The remote keyboard hook
   // deliberately ignores keystrokes aimed at our own inputs and dialogs, so a
@@ -520,10 +574,10 @@ function SessionView({
   // input handler's hidden capture element (not the canvas), which is what
   // lets IMEs and dictation deliver text to the session at all.
   useEffect(() => {
-    if (!viewReady || !visible) return;
+    if (!viewReady || !owns) return;
     if (inputRef.current) inputRef.current.focus();
     else canvasRef.current?.focus({ preventScroll: true });
-  }, [viewReady, visible]);
+  }, [viewReady, owns]);
 
   // …and only the view on screen draws. Frames for a background tab still
   // arrive and are still uploaded into its texture, so switching back shows
@@ -532,13 +586,13 @@ function SessionView({
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!viewReady || !renderer) return;
-    if (visible) {
+    if (painted) {
       renderer.start();
       renderer.markDirty();
     } else {
       renderer.stop();
     }
-  }, [viewReady, visible]);
+  }, [viewReady, painted]);
 
   // ------------------------------------------------------- derived wiring
 
@@ -559,7 +613,7 @@ function SessionView({
   // core (it decides keysym vs scancode on the wire), so it is pushed to the
   // backend rather than into the input handler.
   useEffect(() => {
-    if (!viewReady || !visible) return;
+    if (!viewReady || !painted) return;
     const sid = params.sessionId;
     const sync = (): void => {
       inputRef.current?.setNaturalScroll(readBoolPref(PREF_NATURAL_SCROLL, true));
@@ -577,7 +631,7 @@ function SessionView({
     sync();
     window.addEventListener("focus", sync);
     return () => window.removeEventListener("focus", sync);
-  }, [viewReady, visible, params.sessionId]);
+  }, [viewReady, painted, params.sessionId]);
 
   // --------------------------------------------------- native key capture
   //
@@ -634,17 +688,22 @@ function SessionView({
     };
   }, [params.sessionId]);
 
-  // Switching tabs is not a window blur, so none of the shell's focus hooks
-  // fire: a tab going to the back has to hand the keyboard back itself, or it
-  // would keep swallowing the shortcuts meant for the tab in front. The
-  // pass-through switch stays ON, so coming back re-arms without asking again.
+  // Switching tabs, or moving the focus to the pane next door, is not a window
+  // blur, so none of the shell's focus hooks fire: a view losing the focus has
+  // to hand the keyboard back itself, or it would keep swallowing the
+  // keystrokes meant for the one that took it. The pass-through switch stays
+  // ON, so coming back re-arms without asking again.
+  //
+  // This follows the focus rather than the pixels for the same reason the
+  // keyboard hook does: the native grab is one per window, and a split showing
+  // four desktops must not have four of them fighting over it.
   const passthroughRef = useRef(passthrough);
   passthroughRef.current = passthrough;
   const captureSuspended = useRef(false);
   useEffect(() => {
     const sid = params.sessionId;
     if (!embedded || !sid) return;
-    if (!active) {
+    if (!owns) {
       if (!passthroughRef.current) return;
       captureSuspended.current = true;
       void captureStop(sid).then(setCapture);
@@ -652,7 +711,7 @@ function SessionView({
       captureSuspended.current = false;
       if (passthroughRef.current) void captureStart(sid).then(setCapture);
     }
-  }, [embedded, active, params.sessionId]);
+  }, [embedded, owns, params.sessionId]);
 
   const togglePassthrough = useCallback(
     (want: boolean): void => {
@@ -1013,7 +1072,7 @@ function SessionView({
 
   const clipboardReady = session.state.state === "connected";
   useEffect(() => {
-    if (!clipboardReady || !visible) return;
+    if (!clipboardReady || !owns) return;
     const sync = (): void => {
       if (!readBoolPref(PREF_CLIPBOARD_AUTO, true)) return;
       if (!readBoolPref(PREF_CLIPBOARD_ON_FOCUS, true)) return;
@@ -1024,7 +1083,7 @@ function SessionView({
     sync();
     window.addEventListener("focus", sync);
     return () => window.removeEventListener("focus", sync);
-  }, [clipboardReady, visible]);
+  }, [clipboardReady, owns]);
 
   // Bell: brief visual pulse via toast
   useEffect(() => {
@@ -1270,10 +1329,12 @@ function SessionView({
   // fire for real files, this is the only path that sees them.
   //
   // Tauri reports a drop to the whole window, not to a part of it, so only the
-  // tab in front may listen: otherwise one dropped file would be uploaded once
-  // per open tab, to whichever machines those happen to be.
+  // focused view may listen: otherwise one dropped file would be uploaded once
+  // per open pane, to whichever machines those happen to be. In a split that
+  // means files go to the pane you last clicked in, which is also the only
+  // reading of "here" the OS gives us anything to work with.
   useEffect(() => {
-    if (!inTauri() || sshAvailable !== true || !visible) return;
+    if (!inTauri() || sshAvailable !== true || !owns) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void import("@tauri-apps/api/webview")
@@ -1311,7 +1372,7 @@ function SessionView({
       cancelled = true;
       unlisten?.();
     };
-  }, [sshAvailable, visible, ensureFilesConnected, dropDir, push]);
+  }, [sshAvailable, owns, ensureFilesConnected, dropDir, push]);
 
   // ------------------------------------------------------------- actions
 
@@ -1349,8 +1410,10 @@ function SessionView({
    * frontend to route it; the library window and the app shell each listen
    * for the items they own. Nothing listened for the session's, so the whole
    * Session and Connection menus, and the three View items that are not
-   * handled natively, silently did nothing (issue #1). Only the view in
-   * front may act: the event reaches every mounted tab.
+   * handled natively, silently did nothing (issue #1). Only the FOCUSED view
+   * may act: the event reaches every mounted pane, and the menu bar shows one
+   * session's settings, so the pane whose settings those are is the one that
+   * has to answer for them.
    *
    * The table itself is built further down (`menuActionsRef`), once every
    * callback it reaches for exists. Through a ref rather than in the
@@ -1361,7 +1424,7 @@ function SessionView({
    */
   const menuActionsRef = useRef<(id: string) => void>(() => undefined);
   useEffect(() => {
-    if (!visible) return;
+    if (!owns) return;
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
@@ -1377,7 +1440,7 @@ function SessionView({
       cancelled = true;
       unlisten?.();
     };
-  }, [visible]);
+  }, [owns]);
 
   const sendCombo = useCallback(
     (combo: "ctrl-alt-del" | "cmd-tab" | "win" | "alt-f4" | "escape"): void => {
@@ -1691,12 +1754,12 @@ function SessionView({
   pushMenuRef.current = () => syncSessionMenu(hideToolbar, menuState);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!owns) return;
     const push = (): void => pushMenuRef.current();
     push();
     window.addEventListener("focus", push);
     return () => window.removeEventListener("focus", push);
-  }, [visible, hideToolbar, menuState, menuNonce]);
+  }, [owns, hideToolbar, menuState, menuNonce]);
 
   // ------------------------------------------------------------- render
 
@@ -1710,7 +1773,7 @@ function SessionView({
   // left to send it to once the session is over.
   const terminal = st.state === "disconnected";
   useEffect(() => {
-    if (!terminal || !visible) return;
+    if (!terminal || !owns) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== "Escape") return;
       e.preventDefault();
@@ -1719,7 +1782,7 @@ function SessionView({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [terminal, visible, dismiss]);
+  }, [terminal, owns, dismiss]);
 
   const showConnecting =
     st.state === "resolving" || st.state === "connecting" ||
@@ -1739,9 +1802,17 @@ function SessionView({
       />
 
       {/* Preferences ▸ Session can take the bar away; the View and Session
-          menus carry the same options either way. */}
-      {hideToolbar ? null : (
+          menus carry the same options either way.
+
+          Only the focused view draws one. The bar's position is a single
+          app-wide preference, so a split would otherwise stack one toolbar per
+          pane at the same point, and every button on it acts on a particular
+          session: four disconnect buttons in a heap, no way to tell whose is
+          whose. Following the focus gives the same answer the menu bar does. */}
+      {hideToolbar || !owns ? null : (
         <SessionToolbar
+          frame={frame}
+          onSplit={onSplit}
           desktopName={session.desktopName}
           protocol={params.protocol}
           state={st}

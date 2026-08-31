@@ -259,23 +259,29 @@ export function Dialog({
   initialFocusSelector?: string;
 }): ReactNode {
   const ref = useRef<HTMLDivElement>(null);
-  // A dialog on a background tab is not on screen, and must neither take the
-  // focus nor answer the keyboard. Both effects below listen outside this
-  // subtree, where hiding the pane does not reach them.
-  const onScreen = usePaneVisible();
+  // A dialog outside the focused pane must neither take the focus nor answer
+  // the keyboard. Both effects below listen outside this subtree, so neither
+  // hiding the pane nor merely not being the pane in use reaches them.
+  //
+  // In a split that dialog may be perfectly visible while it waits: a
+  // credential prompt can appear in the pane next door while the user is
+  // typing in this one. It stays inert deliberately, because an Escape means
+  // the pane the user is working in, and stealing the focus would pull them
+  // out of it. Clicking that pane hands it both.
+  const owns = usePaneVisible();
 
   useEffect(() => {
     const el = ref.current;
-    if (!el || !onScreen) return;
+    if (!el || !owns) return;
     const target = initialFocusSelector
       ? el.querySelector<HTMLElement>(initialFocusSelector)
       : el.querySelector<HTMLElement>("[data-autofocus]") ??
         el.querySelector<HTMLElement>("input, select, button");
     target?.focus();
-  }, [initialFocusSelector, onScreen]);
+  }, [initialFocusSelector, owns]);
 
   useEffect(() => {
-    if (!onScreen) return;
+    if (!owns) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         e.stopPropagation();
@@ -300,7 +306,7 @@ export function Dialog({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, onScreen]);
+  }, [onClose, owns]);
 
   const style: CSSProperties = { width, maxWidth: "calc(100vw - 32px)" };
 

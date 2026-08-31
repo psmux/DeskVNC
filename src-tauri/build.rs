@@ -201,12 +201,29 @@ fn main() {
             // `ssh_send` carries keystrokes, so it is as sensitive as
             // `send_input` and stays its own grantable command.
             "ssh_probe",
+            // Reads the NAMES of the keys in `~/.ssh`, never their contents,
+            // so the host editor can offer a list to choose from.
+            "ssh_list_local_keys",
             "ssh_list_wsl_distros",
             "ssh_connect",
             "ssh_send",
             "ssh_resize",
             "ssh_reconnect_now",
             "ssh_disconnect",
+            // The agent plane, as a person sees it. Neither of these reaches
+            // the dvvp.v1 socket: `agent_status` reads what the shell already
+            // knows so a pane can seed its badge on mount, and
+            // `agent_take_the_wheel` is the revocation D5 promises needs no
+            // application code anywhere else. They are two grantable commands
+            // rather than one because reading who is driving and taking the
+            // machine off them are different acts.
+            "agent_status",
+            "agent_take_the_wheel",
+            // Registering the bundled `dvv` with Claude Code, which runs a
+            // program on the person's behalf. Its own grant for that reason:
+            // reading the plane's state and spawning a process are not the
+            // same act.
+            "agent_register_with_claude",
         ]),
     ))
     .expect("failed to run tauri-build");

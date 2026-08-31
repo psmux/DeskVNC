@@ -92,6 +92,10 @@
     "allow-capture-permission-granted",
     "allow-capture-request-permission",
 
+    "allow-agent-status",
+    "allow-agent-take-the-wheel",
+    "allow-agent-register-with-claude",
+
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "x-apple.systempreferences:*" }]

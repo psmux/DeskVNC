@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-take-the-wheel"
+description = "Enables the agent_take_the_wheel command without any pre-configured scope."
+commands.allow = ["agent_take_the_wheel"]
+
+[[permission]]
+identifier = "deny-agent-take-the-wheel"
+description = "Denies the agent_take_the_wheel command without any pre-configured scope."
+commands.deny = ["agent_take_the_wheel"]

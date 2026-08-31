@@ -20,6 +20,17 @@ members = [
     "crates/vnc-store",
     "crates/vnc-files",
     "crates/vnc-input-capture",
+    # The agent plane (PRDAgentPlug/01 §3, /02, /08 §5). Deliberately two
+    # crates rather than one: `agent-lease` is arbitration and knows nothing
+    # about limbs, protocols or tokio channels, so it can be reasoned about and
+    # tested on its own, and `limb-core` is the contract a limb implements and
+    # depends only on `remote-core`. Neither depends on tauri, so the plane is
+    # reachable from a headless binary (PRDAgentPlug/03 §1).
+    "crates/agent-lease",
+    "crates/limb-core",
+    "crates/agent-perception",
+    "crates/agent-plane",
+    "crates/dvv",
     "src-tauri",
 ]
 
@@ -32,7 +43,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.18.0"
+version = "0.23.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"

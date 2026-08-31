@@ -1,0 +1,25 @@
+[package]
+name = "agent-lease"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Control arbitration for the agent plane: who is driving a limb right now, and what happens when somebody else wants the wheel."
+
+# Deliberately almost dependency free. This crate is arbitration and nothing
+# else: it holds no sockets, spawns no tasks, and knows nothing about limbs,
+# protocols or framebuffers. Everything it decides is a pure function of the
+# state it was given plus a caller-supplied instant, which is what makes the
+# preemption rules testable without a runtime (PRDAgentPlug/08 §5).
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+# Only so the wire shape can be asserted. `remote-core` has a `wire_compat.rs`
+# for the same reason: the serialised form of a lease is what a pane renders
+# and what a trace stores (PRDAgentPlug/10 §3), so it is a contract, and a
+# contract nothing tests is a contract that drifts.
+[dev-dependencies]
+serde_json = { workspace = true }

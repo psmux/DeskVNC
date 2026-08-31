@@ -33,7 +33,8 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use ssh_core::{MultiplexerConfig, SshEvent, SshSession, SshTermOptions, TerminalOptions};
 use ssh_transport::{Error as SshError, SshConfig};
-use tauri::{AppHandle, Emitter, State};
+use std::path::Path;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::files::{build_auth, local_username, AuthKind, FilesState};
 
@@ -437,6 +438,258 @@ pub async fn ssh_disconnect(state: State<'_, SshState>, session_id: String) -> R
 }
 
 // ---------------------------------------------------------------------------
+// Local key discovery
+// ---------------------------------------------------------------------------
+
+/// One private key sitting in the user's `~/.ssh`.
+///
+/// A path and a label, never key material: the file is read here only far
+/// enough to tell a private key from a `known_hosts`, and the bytes are
+/// dropped again before this struct is built. The same invariant the rest of
+/// this module runs on (secrets stay in Rust) is why `kind` and `comment`
+/// come from the *public* half of the pair.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalKey {
+    /// Absolute path, which is what goes into `keyPath`.
+    pub path: String,
+    /// File name on its own, which is what a person recognises.
+    pub name: String,
+    /// `ed25519`, `rsa`, `ecdsa`, `dsa`, `pkcs8`, or empty when the file is a
+    /// private key whose algorithm we cannot name without unlocking it.
+    pub kind: String,
+    /// The trailing comment on the `.pub` sibling, usually `user@machine`.
+    pub comment: Option<String>,
+    /// The key is passphrase-protected, so connecting needs the passphrase
+    /// saved in the keychain. Drives a hint in the host editor.
+    pub encrypted: bool,
+}
+
+/// What [`ssh_list_local_keys`] found, and where it looked.
+///
+/// `dir` travels back even when `keys` is empty: it is what the Browse button
+/// opens the native file dialog at, and a first-time user with no keys yet is
+/// exactly who needs the dialog to start somewhere useful.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalKeys {
+    pub dir: String,
+    pub keys: Vec<LocalKey>,
+}
+
+/// Names in `~/.ssh` that are never private keys.
+const NOT_KEYS: &[&str] = &[
+    "config",
+    "known_hosts",
+    "known_hosts.old",
+    "authorized_keys",
+    "authorized_keys2",
+    "environment",
+    "rc",
+];
+
+/// List the private keys in `~/.ssh`, so choosing one is a pick from a list
+/// rather than a path typed from memory.
+///
+/// Never an error worth showing: no `~/.ssh` at all is an ordinary state on a
+/// machine that has never used SSH, and the editor answers it with the Browse
+/// button rather than a red box.
+#[tauri::command]
+pub async fn ssh_list_local_keys(app: AppHandle) -> Result<LocalKeys, String> {
+    let dir = app.path().home_dir().map_err(|e| e.to_string())?.join(".ssh");
+    let scan = dir.clone();
+    let keys = tokio::task::spawn_blocking(move || scan_key_dir(&scan))
+        .await
+        .unwrap_or_default();
+    Ok(LocalKeys {
+        dir: dir.to_string_lossy().to_string(),
+        keys,
+    })
+}
+
+/// Every private key in one directory, sorted by name.
+fn scan_key_dir(dir: &Path) -> Vec<LocalKey> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    for item in read.flatten() {
+        let name = item.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name.ends_with(".pub") || NOT_KEYS.contains(&name.as_str()) {
+            continue;
+        }
+        let path = item.path();
+        if !item.metadata().map(|m| m.is_file()).unwrap_or(false) {
+            continue;
+        }
+        // Read a head, not the file: a private key's identifying line is its
+        // first, and a stray multi-megabyte file in `~/.ssh` should cost this
+        // scan one page rather than its whole length.
+        let Some(head) = read_head(&path) else {
+            continue;
+        };
+        let Some((kind, encrypted)) = classify_key(&head) else {
+            continue;
+        };
+        let (pub_kind, comment) = read_public_half(&path);
+        keys.push(LocalKey {
+            path: path.to_string_lossy().to_string(),
+            name,
+            // The `.pub` sibling names the algorithm exactly and costs
+            // nothing to read; the private half's own header only says
+            // "OPENSSH", so it is the fallback rather than the source.
+            kind: pub_kind.unwrap_or(kind),
+            comment,
+            encrypted,
+        });
+    }
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+    keys
+}
+
+/// The first 4 KiB of a file as lossy UTF-8, or `None` if it cannot be read.
+fn read_head(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 4096];
+    let read = file.read(&mut buf).ok()?;
+    buf.truncate(read);
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Is this a private key, and if so what kind, and is it locked?
+///
+/// Returns `None` for anything that is not a private key at all, which is how
+/// the scan filters a directory it does not otherwise understand.
+fn classify_key(head: &str) -> Option<(String, bool)> {
+    let trimmed = head.trim_start();
+
+    // PuTTY's own format, which this app reads (v2 and v3). The header line
+    // names the algorithm and an `Encryption:` line names the cipher.
+    if let Some(rest) = trimmed.strip_prefix("PuTTY-User-Key-File-") {
+        // `PuTTY-User-Key-File-3: ssh-ed25519`: the version is what the
+        // prefix ate, so the algorithm is what follows the colon on that
+        // first line and nowhere else.
+        let algorithm = rest
+            .lines()
+            .next()
+            .and_then(|line| line.split_once(':'))
+            .map(|(_, algorithm)| algorithm.trim())
+            .unwrap_or("");
+        let encrypted = header_value(head, "Encryption:")
+            .map(|c| c != "none")
+            .unwrap_or(false);
+        return Some((algorithm_name(algorithm), encrypted));
+    }
+
+    let begin = trimmed.lines().next()?.trim();
+    if !begin.starts_with("-----BEGIN ") || !begin.contains("PRIVATE KEY") {
+        return None;
+    }
+
+    if begin.contains("OPENSSH") {
+        return Some(("".into(), openssh_is_encrypted(head)));
+    }
+    // The classic PEM formats say what they hold on the BEGIN line, and mark
+    // an encrypted body with a `Proc-Type` header rather than in the body.
+    let locked = head.contains("Proc-Type: 4,ENCRYPTED");
+    if begin.contains("RSA") {
+        return Some(("rsa".into(), locked));
+    }
+    if begin.contains("EC ") {
+        return Some(("ecdsa".into(), locked));
+    }
+    if begin.contains("DSA") {
+        return Some(("dsa".into(), locked));
+    }
+    // PKCS#8, whose BEGIN line says nothing about the algorithm. The
+    // ENCRYPTED variant is the only one that is locked.
+    Some(("pkcs8".into(), begin.contains("ENCRYPTED")))
+}
+
+/// Value of a `Name: value` header line in a PuTTY key file.
+fn header_value<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(name))
+        .map(str::trim)
+}
+
+/// Is an `openssh-key-v1` private key passphrase-protected?
+///
+/// The format puts the cipher name in cleartext at the very start of the
+/// base64 body: the magic `openssh-key-v1\0`, then a length-prefixed string
+/// which is `none` for an unlocked key. Only the first few lines are decoded,
+/// which is more than enough to reach it.
+fn openssh_is_encrypted(head: &str) -> bool {
+    let body: String = head
+        .lines()
+        .skip_while(|l| !l.starts_with("-----BEGIN"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("-----END"))
+        .take(4)
+        .flat_map(|l| l.trim().chars())
+        .collect();
+    // The tail of a 4-line slice is very unlikely to land on a 4-character
+    // boundary, so decode the largest prefix that does rather than failing.
+    let usable = body.len() - body.len() % 4;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&body[..usable]) else {
+        return false;
+    };
+    const MAGIC: &[u8] = b"openssh-key-v1\0";
+    let Some(rest) = bytes.strip_prefix(MAGIC) else {
+        return false;
+    };
+    if rest.len() < 4 {
+        return false;
+    }
+    let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    let Some(cipher) = rest.get(4..4 + len) else {
+        return false;
+    };
+    cipher != b"none"
+}
+
+/// The algorithm and comment from a key's `.pub` sibling, when there is one.
+///
+/// A public key line is `algorithm base64 comment`, and both ends of it are
+/// worth showing: the algorithm because `id_rsa` is not always RSA, and the
+/// comment because it is usually the only thing distinguishing two keys with
+/// generated names.
+fn read_public_half(private: &Path) -> (Option<String>, Option<String>) {
+    let mut public = private.as_os_str().to_os_string();
+    public.push(".pub");
+    let Ok(text) = std::fs::read_to_string(Path::new(&public)) else {
+        return (None, None);
+    };
+    let Some(line) = text.lines().next() else {
+        return (None, None);
+    };
+    let mut fields = line.split_whitespace();
+    let algorithm = fields.next().map(algorithm_name).filter(|k| !k.is_empty());
+    let _base64 = fields.next();
+    let comment = fields.collect::<Vec<_>>().join(" ");
+    (algorithm, Some(comment).filter(|c| !c.is_empty()))
+}
+
+/// `ssh-ed25519` and friends as the short name a person reads.
+///
+/// The wire names carry prefixes and suffixes that mean something to the
+/// protocol and nothing in a dropdown: `sk-` for a hardware key, `ssh-` for
+/// the older algorithms, a curve after `ecdsa`, and `@openssh.com` on every
+/// vendor extension.
+fn algorithm_name(algorithm: &str) -> String {
+    let mut short = algorithm.trim();
+    short = short.strip_prefix("sk-").unwrap_or(short);
+    short = short.strip_prefix("ssh-").unwrap_or(short);
+    let short = short.split(['-', '@']).next().unwrap_or(short);
+    match short {
+        // Only the wire name is `dss`; everything a person reads says DSA.
+        "dss" => "dsa".into(),
+        s => s.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Event pump
 // ---------------------------------------------------------------------------
 
@@ -450,7 +703,32 @@ fn spawn_event_pump(
     tauri::async_runtime::spawn(async move {
         let b64 = base64::engine::general_purpose::STANDARD;
         while let Some(event) = events.recv().await {
+            // An answer to an agent intent is for the plane, not the pane, and
+            // that is the same decision `event_json` takes for the same two
+            // variants (`commands/session.rs`). Two reasons. The payload of a
+            // served answer is a remote machine's own bytes, so surfacing it
+            // here would put output into somebody's terminal window that they
+            // never asked for and did not type. And the only consumer that
+            // needs it is the `AttachedLimb` waiting on the intent id, which
+            // lives in the agent's own process on the far side of the socket,
+            // not in this window.
+            //
+            // OWED, and deliberately not faked: the socket does not carry
+            // `exec` at all yet (`agent/server.rs`'s `GRANTED` says so in
+            // terms), so nothing is waiting for these on the other end. When
+            // `exec` is granted, the answer has to travel back as the reply to
+            // the request that started it, and this is where it gets picked
+            // up. Logged rather than dropped in silence, because a driver
+            // answering into a void is exactly the failure `00 R28` exists to
+            // prevent and it should be visible while it is true.
             let mut value = match event {
+                SshEvent::AgentServed(_) | SshEvent::AgentRefused(_) => {
+                    tracing::debug!(
+                        session = %session_id,
+                        "an agent intent was answered by the SSH driver, and nothing is waiting for it yet: the socket does not grant exec"
+                    );
+                    continue;
+                }
                 SshEvent::Output(bytes) => serde_json::json!({
                     "type": "output",
                     "data": b64.encode(bytes),
@@ -549,6 +827,84 @@ mod tests {
             Some("work")
         );
         assert_eq!(r.accept_host_key.as_deref(), Some("SHA256:abc"));
+    }
+
+    /// The scan has to answer three questions about a directory that holds
+    /// far more than keys: which files are private keys at all, what
+    /// algorithm each one is, and which of them will need a passphrase.
+    ///
+    /// The bodies here are shaped like the real formats but hold no key
+    /// material: the classifier only ever reads the headers.
+    #[test]
+    fn the_key_scan_keeps_private_keys_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str, body: &str| {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        };
+
+        // An unlocked ed25519 key: `openssh-key-v1\0` then the length-
+        // prefixed cipher name `none`, base64-encoded the way the format
+        // stores it.
+        let mut unlocked = b"openssh-key-v1\0".to_vec();
+        unlocked.extend_from_slice(&4u32.to_be_bytes());
+        unlocked.extend_from_slice(b"none");
+        unlocked.extend_from_slice(&[0u8; 32]);
+        let mut locked = b"openssh-key-v1\0".to_vec();
+        locked.extend_from_slice(&(b"aes256-ctr".len() as u32).to_be_bytes());
+        locked.extend_from_slice(b"aes256-ctr");
+        locked.extend_from_slice(&[0u8; 32]);
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let wrap = |bytes: &[u8]| {
+            format!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                b64.encode(bytes)
+            )
+        };
+
+        at("id_ed25519", &wrap(&unlocked));
+        at("id_ed25519.pub", "ssh-ed25519 AAAAC3Nz gj@laptop\n");
+        at("work_key", &wrap(&locked));
+        at("legacy_rsa", "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\nZm9v\n-----END RSA PRIVATE KEY-----\n");
+        at("box.ppk", "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: aes256-cbc\nComment: box\n");
+        // Everything the scan must ignore.
+        at("known_hosts", "box.local ssh-ed25519 AAAAC3Nz\n");
+        at("config", "Host box\n  User gj\n");
+        at("notes.txt", "remember to rotate these\n");
+
+        let found = scan_key_dir(dir.path());
+        let names: Vec<&str> = found.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, vec!["box.ppk", "id_ed25519", "legacy_rsa", "work_key"]);
+
+        let by = |name: &str| found.iter().find(|k| k.name == name).unwrap();
+        // The `.pub` sibling names the algorithm and the comment.
+        assert_eq!(by("id_ed25519").kind, "ed25519");
+        assert_eq!(by("id_ed25519").comment.as_deref(), Some("gj@laptop"));
+        assert!(!by("id_ed25519").encrypted);
+        // No sibling, so no algorithm to show, but the cipher name is still
+        // readable and says the key is locked.
+        assert_eq!(by("work_key").kind, "");
+        assert!(by("work_key").encrypted);
+        assert_eq!(by("legacy_rsa").kind, "rsa");
+        assert!(by("legacy_rsa").encrypted);
+        assert_eq!(by("box.ppk").kind, "ed25519");
+        assert!(by("box.ppk").encrypted);
+    }
+
+    /// A directory that is not there is an ordinary answer, not an error: a
+    /// machine that has never used SSH has no `~/.ssh`.
+    #[test]
+    fn a_missing_key_directory_lists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(scan_key_dir(&dir.path().join("nope")).is_empty());
+    }
+
+    #[test]
+    fn wire_algorithm_names_become_readable_ones() {
+        assert_eq!(algorithm_name("ssh-ed25519"), "ed25519");
+        assert_eq!(algorithm_name("ecdsa-sha2-nistp256"), "ecdsa");
+        assert_eq!(algorithm_name("sk-ssh-ed25519@openssh.com"), "ed25519");
+        assert_eq!(algorithm_name("ssh-dss"), "dsa");
+        assert_eq!(algorithm_name("ssh-rsa"), "rsa");
     }
 
     /// Terminal bytes have to survive the round trip exactly: a partial UTF-8

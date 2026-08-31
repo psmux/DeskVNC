@@ -1,5 +1,5 @@
 /** Add/Edit host dialog with progressive disclosure (PRD/11 §3.3). */
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   HostGroup,
   HostProfile,
@@ -30,7 +30,9 @@ import {
 import type { MultiplexerKind, SshAuthKind, SshSettings } from "../lib/ssh";
 import { blankSshSettings, parseSshSettings } from "../lib/ssh";
 import { sshDefaults } from "../lib/sshDefaults";
-import { sshListWslDistros } from "../lib/tauri";
+import type { LocalKeys } from "../lib/tauri";
+import { pickPrivateKeyFile, sshListLocalKeys, sshListWslDistros } from "../lib/tauri";
+import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
@@ -189,6 +191,24 @@ const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
   vnc: { graphical: true, rfbSecurity: true, username: false, domain: false },
   rdp: { graphical: true, rfbSecurity: false, username: true, domain: true },
   ssh: { graphical: false, rfbSecurity: false, username: true, domain: false },
+};
+
+/**
+ * The three ways to sign in to an SSH host, in the order people actually
+ * reach for them. Password and key file come first because they are the two
+ * everybody knows; the agent is last because it is the one that needs
+ * nothing typed and nothing chosen, so it is the one nobody goes looking for.
+ */
+const SSH_AUTH_CHOICES: ReadonlyArray<readonly [SshAuthKind, string]> = [
+  ["password", "Password"],
+  ["key-file", "Key file"],
+  ["agent", "SSH agent"],
+];
+
+const SSH_AUTH_HINT: Record<SshAuthKind, string> = {
+  password: "The password for your account on that computer, kept in your system keychain.",
+  "key-file": "A private key on this computer. It is read when you connect and never leaves this machine.",
+  agent: "Uses your running ssh-agent, Pageant, or the Windows OpenSSH pipe. Stores nothing.",
 };
 
 export function HostDialog({
@@ -459,23 +479,76 @@ export function HostDialog({
           )
         ) : null}
 
-        <Field
-          label="Password"
-          hint={
-            d.hasPassword && !d.password
-              ? "A password is saved in your system keychain. Leave blank to keep it."
-              : "Stored in your system keychain, never in a file"
-          }
-        >
-          <input
-            className="field"
-            type="password"
-            value={d.password}
-            placeholder={d.hasPassword ? "••••••••  (unchanged)" : "Optional"}
-            autoComplete="off"
-            onChange={(e) => set({ password: e.target.value })}
-          />
-        </Field>
+        {/*
+          A password or a key: that is the whole question, and for an SSH host
+          it is the second thing anybody decides after the address. It used to
+          live inside Advanced, under a heading about agents, which meant the
+          ordinary "I use a key for this box" case was three clicks and a
+          typed path away and looked like an expert setting. It sits in the
+          main form now, directly above the secret it decides the meaning of.
+        */}
+        {isSsh ? (
+          <Field label="Sign in with" hint={SSH_AUTH_HINT[ssh.auth]}>
+            <div
+              className="flex gap-1 rounded-md border border-subtle p-0.5"
+              role="radiogroup"
+              aria-label="SSH authentication"
+            >
+              {SSH_AUTH_CHOICES.map(([kind, label]) => (
+                <button
+                  key={kind}
+                  type="button"
+                  role="radio"
+                  aria-checked={ssh.auth === kind}
+                  className={classNames(
+                    "flex-1 rounded-sm px-3 py-1.5 text-sm",
+                    ssh.auth === kind
+                      ? "bg-accent/12 font-medium text-accent"
+                      : "text-secondary hover:text-primary",
+                  )}
+                  onClick={() => setSsh({ auth: kind })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+        ) : null}
+
+        {isSsh && ssh.auth === "key-file" ? (
+          <KeyFileField value={ssh.keyPath} onChange={(keyPath) => setSsh({ keyPath })} />
+        ) : null}
+
+        {/*
+          An agent holds the secret itself, so there is nothing to type here
+          and an empty box would only invite somebody to put their login
+          password in it. Every other choice needs one secret, and it is the
+          same keychain slot either way: an account password for password
+          auth, the key's passphrase for a key file. The Rust side reads that
+          one slot as whichever the auth kind says it is, so the label is what
+          has to change, not the storage.
+        */}
+        {isSsh && ssh.auth === "agent" ? null : (
+          <Field
+            label={isSsh && ssh.auth === "key-file" ? "Key passphrase" : "Password"}
+            hint={
+              d.hasPassword && !d.password
+                ? "A secret is saved in your system keychain. Leave blank to keep it."
+                : isSsh && ssh.auth === "key-file"
+                  ? "Only needed if the key itself is protected. Stored in your system keychain, never in a file."
+                  : "Stored in your system keychain, never in a file"
+            }
+          >
+            <input
+              className="field"
+              type="password"
+              value={d.password}
+              placeholder={d.hasPassword ? "••••••••  (unchanged)" : "Optional"}
+              autoComplete="off"
+              onChange={(e) => set({ password: e.target.value })}
+            />
+          </Field>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Group">
@@ -874,6 +947,13 @@ function toDetectAuth(auth: SshAuthKind): "stored" | "key-file" | "agent" {
  * Mirrors {@link RdpOptionsSection}'s shape: everything here is an ordinary
  * preference, not a security decision, so it lives in one flat block rather
  * than behind its own disclosure.
+ *
+ * Authentication used to be the first thing in here and is not any more: it
+ * is the difference between connecting and not connecting, which is not an
+ * advanced preference, so it lives in the main form beside the password it
+ * governs. What is left is genuinely optional. The auth *kind* is still read
+ * here, by {@link toDetectAuth}, because Detect has to connect the same way
+ * the profile will.
  */
 function SshOptionsSection({
   ssh,
@@ -926,49 +1006,6 @@ function SshOptionsSection({
 
   return (
     <div className="space-y-4">
-      {/*
-        Sits above the multiplexer, above everything else in this section,
-        because it decides whether the connection works at all: the bug this
-        control fixes was a host with a saved password and no running
-        ssh-agent, which failed with an agent error even though a perfectly
-        good password was sitting in the keychain, because nothing on this
-        side ever told the Rust side to use it. Agent stays the default,
-        because it is the only one that needs nothing stored here.
-      */}
-      <Field
-        label="Authentication"
-        hint={
-          ssh.auth === "password"
-            ? "Uses the Password field above, kept in your system keychain, never in a file."
-            : ssh.auth === "key-file"
-              ? "The key file is read at connect time and never sent to the interface."
-              : "Uses your running ssh-agent, Pageant, or the Windows OpenSSH pipe. Stores nothing."
-        }
-      >
-        <Select
-          value={ssh.auth}
-          onChange={(e) => onChange({ auth: e.target.value as SshAuthKind })}
-        >
-          <option value="agent">SSH agent (recommended)</option>
-          <option value="password">Password</option>
-          <option value="key-file">Key file</option>
-        </Select>
-      </Field>
-
-      {ssh.auth === "key-file" ? (
-        <Field label="Private key path" hint="An OpenSSH or PuTTY (.ppk) private key on this computer">
-          <input
-            className="field mono"
-            value={ssh.keyPath ?? ""}
-            placeholder="~/.ssh/id_ed25519"
-            spellCheck={false}
-            autoCapitalize="none"
-            autoCorrect="off"
-            onChange={(e) => onChange({ keyPath: e.target.value || null })}
-          />
-        </Field>
-      ) : null}
-
       {/*
         Sits directly after Authentication and before the multiplexer below,
         because it decides WHERE the multiplexer is looked for, not just
@@ -1228,6 +1265,142 @@ function SecuritySection({
 }
 
 /** A checkbox with the label-and-hint shape this dialog uses everywhere. */
+/** The select entry that opens the native file dialog. */
+const BROWSE = "__browse__";
+
+/**
+ * Choose a private key: pick one this computer already has, or browse for it.
+ *
+ * This replaced a bare text box that wanted an absolute path typed from
+ * memory, which is a fine control for somebody who knows their key is at
+ * `~/.ssh/id_ed25519` and a dead end for everybody else. Almost every key on
+ * a personal machine is in `~/.ssh`, so the list is nearly always the whole
+ * answer; Browse is there for the key on a USB stick, and the path box for
+ * the person who would rather type it anyway.
+ *
+ * The path field appears on its own whenever the chosen key is not one of
+ * the listed ones, so a browsed or typed path is always visible and always
+ * editable rather than hiding behind a select that cannot represent it.
+ */
+function KeyFileField({
+  value,
+  onChange,
+}: {
+  value: string | null;
+  onChange: (path: string | null) => void;
+}): ReactNode {
+  const [found, setFound] = useState<LocalKeys>({ dir: "", keys: [] });
+  // Sticky once the user has gone off-list: cancelling the file dialog, or
+  // typing a path by hand, must not bounce the field back to the list and
+  // silently re-select somebody else's key.
+  const [manual, setManual] = useState(false);
+  // In a plain browser there is no Rust side to ask, so the dev server shows
+  // the same three-state list the real one would, exactly as the library
+  // shows mock hosts.
+  const mock = useMockData();
+
+  useEffect(() => {
+    let live = true;
+    void sshListLocalKeys().then((keys) => {
+      if (!live) return;
+      setFound(mock ? { dir: "/Users/you/.ssh", keys: MOCK_LOCAL_KEYS } : keys);
+    });
+    return () => {
+      live = false;
+    };
+  }, [mock]);
+
+  const path = value ?? "";
+  const chosen = found.keys.find((k) => k.path === path) ?? null;
+  const offList = path !== "" && chosen === null;
+  const showPath = manual || offList || found.keys.length === 0;
+
+  const browse = async (): Promise<void> => {
+    const picked = await pickPrivateKeyFile(found.dir);
+    if (picked) {
+      onChange(picked);
+      setManual(false);
+    }
+  };
+
+  return (
+    <Field
+      label="Private key"
+      hint={
+        chosen?.encrypted
+          ? "This key is protected by a passphrase. Put the passphrase in the box below and it is kept in your system keychain."
+          : found.keys.length === 0
+            ? "An OpenSSH or PuTTY (.ppk) private key on this computer."
+            : "Keys found in your .ssh folder, or browse for one somewhere else."
+      }
+    >
+      <div className="space-y-2">
+        {found.keys.length > 0 ? (
+          <div className="flex gap-2">
+            <Select
+              value={offList || manual ? BROWSE : path}
+              onChange={(e) => {
+                const picked = e.target.value;
+                if (picked === BROWSE) {
+                  setManual(true);
+                  void browse();
+                  return;
+                }
+                setManual(false);
+                onChange(picked || null);
+              }}
+            >
+              <option value="">Choose a key...</option>
+              {found.keys.map((k) => (
+                <option key={k.path} value={k.path}>
+                  {keyLabel(k.name, k.kind, k.comment)}
+                </option>
+              ))}
+              <option value={BROWSE}>Another file...</option>
+            </Select>
+            <button type="button" className="btn-secondary shrink-0" onClick={() => void browse()}>
+              Browse...
+            </button>
+          </div>
+        ) : null}
+        {showPath ? (
+          <div className="flex gap-2">
+            <input
+              className="field mono"
+              value={path}
+              placeholder="~/.ssh/id_ed25519"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              aria-label="Private key path"
+              onChange={(e) => {
+                setManual(true);
+                onChange(e.target.value || null);
+              }}
+            />
+            {found.keys.length > 0 ? null : (
+              <button
+                type="button"
+                className="btn-secondary shrink-0"
+                onClick={() => void browse()}
+              >
+                Browse...
+              </button>
+            )}
+          </div>
+        ) : null}
+      </div>
+    </Field>
+  );
+}
+
+/** `id_ed25519 (ed25519, gj@laptop)`: the file name, then whatever else there
+ *  is to tell two generated names apart. */
+function keyLabel(name: string, kind: string, comment: string | null): string {
+  const extra = [kind, comment].filter((part) => part && part.length > 0);
+  return extra.length > 0 ? `${name}  (${extra.join(", ")})` : name;
+}
+
 function Check({
   checked,
   onChange,
@@ -1340,15 +1513,7 @@ function SshTunnelSection({
             </Field>
           </div>
           {t.auth === "key-file" ? (
-            <Field label="Private key path" hint="An OpenSSH or PuTTY (.ppk) private key on this computer">
-              <input
-                className="field mono"
-                value={t.keyPath ?? ""}
-                placeholder="~/.ssh/id_ed25519"
-                spellCheck={false}
-                onChange={(e) => patch({ keyPath: e.target.value || null })}
-              />
-            </Field>
+            <KeyFileField value={t.keyPath} onChange={(keyPath) => patch({ keyPath })} />
           ) : null}
           {t.auth !== "agent" ? (
             <Field
