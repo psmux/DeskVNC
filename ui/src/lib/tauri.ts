@@ -662,6 +662,64 @@ export type SshEventPayload =
   | { sessionId: string; type: "notice"; message: string }
   | ({ sessionId: string; type: "state" } & SshTerminalState);
 
+/**
+ * One private key found in `~/.ssh`, as `ssh_list_local_keys` describes it.
+ *
+ * A path and a label. No key material crosses this boundary and none needs
+ * to: the file is read on the Rust side at connect time, and everything here
+ * comes from the public half of the pair or from the private half's
+ * cleartext header.
+ */
+export interface LocalKey {
+  path: string;
+  /** File name on its own, which is what the picker shows. */
+  name: string;
+  /** `ed25519`, `rsa`, `ecdsa`, `dsa`, `pkcs8`, or empty when it cannot be
+   *  named without unlocking the key. */
+  kind: string;
+  /** The `.pub` sibling's trailing comment, usually `user@machine`. */
+  comment: string | null;
+  /** Locked with a passphrase, so a passphrase has to be saved with it. */
+  encrypted: boolean;
+}
+
+export interface LocalKeys {
+  /** `~/.ssh`, where Browse opens even when nothing was found. */
+  dir: string;
+  keys: LocalKey[];
+}
+
+/**
+ * The private keys sitting in `~/.ssh`.
+ *
+ * `safeInvoke`, not `mustInvoke`: a machine that has never used SSH has no
+ * `~/.ssh`, which is an ordinary state and not something to raise an error
+ * dialog over. An empty list leaves the picker with its Browse button, which
+ * is exactly the right answer.
+ */
+export function sshListLocalKeys(): Promise<LocalKeys> {
+  return safeInvoke<LocalKeys>("ssh_list_local_keys", {}, { dir: "", keys: [] });
+}
+
+/**
+ * Pick a private key in the native file dialog.
+ *
+ * No extension filter: an OpenSSH private key has no extension at all, and
+ * one that filtered for `.ppk` would hide every key the user actually has.
+ * `defaultPath` is `~/.ssh`, which macOS and Windows both hide from an
+ * ordinary Open dialog, so starting there is the difference between one
+ * click and a keyboard incantation.
+ */
+export async function pickPrivateKeyFile(defaultPath?: string): Promise<string | null> {
+  const picked = await nativeOpen({
+    multiple: false,
+    directory: false,
+    title: "Choose a private key",
+    defaultPath: defaultPath || undefined,
+  });
+  return picked[0] ?? null;
+}
+
 /** Is SSH reachable? Drives the enabled state of the Terminal button. */
 export function sshProbe(host: string, port?: number): Promise<boolean> {
   return safeInvoke<boolean>("ssh_probe", { host, port: port ?? 22, timeoutMs: 1500 }, false);

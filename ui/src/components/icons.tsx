@@ -90,6 +90,10 @@ export const IconFile = (p: IconProps): ReactNode => (
 export const IconMaximize = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" /></Icon>
 );
+/** Corners pointing inward: the way back from a maximised pane. */
+export const IconMinimize = (p: IconProps): ReactNode => (
+  <Icon {...p}><path d="M9 3v4a2 2 0 0 1-2 2H3" /><path d="M15 3v4a2 2 0 0 0 2 2h4" /><path d="M9 21v-4a2 2 0 0 0-2-2H3" /><path d="M15 21v-4a2 2 0 0 1 2-2h4" /></Icon>
+);
 export const IconEye = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></Icon>
 );
@@ -143,4 +147,37 @@ export const IconTabs = (p: IconProps): ReactNode => (
 /** Shell prompt: a chevron about to type, on a frame. */
 export const IconTerminal = (p: IconProps): ReactNode => (
   <Icon {...p}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m6 9 4 3-4 3" /><path d="M13 15h5" /></Icon>
+);
+/**
+ * Splitting a pane, drawn as the result rather than the gesture: a frame with
+ * the new divider through it, dashed on the side about to be opened up so the
+ * two icons read as "the new one goes here" instead of as a mirrored pair.
+ */
+export const IconSplitRight = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M12 4v16" /><path d="M16 9v6" strokeDasharray="2 2" /></Icon>
+);
+export const IconSplitDown = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M2 12h20" /><path d="M9 16h6" strokeDasharray="2 2" /></Icon>
+);
+/**
+ * Take the lease off an agent.
+ *
+ * The same square that marks an agent on a pane header and on the activity
+ * strip, filled in. Every other glyph in the set is an outline, so a solid one
+ * reads as the end of something without a label, and using the badge's own
+ * shape means "stop that" needs no explaining: a person who has learned what
+ * the square means has already learned what the button does.
+ */
+export const IconStop = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none" /></Icon>
+);
+/**
+ * An AI agent, drawn as the thing rather than as a metaphor.
+ *
+ * A head with an aerial and two eyes. Nothing clever on purpose: this sits in
+ * the sidebar above Preferences, where a person reads the label and the icon
+ * only has to be recognisable at 16px and not be another gear.
+ */
+export const IconAgent = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="4" y="8" width="16" height="12" rx="3" /><path d="M12 4v4" /><path d="M12 3h.01" /><path d="M9 13h.01" /><path d="M15 13h.01" /><path d="M9.5 17h5" /></Icon>
 );

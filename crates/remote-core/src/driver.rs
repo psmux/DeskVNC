@@ -94,6 +94,48 @@ impl std::fmt::Display for ProtocolKind {
 #[error("session is no longer running")]
 pub struct SessionGone;
 
+/// Why a non blocking send did not happen.
+///
+/// `PRDAgentPlug/00 R49a`. [`SessionHandle::try_send`] used to map both of
+/// tokio's `TrySendError` cases onto one [`SessionGone`], and for the webview
+/// that was fine: a person's next mouse move repairs either one. For the agent
+/// plane it is wrong, because `08 §4.3`'s drop policy gives them OPPOSITE
+/// repairs. Full means the session is alive and behind, so the caller sheds or
+/// waits and reports how much was lost (`00 R24`: never silently). Closed
+/// means the limb is finished, so every outstanding intent settles as
+/// `LinkLost` and nothing is worth retrying. Flattened, a stalled session looks
+/// dead and a dead one looks recoverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TrySendFailed {
+    /// The command queue is at its bound. The session is still running.
+    #[error("the session's command queue is full")]
+    Full,
+    /// The session task dropped its receiver.
+    #[error("session is no longer running")]
+    Gone,
+}
+
+impl TrySendFailed {
+    /// Is this the unrecoverable one? The question a caller that only ever
+    /// cared about "gone" is really asking.
+    pub const fn is_gone(self) -> bool {
+        matches!(self, TrySendFailed::Gone)
+    }
+}
+
+/// So a caller whose own error type is already [`SessionGone`] keeps working
+/// with a plain `?` and does not churn.
+///
+/// Lossy on purpose, and only in the direction that was already lossy: a full
+/// queue arriving somewhere that has no vocabulary for it is exactly the old
+/// behaviour, and a caller that wants better asks for [`TrySendFailed`].
+impl From<TrySendFailed> for SessionGone {
+    fn from(_: TrySendFailed) -> Self {
+        SessionGone
+    }
+}
+
 /// Handle to a running session, held by the shell.
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
@@ -114,8 +156,15 @@ impl SessionHandle {
     /// Non-async, never blocking way in. The input path uses it because input
     /// must never queue unboundedly behind a stalled session
     /// (`src-tauri/src/commands/capture.rs:126` says so on the raw sender).
-    pub fn try_send(&self, cmd: ClientCommand) -> Result<(), SessionGone> {
-        self.commands.try_send(cmd).map_err(|_| SessionGone)
+    ///
+    /// That discipline is unchanged. What changed is the answer: the two
+    /// failures are told apart rather than flattened, for the reason on
+    /// [`TrySendFailed`] (`00 R49a`).
+    pub fn try_send(&self, cmd: ClientCommand) -> Result<(), TrySendFailed> {
+        self.commands.try_send(cmd).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => TrySendFailed::Full,
+            mpsc::error::TrySendError::Closed(_) => TrySendFailed::Gone,
+        })
     }
 
     pub fn shutdown(&self) {

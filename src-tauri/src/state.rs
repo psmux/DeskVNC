@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
-use vnc_core::{ProtocolDriver, ProtocolKind, SessionHandle, VncDriver};
+use vnc_core::{ProtocolDriver, ProtocolKind, SessionHandle, SessionState, VncDriver};
 
+use crate::agent::AgentPlane;
 use crate::thumbnail::ThumbnailPolicy;
 
 /// Global app state, `app.manage`d in `lib.rs::run`.
@@ -41,6 +42,14 @@ pub struct AppState {
     /// The protocols this build can speak. `connect_session` dispatches
     /// through it rather than calling one protocol's spawn directly.
     pub protocols: Arc<ProtocolRegistry>,
+    /// The agent plane's shell side state: the `dvvp.v1` socket while it is
+    /// switched on, and who is attached to which session.
+    ///
+    /// Constructed always and started never, unless the setting says so. An
+    /// `AgentPlane` that has not been started holds two empty maps and owns no
+    /// file descriptor, which is what makes "off" cost nothing (`AGENT_BRIEF`
+    /// D2, `00 R40`).
+    pub agent: Arc<AgentPlane>,
 }
 
 /// A session window that exists but has not registered a session yet.
@@ -231,6 +240,51 @@ pub struct SessionEntry {
     /// one that changes button state (must never be dropped), see
     /// `commands::session::send_input`.
     pub last_pointer_mask: Arc<std::sync::atomic::AtomicI32>,
+    /// What the shell has heard about this session that it used to forward and
+    /// forget (see [`SessionFacts`]).
+    pub facts: Arc<Mutex<SessionFacts>>,
+}
+
+/// The two facts about a live session the shell now keeps rather than only
+/// forwarding.
+///
+/// Both used to be write only: `forward_events` turned a `StateChanged` into a
+/// `session://event` and a `DesktopResize` into a binary frame, and the
+/// authoritative copy of each lived in a webview. That is fine while the only
+/// consumer is a window, and it is not fine for the agent plane, which has no
+/// window: `agent-plane` refuses an intent against a limb that is not
+/// `Connected` with the retry time in the refusal (`02 §6.1`), and it bounds
+/// every coordinate against the framebuffer size (`00 R10`). Without these two
+/// the plane would refuse everything with `NOT_READY` and bound every click
+/// against a zero sized screen, which is the design working and the design
+/// being unusable.
+///
+/// Kept behind the entry's own lock rather than on `AppState`, so a session
+/// that ends takes its facts with it.
+#[derive(Debug, Clone)]
+pub struct SessionFacts {
+    /// The last lifecycle state this session reported.
+    pub state: SessionState,
+    /// Framebuffer pixels for a desktop session. `None` until the first
+    /// `DesktopResize`, which for VNC and RDP arrives as part of connecting.
+    ///
+    /// A terminal session never sets it: the shell learns a PTY's geometry
+    /// only from the webview's own `ssh_resize`, so the honest answer here is
+    /// "not known", and a limb with `Grounding::Cells` carries no coordinate
+    /// for the size to bound anyway.
+    pub size: Option<(u16, u16)>,
+}
+
+impl Default for SessionFacts {
+    fn default() -> Self {
+        // `Idle` rather than `Connected`: the plane has been told nothing, and
+        // a caller that never reports a state must get every intent refused
+        // rather than have the plane assume a machine is there.
+        SessionFacts {
+            state: SessionState::Idle,
+            size: None,
+        }
+    }
 }
 
 impl SessionEntry {
@@ -313,22 +367,203 @@ pub fn find_opening_window(
         })
 }
 
-/// Discovery machinery state. The mDNS browse and the subnet scan are both
-/// cancellation-token driven; a `Some` token means "running".
+/// The one mDNS browse, and the windows that have asked for it.
+///
+/// One browse serves the whole process on purpose: it feeds the single shared
+/// `HostRegistry` that de-duplicates mDNS against the subnet scan (see
+/// `commands::discovery::registry`), and a second browse would only be a second
+/// copy of the same multicast traffic.
+///
+/// Every Library window nonetheless starts one on mount and stops one on
+/// unmount (`ui/src/state/DiscoveryContext.tsx`). With a bare token that meant
+/// the first window to close cancelled the browse the other window was still
+/// showing, and the survivor was told nothing at all: its Nearby list simply
+/// stopped changing, which reads as a quiet network rather than as a bug (B2).
+/// The subscriber set is what makes "stop" mean "this window is done" instead
+/// of "everybody is done".
+#[derive(Default)]
+struct BrowseState {
+    cancel: Option<tokio_util::sync::CancellationToken>,
+    subscribers: std::collections::HashSet<String>,
+}
+
+/// The subnet scan that currently owns the politeness budget, and enough about
+/// it to name it to whoever asks for a second one.
+struct RunningScan {
+    /// Identifies this claim on the scan slot within the process. Deliberately
+    /// not an IPC value: nothing on the `discovery://` channel carries it, and
+    /// the command surface is unchanged by it.
+    id: u64,
+    cancel: tokio_util::sync::CancellationToken,
+    /// The CIDR strings this scan was asked to cover. Empty means the caller
+    /// left the choice to vnc-discovery's safe-interface list.
+    subnets: Vec<String>,
+    /// The window that started it, so a refusal points at something the user
+    /// can go and look at.
+    started_by: String,
+    started_at: Instant,
+}
+
+impl RunningScan {
+    /// What a second `scan_network` caller is told.
+    ///
+    /// It names the running scan (what it covers, which window started it, how
+    /// long it has been going) rather than saying "busy", because the caller
+    /// has to be able to choose between waiting for it and going to that window
+    /// to stop it. An agent caller has the same choice to make and nothing but
+    /// this string to make it from.
+    fn already_running_error(&self, now: Instant) -> String {
+        let covering = if self.subnets.is_empty() {
+            "the local interfaces".to_string()
+        } else {
+            self.subnets.join(", ")
+        };
+        format!(
+            "a network scan of {} started {}s ago by window \"{}\" is still running; wait for it to finish or stop it there",
+            covering,
+            now.saturating_duration_since(self.started_at).as_secs(),
+            self.started_by,
+        )
+    }
+}
+
+/// Discovery machinery state: the one mDNS browse and the one subnet scan.
+///
+/// Both are process-wide, because both feed the one shared `HostRegistry`.
+/// What B2 changed is what "process-wide" is allowed to do to a second caller:
+/// it may make that caller wait, and it may tell that caller no, but it may not
+/// take a running discovery away from the caller that started it without
+/// telling anybody. Neither field is public any more for exactly that reason,
+/// every path in and out goes through the methods below.
 #[derive(Default)]
 pub struct DiscoveryState {
-    pub browse_cancel: Mutex<Option<tokio_util::sync::CancellationToken>>,
-    pub scan_cancel: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    browse: Mutex<BrowseState>,
+    scan: Mutex<Option<RunningScan>>,
+    /// Source of [`RunningScan::id`].
+    next_scan_id: std::sync::atomic::AtomicU64,
 }
 
 impl DiscoveryState {
-    /// Cancel everything (app exit).
-    pub fn cancel_all(&self) {
-        if let Some(token) = self.browse_cancel.lock().take() {
-            token.cancel();
+    /// Register `window_label` as wanting the mDNS browse.
+    ///
+    /// `Some(token)` means this caller is the one that has to start the browse,
+    /// and must run it under that token. `None` means a browse is already
+    /// running and this window has joined it, which is what makes
+    /// `start_discovery` idempotent.
+    ///
+    /// `window_exists` sweeps subscribers whose window went away without
+    /// unsubscribing (a crash, or a close whose React cleanup never ran).
+    /// Without the sweep a leaked label would hold the browse open for the life
+    /// of the process. That is the direction this can afford to fail in; the
+    /// opposite mistake is the bug being fixed.
+    pub fn subscribe_browse(
+        &self,
+        window_label: &str,
+        window_exists: &dyn Fn(&str) -> bool,
+    ) -> Option<tokio_util::sync::CancellationToken> {
+        let mut browse = self.browse.lock();
+        browse.subscribers.retain(|label| window_exists(label));
+        browse.subscribers.insert(window_label.to_string());
+        if browse.cancel.is_some() {
+            return None;
         }
-        if let Some(token) = self.scan_cancel.lock().take() {
-            token.cancel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        browse.cancel = Some(cancel.clone());
+        Some(cancel)
+    }
+
+    /// Drop `window_label`'s interest in the mDNS browse.
+    ///
+    /// Returns true when that was the last one and the browse really was
+    /// cancelled, which is also the only moment the shared registry may be
+    /// forgotten: clearing it while another window is still browsing would
+    /// throw away the de-duplication state that window's tiles depend on.
+    pub fn unsubscribe_browse(
+        &self,
+        window_label: &str,
+        window_exists: &dyn Fn(&str) -> bool,
+    ) -> bool {
+        let mut browse = self.browse.lock();
+        browse.subscribers.remove(window_label);
+        browse.subscribers.retain(|label| window_exists(label));
+        if !browse.subscribers.is_empty() {
+            return false;
+        }
+        match browse.cancel.take() {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Claim the one subnet scan for `window_label`, or be told what already
+    /// holds it.
+    ///
+    /// `Err` names the scan in flight and leaves it running. The reasoning for
+    /// refusing rather than running both is on
+    /// [`crate::commands::discovery::scan_network`].
+    pub fn begin_scan(
+        &self,
+        window_label: &str,
+        subnets: &[String],
+        now: Instant,
+    ) -> Result<(u64, tokio_util::sync::CancellationToken), String> {
+        let mut guard = self.scan.lock();
+        if let Some(running) = guard.as_ref() {
+            return Err(running.already_running_error(now));
+        }
+        let id = self
+            .next_scan_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        *guard = Some(RunningScan {
+            id,
+            cancel: cancel.clone(),
+            subnets: subnets.to_vec(),
+            started_by: window_label.to_string(),
+            started_at: now,
+        });
+        Ok((id, cancel))
+    }
+
+    /// Release the scan slot held by claim `id`.
+    ///
+    /// Matched on the id rather than cleared outright: [`Self::cancel_all`] may
+    /// already have taken it on the exit path, and a finishing scan that
+    /// cleared the slot regardless would give away a *later* scan's claim, so
+    /// that later scan could then be cancelled by a third caller it never heard
+    /// about. That is the same class of bug as B2 itself.
+    pub fn finish_scan(&self, id: u64) {
+        let mut guard = self.scan.lock();
+        if guard.as_ref().is_some_and(|running| running.id == id) {
+            *guard = None;
+        }
+    }
+
+    /// Is a subnet scan running right now? Read by `stop_discovery`, which must
+    /// not clear the shared registry out from under one.
+    pub fn scan_is_running(&self) -> bool {
+        self.scan.lock().is_some()
+    }
+
+    /// Cancel everything (app exit).
+    ///
+    /// Still the blunt instrument it was, and it has to be: `lib.rs` calls it
+    /// from the exit handler, where there is no caller left to be polite to.
+    /// The subscriber set is emptied along with the browse so a stale label
+    /// cannot outlive the token it was holding open.
+    pub fn cancel_all(&self) {
+        {
+            let mut browse = self.browse.lock();
+            browse.subscribers.clear();
+            if let Some(token) = browse.cancel.take() {
+                token.cancel();
+            }
+        }
+        if let Some(running) = self.scan.lock().take() {
+            running.cancel.cancel();
         }
     }
 }
@@ -354,6 +589,7 @@ impl AppState {
             pending_prompts: Arc::new(Mutex::new(HashMap::new())),
             opening_windows: Arc::new(Mutex::new(HashMap::new())),
             protocols: Arc::new(ProtocolRegistry::new(host_keys)),
+            agent: Arc::new(AgentPlane::default()),
         }
     }
 
@@ -474,6 +710,146 @@ impl AppState {
     }
 }
 
+/// B2: one browse and one scan serve the whole process, and neither may be
+/// taken away from the caller that started it without that caller hearing about
+/// it. Every one of these is a test for something that used to happen silently.
+#[cfg(test)]
+mod discovery_state_tests {
+    use super::*;
+
+    const ALL_WINDOWS_EXIST: &dyn Fn(&str) -> bool = &|_: &str| true;
+
+    /// The reported bug. The second caller is refused, the first caller's scan
+    /// survives, and the refusal names the scan holding the slot: an agent
+    /// caller has no screen to look at and nothing but this string to act on.
+    #[test]
+    fn a_second_scan_is_refused_by_name_and_leaves_the_first_running() {
+        let state = DiscoveryState::default();
+        let now = Instant::now();
+        let (_, first) = state
+            .begin_scan("main", &["192.168.1.0/24".to_string()], now)
+            .expect("nothing is scanning yet");
+
+        let refused = state
+            .begin_scan("library-2", &["10.0.0.0/24".to_string()], now)
+            .expect_err("one scan at a time");
+
+        assert!(
+            refused.contains("192.168.1.0/24"),
+            "the refusal must name what is running: {refused}"
+        );
+        assert!(
+            refused.contains("main"),
+            "…and which window is running it: {refused}"
+        );
+        assert!(
+            !first.is_cancelled(),
+            "the running scan must survive a second request"
+        );
+        assert!(state.scan_is_running());
+    }
+
+    /// `subnets` is optional at the IPC edge, and "whatever vnc-discovery deems
+    /// safe" still has to read as something in the refusal.
+    #[test]
+    fn a_scan_of_the_default_interfaces_is_still_named_in_the_refusal() {
+        let state = DiscoveryState::default();
+        let now = Instant::now();
+        state.begin_scan("main", &[], now).unwrap();
+        let refused = state.begin_scan("library-2", &[], now).unwrap_err();
+        assert!(refused.contains("local interfaces"), "{refused}");
+    }
+
+    /// The slot is released by the scan that holds it and by no other. A
+    /// completion that cleared the slot outright would hand a newer scan's
+    /// claim away, and that newer scan could then be cancelled by a third
+    /// caller it never heard about, which is B2 again one turn later.
+    #[test]
+    fn a_finished_scan_releases_only_its_own_claim() {
+        let state = DiscoveryState::default();
+        let now = Instant::now();
+        let (stale, _) = state.begin_scan("main", &[], now).unwrap();
+        state.finish_scan(stale);
+        assert!(!state.scan_is_running());
+
+        let (current, token) = state.begin_scan("library-2", &[], now).unwrap();
+        state.finish_scan(stale);
+        assert!(
+            state.scan_is_running(),
+            "a late completion must not free a newer scan's claim"
+        );
+        assert!(!token.is_cancelled(), "finishing is not cancelling");
+
+        state.finish_scan(current);
+        assert!(!state.scan_is_running());
+    }
+
+    /// The same defect on the browse, and the one that is genuinely silent
+    /// today: two Library windows browse, and the first to close must not take
+    /// the mDNS stream away from the one still on screen. The survivor gets no
+    /// event when that happens, its Nearby list just stops changing.
+    #[test]
+    fn one_library_window_closing_leaves_the_others_browse_running() {
+        let state = DiscoveryState::default();
+        let token = state
+            .subscribe_browse("main", ALL_WINDOWS_EXIST)
+            .expect("the first window starts the browse");
+        assert!(
+            state
+                .subscribe_browse("library-2", ALL_WINDOWS_EXIST)
+                .is_none(),
+            "the second window joins the running browse rather than starting one"
+        );
+
+        assert!(
+            !state.unsubscribe_browse("library-2", ALL_WINDOWS_EXIST),
+            "not the last one out"
+        );
+        assert!(!token.is_cancelled(), "`main` is still watching");
+
+        assert!(state.unsubscribe_browse("main", ALL_WINDOWS_EXIST));
+        assert!(token.is_cancelled(), "the last one out turns it off");
+    }
+
+    /// A window that went away without unsubscribing (a crash, or a close whose
+    /// cleanup never ran) must not hold the browse open for the rest of the
+    /// process.
+    #[test]
+    fn a_vanished_window_stops_holding_the_browse_open() {
+        let state = DiscoveryState::default();
+        let token = state.subscribe_browse("main", ALL_WINDOWS_EXIST).unwrap();
+        state.subscribe_browse("library-2", ALL_WINDOWS_EXIST);
+
+        // `main` is gone and never said so; `library-2` closes normally.
+        let only_library: &dyn Fn(&str) -> bool = &|label: &str| label == "library-2";
+        assert!(state.unsubscribe_browse("library-2", only_library));
+        assert!(token.is_cancelled());
+    }
+
+    /// App exit is still a full stop, and `lib.rs` calls exactly this on the
+    /// exit path. Reference counting the browse must not have made it
+    /// survivable.
+    #[test]
+    fn cancel_all_still_stops_the_browse_and_the_scan() {
+        let state = DiscoveryState::default();
+        let browse = state.subscribe_browse("main", ALL_WINDOWS_EXIST).unwrap();
+        state.subscribe_browse("library-2", ALL_WINDOWS_EXIST);
+        let (_, scan) = state.begin_scan("main", &[], Instant::now()).unwrap();
+
+        state.cancel_all();
+
+        assert!(
+            browse.is_cancelled(),
+            "no subscriber count outranks app exit"
+        );
+        assert!(scan.is_cancelled());
+        assert!(!state.scan_is_running());
+        // …and the subscriber set went with it, so the next window in is the
+        // one that starts the browse rather than joining a token that is gone.
+        assert!(state.subscribe_browse("main", ALL_WINDOWS_EXIST).is_some());
+    }
+}
+
 #[cfg(test)]
 mod protocol_registry_tests {
     use super::*;
@@ -581,6 +957,7 @@ mod tests {
                     started_at: Instant::now(),
                     thumbnails: Default::default(),
                     last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
+                    facts: Default::default(),
                 },
             );
             self

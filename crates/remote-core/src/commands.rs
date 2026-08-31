@@ -5,6 +5,7 @@
 //! from a Tauri argument by hand, so a new variant is a compile error where it
 //! has to be decided rather than a silently dropped message.
 
+use crate::intent::AgentIntent;
 use crate::options::QualityPreset;
 use crate::pins::PinScheme;
 
@@ -91,4 +92,25 @@ pub enum ClientCommand {
         cols: u16,
         rows: u16,
     },
+
+    /// An agent intent the driver serves natively rather than as lowered
+    /// input.
+    ///
+    /// `PRDAgentPlug/00 R28`. Most intents never arrive this way: the plane
+    /// lowers a `click` into [`ClientCommand::Pointer`] and a `type` into a
+    /// run of [`ClientCommand::Key`], because a driver that already knows how
+    /// to move a pointer should not learn a second vocabulary for it. This
+    /// variant is for the ones that have no lowering at all, the three
+    /// `05 §4.1` names: `exec` needs a channel of its own with a real exit
+    /// status, and `declare` is state a limb holds between commands. Neither
+    /// is expressible as any command above.
+    ///
+    /// One variant rather than eighteen flat ones, and the reason is in
+    /// [`crate::intent`]: wrapped, the place a driver could drop an intent is
+    /// ONE arm in one match, so it can be found and it can be made to answer.
+    /// Flat, it would be eighteen chances for a driver to say nothing.
+    ///
+    /// A driver that will not serve one must say so with
+    /// [`AgentIntent::refuse`], never by ignoring it.
+    Agent(AgentIntent),
 }

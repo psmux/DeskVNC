@@ -871,6 +871,14 @@ export class SessionInput {
     if (isLocalUiTarget(e)) return;
     if (this.onAppHotkey(e)) {
       e.preventDefault();
+      // And say so to everyone else. This hook is on `window` in the capture
+      // phase, so without this the keystroke carries on down to the page and
+      // back up to the shell's own listener, which runs the very same command
+      // a second time. That was invisible while the shell's only shortcuts
+      // were "switch to tab N", which lands in the same place however many
+      // times it runs; a pane command is not idempotent, and closing a pane
+      // twice closes a session nobody asked to disconnect.
+      e.stopPropagation();
       return;
     }
     // Without pass-through, let OS-level shortcuts (Cmd/Win combos) through.

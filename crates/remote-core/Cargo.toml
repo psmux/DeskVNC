@@ -20,6 +20,11 @@ tracing = { workspace = true }
 # The backoff jitter, and nothing else (PRDRDP/06 §5.3).
 rand = { workspace = true }
 vnc-transport = { path = "../vnc-transport" }
+# `AgentIntent::grant` names `PartyId`, and arbitration is where that identity
+# is defined (PRDAgentPlug/08 §5). No cycle: `agent-lease` depends on serde and
+# thiserror and on no crate in this workspace, which is the same property that
+# let `limb-core` name it before the intent vocabulary moved here (00 R47a).
+agent-lease = { path = "../agent-lease" }
 
 [dev-dependencies]
 serde_json = { workspace = true }

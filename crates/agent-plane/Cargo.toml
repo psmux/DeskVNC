@@ -1,0 +1,34 @@
+[package]
+name = "agent-plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The runtime that joins the three pure crates to a live session: a limb registry, intent lowering onto ClientCommand, lease enforcement, and the observation path."
+
+# This is the only crate of the four that knows about running things. The
+# other three are deliberately inert: `agent-lease` is arbitration with no
+# clock, `limb-core` is vocabulary with no runtime, `agent-perception` is
+# pixels with no transport. Everything that spawns, sends or blocks lives
+# here, so the parts that need to be reasoned about can be reasoned about
+# without it (PRDAgentPlug/01 §3).
+#
+# Still no tauri. The shell adapts to this crate, not the other way round,
+# which is what keeps a headless binary possible (PRDAgentPlug/03 §1).
+[dependencies]
+remote-core = { path = "../remote-core" }
+limb-core = { path = "../limb-core" }
+agent-lease = { path = "../agent-lease" }
+agent-perception = { path = "../agent-perception" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

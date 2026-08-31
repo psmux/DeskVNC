@@ -98,6 +98,30 @@ pub enum SshEvent {
         /// Prefill for the username field.
         username_hint: Option<String>,
     },
+
+    /// An agent intent was served, and this is the answer
+    /// (`PRDAgentPlug/00 R51b`).
+    ///
+    /// Addressed to the agent that asked, never to the terminal: none of this
+    /// is output the person at this window typed for, and the bytes inside came
+    /// off a remote machine, so putting them on the screen would be a remote
+    /// machine writing into our UI. [`crate::driver`] passes it out as
+    /// `SessionEvent::AgentServed`.
+    ///
+    /// Boxed because it is by far the widest thing this enum carries and
+    /// [`SshEvent::Output`], which arrives thousands of times a second on a
+    /// scrolling build log, would otherwise pay for it on every clone.
+    AgentServed(Box<remote_core::intent::IntentServed>),
+
+    /// An agent intent was not served, and nothing went on the wire
+    /// (`PRDAgentPlug/00 R28`).
+    ///
+    /// [`crate::driver`] refuses the intents this session can never serve
+    /// before they reach here. This is for the ones it can normally serve and
+    /// could not this time: a channel that would not open, a request the far
+    /// side rejected, a session that is not connected yet. Boxed with
+    /// [`SshEvent::AgentServed`] and for the same reason.
+    AgentRefused(Box<remote_core::intent::IntentRefused>),
 }
 
 /// What the UI asks of a running session.
@@ -123,6 +147,20 @@ pub enum SshCommand {
     /// The user dismissed the credential dialog. Ends the session rather than
     /// retrying: they were asked and declined.
     CancelCredentials,
+
+    /// Run one command on a channel of its own, for an agent that asked
+    /// (`PRDAgentPlug/05 §3`).
+    ///
+    /// Not [`SshCommand::Input`] with a newline on the end, and
+    /// [`crate::exec`]'s module header is where that argument lives: typing at
+    /// the prompt somebody is watching gives no exit status, no stderr split
+    /// and no output bound, which is three of the five things an answer needs.
+    ///
+    /// The session serves this on a task of its own. A command that takes two
+    /// minutes must not be two minutes during which the terminal accepts no
+    /// keystrokes, which is the stall the two pump split already exists to
+    /// avoid.
+    Exec(crate::exec::ExecRequest),
 }
 
 #[cfg(test)]

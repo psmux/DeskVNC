@@ -2,6 +2,7 @@
 //! `Result<_, String>` with errors mapped to display strings, no `unwrap()`.
 
 pub mod about;
+pub mod agent;
 pub mod capture;
 pub mod credentials;
 pub mod discovery;

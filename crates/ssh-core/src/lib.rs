@@ -53,22 +53,28 @@
 //! |---|---|
 //! | [`options`] | geometry, `TERM`, the multiplexer, the retry ladder |
 //! | [`modes`] | which private modes the remote turned on, and how to undo them |
+//! | [`bell`] | how often a BEL from the remote is allowed to ring |
 //! | [`pty`] | the `pty-req`, the pre-flight probe, starting the shell |
+//! | [`exec`] | one command on a channel of its own, with a real exit status |
 //! | [`session`] | the supervisor loop and the byte pump |
 //! | [`events`] | the IPC-shaped event and command types |
 //! | [`error`] | failures, classified for the supervisor |
 
 #![forbid(unsafe_code)]
 
+pub mod bell;
 pub mod error;
 pub mod events;
+pub mod exec;
 pub mod modes;
 pub mod options;
 pub mod pty;
 pub mod session;
 
+pub use bell::BellLimiter;
 pub use error::{Error, Result};
 pub use events::{SshCommand, SshEvent, TerminalState};
+pub use exec::{ExecRequest, DEFAULT_MAX_OUTPUT, MAX_OUTPUT_CEILING};
 pub use modes::ModeTracker;
 pub use multiplexer::{
     parse_wsl_distros, Detected, MultiplexerConfig, MultiplexerKind, ShellDialect, WSL_LIST_COMMAND,

@@ -1,0 +1,63 @@
+[package]
+name = "dvv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The thing an agent connects to: an MCP server over stdio, and a CLI over the same surface."
+
+[[bin]]
+name = "dvv"
+path = "src/main.rs"
+
+# No MCP SDK. The 2026-07-28 specification is stateless JSON-RPC 2.0 with
+# header based routing, so a server is a framed reader, a dispatch table and a
+# writer. An SDK would be a dependency the DMG has to carry for something this
+# small, and PRDAgentPlug/00 R40's DMG constraints apply to every dependency,
+# not only to model weights.
+#
+# There IS an HTTP server, and R40 is why it is this one. `hyper` 1.x, its tokio
+# adapter and its body helper are already in this workspace's lock file
+# underneath tauri, which reaches them through reqwest, so naming them here adds
+# a manifest line and NOT a crate to the bundle. Every crate in that subtree is
+# pure Rust (httparse, http, http-body, bytes, itoa, smallvec, want,
+# atomic-waker, pin-project-lite): no build script needs a C toolchain, nothing
+# links a system library, and nothing asks for an entitlement, so the DMG still
+# ships hardenedRuntime with exactly the two network entitlements it advertises.
+# Writing the HTTP/1.1 parse by hand was the alternative and it was rejected:
+# JSON-RPC framing is a line and a `serde_json` call, which is why that one is
+# written here, and an HTTP request parser exposed to a listening socket is a
+# security surface with a decade of other people's bugs already fixed in it.
+[dependencies]
+agent-plane = { path = "../agent-plane" }
+agent-lease = { path = "../agent-lease" }
+limb-core = { path = "../limb-core" }
+agent-perception = { path = "../agent-perception" }
+remote-core = { path = "../remote-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time", "net"] }
+# The HTTP transport (PRDAgentPlug/00 R52). `http1` and `server` only: this
+# crate does not make outbound requests and has no business carrying a client.
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+# Constant time comparison of the bearer token. A comparison that stops at the
+# first wrong byte tells an attacker how much of the token they have guessed.
+subtle = { workspace = true }
+# The bearer token itself, from the OS CSPRNG through rand 0.10's fallible
+# SysRng, so "the CSPRNG is unreachable" refuses to start rather than listening
+# with a weak token.
+rand = { workspace = true }
+# Decoding the `=?base64?...?=` sentinel the specification wraps a header value
+# in when it is not plain ASCII. Decode, THEN compare, or an encoded value is a
+# spurious header mismatch.
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

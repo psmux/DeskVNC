@@ -8,12 +8,21 @@
 import { useEffect, useRef, type ReactNode, type Ref } from "react";
 import { classNames } from "../lib/util";
 import type { SessionState } from "../lib/types";
-import type { SessionTab } from "../state/TabsContext";
+import type { TabSummary } from "../state/TabsContext";
+import { SESSION_PANEL_ID } from "./SplitView";
 import { IconGrid, IconX } from "./icons";
 
-/** DOM id of the pane a tab controls. `null` is the library. */
+/**
+ * DOM id of the surface a tab controls.
+ *
+ * There are two, not one per tab: the library, and the one every session is
+ * laid out on. `SplitView` mounts every tab's sessions at once in a single
+ * element so that moving one between panes cannot re-parent its canvas, so a
+ * per-tab panel element does not exist to point at. One panel whose contents
+ * follow the selected tab is the shape this actually has.
+ */
 export function tabPanelId(id: string | null): string {
-  return `pane-${id ?? "library"}`;
+  return id === null ? "pane-library" : SESSION_PANEL_ID;
 }
 
 /** Colour of a tab's status dot, and what a screen reader hears for it. */
@@ -30,19 +39,29 @@ function statusOf(state: SessionState): { className: string; label: string } {
   }
 }
 
+const NO_TABS_DRIVEN: ReadonlySet<string> = new Set();
+
 export function TabStrip({
   tabs,
   activeId,
   onSelect,
   onClose,
   onSelectRelative,
+  drivenTabIds = NO_TABS_DRIVEN,
 }: {
-  tabs: readonly SessionTab[];
+  tabs: readonly TabSummary[];
   activeId: string | null;
   onSelect: (id: string | null) => void;
   onClose: (id: string) => void;
   /** Left/right arrow within the strip, the ARIA tablist keyboard contract. */
   onSelectRelative: (delta: number) => void;
+  /**
+   * Tabs holding at least one session an agent is driving.
+   *
+   * Empty until the agent plane is on, at which point every tab looks exactly
+   * as it always has.
+   */
+  drivenTabIds?: ReadonlySet<string>;
 }): ReactNode {
   const activeRef = useRef<HTMLDivElement>(null);
 
@@ -80,6 +99,7 @@ export function TabStrip({
       {tabs.map((tab) => {
         const selected = tab.id === activeId;
         const status = statusOf(tab.state);
+        const driven = drivenTabIds.has(tab.id);
         return (
           <Tab
             key={tab.id}
@@ -88,16 +108,28 @@ export function TabStrip({
             onSelect={() => onSelect(tab.id)}
             onClose={() => onClose(tab.id)}
             panelId={tabPanelId(tab.id)}
-            // The dot is decorative here: its meaning is already in the tab's
-            // own accessible name, and announcing it twice is just noise.
+            // Both glyphs are decorative here: their meaning is already in the
+            // tab's own accessible name, and announcing it twice is just noise.
+            // The square is the same one the pane header uses, so a tab in the
+            // background reads the same way as a pane in front does.
             icon={
-              <span
-                aria-hidden="true"
-                className={classNames("h-1.5 w-1.5 shrink-0 rounded-full", status.className)}
-              />
+              <span className="flex shrink-0 items-center gap-1">
+                <span
+                  aria-hidden="true"
+                  className={classNames("h-1.5 w-1.5 shrink-0 rounded-full", status.className)}
+                />
+                {driven ? (
+                  <span
+                    aria-hidden="true"
+                    className="h-1.5 w-1.5 shrink-0 rounded-[1px] bg-warning"
+                  />
+                ) : null}
+              </span>
             }
             label={tab.title}
-            status={status.label}
+            // Said in words rather than left to a shape, because a shape is
+            // exactly what a screen reader cannot pass on.
+            status={driven ? `${status.label}, agent driving` : status.label}
           />
         );
       })}

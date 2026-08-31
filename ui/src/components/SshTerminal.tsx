@@ -271,7 +271,7 @@ export function SshTerminal({
   const [phase, setPhase] = useState<Phase>({ kind: "handshake" });
   const [notice, setNotice] = useState<string | null>(null);
   const [bellTick, setBellTick] = useState(0);
-  const onScreen = usePaneVisible();
+  const owns = usePaneVisible();
   const { push } = useToasts();
 
   // Latest config/onClose for the mount effect to read without depending on
@@ -417,8 +417,8 @@ export function SshTerminal({
   // other modal in the app by re-focusing on the same trigger; this mirrors
   // it rather than depending on effect ordering to sort itself out.
   useEffect(() => {
-    if (onScreen) termRef.current?.focus();
-  }, [onScreen]);
+    if (owns) termRef.current?.focus();
+  }, [owns]);
 
   // Live theme: re-read the tokens whenever the app's theme actually
   // changes, rather than only once at mount, so switching Preferences ▸
@@ -461,13 +461,13 @@ export function SshTerminal({
   // pane is in the background, or it would answer a keystroke meant for
   // whichever session is actually on screen.
   useEffect(() => {
-    if (!onScreen) return;
+    if (!owns) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onScreen]);
+  }, [owns]);
 
   const status = statusPill(phase);
   const shellState = phase.kind === "shell" ? phase.state : null;

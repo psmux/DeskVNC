@@ -6,6 +6,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -27,7 +28,7 @@ import { usePaneVisible } from "./Pane";
 import {
   IconActivity, IconCamera, IconChevronDown, IconClipboard, IconEye, IconFile,
   IconGripVertical, IconKeyboard, IconMaximize, IconMonitor, IconPin, IconPower,
-  IconCursor, IconRefresh, IconSearch, IconTerminal,
+  IconCursor, IconRefresh, IconSearch, IconSplitDown, IconSplitRight, IconTerminal,
 } from "./icons";
 
 type Edge = "top" | "bottom" | "left" | "right";
@@ -175,6 +176,23 @@ export interface SessionToolbarProps {
   onScreenshot: () => void;
   onRefresh: () => void;
   onDisconnect: () => void;
+  /**
+   * Divide this pane, putting the new one to the right or underneath.
+   *
+   * Absent for a session in a window of its own, where there are no panes to
+   * divide and the buttons are simply not drawn.
+   */
+  onSplit?: (dir: "row" | "column") => void;
+  /**
+   * The box the toolbar has to stay inside, in viewport coordinates.
+   *
+   * Omitted for a session that has the window to itself, where the box is the
+   * window less whatever `--session-inset-top` reserves at the top. A session
+   * in a split pane passes its pane's rectangle instead, so the bar belongs to
+   * the view it controls rather than floating over a neighbour and offering
+   * that machine's disconnect button to the wrong desktop.
+   */
+  frame?: { x: number; y: number; width: number; height: number };
 }
 
 export function SessionToolbar(props: SessionToolbarProps): ReactNode {
@@ -183,7 +201,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   /** Latest position, for the drag handler to persist on drop. */
   const posRef = useRef(pos);
   posRef.current = pos;
-  const onScreen = usePaneVisible();
+  const owns = usePaneVisible();
 
   // Follow the shared layout while other tabs' toolbars are mounted alongside.
   useEffect(() => {
@@ -212,25 +230,46 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
    * because the anchor is the toolbar's centre; the box around it is what has
    * to stay inside, and it changes width as buttons appear and disappear.
    */
-  const [viewport, setViewport] = useState(() => ({
+  const [windowSize, setWindowSize] = useState(() => ({
     w: window.innerWidth,
     h: window.innerHeight,
   }));
   const [size, setSize] = useState({ w: 0, h: 0 });
-  const [insetTop, setInsetTop] = useState(0);
+  const [windowInsetTop, setWindowInsetTop] = useState(0);
 
   useEffect(() => {
     const measure = (): void => {
-      setViewport({ w: window.innerWidth, h: window.innerHeight });
+      setWindowSize({ w: window.innerWidth, h: window.innerHeight });
       const raw = getComputedStyle(document.documentElement).getPropertyValue(
         "--session-inset-top",
       );
-      setInsetTop(parseFloat(raw) || 0);
+      setWindowInsetTop(parseFloat(raw) || 0);
     };
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [onScreen]);
+  }, [owns]);
+
+  /**
+   * Everything below works in coordinates local to whatever the toolbar is
+   * confined to, so a pane and a whole window are the same problem with
+   * different numbers. `origin` is what turns the answer back into the
+   * viewport coordinates a `position: fixed` box wants.
+   *
+   * A pane rectangle already starts below the tab strip, so a framed toolbar
+   * needs no inset of its own; the shell's inset only exists to keep a
+   * window-wide toolbar off the tabs.
+   */
+  const { frame } = props;
+  const origin = useMemo(
+    () => (frame ? { x: frame.x, y: frame.y } : { x: 0, y: 0 }),
+    [frame],
+  );
+  const viewport = useMemo(
+    () => (frame ? { w: frame.width, h: frame.height } : windowSize),
+    [frame, windowSize],
+  );
+  const insetTop = frame ? 0 : windowInsetTop;
 
   // The collapsed chevron is a fraction of the width of the open toolbar, and
   // the open one grows and shrinks with the capture badge, so the box is
@@ -250,6 +289,27 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     ro.observe(el);
     return () => ro.disconnect();
   }, [collapsed]);
+
+  /**
+   * Measure after every render as well, not only when the observer says so.
+   *
+   * The observer covers a box that changes without us re-rendering (a font
+   * finishing loading, say). This covers the reverse, and it is the case that
+   * matters: the width decides whether the bar fits its pane at all, and a
+   * measurement that never arrives leaves it drawn across the pane next door.
+   * `setSize` returns the previous object when nothing moved, so a render that
+   * changes nothing costs one `getBoundingClientRect` and no second pass.
+   */
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setSize((prev) =>
+      Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5
+        ? prev
+        : { w: r.width, h: r.height },
+    );
+  });
 
   const collapse = useCallback((): void => {
     if (collapsedRef.current) return;
@@ -276,11 +336,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
     }, IDLE_MS);
   }, [pinned, collapse]);
 
-  // A toolbar on a background tab has nothing to auto-hide from, so it does not
-  // watch the pointer: otherwise every mouse move would reset one timer per
-  // open tab, for toolbars nobody can see.
+  // Only the focused pane's toolbar watches the pointer. A toolbar belonging to
+  // any other pane is not drawn at all, and one that still ran this would reset
+  // an idle timer on every mouse move for a bar nobody can see.
   useEffect(() => {
-    if (!onScreen) return;
+    if (!owns) return;
     armIdle();
     const wake = (): void => armIdle();
     window.addEventListener("pointermove", wake);
@@ -288,7 +348,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       window.removeEventListener("pointermove", wake);
       window.clearTimeout(idleTimer.current);
     };
-  }, [armIdle, onScreen]);
+  }, [armIdle, owns]);
 
   /**
    * Show/hide via the hotkey (the parent bumps `recallSignal`). It toggles, so
@@ -349,6 +409,8 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
   sizeRef.current = size;
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
+  const originRef = useRef(origin);
+  originRef.current = origin;
 
   /**
    * Drag the whole toolbar by whatever was grabbed: the grip when open, the
@@ -386,8 +448,11 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       const { w: W, h: H } = viewportRef.current;
       const { w, h } = sizeRef.current;
       const b = boundsRef.current;
-      const left = clamp(ev.clientX - grabX, b.minX, b.maxX);
-      const top = clamp(ev.clientY - grabY, b.minY, b.maxY);
+      // The pointer speaks viewport coordinates; the bounds are local to
+      // whatever the toolbar is confined to, so meet in the middle.
+      const o = originRef.current;
+      const left = clamp(ev.clientX - grabX - o.x, b.minX, b.maxX);
+      const top = clamp(ev.clientY - grabY - o.y, b.minY, b.maxY);
 
       // Distance from each edge of the window to the matching edge of the box.
       const dTop = top - b.minY;
@@ -460,8 +525,8 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         left = clamp(pos.x * W, b.minX, b.maxX);
         top = clamp(pos.y * H, b.minY, b.maxY);
     }
-    return { position: "fixed", zIndex: 30, left, top };
-  }, [pos, viewport, size, insetTop, bounds]);
+    return { position: "fixed", zIndex: 30, left: origin.x + left, top: origin.y + top };
+  }, [pos, viewport, size, insetTop, bounds, origin]);
 
   // Floating toolbars open their menus downwards unless they sit low enough
   // that the menu would run off the bottom.
@@ -470,7 +535,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       ? false
       : pos.edge !== null || style.top === undefined
         ? true
-        : Number(style.top) < viewport.h * 0.6;
+        : Number(style.top) - origin.y < viewport.h * 0.6;
 
   // Zero means "never measured", not "instant": the core leaves it at 0 until
   // a probe completes, and a session showing a confident "0ms" while the real
@@ -520,7 +585,19 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           hovering.current = false;
           armIdle();
         }}
-        className="fade-in flex items-center gap-0.5 rounded-pill border border-subtle bg-raised/95 px-1.5 py-1 shadow-(--shadow-pop) backdrop-blur transition-shadow duration-150 hover:shadow-(--shadow-glow)"
+        /*
+         * Wrap onto a second row rather than run off the edge.
+         *
+         * The bar is a single flex row of two dozen controls and is `position:
+         * fixed`, so nothing about the layout stops it growing straight past
+         * the side of its pane and then past the side of the window, taking
+         * the controls at that end out of reach. Clamping the corner keeps the
+         * left of it on screen, which is not the same as keeping all of it on
+         * screen. Given a width to work within it now folds instead, which is
+         * what the rounded pill was always able to do and never asked to.
+         */
+        style={{ maxWidth: Math.max(160, viewport.w - 2 * MARGIN) }}
+        className="fade-in flex flex-wrap items-center justify-center gap-0.5 rounded-lg border border-subtle bg-raised/95 px-1.5 py-1 shadow-(--shadow-pop) backdrop-blur transition-shadow duration-150 hover:shadow-(--shadow-glow)"
       >
         <button
           type="button"
@@ -637,6 +714,25 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         <ToolButton label={`Fullscreen (${modKeyLabel}⌥Enter)`} onClick={props.onFullscreen}>
           <IconMaximize size={15} />
         </ToolButton>
+
+        {/* Only a session shown in a tab has panes to divide. A window has
+            nothing to put a second desktop beside. */}
+        {props.onSplit ? (
+          <>
+            <ToolButton
+              label={`Split right (${modKeyLabel}⌥D)`}
+              onClick={() => props.onSplit?.("row")}
+            >
+              <IconSplitRight size={15} />
+            </ToolButton>
+            <ToolButton
+              label={`Split down (${modKeyLabel}⌥⇧D)`}
+              onClick={() => props.onSplit?.("column")}
+            >
+              <IconSplitDown size={15} />
+            </ToolButton>
+          </>
+        ) : null}
 
         <ToolButton
           label={props.viewOnly ? "View only: on, click to allow input" : "View only: off, click to block input"}

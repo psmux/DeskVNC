@@ -5,6 +5,7 @@
 //! discovery. This crate wires them to windows, commands, channels, menu,
 //! tray, and the capability-scoped IPC surface.
 
+mod agent;
 mod commands;
 mod framing;
 mod menu;
@@ -93,6 +94,12 @@ pub fn run() {
 
             menu::install(app.handle())?;
             tray::install(app.handle())?;
+
+            // The agent plane, if a person has switched it on. With the
+            // setting off this binds nothing, spawns nothing and creates no
+            // file, which is what `AGENT_BRIEF` D2 and `00 R40` require of an
+            // ordinary install.
+            commands::agent::install(app.handle());
 
             // Escape hatch (PRD/06 §3): force-release capture from anywhere.
             // A stuck grab that swallows the keyboard is unforgivable, so this
@@ -229,6 +236,10 @@ pub fn run() {
             commands::session::release_session_claim,
             commands::session::fullscreen_session,
             commands::session::list_active_sessions,
+            // agent plane (dvvp.v1)
+            commands::agent::agent_status,
+            commands::agent::agent_take_the_wheel,
+            commands::agent::agent_register_with_claude,
             // file transfer (SFTP sidecar)
             commands::files::files_probe,
             commands::files::files_connect,
@@ -249,6 +260,7 @@ pub fn run() {
             commands::files::files_local_remove,
             // remote shell (pty over the same ssh carrier)
             commands::ssh::ssh_probe,
+            commands::ssh::ssh_list_local_keys,
             commands::ssh::ssh_list_wsl_distros,
             commands::ssh::ssh_connect,
             commands::ssh::ssh_send,
@@ -272,6 +284,12 @@ pub fn run() {
                 // Graceful shutdown: cancel every session, then give the
                 // per-session tasks a beat to close their sockets cleanly.
                 if let Some(state) = app.try_state::<AppState>() {
+                    // The socket goes first: an agent that reconnects to a
+                    // path the application no longer serves gets a refusal,
+                    // and an agent that finds the file still there while the
+                    // sessions are being torn down gets a limb that dies under
+                    // it.
+                    agent::stop(&state.agent);
                     state.shutdown_all_sessions();
                     state.discovery.cancel_all();
                 }

@@ -95,13 +95,14 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
 
   const conn = files.conn;
   const busy = conn.state === "connecting";
-  const onScreen = usePaneVisible();
+  const owns = usePaneVisible();
 
-  // Esc closes the panel unless a nested prompt owns it. Not while this tab is
-  // in the background: the listener is on `window`, so hiding the pane does not
-  // reach it, and it would answer an Escape meant for the session in front.
+  // Esc closes the panel unless a nested prompt owns it. Only in the focused
+  // pane: the listener is on `window`, so neither hiding the pane nor sitting
+  // beside the pane in use reaches it, and it would otherwise answer an Escape
+  // meant for whichever session the user is actually working in.
   useEffect(() => {
-    if (!onScreen) return;
+    if (!owns) return;
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== "Escape") return;
       if (renaming || creating || confirmDelete) {
@@ -115,7 +116,7 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, onScreen, renaming, creating, confirmDelete]);
+  }, [onClose, owns, renaming, creating, confirmDelete]);
 
   const activePane = focused === "local" ? files.local : files.remote;
   const canTransfer = conn.state === "connected";

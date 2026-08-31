@@ -67,6 +67,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-lease"
+version = "0.23.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "agent-perception"
+version = "0.23.0"
+dependencies = [
+ "image",
+ "limb-core",
+ "remote-core",
+ "remote-pixel",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "agent-plane"
+version = "0.23.0"
+dependencies = [
+ "agent-lease",
+ "agent-perception",
+ "bytes",
+ "limb-core",
+ "remote-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1377,12 +1417,14 @@ dependencies = [
 
 [[package]]
 name = "deskvncviewer"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
+ "agent-perception",
  "anyhow",
  "base64 0.22.1",
  "bytes",
  "crossbeam-channel",
+ "limb-core",
  "os_info",
  "parking_lot",
  "rdp-core",
@@ -1601,6 +1643,29 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dvv"
+version = "0.23.0"
+dependencies = [
+ "agent-lease",
+ "agent-perception",
+ "agent-plane",
+ "base64 0.22.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "limb-core",
+ "rand 0.10.2",
+ "remote-core",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "dyn-clone"
@@ -2638,6 +2703,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2662,6 +2733,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -3220,6 +3292,21 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "limb-core"
+version = "0.23.0"
+dependencies = [
+ "agent-lease",
+ "bytes",
+ "remote-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4772,7 +4859,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-auth"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -4796,7 +4883,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-codecs"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "criterion",
  "hex",
@@ -4807,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-core"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "bytes",
  "futures",
@@ -4832,7 +4919,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-pdu"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "bytes",
  "hex",
@@ -4912,8 +4999,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote-core"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
+ "agent-lease",
  "bytes",
  "rand 0.10.2",
  "serde",
@@ -4927,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "remote-pixel"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "criterion",
 ]
@@ -5855,7 +5943,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-core"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -5914,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-transport"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "aes 0.8.4",
  "argon2 0.5.3",
@@ -7166,7 +7254,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vnc-core"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "aes 0.8.4",
  "byteorder",
@@ -7203,7 +7291,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-discovery"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -7224,7 +7312,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-files"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -7246,7 +7334,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-input-capture"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "core-foundation",
  "core-graphics 0.24.0",
@@ -7263,7 +7351,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-store"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -7288,7 +7376,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-transport"
-version = "0.18.0"
+version = "0.23.0"
 dependencies = [
  "hex",
  "openssl",

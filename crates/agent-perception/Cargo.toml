@@ -1,0 +1,27 @@
+[package]
+name = "agent-perception"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "What an agent is allowed to see: a server side framebuffer mirror, damage tracking, and the crop, downscale and encode path that turns pixels into an observation."
+
+# No tauri and no webview. The running application composites in the webview
+# and `capture_thumbnail` takes RGBA back from it, which is right for the
+# interactive product and unavailable to a headless plane
+# (PRDAgentPlug/03 §1). This crate is the second consumer of the SAME
+# `SessionEvent` stream, so it must not be visible from inside `vnc-core` or
+# `rdp-core` (PRDAgentPlug/00 R5).
+[dependencies]
+remote-core = { path = "../remote-core" }
+remote-pixel = { path = "../remote-pixel" }
+limb-core = { path = "../limb-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

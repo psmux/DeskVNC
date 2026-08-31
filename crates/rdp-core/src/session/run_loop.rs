@@ -317,7 +317,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     return Err(RdpError::Cancelled);
                 }
                 Step::Command(Some(cmd)) => {
-                    if let Some(outcome) = self.handle_command(cmd).await? {
+                    if let Some(outcome) = self.handle_command(cmd, events).await? {
                         return Ok(outcome);
                     }
                 }
@@ -836,7 +836,15 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
     /// Act on one command from the shell.
     ///
     /// Returns `Some` when the command ends the session.
-    async fn handle_command(&mut self, cmd: ClientCommand) -> Result<Option<RunOutcome>> {
+    ///
+    /// `events` is here for one arm: a refused agent intent has to be answered
+    /// and the answer is a `SessionEvent` (PRDAgentPlug/00 R28). Nothing else
+    /// in this match emits, which is why it was not a parameter before.
+    async fn handle_command(
+        &mut self,
+        cmd: ClientCommand,
+        events: &mpsc::Sender<SessionEvent>,
+    ) -> Result<Option<RunOutcome>> {
         match cmd {
             ClientCommand::Disconnect => {
                 // A cookie that survives a deliberate sign out and lets the
@@ -920,6 +928,30 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     &mut out,
                 )?;
                 self.flush_channel(out).await?;
+                Ok(None)
+            }
+            ClientCommand::Agent(intent) => {
+                // `PRDAgentPlug/00 R28`, and the answer is RFB's for a
+                // different reason. RDP does have virtual channels, so the
+                // refusal is not a property of the protocol the way it is for
+                // RFB. It is a property of what is on the far side: every
+                // channel this build opens is a defined MS-RDP* one
+                // (cliprdr, display control, graphics, audio) with no room for
+                // an arbitrary intent, and a channel that would run a command
+                // on the server needs an agent installed THERE. A client
+                // cannot invent one.
+                //
+                // Written above the catch all below on purpose. That arm logs
+                // and returns, which for a quality preset is right and for an
+                // intent is the silent drop `00 R28` exists to stop.
+                remote_core::emit(
+                    events,
+                    SessionEvent::AgentRefused(
+                        intent
+                            .refuse("no RDP virtual channel in this build carries an agent intent"),
+                    ),
+                )
+                .await?;
                 Ok(None)
             }
             // Quality arrives with the channels that carry it
@@ -1602,12 +1634,16 @@ mod tests {
         use rdp_pdu::input::pointer_flags;
 
         let (tx, mut rx) = mpsc::channel(crate::transport::writer::WRITER_QUEUE);
+        let (events, _events_rx) = mpsc::channel(8);
         let mut rl = loop_with(&[][..], tx);
-        rl.handle_command(ClientCommand::Pointer {
-            x: 10,
-            y: 20,
-            button_mask: 0b001,
-        })
+        rl.handle_command(
+            ClientCommand::Pointer {
+                x: 10,
+                y: 20,
+                button_mask: 0b001,
+            },
+            &events,
+        )
         .await
         .expect("queued");
 
@@ -1634,6 +1670,64 @@ mod tests {
         );
     }
 
+    /// An agent intent this driver cannot serve is ANSWERED, and nothing goes
+    /// on the wire (PRDAgentPlug/00 R28).
+    ///
+    /// The arm below this one in `handle_command` is a catch all that logs and
+    /// returns, which is right for a quality preset the shell fans out to every
+    /// session and is the silent drop `00 R28` exists to stop for an intent.
+    /// This test is what keeps the explicit arm above it: delete the arm and
+    /// the intent falls into the catch all, the events channel stays empty,
+    /// and this fails.
+    #[tokio::test]
+    async fn an_agent_intent_is_refused_out_loud_and_never_dropped() {
+        use remote_core::intent::{AgentIntent, CommandSpec, IntentId, IntentKind, IntentName};
+
+        let (tx, mut rx) = mpsc::channel(crate::transport::writer::WRITER_QUEUE);
+        let (events, mut events_rx) = mpsc::channel(8);
+        let mut rl = loop_with(&[][..], tx);
+
+        let outcome = rl
+            .handle_command(
+                ClientCommand::Agent(AgentIntent {
+                    id: IntentId(9),
+                    grant: "att_test".into(),
+                    deadline: Some(Duration::from_secs(5)),
+                    fence: None,
+                    kind: IntentKind::Exec {
+                        spec: CommandSpec {
+                            command: "whoami".into(),
+                            cwd: None,
+                            env: Vec::new(),
+                            timeout: Duration::from_secs(5),
+                            stdin: None,
+                            max_output_bytes: None,
+                        },
+                    },
+                }),
+                &events,
+            )
+            .await
+            .expect("handled");
+        assert_eq!(outcome, None, "a refusal does not end the session");
+
+        match events_rx.try_recv().expect("an answer, not a silence") {
+            SessionEvent::AgentRefused(refusal) => {
+                assert_eq!(refusal.id, IntentId(9));
+                assert_eq!(refusal.name, IntentName::Exec);
+                assert!(!refusal.reason.is_empty(), "a refusal says why");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // Refused means nothing was delivered. An agent that is told "no" and
+        // has had something sent anyway cannot reason about the remote at all.
+        assert!(
+            rx.try_recv().is_err(),
+            "a refused intent must put nothing on the wire"
+        );
+    }
+
     /// A disconnect releases every held key before the ultimatum. A key the
     /// server believes is held repeats into the session forever
     /// (PRDRDP/05 §2.11).
@@ -1642,18 +1736,22 @@ mod tests {
         use rdp_pdu::input::fastpath::{keyboard_flags, FastPathInputEvent, FastPathInputPdu};
 
         let (tx, mut rx) = mpsc::channel(crate::transport::writer::WRITER_QUEUE);
+        let (events, _events_rx) = mpsc::channel(8);
         let mut rl = loop_with(&[][..], tx);
-        rl.handle_command(ClientCommand::Key {
-            keysym: 0,
-            keycode: Some(0x1e),
-            down: true,
-        })
+        rl.handle_command(
+            ClientCommand::Key {
+                keysym: 0,
+                keycode: Some(0x1e),
+                down: true,
+            },
+            &events,
+        )
         .await
         .expect("queued");
         let _press = rx.recv().await.expect("the press");
 
         let outcome = rl
-            .handle_command(ClientCommand::Disconnect)
+            .handle_command(ClientCommand::Disconnect, &events)
             .await
             .expect("queued");
         assert_eq!(outcome, Some(RunOutcome::UserDisconnect));

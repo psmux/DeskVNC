@@ -16,6 +16,8 @@
 //! | [`state`]       | [`SessionState`], the lifecycle the UI renders          |
 //! | [`events`]      | What a session tells the shell                          |
 //! | [`commands`]    | What the shell tells a session                          |
+//! | [`intent`]      | What an agent wants done (PRDAgentPlug/00 R28)          |
+//! | [`keys`]        | The named key table an intent presses by name           |
 //! | [`stats`]       | Per tick measurements                                   |
 //! | [`driver`]      | Protocol identity, the session handle, the event sink   |
 //! | [`reconnect`]   | The retry ladder, shared by every protocol              |
@@ -35,6 +37,8 @@ pub mod credentials;
 pub mod driver;
 pub mod events;
 pub mod geometry;
+pub mod intent;
+pub mod keys;
 pub mod options;
 pub mod pins;
 pub mod reconnect;
@@ -46,6 +50,8 @@ pub use credentials::*;
 pub use driver::*;
 pub use events::*;
 pub use geometry::*;
+pub use intent::*;
+pub use keys::*;
 pub use options::*;
 pub use pins::*;
 pub use state::*;

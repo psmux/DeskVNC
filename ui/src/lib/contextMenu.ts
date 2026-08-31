@@ -35,6 +35,20 @@
 /** Marks an element that is editable for machinery, not for a human. */
 const CAPTURE_ATTRIBUTE = "data-remote-capture";
 
+/**
+ * Marks a field that is focused for convenience rather than because anyone
+ * asked for it.
+ *
+ * An empty pane focuses its host search box so a split can be typed into
+ * straight away. That is worth having, but it means a genuine text field now
+ * holds the focus for as long as the pane sits empty, and the editing menu a
+ * webview offers is built from the FOCUSED element rather than the clicked one
+ * (see the note above). Suppressing the event we can see is not always enough
+ * on that path, so a secondary click anywhere in the chrome also lets this kind
+ * of field go: nothing is lost, because nobody chose to be in it.
+ */
+const COURTESY_FOCUS_ATTRIBUTE = "data-courtesy-focus";
+
 /** xterm's hidden input element, which exists for the same reason. */
 const TERMINAL_HELPER_CLASS = "xterm-helper-textarea";
 
@@ -84,7 +98,29 @@ export function installContextMenuSuppressor(root: Window = window): () => void 
     if (e.defaultPrevented) return;
     if (allowsNativeContextMenu(e.target)) return;
     e.preventDefault();
+    dropCourtesyFocus(root, e.target);
   };
   root.addEventListener("contextmenu", onContextMenu);
   return () => root.removeEventListener("contextmenu", onContextMenu);
+}
+
+/**
+ * Let go of a field nobody chose to be in, when the click was somewhere else.
+ *
+ * `preventDefault` above deals with the menu the page is offered. It does not
+ * reliably deal with the editing menu a webview puts up for whatever is
+ * FOCUSED, which is the whole reason this module exists, and which came back
+ * the moment a real text field started being focused as a courtesy. Blurring it
+ * removes the thing that menu would have been about.
+ *
+ * Only ever a field marked as courtesy-focused, and only when the click landed
+ * outside it: a search box the user deliberately clicked into keeps its focus
+ * and its menu, which is the behaviour the rule above is there to protect.
+ */
+function dropCourtesyFocus(root: Window, target: EventTarget | null): void {
+  const active = root.document.activeElement;
+  if (!(active instanceof HTMLElement)) return;
+  if (!active.hasAttribute(COURTESY_FOCUS_ATTRIBUTE)) return;
+  if (target instanceof Node && active.contains(target)) return;
+  active.blur();
 }

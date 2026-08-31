@@ -709,6 +709,239 @@ discriminator, top-level keys **camelCase**:
 
 Seed initial state with [`list_active_sessions`](#list_active_sessions), anything broadcast before the listener registered is lost.
 
+### `agent://event`, app-wide (JSON)
+
+Who is driving a machine, broadcast with `emit` (every window) so a pane can
+show an agent badge and a take-the-wheel control without owning the socket the
+agent is on. Flat payloads on a `type` discriminator, top-level keys
+**camelCase**, and an unknown `type` must be ignored, exactly as for
+`sessions://event`.
+
+| Payload | When |
+|---|---|
+| `{ type: "plane", enabled, socket, error? }` | the agent plane was switched on or off. `socket` is the unix socket's path, or `null`. `error` is present only when it was asked to start and could not |
+| `{ type: "attached", sessionId, attachmentId, client }` | an agent attached to that session over `dvvp.v1`. `client` is the name the agent gave in `hello`, e.g. `"dvv"`, and it is **untrusted text**: render it as text, never as HTML |
+| `{ type: "lease", sessionId, attachmentId, client, held, phase, holderKind, holderLabel, humanTookOver, revoked, inflight }` | the agent reported where its lease is, or a person took the wheel |
+| `{ type: "detached", sessionId, attachmentId? }` | the agent let the session go, or the session ended |
+| `{ type: "counts", agentsConnected, sessionsDriven, sessionsLive }` | one of those three numbers moved. **On change only, never on a timer**, and never repeated with the same three values |
+
+The `lease` payload is the one a pane renders, and its fields are:
+
+| Field | Meaning |
+|---|---|
+| `held` | the agent holds the control lease on this session right now |
+| `phase` | the lease phase as the agent spells it: `"held"`, `"free"`, `"handing-over"`, `"revoked"` |
+| `holderKind` | `"agent"`, `"human"`, `"admin"` or `null` |
+| `holderLabel` | display name of the holder, or `null`. **Untrusted text** |
+| `humanTookOver` | a spelled-out boolean rather than a `reason` string to pattern match: true means a PERSON has the machine |
+| `revoked` | this attachment has been stood down and every further command from it is refused |
+| `inflight` | zero or more command kinds the agent has on the wire right now, e.g. `["pointer"]`. Coalesced: a drag of two hundred pointer events is one payload, not two hundred |
+
+The `counts` payload is what a status bar reads, and only the shell knows all
+three of its numbers:
+
+| Field | Meaning |
+|---|---|
+| `agentsConnected` | distinct CLIENTS connected right now, over any transport this plane serves. Not attachments: one agent holding four limbs is `1`. A connection counts from its `hello` (a connection that has not said hello can do nothing at all) until it ends, however it ends |
+| `sessionsDriven` | sessions an agent HOLDS the control lease on right now, which is `held` plus a `holderKind` of `"agent"`. Attached and idle is **not** driving, and a person taking the wheel drops this without dropping `agentsConnected` |
+| `sessionsLive` | every live session in the registry, agent driven or not, so a person reads "3 of 11" rather than a bare "3". Truthful with the plane switched off, when the other two are `0` |
+
+The same three fields sit on `agent_status`, with the same names, so a window
+seeds the bar from the command on mount and follows this payload after that.
+A session ENDING emits one of these; a session being **opened** does not, since
+the plane is not on that path. Re-seed from `agent_status` on
+`sessions://event` `{ type: "started" }`.
+
+**The lease itself lives in the agent's process, not here.** `agent-lease` runs
+inside `dvv`, so the shell renders what the holder reported and keeps no second
+opinion about it. The one thing the shell decides on its own is the revocation:
+`agent_take_the_wheel` sets `revoked`, and a revoked attachment cannot report
+itself back into the wheel.
+
+Seed initial state with `agent_status`; anything broadcast before the listener
+registered is lost.
+
+### `agent_status` / `agent_take_the_wheel`, `commands/agent.rs`
+
+```jsonc
+// invoke("agent_status")
+{ "enabled": true,                                  // is the socket really there
+  "socket": "/Users/…/DeskVNCViewer/agent.sock",    // or null
+  // The absolute path of the `dvv` that shipped inside this app bundle, or
+  // null. See below.
+  "binary": "/Applications/DeskVNCViewer.app/Contents/MacOS/dvv",
+  "attachments": [ /* one `lease` shaped payload per attached session */ ],
+  // The status bar's three numbers, flat, exactly as the `counts` event
+  // spells them. Zero and zero with the plane off; `sessionsLive` is
+  // truthful either way.
+  "agentsConnected": 1,
+  "sessionsDriven": 0,
+  "sessionsLive": 3 }
+
+// invoke("agent_take_the_wheel", { sessionId })
+// -> null. Idempotent: taking the wheel of a machine no agent is driving is
+//    an ordinary success.
+```
+
+`agent_take_the_wheel` is a revocation and not a request, with no grace window.
+The session itself is untouched: a revoked agent that had a build running does
+not take the build with it.
+
+**`binary`** is the agent binary the connect instructions name, and it really
+ships: `scripts/package-macos.sh` builds `dvv` and copies it into
+`DeskVNCViewer.app/Contents/MacOS/dvv`, beside the main executable, where it is
+signed with the same identity, notarized in the same submission and deleted
+with the app. The path is derived from `std::env::current_exe()` and never
+composed from a guess, so it is correct wherever a person dragged the bundle,
+including a second copy on an external disk.
+
+It is **`null` in a development build**, which has no bundle. That is the
+honest answer and not a gap: `target/debug/dvv` does sit beside
+`target/debug/deskvncviewer`, but the instructions this path appears in are
+about an installed app. Render a placeholder when it is null, and never print
+the placeholder as if it were a path.
+
+### `agent_register_with_claude`, `commands/agent.rs`
+
+One button, no line to paste. It runs
+
+```
+claude mcp add --scope user deskvnc -- <binary> mcp --stdio
+```
+
+as an argv array and never through a shell, so a bundle path with a space in it
+works and cannot become anything the shell would act on. The child is bounded
+at 20 seconds and killed if it overruns. Both pipes are drained while it runs.
+
+```jsonc
+// invoke("agent_register_with_claude")
+{ "status": "registered",
+  "claude": "/opt/homebrew/bin/claude",
+  "argv": ["mcp", "add", "--scope", "user", "deskvnc", "--", "/Applications/…/dvv", "mcp", "--stdio"] }
+
+{ "status": "already-registered", "claude": "/opt/homebrew/bin/claude" }
+
+// Claude Code is not installed, or not anywhere this app can see it. `looked`
+// is every path that was tried, in order, so the modal can show the search
+// rather than assert a negative.
+{ "status": "claude-not-found", "looked": ["/usr/bin/claude", "…"] }
+
+// A dev build. There is no bundled `dvv` to register, and `binary` is null for
+// the same reason.
+{ "status": "no-binary" }
+
+// `claude` ran and refused. `stderr` is its own words: UNTRUSTED TEXT, render
+// it as text and never as HTML. `code` is null when the spawn itself failed.
+{ "status": "failed", "claude": "…", "code": 1, "stderr": "…" }
+
+{ "status": "timed-out", "claude": "…", "seconds": 20 }
+```
+
+Switch on `status`, which is kebab-case like every other discriminator here,
+and treat an unknown one as a failure worth showing rather than a success.
+
+`claude` is looked for on `PATH` first and then in the locations the published
+installers use (`~/.claude/local`, `~/.local/bin`, the bun/volta/npm prefixes,
+`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`). A GUI app on macOS inherits
+launchd's `PATH` and not a person's shell profile, which is why the second half
+of that list exists, and why the child is given a `PATH` with those directories
+on it: Claude Code's npm build is a script that has to find `node`.
+
+### The agent plane's socket, `dvvp.v1`
+
+Off by default. The app-setting key is **`agent_plane_enabled`**, read the same
+way as `allow_multiple_sessions_per_host`: only `"true"`, `"1"`, `"yes"` or
+`"on"` switch it on, and anything else is off. Writing it through
+`set_app_setting` takes effect at once, binding or unlinking the socket without
+a restart. **With it off there is no socket, no task and no file.**
+
+The socket is a unix domain socket at
+`~/Library/Application Support/DeskVNCViewer/agent.sock` on macOS,
+`$XDG_RUNTIME_DIR/deskvncviewer/agent.sock` on Linux, mode `0600`. Note that
+this is the product-name directory, not `app_data_dir()`'s bundle-identifier
+one: it is the path `dvv doctor` prints. There is no TCP listener and no
+feature flag for one.
+
+Its framing and verbs are `PRDAgentPlug/04 §2` and the code is
+`src-tauri/src/agent/`. It is **not** part of the webview contract and no
+webview reaches it. Two things about it belong here because they are the same
+vocabularies this document already defines:
+
+* Every message is an 8 byte envelope, `[u8 msg_type][u8 flags][u16
+  reserved][u32 len]`, little endian, then `len` bytes. `msg_type` 0 is one
+  JSON-RPC 2.0 message; 1 to 4 are `FRAME_FORMAT.md`'s lanes and **are not
+  carried in this build**. An unknown `msg_type` is ignored, as everywhere else.
+* `limb.command` carries one `ClientCommand` as `{ "kind": … }`, hand-decoded in
+  `src-tauri/src/agent/wire.rs` for the reason `ClientCommand` does not derive
+  `Serialize`: a new variant has to be a decision rather than a silent drop.
+  `provide-credentials`, `cancel-credentials` and `trust-certificate` are
+  refused by name and always will be. Answering a credential or a certificate
+  prompt is a person's act, in this application.
+* **Pixels ride on the control lane, as the answer to `screen.read`.** The
+  binary lanes are not built and a push lane would be the wrong shape anyway:
+  `dvv`'s session source is synchronous request and reply over one blocking
+  socket, with no reader task a push could arrive on. So a frame is a reply,
+  with the encoded image base64 in `observation.image.base64` beside the
+  `observation.image.space` that says how to turn a pixel of it back into a
+  framebuffer coordinate. The encoded image is capped so the reply fits the
+  8 MB envelope; over it the call is **refused** with `IMAGE_TOO_LARGE` and no
+  smaller image is substituted.
+
+#### Perception on `dvvp.v1`
+
+Off unless asked for. `limb.attach` takes `perceive`, which is `false` (the
+default), `"damage"` or `true`/`"frames"`:
+
+| `perceive` | what is allocated | what is put on the person's session |
+|---|---|---|
+| absent or `false` | nothing | nothing |
+| `"damage"` | a rectangle log | nothing |
+| `true` / `"frames"` | a framebuffer mirror, `width * height * 4` bytes | the `03 §3.4` order: `SetQuality(high)` then `Refresh` on VNC, `Refresh` elsewhere |
+
+**A mirror changes the session a person may be watching**, and that is why it
+is opt in. On VNC the preset moves to High because that is the only preset
+which clears `allow_h264` without dropping the session to a palette, and a
+mirror fed an H.264 rectangle holds stale pixels in exactly the region that is
+moving with no error anywhere. `limb.detach` puts the preset back and reports
+which one in `qualityRestored`; so does switching the plane off.
+
+`limb.attach` and `limb.status` both carry a `perception` object:
+
+```jsonc
+{ "mirror": true,      // a framebuffer mirror exists for this session
+  "frames": false,     // …and every tile has been painted, so a read can answer
+  "priming": true,     // the refresh is on the wire and has not landed
+  "size": { "width": 1920, "height": 1080 },
+  "bytes": 8294400,
+  "geometryGeneration": 1,
+  "h264Rects": 0,      // non-zero means the renegotiation did not take
+  "negotiated": ["set-quality", "refresh"],   // what was sent, or `wouldNeed`
+  "restoreOnDetach": "auto",
+  "why": "…" }         // present whenever `frames` is false
+```
+
+`screen.read` takes `{ sessionId, kind?, rect?, longEdge?, scale?, margin?,
+format?, jpegQuality?, stale?, generation? }`. `kind` defaults to `"change"`, a
+crop around what moved, chosen from the damage rect **list** and never from its
+bounding box; the others are `"frame"` (downscaled, long edge 1456 by default)
+and `"region"` (native resolution, scale exactly 1.0). It answers either
+`{ "unchanged": true, "geometryGeneration": n }`, which is an answer and not an
+error, or `{ "unchanged": false, "observation": … }` where the observation is
+`agent-perception`'s `FrameObservation` plus `image.base64`.
+
+`screen.damage` takes `{ sessionId }` and answers `{ rects, bounds, space,
+updates, dropped, geometryGeneration, quiet }`. An empty list is **not**
+evidence the screen is still.
+
+Capabilities are checked per connection and split: `screen.read` needs
+`capture`, `screen.damage` needs `view`, and holding `view` never implies
+`capture`. A client may narrow its own set by passing `capabilities` to
+`hello`; it can never widen it. Refusals are tagged for branching:
+`PRIMING` (transient, wait and read again), `STALE_REGION` (not transient, the
+session is still sending H.264), `NO_MIRROR`, `BUDGET_REFUSED`,
+`NO_FRAMEBUFFER`, `OUT_OF_BOUNDS`, `GEOMETRY_CHANGED`, `IMAGE_TOO_LARGE` and
+`MISSING_CAPABILITY`.
+
 ### `sessions://stats`, app-wide (JSON)
 
 Broadcast with `emit` once per stats tick (1 Hz per connected session), in
@@ -1005,6 +1238,7 @@ conflates them will look for terminal output on the wrong channel.
 | Command | JS call | Returns |
 |---|---|---|
 | `ssh_probe` | `invoke("ssh_probe", { host, port?, timeoutMs? })` | `boolean`, never rejects; `port` defaults to 22 |
+| `ssh_list_local_keys` | `invoke("ssh_list_local_keys")` | `LocalKeys`, **never rejects**; empty when there is no `~/.ssh` |
 | `ssh_list_wsl_distros` | `invoke("ssh_list_wsl_distros", { config })` | `string[]`, **never rejects**; empty when the question cannot be answered |
 | `ssh_connect` | `invoke("ssh_connect", { sessionId, windowLabel, config })` | `SshConnectOutcome` |
 | `ssh_send` | `invoke("ssh_send", { sessionId, data })` | `void`; `data` is **base64** |
@@ -1026,6 +1260,37 @@ string. The framebuffer path solves the same problem with the binary framing in
 `FRAME_FORMAT.md`, which earns its keep at megabytes per second; a terminal is
 orders of magnitude quieter, so it rides the normal event channel instead.
 Decode to a `Uint8Array` and hand it straight to the emulator.
+
+### `ssh_list_local_keys`
+
+Lists the private keys in the user's `~/.ssh`, so the host editor can offer a
+list to pick from instead of a text box that wants an absolute path typed from
+memory.
+
+```jsonc
+{
+  "dir": "/Users/gj/.ssh",          // where it looked; also where Browse opens
+  "keys": [
+    {
+      "path": "/Users/gj/.ssh/id_ed25519",
+      "name": "id_ed25519",
+      "kind": "ed25519",            // "" when it cannot be named unlocked
+      "comment": "gj@laptop",       // the .pub sibling's trailing comment
+      "encrypted": false            // needs a passphrase to use
+    }
+  ]
+}
+```
+
+**No key material crosses the boundary, and none needs to.** Each candidate is
+read only far enough to tell a private key from a `known_hosts` (the first 4
+KiB, which is all the identifying header), and `kind` and `comment` come from
+the *public* half of the pair. The private key itself is read on the Rust side
+at connect time, as always.
+
+Like `ssh_list_wsl_distros` it **never rejects**: a machine that has never used
+SSH has no `~/.ssh`, which is an ordinary state. `dir` still comes back so the
+Browse button has somewhere to open, and the editor falls back to a path field.
 
 ### `ssh_list_wsl_distros`
 

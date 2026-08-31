@@ -451,6 +451,17 @@ pub(crate) struct RunLoop {
     screens: Vec<Screen>,
     /// keysym → keycode for every key we believe is currently pressed.
     pressed: HashMap<u32, Option<u32>>,
+    /// Where the last PointerEvent we sent put the cursor, so the release
+    /// path can lift the buttons where the user actually left them rather
+    /// than teleporting to the origin first.
+    last_pos: Option<(u16, u16)>,
+    /// The button mask of that last PointerEvent, and the whole reason the
+    /// release path needs anything at all: a PointerEvent carries the FULL
+    /// button state (RFB 3.8 §7.5.5), so the server holds whatever it was
+    /// last told until a later event clears the bit. Nothing here remembered
+    /// it, so a button held at the moment focus went away stayed held with no
+    /// state anywhere to release it from.
+    last_mask: u16,
     /// Continuous updates negotiated and switched on.
     cu_active: bool,
     /// The stored resize request has been re-applied on this connection.
@@ -612,6 +623,8 @@ impl RunLoop {
             fb_height,
             screens: Vec::new(),
             pressed: HashMap::new(),
+            last_pos: None,
+            last_mask: 0,
             cu_active: false,
             resize_reapplied: false,
             priming_update_pending: true,
@@ -692,8 +705,9 @@ impl RunLoop {
 
             match step {
                 Step::Cancelled => {
-                    // Keyboard safety: never leave stuck modifiers behind.
-                    let _ = self.release_all_keys(settings).await;
+                    // Input safety: never leave a stuck modifier, or a stuck
+                    // mouse button, behind.
+                    let _ = self.release_all_input(settings).await;
                     return Err(VncError::Cancelled);
                 }
                 Step::Message(byte) => {
@@ -716,7 +730,7 @@ impl RunLoop {
                 Step::Command(None) => {
                     // The handle was dropped: nobody can control this session
                     // any more. Treat as cancellation.
-                    let _ = self.release_all_keys(settings).await;
+                    let _ = self.release_all_input(settings).await;
                     return Err(VncError::Cancelled);
                 }
                 Step::Command(Some(cmd)) => {
@@ -1504,9 +1518,20 @@ impl RunLoop {
     ) -> Result<()> {
         match cmd {
             ClientCommand::Pointer { x, y, button_mask } => {
-                if !settings.view_only {
+                if settings.view_only {
+                    // Nothing went out, so the server holds nothing:
+                    // remembering a mask we never sent would make
+                    // `release_all_input` lift a button the server was never
+                    // told about.
+                    self.last_mask = 0;
+                } else {
                     let msg = crate::input::encode_pointer_event(x, y, button_mask);
                     self.send(&msg).await?;
+                    // Recorded AFTER the send, so a write that failed does not
+                    // leave us believing the server knows about a button it
+                    // never heard of.
+                    self.last_pos = Some((x, y));
+                    self.last_mask = button_mask;
                 }
             }
             ClientCommand::Key {
@@ -1524,7 +1549,7 @@ impl RunLoop {
                     }
                 }
             }
-            ClientCommand::ReleaseAllKeys => self.release_all_keys(settings).await?,
+            ClientCommand::ReleaseAllKeys => self.release_all_input(settings).await?,
             other => {
                 debug_assert!(false, "not an input command: {other:?}");
             }
@@ -1558,7 +1583,7 @@ impl RunLoop {
                     self.handle_input_command(cmd, settings).await?;
                 }
                 ClientCommand::Disconnect => {
-                    let _ = self.release_all_keys(settings).await;
+                    let _ = self.release_all_input(settings).await;
                     self.pending_outcome = Some(RunOutcome::UserDisconnect);
                     return Ok(());
                 }
@@ -1576,7 +1601,7 @@ impl RunLoop {
     ) -> Result<Option<RunOutcome>> {
         match cmd {
             ClientCommand::Disconnect => {
-                let _ = self.release_all_keys(settings).await;
+                let _ = self.release_all_input(settings).await;
                 return Ok(Some(RunOutcome::UserDisconnect));
             }
             // Handshake-time commands. If one arrives while connected the
@@ -1693,7 +1718,7 @@ impl RunLoop {
             ClientCommand::SetViewOnly(v) => {
                 settings.view_only = v;
                 if v {
-                    self.release_all_keys(settings).await?;
+                    self.release_all_input(settings).await?;
                 }
             }
             ClientCommand::SetPreferScancodes(v) => {
@@ -1702,7 +1727,7 @@ impl RunLoop {
                 // key-down did, otherwise the remote can be left with a key
                 // stuck in whichever encoding it no longer listens to.
                 if settings.prefer_scancodes != v {
-                    self.release_all_keys(settings).await?;
+                    self.release_all_input(settings).await?;
                     settings.prefer_scancodes = v;
                 }
             }
@@ -1712,6 +1737,27 @@ impl RunLoop {
             }
             ClientCommand::ReconnectNow => {
                 // Already connected, nothing to do.
+            }
+            ClientCommand::Agent(intent) => {
+                // `PRDAgentPlug/00 R28`. RFB carries pointer messages, key
+                // messages, cut text and framebuffer requests, and nothing
+                // that could carry an intent. There is no native variant to
+                // serve here and there will not be one: this is a property of
+                // the protocol, not of how far this build has got.
+                //
+                // Answered rather than ignored, and that is the whole point of
+                // the arm. The arms above are allowed to shrug at a misrouted
+                // terminal command because a person is watching the session
+                // and will notice nothing happened. An agent is watching
+                // nothing; it is blocked on a settlement, and a shrug here is
+                // an agent that waits forever.
+                emit(
+                    events,
+                    SessionEvent::AgentRefused(intent.refuse(
+                        "RFB has no native command channel: this intent cannot be served over VNC",
+                    )),
+                )
+                .await?;
             }
         }
         let _ = events; // arms that need the event channel use helpers
@@ -1743,9 +1789,41 @@ impl RunLoop {
         }
     }
 
-    /// Send key-up for everything we believe is pressed (blur / disconnect /
-    /// view-only safety, PRD/05 §6.3).
-    async fn release_all_keys(&mut self, settings: &SessionSettings) -> Result<()> {
+    /// Release everything we believe is held, buttons first and then keys
+    /// (blur / disconnect / view-only safety, PRD/05 §6.3).
+    ///
+    /// This used to release keys only, and the buttons were missing for the
+    /// same reason they were missing in `rdp-core` before it grew the same
+    /// fix: a PointerEvent carries the whole button state, so the server goes
+    /// on holding the last mask it was told until something clears the bit.
+    /// A button held when focus was lost therefore stayed held, and an
+    /// interrupted drag COMPLETED at wherever the next pointer event landed
+    /// instead of being cancelled. That is a dragged file dropped somewhere
+    /// nobody chose.
+    ///
+    /// Buttons before keys: a modifier that is still held while the button
+    /// goes up is what the server saw when it went down, so the gesture ends
+    /// the way it began.
+    ///
+    /// Unlike the RDP path there is no transition to compute here (RFB sends
+    /// an absolute mask, not per-button up/down events), so a cleared
+    /// `last_mask` cannot swallow the next press the way a stale one there
+    /// did: the next PointerEvent goes out whole whatever we believe. The
+    /// mask is still cleared, so a second release in a row sends nothing.
+    async fn release_all_input(&mut self, settings: &SessionSettings) -> Result<()> {
+        if self.last_mask != 0 {
+            // `last_mask` is only ever non-zero after a PointerEvent went
+            // out, so `last_pos` is Some by construction; the fallback is
+            // there so a future caller cannot turn a missed update into a
+            // panic.
+            let (x, y) = self.last_pos.unwrap_or((0, 0));
+            // Cleared before the send, not after: if the write fails the
+            // socket is going away, and we must not be left believing a
+            // button is still held on a server we can no longer talk to.
+            self.last_mask = 0;
+            let msg = crate::input::encode_pointer_event(x, y, 0);
+            self.send(&msg).await?;
+        }
         let pressed: Vec<(u32, Option<u32>)> = self.pressed.drain().collect();
         for (keysym, keycode) in pressed {
             self.send_key(keysym, keycode, false, settings.prefer_scancodes)

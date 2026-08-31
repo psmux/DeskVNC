@@ -60,6 +60,35 @@ export const PREF_EDGE_PAN = "edgePan";
  * a chevron still leaves the chevron. Off by default.
  */
 export const PREF_HIDE_TOOLBAR = "hideToolbar";
+/**
+ * Take the agent counts out of the activity strip.
+ *
+ * Off by default, so the counts show wherever there is a plane to count: a
+ * number of remote machines being driven by something other than the person
+ * watching is not a thing to make somebody go looking for. With the plane
+ * switched off there is no strip and this preference decides nothing.
+ *
+ * The strip is not the only way back: this switch lives in Preferences, which
+ * is where it stays reachable after the counts are gone.
+ */
+export const PREF_HIDE_AGENT_STATUS = "hideAgentStatus";
+
+/**
+ * Fired on `window` when a boolean preference is written in THIS window.
+ *
+ * Preferences and the shell chrome share a window here, so a switch flipped in
+ * one has to reach the other without a reload. Readers that want to follow a
+ * preference live listen for this and re-read; readers that only need the
+ * value at the moment they act, which is most of them, carry on calling
+ * [`readBoolPref`] and ignore it entirely. `detail` carries the key so a
+ * listener can drop the events that are not about it.
+ */
+export const PREF_CHANGED_EVENT = "deskvnc://pref-changed";
+
+export interface PrefChanged {
+  key: string;
+  value: boolean;
+}
 
 export function prefStorageKey(key: string): string {
   return `${PREFIX}${key}`;
@@ -83,5 +112,15 @@ export function writeBoolPref(key: string, value: boolean): void {
     localStorage.setItem(prefStorageKey(key), value ? "1" : "0");
   } catch {
     /* storage unavailable; the preference simply does not persist */
+  }
+  // Outside the try above on purpose: a webview that refuses storage still has
+  // the value for as long as this window lives, and a listener that acts on it
+  // should get the same answer either way.
+  try {
+    window.dispatchEvent(
+      new CustomEvent<PrefChanged>(PREF_CHANGED_EVENT, { detail: { key, value } }),
+    );
+  } catch {
+    /* no DOM (a unit test); nothing is listening in that case either */
   }
 }

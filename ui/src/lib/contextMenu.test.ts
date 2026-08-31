@@ -138,4 +138,59 @@ describe("the rule", () => {
     expect(allowsNativeContextMenu(disabled)).toBe(false);
     expect(allowsNativeContextMenu(readOnly)).toBe(false);
   });
+
+  /**
+   * The editing menu a webview offers is built from the FOCUSED element, not
+   * the clicked one, which is the whole reason this module exists. A field that
+   * was focused as a courtesy rather than by choice therefore has to let go
+   * when the user's secondary click was plainly about something else.
+   */
+  describe("a field focused as a courtesy", () => {
+    function courtesyField(): HTMLInputElement {
+      const input = document.createElement("input");
+      input.setAttribute("data-courtesy-focus", "true");
+      document.body.appendChild(input);
+      input.focus();
+      return input;
+    }
+
+    it("is let go when the secondary click lands on the chrome", () => {
+      const input = courtesyField();
+      const tab = document.createElement("button");
+      document.body.appendChild(tab);
+      expect(document.activeElement).toBe(input);
+
+      const undo = installContextMenuSuppressor(window);
+      tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      undo();
+
+      expect(document.activeElement).not.toBe(input);
+    });
+
+    it("keeps its focus, and its menu, when the click is inside it", () => {
+      const input = courtesyField();
+
+      const undo = installContextMenuSuppressor(window);
+      input.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      undo();
+
+      // It is still a genuine text field, so Cut/Copy/Paste is exactly right.
+      expect(allowsNativeContextMenu(input)).toBe(true);
+      expect(document.activeElement).toBe(input);
+    });
+
+    it("leaves a field the user chose alone", () => {
+      const search = document.createElement("input");
+      document.body.appendChild(search);
+      search.focus();
+      const tab = document.createElement("button");
+      document.body.appendChild(tab);
+
+      const undo = installContextMenuSuppressor(window);
+      tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      undo();
+
+      expect(document.activeElement).toBe(search);
+    });
+  });
 });

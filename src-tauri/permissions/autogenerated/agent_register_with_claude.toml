@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-register-with-claude"
+description = "Enables the agent_register_with_claude command without any pre-configured scope."
+commands.allow = ["agent_register_with_claude"]
+
+[[permission]]
+identifier = "deny-agent-register-with-claude"
+description = "Denies the agent_register_with_claude command without any pre-configured scope."
+commands.deny = ["agent_register_with_claude"]

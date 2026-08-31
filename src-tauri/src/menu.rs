@@ -437,6 +437,67 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 .build(app)?,
         )
         .separator()
+        // Panes divide one tab between several sessions. These sit beside the
+        // tab items and reach the library window the same way, for the same
+        // reason: the layout belongs to the shell, and the session in front
+        // has no idea what shape it is being shown in.
+        //
+        // Every one carries Alt on top of the platform modifier. The plain
+        // pairs are spoken for (Shift+W closes a tab, Shift+D disconnects),
+        // and a chord that closed a pane when the user meant the tab is the
+        // kind of near miss that costs a connection.
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:split-right", "Split Right")
+                .accelerator("CmdOrCtrl+Alt+D")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:split-down", "Split Down")
+                .accelerator("CmdOrCtrl+Alt+Shift+D")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:next", "Next Pane")
+                .accelerator("CmdOrCtrl+Alt+]")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:prev", "Previous Pane")
+                .accelerator("CmdOrCtrl+Alt+[")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:zoom", "Maximise Pane")
+                .accelerator("CmdOrCtrl+Alt+Z")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:even", "Even Out Panes")
+                .accelerator("CmdOrCtrl+Alt+=")
+                .build(app)?,
+        )
+        // Ready made grids, so a wall of machines does not have to be built one
+        // split at a time. The counts are the ones people actually ask for; the
+        // frontend can lay out any number, these are just the ones worth a
+        // menu item. Whatever is already connected in the tab is kept and
+        // re-placed, and the rest of the panes come up empty.
+        .item(
+            &SubmenuBuilder::new(app, "Arrange")
+                .item(&action!("menu:pane:grid:2", "2 Panes"))
+                .item(&action!("menu:pane:grid:3", "3 Panes"))
+                .item(&action!("menu:pane:grid:4", "4 Panes"))
+                .item(&action!("menu:pane:grid:6", "6 Panes"))
+                .item(&action!("menu:pane:grid:8", "8 Panes"))
+                .item(&action!("menu:pane:grid:9", "9 Panes"))
+                .item(&action!("menu:pane:grid:12", "12 Panes"))
+                .build()?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:pane:close", "Close Pane")
+                .accelerator("CmdOrCtrl+Alt+W")
+                .build(app)?,
+        )
+        .separator()
         .minimize()
         .maximize()
         .separator()
@@ -639,15 +700,35 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 tracing::warn!("failed to open {url}: {e}");
             }
         }
-        "menu:tab:library" | "menu:tab:next" | "menu:tab:prev" | "menu:tab:close" => {
-            // The tab strip lives in the library window, so these always go
-            // there rather than to whatever is focused: a session window in
-            // front must not swallow "next tab" into a webview that has no
-            // tabs. Deliberately WITHOUT the show/focus dance below, in the
-            // tabbed view the library window is already the focused one, and
-            // in the separate-windows view there are no tabs to switch, so
-            // raising the library over the session the user is working in
-            // would be a jump scare rather than a feature.
+        "menu:tab:library"
+        | "menu:tab:next"
+        | "menu:tab:prev"
+        | "menu:tab:close"
+        | "menu:pane:split-right"
+        | "menu:pane:split-down"
+        | "menu:pane:next"
+        | "menu:pane:prev"
+        | "menu:pane:even"
+        | "menu:pane:zoom"
+        | "menu:pane:close" => {
+            // The tab strip and the pane layout both live in the library
+            // window, so these always go there rather than to whatever is
+            // focused: a session window in front must not swallow "next tab"
+            // into a webview that has no tabs, nor "split right" into one that
+            // has no panes. Deliberately WITHOUT the show/focus dance below,
+            // in the tabbed view the library window is already the focused
+            // one, and in the separate-windows view there is nothing to switch
+            // or divide, so raising the library over the session the user is
+            // working in would be a jump scare rather than a feature.
+            let payload = serde_json::json!({ "id": id });
+            let _ = app.emit_to("main", "menu://action", payload);
+        }
+        // The grid sizes carry their count in the id, so they are matched by
+        // prefix rather than listed twice.
+        custom if custom.starts_with("menu:pane:grid:") => {
+            // Same destination and the same reasoning as the arm above; these
+            // carry their pane count in the id, so they match by prefix rather
+            // than being listed one by one.
             let payload = serde_json::json!({ "id": id });
             let _ = app.emit_to("main", "menu://action", payload);
         }

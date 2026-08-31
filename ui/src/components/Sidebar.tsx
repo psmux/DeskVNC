@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import type { HostGroup, HostProfile, HostTag } from "../lib/types";
 import { classNames } from "../lib/util";
 import {
+  IconAgent,
   IconChevronDown,
   IconChevronRight,
   IconClock,
@@ -13,6 +14,7 @@ import {
   IconGear,
   IconPlus,
 } from "./icons";
+import { AgentConnect } from "./AgentConnect";
 
 export type SidebarSelection =
   | { kind: "all" }
@@ -36,6 +38,7 @@ export function Sidebar({
   onNewGroup,
   onNewTag,
   onOpenPreferences,
+  onGroupContextMenu,
   dragging = false,
   dropOverKey = null,
 }: {
@@ -53,6 +56,12 @@ export function Sidebar({
   onNewTag: () => void;
   onOpenPreferences: () => void;
   /**
+   * Secondary click on a group. The Library owns the menu itself, since what
+   * belongs on it (open as a grid, forget the saved arrangement) is about
+   * sessions, which the sidebar knows nothing about.
+   */
+  onGroupContextMenu?: (group: HostGroup, x: number, y: number) => void;
+  /**
    * Hosts are being dragged over the library right now. Groups and tags are
    * drop targets, so they light up to say so; the Library owns the gesture
    * (see `useHostDragSelect`) and hit-tests the `data-drop` attributes below.
@@ -68,7 +77,19 @@ export function Sidebar({
 
   const rootGroups = groups.filter((g) => g.parentId === null).sort((a, b) => a.sort - b.sort);
 
+  /**
+   * The connect modal is owned here rather than plumbed down from the shell.
+   *
+   * It is opened from one button, it closes itself, and nothing else in the
+   * application needs to know it is open, so a prop through the Library would
+   * be three files carrying a boolean between two lines that are next to each
+   * other. Preferences is plumbed that way because the native menu opens it
+   * too; this has no second way in.
+   */
+  const [agentsOpen, setAgentsOpen] = useState(false);
+
   return (
+    <>
     <nav
       className="flex w-56 shrink-0 flex-col gap-1 overflow-y-auto border-r border-subtle bg-surface/60 px-2.5 py-3"
       aria-label="Library sections"
@@ -116,6 +137,7 @@ export function Sidebar({
             <GroupRow
               key={g.id}
               group={g}
+              onContextMenu={onGroupContextMenu}
               depth={0}
               groups={groups}
               count={groupCount}
@@ -184,7 +206,19 @@ export function Sidebar({
         )}
       </Section>
 
+      {/*
+        Above Preferences and treated exactly like it: same row, same icon
+        size, same quiet corner of the sidebar. It is the only agent chrome
+        that exists while the plane is off, which is the whole reason it is
+        here rather than behind the feature it turns on.
+      */}
       <div className="mt-auto pt-2">
+        <SidebarRow
+          icon={<IconAgent size={16} />}
+          label="AI Agents"
+          active={agentsOpen}
+          onClick={() => setAgentsOpen(true)}
+        />
         <SidebarRow
           icon={<IconGear size={16} />}
           label="Preferences"
@@ -193,6 +227,8 @@ export function Sidebar({
         />
       </div>
     </nav>
+    {agentsOpen ? <AgentConnect onClose={() => setAgentsOpen(false)} /> : null}
+    </>
   );
 }
 
@@ -288,6 +324,7 @@ function GroupRow({
   count,
   selection,
   onSelect,
+  onContextMenu,
   dragging,
   dropOverKey,
 }: {
@@ -297,6 +334,7 @@ function GroupRow({
   count: (gid: string) => number;
   selection: SidebarSelection;
   onSelect: (s: SidebarSelection) => void;
+  onContextMenu?: (group: HostGroup, x: number, y: number) => void;
   dragging?: boolean;
   dropOverKey?: string | null;
 }): ReactNode {
@@ -317,6 +355,11 @@ function GroupRow({
         )}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => onSelect({ kind: "group", id: group.id })}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          onContextMenu(group, e.clientX, e.clientY);
+        }}
       >
         <IconFolder size={15} className={active ? "text-accent" : "text-tertiary"} />
         <span className="min-w-0 flex-1 truncate text-left">{group.name}</span>
@@ -331,6 +374,7 @@ function GroupRow({
           count={count}
           selection={selection}
           onSelect={onSelect}
+          onContextMenu={onContextMenu}
           dragging={dragging}
           dropOverKey={dropOverKey}
         />

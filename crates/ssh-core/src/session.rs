@@ -32,6 +32,7 @@ use ssh_transport::{connect_and_authenticate_with, Keepalive};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::bell::BellLimiter;
 use crate::error::{Error, Result};
 use crate::events::{SshCommand, SshEvent, TerminalState};
 use crate::modes::ModeTracker;
@@ -229,7 +230,7 @@ async fn supervise(
                     return;
                 }
 
-                match wait_backoff(delay, &mut commands, &cancel, &mut terminal).await {
+                match wait_backoff(delay, &events, &mut commands, &cancel, &mut terminal).await {
                     WaitOutcome::Stop => return,
                     // The user pressed "reconnect now", which is a statement
                     // that the network is back. Taking them at their word
@@ -258,6 +259,7 @@ enum WaitOutcome {
 /// later is how people accidentally run half a command.
 async fn wait_backoff(
     delay: std::time::Duration,
+    events: &mpsc::Sender<SshEvent>,
     commands: &mut mpsc::Receiver<SshCommand>,
     cancel: &CancellationToken,
     terminal: &mut crate::options::TerminalOptions,
@@ -275,6 +277,22 @@ async fn wait_backoff(
                 Some(SshCommand::Resize { cols, rows }) => {
                     terminal.cols = cols;
                     terminal.rows = rows;
+                }
+                // There is no connection to run it on, and an agent is blocked
+                // on the answer, so it is told rather than dropped
+                // (`00 R28`). A refusal is exactly the right word here:
+                // nothing was delivered, and the sentence tells the agent to
+                // wait for the session rather than to retry into a hole.
+                Some(SshCommand::Exec(request)) => {
+                    let refusal = request.refuse(
+                        "the session is reconnecting, so no channel could be opened and nothing was run",
+                    );
+                    if emit(events, SshEvent::AgentRefused(Box::new(refusal)))
+                        .await
+                        .is_err()
+                    {
+                        return WaitOutcome::Stop;
+                    }
                 }
                 // Nothing is asking, so an answer arriving here is stale
                 // (the dialog was answered twice, or after a timeout). Drop
@@ -384,6 +402,14 @@ async fn run_once(
         }
     };
 
+    // Shared rather than owned from here on, because `exec` runs on a task of
+    // its own and needs the same authenticated carrier this PTY is riding
+    // (`00 R50a`, RFC 4254 §6.5). One connection, several channels, which is
+    // what SSH is for: a second connection would mean a second authentication,
+    // a second host key check and a second entry in the server's logs for what
+    // the user did once.
+    let ssh = Arc::new(ssh);
+
     let found = pty::probe_multiplexer(&ssh, &options.multiplexer).await?;
     let session = pty::open(
         &ssh,
@@ -441,6 +467,7 @@ async fn run_once(
 
     let outcome = pump(
         &mut channel,
+        &ssh,
         events,
         commands,
         cancel,
@@ -513,6 +540,20 @@ async fn ask_for_credentials(
                 Some(SshCommand::ProvideCredentials { username, password }) => {
                     return Some((username.filter(|u| !u.trim().is_empty()), password));
                 }
+                // The session is paused on a person, which can be a long time,
+                // and an agent waiting on a settlement has no way to know that.
+                // So it is told (`00 R28`). Named ahead of the catch all below
+                // deliberately: the drop that arm performs is right for a
+                // keystroke and is the exact failure this requirement exists to
+                // remove for an intent.
+                Some(SshCommand::Exec(request)) => {
+                    let refusal = request.refuse(
+                        "the session is waiting for a person to supply credentials, so nothing was run",
+                    );
+                    emit(events, SshEvent::AgentRefused(Box::new(refusal)))
+                        .await
+                        .ok()?;
+                }
                 // Keystrokes, resizes and reconnect requests are meaningless
                 // before a shell exists. Drop them and keep waiting.
                 Some(_) => continue,
@@ -522,8 +563,12 @@ async fn ask_for_credentials(
 }
 
 /// The byte pump: remote output out, keystrokes and resizes in.
+#[allow(clippy::too_many_arguments)]
 async fn pump(
     channel: &mut russh::Channel<russh::client::Msg>,
+    // The carrier the PTY channel is riding, for the intents that need a
+    // channel of their own. Held rather than reopened: see `run_once`.
+    ssh: &Arc<ssh_transport::SshHandle>,
     events: &mpsc::Sender<SshEvent>,
     commands: &mut mpsc::Receiver<SshCommand>,
     cancel: &CancellationToken,
@@ -551,6 +596,11 @@ async fn pump(
     const FLUSH_BYTES: usize = 16 * 1024;
     const FLUSH_AFTER: std::time::Duration = std::time::Duration::from_millis(4);
     let mut pending: Vec<u8> = Vec::with_capacity(FLUSH_BYTES);
+
+    // The bell has the same volume problem as the output above and for a
+    // sharper reason: one BEL is one byte, so a single 16 KB read can hold
+    // thousands of them. See `crate::bell`.
+    let mut bell = BellLimiter::new();
 
     loop {
         // Nothing buffered means nothing to wait out, so the timer is only
@@ -641,6 +691,16 @@ async fn pump(
                 if pending.len() >= FLUSH_BYTES {
                     emit(events, SshEvent::Output(std::mem::take(&mut pending))).await?;
                 }
+
+                // After the flush above, so a bell that arrived with a
+                // screenful of text rings behind the text it belongs to
+                // rather than in front of it. `take_bell` reports only a
+                // real bell: the BEL that ends the OSC every shell writes to
+                // set the window title is not one, and it happens on every
+                // prompt.
+                if tracker.take_bell() && bell.ring(std::time::Instant::now()) {
+                    emit(events, SshEvent::Bell).await?;
+                }
             }
 
             cmd = commands.recv() => match cmd {
@@ -670,6 +730,21 @@ async fn pump(
                             tracing::debug!("window-change was refused: {e}");
                         }
                     }
+                }
+                // A command of an agent's own, on a channel of its own
+                // (`00 R50a`). Spawned rather than awaited here, and that is
+                // the load bearing word: an agent's `cargo build` is minutes,
+                // and awaiting it in this loop would be minutes during which
+                // the person at the window can type nothing and see nothing.
+                // The task answers the intent itself, whatever happens to it,
+                // which is what `00 R28` requires.
+                Some(SshCommand::Exec(request)) => {
+                    tokio::spawn(crate::exec::serve(
+                        ssh.clone(),
+                        request,
+                        events.clone(),
+                        cancel.clone(),
+                    ));
                 }
                 // Already connected; nothing to do. A credential answer this
                 // late is stale for the same reason.
@@ -717,8 +792,10 @@ mod tests {
         .await
         .unwrap();
 
+        let (events, _events_rx) = mpsc::channel(4);
         let outcome = wait_backoff(
             std::time::Duration::from_millis(60),
+            &events,
             &mut rx,
             &cancel,
             &mut terminal,
@@ -740,8 +817,10 @@ mod tests {
         let mut terminal = TerminalOptions::default();
         tx.send(SshCommand::ReconnectNow).await.unwrap();
 
+        let (events, _events_rx) = mpsc::channel(4);
         let outcome = wait_backoff(
             std::time::Duration::from_secs(30),
+            &events,
             &mut rx,
             &cancel,
             &mut terminal,
@@ -757,8 +836,10 @@ mod tests {
         cancel.cancel();
         let mut terminal = TerminalOptions::default();
 
+        let (events, _events_rx) = mpsc::channel(4);
         let outcome = wait_backoff(
             std::time::Duration::from_secs(30),
+            &events,
             &mut rx,
             &cancel,
             &mut terminal,
@@ -779,8 +860,10 @@ mod tests {
             .await
             .unwrap();
 
+        let (events, _events_rx) = mpsc::channel(4);
         let outcome = wait_backoff(
             std::time::Duration::from_millis(60),
+            &events,
             &mut rx,
             &cancel,
             &mut terminal,

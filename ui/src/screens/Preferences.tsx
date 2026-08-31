@@ -9,6 +9,7 @@ import {
   PREF_CLIPBOARD_ON_PASTE,
   PREF_EDGE_PAN,
   PREF_FORWARD_INSERTED_TEXT,
+  PREF_HIDE_AGENT_STATUS,
   PREF_HIDE_TOOLBAR,
   PREF_MATCH_LOCAL_LAYOUT,
   PREF_NATURAL_SCROLL,
@@ -16,6 +17,8 @@ import {
   readBoolPref,
   writeBoolPref,
 } from "../lib/prefs";
+import { useAgentActivity } from "../state/AgentActivityContext";
+import { planeStatusLine } from "../lib/agentActivity";
 import { readViewDefaults, writeViewDefaults, type ViewPrefs } from "../lib/viewPrefs";
 import type { QualityPreset, ScalingMode } from "../lib/types";
 import type { RdpResolution } from "../lib/rdp";
@@ -30,9 +33,22 @@ import { classNames } from "../lib/util";
 import { IconX } from "../components/icons";
 
 const TABS = [
-  "General", "Appearance", "Connections", "Session", "Input", "Clipboard", "Files", "Security", "Network",
+  "General", "Appearance", "Connections", "Session", "Input", "Clipboard", "Files", "Security", "Network", "Agents",
 ] as const;
 type Tab = (typeof TABS)[number];
+
+/**
+ * Tabs that only exist when there is something behind them.
+ *
+ * "Agents" is the only one, and it is here rather than always on because
+ * `AGENT_BRIEF` D2 means an install with the plane switched off has to look
+ * exactly as it did before the feature was written, Preferences included. The
+ * way in with the plane off is the AI Agents button in the library sidebar,
+ * which exists in both states on purpose.
+ */
+function tabsFor(planeOn: boolean): readonly Tab[] {
+  return planeOn ? TABS : TABS.filter((t) => t !== "Agents");
+}
 
 /**
  * localStorage-backed preference (until the backend settings store lands).
@@ -164,11 +180,22 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [hideToolbar, setHideToolbar] = usePref(PREF_HIDE_TOOLBAR, false);
   const [zoomLocked, setZoomLocked] = usePref(PREF_ZOOM_LOCKED, false);
   const [edgePan, setEdgePan] = usePref(PREF_EDGE_PAN, true);
+  const [hideAgentStatus, setHideAgentStatus] = usePref(PREF_HIDE_AGENT_STATUS, false);
   const [viewDefaults, setViewDefaults] = useViewDefaults();
+  // The plane, read for two things only: whether the Agents tab exists at all,
+  // and the live line the toggle below is about.
+  const { plane } = useAgentActivity();
+  const tabs = tabsFor(plane.on);
 
   useEffect(() => {
     void safeInvoke<string | null>("credential_backend", undefined, null).then(setCredBackend);
   }, []);
+
+  // Somebody reading this tab while the plane is switched off from elsewhere
+  // would be left looking at a section that is no longer listed.
+  useEffect(() => {
+    if (!plane.on && tab === "Agents") setTab("General");
+  }, [plane.on, tab]);
 
   // Escape closes, like every other modal in the app (the X was the only way out).
   useEffect(() => {
@@ -196,7 +223,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
         className="flex h-[560px] w-[760px] max-w-[calc(100vw-32px)] overflow-hidden rounded-lg border border-subtle bg-surface shadow-(--shadow-pop)"
       >
         <nav className="w-44 shrink-0 space-y-0.5 border-r border-subtle bg-inset/40 p-2.5" aria-label="Preference sections">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button
               key={t}
               type="button"
@@ -589,6 +616,34 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   value={settings.probeOnline}
                   onChange={(v) => update({ probeOnline: v })}
                 />
+              </>
+            ) : null}
+            {tab === "Agents" && plane.on ? (
+              <>
+                <Toggle
+                  label="Hide the agent counts"
+                  description="Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself still appears while an agent is driving something, with a card per machine, and this switch stays here."
+                  value={hideAgentStatus}
+                  onChange={setHideAgentStatus}
+                />
+                <div className="border-t border-subtle pt-5">
+                  <p className="text-sm font-medium text-primary">Right now</p>
+                  {/*
+                    The same sentence the strip draws, from the same function.
+                    A person deciding whether to hide something should be able
+                    to see what they are hiding.
+                  */}
+                  <p className="mono mt-0.5 text-xs text-secondary">{planeStatusLine(plane)}</p>
+                  <p className="mt-1.5 text-xs text-tertiary">
+                    Driving means an agent holds the lease on that machine. An agent that is
+                    connected but holds nothing is driving nothing, and is counted only in the
+                    first number.
+                  </p>
+                </div>
+                <p className="text-xs text-tertiary">
+                  AI Agents, in the library sidebar, has the lines to paste, the check to run,
+                  and the switch that turns all of this off again.
+                </p>
               </>
             ) : null}
           </div>

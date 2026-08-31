@@ -12,7 +12,7 @@ import { useHosts } from "../state/HostsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
-import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
+import type { DiscoveredHost, HostGroup, HostProfile, ProtocolKind } from "../lib/types";
 import { serializeRdpSettings } from "../lib/rdp";
 import { serializeSshSettings } from "../lib/ssh";
 import { loadSshDefaults } from "../lib/sshDefaults";
@@ -35,6 +35,13 @@ import {
 import { seedMockThumbnails, useMockData } from "../lib/mock";
 import { useSessions } from "../state/SessionsContext";
 import { useTabs } from "../state/TabsContext";
+import { gridLayout } from "../lib/layout";
+import {
+  forgetGroupLayout,
+  hasSavedLayout,
+  restoreLayout,
+  saveGroupLayout,
+} from "../lib/groupLayout";
 import { classNames, formatBps, fuzzyMatch, modKeyLabel, timeAgo } from "../lib/util";
 import { Sidebar, type SidebarSelection } from "../components/Sidebar";
 import { useHostDragSelect, type DropTarget } from "../hooks/useHostDragSelect";
@@ -63,6 +70,13 @@ interface CtxMenuState {
   x: number;
   y: number;
   host: HostProfile;
+}
+
+/** Secondary click on a group in the sidebar. */
+interface GroupMenuState {
+  x: number;
+  y: number;
+  group: HostGroup;
 }
 
 /**
@@ -103,7 +117,10 @@ export function Library({
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
-  const { tabs, open: openTab, select: selectTab, has: hasTab, activeId: activeTabId } = useTabs();
+  const {
+    summaries, open: openTab, select: selectTab, selectSession, has: hasTab,
+    activeId: activeTabId, openArranged, adopt, serializeActive,
+  } = useTabs();
   /** Is the library the pane on screen, or is a session tab in front of it? */
   const inFront = activeTabId === null;
   const { push } = useToasts();
@@ -113,6 +130,7 @@ export function Library({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [hostDialog, setHostDialog] = useState<HostDraft | null>(null);
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
   const [activeTagIds, setActiveTagIds] = useState<Set<string>>(new Set());
   const [tagMode, setTagMode] = useState<"and" | "or">("or");
   const [namePrompt, setNamePrompt] = useState<"group" | "tag" | null>(null);
@@ -158,7 +176,11 @@ export function Library({
         if (!outcome) return;
       }
       if (outcome.reused) {
-        if (outcome.target === "tab") selectTab(outcome.sessionId);
+        // A tab no longer means a session: it is a layout that may hold
+        // several, so the session has to be looked up rather than assumed to
+        // be the tab's own name. This also lands the keyboard on the right
+        // pane, not merely the right tab.
+        if (outcome.target === "tab") selectSession(outcome.sessionId);
         push("info", `${label} is already open, brought it to the front`);
         return;
       }
@@ -176,7 +198,7 @@ export function Library({
       }
       onConnected?.();
     },
-    [tabbed, selectTab, openTab, hasTab, push],
+    [tabbed, selectSession, openTab, hasTab, push],
   );
 
   const connectHost = useCallback(
@@ -238,6 +260,149 @@ export function Library({
         (protocol === "vnc" ? "" : `&protocol=${protocol}`);
     },
     [openSession, tabbed, openTab],
+  );
+
+  /**
+   * Open every machine in a group at once, side by side in one tab.
+   *
+   * A group that has been arranged before comes back exactly as it was left,
+   * down to where the dividers sat. One that has not is laid out as an even
+   * grid in whatever order the library is currently sorted, which the user can
+   * then rearrange and save, so the arrangement is something a group acquires
+   * rather than something it has to be given up front.
+   *
+   * The panes are created and shown FIRST, then filled as each connection
+   * answers. Dialling half a dozen machines takes a moment and they will not
+   * finish in any particular order, so the alternative is either a blank window
+   * or a layout that shuffles itself as replies arrive.
+   */
+  const openGroupAsGrid = useCallback(
+    (group: HostGroup): void => {
+      const childIds = groups.filter((g) => g.parentId === group.id).map((g) => g.id);
+      const inGroup = hosts.filter(
+        (h) => h.groupId === group.id || (h.groupId !== null && childIds.includes(h.groupId)),
+      );
+      if (inGroup.length === 0) {
+        push("info", `${group.name} has no hosts in it yet`);
+        return;
+      }
+
+      const saved = restoreLayout(group.id);
+      // A saved arrangement can name a host that has since been deleted, and
+      // the library can have gained hosts since it was saved. Honour the
+      // arrangement for what it still knows about, and say so if the two have
+      // drifted, rather than silently opening the wrong set of machines.
+      let places: Array<{ paneId: string; profileId: string }>;
+      let tabId: string;
+      if (saved) {
+        const known = new Set(inGroup.map((h) => h.id));
+        places = saved.places.filter((p) => known.has(p.profileId));
+        ({ tabId } = openArranged(saved.root));
+        const missing = saved.places.length - places.length;
+        const added = inGroup.length - places.length;
+        if (missing > 0 || added > 0) {
+          push(
+            "info",
+            `${group.name} has changed since its layout was saved; opened what still matches`,
+          );
+        }
+      } else {
+        const { tabId: id, paneIds } = openArranged(gridLayout(inGroup.length));
+        tabId = id;
+        places = inGroup.map((h, i) => ({ paneId: paneIds[i], profileId: h.id }));
+      }
+
+      for (const { paneId, profileId } of places) {
+        const host = inGroup.find((h) => h.id === profileId);
+        if (!host) continue;
+        if (!inTauri()) {
+          const id = devSessionId();
+          openTab(
+            id,
+            {
+              sessionId: id,
+              profileId: host.id,
+              address: host.address,
+              port: host.port,
+              name: host.friendlyName,
+              protocol: hostProtocol(host),
+            },
+            { tabId, paneId },
+          );
+          continue;
+        }
+        void openSessionWindow({ profileId: host.id, asTab: true }).then((outcome) => {
+          if (!outcome) return;
+          if (outcome.reused) {
+            // Already connected somewhere: move it in rather than refusing.
+            adopt(tabId, paneId, outcome.sessionId);
+            return;
+          }
+          if (outcome.target !== "tab" || !outcome.params) return;
+          openTab(
+            outcome.sessionId,
+            {
+              sessionId: outcome.sessionId,
+              profileId: outcome.params.profileId,
+              address: outcome.params.address,
+              port: outcome.params.port,
+              name: outcome.params.name,
+              protocol: outcome.params.protocol,
+            },
+            { tabId, paneId },
+          );
+          void safeInvoke("touch_connected", { hostId: host.id }, null);
+        });
+      }
+    },
+    [groups, hosts, openArranged, openTab, adopt, push],
+  );
+
+  /**
+   * Remember the arrangement in front against a group.
+   *
+   * Offered on the group rather than on the layout because a group is already
+   * the name the user gave to "these machines together", and giving layouts
+   * names of their own would be a second list to keep in step with the first.
+   */
+  const saveLayoutToGroup = useCallback(
+    (group: HostGroup): void => {
+      const serialized = serializeActive();
+      if (!serialized) {
+        push("info", "Open a group as a grid first, then save how you arranged it");
+        return;
+      }
+      saveGroupLayout(group.id, serialized);
+      push("success", `Saved this arrangement to ${group.name}`);
+    },
+    [serializeActive, push],
+  );
+
+  const groupMenuItems = useCallback(
+    (group: HostGroup): MenuItem[] => {
+      const items: MenuItem[] = [
+        {
+          label: hasSavedLayout(group.id) ? "Open as grid (saved layout)" : "Open as grid",
+          onSelect: () => openGroupAsGrid(group),
+        },
+      ];
+      // Only worth offering with a session in front: with the library showing
+      // there is no arrangement to save.
+      if (activeTabId !== null) {
+        items.push({ label: "Save this layout to group", onSelect: () => saveLayoutToGroup(group) });
+      }
+      if (hasSavedLayout(group.id)) {
+        items.push({
+          label: "Forget saved layout",
+          onSelect: () => {
+            forgetGroupLayout(group.id);
+            push("info", `${group.name} will open as a plain grid from now on`);
+          },
+        });
+      }
+      return items;
+    },
+    [openGroupAsGrid, saveLayoutToGroup, activeTabId, push],
   );
 
   /** Most recent first, no duplicates, oldest dropped past the cap. */
@@ -668,7 +833,7 @@ export function Library({
       // Sessions open in tabs are reachable from here as well as from the
       // strip, so a library with a long list of machines still has one keyboard
       // route back to the one you were working in.
-      ...tabs.map((t, i) => ({
+      ...summaries.map((t, i) => ({
         id: `go-to-tab-${t.id}`,
         label: `Go to ${t.title}`,
         hint: i < 8 ? `${modKeyLabel}${i + 2}` : "",
@@ -687,7 +852,7 @@ export function Library({
       { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
       { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
     ];
-  }, [tabs, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
+  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -1069,6 +1234,7 @@ export function Library({
           onNewGroup={() => setNamePrompt("group")}
           onNewTag={() => setNamePrompt("tag")}
           onOpenPreferences={onOpenPreferences}
+          onGroupContextMenu={(group, x, y) => setGroupMenu({ group, x, y })}
           dragging={drag !== null}
           dropOverKey={drag?.over ?? null}
         />
@@ -1222,6 +1388,14 @@ export function Library({
               : menuItemsFor(ctxMenu.host)
           }
           onClose={() => setCtxMenu(null)}
+        />
+      ) : null}
+      {groupMenu ? (
+        <ContextMenu
+          x={groupMenu.x}
+          y={groupMenu.y}
+          items={groupMenuItems(groupMenu.group)}
+          onClose={() => setGroupMenu(null)}
         />
       ) : null}
       {paletteOpen ? (

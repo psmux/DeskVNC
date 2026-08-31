@@ -15,7 +15,7 @@
 //! connect fails, turning a useless network error into the exact prompt the
 //! situation calls for.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -293,7 +293,8 @@ pub fn load_key_file(
     path: &Path,
     passphrase: Option<&str>,
 ) -> std::result::Result<PrivateKey, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let path = expand_home(path);
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
     if crate::ppk::is_ppk(&bytes) {
         return crate::ppk::load(&bytes, passphrase).map_err(|e| e.to_string());
     }
@@ -302,6 +303,38 @@ pub fn load_key_file(
         passphrase,
     )
     .map_err(|e| e.to_string())
+}
+
+/// Turn a leading `~` into the home directory.
+///
+/// `~/.ssh/id_ed25519` is how everybody writes the path to a key, including
+/// every piece of documentation and the placeholder in this app's own host
+/// editor. Nothing below this expands it: a shell does that before the path
+/// ever reaches a program, and a path typed into a text box has no shell in
+/// front of it, so it arrives as a literal `~` directory that does not exist.
+///
+/// Only a leading `~/` (or a bare `~`) is expanded. `~user` is a different
+/// lookup with different answers per platform, and guessing at it would turn
+/// a wrong path into a *different* wrong path.
+fn expand_home(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let rest = if text == "~" {
+        ""
+    } else if let Some(rest) = text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
+        rest
+    } else {
+        return path.to_path_buf();
+    };
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    match home {
+        Some(home) if rest.is_empty() => home,
+        Some(home) => home.join(rest),
+        None => path.to_path_buf(),
+    }
 }
 
 /// RSA keys need an explicit signature hash: `ssh-rsa` (SHA-1) is refused by
@@ -449,5 +482,29 @@ mod tests {
     fn neither_profile_tears_down_a_merely_idle_session() {
         assert_eq!(Keepalive::sidecar().inactivity_timeout, None);
         assert_eq!(Keepalive::interactive().inactivity_timeout, None);
+    }
+
+    /// A key path typed into a text box never met a shell, so the `~` that
+    /// every piece of SSH documentation writes has to be expanded here.
+    #[test]
+    fn a_leading_tilde_becomes_the_home_directory() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        assert_eq!(
+            expand_home(Path::new("~/.ssh/id_ed25519")),
+            home.join(".ssh/id_ed25519")
+        );
+        assert_eq!(expand_home(Path::new("~")), home);
+    }
+
+    /// Everything else is left exactly as written: an absolute path is
+    /// already an answer, and `~user` is a lookup this deliberately does not
+    /// guess at.
+    #[test]
+    fn other_paths_are_left_alone() {
+        for path in ["/etc/keys/id_rsa", "keys/id_rsa", "~someone/.ssh/id_rsa"] {
+            assert_eq!(expand_home(Path::new(path)), PathBuf::from(path));
+        }
     }
 }
