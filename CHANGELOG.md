@@ -10,6 +10,40 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-31
+
+Patch-shaped but tagged minor for the one visible behaviour change: an SSH
+session without a multiplexer now echoes what you type, where before it showed
+nothing.
+
+### Fixed
+
+- **Typing was invisible in a plain SSH shell.** The terminal asked the remote
+  for a raw line discipline (no echo, no cooking), on the theory that the
+  local emulator echoes keystrokes itself. It does not: xterm.js renders what
+  the server sends and nothing else, so with the remote echo turned off,
+  nothing echoed at all and every keystroke vanished. The remote now echoes
+  and cooks the line the way it does for `ssh`, so a shell prompt behaves like
+  a shell prompt: characters appear, Backspace rubs one out, Ctrl-C shows as
+  `^C`. A full-screen program (an editor, tmux) still takes the terminal raw
+  itself when it starts, so nothing about them changes.
+
+  This was hidden for a long time because the default profile attaches a
+  multiplexer, and tmux and psmux draw their own screen and so echo whatever
+  the mode. Only a session that fell back to a bare login shell, a host with
+  no multiplexer found, ever showed the blank line.
+
+### Note on "no multiplexer found" with WSL
+
+If a host reports no multiplexer even though tmux is installed, check whether
+"Connect inside WSL" is ticked for it in the host editor. That option wraps
+every command in `wsl.exe`, which is right for a Windows host you reach over
+OpenSSH and land in PowerShell on. It is wrong for a host whose SSH already
+drops you into a Linux shell (a Linux box, or a Windows box whose SSH default
+shell is bash): the wrapper then re-enters WSL from inside it, the probe
+fails, and tmux is not found. Untick it and the multiplexer is detected
+normally.
+
 ## [0.24.0] - 2026-08-31
 
 Minor: opening an SSH machine for the first time asks whether to trust it,
