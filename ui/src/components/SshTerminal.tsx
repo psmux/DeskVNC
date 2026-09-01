@@ -297,21 +297,27 @@ export function SshTerminal({
     let cancelled = false;
 
     const { term, fit, cancelWebgl } = createTerminal();
+    // Handlers before the first fit, so the size fit measures is actually
+    // sent, and so a later ResizeObserver-driven change reaches the wire. The
+    // reverse order fires the opening fit into no handler, and xterm does not
+    // re-emit onResize for a subsequent fit that lands on the same grid.
+    const dData = term.onData((d) => void sshSend(sessionId, new TextEncoder().encode(d)));
+    const dResize = term.onResize(({ cols, rows }) => void sshResize(sessionId, cols, rows));
     term.open(container);
     fit.fit();
     term.focus();
     termRef.current = term;
 
-    const dData = term.onData((d) => void sshSend(sessionId, new TextEncoder().encode(d)));
-    const dResize = term.onResize(({ cols, rows }) => void sshResize(sessionId, cols, rows));
-
     const stopResizeWatch = watchTerminalResize(container, fit);
 
     const connect = (acceptHostKey?: string): void => {
       setPhase({ kind: "handshake" });
-      // Sized from the terminal's OWN measurement, not whatever the caller's
-      // `config` carried: that object is built before this component (and
-      // therefore the terminal) exists, so it cannot know the real grid.
+      // Measure fresh right before dialling, then size from the terminal's OWN
+      // measurement rather than whatever the caller's `config` carried: that
+      // object is built before this component (and therefore the terminal)
+      // exists, so it cannot know the real grid, and the opening fit may have
+      // run before the dialog finished its layout.
+      fit.fit();
       void sshConnect(
         sessionId,
         windowLabel,

@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
 import {
   authMethodLabel,
   readSessionParams,
@@ -130,6 +131,7 @@ export function SshSession({
   const owns = !embedded || focusedProp;
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const { push } = useToasts();
 
   const bridge = useMemo<SessionBridge>(
@@ -224,12 +226,18 @@ export function SshSession({
     if (!container) return;
 
     const { term, fit, cancelWebgl } = createTerminal();
+    // Register the resize handler BEFORE the first fit, so the size that fit
+    // measures is actually sent. Done the other way round (the original bug),
+    // the opening fit fired into no handler, the ResizeObserver's later fit
+    // was a no-op that changed nothing and so emitted nothing either, and the
+    // only size the remote ever heard was whatever the connected-effect below
+    // happened to read.
+    const dData = term.onData((d) => sessionRef.current.sendTerminalInput(new TextEncoder().encode(d)));
+    const dResize = term.onResize(({ cols, rows }) => sessionRef.current.sendTerminalResize(cols, rows));
     term.open(container);
     fit.fit();
     termRef.current = term;
-
-    const dData = term.onData((d) => sessionRef.current.sendTerminalInput(new TextEncoder().encode(d)));
-    const dResize = term.onResize(({ cols, rows }) => sessionRef.current.sendTerminalResize(cols, rows));
+    fitRef.current = fit;
     const stopResizeWatch = watchTerminalResize(container, fit);
 
     return () => {
@@ -245,30 +253,41 @@ export function SshSession({
       dResize.dispose();
       term.dispose();
       termRef.current = null;
+      fitRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /**
    * Tell the remote how big the terminal actually is, once there is a remote
-   * to tell.
+   * to tell, measuring fresh at that instant.
    *
-   * `fit()` runs the moment the terminal mounts, which fires `onResize` and
-   * sends a resize immediately. The session is still connecting at that point
-   * (a TCP dial, a key exchange, authentication, the multiplexer probe and a
-   * pty request all have to finish first), so that first resize reaches a
-   * session that does not exist yet and is dropped. Nothing resent it, so the
-   * pty kept whatever size the profile was saved with, usually 80x24, and a
-   * full-screen program drew into the top-left corner of a much larger window
-   * for the rest of the session.
+   * The opening `fit()` at mount runs while the session is still connecting (a
+   * TCP dial, a key exchange, authentication, the multiplexer probe and a pty
+   * request all have to finish first), so any resize it produces reaches a
+   * session that does not exist yet and is dropped. That left the connect-time
+   * size resting entirely on this effect, and it used to trust whatever the
+   * opening fit had measured, which on a pane that had not finished its layout
+   * at mount was a stale small grid. The pty then kept 80x24 and a full-screen
+   * program, tmux included, drew into a corner of a much larger window. So
+   * this re-fits against the settled layout before it reads and sends.
    *
-   * Resending on `connected` also covers the reconnect case, where the far
-   * side is a brand new pty that has never been told anything.
+   * It also covers the reconnect case, where the far side is a brand new pty
+   * that has never been told anything.
    */
   useEffect(() => {
     if (session.state.state !== "connected") return;
     const term = termRef.current;
     if (!term) return;
+    // Measure NOW, not whatever the opening fit captured. By the time a
+    // connection completes (a TCP dial, a key exchange, auth, the multiplexer
+    // probe and a pty request), the pane has long since settled its layout,
+    // so this is the first measurement that is guaranteed to be against the
+    // real on-screen size rather than a half-laid-out container from mount.
+    // Without it, a terminal that mounted before its pane had a size would
+    // send that stale small size to the remote and never correct it, and a
+    // full-screen program (tmux included) would sit in a corner of the window.
+    fitRef.current?.fit();
     session.sendTerminalResize(term.cols, term.rows);
     // `session` is deliberately not a dependency: it is rebuilt on every
     // render, and this must fire on the transition into `connected`, not on

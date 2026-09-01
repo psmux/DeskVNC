@@ -10,7 +10,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
-## [0.25.0] - 2026-08-31
+## [0.25.1] - 2026-09-02
+
+### Fixed
+
+- **An SSH terminal could attach at 80x24 and stay there.** A remote shell,
+  and any tmux session attached in it, behaved as though it were on a small
+  low-resolution screen: a full-screen program drew into a corner of a much
+  larger window. The terminal reports its real size to the remote once the
+  connection completes, but it was reading a measurement taken at mount, and
+  when the pane had not finished laying out at that instant (a timing the
+  native window hit and a browser did not) that measurement was the empty
+  80x24 default. Nothing re-measured, so the stale size was what the remote
+  heard for the whole session. It now measures against the settled layout at
+  the moment it connects, and registers its resize handler before the first
+  measurement so a later size change reaches the remote too. The terminal
+  fills its window like any other, and tmux attaches at the real size.
 
 Patch-shaped but tagged minor for the one visible behaviour change: an SSH
 session without a multiplexer now echoes what you type, where before it showed
