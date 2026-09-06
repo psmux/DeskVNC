@@ -229,6 +229,17 @@ async fn connect_only(
         inactivity_timeout: keepalive.inactivity_timeout,
         keepalive_interval: keepalive.interval,
         keepalive_max: keepalive.max_missed as usize,
+        // russh defaults this to false, and a tunnelled session pays for that
+        // on every keystroke and every mouse move. The direct TCP path sets
+        // `TCP_NODELAY` deliberately and says why
+        // (`crates/vnc-transport/src/tcp.rs`: a 40 ms Nagle delay on a
+        // mouse-move packet is not something a person will forgive), but a
+        // session tunnelled over SSH never goes through `vnc-transport` at
+        // all: `vnc-core`'s connection path hands it this socket instead. So
+        // the option has to be set again here, or the whole input path
+        // silently gets Nagle back the moment somebody ticks "SSH tunnel".
+        // Keep the two consistent.
+        nodelay: true,
         ..Default::default()
     });
 

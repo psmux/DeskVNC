@@ -105,20 +105,176 @@ pub const H264_CTX_KEYFRAME: u32 = 1 << 1;
 /// `len` field is just a promise the sender can lie about arbitrarily far.
 const MAX_TERMINAL_INPUT_LEN: usize = 64 * 1024;
 
+/// Bytes one rect costs in an encoded framebuffer message, header included.
+///
+/// Shared with [`encode_frame`] so the accumulator in
+/// `commands/session.rs` measures a pending update with the same ruler the
+/// encoder later bills it at. A second, independently written size estimate
+/// is how a byte budget quietly stops matching the thing it is budgeting.
+pub fn encoded_rect_len(rect: &DecodedRect) -> usize {
+    RECT_HEADER_LEN
+        + match &rect.payload {
+            RectPayload::Rgba(b) => b.len(),
+            RectPayload::Jpeg(b) => b.len(),
+            RectPayload::CopyRect { .. } => 4,
+            RectPayload::H264 { data, .. } => H264_PREFIX_LEN + data.len(),
+        }
+}
+
+/// A rectangle as a half-open box in 32-bit coordinates: `(x0, y0, x1, y1)`.
+///
+/// The coverage arithmetic below adds `x + width`, and a rect that reaches the
+/// right-hand edge of a 65535-wide framebuffer overflows a `u16` doing that.
+/// [`Rect::intersect`] has the same shape and has never been fed one, but a
+/// server picks these numbers, not us, so the pruning does its adds in a type
+/// that cannot wrap and cannot panic in a debug build.
+type CoverBox = (u32, u32, u32, u32);
+
+fn cover_box(rect: &Rect) -> CoverBox {
+    (
+        rect.x as u32,
+        rect.y as u32,
+        rect.x as u32 + rect.width as u32,
+        rect.y as u32 + rect.height as u32,
+    )
+}
+
+fn is_empty_box(b: CoverBox) -> bool {
+    b.2 <= b.0 || b.3 <= b.1
+}
+
+/// Push the parts of `piece` that `cover` does not touch onto `out`.
+///
+/// At most four pieces come out (a band above, a band below, and the left and
+/// right slivers of the overlapping band), which is the standard rectangle
+/// subtraction. A `cover` that misses entirely gives `piece` back unchanged.
+fn subtract_box(piece: CoverBox, cover: CoverBox, out: &mut Vec<CoverBox>) {
+    let hit = (
+        piece.0.max(cover.0),
+        piece.1.max(cover.1),
+        piece.2.min(cover.2),
+        piece.3.min(cover.3),
+    );
+    if is_empty_box(hit) {
+        out.push(piece);
+        return;
+    }
+    if hit.1 > piece.1 {
+        out.push((piece.0, piece.1, piece.2, hit.1));
+    }
+    if hit.3 < piece.3 {
+        out.push((piece.0, hit.3, piece.2, piece.3));
+    }
+    if hit.0 > piece.0 {
+        out.push((piece.0, hit.1, hit.0, hit.3));
+    }
+    if hit.2 < piece.2 {
+        out.push((hit.2, hit.1, piece.2, hit.3));
+    }
+}
+
+/// How many pieces one coverage test may fragment a rectangle into before it
+/// gives up and answers "not covered".
+///
+/// Subtracting many small rectangles out of a big one fragments it, and a
+/// general region algebra is far more machinery than this is worth. Bailing
+/// out is always SAFE because the conservative answer keeps the rect: the
+/// worst case is that a frame carries pixels it did not strictly need to.
+const MAX_COVERAGE_PIECES: usize = 64;
+
+/// How many later rects one candidate is compared against.
+///
+/// The case this exists for, video, needs exactly one: a full-screen update
+/// covers everything behind it in a single test. A backlog of hundreds of
+/// tiny scattered rects would otherwise turn the walk quadratic for no
+/// benefit, since none of them covers anything anyway. Truncating the list
+/// only ever prunes less.
+const MAX_COVERAGE_RECTS: usize = 256;
+
+/// Is `candidate` entirely repainted by the union of `covers`?
+fn fully_covered(candidate: CoverBox, covers: &[CoverBox]) -> bool {
+    if is_empty_box(candidate) {
+        return true;
+    }
+    let mut remaining = vec![candidate];
+    let mut next: Vec<CoverBox> = Vec::new();
+    for cover in covers {
+        if remaining.is_empty() {
+            break;
+        }
+        next.clear();
+        for piece in &remaining {
+            subtract_box(*piece, *cover, &mut next);
+        }
+        if next.len() > MAX_COVERAGE_PIECES {
+            return false;
+        }
+        std::mem::swap(&mut remaining, &mut next);
+    }
+    remaining.is_empty()
+}
+
+/// Drop rects that later rects in the same message repaint completely.
+///
+/// This is what makes a backlog of framebuffer updates cheap rather than
+/// merely ordered. Several updates coalesced by concatenation apply correctly
+/// as they stand (update N's rects then N+1's rects is exactly what would have
+/// happened anyway), but during video or a window animation each update
+/// repaints nearly the whole screen, so all but the newest are painted over a
+/// few milliseconds later and cost the renderer a full upload each for
+/// pixels nobody ever sees. Walking from NEWEST to OLDEST and discarding
+/// anything already covered collapses that backlog to roughly the newest
+/// frame.
+///
+/// SAFETY, and every rule here is load bearing, because getting it wrong
+/// corrupts the user's framebuffer in a way that persists until the server
+/// happens to repaint that area:
+///
+/// - A CopyRect READS framebuffer pixels that earlier rects put there, so it
+///   is a hard barrier. It is never dropped, never reordered, and nothing
+///   older than it may be dropped either, because the pixels it copies may be
+///   the ones an older rect painted.
+/// - An H.264 rect is a barrier for the same reason in a different currency:
+///   the access units carry inter-frame dependencies, and a decoder handed a
+///   gap produces garbage until the next IDR.
+/// - Only plain RGBA and JPEG rects are droppable, and only when a later rect
+///   paints every pixel of them.
+/// - Everything that survives keeps its original relative order.
+pub fn prune_covered_rects(rects: Vec<DecodedRect>) -> Vec<DecodedRect> {
+    let mut keep = vec![true; rects.len()];
+    let mut covers: Vec<CoverBox> = Vec::new();
+    let mut dropped = false;
+
+    for (i, rect) in rects.iter().enumerate().rev() {
+        match &rect.payload {
+            // The barrier. Stop here and keep this rect and everything older
+            // than it, untouched and in order.
+            RectPayload::CopyRect { .. } | RectPayload::H264 { .. } => break,
+            RectPayload::Rgba(_) | RectPayload::Jpeg(_) => {
+                let candidate = cover_box(&rect.rect);
+                if fully_covered(candidate, &covers) {
+                    keep[i] = false;
+                    dropped = true;
+                } else if covers.len() < MAX_COVERAGE_RECTS {
+                    covers.push(candidate);
+                }
+            }
+        }
+    }
+
+    if !dropped {
+        return rects;
+    }
+    rects
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(rect, keep)| keep.then_some(rect))
+        .collect()
+}
+
 /// Encode one coalesced framebuffer update (msg_type = 1).
 pub fn encode_frame(rects: &[DecodedRect], damage: &Rect) -> Vec<u8> {
-    let payload_total: usize = rects
-        .iter()
-        .map(|r| {
-            RECT_HEADER_LEN
-                + match &r.payload {
-                    RectPayload::Rgba(b) => b.len(),
-                    RectPayload::Jpeg(b) => b.len(),
-                    RectPayload::CopyRect { .. } => 4,
-                    RectPayload::H264 { data, .. } => H264_PREFIX_LEN + data.len(),
-                }
-        })
-        .sum();
+    let payload_total: usize = rects.iter().map(encoded_rect_len).sum();
 
     let mut out = Vec::with_capacity(FRAME_HEADER_LEN + payload_total);
     out.push(MSG_FRAME);
@@ -287,6 +443,191 @@ pub fn decode_input(body: &[u8]) -> Result<Vec<ClientCommand>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw(x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
+        DecodedRect {
+            rect: Rect::new(x, y, w, h),
+            payload: RectPayload::Rgba(vec![0u8; w as usize * h as usize * 4]),
+        }
+    }
+
+    fn jpeg(x: u16, y: u16, w: u16, h: u16, tag: u8) -> DecodedRect {
+        DecodedRect {
+            rect: Rect::new(x, y, w, h),
+            payload: RectPayload::Jpeg(vec![tag; 16]),
+        }
+    }
+
+    fn copy_rect(x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
+        DecodedRect {
+            rect: Rect::new(x, y, w, h),
+            payload: RectPayload::CopyRect { src_x: 0, src_y: 0 },
+        }
+    }
+
+    fn h264(x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
+        DecodedRect {
+            rect: Rect::new(x, y, w, h),
+            payload: RectPayload::H264 {
+                data: vec![0, 0, 0, 1, 0x65],
+                flags: 0,
+                context_id: 0,
+                reset: false,
+                keyframe: true,
+            },
+        }
+    }
+
+    fn geometry(rects: &[DecodedRect]) -> Vec<(u16, u16, u16, u16)> {
+        rects
+            .iter()
+            .map(|r| (r.rect.x, r.rect.y, r.rect.width, r.rect.height))
+            .collect()
+    }
+
+    /// The whole point: a backlog of full-screen updates collapses onto the
+    /// newest one, because each of them paints over every pixel the previous
+    /// one painted. Without this, playing video makes the renderer upload
+    /// several megabytes per frame for pixels that are overwritten a
+    /// millisecond later, and the picture the user is steering by falls
+    /// seconds behind their mouse.
+    #[test]
+    fn a_rect_a_later_rect_completely_repaints_is_dropped() {
+        let kept = prune_covered_rects(vec![
+            raw(0, 0, 64, 64),
+            raw(0, 0, 64, 64),
+            raw(0, 0, 64, 64),
+        ]);
+        assert_eq!(
+            kept.len(),
+            1,
+            "three identical full repaints collapse to one"
+        );
+        assert_eq!(geometry(&kept), vec![(0, 0, 64, 64)]);
+
+        // A smaller rect inside a later, bigger one goes the same way.
+        let kept = prune_covered_rects(vec![raw(10, 10, 4, 4), raw(0, 0, 64, 64)]);
+        assert_eq!(geometry(&kept), vec![(0, 0, 64, 64)]);
+    }
+
+    /// Only *complete* coverage may drop a rect. A rect the later ones merely
+    /// overlap still owns the pixels they miss, and dropping it would leave
+    /// that strip showing whatever was there before, until the server happens
+    /// to repaint it, which for a static area can be never.
+    #[test]
+    fn a_partially_covered_rect_is_kept() {
+        let kept = prune_covered_rects(vec![raw(0, 0, 64, 64), raw(0, 0, 64, 32)]);
+        assert_eq!(geometry(&kept), vec![(0, 0, 64, 64), (0, 0, 64, 32)]);
+
+        // Two later rects that between them cover the whole of the older one
+        // DO drop it: coverage is tested against the union, not against each
+        // rect on its own.
+        let kept = prune_covered_rects(vec![
+            raw(0, 0, 64, 64),
+            raw(0, 0, 64, 32),
+            raw(0, 32, 64, 32),
+        ]);
+        assert_eq!(geometry(&kept), vec![(0, 0, 64, 32), (0, 32, 64, 32)]);
+    }
+
+    /// A CopyRect reads pixels an older rect painted, so it is a hard barrier:
+    /// it survives, and so does everything older than it, even when a later
+    /// rect covers that older rect completely. Pruning across a CopyRect would
+    /// make it copy whatever stale pixels happened to be in the source area.
+    #[test]
+    fn a_copy_rect_is_never_dropped_and_protects_everything_older() {
+        let kept = prune_covered_rects(vec![
+            raw(0, 0, 64, 64),     // the source pixels the copy will read
+            copy_rect(0, 0, 8, 8), // the barrier
+            raw(0, 0, 64, 64),     // covers the first rect, but may not drop it
+        ]);
+        assert_eq!(kept.len(), 3, "nothing may be dropped across a CopyRect");
+        assert!(matches!(kept[1].payload, RectPayload::CopyRect { .. }));
+
+        // The barrier itself is never dropped even when a later rect paints
+        // over the whole of it.
+        let kept = prune_covered_rects(vec![copy_rect(0, 0, 64, 64), raw(0, 0, 64, 64)]);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// H.264 access units carry inter-frame dependencies, so a dropped one is
+    /// not a stale rectangle, it is a decoder producing garbage until the next
+    /// IDR. Same barrier rule as CopyRect.
+    #[test]
+    fn an_h264_rect_is_never_dropped_and_protects_everything_older() {
+        let kept = prune_covered_rects(vec![
+            raw(0, 0, 64, 64),
+            h264(0, 0, 64, 64),
+            raw(0, 0, 64, 64),
+        ]);
+        assert_eq!(kept.len(), 3);
+        assert!(matches!(kept[1].payload, RectPayload::H264 { .. }));
+
+        // A run of H.264 rects covering each other stays whole.
+        let kept = prune_covered_rects(vec![
+            h264(0, 0, 64, 64),
+            h264(0, 0, 64, 64),
+            h264(0, 0, 64, 64),
+        ]);
+        assert_eq!(kept.len(), 3);
+    }
+
+    /// Whatever survives must apply in the order the server sent it. Pruning
+    /// that reordered rects would be a repaint bug that only shows up where
+    /// two rects overlap, which is exactly where it is hardest to see.
+    #[test]
+    fn surviving_rects_keep_their_original_order() {
+        let kept = prune_covered_rects(vec![
+            jpeg(0, 0, 10, 10, 1),
+            jpeg(20, 20, 10, 10, 2),
+            jpeg(0, 0, 10, 10, 3), // covers the first
+            jpeg(40, 40, 10, 10, 4),
+        ]);
+        assert_eq!(
+            geometry(&kept),
+            vec![(20, 20, 10, 10), (0, 0, 10, 10), (40, 40, 10, 10)]
+        );
+        let tags: Vec<u8> = kept
+            .iter()
+            .map(|r| match &r.payload {
+                RectPayload::Jpeg(b) => b[0],
+                other => panic!("expected a JPEG rect, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(tags, vec![2, 3, 4]);
+    }
+
+    /// Nothing to prune must give the list straight back, unchanged and in
+    /// order. This is the ordinary case on a quiet desktop and it must not
+    /// cost a reallocation or a subtle reshuffle.
+    #[test]
+    fn disjoint_rects_are_all_kept() {
+        let kept = prune_covered_rects(vec![
+            raw(0, 0, 10, 10),
+            raw(20, 0, 10, 10),
+            raw(0, 20, 10, 10),
+        ]);
+        assert_eq!(
+            geometry(&kept),
+            vec![(0, 0, 10, 10), (20, 0, 10, 10), (0, 20, 10, 10)]
+        );
+    }
+
+    /// The byte accounting the pending accumulator budgets with has to agree
+    /// with what the encoder actually emits, or the memory cap is measuring
+    /// something else.
+    #[test]
+    fn encoded_rect_len_matches_what_encode_frame_writes() {
+        let rects = vec![
+            raw(0, 0, 4, 4),
+            jpeg(0, 0, 8, 8, 7),
+            copy_rect(0, 0, 8, 8),
+            h264(0, 0, 16, 16),
+        ];
+        let sum: usize = rects.iter().map(encoded_rect_len).sum();
+        let encoded = encode_frame(&rects, &Rect::new(0, 0, 16, 16));
+        assert_eq!(encoded.len(), 12 + sum);
+    }
 
     #[test]
     fn frame_roundtrip_layout() {

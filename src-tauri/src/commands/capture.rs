@@ -121,9 +121,27 @@ fn spawn_forwarder(app: AppHandle, rx: crossbeam_channel::Receiver<CapturedKey>)
                 let Ok(sender) = state.command_sender(&session_id) else {
                     continue;
                 };
-                // `try_send`, like `send_input`: input must never queue
-                // unboundedly behind a stalled session.
-                let _ = sender.try_send(ClientCommand::Key {
+                // `blocking_send`, not `try_send`, and this is the same
+                // choice `send_input` makes for key events
+                // (`commands/session.rs`): a key event is never safe to shed.
+                // `try_send` drops it silently when the 256-slot command queue
+                // is momentarily full, and the event most likely to be dropped
+                // is the one that matters most, because the queue fills when
+                // the session is stalled and a stalled session is exactly when
+                // a user mashes and then lets go. A dropped key RELEASE leaves
+                // a modifier held down on the remote machine, which is the
+                // precise failure `release_all_input` exists to clean up
+                // after; better to make the forwarder wait for room.
+                //
+                // Blocking here is safe and it is bounded in the way that
+                // matters. This is a dedicated OS thread with no async runtime
+                // on it, so `blocking_send` parks the thread rather than
+                // panicking; keys that arrive meanwhile queue on the crossbeam
+                // channel behind it, in order, so a press and its release
+                // cannot be separated or reordered. A session that has really
+                // gone away drops its receiver and this returns an error
+                // immediately rather than waiting.
+                let _ = sender.blocking_send(ClientCommand::Key {
                     keysym: key.keysym,
                     // The XT scancode drives the layout-independent QEMU
                     // extended-key-event path (PRD/06 §2.2).

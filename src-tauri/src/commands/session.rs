@@ -4,7 +4,12 @@
 //! - Framebuffer updates and cursor shapes go to the webview **binary** over
 //!   the `tauri::ipc::Channel` captured at connect time
 //!   (`InvokeResponseBody::Raw`, framing in `crate::framing` /
-//!   `src-tauri/FRAME_FORMAT.md`).
+//!   `src-tauri/FRAME_FORMAT.md`). Framebuffer updates are flow controlled:
+//!   at most [`MAX_FRAMES_IN_FLIGHT`] of them are unacked at a time and the
+//!   webview returns credit with [`frame_ack`]. Everything behind that
+//!   `Channel::send` is an unbounded queue, so without it a screen playing
+//!   video simply moves its backlog into the webview and the picture the user
+//!   is steering by falls seconds behind their hand.
 //! - Everything else goes as small JSON via
 //!   `emit_to(window_label, "session://event", …)`.
 //! - Input comes back as a raw binary body (`send_input`).
@@ -13,16 +18,17 @@
 //! thread) while building `ConnectOptions`, they NEVER pass through JS.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use vnc_core::{
-    ClientCommand, ConnectOptions, ProtocolEvent, ProtocolKind, ProtocolOptions, QualityPreset,
-    RdpEvent, SessionEvent, SessionState,
+    ClientCommand, ConnectOptions, DecodedRect, ProtocolEvent, ProtocolKind, ProtocolOptions,
+    QualityPreset, RdpEvent, Rect, RectPayload, SessionEvent, SessionState,
 };
 
 use crate::state::{AppState, ExistingWindow, MachineKey, PendingCredentialSave, SessionEntry};
@@ -521,6 +527,306 @@ fn state_tag(state: &SessionState) -> Option<String> {
     Some(value.get("state")?.as_str()?.to_string())
 }
 
+/// How many framebuffer messages may be in flight to the webview at once.
+///
+/// The defect this number exists for: [`Channel::send`] is synchronous, it
+/// always succeeds, and every queue behind it is unbounded (Tauri's
+/// `ChannelDataIpcQueue`, the tao event proxy, the reorder buffer in the
+/// webview and the renderer's own promise chain). While the remote screen
+/// plays video or runs a window animation the shell produces frames faster
+/// than the webview can draw them, so the backlog did not build up in Rust
+/// where somebody could see it, it relocated into the webview. The picture the
+/// user steers by then runs seconds behind their hand. Their clicks reach the
+/// server immediately, they simply cannot see them happen, and that reads as
+/// enormous input lag even though the input path was never slow.
+///
+/// Two, not one and not ten. One idles the shell for a whole
+/// present-then-ack round trip between every frame, which costs real
+/// throughput on a fast link and buys latency nobody can perceive. Two keeps
+/// exactly one frame queued behind the one being drawn, so the renderer never
+/// waits for work while the worst-case staleness stays bounded at two frames
+/// rather than at however many the encoder can produce. Anything larger is a
+/// queue again, and a queue is the thing being removed.
+const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+
+/// How long the forwarding task waits for a [`frame_ack`] before it decides
+/// the ack is never coming and takes the credit back anyway.
+///
+/// A session wedged for ever by one lost ack would be a worse bug than the one
+/// this whole mechanism fixes, and there are honest ways to lose one: a
+/// renderer that threw inside its apply path, a webview reloaded out from
+/// under the channel, a frame the compositor never presented.
+///
+/// One second is deliberately long. A healthy webview acks in milliseconds, so
+/// this never fires in ordinary use, and a webview that is merely SLOW must
+/// not have credit handed back early, because that is the unbounded queue
+/// coming straight back in a different costume. Firing at a second costs one
+/// visible hitch in a case that is already broken.
+const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Ceiling on the bytes the pending accumulator may hold.
+///
+/// 64 MiB is two full 4K framebuffers in raw RGBA (3840 * 2160 * 4 is a shade
+/// over 33 MB each), and it has to be at least that: a cap smaller than ONE
+/// full-screen update of the largest desktop we expect would be tripped by a
+/// single legitimate frame, every time one arrived. Coverage pruning normally
+/// holds the accumulator near one frame's worth however long the backlog, so
+/// reaching this at all means a pile of disjoint updates that cover nothing,
+/// and the only alternative to a cap there is growing until the process is
+/// killed.
+const MAX_PENDING_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
+/// Flow control for one session's framebuffer messages.
+///
+/// Shared between the forwarding task, which spends credit, and [`frame_ack`],
+/// which the webview invokes once it has finished applying a frame.
+struct FrameCredit {
+    /// Frames handed to the channel that have not been acked yet.
+    in_flight: AtomicU32,
+    /// Wakes the forwarding task when an ack lands while it is sitting on a
+    /// coalesced update it had no credit to send.
+    acked: tokio::sync::Notify,
+}
+
+impl FrameCredit {
+    fn new() -> Self {
+        Self {
+            in_flight: AtomicU32::new(0),
+            acked: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Spend one credit, or report there is none to spend.
+    fn try_take(&self) -> bool {
+        let mut current = self.in_flight.load(Ordering::Relaxed);
+        loop {
+            if current >= MAX_FRAMES_IN_FLIGHT {
+                return false;
+            }
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// One frame is done with, so its credit comes back.
+    ///
+    /// Called both by [`frame_ack`] and by the sender itself when the channel
+    /// refuses a frame, because a frame that never reached the webview is a
+    /// frame no ack will ever arrive for; waiting out
+    /// [`FRAME_ACK_TIMEOUT`] for that would stall a live session for a second
+    /// over an error we already know about.
+    ///
+    /// Saturates at zero. A duplicated or spurious ack must not be able to
+    /// mint credit that was never spent, which would put the unbounded queue
+    /// back under a webview's control.
+    fn ack(&self) {
+        let mut current = self.in_flight.load(Ordering::Relaxed);
+        while current > 0 {
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+        // `notify_one` and not `notify_waiters`: it stores a permit when
+        // nobody is waiting yet, so an ack that lands in the gap between the
+        // forwarding task deciding to wait and actually awaiting is not lost.
+        self.acked.notify_one();
+    }
+
+    /// Forget every outstanding frame.
+    ///
+    /// Used when a session disconnects or reconnects: the frames those credits
+    /// were spent on belong to a picture that no longer exists, and nothing
+    /// will ever ack them. Also the timeout's way out.
+    fn reset(&self) {
+        self.in_flight.store(0, Ordering::Release);
+        self.acked.notify_one();
+    }
+
+    /// Wait until an ack frees a credit, or until it is clear none is coming.
+    ///
+    /// `deadline` is a parameter rather than the constant read from inside, so
+    /// a test can drive this in milliseconds instead of making the suite sit
+    /// out a real second. The only caller passes [`FRAME_ACK_TIMEOUT`].
+    async fn wait_for_credit(&self, deadline: Duration) {
+        if tokio::time::timeout(deadline, self.acked.notified())
+            .await
+            .is_err()
+        {
+            self.reset();
+        }
+    }
+}
+
+/// Live sessions' frame credit, keyed by session id.
+///
+/// A `static` rather than a field on `SessionEntry` because the two parties
+/// find it by different routes: the forwarding task holds one end for the life
+/// of the session, while [`frame_ack`] arrives as its own command with nothing
+/// but a session id to look it up by. Registered when forwarding starts and
+/// removed when the event stream closes, so an ack for a session that has
+/// already ended finds nothing and does nothing, which is the normal way for a
+/// window to shut down: the webview finishes drawing the last frame after the
+/// session is gone.
+fn frame_credits() -> &'static Mutex<HashMap<String, Arc<FrameCredit>>> {
+    static CREDITS: std::sync::OnceLock<Mutex<HashMap<String, Arc<FrameCredit>>>> =
+        std::sync::OnceLock::new();
+    CREDITS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Framebuffer updates that arrived while every credit was spent.
+///
+/// Merging consecutive updates is trivially correct by concatenation: applying
+/// update N's rects and then N+1's rects is exactly what the renderer would
+/// have done with the two messages anyway. So this appends, and the whole
+/// accumulated set goes out as one message when credit frees up. What makes it
+/// cheap rather than merely correct is the coverage pruning in
+/// [`framing::prune_covered_rects`], which throws away the rects a later rect
+/// paints over completely.
+struct PendingFrames {
+    rects: Vec<DecodedRect>,
+    /// Union of the damage the merged updates reported. A superset is always
+    /// safe here, it is the region the renderer is told changed.
+    damage: Rect,
+    /// What the merged set would encode to, counted with the encoder's own
+    /// ruler ([`framing::encoded_rect_len`]).
+    bytes: usize,
+}
+
+impl PendingFrames {
+    fn new() -> Self {
+        Self {
+            rects: Vec::new(),
+            damage: Rect::new(0, 0, 0, 0),
+            bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rects.is_empty()
+    }
+
+    /// Merge one update in.
+    ///
+    /// Returns true when the byte ceiling was hit and pixels had to be
+    /// abandoned, which the caller repairs by asking the server for the whole
+    /// screen again.
+    fn merge(&mut self, rects: Vec<DecodedRect>, damage: Rect) -> bool {
+        self.damage = self.damage.union(&damage);
+        self.rects.extend(rects);
+        self.recount();
+        if self.bytes <= MAX_PENDING_FRAME_BYTES {
+            return false;
+        }
+        // Pruning is free of consequences, so it is always tried first.
+        self.prune();
+        if self.bytes <= MAX_PENDING_FRAME_BYTES {
+            return false;
+        }
+        self.shed()
+    }
+
+    /// Drop every rect a later rect repaints completely.
+    fn prune(&mut self) {
+        self.rects = framing::prune_covered_rects(std::mem::take(&mut self.rects));
+        self.recount();
+    }
+
+    /// Last resort: stop accumulating and give up pixels rather than memory.
+    ///
+    /// The droppable rects go first and the barriers (CopyRect, H.264) are
+    /// kept, because a barrier is not just pixels, it is something later rects
+    /// depend on. If the barriers alone are still over budget, they go too:
+    /// the caller's full refresh repairs both cases, and for H.264 it is also
+    /// what produces the IDR a decoder needs after a gap.
+    fn shed(&mut self) -> bool {
+        let before = self.rects.len();
+        self.rects.retain(|r| {
+            matches!(
+                r.payload,
+                RectPayload::CopyRect { .. } | RectPayload::H264 { .. }
+            )
+        });
+        self.recount();
+        if self.bytes > MAX_PENDING_FRAME_BYTES {
+            self.rects.clear();
+            self.bytes = 0;
+        }
+        before != self.rects.len()
+    }
+
+    fn recount(&mut self) {
+        self.bytes = self.rects.iter().map(framing::encoded_rect_len).sum();
+    }
+
+    /// Take the merged, pruned update, leaving the accumulator empty.
+    fn take(&mut self) -> (Vec<DecodedRect>, Rect) {
+        self.prune();
+        self.bytes = 0;
+        let damage = std::mem::replace(&mut self.damage, Rect::new(0, 0, 0, 0));
+        (std::mem::take(&mut self.rects), damage)
+    }
+
+    /// Forget everything held. For a session that disconnected: those pixels
+    /// describe a screen that is gone, and a reconnect always begins with a
+    /// full framebuffer update anyway.
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// Hand the accumulated update to the webview, if there is credit for one.
+fn flush_pending_frame(
+    credit: &FrameCredit,
+    pending: &mut PendingFrames,
+    channel: &Channel<InvokeResponseBody>,
+    session_id: &str,
+) {
+    if pending.is_empty() || !credit.try_take() {
+        return;
+    }
+    let (rects, damage) = pending.take();
+    // Binary fast path; framing per FRAME_FORMAT.md (msg_type 1).
+    let bytes = framing::encode_frame(&rects, &damage);
+    if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
+        credit.ack();
+        tracing::warn!(session = %session_id, "frame channel send failed: {e}");
+    }
+}
+
+/// The webview has finished applying one framebuffer message.
+///
+/// This is the return half of the credit scheme described at
+/// [`MAX_FRAMES_IN_FLIGHT`], and it is deliberately the cheapest command in
+/// the shell: one map lookup and one atomic decrement, no session command, no
+/// event, no allocation beyond the id itself. It runs once per presented
+/// frame, so anything more would be paid sixty times a second.
+///
+/// It carries no frame number. A lost ack is covered by
+/// [`FRAME_ACK_TIMEOUT`] rather than by sequencing, which keeps both ends
+/// stateless; and an ack for a session that has already ended is a no-op, not
+/// an error, because a webview finishing its last frame after the session
+/// closed is the ordinary way a window shuts down.
+#[tauri::command]
+pub async fn frame_ack(session_id: String) {
+    let credit = frame_credits().lock().get(&session_id).cloned();
+    if let Some(credit) = credit {
+        credit.ack();
+    }
+}
+
 /// Forward a session's events until its event stream ends, then clean up the
 /// registry entry and tell the UI the session is over.
 #[allow(clippy::too_many_arguments)] // internal plumbing fan-out, not an API
@@ -542,7 +848,33 @@ fn forward_events(
         // rather than once per 20 ms packet).
         let mut auth_method: Option<String> = None;
         let mut audio_format: Option<(u32, u8)> = None;
-        while let Some(event) = rx.recv().await {
+        // Frame flow control for this session (see [`MAX_FRAMES_IN_FLIGHT`]).
+        // Registered before the first event is read and removed when the
+        // stream ends, so `frame_ack` can find it for exactly as long as there
+        // is anything to ack.
+        let credit = Arc::new(FrameCredit::new());
+        frame_credits()
+            .lock()
+            .insert(session_id.clone(), credit.clone());
+        let mut pending = PendingFrames::new();
+        loop {
+            let event = tokio::select! {
+                received = rx.recv() => match received {
+                    Some(event) => event,
+                    // The session task has ended and dropped its sender.
+                    None => break,
+                },
+                // Nothing new is arriving, but a coalesced update is sitting
+                // here waiting for credit. Without this arm the task would
+                // block in `recv` holding the newest picture of the screen
+                // while the ack that would release it went unread, and a
+                // desktop that had just gone still would show the frame before
+                // last indefinitely.
+                () = credit.wait_for_credit(FRAME_ACK_TIMEOUT), if !pending.is_empty() => {
+                    flush_pending_frame(&credit, &mut pending, &channel, &session_id);
+                    continue;
+                }
+            };
             if let SessionEvent::StateChanged(SessionState::Authenticating { method }) = &event {
                 auth_method = Some(method.clone());
             }
@@ -555,6 +887,19 @@ fn forward_events(
                 SessionEvent::StateChanged(state) => {
                     if let Some(entry) = sessions.lock().get(&session_id) {
                         entry.facts.lock().state = state.clone();
+                    }
+                    // A session that is not connected has no frames worth
+                    // holding and no acks left to expect. Anything pending
+                    // describes a screen that is gone, and the credits spent
+                    // on frames in flight when the link dropped would
+                    // otherwise never come back: a reconnect would inherit an
+                    // exhausted budget and its first updates would sit in the
+                    // accumulator until the ack timeout forgave them one by
+                    // one. A reconnect always begins with a full framebuffer
+                    // update, so nothing is lost by starting empty.
+                    if !matches!(state, SessionState::Connected) {
+                        pending.clear();
+                        credit.reset();
                     }
                 }
                 SessionEvent::DesktopResize { width, height } => {
@@ -569,6 +914,16 @@ fn forward_events(
                     if let Some(state) = app.try_state::<AppState>() {
                         state.agent.note_resize(&session_id, *width, *height);
                     }
+                    // Held rects describe the framebuffer that existed a
+                    // moment ago, and the resize goes to the webview on the
+                    // JSON path while they would go on the binary one, so
+                    // there is nothing keeping them on the correct side of it.
+                    // A rect from the old geometry applied after the renderer
+                    // has reallocated is at best clipped and at worst a
+                    // texture upload past the end of the surface. The server
+                    // follows a resize with a full update, so nothing is lost
+                    // by dropping them.
+                    pending.clear();
                 }
                 // A driver's answer to an agent intent. This pump is the only
                 // reader of the session's event stream, and the party waiting
@@ -685,10 +1040,34 @@ fn forward_events(
                     if let Some(state) = app.try_state::<AppState>() {
                         state.agent.feed(&session_id, &rects);
                     }
-                    // Binary fast path; framing per FRAME_FORMAT.md (msg_type 1).
-                    let bytes = framing::encode_frame(&rects, &damage);
-                    if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
-                        tracing::warn!(session = %session_id, "frame channel send failed: {e}");
+                    // Fed above from EVERY update, before the flow control
+                    // below can merge or prune anything: what an agent
+                    // perceives must not depend on how busy the person's
+                    // webview happens to be.
+                    //
+                    // Merged rather than sent. `flush_pending_frame` at the
+                    // bottom of the loop puts it on the channel if there is
+                    // credit for it; if there is not, the next update merges
+                    // into this one and the renderer eventually receives a
+                    // single message instead of a queue of stale ones.
+                    if pending.merge(rects, damage) {
+                        // The accumulator hit its byte ceiling and pixels had
+                        // to be abandoned to keep it there. We cannot invent
+                        // them back, so ask the server for the whole screen:
+                        // a repaint costs bandwidth once, while a region we
+                        // quietly gave up on stays wrong on screen until
+                        // something else happens to repaint it.
+                        tracing::warn!(
+                            session = %session_id,
+                            "pending frame budget exceeded, asking for a full refresh"
+                        );
+                        let commands = sessions
+                            .lock()
+                            .get(&session_id)
+                            .map(|entry| entry.handle.commands.clone());
+                        if let Some(commands) = commands {
+                            let _ = commands.try_send(ClientCommand::Refresh);
+                        }
                     }
                 }
                 SessionEvent::CursorUpdate(shape) => {
@@ -733,7 +1112,14 @@ fn forward_events(
                     }
                 }
             }
+            // Every event is a chance to hand over whatever is waiting: an ack
+            // may well have landed while this one was being processed.
+            flush_pending_frame(&credit, &mut pending, &channel, &session_id);
         }
+
+        // Nothing will send another frame for this session, so an ack that
+        // arrives from here on finds no entry and does nothing.
+        frame_credits().lock().remove(&session_id);
 
         // Event stream closed: the session task has fully ended. Any
         // credential the user asked to remember but that never reached
@@ -2532,6 +2918,195 @@ mod tests {
             .expect("adopt");
         assert_ne!(vnc.id, adopted.id);
         assert_eq!(vnc.protocol, "vnc");
+    }
+
+    fn raw_rect(x: u16, y: u16, w: u16, h: u16, bytes: usize) -> DecodedRect {
+        DecodedRect {
+            rect: Rect::new(x, y, w, h),
+            payload: RectPayload::Rgba(vec![0u8; bytes]),
+        }
+    }
+
+    /// The governor's whole job: past the cap there is nothing to spend, so
+    /// the forwarding task holds the update instead of handing it to a queue
+    /// nobody is draining.
+    #[test]
+    fn no_frame_goes_out_beyond_the_in_flight_cap() {
+        let credit = FrameCredit::new();
+        for frame in 0..MAX_FRAMES_IN_FLIGHT {
+            assert!(credit.try_take(), "frame {frame} is within the cap");
+        }
+        assert!(
+            !credit.try_take(),
+            "the frame past the cap must wait for an ack, not be sent"
+        );
+    }
+
+    /// And it must actually resume. A governor that stops sending and never
+    /// starts again is a frozen window, which is worse than the lag it
+    /// replaces.
+    #[test]
+    fn sending_resumes_when_the_webview_acks() {
+        let credit = FrameCredit::new();
+        while credit.try_take() {}
+        credit.ack();
+        assert!(credit.try_take(), "an ack frees exactly one credit");
+        assert!(!credit.try_take(), "and only one");
+    }
+
+    /// The webview cannot talk its way into an unbounded queue by acking
+    /// frames that were never sent. Credit saturates at zero.
+    #[test]
+    fn acks_for_frames_that_were_never_sent_mint_no_credit() {
+        let credit = FrameCredit::new();
+        for _ in 0..100 {
+            credit.ack();
+        }
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            assert!(credit.try_take());
+        }
+        assert!(
+            !credit.try_take(),
+            "a hundred spurious acks must not raise the cap"
+        );
+    }
+
+    /// A lost ack must cost a hitch, never the session.
+    #[tokio::test]
+    async fn the_ack_timeout_restores_credit_when_the_webview_goes_quiet() {
+        let credit = FrameCredit::new();
+        while credit.try_take() {}
+        assert!(!credit.try_take());
+
+        // Nobody ever calls `frame_ack`.
+        credit.wait_for_credit(Duration::from_millis(5)).await;
+
+        assert!(
+            credit.try_take(),
+            "a webview that never acks must not wedge the session for ever"
+        );
+    }
+
+    /// An ack that lands before the task starts waiting must still wake it.
+    /// `Notify::notify_one` stores the permit; `notify_waiters` would drop it
+    /// and the task would sit out the full timeout holding a fresh frame.
+    #[tokio::test]
+    async fn an_ack_that_arrives_before_the_wait_is_not_lost() {
+        let credit = FrameCredit::new();
+        while credit.try_take() {}
+        credit.ack();
+        // A timeout long enough that reaching it would mean the stored ack was
+        // dropped, and short enough that the suite does not wait on it.
+        credit.wait_for_credit(Duration::from_secs(30)).await;
+        assert_eq!(
+            credit.in_flight.load(Ordering::Relaxed),
+            MAX_FRAMES_IN_FLIGHT - 1,
+            "the wait returned on the stored ack, not on the timeout, which \
+             would have reset the count to zero"
+        );
+    }
+
+    /// Disconnect and reconnect start from a clean slate. Credits spent on
+    /// frames that were in flight when the link dropped are never acked, so
+    /// without this a reconnect would inherit an exhausted budget.
+    #[test]
+    fn a_reset_clears_the_accounting_for_a_reconnect() {
+        let credit = FrameCredit::new();
+        while credit.try_take() {}
+        credit.reset();
+        assert!(credit.try_take());
+
+        let mut pending = PendingFrames::new();
+        pending.merge(vec![raw_rect(0, 0, 4, 4, 64)], Rect::new(0, 0, 4, 4));
+        assert!(!pending.is_empty());
+        pending.clear();
+        assert!(pending.is_empty());
+        assert_eq!(pending.bytes, 0);
+    }
+
+    /// Coalescing is concatenation: update N's rects then N+1's rects, in that
+    /// order, which is exactly what the renderer would have applied anyway.
+    #[test]
+    fn merged_updates_concatenate_in_order_and_union_their_damage() {
+        let mut pending = PendingFrames::new();
+        assert!(!pending.merge(vec![raw_rect(0, 0, 4, 4, 64)], Rect::new(0, 0, 4, 4)));
+        assert!(!pending.merge(
+            vec![raw_rect(64, 64, 4, 4, 64), raw_rect(80, 80, 4, 4, 64)],
+            Rect::new(64, 64, 20, 20)
+        ));
+
+        let (rects, damage) = pending.take();
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0].rect, Rect::new(0, 0, 4, 4));
+        assert_eq!(rects[1].rect, Rect::new(64, 64, 4, 4));
+        assert_eq!(rects[2].rect, Rect::new(80, 80, 4, 4));
+        assert_eq!(damage, Rect::new(0, 0, 84, 84));
+        assert!(pending.is_empty());
+    }
+
+    /// Pruning is tried before anything is given up, and on the case that
+    /// matters (successive repaints of the same area) it is enough on its own:
+    /// no pixels are lost and no refresh is needed.
+    #[test]
+    fn the_byte_cap_prunes_before_it_sheds() {
+        let big = MAX_PENDING_FRAME_BYTES / 2 + 1024;
+        let mut pending = PendingFrames::new();
+        assert!(!pending.merge(vec![raw_rect(0, 0, 64, 64, big)], Rect::new(0, 0, 64, 64)));
+        // The same area again: over budget on arrival, but the older rect is
+        // completely repainted by this one, so pruning alone settles it.
+        assert!(
+            !pending.merge(vec![raw_rect(0, 0, 64, 64, big)], Rect::new(0, 0, 64, 64)),
+            "coverage pruning must bring this back under budget with no damage"
+        );
+        assert_eq!(pending.rects.len(), 1);
+        assert!(pending.bytes <= MAX_PENDING_FRAME_BYTES);
+    }
+
+    /// When pruning cannot help, because nothing covers anything, the
+    /// accumulator stops growing. It gives up pixels and says so, and the
+    /// caller repairs them with a full refresh from the server.
+    #[test]
+    fn the_byte_cap_is_respected_when_nothing_can_be_pruned() {
+        let big = MAX_PENDING_FRAME_BYTES / 2 + 1024;
+        let mut pending = PendingFrames::new();
+        assert!(!pending.merge(vec![raw_rect(0, 0, 64, 64, big)], Rect::new(0, 0, 64, 64)));
+        assert!(
+            pending.merge(
+                vec![raw_rect(0, 128, 64, 64, big)],
+                Rect::new(0, 128, 64, 64)
+            ),
+            "two disjoint rects over budget must report abandoned pixels"
+        );
+        assert!(pending.bytes <= MAX_PENDING_FRAME_BYTES);
+        assert!(pending.is_empty());
+    }
+
+    /// Shedding gives up the droppable rects first and keeps the barriers: a
+    /// CopyRect is not just pixels, it is something later rects depend on.
+    #[test]
+    fn shedding_keeps_the_barriers_and_drops_the_pixels() {
+        let big = MAX_PENDING_FRAME_BYTES / 2 + 1024;
+        let mut pending = PendingFrames::new();
+        pending.merge(vec![raw_rect(0, 0, 64, 64, big)], Rect::new(0, 0, 64, 64));
+        pending.merge(
+            vec![DecodedRect {
+                rect: Rect::new(0, 0, 8, 8),
+                payload: RectPayload::CopyRect {
+                    src_x: 32,
+                    src_y: 32,
+                },
+            }],
+            Rect::new(0, 0, 8, 8),
+        );
+        assert!(pending.merge(
+            vec![raw_rect(0, 128, 64, 64, big)],
+            Rect::new(0, 128, 64, 64)
+        ));
+        assert_eq!(pending.rects.len(), 1);
+        assert!(matches!(
+            pending.rects[0].payload,
+            RectPayload::CopyRect { .. }
+        ));
     }
 }
 

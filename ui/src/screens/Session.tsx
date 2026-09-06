@@ -432,11 +432,20 @@ function SessionView({
       return;
     }
     rendererRef.current = renderer;
+    // Close the shell's frame credit loop. The renderer fires this once for
+    // every update that leaves its queue, including the ones it pruned away,
+    // because the shell is owed the credit either way and withholds the next
+    // frame until it comes back.
+    renderer.onFrameDone = () => sessionRef.current.ackFrame();
     renderer.start();
 
     const input = new SessionInput(canvas, {
       renderer,
-      send: (pkt) => sessionRef.current.sendInput(pkt),
+      // The coalesce key has to be forwarded, not swallowed. A one-parameter
+      // arrow here type-checks silently and quietly drops it, which leaves
+      // pointer motion back on the strictly ordered path where a backlog of
+      // stale positions builds up behind a slow IPC round trip.
+      send: (pkt, coalesceKey) => sessionRef.current.sendInput(pkt, coalesceKey),
       releaseAllKeys: () => sessionRef.current.releaseAllKeys(),
       // A forwarded Cmd/Ctrl+V pushes the CURRENT local clipboard first, so
       // clipboard-mode dictation (write transcript, synthesize paste) pastes

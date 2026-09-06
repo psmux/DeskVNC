@@ -10,6 +10,9 @@
  *   256/16/8/4/2, plus 1-bit with 4x4 ordered Bayer dithering).
  * - Client-side cursor sprite composited as a second small quad, updated
  *   independently of frame delivery.
+ * - Incoming updates queue in a pending list and are coverage-pruned before
+ *   they are applied, so a backlog that builds up during video playback
+ *   collapses to what is still visible instead of playing out seconds late.
  *
  * This class is deliberately outside React: no state, no allocation per frame
  * on the hot path.
@@ -93,10 +96,231 @@ interface H264Context {
   generation: number;
   /** Monotonic presentation timestamps, in microseconds. */
   timestamp: number;
+  /**
+   * Uploads still waiting on the decoder, keyed by the timestamp of the chunk
+   * that will produce them. Insertion order is submission order, which is
+   * also ascending timestamp order; see `decodeH264` for what that buys.
+   */
+  waiters: Map<number, (frame: VideoFrame | null) => void>;
 }
 
 /** Maximum simultaneous decoder contexts, mirrors the backend's cap. */
 const H264_MAX_CONTEXTS = 64;
+
+/**
+ * How long one H.264 rect waits for its decoded frame before giving up on it.
+ *
+ * A `decode()` normally produces exactly one `output` callback, but a decoder
+ * that quietly swallows a chunk (a corrupt slice, a driver hiccup) would
+ * otherwise leave the apply loop waiting forever, and every later update
+ * queued behind it: the whole viewer freezes, which is far worse than one
+ * missing frame. A real decode is tens of milliseconds, so half a second only
+ * ever fires when something has genuinely gone wrong, and the picture heals on
+ * the next key frame.
+ */
+const H264_FRAME_TIMEOUT_MS = 500;
+
+/**
+ * Hard cap on queued updates before the drain loop stops being polite.
+ *
+ * Below this, only rects that are provably invisible get dropped (see
+ * `pruneUpdates`). At or above it the queue sheds every droppable rect in
+ * every update but the newest, which CAN leave a region stale until the
+ * server repaints it. That trade only makes sense as a last resort, so the cap
+ * sits well above any backlog normal operation produces: the pruning below
+ * collapses video and animation on its own, and a queue that still grows past
+ * sixteen updates means the machine cannot keep up at all, where seconds of
+ * input lag is the worse failure.
+ */
+export const MAX_PENDING_UPDATES = 16;
+
+/**
+ * The same cap expressed in payload bytes. Queued rects hold views into their
+ * IPC message buffers, so a backlog pins that memory until it is applied; a
+ * few full-screen RGBA updates on a 4K desktop are 30 MB each.
+ */
+export const MAX_PENDING_BYTES = 64 * 1024 * 1024;
+
+/** Upper bound on the covered-region set, see `addCover`. */
+const MAX_COVER_RECTS = 32;
+/** Upper bound on the pieces one coverage test may split a rect into. */
+const MAX_COVER_FRAGMENTS = 64;
+
+/**
+ * The rect metadata pruning looks at, and nothing else.
+ *
+ * Deliberately not `WireRect`: the pruner never touches a payload, never
+ * touches GL, and is therefore testable on plain objects without standing up a
+ * WebGL context.
+ */
+export interface PruneRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  format: number;
+}
+
+export interface PruneResult<T extends PruneRect> {
+  /** Surviving rects per update, in protocol order. Inner arrays may be empty. */
+  kept: T[][];
+  /** How many rects were dropped, for the drop counters. */
+  dropped: number;
+}
+
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Whether `b` lies entirely inside `a`. */
+function contains(a: Box, b: Box): boolean {
+  return b.x >= a.x && b.y >= a.y && b.x + b.w <= a.x + a.w && b.y + b.h <= a.y + a.h;
+}
+
+/** The parts of `a` that `b` does not cover, appended to `out`. */
+function subtractBox(a: Box, b: Box, out: Box[]): void {
+  const ix0 = Math.max(a.x, b.x);
+  const iy0 = Math.max(a.y, b.y);
+  const ix1 = Math.min(a.x + a.w, b.x + b.w);
+  const iy1 = Math.min(a.y + a.h, b.y + b.h);
+  if (ix0 >= ix1 || iy0 >= iy1) {
+    out.push(a); // no overlap at all
+    return;
+  }
+  if (a.y < iy0) out.push({ x: a.x, y: a.y, w: a.w, h: iy0 - a.y });
+  if (iy1 < a.y + a.h) out.push({ x: a.x, y: iy1, w: a.w, h: a.y + a.h - iy1 });
+  if (a.x < ix0) out.push({ x: a.x, y: iy0, w: ix0 - a.x, h: iy1 - iy0 });
+  if (ix1 < a.x + a.w) out.push({ x: ix1, y: iy0, w: a.x + a.w - ix1, h: iy1 - iy0 });
+}
+
+/**
+ * Whether the union of `covers` hides every pixel of `r`.
+ *
+ * Chip the rect away one cover at a time and see whether anything is left. A
+ * single later full-screen rect answers this on the first iteration, which is
+ * the case that matters; the general union test is here so that a desktop
+ * repainted as a grid of tiles also collapses instead of only the single-rect
+ * case. If a rect shatters into more pieces than the fragment cap, give up and
+ * say "not covered": keeping a rect is always safe, dropping one is not.
+ */
+function isCovered(r: Box, covers: readonly Box[]): boolean {
+  let frags: Box[] = [r];
+  for (const c of covers) {
+    const next: Box[] = [];
+    for (const f of frags) subtractBox(f, c, next);
+    if (next.length === 0) return true;
+    if (next.length > MAX_COVER_FRAGMENTS) return false;
+    frags = next;
+  }
+  return false;
+}
+
+/**
+ * Record `r` as covered, keeping the set small.
+ *
+ * A rect already inside a recorded one adds nothing, and a rect that swallows
+ * recorded ones replaces them. Without that, a minute of video would leave
+ * hundreds of identical full-screen rects in the set and every coverage test
+ * would walk all of them. Once the set is full, later rects are simply not
+ * recorded: that prunes less, never wrongly.
+ */
+function addCover(covers: Box[], r: Box): void {
+  for (const c of covers) {
+    if (contains(c, r)) return;
+  }
+  let n = 0;
+  for (const c of covers) {
+    if (!contains(r, c)) covers[n++] = c;
+  }
+  covers.length = n;
+  if (covers.length < MAX_COVER_RECTS) covers.push(r);
+}
+
+/**
+ * Decide which queued rects are still worth applying.
+ *
+ * `pending` is the queue oldest-first, each entry one update's rects in
+ * protocol order. The walk goes NEWEST to OLDEST carrying the union of the
+ * regions later rects will paint. Any rect entirely inside that union is
+ * redundant: applying it would be overwritten before a single frame is drawn,
+ * so all it costs is a JPEG decode and a texture upload the user never sees.
+ * That is what makes video cheap here, consecutive full-screen updates fully
+ * cover their predecessors, so a backlog of thirty video frames collapses to
+ * roughly the newest one and display latency stops growing.
+ *
+ * SAFETY, the part that must not be got wrong:
+ *
+ * - `CopyRect` READS the framebuffer it is applied to. Its source pixels are
+ *   whatever earlier rects put there, so dropping or reordering anything
+ *   ahead of it copies the wrong region onto the screen, and the server will
+ *   not repaint what it believes the client already has. So a CopyRect is a
+ *   hard barrier: the walk stops dead at it and everything older is kept.
+ * - `H264` rects carry inter-frame dependencies and are fed to a decoder that
+ *   has state. Dropping one corrupts every frame until the next IDR. They are
+ *   barriers for the same reason.
+ * - Only `Rgba` and `Jpeg` rects are self-contained, so only those are ever
+ *   dropped, and only when fully covered.
+ * - Survivors stay in protocol order. Pruning removes, it never reorders.
+ *
+ * With `collapse` set (the queue has blown past its cap, see
+ * `MAX_PENDING_UPDATES`) every droppable rect outside the newest update is
+ * treated as covered whether it is or not. That can leave a region showing
+ * stale pixels until something repaints it, which is why it is reserved for a
+ * queue that is already failing.
+ *
+ * One accepted trade in the ordinary path: an older rect dropped as covered
+ * leaves its region stale if the newer rect that covered it then fails to
+ * decode. A failing JPEG already leaves a permanently stale region on its own
+ * (see the decode error path in `applyFrameOrdered`), so this widens an
+ * existing hole rather than opening a new one.
+ */
+export function pruneUpdates<T extends PruneRect>(
+  pending: readonly (readonly T[])[],
+  collapse = false,
+): PruneResult<T> {
+  const newest = pending.length - 1;
+  const keep = pending.map((rects) => rects.map(() => true));
+  const covers: Box[] = [];
+  let dropped = 0;
+  scan: for (let u = newest; u >= 0; u--) {
+    const rects = pending[u];
+    for (let i = rects.length - 1; i >= 0; i--) {
+      const r = rects[i];
+      if (r.format === RectFormat.CopyRect || r.format === RectFormat.H264) break scan;
+      // Anything else unknown to the apply switch paints nothing, so it
+      // neither covers a rect below it nor is worth dropping.
+      const paints =
+        (r.format === RectFormat.Rgba || r.format === RectFormat.Jpeg) && r.w > 0 && r.h > 0;
+      if (!paints) continue;
+      if ((collapse && u !== newest) || isCovered(r, covers)) {
+        keep[u][i] = false;
+        dropped++;
+        continue;
+      }
+      addCover(covers, r);
+    }
+  }
+  return {
+    kept: pending.map((rects, u) => rects.filter((_, i) => keep[u][i])),
+    dropped,
+  };
+}
+
+/** One update waiting its turn in the pending queue. */
+interface PendingUpdate {
+  rects: WireRect[];
+  /** Renderer generation the message was parsed against (see `generation`). */
+  generation: number;
+  /**
+   * Payload bytes this update pins. Fixed at arrival rather than recomputed
+   * after pruning: the rects are views into one IPC message buffer, and that
+   * buffer stays alive while any rect of it is still queued.
+   */
+  bytes: number;
+}
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
   const sh = gl.createShader(type);
@@ -139,8 +363,16 @@ export class WebGLRenderer {
   private disposed = false;
   /** bumped on resize/reconnect so stale async JPEG uploads are dropped */
   private generation = 0;
-  /** Serialises frame application so updates can never be reordered. */
-  private applyChain: Promise<void> = Promise.resolve();
+  /** Updates waiting to be applied, oldest first. See `applyFrame`. */
+  private pending: PendingUpdate[] = [];
+  /** True while `drain` is running, so only ever one drain loop exists. */
+  private draining = false;
+  /** Payload bytes the pending queue currently pins. */
+  private pendingBytes = 0;
+  /** Rects pruning has thrown away this session, for `getQueueStats`. */
+  private droppedRects = 0;
+  /** Updates that left the queue without being applied at all. */
+  private droppedUpdates = 0;
 
   // view transform
   private mode: RendererScalingMode = "aspect-fit";
@@ -179,6 +411,25 @@ export class WebGLRenderer {
   private h264Failed = false;
 
   onFirstFrame: (() => void) | null = null;
+
+  /**
+   * Called once for every update that leaves the queue, however it leaves it.
+   *
+   * This is the return half of the shell's frame credit scheme (see
+   * `frame_ack` in IPC_CONTRACT.md). The shell holds at most a couple of
+   * frames in flight and will not send another until one is acknowledged, so
+   * an update that we drop still has to be reported: credit for a frame that
+   * was pruned to nothing, or was parsed for a framebuffer a resize has since
+   * replaced, is exactly as owed as credit for one we painted. Miss any of
+   * the three exits below and the session slows to the pace of the shell's
+   * ack timeout, which is one frame per second, not sixty.
+   *
+   * It fires when the work is DONE rather than when the update is dequeued.
+   * Acking on dequeue would hand the credit back before the decoding and the
+   * uploads have happened, which is the unbounded queue again with extra
+   * steps.
+   */
+  onFrameDone: (() => void) | null = null;
 
   /**
    * Whether any real framebuffer data has been applied.
@@ -317,7 +568,7 @@ export class WebGLRenderer {
   // ------------------------------------------------------------------ frames
 
   /**
-   * Apply one parsed channel message.
+   * Queue one parsed channel message for application.
    *
    * ORDER IS LOAD-BEARING. RGBA and CopyRect apply synchronously, but JPEG has
    * to go through `createImageBitmap`, and H.264 through a `VideoDecoder`,
@@ -325,33 +576,126 @@ export class WebGLRenderer {
    * rect from an older update land *on top of* newer content, visible as
    * patches of stale pixels during window drags and minimise/maximise
    * animations, which then "healed" whenever something else repainted that
-   * region.
+   * region. So everything below applies strictly in protocol order, and
+   * update N is fully applied (including every H.264 rect's frame actually
+   * uploaded) before N+1 starts.
    *
-   * So: kick every JPEG decode off immediately (they still run in parallel;
-   * H.264 chunks are queued to their decoder in-order instead, see
-   * `decodeH264`), then apply everything strictly in protocol order, and
-   * chain updates so update N is fully applied (including every H.264 rect's
-   * frame actually uploaded) before N+1 starts.
+   * What that ordering guarantee used to cost: this was an unbounded promise
+   * chain, one link appended per arriving message, and every message's JPEG
+   * decodes were started the moment it arrived. When updates arrive faster
+   * than they apply, which is exactly what video playback and window
+   * animations do, the chain grew without limit. The server saw the clicks
+   * immediately but the picture on screen was seconds behind, so the session
+   * felt like it had stopped responding altogether.
+   *
+   * Now the message joins a queue that `drain` prunes before each update it
+   * applies, so work that is about to be overwritten is never paid for at
+   * all: no decode is started for it and nothing is uploaded. Ordering is
+   * unchanged, the queue is drained strictly front to back.
    */
   applyFrame(msg: FrameMessage): void {
-    // Start decodes now, parallelism is preserved, ordering is not sacrificed.
-    const pending: (Promise<ImageBitmap> | null)[] = msg.rects.map((r) =>
-      r.format === RectFormat.Jpeg ? this.decodeJpeg(r.payload) : null,
-    );
-    const gen = this.generation;
-    this.applyChain = this.applyChain
-      .then(() => this.applyFrameOrdered(msg, pending, gen))
-      .catch(() => undefined);
+    if (this.disposed) return;
+    let bytes = 0;
+    for (const r of msg.rects) bytes += r.payload.byteLength;
+    this.pending.push({ rects: msg.rects, generation: this.generation, bytes });
+    this.pendingBytes += bytes;
+    if (this.draining) return;
+    this.draining = true;
+    void this.drain();
+  }
+
+  /**
+   * Apply queued updates until the queue is empty.
+   *
+   * Pruning happens once per iteration rather than once per drain, because
+   * messages keep arriving while we await a decode: by the time an update
+   * reaches the front of the queue, updates behind it may already have made
+   * most of it invisible.
+   */
+  private async drain(): Promise<void> {
+    try {
+      while (this.pending.length > 0 && !this.disposed) {
+        const overCap =
+          this.pending.length > MAX_PENDING_UPDATES || this.pendingBytes > MAX_PENDING_BYTES;
+        const pruned = pruneUpdates(
+          this.pending.map((u) => u.rects),
+          overCap,
+        );
+        this.droppedRects += pruned.dropped;
+        for (let i = 0; i < this.pending.length; i++) this.pending[i].rects = pruned.kept[i];
+
+        const next = this.pending.shift();
+        if (!next) break;
+        this.pendingBytes -= next.bytes;
+        // A resize replaced the texture this update was parsed for; its rect
+        // coordinates address a framebuffer that no longer exists.
+        if (next.generation !== this.generation) {
+          this.droppedRects += next.rects.length;
+          this.droppedUpdates++;
+          this.onFrameDone?.();
+          continue;
+        }
+        if (next.rects.length === 0) {
+          this.droppedUpdates++;
+          this.onFrameDone?.();
+          continue;
+        }
+        // Only now, for the update actually about to be applied, are decodes
+        // started. They still run in parallel within the update, which is
+        // what the ordered loop below awaits them in order for; what has gone
+        // is starting them for updates that are still sitting in the queue
+        // and may never be applied.
+        const decodes: (Promise<ImageBitmap> | null)[] = next.rects.map((r) => {
+          if (r.format !== RectFormat.Jpeg) return null;
+          const p = this.decodeJpeg(r.payload);
+          // The loop awaits these one at a time, so a later rect's failure
+          // would otherwise be reported as an unhandled rejection while we
+          // are still waiting on an earlier one. The await still throws.
+          p.catch(() => undefined);
+          return p;
+        });
+        try {
+          await this.applyFrameOrdered(next.rects, decodes, next.generation);
+        } catch {
+          // One malformed update must not kill the drain loop and strand
+          // every update queued behind it.
+        }
+        // After the catch, not inside the try: a malformed update still owes
+        // the shell its credit back, or one bad frame stalls the session.
+        this.onFrameDone?.();
+      }
+    } finally {
+      this.draining = false;
+    }
+  }
+
+  /**
+   * Queue depth and the shed-work counters, so the drop behaviour can be
+   * observed from a debug overlay or a test without instrumenting the hot
+   * path itself.
+   */
+  getQueueStats(): {
+    depth: number;
+    bytes: number;
+    droppedRects: number;
+    droppedUpdates: number;
+  } {
+    return {
+      depth: this.pending.length,
+      bytes: this.pendingBytes,
+      droppedRects: this.droppedRects,
+      droppedUpdates: this.droppedUpdates,
+    };
   }
 
   private async applyFrameOrdered(
-    msg: FrameMessage,
+    rects: WireRect[],
     pending: (Promise<ImageBitmap> | null)[],
     gen: number,
   ): Promise<void> {
     const gl = this.gl;
-    for (let i = 0; i < msg.rects.length; i++) {
-      const r = msg.rects[i];
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
       if (this.disposed) return;
       switch (r.format) {
         case RectFormat.Rgba:
@@ -459,16 +803,28 @@ export class WebGLRenderer {
    * `h264Key` says this payload can start a decoder. An empty payload is a
    * control message: apply the flags and decode nothing.
    *
-   * ORDERING: `decoder.decode()` is fire-and-forget; the actual pixel upload
-   * happens later in the decoder's `output` callback (see `createH264`),
-   * OUTSIDE `applyFrameOrdered`'s chain. Left alone, that let a slow decode
-   * from update N land on top of update N+1's (synchronous) rects. Awaiting
-   * `decoder.flush()` after `decode()` closes that gap: flush() resolves only
-   * once every decode() queued so far has produced its output (so `output`,
-   * and thus the texSubImage2D upload, has already run) or rejected, which is
-   * exactly the "fully applied before the next rect starts" guarantee the
-   * rest of this chain relies on. It does not require a new key frame
-   * afterwards, unlike reset().
+   * ORDERING: `decoder.decode()` is fire-and-forget; the frame comes back
+   * later in the decoder's `output` callback (see `createH264`), OUTSIDE this
+   * function's turn. Left alone, that let a slow decode from update N land on
+   * top of update N+1's (synchronous) rects.
+   *
+   * This used to be closed by awaiting `decoder.flush()` after every single
+   * `decode()`, which does guarantee the output callback has run, but flush
+   * means "drain everything you are holding and reset your pipeline". Paying
+   * that per rect on a video stream is exactly the workload it hurts most:
+   * the decoder never gets to keep more than one frame in flight, and the
+   * cost lands on the main thread, feeding the backlog this queue exists to
+   * shed.
+   *
+   * Instead the chunk is tagged with a monotonic timestamp that identifies
+   * its position, and `output` hands the decoded frame to whoever is waiting
+   * on that timestamp rather than uploading it itself (see
+   * `deliverH264Frame`). The upload then happens right here, at the rect's
+   * own position in the ordered loop, so ordering is enforced by where the
+   * pixels are written rather than by draining the decoder. The wait is
+   * bounded by `H264_FRAME_TIMEOUT_MS` and released early whenever the
+   * decoder is closed, so a decoder that never answers cannot stall the
+   * queue.
    */
   private async decodeH264(r: WireRect): Promise<void> {
     if (this.h264Failed) return;
@@ -501,22 +857,83 @@ export class WebGLRenderer {
       return;
     }
 
+    ctx.timestamp += 1000; // 1 ms apart: monotonic is all the decoder needs
+    const ts = ctx.timestamp;
+    const wait = this.awaitH264Frame(ctx, ts);
     try {
-      ctx.timestamp += 1000; // 1 ms apart: monotonic is all the decoder needs
       ctx.decoder.decode(
         new EncodedVideoChunk({
           type: isKey ? "key" : "delta",
-          timestamp: ctx.timestamp,
+          timestamp: ts,
           // Copy: the parse buffer is recycled long before decode completes.
           data: r.payload.slice(),
         }),
       );
-      await ctx.decoder.flush();
     } catch {
       // Decode error, or the decoder was reset/closed (e.g. a resize raced
-      // this update) while flush() was in flight: nothing left to upload.
+      // this update). Closing settles the waiter above, so the await below
+      // returns immediately rather than sitting out the timeout.
       this.closeH264(id);
     }
+    const frame = await wait;
+    if (!frame) return;
+    if (this.disposed || ctx.generation !== this.generation) {
+      frame.close();
+      return;
+    }
+    this.uploadVideoFrame(frame, ctx);
+  }
+
+  /**
+   * Wait for the frame a chunk will decode into, identified by its timestamp.
+   *
+   * The waiter is registered before `decode()` is called so that an output
+   * callback can never arrive before there is anything to hand it to, and it
+   * is settled exactly once: whichever of delivery, decoder close, or the
+   * timeout comes first wins, and the losers close the frame they were handed
+   * rather than leaking a `VideoFrame`.
+   */
+  private awaitH264Frame(ctx: H264Context, ts: number): Promise<VideoFrame | null> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (frame: VideoFrame | null): void => {
+        if (ctx.waiters.get(ts) !== settle) {
+          frame?.close();
+          return;
+        }
+        ctx.waiters.delete(ts);
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(frame);
+      };
+      ctx.waiters.set(ts, settle);
+      timer = setTimeout(() => settle(null), H264_FRAME_TIMEOUT_MS);
+    });
+  }
+
+  /**
+   * Route one decoded frame to the rect that asked for it.
+   *
+   * Chunks go in one at a time in protocol order and this path has no
+   * B-frames, so output comes back in the same order. That means anything
+   * still outstanding with an OLDER timestamp than the frame just delivered
+   * is never coming (a corrupt slice the decoder discarded, say), and holding
+   * those waiters open would stall every update queued behind them until they
+   * timed out. Release them as soon as a newer frame proves them lost.
+   *
+   * Matching is on the exact timestamp, which WebCodecs requires the decoder
+   * to carry through from the chunk. A frame nobody is waiting for is dropped
+   * rather than given to the next waiter in line: that frame's rect already
+   * gave up on it, and handing it over would paint frame N where frame N+1
+   * belongs and leave every frame after it one behind for good.
+   */
+  private deliverH264Frame(ctx: H264Context, frame: VideoFrame): void {
+    const ts = frame.timestamp;
+    for (const key of Array.from(ctx.waiters.keys())) {
+      if (key < ts) ctx.waiters.get(key)?.(null);
+    }
+    const waiter = ctx.waiters.get(ts);
+    if (waiter) waiter(frame);
+    else frame.close();
   }
 
   /** Build a decoder for one context, or `null` if WebCodecs refuses. */
@@ -535,6 +952,7 @@ export class WebGLRenderer {
       h: r.h,
       generation,
       timestamp: 0,
+      waiters: new Map(),
     };
     try {
       ctx.decoder = new VideoDecoder({
@@ -543,7 +961,9 @@ export class WebGLRenderer {
             frame.close();
             return;
           }
-          this.uploadVideoFrame(frame, ctx);
+          // Not uploaded here: `decodeH264` uploads it at the rect's own
+          // position in the ordered apply loop.
+          this.deliverH264Frame(ctx, frame);
         },
         error: () => {
           this.closeH264(id);
@@ -616,6 +1036,10 @@ export class WebGLRenderer {
     const ctx = this.h264.get(id);
     if (!ctx) return;
     this.h264.delete(id);
+    // Anything still waiting on this decoder is waiting on a frame that will
+    // never be produced now. Settle those waiters so the apply loop moves on
+    // instead of holding every later update behind a decoder that is gone.
+    for (const settle of Array.from(ctx.waiters.values())) settle(null);
     try {
       if (ctx.decoder.state !== "closed") ctx.decoder.close();
     } catch {
@@ -1056,6 +1480,11 @@ export class WebGLRenderer {
   dispose(): void {
     this.disposed = true;
     this.stop();
+    // Drop the queue before the decoders: an update still holding views into
+    // its IPC buffer keeps that buffer alive for as long as the queue does,
+    // and nothing left in it will ever be applied now.
+    this.pending.length = 0;
+    this.pendingBytes = 0;
     this.closeAllH264();
     const gl = this.gl;
     gl.deleteTexture(this.frameTex);

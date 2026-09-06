@@ -38,6 +38,27 @@ use super::emit;
 /// while newer traffic would have been expected (PRD/05 §6.4).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How often the stats/observation tick runs.
+///
+/// Named rather than inlined because two places now measure against it: the
+/// `tokio::time::interval` in `run`, and the mid-update overdue test in
+/// `read_framebuffer_update` that keeps the observation running while a long
+/// update streams (see `maybe_tick_mid_update`).
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long we wait for the server's EndOfContinuousUpdates after asking it
+/// to stop pushing, before resuming the request pipeline anyway.
+///
+/// RFB says a server that receives EnableContinuousUpdates(false) must send
+/// EndOfContinuousUpdates once it has stopped, and that message is what tells
+/// us it is safe to start requesting again. If it never comes we would sit
+/// with continuous updates off and no request outstanding, which is a screen
+/// that never updates again: the worst possible outcome of a change whose
+/// whole purpose is to make the session more responsive. Two ticks is far
+/// longer than any server needs to drain its queue, and resuming early costs
+/// at most one duplicate update.
+const CU_DISABLE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Idle time after which a lossily-painted region is re-fetched sharp
 /// (PRD/09 §3.2, "auto lossless refresh").
 ///
@@ -464,6 +485,29 @@ pub(crate) struct RunLoop {
     last_mask: u16,
     /// Continuous updates negotiated and switched on.
     cu_active: bool,
+    /// An EnableContinuousUpdates(false) of ours is unacknowledged, sent at
+    /// this instant.
+    ///
+    /// Two jobs, and both are about not double-requesting. The server may
+    /// still be draining updates it queued before it saw our message, and
+    /// those must NOT each pipeline a request of their own (that is how one
+    /// outstanding request turns into five). And EndOfContinuousUpdates is
+    /// also how a server ADVERTISES the extension in the first place, so
+    /// without a flag saying "we asked for this", the acknowledgement of our
+    /// own disable reads as an advertisement and switches continuous updates
+    /// straight back on.
+    ///
+    /// The instant is the escape hatch: see `CU_DISABLE_ACK_TIMEOUT`.
+    cu_disable_pending: Option<Instant>,
+    /// Continuous updates are off because THIS CLIENT turned them off (or
+    /// declined to turn them on) to pace itself, and may be switched back on
+    /// when pacing is no longer wanted.
+    ///
+    /// Without it, "pacing released" would re-enable the stream on a server
+    /// that had ended continuous updates for its own reasons, and the two
+    /// decisions would fight: the server ends the stream, the client starts
+    /// it again a second later, forever.
+    cu_off_for_pacing: bool,
     /// The stored resize request has been re-applied on this connection.
     resize_reapplied: bool,
     /// The priming non-incremental request is still outstanding.
@@ -563,6 +607,13 @@ pub(crate) struct RunLoop {
     /// Time spent inside FramebufferUpdate handling since the last stats
     /// tick, for `SessionStats::server_duty_cycle`.
     update_busy_tick: Duration,
+    /// When the update currently being read started, or when its time was
+    /// last charged to `update_busy_tick`. `None` between updates.
+    ///
+    /// The charge is incremental so that an observation running from inside
+    /// the rect loop sees the cost of the update it is inside. See
+    /// `charge_update_busy`.
+    update_busy_since: Option<Instant>,
     /// An always-refresh (or manual Refresh) full-screen non-incremental
     /// request is outstanding, sent at this instant. See `tick`.
     refresh_request_at: Option<Instant>,
@@ -583,6 +634,26 @@ pub(crate) struct RunLoop {
     /// (they change encodings, format, or session state). Serviced by the
     /// run loop once the update has been fully consumed.
     deferred_cmds: Vec<ClientCommand>,
+    /// A quality change the Auto tuner asked for during a mid-update
+    /// observation, held until the update boundary.
+    ///
+    /// Applying it where it was decided would mean a SetEncodings (and
+    /// possibly a SetPixelFormat) going out between two rects of an update
+    /// the server is already encoding, which is the same class of race that
+    /// `alr_restore_pending` exists to avoid: the server may apply the new
+    /// list to rects it has not sent yet, and this client would still be
+    /// decoding them under the old one. Parked here and applied by `run`
+    /// once the update has been fully consumed, exactly like `deferred_cmds`.
+    pending_quality: Option<QualitySettings>,
+    /// A continuous-updates pacing change decided during a mid-update
+    /// observation, held until the update boundary for the same reason as
+    /// `pending_quality`. `Some(true)` means "stop the server free-running",
+    /// `Some(false)` means "it may free-run again".
+    pending_paced: Option<bool>,
+    /// A mid-update observation ran during the message just handled, so the
+    /// 1 s interval in `run` should be rescheduled rather than fire again
+    /// moments later against a window that has already been counted.
+    mid_update_tick_ran: bool,
     /// A Disconnect arrived mid-update: unwind without reading further.
     pending_outcome: Option<RunOutcome>,
     epoch: Instant,
@@ -626,6 +697,8 @@ impl RunLoop {
             last_pos: None,
             last_mask: 0,
             cu_active: false,
+            cu_disable_pending: None,
+            cu_off_for_pacing: false,
             resize_reapplied: false,
             priming_update_pending: true,
             bytes_counter,
@@ -651,12 +724,16 @@ impl RunLoop {
             last_update_done_at: None,
             passive_rtt: VecDeque::with_capacity(PASSIVE_RTT_WINDOW),
             update_busy_tick: Duration::ZERO,
+            update_busy_since: None,
             refresh_request_at: None,
             refresh_answered_at: None,
             refresh_cost: Duration::ZERO,
             trace: ProtocolTrace::new(),
             pending_pf: VecDeque::new(),
             deferred_cmds: Vec::new(),
+            pending_quality: None,
+            pending_paced: None,
+            mid_update_tick_ran: false,
             pending_outcome: None,
             epoch: Instant::now(),
         }
@@ -690,7 +767,7 @@ impl RunLoop {
         commands: &mut mpsc::Receiver<ClientCommand>,
         cancel: &CancellationToken,
     ) -> Result<RunOutcome> {
-        let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut stats_tick = tokio::time::interval(TICK_INTERVAL);
         stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         stats_tick.reset(); // don't fire immediately
 
@@ -714,18 +791,6 @@ impl RunLoop {
                     let msg_type = byte.map_err(messages::map_eof)?;
                     self.handle_server_message(msg_type, settings, events, commands)
                         .await?;
-                    // A Disconnect that arrived mid-update aborts here, and
-                    // state-changing commands parked during the update run
-                    // now, before the channel is polled again, so ordering
-                    // relative to later commands is preserved.
-                    if let Some(outcome) = self.pending_outcome.take() {
-                        return Ok(outcome);
-                    }
-                    for cmd in std::mem::take(&mut self.deferred_cmds) {
-                        if let Some(outcome) = self.handle_command(cmd, settings, events).await? {
-                            return Ok(outcome);
-                        }
-                    }
                 }
                 Step::Command(None) => {
                     // The handle was dropped: nobody can control this session
@@ -738,7 +803,42 @@ impl RunLoop {
                         return Ok(outcome);
                     }
                 }
-                Step::Tick => self.tick(settings, events).await?,
+                Step::Tick => self.tick(settings, events, commands).await?,
+            }
+
+            // Everything below runs between messages, which is the only place
+            // in the loop where the stream is at a known boundary.
+            //
+            // It sits after the match rather than inside the Message arm
+            // because a tick can now park work too: its stats event is sent
+            // through the input-preserving path, so a Disconnect or a
+            // state-changing command can arrive while it waits for room in
+            // the event channel, exactly as one can mid-update.
+
+            // A Disconnect that arrived mid-update (or mid-emit) aborts here.
+            if let Some(outcome) = self.pending_outcome.take() {
+                return Ok(outcome);
+            }
+            // The update boundary a mid-update observation parks its
+            // conclusions for: changing the encoding list or the update
+            // pacing here cannot land in the middle of an update the server
+            // is already encoding.
+            self.apply_pending_tuning().await?;
+            if std::mem::take(&mut self.mid_update_tick_ran) {
+                // The window this interval was going to close has already
+                // been counted and emitted from inside the update. Firing
+                // again a few milliseconds later would divide a near-empty
+                // window by a near-zero elapsed time and report nonsense
+                // rates, so give the next tick a full interval to measure.
+                stats_tick.reset();
+            }
+            // State-changing commands parked during an update run now, before
+            // the channel is polled again, so ordering relative to later
+            // commands is preserved.
+            for cmd in std::mem::take(&mut self.deferred_cmds) {
+                if let Some(outcome) = self.handle_command(cmd, settings, events).await? {
+                    return Ok(outcome);
+                }
             }
         }
     }
@@ -775,18 +875,42 @@ impl RunLoop {
             server_msg::SERVER_CUT_TEXT => self.handle_server_cut_text(events).await,
             server_msg::END_OF_CONTINUOUS_UPDATES => {
                 self.caps.supports_continuous_updates = true;
-                if !self.cu_active {
-                    // The server just advertised support: switch it on.
-                    let msg = messages::enable_continuous_updates(true, self.full_rect());
-                    self.send(&msg).await?;
-                    self.cu_active = true;
-                    tracing::debug!("continuous updates enabled");
+                if self.cu_disable_pending.take().is_some() {
+                    // This is the acknowledgement of OUR EnableContinuousUpdates
+                    // (false): the server has stopped pushing and everything it
+                    // had queued has been sent. Only now is it safe to ask for
+                    // the next update, and asking exactly once here is what
+                    // keeps the pipeline at one outstanding request across the
+                    // transition. Without the flag this branch would read as
+                    // the advertisement below and switch the free-running
+                    // stream straight back on.
+                    tracing::debug!("continuous updates stopped; request pipeline resumed");
+                    self.resume_request_pipeline().await?;
+                } else if !self.cu_active {
+                    // The server just advertised support. Switch it on unless
+                    // the tuner is already asking for paced updates: enabling
+                    // a free-running stream we would disable on the very next
+                    // observation just costs the server a burst of encoding
+                    // and this client the latency that comes with it.
+                    if self.tuner.wants_paced_updates() {
+                        // Remembered so the stream is switched on when pacing
+                        // is released, rather than never, since the
+                        // advertisement only ever arrives once.
+                        self.cu_off_for_pacing = true;
+                        tracing::debug!(
+                            "continuous updates advertised but pacing is wanted; staying paced"
+                        );
+                    } else {
+                        let msg = messages::enable_continuous_updates(true, self.full_rect());
+                        self.send(&msg).await?;
+                        self.cu_active = true;
+                        tracing::debug!("continuous updates enabled");
+                    }
                 } else {
-                    // Server ended continuous updates: fall back to the
-                    // one-outstanding-request pipeline.
+                    // Server ended continuous updates of its own accord: fall
+                    // back to the one-outstanding-request pipeline.
                     self.cu_active = false;
-                    let msg = messages::framebuffer_update_request(true, self.full_rect());
-                    self.send(&msg).await?;
+                    self.resume_request_pipeline().await?;
                 }
                 Ok(())
             }
@@ -813,12 +937,19 @@ impl RunLoop {
         events: &mpsc::Sender<SessionEvent>,
         commands: &mut mpsc::Receiver<ClientCommand>,
     ) -> Result<()> {
-        let started = Instant::now();
+        // Charged incrementally rather than in one lump at the end, because
+        // an observation can now run from inside the rect loop and it must
+        // not read a duty cycle of zero on the very update that is saturating
+        // the client: one update that takes several seconds would otherwise
+        // contribute nothing at all to the window it spans, and report an
+        // idle session to the tuner while the picture was drowning it.
+        self.update_busy_since = Some(Instant::now());
         let res = self
             .read_framebuffer_update(settings, events, commands)
             .await;
         let done = Instant::now();
-        self.update_busy_tick += done.saturating_duration_since(started);
+        self.charge_update_busy(done);
+        self.update_busy_since = None;
         self.last_update_done_at = Some(done);
 
         // An always-refresh request asks for the WHOLE framebuffer,
@@ -886,7 +1017,7 @@ impl RunLoop {
                 rects = count,
                 "priming update header (no pipelined request)"
             );
-        } else if !self.cu_active {
+        } else if self.pacing_requests() {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
             self.send(&msg).await?;
             // The passive round-trip clock starts here, on the normal update
@@ -951,7 +1082,21 @@ impl RunLoop {
                     &mut self.decoder,
                 )
                 .await?;
-                if self.handle_pseudo(parsed, settings, events).await? {
+                let last_rect = self.handle_pseudo(parsed, settings, events).await?;
+                // Service input here too, not only after a data rect below.
+                // An update made entirely of pseudo rects (a cursor shape
+                // followed by LastRect is the common one, and a server that
+                // pushes cursor updates during a drag sends a stream of them)
+                // took the `continue` above and serviced no input at all for
+                // as long as it lasted, which is exactly the case where the
+                // user is moving the mouse.
+                self.service_mid_update(commands, settings, events).await?;
+                if self.pending_outcome.is_some() {
+                    // Disconnect requested: the stream position no longer
+                    // matters.
+                    return Ok(damage);
+                }
+                if last_rect {
                     break; // LastRect
                 }
                 continue;
@@ -992,8 +1137,9 @@ impl RunLoop {
                 self.rects_decoded += 1;
             }
 
-            // Keep the remote pointer alive while a large update streams in.
-            self.drain_commands_mid_update(commands, settings).await?;
+            // Keep the remote pointer alive, and the observation running,
+            // while a large update streams in.
+            self.service_mid_update(commands, settings, events).await?;
             if self.pending_outcome.is_some() {
                 // Disconnect requested: the stream position no longer matters.
                 return Ok(damage);
@@ -1007,7 +1153,7 @@ impl RunLoop {
         // intervening update, the other does not) if they did not both zero
         // the decode accumulator. `arm_pipelined_request` is what keeps them
         // saying the same thing.
-        if !self.cu_active && !primed_before {
+        if self.pacing_requests() && !primed_before {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
             self.send(&msg).await?;
             self.arm_pipelined_request(Instant::now());
@@ -1074,7 +1220,23 @@ impl RunLoop {
             // damage approaches the whole screen; one that is ignored shows
             // only slivers. Distinguishing those from the log is the whole
             // point, so this is INFO for large updates only.
-            emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
+            //
+            // Sent through the input-preserving path rather than plain
+            // `emit`: the event channel holds 256 and this send AWAITS room
+            // in it, so a renderer that falls behind (which is precisely what
+            // happens while video plays) stalls the whole run loop here, with
+            // every queued keystroke and pointer move waiting behind a frame
+            // nobody is ready to look at.
+            self.emit_serving_input(
+                events,
+                SessionEvent::FramebufferUpdate { rects, damage },
+                commands,
+                settings,
+            )
+            .await?;
+            if self.pending_outcome.is_some() {
+                return Ok(damage);
+            }
         }
 
         // The update following an outstanding lossless-refresh request has
@@ -1593,6 +1755,153 @@ impl RunLoop {
         Ok(())
     }
 
+    /// Charge the time spent inside the update being read up to `now`.
+    ///
+    /// Called at the end of every update and from every mid-update
+    /// observation, so the duty cycle covers the update in progress as well
+    /// as the ones that finished. A no-op between updates.
+    fn charge_update_busy(&mut self, now: Instant) {
+        if let Some(since) = self.update_busy_since {
+            self.update_busy_tick += now.saturating_duration_since(since);
+            self.update_busy_since = Some(now);
+        }
+    }
+
+    /// Everything that must keep happening between the rects of one update:
+    /// input goes out, and the observation tick runs if it is overdue.
+    ///
+    /// Called after every rect, data or pseudo. The two jobs live together
+    /// because they answer the same complaint: while the server streams (a
+    /// video playing, a window animating) the run loop is inside
+    /// `read_framebuffer_update` and NOTHING else in the client runs.
+    async fn service_mid_update(
+        &mut self,
+        commands: &mut mpsc::Receiver<ClientCommand>,
+        settings: &SessionSettings,
+        events: &mpsc::Sender<SessionEvent>,
+    ) -> Result<()> {
+        self.drain_commands_mid_update(commands, settings).await?;
+        if self.pending_outcome.is_some() {
+            return Ok(());
+        }
+        self.maybe_tick_mid_update(commands, settings, events).await
+    }
+
+    /// Run the measurement half of the stats tick from inside an update, if a
+    /// tick is overdue.
+    ///
+    /// THE BUG THIS FIXES. The main `select!` is `biased` with the socket
+    /// read ahead of the tick, and the reader sits behind a 128 KiB
+    /// `BufReader`, so while the server streams updates the read branch is
+    /// ready on essentially every poll and the tick branch is never reached
+    /// (`MissedTickBehavior::Skip` then discards the missed ticks rather than
+    /// catching them up). `tick` is the ONLY caller of `AutoTuner::observe`
+    /// and the only place an Auto quality change is applied, so the client's
+    /// single mechanism for reducing incoming load was switched off exactly
+    /// when the load was highest: play a video on the remote screen and the
+    /// viewer would never turn the quality down, never stop the flood, and
+    /// input would feel seconds behind.
+    ///
+    /// Only the OBSERVATION and stats half runs here. Nothing that changes
+    /// the wire format may go out between two rects of an update the server
+    /// is already encoding, so a quality change or a pacing change is parked
+    /// (`pending_quality`, `pending_paced`) and applied by `run` at the
+    /// update boundary. Dead-peer detection stays in `tick` as well: reaching
+    /// this code means bytes are arriving, which is proof the peer is alive,
+    /// and a probe timeout evaluated here could only ever be a false
+    /// positive that killed a working session.
+    async fn maybe_tick_mid_update(
+        &mut self,
+        commands: &mut mpsc::Receiver<ClientCommand>,
+        settings: &SessionSettings,
+        events: &mpsc::Sender<SessionEvent>,
+    ) -> Result<()> {
+        let now = Instant::now();
+        let since = match self.last_tick_at {
+            Some(prev) => now.saturating_duration_since(prev),
+            // Nothing has ticked yet on this connection, so measure from when
+            // the run loop started rather than firing on the first rect.
+            None => now.saturating_duration_since(self.epoch),
+        };
+        if since < TICK_INTERVAL {
+            return Ok(());
+        }
+        // Charge what this update has cost so far, or the window would be
+        // scored as idle by the very update that is saturating it.
+        self.charge_update_busy(now);
+        let stats = self.observe_tick(settings, now);
+        self.mid_update_tick_ran = true;
+        // The stats event goes out through the input-preserving path for the
+        // same reason the framebuffer event does: a stalled consumer must not
+        // be able to hold input up.
+        self.emit_serving_input(events, SessionEvent::Stats(stats), commands, settings)
+            .await
+    }
+
+    /// Send one event without letting a slow event consumer stall input.
+    ///
+    /// The events channel holds 256 and `emit` awaits room in it, so with the
+    /// renderer behind (which is what a video playing on the remote screen
+    /// does to it) that await parks the entire run loop: no pointer event, no
+    /// keystroke, nothing reaches the socket until the consumer catches up.
+    /// That is one of the ways the viewer came to feel enormously delayed
+    /// under a continuous update stream.
+    ///
+    /// `reserve` rather than `send` inside the `select!`, and this is the
+    /// whole reason the shape is worth the lines: a `send` future dropped
+    /// because the other branch won has consumed the event, so the frame
+    /// would simply vanish. `reserve` only takes a slot; the event is still
+    /// ours until a permit exists, and then handing it over cannot fail.
+    async fn emit_serving_input(
+        &mut self,
+        events: &mpsc::Sender<SessionEvent>,
+        event: SessionEvent,
+        commands: &mut mpsc::Receiver<ClientCommand>,
+        settings: &SessionSettings,
+    ) -> Result<()> {
+        // A closed command channel returns None from `recv` immediately and
+        // forever, which would turn this into a spin loop, so that branch is
+        // disabled once it happens. The session is being torn down anyway;
+        // the event still has to reach the shell.
+        let mut commands_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                permit = events.reserve() => {
+                    // The sink is gone: the shell went away, which unwinds
+                    // the session exactly as a cancellation does.
+                    let permit = permit.map_err(|_| VncError::Cancelled)?;
+                    permit.send(event);
+                    return Ok(());
+                }
+                cmd = commands.recv(), if commands_open => {
+                    let Some(cmd) = cmd else {
+                        commands_open = false;
+                        continue;
+                    };
+                    match cmd {
+                        ClientCommand::Pointer { .. }
+                        | ClientCommand::Key { .. }
+                        | ClientCommand::ReleaseAllKeys => {
+                            self.handle_input_command(cmd, settings).await?;
+                        }
+                        ClientCommand::Disconnect => {
+                            // Stop waiting for a consumer that may never
+                            // take this event: the socket is about to close
+                            // and a frame nobody will render is worth
+                            // nothing. Dropped deliberately, not lost by
+                            // accident.
+                            let _ = self.release_all_input(settings).await;
+                            self.pending_outcome = Some(RunOutcome::UserDisconnect);
+                            return Ok(());
+                        }
+                        other => self.deferred_cmds.push(other),
+                    }
+                }
+            }
+        }
+    }
+
     async fn handle_command(
         &mut self,
         cmd: ClientCommand,
@@ -1997,28 +2306,137 @@ impl RunLoop {
     }
 
     // -----------------------------------------------------------------------
+    // Update pacing
+    // -----------------------------------------------------------------------
+
+    /// Is this client governing the update rate itself?
+    ///
+    /// True whenever the one-outstanding-incremental-request pipeline is the
+    /// thing producing updates, which is also the only state in which a
+    /// pipelined request may be sent. It is false while a continuous-updates
+    /// stream is running (the server decides when to send, we must not add
+    /// requests on top) AND while our own EnableContinuousUpdates(false) is
+    /// unacknowledged: updates arriving in that window were queued before the
+    /// server saw the message, and letting each of them pipeline a request is
+    /// how one outstanding request becomes five.
+    fn pacing_requests(&self) -> bool {
+        !self.cu_active && self.cu_disable_pending.is_none()
+    }
+
+    /// Restart the one-outstanding-incremental-request pipeline after a
+    /// continuous-updates stream has stopped.
+    ///
+    /// Exactly one request, and only if none is already outstanding. Both
+    /// halves matter: a second request would have the server encode the
+    /// screen twice, and no request at all is a picture that never updates
+    /// again.
+    async fn resume_request_pipeline(&mut self) -> Result<()> {
+        if self.priming_update_pending {
+            // The priming full-screen request is still unanswered, and the
+            // end of `read_framebuffer_update` sends the next request once
+            // it has been consumed. Sending one now would make the server
+            // encode the whole screen twice.
+            return Ok(());
+        }
+        if self.pipelined_request_at.is_some() {
+            // A request survived the continuous-updates period (it went out
+            // before the stream started). Its answer will pipeline the next
+            // one in the usual way.
+            return Ok(());
+        }
+        let msg = messages::framebuffer_update_request(true, self.full_rect());
+        self.send(&msg).await?;
+        self.arm_pipelined_request(Instant::now());
+        Ok(())
+    }
+
+    /// Turn client-governed update pacing on or off.
+    ///
+    /// Continuous updates used to be switched on the moment the server
+    /// advertised them and never switched off again, anywhere in the client.
+    /// With the stream free-running the client has no lever at all: it cannot
+    /// slow the server down, and because `arm_pipelined_request` only runs on
+    /// the non-continuous path it also stops producing the passive round-trip
+    /// samples the quality controller needs to notice it is drowning. So the
+    /// one situation the tuner is there for, a server flooding a client that
+    /// cannot keep up, is the one situation where it was both blind and
+    /// powerless. Falling back to the pipeline gives the rate back to the
+    /// client: one outstanding incremental request means the server sends the
+    /// next update only when this client asks for it.
+    async fn set_paced_updates(&mut self, paced: bool) -> Result<()> {
+        if paced {
+            if !self.cu_active || self.cu_disable_pending.is_some() {
+                return Ok(());
+            }
+            let msg = messages::enable_continuous_updates(false, self.full_rect());
+            self.send(&msg).await?;
+            self.cu_active = false;
+            // The pipeline is NOT resumed here. The server may still be
+            // sending updates it had already queued, and it says when it has
+            // finished by answering with EndOfContinuousUpdates; that is
+            // where the single request goes out. `CU_DISABLE_ACK_TIMEOUT`
+            // covers a server that never answers.
+            self.cu_disable_pending = Some(Instant::now());
+            self.cu_off_for_pacing = true;
+            tracing::debug!("continuous updates disabled: pacing updates from the client");
+        } else {
+            // `cu_off_for_pacing` is the load-bearing condition: only a stream
+            // this client stopped may be started again here. A server that
+            // ended continuous updates for its own reasons has to be left
+            // alone, or the two ends spend the session undoing each other.
+            if !self.cu_off_for_pacing
+                || self.cu_active
+                || self.cu_disable_pending.is_some()
+                || !self.caps.supports_continuous_updates
+            {
+                return Ok(());
+            }
+            let msg = messages::enable_continuous_updates(true, self.full_rect());
+            self.send(&msg).await?;
+            self.cu_active = true;
+            self.cu_off_for_pacing = false;
+            tracing::debug!("continuous updates re-enabled: pacing no longer needed");
+        }
+        Ok(())
+    }
+
+    /// Apply whatever a mid-update observation concluded, at a point in the
+    /// stream where changing the wire format is safe.
+    ///
+    /// Called from `run` between server messages and from `tick`, never from
+    /// inside the rect loop. See `pending_quality` for why.
+    async fn apply_pending_tuning(&mut self) -> Result<()> {
+        if let Some(qs) = self.pending_quality.take() {
+            self.apply_quality(qs).await?;
+        }
+        if let Some(paced) = self.pending_paced.take() {
+            self.set_paced_updates(paced).await?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Stats / liveness tick (1 s)
     // -----------------------------------------------------------------------
 
-    async fn tick(
-        &mut self,
-        settings: &mut SessionSettings,
-        events: &mpsc::Sender<SessionEvent>,
-    ) -> Result<()> {
-        // Dead-peer detection: an unanswered fence probe means the connection
-        // is gone even if TCP has not noticed yet.
-        if let Some((_, sent)) = self.probe {
-            if sent.elapsed() > PROBE_TIMEOUT {
-                return Err(VncError::Timeout);
-            }
-        }
-
+    /// The measurement half of the tick: close the accounting window, feed
+    /// the Auto tuner, and park whatever it concluded. Sends nothing on the
+    /// wire, so it is safe to run between the rects of an update as well as
+    /// from `tick` itself (see `maybe_tick_mid_update`).
+    ///
+    /// Returns the stats the caller should emit. The caller emits rather than
+    /// this function, because the two call sites need different sending
+    /// behaviour: `tick` can afford to wait for room in the event channel,
+    /// the mid-update path must keep servicing input while it waits.
+    fn observe_tick(&mut self, settings: &SessionSettings, now: Instant) -> SessionStats {
         // The tick timer assumes exactly 1 s between fires, but
         // `MissedTickBehavior::Skip` (see `run`) makes the interval
         // unbounded whenever one update blocks the select loop past a tick:
         // dividing by the REAL elapsed time keeps throughput/fps correct
-        // instead of understating them whenever that happens.
-        let now = Instant::now();
+        // instead of understating them whenever that happens. The same
+        // division is what makes a mid-update observation honest, since it
+        // fires whenever the update loop gets round to it rather than on a
+        // 1 s boundary.
         let dt_s = match self.last_tick_at {
             Some(prev) => now.saturating_duration_since(prev).as_secs_f64().max(1e-3),
             None => 1.0,
@@ -2058,7 +2476,6 @@ impl RunLoop {
             current_encoding: self.current_encoding,
             jpeg_quality: self.applied_quality.jpeg_quality,
         };
-        emit(events, SessionEvent::Stats(stats)).await?;
 
         if self.trace.enabled {
             let (rects, compression) = (self.rects_decoded, self.applied_quality.compression);
@@ -2108,12 +2525,77 @@ impl RunLoop {
         } else {
             0.0
         };
-        self.tuner
-            .observe(link_bps, self.rtt_ms, stats.decode_ms, server_latency_ms);
+        // The duty cycle goes in as well, and it is the measurement that
+        // speaks most directly to the complaint this whole change is about:
+        // a client pinned inside FramebufferUpdate handling is a client that
+        // is not servicing anything else, whatever the link and the round
+        // trip happen to look like.
+        self.tuner.observe(
+            link_bps,
+            self.rtt_ms,
+            stats.decode_ms,
+            server_latency_ms,
+            duty,
+        );
         if settings.quality == QualityPreset::Auto {
-            if let Some(recommended) = self.tuner.recommended() {
-                self.apply_quality(recommended).await?;
+            self.pending_quality = self.tuner.recommended();
+        }
+        // Parked rather than applied for the same reason as the quality
+        // change: this can be running between two rects of an update.
+        // Recorded unconditionally, since `set_paced_updates` is the place
+        // that knows whether the request is a change or a no-op.
+        self.pending_paced = Some(self.tuner.wants_paced_updates());
+
+        self.frames_since_tick = 0;
+        self.decode_ms_tick = 0.0;
+        stats
+    }
+
+    async fn tick(
+        &mut self,
+        settings: &mut SessionSettings,
+        events: &mpsc::Sender<SessionEvent>,
+        commands: &mut mpsc::Receiver<ClientCommand>,
+    ) -> Result<()> {
+        // Dead-peer detection: an unanswered fence probe means the connection
+        // is gone even if TCP has not noticed yet.
+        if let Some((_, sent)) = self.probe {
+            if sent.elapsed() > PROBE_TIMEOUT {
+                return Err(VncError::Timeout);
             }
+        }
+
+        let now = Instant::now();
+        let stats = self.observe_tick(settings, now);
+        // Through the input-preserving path, not plain `emit`, for the reason
+        // spelled out on `emit_serving_input`: this send awaits room in the
+        // event channel, and a renderer that has fallen behind would
+        // otherwise park the whole run loop here once a second, holding every
+        // queued keystroke and pointer move behind a stats readout.
+        self.emit_serving_input(events, SessionEvent::Stats(stats), commands, settings)
+            .await?;
+        if self.pending_outcome.is_some() {
+            // Disconnect arrived while waiting for room: `run` unwinds on it
+            // as soon as this returns, so do no more work on the wire.
+            return Ok(());
+        }
+        // The stream is between messages here, so the encoding list and the
+        // update pacing may safely change. A mid-update observation cannot
+        // apply its own conclusions (see `pending_quality`), so this is also
+        // where those land when the tick that made them ran between rects.
+        self.apply_pending_tuning().await?;
+
+        // A disable of continuous updates that the server never acknowledged
+        // leaves the session with nothing driving it: no free-running stream
+        // and no outstanding request. Resume the pipeline rather than wait
+        // for a message that is not coming.
+        if self
+            .cu_disable_pending
+            .is_some_and(|t| t.elapsed() > CU_DISABLE_ACK_TIMEOUT)
+        {
+            self.cu_disable_pending = None;
+            tracing::debug!("no EndOfContinuousUpdates from the server; resuming anyway");
+            self.resume_request_pipeline().await?;
         }
 
         // Periodic full re-fetch, when the user has asked for it.
@@ -2160,8 +2642,9 @@ impl RunLoop {
             }
         }
 
-        self.frames_since_tick = 0;
-        self.decode_ms_tick = 0.0;
+        // The per-tick counters were reset by `observe_tick`, which is the
+        // only place that closes an accounting window now that a window can
+        // also be closed from inside an update.
         Ok(())
     }
 }
@@ -2733,5 +3216,284 @@ mod update_budget_tests {
             assert!(n < 32, "budget must trip quickly, not after thousands");
         }
         assert_eq!(n, 9, "64 MiB / 8.3 MB per frame trips on the 9th rect");
+    }
+}
+
+/// The pacing state machine: what the client does when the tuner asks for the
+/// update rate to be governed, driven over an in-memory socket so the exact
+/// bytes can be read back.
+///
+/// These are unit tests rather than integration tests on purpose. Whether the
+/// tuner ASKS for pacing depends on its link-capacity sample, and over
+/// loopback the burst sampler measures tens of gigabits and rejects its own
+/// reading as implausible, so the decision cannot be provoked end to end from
+/// a mock server. The duty cycle can be supplied directly, which is what
+/// these do: a real `AutoTuner`, told the truth about a saturated session,
+/// and the run loop's real response to it.
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+    use crate::types::QualityPreset;
+
+    /// One client message, as far as these tests need to tell them apart.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Sent {
+        ContinuousUpdates(bool),
+        Request { incremental: bool, rect: Rect },
+    }
+
+    /// Parse everything the run loop wrote. Deliberately panics on anything
+    /// else: a SetEncodings appearing here would mean a quality change went
+    /// out with it, which these tests are arranged not to provoke, and
+    /// silently skipping it would hide that.
+    fn parse(bytes: &[u8]) -> Vec<Sent> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let rest = &bytes[i..];
+            assert!(rest.len() >= 10, "truncated client message: {rest:?}");
+            let rect = Rect::new(
+                u16::from_be_bytes([rest[2], rest[3]]),
+                u16::from_be_bytes([rest[4], rest[5]]),
+                u16::from_be_bytes([rest[6], rest[7]]),
+                u16::from_be_bytes([rest[8], rest[9]]),
+            );
+            match rest[0] {
+                messages::client_msg::FRAMEBUFFER_UPDATE_REQUEST => out.push(Sent::Request {
+                    incremental: rest[1] != 0,
+                    rect,
+                }),
+                messages::client_msg::ENABLE_CONTINUOUS_UPDATES => {
+                    out.push(Sent::ContinuousUpdates(rest[1] != 0))
+                }
+                other => panic!("unexpected client message {other} in a pacing test"),
+            }
+            i += 10;
+        }
+        out
+    }
+
+    fn settings() -> SessionSettings {
+        SessionSettings {
+            // NOT Auto: a quality recommendation would put a SetEncodings on
+            // the wire and say nothing about pacing, which is a rate decision
+            // and applies whatever preset the user picked.
+            quality: QualityPreset::High,
+            view_only: false,
+            lossless_refresh: false,
+            requested_size: None,
+            always_refresh: false,
+            prefer_scancodes: true,
+        }
+    }
+
+    /// A run loop talking to an in-memory socket, with continuous updates
+    /// already running and the priming update already answered.
+    fn harness() -> (RunLoop, tokio::io::DuplexStream) {
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let stream: BoxedStream = Box::pin(client);
+        let (read_half, write_half) = tokio::io::split(stream);
+        let received = Arc::new(AtomicU64::new(0));
+        let sent = Arc::new(AtomicU64::new(0));
+        let peak = Arc::new(AtomicU64::new(0));
+        let reader = BufReader::with_capacity(
+            4096,
+            CountingReader::new(read_half, received.clone(), peak.clone()),
+        );
+        let writer = CountingWriter::new(write_half, sent.clone());
+        let caps = ServerCapabilities {
+            width: 640,
+            height: 480,
+            supports_continuous_updates: true,
+            ..Default::default()
+        };
+        let mut rl = RunLoop::new(
+            reader,
+            writer,
+            caps,
+            PixelFormat::bgra8888(),
+            QualityPreset::High.settings(),
+            received,
+            sent,
+            peak,
+        );
+        rl.priming_update_pending = false;
+        rl.cu_active = true;
+        (rl, server)
+    }
+
+    /// Everything the client has written so far.
+    async fn written(server: &mut tokio::io::DuplexStream) -> Vec<Sent> {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(50), server.read(&mut buf)).await
+        {
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+        }
+        parse(&raw)
+    }
+
+    /// One observation window in which the client did nothing but handle
+    /// framebuffer updates, on a link fast enough for the duty brake to
+    /// apply.
+    fn saturated_window(rl: &mut RunLoop, settings: &SessionSettings) {
+        let now = Instant::now();
+        rl.last_tick_at = Some(now - Duration::from_secs(1));
+        rl.update_busy_tick = Duration::from_secs(1);
+        rl.link_peak.store(50_000_000, Ordering::Relaxed);
+        let _ = rl.observe_tick(settings, now);
+    }
+
+    /// REGRESSION: continuous updates were switched on the moment the server
+    /// advertised them and never switched off anywhere in the client. With
+    /// the server free-running there is no rate lever at all, and because a
+    /// pipelined request is only armed on the non-continuous path the client
+    /// also stops producing the passive round-trip samples the tuner needs,
+    /// so the one condition it exists for left it both blind and powerless.
+    #[tokio::test]
+    async fn a_saturated_session_stops_the_stream_then_resumes_one_request() {
+        let (mut rl, mut server) = harness();
+        let mut settings = settings();
+
+        // The duty average has a three second time constant and is
+        // deliberately NOT seeded from the first sample (the first tick of
+        // every session carries the full-screen transfer), so crossing the
+        // budget takes a few real seconds. That is the control law, not a
+        // timing assumption of this test.
+        saturated_window(&mut rl, &settings);
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        saturated_window(&mut rl, &settings);
+        assert_eq!(
+            rl.pending_paced,
+            Some(true),
+            "a saturated session must ask for the update rate to be governed"
+        );
+
+        rl.apply_pending_tuning().await.expect("apply");
+        assert_eq!(
+            written(&mut server).await,
+            vec![Sent::ContinuousUpdates(false)],
+            "the stream is turned off, and nothing is requested yet: the \
+             server may still be draining what it queued"
+        );
+        assert!(!rl.cu_active);
+
+        // An update the server had already queued when it saw the message.
+        // It must NOT pipeline a request of its own, or one outstanding
+        // request becomes one per update still in flight.
+        let (events, _events_rx) = mpsc::channel(8);
+        let (_cmd_tx, mut commands) = mpsc::channel(8);
+        server.write_all(&[0, 0, 0]).await.expect("empty update");
+        rl.handle_server_message(
+            server_msg::FRAMEBUFFER_UPDATE,
+            &mut settings,
+            &events,
+            &mut commands,
+        )
+        .await
+        .expect("read the queued update");
+        assert_eq!(
+            written(&mut server).await,
+            vec![],
+            "updates still in flight must not each pipeline a request"
+        );
+
+        // The server acknowledges: it has stopped pushing, so exactly one
+        // request restarts the pipeline.
+        rl.handle_server_message(
+            server_msg::END_OF_CONTINUOUS_UPDATES,
+            &mut settings,
+            &events,
+            &mut commands,
+        )
+        .await
+        .expect("handle EndOfContinuousUpdates");
+        assert_eq!(
+            written(&mut server).await,
+            vec![Sent::Request {
+                incremental: true,
+                rect: Rect::new(0, 0, 640, 480),
+            }],
+            "exactly one incremental request restarts the pipeline"
+        );
+        assert!(rl.pipelined_request_at.is_some());
+    }
+
+    /// The transition is not a one-way door either: when the tuner stops
+    /// asking for pacing the free-running stream may come back, and the
+    /// request already outstanding must not be duplicated on the way.
+    #[tokio::test]
+    async fn continuous_updates_return_when_pacing_is_no_longer_wanted() {
+        let (mut rl, mut server) = harness();
+        let (events, _events_rx) = mpsc::channel(8);
+        let (_cmd_tx, mut commands) = mpsc::channel(8);
+        let mut settings = settings();
+
+        rl.set_paced_updates(true).await.expect("pace");
+        rl.handle_server_message(
+            server_msg::END_OF_CONTINUOUS_UPDATES,
+            &mut settings,
+            &events,
+            &mut commands,
+        )
+        .await
+        .expect("ack");
+        assert_eq!(
+            written(&mut server).await,
+            vec![
+                Sent::ContinuousUpdates(false),
+                Sent::Request {
+                    incremental: true,
+                    rect: Rect::new(0, 0, 640, 480),
+                },
+            ]
+        );
+
+        rl.set_paced_updates(false).await.expect("unpace");
+        assert!(rl.cu_active);
+        assert_eq!(
+            written(&mut server).await,
+            vec![Sent::ContinuousUpdates(true)],
+            "switching the stream back on must not also request an update: \
+             one is already outstanding and the server is about to push \
+             anyway"
+        );
+    }
+
+    /// A server that never answers the disable must not strand the session.
+    ///
+    /// With continuous updates off and no request outstanding there is
+    /// nothing to make another update arrive, ever: a black hole reached by
+    /// trying to make the session more responsive. The tick resumes the
+    /// pipeline rather than wait for a message that is not coming.
+    #[tokio::test]
+    async fn an_unacknowledged_disable_does_not_strand_the_session() {
+        let (mut rl, mut server) = harness();
+        let (events, _events_rx) = mpsc::channel(8);
+        let (_cmd_tx, mut commands) = mpsc::channel(8);
+        let mut settings = settings();
+
+        rl.set_paced_updates(true).await.expect("pace");
+        // Long enough ago that the acknowledgement is not coming.
+        rl.cu_disable_pending =
+            Some(Instant::now() - CU_DISABLE_ACK_TIMEOUT - Duration::from_secs(1));
+
+        rl.tick(&mut settings, &events, &mut commands)
+            .await
+            .expect("tick");
+
+        let sent = written(&mut server).await;
+        assert!(
+            sent.contains(&Sent::Request {
+                incremental: true,
+                rect: Rect::new(0, 0, 640, 480),
+            }),
+            "the pipeline must resume on its own: {sent:?}"
+        );
+        assert!(rl.cu_disable_pending.is_none());
     }
 }
