@@ -10,6 +10,125 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-06
+
+### Fixed
+
+- **Control of the remote machine was lost whenever its screen played video or
+  ran a window animation.** Moving the mouse or typing appeared to do nothing
+  for seconds at a time, and the delay scaled with how much of the remote
+  screen was changing. A static desktop behaved normally.
+
+  The input was never actually late. Keystrokes and pointer events reached the
+  server in microseconds, as they always had. What was late was the picture.
+  Frame delivery had no flow control anywhere along its length: the shell
+  handed every update it decoded into a Tauri channel with a synchronous send
+  that always succeeds, and every queue behind that send was unbounded, ending
+  in a promise chain in the renderer that applied each update strictly in
+  order and never skipped one. When the remote screen changed faster than the
+  webview could draw, the backlog grew for as long as the motion lasted. The
+  user was looking at a frame from several seconds ago, so their clicks did
+  land, immediately, and they could not see it happen. That reads as a machine
+  that has stopped responding.
+
+  It is bounded now, at both ends. The shell keeps at most two frames in
+  flight and will not send a third until the renderer acknowledges one, so the
+  queue cannot grow behind a webview that is falling behind. Updates that pile
+  up while it waits are merged, and then pruned: walking the merged list from
+  newest to oldest, any region a later rect is about to repaint is dropped,
+  because painting it would be overwritten a moment later anyway. The renderer
+  does the same to its own queue. A backlog of thirty video frames collapses
+  to roughly the newest one instead of being replayed faithfully and far too
+  late. The renderer also no longer starts JPEG decodes for rects it is about
+  to discard, which was the largest single cost on the webview's main thread
+  during video.
+
+  CopyRect and H.264 rects are never dropped, never reordered, and nothing
+  older than one is dropped either. A CopyRect reads pixels an earlier rect
+  wrote, and H.264 carries inter-frame state, so both act as hard barriers
+  that stop the pruning walk. Getting that wrong corrupts the framebuffer
+  rather than merely slowing it down.
+
+- **Pointer motion queued up and then replayed itself.** Motion is produced
+  once per animation frame, about every 16 ms, and it was drained one packet
+  per IPC round trip through a strictly ordered queue. While the remote screen
+  was busy that round trip grew past 16 ms, and from then on the queue grew
+  for as long as the mouse kept moving. Every stale position was still
+  delivered, so the remote pointer walked the scenic route through places the
+  user had left seconds earlier. Keystrokes shared the same queue and
+  inherited the whole delay, which is why the keyboard went with the mouse.
+
+  Pure motion now replaces the pending motion packet instead of queueing
+  behind it. Presses, releases, wheel clicks and keystrokes keep the strict
+  ordering they need, because a press and its release must never be able to
+  overtake each other. Dropping a stale position is safe because every pointer
+  packet carries its own absolute coordinates, so a later press does not
+  depend on an earlier motion packet having arrived. A burst of five hundred
+  queued positions now collapses to two.
+
+- **Automatic quality raised the quality when a video started.** The tier
+  ladder decided from measured link speed alone. Video on a fast link makes
+  the link measure fast, so Auto climbed to its most expensive setting a few
+  seconds after playback began and then stayed there, because coming back down
+  required a slow-link reading that never arrives on a LAN.
+
+  The controller now also sees how much of each second the session spends
+  handling framebuffer updates. Sustained saturation on a link that is
+  demonstrably fast means the client is drowning rather than the wire being
+  full, and that caps the ladder and asks for the update rate to be governed.
+  Downgrades were made faster than upgrades: a load spike now costs about two
+  seconds instead of seven, while the slow upgrade side keeps the session from
+  oscillating. A recommendation that resolves to the settings already in force
+  no longer burns the cooldown that a real downgrade needs.
+
+- **The one mechanism that could reduce the load was switched off by the
+  load.** The session's select loop polls the socket before its once-a-second
+  timer, and under a continuous stream the socket is always ready, so the
+  timer never fired. That timer is the only caller of the quality controller,
+  so the client stopped adapting at exactly the moment adaptation mattered.
+  The measurement half of that tick now runs between rects while a long update
+  streams in. Nothing that changes the wire format is sent from there; a
+  quality or pacing change is parked and applied at the next message boundary,
+  because switching encodings partway through reading an update risks
+  desynchronising the stream.
+
+- **The client had no way to slow the server down.** Continuous updates were
+  enabled the moment a server offered them and were never disabled, which
+  hands pacing entirely to the server and leaves the client no lever but the
+  size of each update. It can now turn continuous updates off and fall back to
+  requesting one update at a time, which is the only rate control the protocol
+  offers. The handshake for that is careful: a server acknowledging our own
+  disable used to be indistinguishable from a fresh offer, which turned the
+  stream straight back on, and an acknowledgement that never arrives now
+  resumes the pipeline after two seconds rather than stranding the session.
+
+- **Every SSH-tunnelled session paid Nagle's delay on each keystroke.** The
+  direct TCP path sets `TCP_NODELAY` deliberately, and has done for a long
+  time, with a comment naming the 40 ms stall on mouse movement as the reason.
+  The tunnel path does not go through that code at all, and the SSH client
+  library leaves the option off by default, so the fix had never applied to a
+  tunnelled connection. It does now.
+
+- **A full command queue could drop a key release.** Key events from the
+  native shortcut forwarder were sent with a non-blocking send that discards
+  the event when the queue is full. Discarding a press loses a keystroke.
+  Discarding a release leaves a modifier held down on the remote machine,
+  which is the exact failure the release-all-keys safety net exists to
+  prevent. Key events now wait for room instead.
+
+### Note on the version
+
+Minor rather than patch. The frontend and the Rust shell now exchange a frame
+acknowledgement (`frame_ack`), which adds a command to the IPC contract, and
+this project treats any change to that contract as minor even when it is
+additive. Nothing about stored data changed, so profiles and settings carry
+over untouched.
+
+A renderer that does not send the acknowledgement falls back to a one second
+timeout, so the symptom of a mismatched frontend and shell is a session that
+runs at about one frame per second rather than an error. The two halves ship
+together here.
+
 ## [0.25.1] - 2026-09-02
 
 ### Fixed

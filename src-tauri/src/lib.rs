@@ -215,6 +215,7 @@ pub fn run() {
             commands::session::connect_session,
             commands::session::disconnect_session,
             commands::session::send_input,
+            commands::session::frame_ack,
             commands::session::set_quality,
             commands::session::request_resize,
             commands::session::refresh_session,

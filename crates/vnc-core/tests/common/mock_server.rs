@@ -35,6 +35,11 @@ pub const RFB_38: [u8; 12] = *b"RFB 003.008\n";
 /// macOS Screen Sharing / ARD.
 pub const RFB_APPLE: [u8; 12] = *b"RFB 003.889\n";
 
+/// EndOfContinuousUpdates (150), server to client. Sent unprompted it
+/// advertises the extension; sent in reply to EnableContinuousUpdates(false)
+/// it says the server has stopped pushing.
+const END_OF_CONTINUOUS_UPDATES: u8 = 150;
+
 pub const SEC_NONE: u8 = 1;
 pub const SEC_VNC_AUTH: u8 = 2;
 /// VeNCrypt (19). The mock only offers the `Plain` subtype (256), no TLS, /// which is enough to exercise a username+password credential prompt.
@@ -631,6 +636,19 @@ pub struct MockConfig {
     pub hang_after_n_updates: Option<usize>,
     /// Accept and immediately close the first N connections.
     pub refuse_first_n_connections: usize,
+    /// Push this update over and over, unprompted, for the life of the
+    /// connection: what a server does once continuous updates are on, and the
+    /// load the client has no lever against until it turns them off again.
+    ///
+    /// Written by a task of its own so the message pump keeps recording what
+    /// the client sends even while the flood is blocked on a client that has
+    /// stopped reading.
+    pub flood: Option<Vec<RectSpec>>,
+    /// Gap between flooded updates. Zero streams as fast as the socket takes.
+    pub flood_gap: Duration,
+    /// Announce ContinuousUpdates support (an unsolicited
+    /// EndOfContinuousUpdates right after ServerInit), the way TigerVNC does.
+    pub advertise_continuous_updates: bool,
 }
 
 impl Default for MockConfig {
@@ -652,6 +670,9 @@ impl Default for MockConfig {
             max_drops: usize::MAX,
             hang_after_n_updates: None,
             refuse_first_n_connections: 0,
+            flood: None,
+            flood_gap: Duration::ZERO,
+            advertise_continuous_updates: false,
         }
     }
 }
@@ -703,6 +724,29 @@ impl MockConfig {
     }
     pub fn refuse_first_n_connections(mut self, n: usize) -> Self {
         self.refuse_first_n_connections = n;
+        self
+    }
+    /// Stream `rects` as an update over and over, `gap` apart, without
+    /// waiting to be asked.
+    ///
+    /// Only encodings that carry no per-connection compressor state are
+    /// allowed: the flood writer runs beside the message pump and keeps its
+    /// own [`Encoders`], so a zlib, ZRLE or Tight rect from either side would
+    /// arrive with the other's stream history and fail to inflate.
+    pub fn flood(mut self, rects: Vec<RectSpec>, gap: Duration) -> Self {
+        assert!(
+            rects.iter().all(|r| matches!(
+                r,
+                RectSpec::Raw { .. } | RectSpec::RawPixels { .. } | RectSpec::CopyRect { .. }
+            )),
+            "flooded updates must use a stateless encoding (Raw, RawPixels, CopyRect)"
+        );
+        self.flood = Some(rects);
+        self.flood_gap = gap;
+        self
+    }
+    pub fn advertise_continuous_updates(mut self) -> Self {
+        self.advertise_continuous_updates = true;
         self
     }
 }
@@ -784,6 +828,15 @@ impl MockServer {
 
     pub fn messages(&self) -> Vec<ClientMessage> {
         self.rec.lock().unwrap().messages.clone()
+    }
+
+    /// Run `f` against the recording as it stands.
+    ///
+    /// For assertions that share a predicate with [`Self::wait_until`]: the
+    /// same closure can be waited on and then re-checked, instead of one
+    /// spelling for the wait and another for the assert.
+    pub fn with_recorded<T>(&self, f: impl FnOnce(&Recorded) -> T) -> T {
+        f(&self.rec.lock().unwrap())
     }
 
     pub fn version_replies(&self) -> Vec<[u8; 12]> {
@@ -1057,7 +1110,13 @@ async fn serve(
     stream.flush().await?;
 
     // --- message pump -----------------------------------------------------
-    let (mut read_half, mut write_half) = stream.into_split();
+    let (mut read_half, write_half) = stream.into_split();
+    // Shared because the flood writer (below) is a task of its own. It has to
+    // be: a flood written from inside the pump loop would stop the pump
+    // recording client messages for as long as one write blocked, and a
+    // client that has stopped reading is exactly the state the tests using
+    // the flood are trying to create.
+    let write_half = Arc::new(tokio::sync::Mutex::new(write_half));
     let (msg_tx, mut msg_rx) = mpsc::channel::<ClientMessage>(256);
     let reader = tokio::spawn(async move {
         // Ends on EOF, a framing error, or the pump going away.
@@ -1066,6 +1125,44 @@ async fn serve(
                 break;
             }
         }
+    });
+
+    if cfg.advertise_continuous_updates {
+        // EndOfContinuousUpdates with nothing outstanding: how a server says
+        // it supports the extension (TigerVNC sends it right after
+        // ServerInit).
+        let mut w = write_half.lock().await;
+        w.write_all(&[END_OF_CONTINUOUS_UPDATES]).await?;
+        w.flush().await?;
+    }
+
+    let mut flood = cfg.flood.clone().map(|specs| {
+        let write_half = write_half.clone();
+        let rec = rec.clone();
+        let gap = cfg.flood_gap;
+        tokio::spawn(async move {
+            let mut enc = Encoders::new();
+            let bytes = encode_update(&mut enc, &specs);
+            loop {
+                {
+                    let mut w = write_half.lock().await;
+                    if w.write_all(&bytes).await.is_err() {
+                        return;
+                    }
+                    if w.flush().await.is_err() {
+                        return;
+                    }
+                }
+                rec.lock().unwrap().updates_sent += 1;
+                if gap.is_zero() {
+                    // Never starve the pump: without a yield this loop can
+                    // hold the runtime while the socket keeps accepting.
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(gap).await;
+                }
+            }
+        })
     });
 
     let mut enc = Encoders::new();
@@ -1078,17 +1175,42 @@ async fn serve(
             msg = msg_rx.recv() => {
                 let Some(msg) = msg else { break };
                 let is_fbur = matches!(msg, ClientMessage::FramebufferUpdateRequest { .. });
+                // A conforming server answers EnableContinuousUpdates(false)
+                // with EndOfContinuousUpdates once it has stopped pushing,
+                // and that message is what tells the client it may start
+                // requesting again.
+                let stop_cu = matches!(
+                    msg,
+                    ClientMessage::EnableContinuousUpdates { enable: false }
+                );
                 rec.lock().unwrap().messages.push(msg);
+                if stop_cu {
+                    // Stop pushing FIRST. A real server does, and the flood
+                    // task holds the write lock while it is blocked on a
+                    // client that has stopped reading, so the acknowledgement
+                    // below would otherwise wait behind it.
+                    if let Some(f) = flood.take() {
+                        f.abort();
+                    }
+                    let mut w = write_half.lock().await;
+                    if w.write_all(&[END_OF_CONTINUOUS_UPDATES]).await.is_err() {
+                        break;
+                    }
+                    let _ = w.flush().await;
+                }
                 if !is_fbur || hung {
                     continue;
                 }
                 let Some(specs) = cfg.updates.get(update_idx) else { continue };
                 update_idx += 1;
                 let bytes = encode_update(&mut enc, specs);
-                if write_half.write_all(&bytes).await.is_err() {
-                    break;
+                {
+                    let mut w = write_half.lock().await;
+                    if w.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                    let _ = w.flush().await;
                 }
-                let _ = write_half.flush().await;
                 updates_sent += 1;
                 rec.lock().unwrap().updates_sent += 1;
                 if cfg.drop_after_n_updates == Some(updates_sent)
@@ -1106,10 +1228,11 @@ async fn serve(
             }
             action = actions.recv() => match action {
                 Ok(ServerAction::Raw(bytes)) => {
-                    if write_half.write_all(&bytes).await.is_err() {
+                    let mut w = write_half.lock().await;
+                    if w.write_all(&bytes).await.is_err() {
                         break;
                     }
-                    let _ = write_half.flush().await;
+                    let _ = w.flush().await;
                 }
                 Ok(ServerAction::Disconnect) => break,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1119,7 +1242,10 @@ async fn serve(
     }
 
     reader.abort();
-    let _ = write_half.shutdown().await;
+    if let Some(flood) = flood {
+        flood.abort();
+    }
+    let _ = write_half.lock().await.shutdown().await;
     Ok(())
 }
 

@@ -496,7 +496,11 @@ const NOT_KEYS: &[&str] = &[
 /// button rather than a red box.
 #[tauri::command]
 pub async fn ssh_list_local_keys(app: AppHandle) -> Result<LocalKeys, String> {
-    let dir = app.path().home_dir().map_err(|e| e.to_string())?.join(".ssh");
+    let dir = app
+        .path()
+        .home_dir()
+        .map_err(|e| e.to_string())?
+        .join(".ssh");
     let scan = dir.clone();
     let keys = tokio::task::spawn_blocking(move || scan_key_dir(&scan))
         .await
@@ -865,7 +869,10 @@ mod tests {
         at("id_ed25519.pub", "ssh-ed25519 AAAAC3Nz gj@laptop\n");
         at("work_key", &wrap(&locked));
         at("legacy_rsa", "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\nZm9v\n-----END RSA PRIVATE KEY-----\n");
-        at("box.ppk", "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: aes256-cbc\nComment: box\n");
+        at(
+            "box.ppk",
+            "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: aes256-cbc\nComment: box\n",
+        );
         // Everything the scan must ignore.
         at("known_hosts", "box.local ssh-ed25519 AAAAC3Nz\n");
         at("config", "Host box\n  User gj\n");
@@ -873,7 +880,10 @@ mod tests {
 
         let found = scan_key_dir(dir.path());
         let names: Vec<&str> = found.iter().map(|k| k.name.as_str()).collect();
-        assert_eq!(names, vec!["box.ppk", "id_ed25519", "legacy_rsa", "work_key"]);
+        assert_eq!(
+            names,
+            vec!["box.ppk", "id_ed25519", "legacy_rsa", "work_key"]
+        );
 
         let by = |name: &str| found.iter().find(|k| k.name == name).unwrap();
         // The `.pub` sibling names the algorithm and the comment.

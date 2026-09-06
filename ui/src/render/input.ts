@@ -21,7 +21,15 @@
 import type { WebGLRenderer } from "./WebGLRenderer";
 import { codePointToKeysym, keyEventToIds, type KeyIds } from "./keysyms";
 
-export type SendInput = (packet: Uint8Array) => void;
+/**
+ * Hand one packet to the transport.
+ *
+ * `coalesceKey` is optional and is only ever set for pure pointer motion, see
+ * `POINTER_MOTION_KEY`. A packet queued with a key replaces the pending packet
+ * holding that same key instead of queueing behind it; a packet queued without
+ * one is delivered in strict order, exactly as every packet used to be.
+ */
+export type SendInput = (packet: Uint8Array, coalesceKey?: string) => void;
 
 export interface SessionInputOptions {
   renderer: WebGLRenderer;
@@ -145,6 +153,32 @@ const KIND_TERMINAL_INPUT = 3;
 const KIND_TERMINAL_RESIZE = 4;
 
 /**
+ * The coalescing key carried by pure pointer motion, and by nothing else.
+ *
+ * Motion is produced once per animation frame (about 60 a second) and drains
+ * one IPC round trip at a time. While the remote screen is busy playing video
+ * the webview's event loop is congested and that round trip grows past 16 ms,
+ * at which point the queue grows for as long as the motion lasts: every stale
+ * position is still delivered, faithfully and far too late, so the remote
+ * pointer walks the scenic route through positions the user left seconds ago.
+ * Keys share the same queue, so keyboard control goes with it. Sharing one key
+ * across every motion packet bounds that queue to one in flight and one
+ * pending, whatever the round trip does.
+ *
+ * WHY DROPPING A MOTION PACKET IS SAFE. Every pointer event on the wire is
+ * `kind | x | y | mask` with x and y ABSOLUTE framebuffer coordinates, and
+ * every producer here writes both fields outright: `sendPointer`,
+ * `sendRightClick`, `sendWheel` and the trailing event in `releaseAllLocal`
+ * all set x and y from the event that caused them. There is no relative
+ * motion, no "same place as last time" encoding, and key events carry no
+ * position at all. So no packet's meaning depends on an earlier packet having
+ * been delivered: a press that follows a dropped motion still says exactly
+ * where it is pressing, and the dropped position was superseded by a newer one
+ * before it ever went out. The moment that stops being true, the key has to go.
+ */
+const POINTER_MOTION_KEY = "pointer-motion";
+
+/**
  * Same cap `framing::decode_input` enforces (`MAX_TERMINAL_INPUT_LEN`): a
  * `len` above this fails the WHOLE `send_input` body, not just this event, so
  * a paste larger than one chunk has to be split before it ever reaches the
@@ -217,6 +251,17 @@ export class SessionInput {
   private attached = false;
 
   private buttonMask = 0;
+  /**
+   * The mask carried by the last pointer packet handed to `dispatch`.
+   *
+   * Only read to decide whether a motion packet may be coalesced. A packet
+   * whose mask matches this one carries no button transition, so losing it to
+   * a newer position loses nothing. A packet whose mask differs carries a
+   * press or a release, and dropping that would leave the remote holding a
+   * button the user is not holding, which is the stuck-button failure the
+   * whole ordering guarantee exists to prevent.
+   */
+  private lastSentMask = 0;
   private lastX = 0;
   private lastY = 0;
   private moveDirty = false;
@@ -270,9 +315,14 @@ export class SessionInput {
    * keydown) would release V before pressing it. Copies because the scratch
    * buffers are reused per event.
    */
-  private dispatch(buf: Uint8Array): void {
+  private dispatch(buf: Uint8Array, coalesceKey?: string): void {
+    // A parked packet loses its key deliberately. The park exists to hold a
+    // run of packets behind the paste chord they followed, and the replay in
+    // `deferForPaste` hands them over one at a time in that order; letting one
+    // of them coalesce against something queued after the flush would put a
+    // packet from before the paste behind one from after it.
     if (this.pendingSends) this.pendingSends.push(buf.slice());
-    else this.send(buf);
+    else this.send(buf, coalesceKey);
   }
 
   setViewOnly(v: boolean): void {
@@ -470,7 +520,15 @@ export class SessionInput {
     return p;
   }
 
-  private sendPointer(x: number, y: number, mask: number): void {
+  /**
+   * `coalesceKey` is left undefined by every caller but one, the motion frame
+   * in `onPointerMove`, and only when that frame carries no button transition.
+   * Every other call site here is a transition or a gesture: a press, a
+   * release, a mask put back in step by `reconcileButtons`, or the position
+   * correction that keeps the remote pointer with a scrolling view. Those must
+   * arrive, and in order.
+   */
+  private sendPointer(x: number, y: number, mask: number, coalesceKey?: string): void {
     // Keep the locally-composited cursor under the real pointer.
     //
     // The remote cursor is drawn client-side from the server's cursor SHAPE so
@@ -485,7 +543,8 @@ export class SessionInput {
     this.ptrView.setUint16(1, x, true);
     this.ptrView.setUint16(3, y, true);
     this.ptrView.setUint16(5, mask, true);
-    this.dispatch(this.ptrBuf);
+    this.lastSentMask = mask;
+    this.dispatch(this.ptrBuf, coalesceKey);
   }
 
   private onPointerDown = (e: PointerEvent): void => {
@@ -629,7 +688,19 @@ export class SessionInput {
       this.moveDirty = true;
       this.moveRaf = requestAnimationFrame(() => {
         this.moveDirty = false;
-        this.sendPointer(this.lastX, this.lastY, this.buttonMask);
+        // The one coalescing send in the class. The mask check is the guard on
+        // it: a press or a release cancels this frame through `syncLastPoint`
+        // and `reconcileButtons` corrects a drifted mask above before the
+        // frame is ever scheduled, so in practice the mask always matches. If
+        // it ever does not, this packet carries a transition and has to be
+        // delivered rather than be droppable, so it goes out unkeyed.
+        const carriesTransition = this.buttonMask !== this.lastSentMask;
+        this.sendPointer(
+          this.lastX,
+          this.lastY,
+          this.buttonMask,
+          carriesTransition ? undefined : POINTER_MOTION_KEY,
+        );
       });
     }
   };

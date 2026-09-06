@@ -197,7 +197,22 @@ impl Events {
 
 /// Spawn a session against `options`, returning its handle and event stream.
 pub fn spawn_session(options: ConnectOptions) -> (SessionHandle, Events) {
-    let (tx, rx) = mpsc::channel(512);
+    spawn_session_with_event_capacity(options, 512)
+}
+
+/// Spawn a session whose event channel holds exactly `capacity` events.
+///
+/// The shipping shell uses 256 and the default here is 512, both generous
+/// enough that no ordinary test ever fills one. A test that has to prove the
+/// run loop keeps servicing input while the event CONSUMER is stalled needs
+/// the opposite: the channel full and the session's next `emit` waiting for
+/// room in it. Filling 512 slots would mean 512 framebuffer updates, and a
+/// channel of two reaches the same state in two.
+pub fn spawn_session_with_event_capacity(
+    options: ConnectOptions,
+    capacity: usize,
+) -> (SessionHandle, Events) {
+    let (tx, rx) = mpsc::channel(capacity);
     let handle = Session::spawn("test-session".into(), options, tx);
     (handle, Events::new(rx))
 }

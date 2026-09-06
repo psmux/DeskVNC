@@ -356,7 +356,11 @@ mod tests {
     fn the_pty_echoes_and_cooks_like_a_real_terminal() {
         let modes = terminal_modes();
         let get = |want: Pty| modes.iter().find(|(m, _)| *m == want).map(|(_, v)| *v);
-        assert_eq!(get(Pty::ECHO), Some(1), "the remote must echo what is typed");
+        assert_eq!(
+            get(Pty::ECHO),
+            Some(1),
+            "the remote must echo what is typed"
+        );
         assert_eq!(get(Pty::ICANON), Some(1), "the line must be cooked");
         // CR from Enter has to become a submitted line, or nothing runs.
         assert_eq!(get(Pty::ICRNL), Some(1), "Enter must submit the line");

@@ -144,6 +144,11 @@ fn main() {
             "connect_session",
             "disconnect_session",
             "send_input",
+            // The webview's ack for one applied framebuffer message. It is
+            // the return half of the frame credit governor in
+            // `commands/session.rs`, so a window that cannot invoke it
+            // receives one frame per ack timeout instead of one per present.
+            "frame_ack",
             "set_quality",
             "request_resize",
             "refresh_session",

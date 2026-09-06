@@ -45,6 +45,10 @@ function setup() {
   canvas.releasePointerCapture = () => {};
   document.body.appendChild(canvas);
   const sent: Uint8Array[] = [];
+  // The coalescing key each packet was handed over with, index-aligned with
+  // `sent`. Only pure pointer motion is allowed to carry one; anything else
+  // has to be undefined or the transport is free to drop it.
+  const keys: (string | undefined)[] = [];
   // The renderer is only asked to map CSS points and park the cursor sprite.
   const renderer = {
     cssPointToFramebuffer: (x: number, y: number) => ({ x: Math.round(x), y: Math.round(y) }),
@@ -64,13 +68,16 @@ function setup() {
   const input = new SessionInput(canvas, {
     renderer,
     // Copy: the class reuses its scratch buffers between events.
-    send: (packet) => sent.push(packet.slice()),
+    send: (packet, coalesceKey) => {
+      sent.push(packet.slice());
+      keys.push(coalesceKey);
+    },
     releaseAllKeys: () => {},
     onAppHotkey: () => false,
     onZoomGesture: (z) => zoomed.push(z),
   });
   input.attach();
-  return { canvas, input, sent, zoomed, panned, panRoom };
+  return { canvas, input, sent, keys, zoomed, panned, panRoom };
 }
 
 describe("terminal input/resize encoding", () => {
@@ -412,5 +419,107 @@ describe("a button that is never let go of", () => {
       new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 9, clientY: 9 }),
     );
     expect(pointers(sent)).toEqual([{ x: 9, y: 9, mask: 1 }]);
+  });
+});
+
+describe("what may be coalesced on the way to the wire", () => {
+  // Pointer motion is produced once per animation frame and drains one IPC
+  // round trip at a time. While the remote screen is busy that round trip
+  // grows past the frame interval and the queue grows with it, so the remote
+  // pointer walks the scenic route through positions the user left seconds ago
+  // and every keystroke queued behind it waits out the same backlog. Motion
+  // packets carry a key so a newer one replaces the one still waiting.
+  //
+  // Nothing else may. A pointer packet carries absolute x and y, so a dropped
+  // position costs only itself, but a dropped press or release leaves the
+  // remote holding a button the user let go of.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("hands pure pointer motion over with a coalescing key", () => {
+    const { canvas, sent, keys } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { buttons: 0, clientX: 30, clientY: 40 }),
+    );
+    vi.advanceTimersToNextFrame();
+
+    expect(pointers(sent)).toEqual([{ x: 30, y: 40, mask: 0 }]);
+    expect(keys).toEqual(["pointer-motion"]);
+  });
+
+  it("keys motion during a drag as well, where only the position moved", () => {
+    // Holding a button does not make the position any less replaceable. The
+    // mask is the same in both packets, so the older one is worthless.
+    const { canvas, keys } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 5, clientY: 5 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { buttons: 1, clientX: 60, clientY: 60 }),
+    );
+    vi.advanceTimersToNextFrame();
+
+    expect(keys).toEqual([undefined, "pointer-motion"]);
+  });
+
+  it("sends a button press and its release with no key at all", () => {
+    const { canvas, sent, keys } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 5, clientY: 5 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointerup", { button: 0, buttons: 0, clientX: 5, clientY: 5 }),
+    );
+
+    expect(pointers(sent)).toEqual([
+      { x: 5, y: 5, mask: 1 },
+      { x: 5, y: 5, mask: 0 },
+    ]);
+    expect(keys).toEqual([undefined, undefined]);
+  });
+
+  it("sends the mask correction on a drifted move with no key", () => {
+    // This one is a release the remote has not heard about yet. Coalescing it
+    // away is the stuck-button bug, arrived at from the other direction.
+    const { canvas, keys } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 2, buttons: 2, clientX: 5, clientY: 5 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { buttons: 0, clientX: 40, clientY: 40 }),
+    );
+
+    // The press, then the correction. Both unkeyed; the motion frame that
+    // follows has not run yet.
+    expect(keys).toEqual([undefined, undefined]);
+  });
+
+  it("sends a wheel click with no key, so neither half can be dropped", () => {
+    const { canvas, sent, keys } = setup();
+    canvas.dispatchEvent(
+      new WheelEvent("wheel", { deltaY: 40, clientX: 1, clientY: 1, bubbles: true }),
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(keys).toEqual([undefined]);
+  });
+
+  it("sends the synthesised right click with no key", () => {
+    const { canvas, sent, keys } = setup();
+    canvas.dispatchEvent(
+      new MouseEvent("contextmenu", { clientX: 120, clientY: 80, bubbles: true }),
+    );
+    vi.advanceTimersByTime(100);
+
+    expect(sent).toHaveLength(1);
+    expect(keys).toEqual([undefined]);
+  });
+
+  it("sends key packets with no key, down and up alike", () => {
+    const { input, sent, keys } = setup();
+    input.sendKeyCombo([{ keysym: 0xff08, keycode: 22 }]);
+
+    expect(sent).toHaveLength(2);
+    expect(keys).toEqual([undefined, undefined]);
   });
 });

@@ -141,7 +141,17 @@ export interface SessionApi {
   sshAttached: { multiplexer: string | null; resumed: boolean } | null;
   /** Most recent `ssh-notice` line, for a status area, never the terminal. */
   sshNotice: string | null;
-  sendInput: (packet: Uint8Array) => void;
+  /**
+   * Queue one input packet for `send_input`.
+   *
+   * `coalesceKey` exists for pointer motion and for nothing else. A packet
+   * queued with a key replaces the pending packet holding that same key
+   * instead of queueing behind it, so a stream of positions cannot pile up
+   * behind one slow IPC round trip. Anything carrying a state transition (a
+   * press, a release, a keystroke) must leave it undefined so it stays
+   * strictly ordered.
+   */
+  sendInput: (packet: Uint8Array, coalesceKey?: string) => void;
   /** Bytes to write to the remote PTY (kind 3); split and queued the same way
    *  pointer/key packets are, see `sendInput`. */
   sendTerminalInput: (bytes: Uint8Array) => void;
@@ -157,6 +167,8 @@ export interface SessionApi {
   requestResize: (width: number, height: number) => void;
   sendClipboard: (text: string) => Promise<void>;
   releaseAllKeys: () => void;
+  /** Return one frame's credit to the shell. See `ackFrame` below. */
+  ackFrame: () => void;
   /**
    * Persist a library thumbnail from raw RGBA (no-op for ad-hoc sessions).
    * Resolves once the shell has taken the pixels, so a window that is closing
@@ -655,31 +667,52 @@ export function useSession(
    * and its release leaves the remote holding a button the user let go of. See
    * `createSerialQueue`. The cost is one queued round trip, against a 16 ms
    * frame budget for input that is already coalesced per frame.
+   *
+   * That cost only stays that low while the queue stays short, which is what
+   * the coalescing key is for. Pointer motion is produced once per animation
+   * frame and drains once per round trip, so while the remote screen is busy
+   * and that round trip grows past 16 ms the queue grows for as long as the
+   * motion lasts. Every stale position is still delivered, faithfully and far
+   * too late, and keystrokes queued behind that trail inherit the whole
+   * delay, which is why keyboard control degrades along with the pointer.
+   * Motion packets carry a key and replace each other. Nothing else does.
    */
   const inputQueue = useRef(createSerialQueue());
 
-  /** Shared by every `send_input` sender below: queue, invoke, warn once. */
-  const enqueueInput = useCallback((body: Uint8Array): void => {
+  /**
+   * Shared by every `send_input` sender below: queue, invoke, warn once.
+   *
+   * `coalesceKey` is handed straight to the queue, which replaces the pending
+   * task holding the same key rather than appending after it. It is undefined
+   * for every caller except pointer motion, which is the only packet a newer
+   * one makes worthless.
+   */
+  const enqueueInput = useCallback((body: Uint8Array, coalesceKey?: string): void => {
     const sessionId = sessionIdRef.current;
-    inputQueue.current(() =>
-      // Raw binary body; session id rides in an invoke header (see FRAME_FORMAT notes).
-      invoke("send_input", body, { headers: { "x-session-id": sessionId } }).catch(
-        (err: unknown) => {
-          if (!inputWarned.current) {
-            inputWarned.current = true;
-            console.warn("send_input failed:", err);
-          }
-        },
-      ),
+    inputQueue.current(
+      () =>
+        // Raw binary body; session id rides in an invoke header (see FRAME_FORMAT notes).
+        invoke("send_input", body, { headers: { "x-session-id": sessionId } }).catch(
+          (err: unknown) => {
+            if (!inputWarned.current) {
+              inputWarned.current = true;
+              console.warn("send_input failed:", err);
+            }
+          },
+        ),
+      coalesceKey,
     );
   }, []);
 
   const sendInput = useCallback(
-    (packet: Uint8Array): void => {
+    (packet: Uint8Array, coalesceKey?: string): void => {
       if (!inTauri()) return;
       // A COPY: the caller reuses its scratch buffers between events, and this
       // packet may not be handed to `invoke` until a previous one has landed.
-      enqueueInput(packet.slice());
+      // The copy counts double for a keyed packet, which may sit pending while
+      // several more events are produced: sharing the caller's scratch buffer
+      // would let it be rewritten underneath before it ever went out.
+      enqueueInput(packet.slice(), coalesceKey);
     },
     [enqueueInput],
   );
@@ -750,6 +783,26 @@ export function useSession(
 
   const releaseAllKeys = useCallback((): void => {
     void safeInvoke("release_all_keys", { sessionId: sid() }, null);
+  }, []);
+
+  /**
+   * Tell the shell one framebuffer message has finished being applied.
+   *
+   * The shell keeps only a couple of frames in flight and waits for this
+   * before sending the next, which is what stops a busy remote screen from
+   * burying the webview under a backlog it can never catch up with. A
+   * renderer that does not call this falls back to the shell's one second ack
+   * timeout, so the symptom of getting this wrong is a session stuck at about
+   * one frame per second rather than an error.
+   *
+   * Deliberately NOT routed through the input queue. Input ordering is a
+   * correctness requirement and acks are pure bookkeeping, so putting acks in
+   * that queue would make every frame compete with the user's mouse for the
+   * same serial IPC slot, which is the problem this whole scheme exists to
+   * solve.
+   */
+  const ackFrame = useCallback((): void => {
+    void safeInvoke("frame_ack", { sessionId: sid() }, null);
   }, []);
 
   /**
@@ -888,7 +941,7 @@ export function useSession(
     state, desktopName, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
-    requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
+    requestResize, sendClipboard, releaseAllKeys, ackFrame, captureThumbnail, trustCertificate, setAlwaysRefresh,
     dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
     submitCredentials, dismissCredentialPrompt, retryConnect,
   };
