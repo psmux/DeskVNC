@@ -35,7 +35,6 @@
     "allow-connect-session",
     "allow-disconnect-session",
     "allow-send-input",
-    "allow-frame-ack",
     "allow-set-quality",
     "allow-request-resize",
     "allow-refresh-session",
