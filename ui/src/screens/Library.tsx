@@ -64,7 +64,12 @@ import {
   IconZap,
 } from "../components/icons";
 import { emit, listen } from "@tauri-apps/api/event";
-import { EDIT_HOST_EVENT, type EditHostRequest } from "../lib/editHost";
+import {
+  AGENT_OPEN_EVENT,
+  type AgentOpenRequest,
+  EDIT_HOST_EVENT,
+  type EditHostRequest,
+} from "../lib/editHost";
 
 interface CtxMenuState {
   x: number;
@@ -754,6 +759,29 @@ export function Library({
     });
     return () => stop?.();
   }, [editHost]);
+
+  /**
+   * An agent opening a machine goes through the SAME path as a click, so it
+   * lands in a tab or a window according to the person's preference, is
+   * de-duplicated against a session already open, and is mounted by the code
+   * that mounts every other session. See `AGENT_OPEN_EVENT`.
+   */
+  useEffect(() => {
+    if (!inTauri()) return;
+    let stop: (() => void) | null = null;
+    void listen<AgentOpenRequest>(AGENT_OPEN_EVENT, (e) => {
+      const ask = e.payload;
+      if (!ask) return;
+      const host = ask.hostId ? hostsRef.current.find((h) => h.id === ask.hostId) : undefined;
+      const options: OpenSessionOptions = host
+        ? { profileId: host.id }
+        : { address: ask.address, port: ask.port, protocol: ask.protocol };
+      void openSession(options, host?.friendlyName || ask.address);
+    }).then((un) => {
+      stop = un;
+    });
+    return () => stop?.();
+  }, [openSession]);
 
   const saveDraft = useCallback(
     async (draft: HostDraft): Promise<void> => {

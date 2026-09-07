@@ -239,6 +239,80 @@ function addCover(covers: Box[], r: Box): void {
   if (covers.length < MAX_COVER_RECTS) covers.push(r);
 }
 
+/** A damage rectangle: the bounding box of one update's changed region. */
+export interface DamageBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** One update as `coalesceByDamage` sees it: its rects and its damage box. */
+export interface DamagedUpdate<T extends PruneRect> {
+  rects: readonly T[];
+  damage: DamageBox;
+}
+
+/** Is `r` wholly inside `b`? */
+function within(r: PruneRect, b: DamageBox): boolean {
+  return r.x >= b.x && r.y >= b.y && r.x + r.w <= b.x + b.w && r.y + r.h <= b.y + b.h;
+}
+
+/**
+ * Drop the rects a newer update's DAMAGE BOX already supersedes.
+ *
+ * This is the coarse partner to `pruneUpdates`, and it exists because that one
+ * cannot collapse a real video. A video arrives as thousands of small dirty
+ * rectangles a second whose edges shift frame to frame, so they never nest
+ * exactly and the per-tile coverage set (capped at `MAX_COVERAGE_RECTS` for
+ * cost) is blown long before it can prove an old tile invisible. Measured on a
+ * real playing video, the renderer queue still sat ~29 updates deep because of
+ * this, and a right-click menu waited behind all of them.
+ *
+ * A whole update carries one damage box, the union of its rects. There are as
+ * many boxes as updates in the queue, tens, not thousands, so using THOSE as
+ * the cover set is cheap. Walking newest to oldest, a droppable rect wholly
+ * inside a newer update's damage box is stale: a newer frame has already
+ * repainted that region, so drawing the old one would be overwritten at once.
+ * Video frames share a damage box and collapse to the newest; a right-click
+ * menu, whose damage box is elsewhere, is inside no video box and is kept.
+ *
+ * The barriers are `pruneUpdates`' barriers, for the same reasons: a CopyRect
+ * reads the framebuffer and an H264 rect carries decoder state, so the walk
+ * stops at the first update that holds one and keeps it and everything older.
+ * Survivors come back in arrival order, oldest first, ready to apply as one
+ * batch.
+ */
+export function coalesceByDamage<T extends PruneRect>(
+  updates: readonly DamagedUpdate<T>[],
+): { kept: T[][]; dropped: number } {
+  const newest = updates.length - 1;
+  const keep = updates.map((u) => u.rects.map(() => true));
+  const covers: DamageBox[] = [];
+  let dropped = 0;
+  scan: for (let u = newest; u >= 0; u--) {
+    const rects = updates[u].rects;
+    for (const r of rects) {
+      if (r.format === RectFormat.CopyRect || r.format === RectFormat.H264) break scan;
+    }
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      const droppable =
+        (r.format === RectFormat.Rgba || r.format === RectFormat.Jpeg) && r.w > 0 && r.h > 0;
+      if (droppable && covers.some((b) => within(r, b))) {
+        keep[u][i] = false;
+        dropped++;
+      }
+    }
+    covers.push(updates[u].damage);
+  }
+  return {
+    kept: updates.map((u, i) => u.rects.filter((_, j) => keep[i][j])),
+    dropped,
+  };
+}
+
+
 /**
  * Decide which queued rects are still worth applying.
  *
@@ -312,6 +386,8 @@ export function pruneUpdates<T extends PruneRect>(
 /** One update waiting its turn in the pending queue. */
 interface PendingUpdate {
   rects: WireRect[];
+  /** This update's damage box, used by `coalesceByDamage` to supersede it. */
+  damage: DamageBox;
   /** Renderer generation the message was parsed against (see `generation`). */
   generation: number;
   /**
@@ -579,7 +655,12 @@ export class WebGLRenderer {
     if (this.disposed) return;
     let bytes = 0;
     for (const r of msg.rects) bytes += r.payload.byteLength;
-    this.pending.push({ rects: msg.rects, generation: this.generation, bytes });
+    this.pending.push({
+      rects: msg.rects,
+      damage: { x: msg.damageX, y: msg.damageY, w: msg.damageW, h: msg.damageH },
+      generation: this.generation,
+      bytes,
+    });
     this.pendingBytes += bytes;
     if (this.draining) return;
     this.draining = true;
@@ -597,49 +678,76 @@ export class WebGLRenderer {
   private async drain(): Promise<void> {
     try {
       while (this.pending.length > 0 && !this.disposed) {
-        const overCap =
-          this.pending.length > MAX_PENDING_UPDATES || this.pendingBytes > MAX_PENDING_BYTES;
+        // Coalesce the WHOLE queue into one apply, not one apply per update.
+        //
+        // Measured under a video playing on the remote: the server sends 16 to
+        // 20 updates a second, the webview receives every one, and this queue
+        // sat 21 updates deep, about 1.3 s. A right-click menu, a fresh update,
+        // went to the BACK of that queue and waited for all 20 ahead of it to
+        // be applied one await at a time, so the menu took two seconds to
+        // appear. Pruning already dropped the covered video tiles of the older
+        // updates, but an update pruned to a handful of rects still cost a full
+        // async apply cycle, and twenty of those is the delay.
+        //
+        // So prune the queue, then apply everything still standing in ONE pass.
+        // A backlog of video frames plus a menu becomes: the newest video tiles
+        // (older ones pruned as covered) and the menu, drawn together, next
+        // frame. Order is preserved by concatenation, which is exactly what the
+        // per-update loop did in sequence; the CopyRect and H264 barriers the
+        // pruner stops at are carried in that same order.
+        // Supersede by damage box first, which is what actually collapses a
+        // video (see `coalesceByDamage`), then fall back to the exact per-tile
+        // pruner for the rest. Over the byte cap, the per-tile pass also
+        // collapses to the newest update as a last resort.
+        const coalesced = coalesceByDamage(
+          this.pending.map((u) => ({ rects: u.rects, damage: u.damage })),
+        );
+        for (let i = 0; i < this.pending.length; i++) this.pending[i].rects = coalesced.kept[i];
+        const overCap = this.pendingBytes > MAX_PENDING_BYTES;
         const pruned = pruneUpdates(
           this.pending.map((u) => u.rects),
           overCap,
         );
-        this.droppedRects += pruned.dropped;
-        for (let i = 0; i < this.pending.length; i++) this.pending[i].rects = pruned.kept[i];
+        this.droppedRects += coalesced.dropped + pruned.dropped;
 
-        const next = this.pending.shift();
-        if (!next) break;
-        this.pendingBytes -= next.bytes;
-        // A resize replaced the texture this update was parsed for; its rect
-        // coordinates address a framebuffer that no longer exists.
-        if (next.generation !== this.generation) {
-          this.droppedRects += next.rects.length;
-          this.droppedUpdates++;
-          continue;
+        const batch: WireRect[] = [];
+        const gen = this.generation;
+        for (let u = 0; u < this.pending.length; u++) {
+          const update = this.pending[u];
+          // A resize replaced the texture an older update was parsed for; its
+          // coordinates address a framebuffer that no longer exists, so it is
+          // dropped rather than mixed into the current generation's batch.
+          if (update.generation !== gen) {
+            this.droppedRects += pruned.kept[u].length;
+            this.droppedUpdates++;
+            continue;
+          }
+          for (const r of pruned.kept[u]) batch.push(r);
         }
-        if (next.rects.length === 0) {
-          this.droppedUpdates++;
-          continue;
-        }
-        // Only now, for the update actually about to be applied, are decodes
-        // started. They still run in parallel within the update, which is
-        // what the ordered loop below awaits them in order for; what has gone
-        // is starting them for updates that are still sitting in the queue
-        // and may never be applied.
-        const decodes: (Promise<ImageBitmap> | null)[] = next.rects.map((r) => {
+        this.pending = [];
+        this.pendingBytes = 0;
+        if (batch.length === 0) continue;
+
+        // Decodes for the whole batch start together and run in parallel; the
+        // ordered apply below awaits them in place so uploads still land in
+        // protocol order.
+        const decodes: (Promise<ImageBitmap> | null)[] = batch.map((r) => {
           if (r.format !== RectFormat.Jpeg) return null;
-          const p = this.decodeJpeg(r.payload);
-          // The loop awaits these one at a time, so a later rect's failure
-          // would otherwise be reported as an unhandled rejection while we
-          // are still waiting on an earlier one. The await still throws.
-          p.catch(() => undefined);
-          return p;
+          const d = this.decodeJpeg(r.payload);
+          // Caught here so a later rect's decode failure is not an unhandled
+          // rejection while an earlier one is still being awaited; the await in
+          // the apply loop still throws and is handled there.
+          d.catch(() => undefined);
+          return d;
         });
         try {
-          await this.applyFrameOrdered(next.rects, decodes, next.generation);
+          await this.applyFrameOrdered(batch, decodes, gen);
         } catch {
-          // One malformed update must not kill the drain loop and strand
-          // every update queued behind it.
+          // One malformed rect must not kill the drain loop and strand every
+          // update queued behind it.
         }
+        // Whatever arrived while that batch was applying is picked up on the
+        // next pass, coalesced with the same economy.
       }
     } finally {
       this.draining = false;

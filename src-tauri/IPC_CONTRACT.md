@@ -1516,3 +1516,13 @@ It degrades to "RDP does not exist" rather than to anything broken.
 The rule that follows: **the shell lands first.** Every shell side addition
 goes in before any UI change that depends on it, and the UI change ships in
 the same release.
+
+### `library://agent-open` (shell to the library webview)
+
+Emitted to the main window when an agent asks the plane to open a machine.
+Payload `{ hostId?, address, port, protocol }`. The library webview answers by
+running its own `openSession`, the same path a click takes, so the session
+lands in a tab or a window according to the person's preference and is
+de-duplicated against one already open. The shell then finds the session by
+machine and reports it to the agent. If the main window is absent or does not
+claim a session within five seconds, the shell opens a window instead.

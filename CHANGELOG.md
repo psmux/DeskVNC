@@ -10,6 +10,74 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.26.3] - 2026-09-08
+
+Measured on the author's machines against a real YouTube video playing on a
+1920x1080 Windows desktop, with a harness that posts OS mouse events, reads the
+packets off the socket, and watches the screen for the menu to appear.
+
+### Fixed
+
+- **A context menu took over two seconds to open while a video played on the
+  remote.** The click was never slow: it reached the server in under 30 ms
+  throughout. What was slow was the picture coming back, and two separate
+  things caused it.
+
+  The renderer drew every stale video frame in order. It has a per-tile check
+  for "has a newer frame already repainted this region", but a video arrives as
+  thousands of small dirty rectangles a second whose edges shift frame to
+  frame, so they never nest exactly and the coverage set, capped at 256 regions
+  for cost, was blown long before it could prove an old tile invisible. The
+  queue sat 29 updates deep, about a second and a half, and a right-click menu
+  waited behind all of it. Frames are now superseded by their DAMAGE BOX, one
+  box per frame rather than thousands of tiles, so tens of boxes decide it and
+  the cap is never reached. An older frame whose region a newer one has already
+  repainted is dropped; a menu, whose damage box is elsewhere on the screen, is
+  kept and drawn with the newest frame. Queue depth fell from 29 to 4 to 6.
+  Barriers are unchanged: a CopyRect reads the framebuffer and an H264 rect
+  carries decoder state, so the walk still stops at the first update holding
+  one.
+
+  The rest was this client's own quality brake refusing to go low enough. The
+  duty-cycle cap added in 0.26.0 was capping the ladder at Medium, on the
+  stated reasoning that dropping below Medium "would trade picture quality
+  against a problem it cannot fix". On real hardware that was wrong: at Medium
+  the duty cycle sat between 0.72 and 0.99, meaning almost no time was left for
+  the person driving, and the menu took 1359 ms; forced to Low by hand on the
+  same video it was 508 ms. The cap now has a second rung. Past 0.85 duty it
+  drops to Low; below that it still stops at Medium and keeps the picture, so a
+  window drag or an animation is not over-reacted to.
+
+  End to end on Auto, the setting people actually use, with the video playing:
+  the menu appears in 346 ms, down from 2208 ms.
+
+### Note on the version
+
+Patch. No stored data change, no new command, no IPC contract change.
+
+## [0.26.2] - 2026-09-07
+
+### Fixed
+
+- **A machine opened by an agent landed in its own window, never in the tab
+  strip.** 0.26.1 fixed `dvv open` dialling nothing at all, but did it by
+  opening a window, which put every agent session outside the tabs a person
+  actually works in. The shell cannot build a tab: the tab strip lives in the
+  library webview, and so does the tab-or-window preference, in browser
+  storage the shell cannot read. So the plane no longer guesses. It sends the
+  library webview the same request a click makes (`library://agent-open`), and
+  the webview runs its own `openSession`: it honours the preference,
+  de-duplicates against a session already open, and mounts the viewer with the
+  code that mounts every other session. The shell then finds the session by
+  machine, the lookup it already uses for the window rule, and hands it to the
+  agent. If the library window is closed, or does not claim the session within
+  five seconds, the shell opens a window instead, so an agent still gets its
+  machine.
+
+### Note on the version
+
+Patch. One new shell-to-webview event, no new command, no stored data change.
+
 ## [0.26.1] - 2026-09-07
 
 Measured on the author's own machines this time, against two real VNC

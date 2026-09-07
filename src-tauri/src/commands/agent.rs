@@ -14,11 +14,18 @@
 //! from [`agent_status`] on mount and follows `agent://event` after that.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::agent::{self, AgentPlane};
 use crate::state::AppState;
+
+/// How long the opener waits for the library webview to claim a session it
+/// was asked to open before opening a window itself. A claim needs one event
+/// delivery and one `open_session_window` round trip; under load a round trip
+/// measured about half a second, so this is several of those, not one.
+const AGENT_OPEN_CLAIM_WINDOW: Duration = Duration::from_secs(5);
 
 /// Build the context the socket answers requests from.
 ///
@@ -93,6 +100,84 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                         let _ = tell.send(Err("the application is shutting down".into()));
                         return;
                     };
+                    // The person's own path first. The shell cannot build a
+                    // tab: the tab strip lives in the library webview, and so
+                    // does the tab-or-window preference, in browser storage
+                    // the shell cannot read. So rather than guess, ask that
+                    // webview to open the machine exactly as a click would.
+                    // It honours the preference, de-duplicates, mounts the
+                    // viewer, and its `open_session_window` call claims the
+                    // session, which is how the id is found here afterwards:
+                    // by machine, with the same lookup the window rule uses.
+                    //
+                    // From 0.23.0 to 0.26.0 this closure asked for a tab
+                    // directly and got the tab parameters back, which it had
+                    // no webview to hand to, so nothing was ever dialled.
+                    // 0.26.1 opened a window instead, which worked and put
+                    // every agent session outside the person's tab strip.
+                    let kind =
+                        match crate::commands::session::resolve_protocol(Some(&ask.protocol), None)
+                        {
+                            Ok(kind) => kind,
+                            Err(why) => {
+                                let _ = tell.send(Err(why));
+                                return;
+                            }
+                        };
+                    let key = crate::state::MachineKey::new(
+                        kind,
+                        ask.host_id.as_deref(),
+                        &ask.address,
+                        ask.port,
+                    );
+                    let exists = {
+                        let app = app.clone();
+                        move |label: &str| app.get_webview_window(label).is_some()
+                    };
+                    if let Some(main) = app.get_webview_window(crate::windows::MAIN_WINDOW_LABEL) {
+                        // Already open: report it, exactly as a click would be
+                        // told, without asking the webview to do anything.
+                        if let Some(found) =
+                            state.existing_window_for_machine(&key, Instant::now(), &exists)
+                        {
+                            let _ = tell.send(Ok(agent::server::Opened {
+                                session_id: found.session_id,
+                                reused: true,
+                            }));
+                            return;
+                        }
+                        let _ = main.emit(
+                            crate::commands::session::AGENT_OPEN_EVENT,
+                            serde_json::json!({
+                                "hostId": ask.host_id,
+                                "address": ask.address,
+                                "port": ask.port,
+                                "protocol": ask.protocol,
+                            }),
+                        );
+                        // The webview's open claims the session within a few
+                        // IPC round trips; the wait only has to outlast a busy
+                        // one. Past it, fall through and open a window rather
+                        // than fail: an agent with the library minimised or
+                        // mid-reload still gets its machine.
+                        let deadline = Instant::now() + AGENT_OPEN_CLAIM_WINDOW;
+                        while Instant::now() < deadline {
+                            if let Some(found) =
+                                state.existing_window_for_machine(&key, Instant::now(), &exists)
+                            {
+                                let _ = tell.send(Ok(agent::server::Opened {
+                                    session_id: found.session_id,
+                                    reused: false,
+                                }));
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        tracing::warn!(
+                            address = %ask.address,
+                            "the library webview did not claim the session in time; opening a window"
+                        );
+                    }
                     let done = crate::commands::session::open_session_window(
                         app.clone(),
                         state,
@@ -103,23 +188,6 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                         None,
                         Some(ask.protocol),
                         None,
-                        // A window, not a tab, until the tab path works from
-                        // here. The intent was a tab: a person watching several
-                        // machines an agent is driving wants them in one grid.
-                        // But with `as_tab` the command builds nothing. It
-                        // records the claim and hands the tab parameters back
-                        // to its CALLER, because the tab strip lives in the
-                        // library webview and only that webview can add to it.
-                        // A person's click is that caller; this closure is not,
-                        // and it has no way to reach the webview. So from
-                        // v0.23.0, when sessions became tabs, until this line,
-                        // every `limb.open` returned a session id for a session
-                        // that was never dialled, and `dvv open` timed out
-                        // waiting for it. The window path builds the webview in
-                        // Rust, the page boots on its own, connects with the
-                        // saved credential, and registers exactly as a clicked
-                        // session does. Restoring the tab needs an event the
-                        // library webview listens for; that is the follow-up.
                         None,
                     )
                     .await;
