@@ -347,17 +347,27 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .item(&check!("menu:gray:1", "1-bit (Dithered)"))
         .build()?;
 
-    // The toolbar splits these into "Network" and "Quality" lists that call
-    // the same setter with the same five values; one list says the same thing
-    // without the duplication, with the link each preset implies in its name.
+    // Named for the trade the person is making, picture sharpness against how
+    // quickly the screen answers them, rather than for the link the preset was
+    // once assumed to imply. The toolbar carries the same five in the same
+    // words. Auto does both ends: it holds the picture while the client can
+    // afford it and steps down while the client is saturated, which is what a
+    // video playing on the remote needs (measured: a right-click menu went
+    // from 2208 ms to 346 ms once Auto dropped the quality by itself).
     let quality = SubmenuBuilder::new(app, "Quality")
-        .item(&check!("menu:quality:auto", "Auto (detect from the link)"))
-        .item(&check!("menu:quality:high", "High (LAN, no adaptation)"))
         .item(&check!(
-            "menu:quality:medium",
-            "Medium (WAN, save bandwidth)"
+            "menu:quality:auto",
+            "Auto (sharp when idle, faster under load)"
         ))
-        .item(&check!("menu:quality:low", "Low"))
+        .item(&check!(
+            "menu:quality:high",
+            "Sharp (best picture, never adapts)"
+        ))
+        .item(&check!("menu:quality:medium", "Balanced"))
+        .item(&check!(
+            "menu:quality:low",
+            "Responsive (softer picture, lowest lag)"
+        ))
         .item(&check!("menu:quality:bw", "Black & White"))
         .separator()
         .item(&gray)
