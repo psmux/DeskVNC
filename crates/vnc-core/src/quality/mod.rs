@@ -286,9 +286,34 @@ const DUTY_PENALTY: Duration = Duration::from_secs(60);
 /// what is needed, which is what it did before: on a fast link the burst
 /// sampler measures a genuinely fast wire during video, so the ladder climbed
 /// to High, the most expensive operating point it has, a few seconds after the
-/// video started. Dropping below Medium would trade picture quality against a
-/// problem it cannot fix.
+/// video started.
 const DUTY_CAP_TIER: Tier = Tier::Medium;
+
+/// Duty at which the cap drops a second rung, to [`DUTY_DEEP_CAP_TIER`].
+///
+/// Medium alone was not enough, and this is measured rather than reasoned. On
+/// a 1920x1080 Windows desktop playing a YouTube video, the duty cycle sat
+/// between 0.72 and 0.99 with the cap already holding the ladder at Medium,
+/// and a right-click menu took 1359 ms to appear. Forced to Low by hand, on
+/// the same video: duty 0.44 to 0.55, and the menu appeared in 508 ms. So
+/// there IS a rung below Medium that buys back interactivity, and the comment
+/// that used to sit here, that dropping below Medium trades picture quality
+/// against a problem it cannot fix, was wrong.
+///
+/// Above 0.85 the session is spending almost every millisecond inside update
+/// handling and has nothing left for the person driving it. Below that, the
+/// Medium cap plus pacing is the gentler answer and keeps the picture.
+const DUTY_DEEP_BUDGET: f32 = 0.85;
+
+/// Release threshold for the deep rung, mirroring [`DUTY_RELEASE`]'s job for
+/// the first one: well under the engage threshold so a session hovering at the
+/// budget does not step up and down between Medium and Low.
+const DUTY_DEEP_RELEASE: f32 = 0.65;
+
+/// Where the deep rung caps. Low is jpeg quality 2, which measured 4.6 MB/s
+/// against Medium's 6.4 on the same video: fewer and smaller tiles, which is
+/// what both the server's encoder and this client's decoder are drowning in.
+const DUTY_DEEP_CAP_TIER: Tier = Tier::Low;
 
 /// The duty cap only engages when the link has also been measured at or above
 /// this rate.
@@ -778,6 +803,8 @@ struct Shared {
     /// Whether the duty-cycle cap is currently holding the ladder down.
     /// See [`DUTY_BUDGET`].
     duty_capped: bool,
+    /// Whether the cap has dropped its second rung. See [`DUTY_DEEP_BUDGET`].
+    duty_deep_capped: bool,
     /// The duty cap's equivalent of `latency_penalty_until`. See
     /// [`DUTY_PENALTY`].
     duty_penalty_until: Option<Instant>,
@@ -850,6 +877,7 @@ impl AutoTuner {
                 latency_capped: false,
                 latency_penalty_until: None,
                 duty_capped: false,
+                duty_deep_capped: false,
                 duty_penalty_until: None,
                 paced: false,
             }),
@@ -1037,6 +1065,14 @@ impl AutoTuner {
             sh.duty_penalty_until = Some(now + DUTY_PENALTY);
         }
         sh.duty_capped = flooded;
+        // The second rung, on the same engage/release shape so it cannot
+        // chatter between Medium and Low while duty hovers at the budget.
+        sh.duty_deep_capped = link_fast_enough
+            && if sh.duty_deep_capped {
+                self.duty > DUTY_DEEP_RELEASE
+            } else {
+                self.duty > DUTY_DEEP_BUDGET
+            };
         let duty_penalised = sh.duty_penalty_until.is_some_and(|until| now < until);
         if !duty_penalised {
             sh.duty_penalty_until = None;
@@ -1112,6 +1148,11 @@ impl AutoTuner {
         // simply takes the stricter of the two.
         if duty_cap_active {
             target = target.cap_at(DUTY_CAP_TIER);
+        }
+        // Stricter still while the client is drowning. `cap_at` never raises a
+        // tier, so this simply takes over from the Medium cap above.
+        if sh.duty_deep_capped {
+            target = target.cap_at(DUTY_DEEP_CAP_TIER);
         }
         let cap_active = latency_cap_active || duty_cap_active;
 
@@ -1790,10 +1831,16 @@ mod tests {
                 at_high_ticks += 1;
             }
         }
+        // Low, not Medium. 0.95 is past `DUTY_DEEP_BUDGET`, and this test's
+        // own comment above says what 0.95 models: a full-screen video. That
+        // is precisely the case where Medium measured 1359 ms to open a
+        // right-click menu and Low measured 508 ms on the same video, so the
+        // deep rung is the whole point rather than an over-reaction.
         assert_eq!(
             t.current_tier_raw(),
-            Tier::Medium,
-            "a flooded client must not sit at the ladder's most expensive rung"
+            Tier::Low,
+            "a client inside update handling 95% of the time must drop to the \
+             rung that measurably buys interactivity back, not stop at Medium"
         );
         assert!(
             t.wants_paced_updates(),
@@ -1837,6 +1884,39 @@ mod tests {
     /// memory that survives its own remedy, exactly as `LATENCY_PENALTY` is
     /// for the latency cap.
     #[test]
+    fn the_duty_cap_has_two_rungs_and_moderate_load_keeps_the_picture() {
+        // Busy but not drowning: past `DUTY_BUDGET`, short of
+        // `DUTY_DEEP_BUDGET`. This is a window being dragged or an animation,
+        // where the Medium cap plus pacing is the right answer and throwing
+        // the picture away would be an over-reaction.
+        let mut t = AutoTuner::new();
+        let mut now = Instant::now();
+        for _ in 0..300 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 4.0, 0.0, 0.78);
+            let _ = t.recommended();
+        }
+        assert_eq!(
+            t.current_tier_raw(),
+            Tier::Medium,
+            "moderate saturation caps at Medium and keeps the picture"
+        );
+        assert!(t.wants_paced_updates(), "the rate lever still applies");
+
+        // Now it gets worse, the way a video starting makes it worse.
+        for _ in 0..300 {
+            now += STEP;
+            t.observe_at(now, Some(80e6), 5.0, 4.0, 0.0, 0.95);
+            let _ = t.recommended();
+        }
+        assert_eq!(
+            t.current_tier_raw(),
+            Tier::Low,
+            "deep saturation drops the second rung"
+        );
+    }
+
+    #[test]
     fn duty_returning_to_normal_releases_the_cap_after_the_penalty() {
         let mut t = AutoTuner::new();
         let mut now = Instant::now();
@@ -1846,7 +1926,11 @@ mod tests {
             let _ = t.recommended();
         }
         assert!(t.wants_paced_updates(), "the cap must engage first");
-        assert_eq!(t.current_tier_raw(), Tier::Medium);
+        assert_eq!(
+            t.current_tier_raw(),
+            Tier::Low,
+            "0.95 duty is the deep rung"
+        );
 
         // The video stops. The duty average falls below the release threshold
         // within a couple of seconds, but the penalty outlives it.

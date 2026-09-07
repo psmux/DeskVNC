@@ -44,6 +44,12 @@ use crate::{framing, windows};
 /// session just gained a host profile, see [`adopt_session_host`]; the Library
 /// re-reads its host list on it).
 pub const SESSIONS_EVENT: &str = "sessions://event";
+/// The shell asking the library webview to open a machine the way a click
+/// does. Sent by the agent plane's opener, see `commands::agent`. The webview
+/// answers by calling `open_session_window` itself, which is what lets the
+/// session land in a tab: the tab strip and the tab-or-window preference both
+/// live in that webview, and the shell can build neither.
+pub const AGENT_OPEN_EVENT: &str = "library://agent-open";
 
 /// App-wide per-session stats broadcast (`emit`, 1 Hz per connected session):
 /// `{ sessionId, profileId, address, port, stats }`, top-level keys camelCase,
@@ -850,7 +856,7 @@ pub enum SessionConnectOutcome {
 /// Falling back to VNC would send an RFB handshake at an endpoint the user
 /// configured for something else, which is the same class of mistake the cert
 /// pin loop already refuses to make.
-fn resolve_protocol(
+pub(crate) fn resolve_protocol(
     explicit: Option<&str>,
     profile: Option<&vnc_store::HostProfile>,
 ) -> Result<ProtocolKind, String> {
