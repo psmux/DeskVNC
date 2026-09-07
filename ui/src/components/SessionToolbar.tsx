@@ -921,32 +921,39 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           {openMenu === "quality" ? (
             <div>
               {/*
-                Network mode sits above the presets because it is the choice
-                people actually want to make: Auto infers the link from
-                throughput, and a server that encodes slowly (a Raspberry Pi
-                is the usual one) looks exactly like a slow link, so on a LAN
-                it can settle far below what the network can carry. These
-                override that inference; they are the presets underneath, named
-                for the decision rather than for the setting.
+                One list, named for the trade the person is actually making.
+                These used to be split into a "Network" list (Auto / LAN / WAN)
+                and a "Quality" list (Auto / High / Medium / Low / B&W) that
+                called the same setter with the same five values, so the same
+                choice appeared twice under two different vocabularies and
+                neither said what it costs you. They are named for the trade
+                now: picture sharpness against how quickly the screen answers
+                you.
+
+                Auto is the honest default and does both. It keeps the picture
+                sharp while the client can afford it, and steps down while the
+                client is genuinely saturated (measured as the fraction of each
+                second spent handling updates), then comes back up. A video
+                playing on the remote is the case that needs it: measured on a
+                real one, the menu you right-click for went from 2208 ms to
+                346 ms because Auto dropped the quality on its own.
               */}
-              <p className="px-2.5 py-1 text-2xs text-tertiary">Network</p>
+              <p className="px-2.5 py-1 text-2xs text-tertiary">Picture vs response</p>
               <MenuRow selected={props.quality === "auto"} onClick={() => props.onQuality("auto")}>
-                Auto — detect from the link
+                Auto — sharp when idle, faster under load
               </MenuRow>
               <MenuRow selected={props.quality === "high"} onClick={() => props.onQuality("high")}>
-                LAN — full quality, no adaptation
+                Sharp — best picture, never adapts
               </MenuRow>
               <MenuRow selected={props.quality === "medium"} onClick={() => props.onQuality("medium")}>
-                WAN — save bandwidth
+                Balanced
               </MenuRow>
-              <div className="mt-1 border-t border-subtle pt-1">
-                <p className="px-2.5 py-1 text-2xs text-tertiary">Quality</p>
-              </div>
-              {(["auto", "high", "medium", "low", "bw"] as QualityPreset[]).map((q) => (
-                <MenuRow key={q} selected={props.quality === q} onClick={() => props.onQuality(q)}>
-                  {q === "bw" ? "Black & White" : q[0].toUpperCase() + q.slice(1)}
-                </MenuRow>
-              ))}
+              <MenuRow selected={props.quality === "low"} onClick={() => props.onQuality("low")}>
+                Responsive — softer picture, lowest lag
+              </MenuRow>
+              <MenuRow selected={props.quality === "bw"} onClick={() => props.onQuality("bw")}>
+                Black &amp; White
+              </MenuRow>
               {/*
                 Hidden for RDP rather than disabled, and that asymmetry with
                 "Remote resize" above is deliberate. This switch exists for a

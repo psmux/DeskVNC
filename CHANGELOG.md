@@ -10,6 +10,30 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.26.4] - 2026-09-08
+
+### Changed
+
+- **The quality presets are named for the trade they make.** They were split
+  across two lists, a "Network" one (Auto / LAN / WAN) and a "Quality" one
+  (Auto / High / Medium / Low / B&W), which called the same setter with the
+  same five values: the same choice twice, in two vocabularies, and neither
+  said what picking it costs. One list now, named for the decision: Auto
+  (sharp when idle, faster under load), Sharp (best picture, never adapts),
+  Balanced, Responsive (softer picture, lowest lag), Black & White. The same
+  five values go on the wire, so nothing stored or negotiated changes.
+
+  Auto is the one that does both ends, and 0.26.3 is what made it worth
+  choosing: it holds the picture while the client can afford it and steps down
+  while the client is genuinely saturated, then comes back. Measured against a
+  video playing on a real remote desktop, a right-click menu went from 2208 ms
+  to 346 ms with Auto doing that unaided.
+
+### Note on the version
+
+Patch. Labels, and one duplicated list removed. No behaviour, stored data or
+protocol change.
+
 ## [0.26.3] - 2026-09-08
 
 Measured on the author's machines against a real YouTube video playing on a
