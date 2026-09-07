@@ -40,7 +40,6 @@ import type {
   SessionStats,
 } from "../lib/types";
 import { DEFAULT_PORT, isProtocolKind } from "../lib/types";
-import { createSerialQueue } from "../lib/serialQueue";
 
 export interface SessionBridge {
   onFrame: (msg: FrameMessage) => void;
@@ -661,48 +660,80 @@ export function useSession(
   const sid = (): string => sessionIdRef.current;
 
   /**
-   * Input goes out one packet at a time, in the order it was produced.
+   * Input goes out in ORDER, but not one packet per IPC call.
    *
    * Two `invoke` calls are two independent IPC requests, and reversing a press
-   * and its release leaves the remote holding a button the user let go of. See
-   * `createSerialQueue`. The cost is one queued round trip, against a 16 ms
-   * frame budget for input that is already coalesced per frame.
+   * and its release leaves the remote holding a button the user let go of. So
+   * ordering is not negotiable. This used to buy it the expensive way: one
+   * `invoke` per packet, each awaited before the next was issued.
    *
-   * That cost only stays that low while the queue stays short, which is what
-   * the coalescing key is for. Pointer motion is produced once per animation
-   * frame and drains once per round trip, so while the remote screen is busy
-   * and that round trip grows past 16 ms the queue grows for as long as the
-   * motion lasts. Every stale position is still delivered, faithfully and far
-   * too late, and keystrokes queued behind that trail inherit the whole
-   * delay, which is why keyboard control degrades along with the pointer.
-   * Motion packets carry a key and replace each other. Nothing else does.
+   * Measured on a real session, that cost 474 to 846 ms per packet, median
+   * 572. Frames cross the same `ipc://` transport on the same main thread, so
+   * every input packet pays a contended round trip, and a click is two of them
+   * (press and release) with a right click menu waiting on both. That is the
+   * "I click and wait a couple of seconds" a person actually feels.
+   *
+   * The wire format has always allowed several events in one body:
+   * `framing::decode_input` walks a body as a sequence, which is how a right
+   * click and a wheel notch already pack their press and release together. So
+   * everything pending drains into ONE call. Order is preserved by
+   * concatenation, and a burst that used to cost N round trips now costs one.
+   *
+   * A keyed packet (pointer motion, the only kind a newer one makes worthless)
+   * REPLACES the pending one and moves to the tail rather than being rewritten
+   * in place. Rewriting in place let a motion queued after a press go out
+   * ahead of that press, which put the click somewhere the user was not
+   * pointing.
    */
-  const inputQueue = useRef(createSerialQueue());
+  const inputPending = useRef<{ body: Uint8Array; key?: string }[]>([]);
+  const inputDraining = useRef(false);
 
-  /**
-   * Shared by every `send_input` sender below: queue, invoke, warn once.
-   *
-   * `coalesceKey` is handed straight to the queue, which replaces the pending
-   * task holding the same key rather than appending after it. It is undefined
-   * for every caller except pointer motion, which is the only packet a newer
-   * one makes worthless.
-   */
-  const enqueueInput = useCallback((body: Uint8Array, coalesceKey?: string): void => {
-    const sessionId = sessionIdRef.current;
-    inputQueue.current(
-      () =>
-        // Raw binary body; session id rides in an invoke header (see FRAME_FORMAT notes).
-        invoke("send_input", body, { headers: { "x-session-id": sessionId } }).catch(
-          (err: unknown) => {
-            if (!inputWarned.current) {
-              inputWarned.current = true;
-              console.warn("send_input failed:", err);
-            }
-          },
-        ),
-      coalesceKey,
-    );
+  const drainInput = useCallback(async (): Promise<void> => {
+    inputDraining.current = true;
+    try {
+      // Re-checked every pass: whatever arrived while the last call was in
+      // flight goes out together in the next one, which is the whole point.
+      while (inputPending.current.length > 0) {
+        const batch = inputPending.current;
+        inputPending.current = [];
+        let total = 0;
+        for (const e of batch) total += e.body.byteLength;
+        const body = new Uint8Array(total);
+        let at = 0;
+        for (const e of batch) {
+          body.set(e.body, at);
+          at += e.body.byteLength;
+        }
+        try {
+          await invoke("send_input", body, {
+            headers: { "x-session-id": sessionIdRef.current },
+          });
+        } catch (err: unknown) {
+          // Warn once: a session that has gone away would otherwise print a
+          // line per packet for as long as the user keeps moving the mouse.
+          if (!inputWarned.current) {
+            inputWarned.current = true;
+            console.warn("send_input failed:", err);
+          }
+        }
+      }
+    } finally {
+      inputDraining.current = false;
+    }
   }, []);
+
+  /** Shared by every `send_input` sender below. */
+  const enqueueInput = useCallback(
+    (body: Uint8Array, coalesceKey?: string): void => {
+      if (coalesceKey !== undefined) {
+        const stale = inputPending.current.findIndex((e) => e.key === coalesceKey);
+        if (stale >= 0) inputPending.current.splice(stale, 1);
+      }
+      inputPending.current.push({ body, key: coalesceKey });
+      if (!inputDraining.current) void drainInput();
+    },
+    [drainInput],
+  );
 
   const sendInput = useCallback(
     (packet: Uint8Array, coalesceKey?: string): void => {

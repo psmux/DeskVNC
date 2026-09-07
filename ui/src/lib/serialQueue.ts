@@ -25,12 +25,21 @@
  * why keyboard control degrades along with the mouse.
  *
  * A task queued with a coalesce key REPLACES the pending task holding the same
- * key rather than queueing behind it, keeping that task's place in the order.
- * Stale pointer positions are worthless the moment a newer one exists, so
- * dropping them costs nothing and bounds the queue by construction: at most
- * one in flight and one pending per key. Anything queued without a key keeps
- * the old strict behaviour, so presses, releases, wheel clicks and keystrokes
- * are untouched.
+ * key rather than queueing behind it. Stale pointer positions are worthless
+ * the moment a newer one exists, so dropping them costs nothing and bounds
+ * the queue by construction: at most one in flight and one pending per key.
+ * Anything queued without a key keeps the old strict behaviour, so presses,
+ * releases, wheel clicks and keystrokes are untouched.
+ *
+ * The replacement goes to the BACK of the queue; it does not inherit the
+ * stale task's slot. It used to, and that let a motion overtake a click: with
+ * motion(A) pending and a slow round trip in flight, press(A) and release(A)
+ * queued behind it, and then the pointer moved on and motion(B) arrived. Put
+ * in motion(A)'s slot, motion(B) went out ahead of the press, so the wire saw
+ * the pointer go to B, then a click at A, and the remote cursor snapped back
+ * to A after the user had left it. Every task is queued at the moment it was
+ * produced, so the order it was produced in is the order of the queue, and a
+ * replacement is a new task, produced after everything already waiting.
  */
 export function createSerialQueue(): (task: () => Promise<unknown>, coalesceKey?: string) => void {
   type Entry = { task: () => Promise<unknown>; key?: string };
@@ -55,13 +64,11 @@ export function createSerialQueue(): (task: () => Promise<unknown>, coalesceKey?
 
   return (task, coalesceKey) => {
     if (coalesceKey !== undefined) {
-      const slot = pending.find((e) => e.key === coalesceKey);
-      if (slot) {
-        // Newest wins, and it inherits the older packet's place in the queue
-        // so it still cannot overtake an ordered packet queued before it.
-        slot.task = task;
-        return;
-      }
+      const stale = pending.findIndex((e) => e.key === coalesceKey);
+      // Newest wins. The stale one is removed and the new one appended, not
+      // written into the stale one's slot: anything queued between the two
+      // was produced between them and has to stay between them.
+      if (stale >= 0) pending.splice(stale, 1);
     }
     pending.push({ task, key: coalesceKey });
     if (!draining) void drain();

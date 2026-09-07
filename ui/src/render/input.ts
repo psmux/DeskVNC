@@ -365,11 +365,12 @@ export class SessionInput {
     c.addEventListener("pointerdown", this.onPointerDown);
     c.addEventListener("pointermove", this.onPointerMove);
     c.addEventListener("pointerup", this.onPointerUp);
-    c.addEventListener("pointercancel", this.onPointerUp);
     // Capture can be taken away without a pointerup ever arriving: an OS
     // gesture claims the pointer, or the canvas is replaced under us. Both
-    // land here, and both used to leave a button held down forever.
-    c.addEventListener("lostpointercapture", this.onPointerUp);
+    // used to leave a button held down forever. They get a handler of their
+    // own rather than `onPointerUp`, see `onPointerLost` for why.
+    c.addEventListener("pointercancel", this.onPointerLost);
+    c.addEventListener("lostpointercapture", this.onPointerLost);
     c.addEventListener("wheel", this.onWheel, { passive: false });
     c.addEventListener("contextmenu", this.onContextMenu);
     c.addEventListener("pointerleave", this.onPointerLeave);
@@ -393,8 +394,8 @@ export class SessionInput {
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);
     c.removeEventListener("pointerup", this.onPointerUp);
-    c.removeEventListener("pointercancel", this.onPointerUp);
-    c.removeEventListener("lostpointercapture", this.onPointerUp);
+    c.removeEventListener("pointercancel", this.onPointerLost);
+    c.removeEventListener("lostpointercapture", this.onPointerLost);
     c.removeEventListener("wheel", this.onWheel);
     c.removeEventListener("contextmenu", this.onContextMenu);
     c.removeEventListener("pointerleave", this.onPointerLeave);
@@ -529,6 +530,24 @@ export class SessionInput {
    * arrive, and in order.
    */
   private sendPointer(x: number, y: number, mask: number, coalesceKey?: string): void {
+    // Never send a pointer event whose position we do not actually know.
+    //
+    // `DataView.setUint16` converts its argument with ToUint16, and ToUint16
+    // of NaN is 0. So a single NaN coordinate does not throw and does not
+    // warn: it silently writes a pointer event at the top-left corner, with
+    // the button mask intact. On screen that is a pointer that follows the
+    // mouse correctly and then snaps to (0,0), and a click that opens its
+    // context menu in the corner.
+    //
+    // NaN reaches here from `cssPointToFramebuffer`, which divides by the
+    // content transform's scale and then clamps with Math.min/Math.max. Both
+    // propagate NaN rather than rejecting it, so any moment where the
+    // transform is degenerate (a zero-sized canvas mid-layout, a framebuffer
+    // whose size is not known yet) turns every coordinate into a corner click.
+    // Dropping the event is right: a pointer event carries absolute position,
+    // so the next good one states the truth in full and nothing is lost.
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
     // Keep the locally-composited cursor under the real pointer.
     //
     // The remote cursor is drawn client-side from the server's cursor SHAPE so
@@ -595,16 +614,16 @@ export class SessionInput {
     e.preventDefault();
   };
 
+  /**
+   * A real `pointerup`, and only that. `pointercancel` and
+   * `lostpointercapture` go to `onPointerLost`.
+   */
   private onPointerUp = (e: PointerEvent): void => {
     // Only release panning for the button that started it: onPointerUp used
     // to early-return for ANY button while panning, so releasing the left
     // button during a middle-drag pan never reached the mask update below and
     // buttonMask kept bit 0 set, a permanently "stuck" left button.
-    // `e.button` is -1 on pointercancel and lostpointercapture, which no pan
-    // button can equal, so a cancelled pan used to leave `panning` set and
-    // every later press took the early return below: pointer input stopped
-    // entirely until the session was reattached.
-    if (this.panning && (e.button === this.panButton || e.button < 0)) {
+    if (this.panning && e.button === this.panButton) {
       this.panning = false;
       this.panButton = -1;
       this.syncLastPoint(e);
@@ -616,8 +635,9 @@ export class SessionInput {
     }
     const bit = e.button === 0 ? 0 : e.button === 1 ? 1 : e.button === 2 ? 2 : -1;
     if (bit < 0) {
-      // A cancel, a lost capture, or a button we do not forward. The first two
-      // carry `buttons` of 0, so this is what releases what was held.
+      // A button we do not forward (back, forward). Its position is real, so
+      // it is still worth snapping the tracked point to, and `buttons` is the
+      // live set, so a release that went missing is put right here too.
       const q = this.syncLastPoint(e);
       this.reconcileButtons(e, q.x, q.y);
       return;
@@ -626,6 +646,45 @@ export class SessionInput {
     const p = this.syncLastPoint(e);
     this.sendPointer(p.x, p.y, this.buttonMask);
     e.preventDefault();
+  };
+
+  /**
+   * `pointercancel` and `lostpointercapture`: the pointer is gone, or capture
+   * is, but nothing moved.
+   *
+   * These used to share `onPointerUp`, on the assumption that they arrive
+   * with `button` of -1 and would take its "not a button we forward" branch.
+   * WebKit does not do that. It builds the `lostpointercapture` event from
+   * the mouseup that ended the capture, so `button` is 0 for a left click,
+   * `buttons` is 0, and clientX and clientY are 0 because the event is about
+   * a state change and carries no position. In `onPointerUp` that reads as a
+   * perfectly ordinary left button release at client (0,0). The mask matched
+   * the release that had just gone out, so nothing filtered it, and
+   * `syncLastPoint` mapped the corner into framebuffer space and sent it.
+   *
+   * On the wire that is press(P) release(P) release(0,0), one extra packet per
+   * click, and on screen the remote pointer lands the click and then jumps to
+   * the top-left corner a moment later. Guarding on `button < 0` could never
+   * catch it. Guarding on the event TYPE does, which is what a separate
+   * listener is: whatever `button` says, an event of this type is never a
+   * place the pointer went.
+   *
+   * Losing the pointer does not move the mouse, so the tracked position is
+   * kept as it is. The buttons are reconciled against `buttons`, the live set,
+   * from the last position actually observed: a capture stolen mid-drag still
+   * releases the button, where the drag really was, rather than at the origin.
+   * A pan ends here too, because its `pointerup` is not coming: without this
+   * a cancelled pan left `panning` set and every later press took the pan
+   * early return, so pointer input stopped until the session was reattached.
+   */
+  private onPointerLost = (e: PointerEvent): void => {
+    if (this.panning) {
+      this.panning = false;
+      this.panButton = -1;
+      return;
+    }
+    if (this.viewOnly) return;
+    this.reconcileButtons(e, this.lastX, this.lastY);
   };
 
   /**

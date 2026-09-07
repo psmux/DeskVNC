@@ -103,11 +103,24 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                         None,
                         Some(ask.protocol),
                         None,
-                        // As a tab rather than its own window: a person watching
-                        // several machines an agent is driving wants them in one
-                        // grid, and `00 B7`'s de-duplication is a window rule, so
-                        // a tab is also where the existing session is found.
-                        Some(true),
+                        // A window, not a tab, until the tab path works from
+                        // here. The intent was a tab: a person watching several
+                        // machines an agent is driving wants them in one grid.
+                        // But with `as_tab` the command builds nothing. It
+                        // records the claim and hands the tab parameters back
+                        // to its CALLER, because the tab strip lives in the
+                        // library webview and only that webview can add to it.
+                        // A person's click is that caller; this closure is not,
+                        // and it has no way to reach the webview. So from
+                        // v0.23.0, when sessions became tabs, until this line,
+                        // every `limb.open` returned a session id for a session
+                        // that was never dialled, and `dvv open` timed out
+                        // waiting for it. The window path builds the webview in
+                        // Rust, the page boots on its own, connects with the
+                        // saved credential, and registers exactly as a clicked
+                        // session does. Restoring the tab needs an event the
+                        // library webview listens for; that is the follow-up.
+                        None,
                     )
                     .await;
                     let _ = tell.send(done.map(|out| agent::server::Opened {
