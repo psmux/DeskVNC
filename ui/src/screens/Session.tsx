@@ -432,11 +432,15 @@ function SessionView({
       return;
     }
     rendererRef.current = renderer;
-    // Close the shell's frame credit loop. The renderer fires this once for
-    // every update that leaves its queue, including the ones it pruned away,
-    // because the shell is owed the credit either way and withholds the next
-    // frame until it comes back.
-    renderer.onFrameDone = () => sessionRef.current.ackFrame();
+    // Deliberately NOT acking frames back to the shell any more.
+    //
+    // There was a credit scheme here: the shell held frames until the webview
+    // said it had applied one. Measured against a real server it was worse
+    // than no flow control at all, and the ack itself was a full IPC round
+    // trip per frame, competing with the user's own pointer and key events for
+    // the same transport. Staleness is bounded inside the renderer instead,
+    // where the work actually happens and where shedding cannot ask the server
+    // for more data.
     renderer.start();
 
     const input = new SessionInput(canvas, {

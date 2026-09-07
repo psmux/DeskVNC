@@ -292,7 +292,16 @@ impl ProtocolTrace {
             }
             m::POINTER_EVENT => {
                 self.pointer_events += 1;
-                tracing::debug!("TX PointerEvent");
+                // Coordinates included: a count alone cannot tell a pointer
+                // that is tracking the mouse from one pinned at the corner,
+                // which is exactly the bug this line was added to settle.
+                if bytes.len() >= 6 {
+                    let px = u16::from_be_bytes([bytes[2], bytes[3]]);
+                    let py = u16::from_be_bytes([bytes[4], bytes[5]]);
+                    tracing::debug!(x = px, y = py, mask = bytes[1], "TX PointerEvent");
+                } else {
+                    tracing::debug!("TX PointerEvent");
+                }
             }
             m::CLIENT_CUT_TEXT => {
                 self.other_msgs += 1;

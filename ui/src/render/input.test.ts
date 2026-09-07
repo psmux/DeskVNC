@@ -396,6 +396,55 @@ describe("a button that is never let go of", () => {
     ]);
   });
 
+  it("does not send a second release at the corner when capture ends after a click", () => {
+    // WebKit builds `lostpointercapture` from the mouseup that ended the
+    // implicit capture, so it arrives with button 0 (not the -1 the spec
+    // suggests), buttons 0, and clientX/clientY of 0. Treated as a pointerup
+    // that was a left button release at the top-left corner: one extra packet
+    // per click, and the remote pointer jumped to (0,0) after every click.
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 564, clientY: 636 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointerup", { button: 0, buttons: 0, clientX: 564, clientY: 636 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("lostpointercapture", { button: 0, buttons: 0, clientX: 0, clientY: 0 }),
+    );
+
+    expect(pointers(sent)).toEqual([
+      { x: 564, y: 636, mask: 1 },
+      { x: 564, y: 636, mask: 0 },
+    ]);
+
+    // And the tracked position survived, so the next press is where the
+    // mouse is, not at the corner the event claimed.
+    sent.length = 0;
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 564, clientY: 636 }),
+    );
+    expect(pointers(sent)).toEqual([{ x: 564, y: 636, mask: 1 }]);
+  });
+
+  it("releases a button lost with capture where the drag was, not at the corner", () => {
+    // Capture stolen mid-drag: the button has to be released, and released
+    // at the last place the pointer was seen. The event's own (0,0) is not a
+    // position the mouse ever visited.
+    const { canvas, sent } = setup();
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { button: 0, buttons: 1, clientX: 100, clientY: 100 }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("lostpointercapture", { button: 0, buttons: 0, clientX: 0, clientY: 0 }),
+    );
+
+    expect(pointers(sent)).toEqual([
+      { x: 100, y: 100, mask: 1 },
+      { x: 100, y: 100, mask: 0 },
+    ]);
+  });
+
   it("does not wedge pointer input when a pan is cancelled", () => {
     // onPointerUp only ended a pan for `e.button === panButton`, and no pan
     // button is -1, so a cancelled pan left `panning` set. Every later press

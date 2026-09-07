@@ -74,10 +74,13 @@ describe("createSerialQueue", () => {
     expect(done).toEqual(["blocker", "motion:3"]);
   });
 
-  it("keeps the replacement in the slot the first keyed task held", async () => {
-    // Newest wins, but it does NOT jump to the back of the queue. If it did,
-    // a motion produced before a release could be delivered after it, and the
-    // remote pointer would finish the drag at the wrong place.
+  it("queues the replacement at the back, behind everything produced before it", async () => {
+    // The replacement is a new task, produced after the press and the release
+    // already waiting, so it goes out after them. It used to take over the
+    // stale task's slot instead, ahead of both, and on a slow IPC round trip
+    // that put the NEXT click's motion on the wire before THIS click's press:
+    // the remote pointer went to the new place, clicked at the old one, and
+    // sat there until the next motion.
     const done: string[] = [];
     const queue = createSerialQueue();
     queue(async () => {
@@ -97,7 +100,7 @@ describe("createSerialQueue", () => {
       done.push("motion:2");
     }, "motion");
     await wait(60);
-    expect(done).toEqual(["blocker", "press", "motion:2", "release"]);
+    expect(done).toEqual(["blocker", "press", "release", "motion:2"]);
   });
 
   it("never coalesces unkeyed tasks, however alike they are", async () => {

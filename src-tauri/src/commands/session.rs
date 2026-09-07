@@ -1045,29 +1045,29 @@ fn forward_events(
                     // perceives must not depend on how busy the person's
                     // webview happens to be.
                     //
-                    // Merged rather than sent. `flush_pending_frame` at the
-                    // bottom of the loop puts it on the channel if there is
-                    // credit for it; if there is not, the next update merges
-                    // into this one and the renderer eventually receives a
-                    // single message instead of a queue of stale ones.
-                    if pending.merge(rects, damage) {
-                        // The accumulator hit its byte ceiling and pixels had
-                        // to be abandoned to keep it there. We cannot invent
-                        // them back, so ask the server for the whole screen:
-                        // a repaint costs bandwidth once, while a region we
-                        // quietly gave up on stays wrong on screen until
-                        // something else happens to repaint it.
-                        tracing::warn!(
-                            session = %session_id,
-                            "pending frame budget exceeded, asking for a full refresh"
-                        );
-                        let commands = sessions
-                            .lock()
-                            .get(&session_id)
-                            .map(|entry| entry.handle.commands.clone());
-                        if let Some(commands) = commands {
-                            let _ = commands.try_send(ClientCommand::Refresh);
-                        }
+                    // Sent straight through, deliberately.
+                    //
+                    // This used to go through a credit scheme: hold at most a
+                    // couple of frames until the webview acknowledged one, and
+                    // accumulate whatever arrived while waiting. Measured
+                    // against a real server pushing 13 MB/s it was much worse
+                    // than the queue it replaced. The webview only has to be
+                    // slightly slower than the server for the accumulator to
+                    // fill, and on overflow it asked the server for a full
+                    // screen repaint, which is a BIGGER frame, which starved
+                    // the credit again. That loop ran every few seconds and
+                    // pinned the session at 13 MB/s and 68 percent duty cycle
+                    // while the picture sat still.
+                    //
+                    // The lesson is that the place to shed work is the place
+                    // that does the work. The renderer bounds its own queue and
+                    // prunes rects a later rect repaints, which cannot feed
+                    // back into the protocol and so cannot storm. Flow control
+                    // here, at a hop that can ask the server for more data, was
+                    // the mistake.
+                    let bytes = framing::encode_frame(&rects, &damage);
+                    if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
+                        tracing::warn!(session = %session_id, "frame channel send failed: {e}");
                     }
                 }
                 SessionEvent::CursorUpdate(shape) => {
