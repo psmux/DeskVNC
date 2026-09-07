@@ -309,7 +309,6 @@ Results stream as events; these commands do not return hosts.
 | `connect_session` | `invoke("connect_session", { sessionId? profileId? address, port, acceptSshHostKey? onEvent })` | `SessionConnectOutcome`, see below |
 | `disconnect_session` | `invoke("disconnect_session", { sessionId })` | `void` |
 | `send_input` | raw body, see below | `void` |
-| `frame_ack` | `invoke("frame_ack", { sessionId })` | `void` |
 | `set_quality` | `invoke("set_quality", { sessionId, preset })` | `void` |
 | `request_resize` | `invoke("request_resize", { sessionId, width, height })` | `void` |
 | `refresh_session` | `invoke("refresh_session", { sessionId })` | `void` |
@@ -504,9 +503,20 @@ Accepts `{ sessionId, username?, domain?, password, save }`.
 
 ### `send_input` (raw binary body)
 
+`x-input-seq` is a per-session counter the webview increments on every call,
+starting at 1. The shell holds a call until the one numbered before it has
+been queued, then lets it through, so the webview may have several calls in
+flight and never waits for an answer before issuing the next. Ordering used to
+be bought by awaiting each call in turn, and while the webview is drawing that
+answer takes around half a second to come back, so a click's release sat
+behind its press for that long. A call without the header is queued as it
+arrives, which is what an older webview or a test gets. A gap in the sequence
+(a call that never arrives) releases the next after a short timeout rather
+than wedging input; the shell logs it.
+
 ```ts
 invoke("send_input", packet /* Uint8Array */, {
-  headers: { "x-session-id": sessionId },
+  headers: { "x-session-id": sessionId, "x-input-seq": String(seq) },
 });
 ```
 
@@ -515,53 +525,6 @@ Body layout is in `FRAME_FORMAT.md` §"Input events": pointer is
 `[u8 1][u8 down][u32 keysym][u32 keycode]` = 10 bytes, release-all is
 `[u8 2]` = 1 byte, little-endian, concatenable. A malformed body rejects the
 whole invoke and applies nothing.
-
-### `frame_ack`
-
-**The renderer must call this once for every framebuffer message it finishes
-applying** (`msg_type = 1` on the binary channel). Nothing else acks, and a
-renderer that never calls it gets one frame per second instead of sixty.
-
-```ts
-invoke("frame_ack", { sessionId });
-```
-
-This is the return half of a credit scheme in the shell. Frame delivery used to
-have no flow control at all: `Channel::send` is synchronous, it always
-succeeds, and every queue behind it is unbounded (Tauri's
-`ChannelDataIpcQueue`, the tao event proxy, the reorder buffer in the webview,
-the renderer's own promise chain). While the remote screen plays video the
-shell produces frames faster than the webview can draw them, so the backlog
-built up inside the webview, the picture ran seconds behind the user's hand,
-and their input landed on the server immediately without them being able to see
-it happen. That reads as enormous input lag even though the input path was
-never slow.
-
-So the shell now allows at most `MAX_FRAMES_IN_FLIGHT` (2) unacked framebuffer
-messages per session. Updates that arrive while both credits are spent are
-merged into one, by concatenating their rect lists in order, and the merged set
-is pruned: a rect a later rect repaints completely is dropped, which is what
-collapses a backlog of near-full-screen video frames onto roughly the newest
-one. CopyRect and H.264 rects are never dropped or reordered and nothing older
-than one of them is dropped either, so what arrives is always safe to apply in
-order exactly as before. **The wire format does not change**: the webview
-receives ordinary `msg_type = 1` messages that simply carry more rects.
-
-Rules for the caller:
-
-- Ack **after** the frame has been applied, not on receipt. Acking on receipt
-  puts the queue back where it was and undoes the whole mechanism.
-- One ack per message received, whatever the rect count. A coalesced message is
-  still one message.
-- It takes a session id and nothing else, deliberately: it runs once per
-  presented frame, so it is one map lookup and one atomic decrement, with no
-  frame number to keep in step on either side.
-- An ack for a session that has already ended is a **no-op, not an error**.
-  Finishing the last frame after the session closed is the ordinary way a
-  window shuts down.
-- A lost ack costs a hitch, never the session: the shell takes the credit back
-  by itself after one second of silence (`FRAME_ACK_TIMEOUT`), and a disconnect
-  or reconnect resets the accounting.
 
 ### `capture_thumbnail` (raw binary body)
 

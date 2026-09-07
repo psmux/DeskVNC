@@ -412,24 +412,6 @@ export class WebGLRenderer {
 
   onFirstFrame: (() => void) | null = null;
 
-  /**
-   * Called once for every update that leaves the queue, however it leaves it.
-   *
-   * This is the return half of the shell's frame credit scheme (see
-   * `frame_ack` in IPC_CONTRACT.md). The shell holds at most a couple of
-   * frames in flight and will not send another until one is acknowledged, so
-   * an update that we drop still has to be reported: credit for a frame that
-   * was pruned to nothing, or was parsed for a framebuffer a resize has since
-   * replaced, is exactly as owed as credit for one we painted. Miss any of
-   * the three exits below and the session slows to the pace of the shell's
-   * ack timeout, which is one frame per second, not sixty.
-   *
-   * It fires when the work is DONE rather than when the update is dequeued.
-   * Acking on dequeue would hand the credit back before the decoding and the
-   * uploads have happened, which is the unbounded queue again with extra
-   * steps.
-   */
-  onFrameDone: (() => void) | null = null;
 
   /**
    * Whether any real framebuffer data has been applied.
@@ -632,12 +614,10 @@ export class WebGLRenderer {
         if (next.generation !== this.generation) {
           this.droppedRects += next.rects.length;
           this.droppedUpdates++;
-          this.onFrameDone?.();
           continue;
         }
         if (next.rects.length === 0) {
           this.droppedUpdates++;
-          this.onFrameDone?.();
           continue;
         }
         // Only now, for the update actually about to be applied, are decodes
@@ -660,9 +640,6 @@ export class WebGLRenderer {
           // One malformed update must not kill the drain loop and strand
           // every update queued behind it.
         }
-        // After the catch, not inside the try: a malformed update still owes
-        // the shell its credit back, or one bad frame stalls the session.
-        this.onFrameDone?.();
       }
     } finally {
       this.draining = false;

@@ -10,6 +10,66 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-09-07
+
+Measured on the author's own machines this time, against two real VNC
+servers, with a harness that posts real mouse events and reads the packets
+off the socket. Every number below comes from that harness.
+
+### Fixed
+
+- **After every left click the remote pointer jumped to the top-left corner.**
+  Clicks landed where they were aimed; the cursor then flew to the corner, and
+  a right-click menu opened up there. WebKit dispatches `lostpointercapture`
+  with `button = 0` and `clientX/clientY = 0` when the implicit capture taken
+  on pointerdown is released, so the release handler read it as an ordinary
+  left release at (0,0) and sent it. That event is a state change, not a place
+  the pointer went. It now has its own listener, keyed on the event type, that
+  keeps the tracked position and reconciles only the buttons. Zero phantom
+  packets across every click test since.
+
+- **A click took half a second to a second to reach the socket.** Input went
+  out one IPC call per packet, each awaited before the next could be issued,
+  and while the webview is drawing that answer takes around 500 ms to come
+  back. A click is a press and a release, so it paid twice; a right-click menu
+  waited on both. Two changes: everything pending drains into one call
+  (`decode_input` has always accepted a body as a sequence of events), and the
+  webview no longer waits for any answer before sending the next batch.
+  Ordering, the reason it used to wait, is enforced in the shell instead:
+  every call carries `x-input-seq` and is admitted once the one before it has
+  been queued. Press, release, right-click and the first move of a drag now
+  reach the socket in 15 to 65 ms, from 460 to 850 ms.
+
+- **Pointer motion could overtake a press queued after it.** The coalescing
+  added in 0.26.0 rewrote a replaced motion packet in place, keeping its old
+  slot ahead of a later press. A replacement now moves to the tail.
+
+- **The frame credit scheme from 0.26.0 is gone.** It held frames until the
+  webview acknowledged one, buffered up to 64 MB meanwhile, and on overflow
+  asked the server for a full-screen repaint, which is a bigger frame, which
+  starved the credit again. On a fast LAN server that loop ran every few
+  seconds and pinned the session at 13 MB/s and 68 percent duty cycle while
+  the picture sat still. Frames go straight through again. The renderer keeps
+  the part that helps, a bounded queue that prunes rects a later rect
+  repaints, which cannot feed back into the protocol. The per-frame
+  acknowledgement, a full IPC round trip competing with input, is gone with it.
+
+- **`dvv open` had not started a session since 0.23.0.** The agent plane asked
+  for a tab, and the tab parameters were handed back to a caller that could
+  not build one, so every open returned a session id for a session that was
+  never dialled. It opens a window now. Restoring the tab is a follow-up that
+  needs the library webview to listen for it.
+
+- **Pointer coordinates are logged on the wire** at debug level
+  (`RUST_LOG=vnc_core=debug`), which is what made both the corner bug and the
+  latency measurable at all.
+
+### Note on the version
+
+Patch: the `frame_ack` command added in 0.26.0 is removed and `send_input`
+gains an optional header, both within a release nobody installed (0.26.0 was
+never published; its draft is withdrawn). No stored data changed.
+
 ## [0.26.0] - 2026-09-06
 
 ### Fixed

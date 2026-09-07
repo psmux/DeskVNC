@@ -166,8 +166,6 @@ export interface SessionApi {
   requestResize: (width: number, height: number) => void;
   sendClipboard: (text: string) => Promise<void>;
   releaseAllKeys: () => void;
-  /** Return one frame's credit to the shell. See `ackFrame` below. */
-  ackFrame: () => void;
   /**
    * Persist a library thumbnail from raw RGBA (no-op for ad-hoc sessions).
    * Resolves once the shell has taken the pixels, so a window that is closing
@@ -687,13 +685,42 @@ export function useSession(
    */
   const inputPending = useRef<{ body: Uint8Array; key?: string }[]>([]);
   const inputDraining = useRef(false);
+  /** Next `x-input-seq`. Starts at 1 so 0 can never be mistaken for "unset". */
+  const inputSeq = useRef(1);
+  /** Calls issued and not yet answered; bounded, see `drainInput`. */
+  const inputInflight = useRef(new Set<Promise<unknown>>());
 
+  /**
+   * Fire each batch WITHOUT waiting for the previous one's answer.
+   *
+   * Batching removed the one-call-per-packet cost, and the press of a click
+   * then reached the socket in about 30 ms. The release still took 570 ms,
+   * because the drain loop awaited the first call before it would issue the
+   * second, and that first call's answer takes around half a second to come
+   * back while the webview is drawing. The socket write itself is prompt: the
+   * press proves it. So the wait was for a reply nobody needed.
+   *
+   * Ordering used to be the reason to wait. Two invokes are two independent
+   * IPC requests and the shell may run them in either order, so a press and
+   * its release could swap. Now every batch carries `x-input-seq`, and
+   * `send_input` in the shell holds a batch until the one before it has been
+   * queued, then lets it through. Order is enforced where it is cheap, on the
+   * Rust side, and the webview never blocks on an answer again.
+   *
+   * The in-flight set is capped so a truly stuck shell cannot accumulate an
+   * unbounded pile of pending fetches: past the cap the loop waits for ONE
+   * answer, which keeps memory bounded without reintroducing a serial wait in
+   * the normal case. Motion coalescing on `inputPending` is unchanged.
+   */
+  const INPUT_MAX_INFLIGHT = 8;
   const drainInput = useCallback(async (): Promise<void> => {
     inputDraining.current = true;
     try {
-      // Re-checked every pass: whatever arrived while the last call was in
-      // flight goes out together in the next one, which is the whole point.
       while (inputPending.current.length > 0) {
+        if (inputInflight.current.size >= INPUT_MAX_INFLIGHT) {
+          await Promise.race(inputInflight.current);
+          continue;
+        }
         const batch = inputPending.current;
         inputPending.current = [];
         let total = 0;
@@ -704,18 +731,19 @@ export function useSession(
           body.set(e.body, at);
           at += e.body.byteLength;
         }
-        try {
-          await invoke("send_input", body, {
-            headers: { "x-session-id": sessionIdRef.current },
-          });
-        } catch (err: unknown) {
+        const seq = inputSeq.current++;
+        const call: Promise<unknown> = invoke("send_input", body, {
+          headers: { "x-session-id": sessionIdRef.current, "x-input-seq": String(seq) },
+        }).catch((err: unknown) => {
           // Warn once: a session that has gone away would otherwise print a
           // line per packet for as long as the user keeps moving the mouse.
           if (!inputWarned.current) {
             inputWarned.current = true;
             console.warn("send_input failed:", err);
           }
-        }
+        });
+        inputInflight.current.add(call);
+        void call.finally(() => inputInflight.current.delete(call));
       }
     } finally {
       inputDraining.current = false;
@@ -814,26 +842,6 @@ export function useSession(
 
   const releaseAllKeys = useCallback((): void => {
     void safeInvoke("release_all_keys", { sessionId: sid() }, null);
-  }, []);
-
-  /**
-   * Tell the shell one framebuffer message has finished being applied.
-   *
-   * The shell keeps only a couple of frames in flight and waits for this
-   * before sending the next, which is what stops a busy remote screen from
-   * burying the webview under a backlog it can never catch up with. A
-   * renderer that does not call this falls back to the shell's one second ack
-   * timeout, so the symptom of getting this wrong is a session stuck at about
-   * one frame per second rather than an error.
-   *
-   * Deliberately NOT routed through the input queue. Input ordering is a
-   * correctness requirement and acks are pure bookkeeping, so putting acks in
-   * that queue would make every frame compete with the user's mouse for the
-   * same serial IPC slot, which is the problem this whole scheme exists to
-   * solve.
-   */
-  const ackFrame = useCallback((): void => {
-    void safeInvoke("frame_ack", { sessionId: sid() }, null);
   }, []);
 
   /**
@@ -972,7 +980,7 @@ export function useSession(
     state, desktopName, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
-    requestResize, sendClipboard, releaseAllKeys, ackFrame, captureThumbnail, trustCertificate, setAlwaysRefresh,
+    requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
     dismissCertPrompt, acceptSshHostKey, dismissSshHostKeyPrompt,
     submitCredentials, dismissCredentialPrompt, retryConnect,
   };

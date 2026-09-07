@@ -70,7 +70,11 @@ fn stamp_git_provenance() {
     // short hash, and a -dirty suffix when the tree had local edits.
     stamp(
         "DESKVNC_GIT_DESCRIBE",
-        git(&["describe", "--tags", "--always", "--dirty"]),
+        // `--abbrev=9` matches the `--short=9` hash above. Left at git's default
+        // (7 on this repo), an untagged commit's describe carried a 7 char hash
+        // that the about test could not find inside the 9 char one, so the
+        // check only ever passed on a tagged release commit.
+        git(&["describe", "--tags", "--always", "--dirty", "--abbrev=9"]),
     );
     stamp(
         "DESKVNC_GIT_BRANCH",
@@ -144,11 +148,6 @@ fn main() {
             "connect_session",
             "disconnect_session",
             "send_input",
-            // The webview's ack for one applied framebuffer message. It is
-            // the return half of the frame credit governor in
-            // `commands/session.rs`, so a window that cannot invoke it
-            // receives one frame per ack timeout instead of one per present.
-            "frame_ack",
             "set_quality",
             "request_resize",
             "refresh_session",
