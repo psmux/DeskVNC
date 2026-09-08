@@ -24,6 +24,7 @@ import {
   type FrameMessage,
   type WireRect,
 } from "./frameProtocol";
+import { traceMark } from "./trace";
 
 export type RendererScalingMode = "fit" | "aspect-fit" | "actual" | "custom";
 
@@ -831,6 +832,7 @@ export class WebGLRenderer {
       this.sawFrame = true;
       this.onFirstFrame?.();
     }
+    traceMark("frame_applied", rects.length);
     this.markDirty();
   }
 
@@ -1388,6 +1390,7 @@ export class WebGLRenderer {
   }
 
   private draw(): void {
+    traceMark("frame_drawn");
     const gl = this.gl;
     const W = this.canvas.width;
     const H = this.canvas.height;

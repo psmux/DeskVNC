@@ -68,6 +68,7 @@ use agent_perception::{
     mirror_safety, DamageDelta, DamageLog, MirrorBudget, MirrorSafety, MirrorSlot, PerceptionError,
     Read, ReadRequest, ReaderId,
 };
+use limb_core::fence::{ContentFence, ContentGeneration, ContentRejected};
 use limb_core::observation::Timestamp;
 use parking_lot::Mutex;
 use remote_core::geometry::GeometryGeneration;
@@ -235,6 +236,20 @@ struct SessionMirror {
     /// damage only subscriber has no mirror to read it off (`03 §9 A5`).
     size: (u16, u16),
     generation: GeometryGeneration,
+    /// How many times something large has repainted on this screen.
+    ///
+    /// Beside the geometry generation rather than folded into it, because the
+    /// two move on different events and mean different things: a desktop that
+    /// never resizes holds one geometry generation for its whole life while a
+    /// dozen windows open on top of it, and every one of those is a screen an
+    /// agent has not read. [`limb_core::fence::ContentFence`] carries the
+    /// incident and the threshold.
+    ///
+    /// It lives on the SessionMirror and not on the attachment because it is a
+    /// fact about the machine: two attachments looking at one desktop are
+    /// looking at the same repaints. What is per attachment is how much of it
+    /// each has seen, and that is [`crate::agent::Attachment::observed_content`].
+    content: ContentFence,
     /// The preset to put back, and `None` when nothing was changed and there
     /// is therefore nothing to put back.
     restore: Option<QualityPreset>,
@@ -244,6 +259,26 @@ impl SessionMirror {
     fn bounds(&self) -> Rect {
         Rect::new(0, 0, self.size.0, self.size.1)
     }
+}
+
+/// How much of the framebuffer one update painted, in pixels.
+///
+/// A plain sum over the rectangles, with no attempt to subtract the overlap
+/// between two of them. Overlap makes this an over count, and it over counts in
+/// the direction that trips the fence sooner rather than later, which is the
+/// safe direction: an overlapping repaint is still a repaint. Deduplicating it
+/// properly would be a rectangle union per update on the session's own event
+/// path, which is a cost paid on every frame a person is watching to sharpen a
+/// number that is compared against a threshold with a wide margin either side.
+///
+/// Saturating, and not because a framebuffer can overflow a `u64`: a server is
+/// free to send a rectangle whose width and height are nonsense, and a wrap
+/// here would turn a huge repaint into a small one, which is the one direction
+/// this must never fail in.
+fn covered_area(rects: &[DecodedRect]) -> u64 {
+    rects.iter().fold(0u64, |sum, decoded| {
+        sum.saturating_add(u64::from(decoded.rect.width) * u64::from(decoded.rect.height))
+    })
 }
 
 /// Every mirror this process holds.
@@ -325,6 +360,7 @@ impl Mirrors {
                 reader,
                 size: (width, height),
                 generation: GeometryGeneration::FIRST,
+                content: ContentFence::new(),
                 restore: None,
             }
         });
@@ -385,6 +421,29 @@ impl Mirrors {
         let bounds = held.bounds();
         held.slot.apply(rects);
         held.damage.record(rects, bounds, at);
+
+        // The content fence, fed from the same update and measured PER UPDATE
+        // rather than accumulated. Accumulating would eventually trip on a
+        // screen that had been quietly redrawing a clock for an hour, and a
+        // fence that trips on time passing teaches an agent that the refusal
+        // means nothing.
+        //
+        // This is the second consumer of a stream a person's window is waiting
+        // on (`03 §2.1`), so it is a multiply and an add per rectangle and
+        // nothing else. No allocation, no union, no second pass.
+        let area = u64::from(bounds.width) * u64::from(bounds.height);
+        if let Some(generation) = held.content.painted(covered_area(rects), area) {
+            // Logged at info, not debug. When an agent is refused with
+            // SCREEN_CHANGED the first question anybody asks is what actually
+            // repainted, and a counter that moved with no line in the log is a
+            // refusal nobody can reconstruct afterwards.
+            tracing::info!(
+                session = %session_id,
+                covered = covered_area(rects),
+                area,
+                "the screen repainted materially: content generation is now {generation}"
+            );
+        }
     }
 
     /// The remote desktop changed resolution.
@@ -407,6 +466,13 @@ impl Mirrors {
         };
         held.size = (width, height);
         held.generation = held.generation.next();
+        // The content counter moves too. A desktop that changed resolution has
+        // rearranged every window on it, so a screenshot read before the resize
+        // says nothing true about what has focus now. It is bumped here rather
+        // than left to the repaint that follows, because that repaint arrives
+        // as whatever rectangles the server chooses to send and may not clear
+        // the threshold in any single one of them.
+        held.content.painted(1, 1);
         let generation = held.generation;
         if let Err(e) = held.slot.resize(width, height, generation, others) {
             // The mirror was dropped rather than kept: a session that resizes
@@ -442,6 +508,36 @@ impl Mirrors {
         held.slot.read(request, damage, now)
     }
 
+    /// May this attachment type into this session's screen?
+    ///
+    /// The plane's side of [`ContentFence::admit`], which is the one place the
+    /// comparison is written. `observed` is the content generation the asking
+    /// attachment last read PIXELS at.
+    ///
+    /// A session nothing is subscribed to is judged against a fresh fence
+    /// rather than waved through, and that is the whole of the rule for an
+    /// agent that never looked: an attachment that asked to perceive nothing
+    /// has observed nothing, so it is refused and told to attach for frames and
+    /// read the screen. The caller decides whether this session HAS a screen at
+    /// all before it asks: a terminal has no framebuffer, no damage and nothing
+    /// to observe, and fencing it would refuse every SSH session forever.
+    ///
+    /// # Errors
+    ///
+    /// A [`ContentRejected`] carrying both numbers, which the socket turns into
+    /// `SCREEN_CHANGED`.
+    pub fn admit_typing(
+        &self,
+        session_id: &str,
+        observed: Option<ContentGeneration>,
+    ) -> Result<(), ContentRejected> {
+        let mirrors = self.inner.lock();
+        match mirrors.get(session_id) {
+            Some(held) => held.content.admit(observed),
+            None => ContentFence::new().admit(observed),
+        }
+    }
+
     /// This session's reader id, so a rung 4 read names the right cursor.
     pub fn reader(&self, session_id: &str) -> Option<ReaderId> {
         self.inner.lock().get(session_id).map(|held| held.reader)
@@ -471,6 +567,7 @@ impl Mirrors {
                 width: held.size.0,
                 height: held.size.1,
                 generation: held.generation,
+                content: held.content.current(),
                 h264_rects: held.slot.get().map_or(0, |m| m.signals().h264_rects()),
             },
         }
@@ -548,6 +645,15 @@ pub struct MirrorStatus {
     pub width: u16,
     pub height: u16,
     pub generation: GeometryGeneration,
+    /// How many times something large has repainted on this screen.
+    ///
+    /// Published beside the geometry generation so an agent can see the two
+    /// counters move independently, and so a caller reading `limb.status` can
+    /// tell the screen changed under it without having to be refused first. It
+    /// is a number to compare, never one to send back: the content fence takes
+    /// no parameter from the agent, because a fence whose other half the agent
+    /// supplies is a fence the agent can supply the wrong half of.
+    pub content: ContentGeneration,
     /// How many H.264 rectangles have reached this mirror and poisoned their
     /// region. Reported because a non zero count on a session that was
     /// renegotiated is the one number that says the renegotiation did not
@@ -569,6 +675,7 @@ impl Default for MirrorStatus {
             width: 0,
             height: 0,
             generation: GeometryGeneration::FIRST,
+            content: ContentGeneration::FIRST,
             h264_rects: 0,
         }
     }
@@ -635,6 +742,114 @@ mod tests {
             now(),
         );
         mirrors.take_damage(id);
+    }
+
+    /// The threshold, at the two sizes it has to get right.
+    ///
+    /// 1920x1080 is 2,073,600 pixels. A glyph cell is about 200 of them and a
+    /// window is hundreds of thousands, so this is a wide gap and the test
+    /// walks both edges of it rather than only the happy one.
+    #[test]
+    fn a_keystrokes_echo_is_not_a_new_screen_and_a_window_is() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (1920, 1080));
+        let before = mirrors.status("s1").content;
+
+        // A glyph, a caret, a clock digit, a whole rewrapped line of text.
+        // None of these is the screen becoming a different screen.
+        for rect in [
+            Rect::new(400, 300, 12, 20),
+            Rect::new(400, 300, 2, 20),
+            Rect::new(1800, 1050, 60, 20),
+            Rect::new(10, 300, 1900, 20),
+        ] {
+            mirrors.feed("s1", &[rgba(rect, [1, 2, 3, 255])], now());
+        }
+        assert_eq!(
+            mirrors.status("s1").content,
+            before,
+            "an agent that fences itself out with its own echo is a fence nobody keeps"
+        );
+
+        // A file dialog. Notepad. Anything that can take focus and eat the
+        // next keystroke.
+        mirrors.feed(
+            "s1",
+            &[rgba(Rect::new(0, 0, 900, 600), [4, 5, 6, 255])],
+            now(),
+        );
+        assert_eq!(
+            mirrors.status("s1").content,
+            before.next(),
+            "a window sized repaint is the whole reason this counter exists"
+        );
+    }
+
+    /// A repaint that arrives as many rectangles counts as what it covers, not
+    /// as its largest piece.
+    ///
+    /// A server is free to send one window as a grid of tiles, and a rule that
+    /// looked at rectangles one at a time would miss every one of them.
+    #[test]
+    fn a_window_that_arrives_as_tiles_still_counts_as_a_window() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (1920, 1080));
+        let before = mirrors.status("s1").content;
+
+        let tiles: Vec<DecodedRect> = (0..16)
+            .map(|i| rgba(Rect::new((i % 4) * 200, (i / 4) * 200, 200, 200), [7; 4]))
+            .collect();
+        mirrors.feed("s1", &tiles, now());
+        assert_eq!(mirrors.status("s1").content, before.next());
+    }
+
+    /// A resize is a new screen for typing as well as for clicking.
+    ///
+    /// Both counters move, and they are separate counters: nothing here reads
+    /// one off the other.
+    #[test]
+    fn a_resize_moves_both_generations() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (1280, 720));
+        let before = mirrors.status("s1");
+        mirrors.resize("s1", 1920, 1080);
+        let after = mirrors.status("s1");
+        assert_eq!(after.generation, before.generation.next());
+        assert_eq!(after.content, before.content.next());
+    }
+
+    /// The one place the comparison is written, reached through the plane.
+    ///
+    /// An attachment that has looked at the current screen may type; one that
+    /// looked at an older one may not; one that has never looked may not, and
+    /// that last arm is the incident.
+    #[test]
+    fn typing_is_admitted_only_against_the_screen_that_was_read() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (1920, 1080));
+        let seen = mirrors.status("s1").content;
+
+        assert!(mirrors.admit_typing("s1", Some(seen)).is_ok());
+        assert!(mirrors.admit_typing("s1", None).is_err());
+
+        mirrors.feed(
+            "s1",
+            &[rgba(Rect::new(0, 0, 900, 600), [4, 5, 6, 255])],
+            now(),
+        );
+        let rejected = mirrors
+            .admit_typing("s1", Some(seen))
+            .expect_err("a window opened over what was read");
+        // Both numbers in the sentence, the way the geometry refusal carries
+        // both of its own.
+        let why = rejected.to_string();
+        assert!(why.contains(&seen.to_string()), "{why}");
+        assert!(why.contains(&seen.next().to_string()), "{why}");
+
+        // A session nothing is subscribed to has no fence of its own and is
+        // judged against a fresh one, so an attachment that asked to perceive
+        // nothing is refused rather than waved through.
+        assert!(mirrors.admit_typing("nothing-here", None).is_err());
     }
 
     /// The default preset on a capable server is the case, and it is the one

@@ -691,6 +691,9 @@ fn forward_events(
             }
             match event {
                 SessionEvent::FramebufferUpdate { rects, damage } => {
+                    // JPEG tiles become pixels here, once, for both consumers
+                    // below. See `framing::decode_jpeg_rects` for the numbers.
+                    let rects = framing::decode_jpeg_rects(rects);
                     // The agent plane is the SECOND consumer of this stream and
                     // it must stay second: the webview's frame is what a person
                     // is looking at, so it goes first and is never delayed by
@@ -725,8 +728,11 @@ fn forward_events(
                     // here, at a hop that can ask the server for more data, was
                     // the mistake.
                     let bytes = framing::encode_frame(&rects, &damage);
+                    let len = bytes.len();
                     if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
                         tracing::warn!(session = %session_id, "frame channel send failed: {e}");
+                    } else if protocol_trace_enabled() {
+                        tracing::info!(bytes = len, "frame -> webview");
                     }
                 }
                 SessionEvent::CursorUpdate(shape) => {
@@ -1582,6 +1588,52 @@ pub async fn send_input(
         }
     }
     Ok(())
+}
+
+/// Whether `DVV_TRACE_PROTOCOL=1` is set, read once. The same switch that
+/// turns on the wire trace in `vnc_core` also turns on the webview's timing
+/// marks, so one env var gives the whole keystroke-to-pixel timeline.
+pub fn protocol_trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DVV_TRACE_PROTOCOL").as_deref() == Ok("1"))
+}
+
+#[tauri::command]
+pub fn trace_enabled() -> bool {
+    let on = protocol_trace_enabled();
+    tracing::debug!(on, "trace_enabled asked");
+    on
+}
+
+/// One timing mark from the webview: `at` is epoch milliseconds from
+/// `performance.timeOrigin + performance.now()`, so it lines up with the
+/// timestamps on the Rust side of the log.
+#[derive(Debug, serde::Deserialize)]
+pub struct TraceMark {
+    pub label: String,
+    pub at: f64,
+    #[serde(default)]
+    pub n: u32,
+}
+
+#[tauri::command]
+pub fn trace_marks(marks: Vec<TraceMark>) {
+    if !protocol_trace_enabled() {
+        return;
+    }
+    for m in marks {
+        let secs = (m.at / 1000.0).floor() as i64;
+        let millis = (m.at - secs as f64 * 1000.0).round() as u32;
+        let day = secs.rem_euclid(86_400);
+        let t = format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            day / 3600,
+            (day % 3600) / 60,
+            day % 60,
+            millis
+        );
+        tracing::info!(label = %m.label, at = %t, n = m.n, "UI mark");
+    }
 }
 
 #[tauri::command]

@@ -28,6 +28,7 @@ import {
   type FrameMessage,
 } from "../render/frameProtocol";
 import { encodeTerminalInput, encodeTerminalResize } from "../render/input";
+import { initTrace, traceMark } from "../render/trace";
 import type {
   CredentialRequest,
   PinScheme,
@@ -384,11 +385,13 @@ export function useSession(
 
     // Binary channel: framebuffer updates (msg_type 1) AND cursor shapes
     // (msg_type 2). Anything else is ignored for forward compatibility.
+    void initTrace();
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (data: ArrayBuffer) => {
       if (cancelled) return;
       switch (messageType(data)) {
         case MSG_FRAMEBUFFER: {
+          traceMark("frame_rx", data.byteLength);
           const msg = parseFrameMessage(data);
           // A parse failure silently discards a WHOLE update: every region it
           // covered stays stale until something else repaints it. If this

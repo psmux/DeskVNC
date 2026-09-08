@@ -148,6 +148,8 @@ fn main() {
             "connect_session",
             "disconnect_session",
             "send_input",
+            "trace_enabled",
+            "trace_marks",
             "set_quality",
             "request_resize",
             "refresh_session",

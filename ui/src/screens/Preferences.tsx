@@ -9,6 +9,7 @@ import {
   PREF_CLIPBOARD_ON_PASTE,
   PREF_EDGE_PAN,
   PREF_FORWARD_INSERTED_TEXT,
+  PREF_TYPE_LOCAL_PASTE,
   PREF_HIDE_AGENT_STATUS,
   PREF_HIDE_TOOLBAR,
   PREF_MATCH_LOCAL_LAYOUT,
@@ -174,6 +175,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [clipboardOnFocus, setClipboardOnFocus] = usePref(PREF_CLIPBOARD_ON_FOCUS, true);
   const [clipboardOnPaste, setClipboardOnPaste] = usePref(PREF_CLIPBOARD_ON_PASTE, true);
   const [forwardInsertedText, setForwardInsertedText] = usePref(PREF_FORWARD_INSERTED_TEXT, true);
+  const [typeLocalPaste, setTypeLocalPaste] = usePref(PREF_TYPE_LOCAL_PASTE, true);
   const [confirmFileOverwrite, setConfirmFileOverwrite] = usePref("confirmFileOverwrite", true);
   const [strictTofu, setStrictTofu] = usePref("strictTofu", true);
   const [mdnsEnabled, setMdnsEnabled] = usePref("mdnsEnabled", true);
@@ -516,6 +518,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Text that dictation and automation software inserts without pressing keys is typed into the remote desktop. Accents and CJK input methods work either way, those are you typing."
                   value={forwardInsertedText}
                   onChange={setForwardInsertedText}
+                />
+                <Toggle
+                  label="Type a paste that stays on this Mac into the remote"
+                  description="When Cmd+V is left to macOS (system shortcuts not passed through) or you pick Edit ▸ Paste, the clipboard text is typed into the remote desktop key by key. Dictation tools that paste, such as Wispr Flow, need this on."
+                  value={typeLocalPaste}
+                  onChange={setTypeLocalPaste}
                 />
                 <Toggle
                   label="Show the remote pointer"

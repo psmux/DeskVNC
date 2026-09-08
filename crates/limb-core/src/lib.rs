@@ -25,7 +25,7 @@
 //! | Module           | Responsibility                                            |
 //! |------------------|-----------------------------------------------------------|
 //! | [`identity`]     | [`LimbId`], the reproducible name of a machine at a slot  |
-//! | [`fence`]        | [`GeometryGeneration`], and why a stale actuation is typed |
+//! | [`fence`]        | [`GeometryGeneration`] and [`ContentGeneration`], and why a stale actuation is typed |
 //! | [`capability`]   | [`Capability`], the canonical seventeen (`00 R20`)        |
 //! | [`intent`]       | [`AgentIntent`], one wrapping variant (`00 R28`)          |
 //! | [`keys`]         | Typing and named keys, keysym only (`00 R8`)              |

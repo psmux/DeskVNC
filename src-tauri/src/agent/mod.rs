@@ -50,6 +50,8 @@ use std::sync::Arc;
 
 use crate::state::SessionEntry;
 
+use limb_core::fence::ContentGeneration;
+
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
@@ -504,6 +506,23 @@ pub struct Attachment {
     pub holder_label: Option<String>,
     pub human_took_over: bool,
     pub inflight: Vec<String>,
+    /// The content generation this attachment last read PIXELS at, and `None`
+    /// while it has read none.
+    ///
+    /// The other half of the content fence. The counter itself lives on the
+    /// session's mirror because repaints are a fact about the machine; how much
+    /// of it any one agent has actually looked at is a fact about the
+    /// attachment, and this is where that fact belongs. Keeping it here also
+    /// makes the reset free: a re-attach builds a new [`Attachment`], so an
+    /// agent that detached and came back has observed nothing, which is exactly
+    /// true.
+    ///
+    /// It is set by an observation that returned pixels and by nothing else.
+    /// `screen.damage` deliberately does not set it: a list of rectangles says
+    /// something moved and never says what it now reads, and an agent that
+    /// cleared the fence with a damage call would be typing into a screen it had
+    /// still not seen.
+    pub observed_content: Option<ContentGeneration>,
 }
 
 impl Attachment {
@@ -788,6 +807,45 @@ impl AgentPlane {
             .iter()
             .map(|(session, held)| (session.clone(), held.attachment_id.clone()))
             .collect()
+    }
+
+    /// Record that this attachment has just looked at this session's screen.
+    ///
+    /// Called from the one place an observation hands back pixels,
+    /// [`crate::agent::server::screen_read`]. Nothing else may call it, and the
+    /// reason is the incident: an attachment whose "I have looked" flag can be
+    /// set by a call that returned no pixels has a fence that clears itself.
+    ///
+    /// A no op when the asking connection is not the one holding the session.
+    /// It cannot have been served pixels either, so there is nothing to record,
+    /// and recording it against somebody else's attachment would clear THEIR
+    /// fence with an observation they never saw.
+    pub fn note_observed(&self, session_id: &str, attachment_id: &str, at: ContentGeneration) {
+        let mut attachments = self.attachments.lock();
+        let Some(held) = attachments.get_mut(session_id) else {
+            return;
+        };
+        if held.attachment_id != attachment_id {
+            return;
+        }
+        held.observed_content = Some(at);
+    }
+
+    /// The content generation this attachment last read pixels at.
+    ///
+    /// `None` when it has never read any, which the fence treats as the refusal
+    /// it is rather than as a missing value to default.
+    pub fn observed_content(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+    ) -> Option<ContentGeneration> {
+        let attachments = self.attachments.lock();
+        let held = attachments.get(session_id)?;
+        if held.attachment_id != attachment_id {
+            return None;
+        }
+        held.observed_content
     }
 
     /// May this attachment still act on this session?
@@ -1329,6 +1387,20 @@ mod tests {
         (entry, receiver)
     }
 
+    /// A file operation reaching a build with no sidecar behind it.
+    ///
+    /// Every test in this file is about the listener, the switch and the
+    /// counts, and none of them touches a file. The refusal is real rather
+    /// than a panic so that a test which grew a file call by accident would
+    /// read a sentence instead of losing the socket task.
+    fn no_sidecar() -> server::Filer {
+        Arc::new(|_session, _ask, tell| {
+            let _ = tell.send(Err(server::FileRefusal::unavailable(
+                "this fixture has no SFTP sidecar behind it",
+            )));
+        })
+    }
+
     /// A registry of live sessions. The receivers come back with it and have
     /// to be held for the length of the test.
     #[allow(clippy::type_complexity)] // a map and the receivers that keep it alive
@@ -1360,6 +1432,7 @@ mod tests {
             holder_label: None,
             human_took_over: false,
             inflight: Vec::new(),
+            observed_content: None,
         }
     }
 
@@ -1521,6 +1594,7 @@ mod tests {
             store,
             plane: plane.clone(),
             emit: Arc::new(|_| {}),
+            files: no_sidecar(),
         });
         start(&plane, ctx, dir.path().join("agent.sock")).expect("the plane starts");
 
@@ -1662,6 +1736,7 @@ mod tests {
                 holder_label: None,
                 human_took_over: false,
                 inflight: vec!["type".into()],
+                observed_content: None,
             },
         );
         let revoked = plane.revoke("s1").expect("something was attached");
@@ -1737,6 +1812,7 @@ mod tests {
             store,
             plane: plane.clone(),
             emit: Arc::new(|_| {}),
+            files: no_sidecar(),
         });
 
         // Off. Nothing exists, and that is the default every install gets.
@@ -1866,6 +1942,7 @@ mod tests {
             store,
             plane: plane.clone(),
             emit: Arc::new(|_| {}),
+            files: no_sidecar(),
         });
         let path = socket_path();
         start(&plane, ctx, path.clone()).expect("the plane starts at its published path");

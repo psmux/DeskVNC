@@ -163,6 +163,7 @@ export const KEYSYM = {
   Delete: 0xffff,
   Super_L: 0xffeb,
   Tab: 0xff09,
+  Return: 0xff0d,
   Escape: 0xff1b,
   F4: 0xffc1,
 } as const;

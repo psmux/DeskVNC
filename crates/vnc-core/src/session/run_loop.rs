@@ -101,6 +101,25 @@ const RTT_SMOOTHING: f32 = 0.3;
 /// may round a request out to a small tile, so this is not exactly 1.
 const PROBE_ANSWER_MAX_AREA: usize = 16 * 16;
 
+/// Consecutive one-pixel probes answered with a repaint of at least half the
+/// screen before the probe is switched off for the rest of the session.
+///
+/// Measured on a Windows TightVNC-family server (1920x1080, no Fence): every
+/// non-incremental request, however small, came back as the whole desktop in
+/// 136 rects, 3.7 MB decoded, and the pipelined incremental request behind it
+/// was answered with the whole desktop a second time. With the probe going
+/// out every quiet second that was two full-screen repaints a second on a
+/// still text screen, each one costing the webview about 100 ms of JPEG
+/// decode on the thread that also has to notice the next keystroke. Typing
+/// into a terminal on a LAN felt like typing over a satellite link, and the
+/// round-trip readout the probe exists for was wrong anyway, since a full
+/// repaint is not the answer to a one-pixel question. The passive readout
+/// (`passive_rtt`) carries the figure once the probe is off.
+///
+/// Two strikes rather than one, so a window that genuinely opened at the
+/// moment a probe went out does not switch the readout off for good.
+const PROBE_FULL_REPAINT_STRIKES: u8 = 2;
+
 /// Longest gap between finishing one update and the arrival of the next
 /// update's header that still counts as a "busy streak", for the passive
 /// round-trip readout (see `passive_rtt`).
@@ -580,6 +599,13 @@ pub(crate) struct RunLoop {
     /// quiet screen, so on a busy desktop its reading can be minutes old;
     /// past `RTT_SAMPLE_FRESH` the passive readout takes over.
     probe_sample_at: Option<Instant>,
+    /// Consecutive one-pixel probes answered with at least half the screen.
+    /// See [`PROBE_FULL_REPAINT_STRIKES`].
+    probe_full_answers: u8,
+    /// The one-pixel probe is off for the rest of this session because the
+    /// server answers it with a full repaint. See
+    /// [`PROBE_FULL_REPAINT_STRIKES`].
+    probe_disabled: bool,
     /// Outstanding fence RTT probe: (payload id, send time).
     probe: Option<(u64, Instant)>,
     /// When the currently outstanding pipelined incremental
@@ -728,6 +754,8 @@ impl RunLoop {
             probe: None,
             probe_request_at: None,
             probe_sample_at: None,
+            probe_full_answers: 0,
+            probe_disabled: false,
             pipelined_request_at: None,
             decode_ms_since_request: 0.0,
             last_update_done_at: None,
@@ -1006,6 +1034,9 @@ impl RunLoop {
     ) -> Result<Rect> {
         let count = messages::read_framebuffer_update_header(&mut self.reader).await?;
         let header_at = Instant::now();
+        if self.trace.enabled {
+            tracing::info!(rects = count, "RX FramebufferUpdate header");
+        }
         // Timed from the header, before any rect is read, so the figure is the
         // round trip and not the time spent decoding what came back. Whether
         // this update is really the probe's answer is decided once its size
@@ -1212,8 +1243,29 @@ impl RunLoop {
                     sample
                 };
                 self.probe_sample_at = Some(Instant::now());
+                self.probe_full_answers = 0;
             } else {
                 tracing::trace!(area = damage.area(), "rtt probe spoiled by real damage");
+                // A spoiled probe is usually a coincidence. A spoiled probe
+                // whose "answer" is most of the screen, twice running, is a
+                // server that repaints everything for any non-incremental
+                // request, and every further probe would cost the person
+                // two whole screens a second (see PROBE_FULL_REPAINT_STRIKES).
+                let screen = (self.fb_width as usize * self.fb_height as usize).max(1);
+                if damage.area() * 2 >= screen {
+                    self.probe_full_answers = self.probe_full_answers.saturating_add(1);
+                    if self.probe_full_answers >= PROBE_FULL_REPAINT_STRIKES && !self.probe_disabled
+                    {
+                        self.probe_disabled = true;
+                        tracing::info!(
+                            area = damage.area(),
+                            "server answers a one-pixel non-incremental request with a full \
+                             repaint; round-trip probe disabled for this session"
+                        );
+                    }
+                } else {
+                    self.probe_full_answers = 0;
+                }
             }
         }
 
@@ -1236,6 +1288,7 @@ impl RunLoop {
             // happens while video plays) stalls the whole run loop here, with
             // every queued keystroke and pointer move waiting behind a frame
             // nobody is ready to look at.
+            let rect_count = rects.len();
             self.emit_serving_input(
                 events,
                 SessionEvent::FramebufferUpdate { rects, damage },
@@ -1243,6 +1296,14 @@ impl RunLoop {
                 settings,
             )
             .await?;
+            if self.trace.enabled {
+                tracing::info!(
+                    rects = rect_count,
+                    damage = %format!("{}x{}+{}+{}", damage.width, damage.height, damage.x, damage.y),
+                    since_header_ms = header_at.elapsed().as_secs_f64() * 1000.0,
+                    "RX FramebufferUpdate emitted"
+                );
+            }
             if self.pending_outcome.is_some() {
                 return Ok(damage);
             }
@@ -2644,7 +2705,7 @@ impl RunLoop {
             let quiet = self
                 .last_update_at
                 .is_none_or(|t| t.elapsed() >= PROBE_IDLE);
-            if self.probe_request_at.is_none() && quiet {
+            if self.probe_request_at.is_none() && quiet && !self.probe_disabled {
                 let msg = messages::framebuffer_update_request(false, Rect::new(0, 0, 1, 1));
                 self.send(&msg).await?;
                 self.probe_request_at = Some(Instant::now());
@@ -3504,5 +3565,147 @@ mod pacing_tests {
             "the pipeline must resume on its own: {sent:?}"
         );
         assert!(rl.cu_disable_pending.is_none());
+    }
+
+    /// One FramebufferUpdate carrying a single CopyRect covering `rect`, as
+    /// the server would write it after the message type byte: padding,
+    /// rect count, then the rect header and its 4-byte payload. CopyRect
+    /// because it is the only encoding whose damage can cover the whole
+    /// screen for the price of four bytes, which keeps the duplex buffer
+    /// out of the picture.
+    fn copy_rect_update(rect: Rect) -> Vec<u8> {
+        let mut b = vec![0u8, 0, 1];
+        b.extend_from_slice(&rect.x.to_be_bytes());
+        b.extend_from_slice(&rect.y.to_be_bytes());
+        b.extend_from_slice(&rect.width.to_be_bytes());
+        b.extend_from_slice(&rect.height.to_be_bytes());
+        b.extend_from_slice(&encoding::COPY_RECT.to_be_bytes());
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        b
+    }
+
+    /// Feed one update to a run loop that has a one-pixel probe outstanding.
+    async fn answer_probe(
+        rl: &mut RunLoop,
+        server: &mut tokio::io::DuplexStream,
+        settings: &mut SessionSettings,
+        damage: Rect,
+    ) {
+        let (events, _events_rx) = mpsc::channel(8);
+        let (_cmd_tx, mut commands) = mpsc::channel(8);
+        rl.probe_request_at = Some(Instant::now());
+        server
+            .write_all(&copy_rect_update(damage))
+            .await
+            .expect("write update");
+        rl.handle_server_message(
+            server_msg::FRAMEBUFFER_UPDATE,
+            settings,
+            &events,
+            &mut commands,
+        )
+        .await
+        .expect("read the update");
+    }
+
+    /// Everything a tick wrote, with the probe's precondition (a quiet
+    /// screen) arranged first.
+    async fn tick_on_a_quiet_screen(
+        rl: &mut RunLoop,
+        server: &mut tokio::io::DuplexStream,
+        settings: &mut SessionSettings,
+    ) -> Vec<Sent> {
+        let (events, _events_rx) = mpsc::channel(8);
+        let (_cmd_tx, mut commands) = mpsc::channel(8);
+        rl.last_update_at = None;
+        rl.probe_request_at = None;
+        rl.tick(settings, &events, &mut commands)
+            .await
+            .expect("tick");
+        written(server).await
+    }
+
+    fn probe() -> Sent {
+        Sent::Request {
+            incremental: false,
+            rect: Rect::new(0, 0, 1, 1),
+        }
+    }
+
+    /// The bug this guards: a TightVNC-family Windows server answered every
+    /// one-pixel non-incremental request with the whole desktop, so the
+    /// once-a-second probe cost a full-screen repaint (two, with the
+    /// pipelined request behind it) on a still text screen, and typing into
+    /// a terminal waited behind those repaints.
+    #[tokio::test]
+    async fn a_server_that_answers_the_probe_with_the_whole_screen_gets_no_more_probes() {
+        let (mut rl, mut server) = harness();
+        let mut settings = settings();
+        let whole = Rect::new(0, 0, 640, 480);
+
+        // The probe still goes out on a quiet screen to begin with.
+        let sent = tick_on_a_quiet_screen(&mut rl, &mut server, &mut settings).await;
+        assert!(
+            sent.contains(&probe()),
+            "no probe before any strike: {sent:?}"
+        );
+
+        answer_probe(&mut rl, &mut server, &mut settings, whole).await;
+        assert!(
+            !rl.probe_disabled,
+            "one full repaint could be a coincidence"
+        );
+        let sent = tick_on_a_quiet_screen(&mut rl, &mut server, &mut settings).await;
+        assert!(
+            sent.contains(&probe()),
+            "still probing after one strike: {sent:?}"
+        );
+
+        answer_probe(&mut rl, &mut server, &mut settings, whole).await;
+        assert!(
+            rl.probe_disabled,
+            "two full repaints in a row is the server's policy"
+        );
+        let sent = tick_on_a_quiet_screen(&mut rl, &mut server, &mut settings).await;
+        assert!(
+            !sent.contains(&probe()),
+            "the probe must stay off for the session: {sent:?}"
+        );
+    }
+
+    /// A probe spoiled by ordinary damage (a window painting somewhere) is
+    /// the case the probe already handled, and it must not count as a
+    /// strike: the screen was busy, not the server misbehaving.
+    #[tokio::test]
+    async fn a_probe_spoiled_by_small_damage_is_not_a_strike() {
+        let (mut rl, mut server) = harness();
+        let mut settings = settings();
+        let corner = Rect::new(0, 0, 200, 200);
+        for _ in 0..4 {
+            answer_probe(&mut rl, &mut server, &mut settings, corner).await;
+        }
+        assert_eq!(rl.probe_full_answers, 0);
+        assert!(!rl.probe_disabled);
+        let sent = tick_on_a_quiet_screen(&mut rl, &mut server, &mut settings).await;
+        assert!(sent.contains(&probe()), "{sent:?}");
+    }
+
+    /// A clean one-pixel answer between two full repaints breaks the streak:
+    /// the strikes have to be consecutive.
+    #[tokio::test]
+    async fn a_clean_answer_resets_the_strike_count() {
+        let (mut rl, mut server) = harness();
+        let mut settings = settings();
+        answer_probe(
+            &mut rl,
+            &mut server,
+            &mut settings,
+            Rect::new(0, 0, 640, 480),
+        )
+        .await;
+        assert_eq!(rl.probe_full_answers, 1);
+        answer_probe(&mut rl, &mut server, &mut settings, Rect::new(0, 0, 1, 1)).await;
+        assert_eq!(rl.probe_full_answers, 0);
+        assert!(!rl.probe_disabled);
     }
 }

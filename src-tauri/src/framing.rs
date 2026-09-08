@@ -121,6 +121,59 @@ pub fn encoded_rect_len(rect: &DecodedRect) -> usize {
         }
 }
 
+/// Decode every JPEG rect to RGBA before the update crosses into the webview.
+///
+/// Measured with `DVV_TRACE_PROTOCOL=1` on a 1920x1080 Windows server at the
+/// Low preset: a 136-rect full-screen update of JPEG tiles took the webview
+/// 89 to 116 ms from `frame_rx` to `frame_applied`, all of it on the main
+/// thread inside `createImageBitmap`, and a keydown posted during that window
+/// waited 63 ms just to be seen by JavaScript. The same screen as RGBA took
+/// 2 to 3 ms to apply and 6 ms more to cross the IPC. zune-jpeg does the
+/// decode here in a fraction of that, on the event forwarding task rather
+/// than the protocol loop, so neither the wire nor the next keystroke waits
+/// on it. The agent mirror, fed from the same rects, gets pixels it can use
+/// without a decoder of its own.
+///
+/// A JPEG whose dimensions do not match its rect, or that does not decode, is
+/// passed through untouched: the webview's decoder stays as the fallback, and
+/// the wire format still carries `FMT_JPEG` for exactly that case.
+pub fn decode_jpeg_rects(rects: Vec<DecodedRect>) -> Vec<DecodedRect> {
+    rects
+        .into_iter()
+        .map(|r| match &r.payload {
+            RectPayload::Jpeg(data) => {
+                match vnc_core::encodings::tight::decode_jpeg_to_rgba(data) {
+                    Ok((w, h, rgba))
+                        if w == u32::from(r.rect.width) && h == u32::from(r.rect.height) =>
+                    {
+                        DecodedRect {
+                            rect: r.rect,
+                            payload: RectPayload::Rgba(rgba),
+                        }
+                    }
+                    Ok((w, h, _)) => {
+                        tracing::debug!(
+                            w,
+                            h,
+                            rect_w = r.rect.width,
+                            rect_h = r.rect.height,
+                            "jpeg rect size differs from its rect; leaving it to the webview"
+                        );
+                        r
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "jpeg rect did not decode natively ({e}); leaving it to the webview"
+                        );
+                        r
+                    }
+                }
+            }
+            _ => r,
+        })
+        .collect()
+}
+
 /// Encode one coalesced framebuffer update (msg_type = 1).
 pub fn encode_frame(rects: &[DecodedRect], damage: &Rect) -> Vec<u8> {
     let payload_total: usize = rects.iter().map(encoded_rect_len).sum();
@@ -693,5 +746,51 @@ mod tests {
         // Same bytes through encode_pty, the outbound direction.
         let buf = encode_pty(PTY_STREAM_OUTPUT, &payload);
         assert_eq!(&buf[PTY_HEADER_LEN..], &payload[..]);
+    }
+
+    #[test]
+    fn jpeg_rects_are_decoded_to_rgba_before_the_webview_sees_them() {
+        let rects = vec![
+            raw(0, 0, 2, 2),
+            DecodedRect {
+                rect: Rect::new(8, 8, 8, 8),
+                payload: RectPayload::Jpeg(vnc_core::encodings::tight::JPEG_8X8_RED_BLUE.to_vec()),
+            },
+        ];
+        let out = decode_jpeg_rects(rects);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0].payload, RectPayload::Rgba(_)));
+        match &out[1].payload {
+            RectPayload::Rgba(px) => {
+                assert_eq!(px.len(), 8 * 8 * 4);
+                // Left column is red, right column is blue; alpha is opaque.
+                assert!(
+                    px[0] > 200 && px[2] < 60 && px[3] == 255,
+                    "left: {:?}",
+                    &px[..4]
+                );
+                let r = 7 * 4;
+                assert!(px[r] < 60 && px[r + 2] > 200, "right: {:?}", &px[r..r + 4]);
+            }
+            other => panic!("expected the jpeg to become rgba, got {other:?}"),
+        }
+        assert_eq!(out[1].rect, Rect::new(8, 8, 8, 8));
+    }
+
+    #[test]
+    fn a_jpeg_that_will_not_decode_is_passed_through_for_the_webview() {
+        let out = decode_jpeg_rects(vec![jpeg(0, 0, 4, 4, 0xAB)]);
+        assert!(matches!(&out[0].payload, RectPayload::Jpeg(b) if b == &vec![0xAB; 16]));
+    }
+
+    #[test]
+    fn a_jpeg_whose_size_disagrees_with_its_rect_is_passed_through() {
+        // The fixture is 8x8; the rect claims 4x4. Converting would either
+        // truncate or overrun the rect, so the webview keeps the decision.
+        let out = decode_jpeg_rects(vec![DecodedRect {
+            rect: Rect::new(0, 0, 4, 4),
+            payload: RectPayload::Jpeg(vnc_core::encodings::tight::JPEG_8X8_RED_BLUE.to_vec()),
+        }]);
+        assert!(matches!(out[0].payload, RectPayload::Jpeg(_)));
     }
 }

@@ -63,6 +63,8 @@
     "allow-connect-session",
     "allow-disconnect-session",
     "allow-send-input",
+    "allow-trace-enabled",
+    "allow-trace-marks",
     "allow-set-quality",
     "allow-request-resize",
     "allow-refresh-session",

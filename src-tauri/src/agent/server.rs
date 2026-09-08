@@ -43,10 +43,30 @@
 //!   SPAWNED and says so, because a call that blocked until a machine had
 //!   authenticated would be a call that blocks on a person typing a password.
 //!
+//! ## Files, and why they ride the control lane too
+//!
+//! The `files.*` verbs move bytes over the SFTP sidecar `PRD/08` already built
+//! for the Files panel, and they move them base64 inside the JSON envelope for
+//! the same reason [`screen_read`] answers with an image on it: there is one
+//! lane, and a request and reply shape with nothing that can interleave. What
+//! that costs is the third base64 adds and a cap this file enforces
+//! ([`MAX_FILE_CHUNK`]); what it buys is that an installer crosses in windows
+//! and arrives byte for byte, with the size of the whole file beside every
+//! window so the caller can see it has all of it.
+//!
+//! The sidecar is opened on FIRST USE and there is no connect verb, because a
+//! connect verb is a round trip an agent has to know to make. Two things it
+//! will not do on an agent's behalf: accept an unknown SSH host key, which is
+//! a decision only a person can make, and continue past a CHANGED one, which
+//! nobody may.
+//!
 //! ## What it deliberately cannot do
 //!
 //! **Carry a credential.** `crate::agent::wire::decode_command` has no arm for
-//! one (D7).
+//! one (D7). The `files.*` verbs keep that rule by naming no endpoint at all:
+//! a file call names a session it is already attached to, and the address, the
+//! port and the keychain lookup are the shell's, exactly as they are for a
+//! person opening the Files panel.
 //!
 //! ## How pixels get out
 //!
@@ -114,6 +134,17 @@ pub struct Ctx {
     /// Where an `agent://event` goes. A closure rather than an `AppHandle` for
     /// the reason above.
     pub emit: Arc<dyn Fn(Value) + Send + Sync>,
+    /// How a `files.*` verb reaches the SFTP sidecar, which lives in
+    /// `crate::commands::files` behind `State<'_, FilesState>` and therefore
+    /// behind an `AppHandle` this struct will not hold.
+    ///
+    /// A closure for the same reason `emit` is one, and a FIELD rather than
+    /// the process global [`install_opener`] uses, which is a deliberate
+    /// difference: a global installed by one test is still installed for the
+    /// next, so a test that wanted to prove a file verb behaves without a
+    /// sidecar would be at the mercy of whichever test ran before it. Every
+    /// [`Ctx`] carries its own.
+    pub files: Filer,
 }
 
 /// One connection's own state.
@@ -220,13 +251,26 @@ pub async fn dispatch(
         "limb.open" => limb_open(ctx, peer, params).await,
         "limb.attach" => limb_attach(ctx, peer, params),
         "limb.detach" => limb_detach(ctx, peer, params),
-        "limb.status" => limb_status(ctx, params),
+        "limb.status" => limb_status(ctx, peer, params),
         "limb.command" => limb_command(ctx, peer, params),
         // `00 R28`, `00 R51b`. An intent the driver serves natively gets a
         // method of its own rather than an arm in `limb.command`, because the
         // answer is the reply: a `{ "delivered": true }` for a command
         // somebody is blocked on is a silence with a success on it.
         "limb.exec" => limb_exec(ctx, peer, params).await,
+        // The SFTP sidecar (`PRD/08`), one verb per operation for the same
+        // reason `limb.exec` has one: the answer to "list that directory" is
+        // the listing, and a `{ "delivered": true }` for a call somebody is
+        // blocked on is a silence with a success on it. The sidecar is
+        // connected on first use rather than by a verb of its own, so an agent
+        // that wants a file asks for the file (see [`FileAsk`]).
+        "files.home" => files_home(ctx, peer, params).await,
+        "files.list" => files_list(ctx, peer, params).await,
+        "files.get" => files_get(ctx, peer, params).await,
+        "files.put" => files_put(ctx, peer, params).await,
+        "files.mkdir" => files_mkdir(ctx, peer, params).await,
+        "files.remove" => files_remove(ctx, peer, params).await,
+        "files.rename" => files_rename(ctx, peer, params).await,
         "control.report" => control_report(ctx, peer, params),
         // The perception pair, split the way `00 R5` splits it: pixels and
         // rectangles are two different powers and the weaker one does not
@@ -239,8 +283,17 @@ pub async fn dispatch(
 
 /// The capabilities this socket will honour at all.
 ///
-/// Deny by default, no hierarchy and no wildcard (D4). `scancode`, `admin` and
-/// the file pair are absent because nothing here implements them.
+/// Deny by default, no hierarchy and no wildcard (D4). `scancode` and `admin`
+/// are absent because nothing here implements them.
+///
+/// The file pair is here and it is split, which is the point of it rather than
+/// a formality. `files.read` lists and downloads; `files.write` uploads,
+/// renames, removes and makes directories. Neither implies the other and
+/// `control` implies neither, because the SFTP sidecar reaches somebody's disk
+/// over a second connection that leaves no mark on the screen a person is
+/// watching. The verbs are `files.*` and they connect the sidecar on first
+/// use, so an agent that holds neither is refused by [`require`] before
+/// anything dials SSH.
 ///
 /// `exec` is here and its presence is the point of `00 R19`'s treatment of it
 /// rather than a hole in it. It stays in
@@ -267,6 +320,8 @@ const GRANTED: &[Capability] = &[
     Capability::ClipboardWrite,
     Capability::TerminalRead,
     Capability::TerminalWrite,
+    Capability::FilesRead,
+    Capability::FilesWrite,
     Capability::Exec,
 ];
 
@@ -285,12 +340,32 @@ fn require(peer: &Peer, needed: Capability) -> Result<(), RpcError> {
     Err(RpcError::tagged(
         "MISSING_CAPABILITY",
         format!(
-            "this connection does not hold `{}`, which it asked not to hold in hello. {} does not imply {}: damage rectangles leak geometry and timing, and a frame leaks whatever is on somebody's screen",
+            "this connection does not hold `{}`, which it asked not to hold in hello. {}",
             needed.as_str(),
-            Capability::View.as_str(),
-            Capability::Capture.as_str(),
+            separate_because(needed),
         ),
     ))
+}
+
+/// Why the capability that is missing is a capability of its own.
+///
+/// One sentence per pair that an agent is likely to have assumed away, and the
+/// perception pair as the default because it is the one most callers meet
+/// first. It is not decoration: an agent told only "no" spends its next turn
+/// asking the same thing a slightly different way, and an agent told which
+/// authority it is short of tells the USER which one to add to the grant.
+fn separate_because(needed: Capability) -> &'static str {
+    match needed {
+        Capability::FilesRead => {
+            "files.write does not imply files.read. Writing puts something known onto a machine; reading takes a copy of whatever happens to be on somebody's disk, which is an exfiltration path that needs no screen and leaves no mark on one"
+        }
+        Capability::FilesWrite => {
+            "files.read does not imply files.write, and neither does control. Reading a machine's disk is observation; writing to it leaves something behind that is still there tomorrow, and holding the keyboard is not authority over the filesystem"
+        }
+        _ => {
+            "view does not imply capture: damage rectangles leak geometry and timing, and a frame leaks whatever is on somebody's screen"
+        }
+    }
 }
 
 /// Establish, and learn the grant.
@@ -352,8 +427,10 @@ fn hello(ctx: &Ctx, peer: &mut Peer, params: &Value) -> Result<Value, RpcError> 
         // and no wildcard (D4). `capture` is here because a mirror is attached
         // on request and `screen.read` answers from it (00 R5, 00 R6,
         // crate::agent::mirror). `open` and `exec` are here because
-        // `limb.open` and `limb.exec` reach real work now; a client that does
-        // not want either asks for less in `capabilities` and gets less.
+        // `limb.open` and `limb.exec` reach real work now, and the file pair
+        // is here because the `files.*` verbs reach the SFTP sidecar; a client
+        // that does not want any of them asks for less in `capabilities` and
+        // gets less.
         "capabilities": peer.capabilities.iter().map(Capability::as_str).collect::<Vec<_>>(),
         // What this build IMPLEMENTS, so a client can tell "not granted" from
         // "not built".
@@ -616,6 +693,12 @@ fn limb_attach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
             holder_label: None,
             human_took_over: false,
             inflight: Vec::new(),
+            // Nothing has been observed yet, and the attach reply carries no
+            // pixels however `perceive` was set: the mirror is allocated here
+            // and the refresh that fills it is still on the wire. So a fresh
+            // attachment is fenced out of typing until it reads the screen,
+            // which is the whole point.
+            observed_content: None,
         },
     );
     (ctx.emit)(json!({
@@ -724,6 +807,11 @@ fn perception_json(
         "size": { "width": status.width, "height": status.height },
         "bytes": status.bytes,
         "geometryGeneration": status.generation.get(),
+        // The second counter, [`limb_core::fence::ContentFence`]. It moves
+        // when something large repaints, and it is compared, never sent back:
+        // see [`admit_typing`] for why the content fence takes no parameter
+        // from the agent.
+        "contentGeneration": status.content.get(),
         // Non zero on a session that was renegotiated means the renegotiation
         // did not take, and nothing else in this object would show it. Every
         // one of those rectangles poisoned its region (`00 R6`).
@@ -830,26 +918,63 @@ fn limb_detach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
     Ok(json!({ "detached": session_id, "qualityRestored": restored }))
 }
 
-fn limb_status(ctx: &Ctx, params: &Value) -> Result<Value, RpcError> {
+fn limb_status(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
     let session_id = session_id_of(params)?;
-    let sessions = ctx.sessions.lock();
-    let entry = sessions
-        .get(&session_id)
-        .filter(|entry| entry.is_live())
-        .ok_or_else(|| {
-            RpcError::tagged(
-                "LIMB_GONE",
-                format!("no live session is registered as {session_id}; call limb.list"),
-            )
-        })?;
-    let slot = slot_of(&sessions, &session_id, &entry.machine_key());
-    let attached = ctx.plane.attached_ids().get(&session_id).cloned();
-    let mut out = record(&session_id, entry, slot, attached);
+    let (mut out, has_screen) = {
+        let sessions = ctx.sessions.lock();
+        let entry = sessions
+            .get(&session_id)
+            .filter(|entry| entry.is_live())
+            .ok_or_else(|| {
+                RpcError::tagged(
+                    "LIMB_GONE",
+                    format!("no live session is registered as {session_id}; call limb.list"),
+                )
+            })?;
+        let slot = slot_of(&sessions, &session_id, &entry.machine_key());
+        let attached = ctx.plane.attached_ids().get(&session_id).cloned();
+        let has_screen = entry.facts.lock().size.is_some();
+        (record(&session_id, entry, slot, attached), has_screen)
+    };
     // Carried here as well as on the attach reply, because `frames` goes from
     // false to true when the refresh lands and an agent needs somewhere cheap
     // to watch for that. This is rung 0 and costs nothing.
     out["perception"] = perception_json(&ctx.plane.mirrors.status(&session_id), None, &[]);
+    // The content fence's answer, BEFORE the agent is refused by it.
+    //
+    // `04 §4.4`'s rule is that a code is what an agent branches on and the
+    // sentence beside it is what an agent acts on, and this is the same pair
+    // one call earlier. An adapter that reads this can decline to lower a
+    // `Type` at all, so the agent gets a settlement it can read instead of a
+    // batch of keystrokes the socket refuses one at a time. It is a report and
+    // never the check: the fence itself is applied in `limb.command`, at the
+    // last instant before the keystroke reaches the session, because a screen
+    // can repaint between this reply and the next call.
+    out["typing"] = typing_json(ctx, &session_id, peer, has_screen);
     Ok(out)
+}
+
+/// What `limb.status` says about whether text may be sent right now.
+///
+/// `allowed` is true on a session with no screen because there is no screen to
+/// have changed: see [`types_into_focus`] and the terminal note in
+/// [`limb_command`].
+fn typing_json(ctx: &Ctx, session_id: &str, peer: &Peer, has_screen: bool) -> Value {
+    if !has_screen {
+        return json!({
+            "allowed": true,
+            "why": "this session reports no framebuffer, so it is a terminal: there is no screen to have changed under a keystroke and nothing to observe before sending one"
+        });
+    }
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    match admit_typing(ctx, session_id, &attachment_id) {
+        Ok(()) => json!({ "allowed": true }),
+        Err(refused) => json!({
+            "allowed": false,
+            "code": refused.tag,
+            "why": refused.message,
+        }),
+    }
 }
 
 /// Rungs 2 to 4: pixels.
@@ -889,6 +1014,26 @@ fn screen_read(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
             "capturedAt": at.0,
         })),
         Read::Frame(observation) => {
+            // The agent has now LOOKED, so the content fence clears for this
+            // attachment. Recorded on this arm and on no other, because this is
+            // the only arm that hands back pixels: `Read::Unchanged` above says
+            // nothing moved since this reader's cursor, which is a true and
+            // useful answer and is not a picture, and `screen.damage` is a list
+            // of rectangles that says something moved without ever saying what
+            // it now reads. An attachment that could clear the fence with
+            // either of those would be typing into a screen it had still not
+            // seen, which is the whole failure.
+            //
+            // Read after the mirror answered rather than before, so the number
+            // recorded is the one the pixels in this reply were composited at.
+            // Recording the pre read value would credit the agent with an
+            // observation of a screen that repainted while the read was being
+            // encoded.
+            ctx.plane.note_observed(
+                &session_id,
+                &attachment_id,
+                ctx.plane.mirrors.status(&session_id).content,
+            );
             if observation.image.bytes.len() > MAX_IMAGE_BYTES {
                 return Err(RpcError::tagged(
                     "IMAGE_TOO_LARGE",
@@ -1135,19 +1280,33 @@ fn limb_command(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcErro
         RpcError::bad_params("limb.command needs a `command` object; see IPC_CONTRACT.md")
     })?;
     let command = wire::decode_command(command).map_err(RpcError::bad_params)?;
-    let handle = {
+    let (handle, has_screen) = {
         let sessions = ctx.sessions.lock();
-        sessions
+        let entry = sessions
             .get(&session_id)
             .filter(|entry| entry.is_live())
-            .map(|entry| entry.handle.clone())
             .ok_or_else(|| {
                 RpcError::tagged(
                     "LIMB_GONE",
                     format!("no live session is registered as {session_id}"),
                 )
-            })?
+            })?;
+        // A framebuffer size is what makes this a session with a screen. A
+        // terminal never reports one (`SessionFacts::size`), which is exactly
+        // the right test for the content fence below: a PTY has nothing to
+        // observe, echoes what it is sent into a stream the agent reads back,
+        // and fencing it would refuse every SSH session forever.
+        let has_screen = entry.facts.lock().size.is_some();
+        (entry.handle.clone(), has_screen)
     };
+
+    // The content fence, and this is the last place it can be applied: below
+    // here the command is on the session's own channel and the next thing that
+    // touches it is the driver's input pipeline.
+    if has_screen && types_into_focus(&command) {
+        admit_typing(ctx, &session_id, &attachment_id)?;
+    }
+
     match handle.try_send(command) {
         Ok(()) => Ok(json!({ "delivered": true })),
         Err(vnc_core::TrySendFailed::Full) => Err(RpcError::tagged(
@@ -1167,6 +1326,92 @@ fn limb_command(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcErro
             format!("{session_id} refused the command: {other}"),
         )),
     }
+}
+
+/// Does this command put a character into whatever currently has focus?
+///
+/// The reason this is a predicate over `ClientCommand` and not over
+/// [`remote_core::intent::IntentKind::is_text_bearing`] is that by the time
+/// something reaches this socket it is no longer an intent. `dvv` lowers a
+/// `Type` of eleven characters into twenty two `Key` commands and a `Press` of
+/// Ctrl+A into four, and the shell sees only the keystrokes. That turns out to
+/// be the honest level to check at anyway: on a text editor holding a selection
+/// the letter `a`, Enter, Delete and Ctrl+V destroy the document identically,
+/// so a rule that fenced `Type` and waved `Press` through would be drawing a
+/// line the remote machine does not have.
+///
+/// **Only the press.** A `Key` going UP is always let through, and that is not
+/// an oversight. A release ends something that has already happened, and a
+/// refused release leaves a modifier held down on somebody's desktop with
+/// nothing that will ever lift it: every subsequent keystroke on that machine,
+/// the person's included, arrives with Ctrl or Shift stuck on. Refusing the
+/// press is what stops the keystroke; refusing the release only breaks the
+/// machine. [`ClientCommand::ReleaseAllKeys`] passes for the same reason, and
+/// it is the repair for a modifier stranded some other way.
+///
+/// [`ClientCommand::ClipboardText`] is not here either. It writes the remote
+/// clipboard, which changes no document by itself; what pastes it is a Ctrl+V,
+/// and that is a `Key` press and is fenced above.
+fn types_into_focus(command: &ClientCommand) -> bool {
+    matches!(command, ClientCommand::Key { down: true, .. })
+}
+
+/// May this attachment put text on this session's wire right now?
+///
+/// The plane's content fence (`limb_core::fence::ContentFence`), and the
+/// asymmetry it exists to close. A `click` has carried a geometry generation
+/// since `00 R10` and is refused when the screen it was computed against has
+/// gone. A keystroke carried nothing and was checked against nothing, because
+/// [`IntentKind::is_grounded`](remote_core::intent::IntentKind::is_grounded) is
+/// false for `Type`, `Press` and `Scancode`: they aim at no coordinate, so
+/// there was nothing for a resize to invalidate and the question stopped there.
+///
+/// It should not have. A keystroke aims at whatever has focus, and focus moves
+/// when a window appears. An agent ran `Start-Process notepad` on a remote
+/// desktop and typed into it without looking. Notepad had come up holding the
+/// person's own file with all 2,378,798 characters selected; the next keystroke
+/// would have replaced it. A human caught it by looking at a screenshot before
+/// the typing step ran. Nothing in the plane would have.
+///
+/// So: the mirror counts material repaints, an observation that returned pixels
+/// records the count it was read at, and text is refused while the two differ.
+/// Both numbers travel in the refusal, the way
+/// [`GeometryRejected`](limb_core::fence::GeometryRejected) carries both of its
+/// own, because a refusal an agent cannot check against what it thought it knew
+/// is a refusal it will retry blind.
+///
+/// **There is no override and that is deliberate.** A `"blind": true` was
+/// considered for the case an agent can honestly make, typing a password into a
+/// prompt it triggered itself. It is not built, for three reasons. The prompt
+/// an agent triggered is precisely the large repaint that trips this, so the
+/// override would be off in the one case it was argued for. The geometry fence
+/// has no override, and a plane where one fence is negotiable and the other is
+/// not teaches that fences are negotiable. And what the fence costs is a single
+/// `screen.read`, so an escape hatch would be one token cheaper than complying,
+/// which means a model that meets this refusal once sets the flag for ever
+/// after and the fence is gone. If an override is ever added it belongs in the
+/// GRANT, decided by the person approving the agent, not in the call.
+///
+/// # Errors
+///
+/// An [`RpcError`] tagged `SCREEN_CHANGED`, and nothing was sent.
+fn admit_typing(ctx: &Ctx, session_id: &str, attachment_id: &str) -> Result<(), RpcError> {
+    let observed = ctx.plane.observed_content(session_id, attachment_id);
+    ctx.plane
+        .mirrors
+        .admit_typing(session_id, observed)
+        .map_err(|rejected| {
+            // Logged where the refusal is decided rather than left to whatever
+            // reads the reply. A person asking why an agent stopped typing at
+            // their machine gets both numbers and the session id from the
+            // application's own log, without the agent's transcript.
+            tracing::info!(
+                session = %session_id,
+                attachment = %attachment_id,
+                "typing refused: {rejected}"
+            );
+            RpcError::tagged("SCREEN_CHANGED", rejected.to_string())
+        })
 }
 
 /// One native intent this socket put on a session's wire and is waiting to
@@ -1654,6 +1899,476 @@ async fn permitted_endpoint(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// `files.*`: the SFTP sidecar, as the plane reaches it.
+// ---------------------------------------------------------------------------
+
+/// The largest slice of one file this surface moves in a single call.
+///
+/// Four megabytes, and the number is derived rather than picked. The envelope
+/// caps a payload at [`wire::MAX_PAYLOAD`], which is eight megabytes, and
+/// base64 costs a third, so four megabytes of file becomes about five and a
+/// half megabytes of text with room left for the path strings and the JSON
+/// around them. It is the cap in BOTH directions, because the same envelope
+/// carries a `files.put` up and a `files.get` down.
+///
+/// **A bigger file is not refused, it is windowed.** `files.get` takes an
+/// `offset` and answers with `eof`, `files.put` takes an `offset` and
+/// truncates only at zero, so a two hundred megabyte installer crosses in
+/// fifty calls and arrives byte for byte. What is refused, by name and with
+/// the number, is a single call that asked for more than this: the alternative
+/// is truncating a payload silently, and a `.exe` that is short by the last
+/// kilobyte is a `.exe` that fails at install time on somebody else's machine
+/// with nothing to point at.
+pub const MAX_FILE_CHUNK: usize = 4 * 1024 * 1024;
+
+/// How long a `files.*` call waits for the application to answer.
+///
+/// Generous on purpose. Behind this sits an SSH handshake on first use plus a
+/// chunk of a file over whatever link the machine is on, and a deadline tuned
+/// for a LAN would turn a slow but working transfer into a refusal, which is
+/// the failure that costs the most: the operation succeeded and the caller was
+/// told it failed.
+const FILES_DEADLINE: Duration = Duration::from_secs(120);
+
+/// One file operation, as the application is asked to perform it.
+///
+/// There is no `Connect` here and that absence is the design. The sidecar is
+/// opened on FIRST USE of whichever verb needs it, because a separate connect
+/// verb is a round trip an agent has to know to make, and an agent that does
+/// not know to make it reads the refusal, guesses, and burns a turn. A person
+/// gets the same treatment from the Files panel, which connects when it opens
+/// rather than making anybody press Connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileAsk {
+    /// Where the remote user's home directory is, which is where a listing
+    /// starts when nobody named a path.
+    Home,
+    List {
+        path: String,
+    },
+    Get {
+        path: String,
+        offset: u64,
+        length: usize,
+    },
+    Put {
+        path: String,
+        /// Zero TRUNCATES and anything else writes in place. That is what
+        /// makes a chunk loop resumable, and what makes writing a short file
+        /// over a long one leave no tail of the old one behind.
+        offset: u64,
+        bytes: Vec<u8>,
+        /// The permission bits, when the caller cares. `0o755` on a script it
+        /// intends to run, mostly.
+        mode: Option<u32>,
+    },
+    Mkdir {
+        path: String,
+    },
+    Remove {
+        path: String,
+        recursive: bool,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+}
+
+/// What one of those produced.
+///
+/// Deliberately not a bare `Value`. The application builds this and this file
+/// renders it, so the JSON an agent reads is written in one place and a field
+/// cannot quietly change spelling on one path and not the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileAnswer {
+    /// A path, resolved on the far side: the answer to `files.home`, and to
+    /// every verb whose whole result is "that path, and it is done now".
+    Path(String),
+    Listing {
+        path: String,
+        entries: Vec<vnc_files::RemoteEntry>,
+    },
+    Window {
+        path: String,
+        offset: u64,
+        bytes: Vec<u8>,
+        /// The whole file's size, so a caller in a chunk loop knows when it is
+        /// finished without a second round trip that could disagree.
+        size: u64,
+    },
+    Wrote {
+        path: String,
+        offset: u64,
+        written: u64,
+        size: u64,
+    },
+}
+
+/// Why a file operation could not happen, in the shape the plane reports it.
+///
+/// A tag beside the sentence, exactly as [`RpcError::tagged`] carries one, so
+/// an agent branches on `FILES_UNAVAILABLE` without matching prose. The two
+/// tags are worth telling apart: one says there is no sidecar to be had on
+/// that machine at all, which is a fact about the machine and no reason to
+/// retry, and the other says the sidecar answered and refused this particular
+/// path, which usually is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRefusal {
+    pub tag: &'static str,
+    pub why: String,
+}
+
+impl FileRefusal {
+    /// No sidecar, and one could not be opened: no SSH on that machine, an
+    /// authentication that failed, or a host key nobody has trusted yet.
+    pub fn unavailable(why: impl Into<String>) -> FileRefusal {
+        FileRefusal {
+            tag: "FILES_UNAVAILABLE",
+            why: why.into(),
+        }
+    }
+
+    /// The sidecar is up and this operation did not work.
+    pub fn failed(why: impl Into<String>) -> FileRefusal {
+        FileRefusal {
+            tag: "FILES_FAILED",
+            why: why.into(),
+        }
+    }
+}
+
+/// How this socket asks the application to touch a file.
+///
+/// A callback rather than an `AppHandle` on [`Ctx`], for the reason [`Ctx`]
+/// gives and [`Opener`] repeats: nothing in this module names a Tauri type.
+/// It takes the ask and a channel rather than returning a future, because the
+/// work behind it is async, lives on the application's runtime, and reaches
+/// `State<'_, FilesState>` which is not `Send` across an await.
+pub type Filer = Arc<
+    dyn Fn(String, FileAsk, tokio::sync::oneshot::Sender<Result<FileAnswer, FileRefusal>>)
+        + Send
+        + Sync,
+>;
+
+/// Do one file operation, with every gate this surface owes it.
+///
+/// The order is [`limb_exec`]'s and it is the order for the same reasons. The
+/// lease check first, so a person who took the wheel stops a download that was
+/// about to start. The capability next, so an agent holding neither half of
+/// the file pair is refused before a path it named is even parsed, and long
+/// before anything dials SSH to a machine.
+async fn on_sidecar(
+    ctx: &Ctx,
+    peer: &Peer,
+    session_id: &str,
+    needed: Capability,
+    ask: FileAsk,
+) -> Result<FileAnswer, RpcError> {
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    ctx.plane.check_allowed(session_id, &attachment_id)?;
+    require(peer, needed)?;
+
+    let (tell, told) = tokio::sync::oneshot::channel();
+    (ctx.files)(session_id.to_string(), ask, tell);
+    match tokio::time::timeout(FILES_DEADLINE, told).await {
+        Ok(Ok(Ok(answer))) => Ok(answer),
+        Ok(Ok(Err(refusal))) => Err(RpcError::tagged(refusal.tag, refusal.why)),
+        // The sender was dropped without an answer, which means the task
+        // carrying it went away: the application is shutting down, or the
+        // sidecar's own task panicked. Either way there is no answer coming,
+        // and saying so is better than waiting out the deadline for one.
+        Ok(Err(_)) => Err(RpcError::tagged(
+            "FILES_UNAVAILABLE",
+            format!("DeskVNCViewer stopped answering for {session_id} before this file operation finished. It may be shutting down. Nothing here invented an outcome for it: call files.list to see what actually happened on that machine"),
+        )),
+        Err(_) => Err(RpcError::tagged(
+            "FILES_TIMEOUT",
+            format!(
+                "the SFTP sidecar for {session_id} had not answered after {} seconds. THIS IS A TIMEOUT AND NOT A FAILURE: a put that was in flight may have written part of the file, so check the size with files.list before writing it again rather than assuming nothing happened",
+                FILES_DEADLINE.as_secs()
+            ),
+        )),
+    }
+}
+
+/// A path argument, which is required and must not be empty.
+///
+/// Empty is refused rather than treated as the home directory, because the two
+/// verbs where that guess would be wrong are `remove` and `rename`, and a
+/// guess that resolves to somebody's home directory in a `remove` is the worst
+/// possible one.
+fn file_path_of(params: &Value, field: &str) -> Result<String, RpcError> {
+    match params.get(field).and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => Ok(path.to_string()),
+        _ => Err(RpcError::bad_params(format!(
+            "this call needs a non-empty `{field}`, a path on the REMOTE machine. `~` and `~/thing` are resolved against the remote user's home directory"
+        ))),
+    }
+}
+
+/// The listing, and the path it was taken from.
+///
+/// Every string in it came off a remote machine and is data rather than
+/// instruction (`AGENT_BRIEF` D6). This file does not wrap it: `dvv`'s
+/// `format::ok_remote` owns the delimiter and the nonce, and a second wrapper
+/// applied here would either double the label or disagree with it.
+fn listing_json(session_id: &str, path: &str, entries: &[vnc_files::RemoteEntry]) -> Value {
+    json!({
+        "sessionId": session_id,
+        "path": path,
+        "entries": entries,
+        "count": entries.len(),
+    })
+}
+
+async fn files_home(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let answer = on_sidecar(ctx, peer, &session_id, Capability::FilesRead, FileAsk::Home).await?;
+    match answer {
+        FileAnswer::Path(path) => Ok(json!({ "sessionId": session_id, "path": path })),
+        other => Err(unexpected(&other, "files.home")),
+    }
+}
+
+/// A directory, listed. Defaults to the remote home rather than to the process
+/// working directory, which on the far side is whatever SFTP happens to make
+/// of `.` and is not a place a person would recognise.
+async fn files_list(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or("~")
+        .to_string();
+    let answer = on_sidecar(
+        ctx,
+        peer,
+        &session_id,
+        Capability::FilesRead,
+        FileAsk::List { path },
+    )
+    .await?;
+    match answer {
+        FileAnswer::Listing { path, entries } => Ok(listing_json(&session_id, &path, &entries)),
+        other => Err(unexpected(&other, "files.list")),
+    }
+}
+
+/// One window of one file, base64, exactly the bytes that are on the far side.
+///
+/// `offset` and `length` are how a file bigger than [`MAX_FILE_CHUNK`] crosses
+/// at all, and `eof` is how a caller's loop knows to stop. A `length` above
+/// the cap is REFUSED and named rather than clamped: a clamp that answered a
+/// six megabyte ask with four megabytes and said nothing would produce callers
+/// that believe they have a whole file and have three quarters of one.
+async fn files_get(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let path = file_path_of(params, "path")?;
+    let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let length = match params.get("length").and_then(Value::as_u64) {
+        Some(asked) if asked as usize > MAX_FILE_CHUNK => {
+            return Err(RpcError::bad_params(format!(
+                "length {asked} is above this surface's cap of {MAX_FILE_CHUNK} bytes per call, and it is refused rather than clamped: a clamp nobody was told about produces callers that believe they hold a whole file and hold part of one. Read the file in windows, offset by offset, until eof is true"
+            )))
+        }
+        Some(asked) => asked as usize,
+        None => MAX_FILE_CHUNK,
+    };
+    let answer = on_sidecar(
+        ctx,
+        peer,
+        &session_id,
+        Capability::FilesRead,
+        FileAsk::Get {
+            path,
+            offset,
+            length,
+        },
+    )
+    .await?;
+    match answer {
+        FileAnswer::Window {
+            path,
+            offset,
+            bytes,
+            size,
+        } => {
+            let returned = bytes.len() as u64;
+            Ok(json!({
+                "sessionId": session_id,
+                "path": path,
+                "offset": offset,
+                "returned": returned,
+                "size": size,
+                "eof": offset.saturating_add(returned) >= size,
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }))
+        }
+        other => Err(unexpected(&other, "files.get")),
+    }
+}
+
+/// One window of one file, written.
+///
+/// The bytes arrive base64 and are decoded here, so what reaches the far side
+/// is what the caller encoded, byte for byte, and a file is a file rather than
+/// a string with an encoding somebody has to guess. Anything that is not valid
+/// base64 is refused by name, because the alternative is writing whatever the
+/// decoder salvaged.
+async fn files_put(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let path = file_path_of(params, "path")?;
+    let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let encoded = params
+        .get("contentBase64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RpcError::bad_params(
+                "files.put needs `contentBase64`: the bytes to write, base64 encoded, so that a binary file crosses this envelope unchanged. An empty string is a legal value and truncates the file at offset 0",
+            )
+        })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| {
+            RpcError::bad_params(format!(
+                "`contentBase64` is not valid base64 and nothing was written: {e}. It is refused rather than decoded as far as it goes, because a file written from a half decoded payload is corrupt in a way nothing downstream can detect"
+            ))
+        })?;
+    if bytes.len() > MAX_FILE_CHUNK {
+        return Err(RpcError::bad_params(format!(
+            "that is {} bytes and this surface moves at most {MAX_FILE_CHUNK} per call. Nothing was written. Send the file in windows: offset 0 first, which truncates, then each following offset, which does not",
+            bytes.len()
+        )));
+    }
+    let mode = params
+        .get("mode")
+        .and_then(Value::as_u64)
+        .map(|m| m as u32 & 0o7777);
+    let answer = on_sidecar(
+        ctx,
+        peer,
+        &session_id,
+        Capability::FilesWrite,
+        FileAsk::Put {
+            path,
+            offset,
+            bytes,
+            mode,
+        },
+    )
+    .await?;
+    match answer {
+        FileAnswer::Wrote {
+            path,
+            offset,
+            written,
+            size,
+        } => Ok(json!({
+            "sessionId": session_id,
+            "path": path,
+            "offset": offset,
+            "written": written,
+            "size": size,
+        })),
+        other => Err(unexpected(&other, "files.put")),
+    }
+}
+
+async fn files_mkdir(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let path = file_path_of(params, "path")?;
+    let answer = on_sidecar(
+        ctx,
+        peer,
+        &session_id,
+        Capability::FilesWrite,
+        FileAsk::Mkdir { path },
+    )
+    .await?;
+    match answer {
+        FileAnswer::Path(path) => {
+            Ok(json!({ "sessionId": session_id, "path": path, "created": true }))
+        }
+        other => Err(unexpected(&other, "files.mkdir")),
+    }
+}
+
+/// Delete something. `recursive` is required to delete a directory that is not
+/// empty and it is not defaulted to true anywhere on this path.
+async fn files_remove(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let path = file_path_of(params, "path")?;
+    let recursive = params
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let answer = on_sidecar(
+        ctx,
+        peer,
+        &session_id,
+        Capability::FilesWrite,
+        FileAsk::Remove { path, recursive },
+    )
+    .await?;
+    match answer {
+        FileAnswer::Path(path) => Ok(json!({
+            "sessionId": session_id,
+            "path": path,
+            "removed": true,
+            "recursive": recursive,
+        })),
+        other => Err(unexpected(&other, "files.remove")),
+    }
+}
+
+async fn files_rename(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let from = file_path_of(params, "from")?;
+    let to = file_path_of(params, "to")?;
+    let answer = on_sidecar(
+        ctx,
+        peer,
+        &session_id,
+        Capability::FilesWrite,
+        FileAsk::Rename {
+            from: from.clone(),
+            to,
+        },
+    )
+    .await?;
+    match answer {
+        FileAnswer::Path(path) => Ok(json!({
+            "sessionId": session_id,
+            "from": from,
+            "path": path,
+            "renamed": true,
+        })),
+        other => Err(unexpected(&other, "files.rename")),
+    }
+}
+
+/// The application answered a file verb with the wrong shape of answer.
+///
+/// Unreachable through the application's own filer, which answers one variant
+/// per ask. It is reported rather than unwrapped because the alternative is a
+/// panic inside the socket task, which takes the connection down and tells the
+/// agent nothing at all.
+fn unexpected(answer: &FileAnswer, method: &str) -> RpcError {
+    let got = match answer {
+        FileAnswer::Path(_) => "a path",
+        FileAnswer::Listing { .. } => "a listing",
+        FileAnswer::Window { .. } => "a window of a file",
+        FileAnswer::Wrote { .. } => "a write receipt",
+    };
+    RpcError::new(
+        -32603,
+        format!("{method} was answered with {got}, which is not the shape that verb produces. This is a bug in DeskVNCViewer and not in the call"),
+    )
+}
+
 /// The agent telling the shell where its lease is, so a pane can say so.
 ///
 /// The lease itself lives in `agent-lease`, inside the agent's own process,
@@ -1739,10 +2454,18 @@ mod tests {
         ctx: Ctx,
         commands: tokio::sync::mpsc::Receiver<ClientCommand>,
         events: Arc<Mutex<Vec<Value>>>,
+        /// What the fake sidecar holds, so a test can seed a file and then
+        /// read back exactly what a `files.put` left behind.
+        disk: Arc<Disk>,
         _dir: tempfile::TempDir,
     }
 
     fn fixture() -> Fixture {
+        fixture_with_disk(Arc::new(Disk::default()))
+    }
+
+    /// The same fixture over a sidecar whose contents a test controls.
+    fn fixture_with_disk(disk: Arc<Disk>) -> Fixture {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let store =
             Arc::new(vnc_store::Store::open(Some(dir.path().to_path_buf())).expect("a store"));
@@ -1782,10 +2505,206 @@ mod tests {
                 store,
                 plane,
                 emit,
+                files: disk.clone().filer(),
             },
             commands,
             events,
+            disk,
             _dir: dir,
+        }
+    }
+
+    /// A sidecar with a map behind it instead of a machine.
+    ///
+    /// A map and NOT a filesystem, and the difference is deliberate: there are
+    /// no permissions here, no symlinks, no ownership and no disk that can be
+    /// full. What these tests are about is the gates this file owns and the
+    /// bytes surviving them, and a fake that reimplemented SFTP would be a
+    /// second implementation to disagree with the first.
+    ///
+    /// `vnc_files::SftpSession` is what the real filer talks to and it needs
+    /// an SSH server, which is why the seam the plane is written against is a
+    /// closure rather than a type: this substitutes for the application, at
+    /// the same boundary the application is installed at.
+    #[derive(Default)]
+    struct Disk {
+        /// Absolute path to contents. Byte vectors, never strings, because the
+        /// claim being tested is that a `.exe` survives.
+        files: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+        /// Directories that exist without holding anything.
+        dirs: Mutex<std::collections::BTreeSet<String>>,
+        /// True for a machine with no SSH at all, so the refusal an agent
+        /// actually reads can be asserted rather than described.
+        offline: bool,
+    }
+
+    /// Where `~` goes on the fake machine.
+    const FAKE_HOME: &str = "/home/agent";
+
+    impl Disk {
+        fn offline() -> Arc<Disk> {
+            Arc::new(Disk {
+                offline: true,
+                ..Disk::default()
+            })
+        }
+
+        fn put(&self, path: &str, bytes: &[u8]) {
+            self.files
+                .lock()
+                .insert(Disk::resolve(path), bytes.to_vec());
+        }
+
+        fn read(&self, path: &str) -> Option<Vec<u8>> {
+            self.files.lock().get(&Disk::resolve(path)).cloned()
+        }
+
+        /// `~` and a relative path both land under [`FAKE_HOME`], which is
+        /// what the real sidecar's `resolve` does with them.
+        fn resolve(path: &str) -> String {
+            let path = path.trim();
+            if path == "~" {
+                return FAKE_HOME.to_string();
+            }
+            if let Some(rest) = path.strip_prefix("~/") {
+                return format!("{FAKE_HOME}/{rest}");
+            }
+            if path.starts_with('/') {
+                return path.trim_end_matches('/').to_string();
+            }
+            format!("{FAKE_HOME}/{path}")
+        }
+
+        fn answer(&self, ask: FileAsk) -> Result<FileAnswer, FileRefusal> {
+            if self.offline {
+                return Err(FileRefusal::unavailable(
+                    "no SFTP sidecar could be opened to 10.0.0.5:22: connection refused. File transfer rides SSH on a second connection",
+                ));
+            }
+            match ask {
+                FileAsk::Home => Ok(FileAnswer::Path(FAKE_HOME.to_string())),
+                FileAsk::List { path } => {
+                    let dir = Disk::resolve(&path);
+                    let prefix = format!("{dir}/");
+                    let entries = self
+                        .files
+                        .lock()
+                        .iter()
+                        .filter_map(|(full, bytes)| {
+                            let name = full.strip_prefix(&prefix)?;
+                            if name.contains('/') {
+                                return None;
+                            }
+                            Some(vnc_files::RemoteEntry {
+                                name: name.to_string(),
+                                path: full.clone(),
+                                is_dir: false,
+                                size: bytes.len() as u64,
+                                modified: Some(1),
+                                mode: 0o644,
+                                is_symlink: false,
+                            })
+                        })
+                        .collect();
+                    Ok(FileAnswer::Listing { path: dir, entries })
+                }
+                FileAsk::Get {
+                    path,
+                    offset,
+                    length,
+                } => {
+                    let full = Disk::resolve(&path);
+                    let held = self.files.lock();
+                    let bytes = held.get(&full).ok_or_else(|| {
+                        FileRefusal::failed(format!("sftp error: no such file: {full}"))
+                    })?;
+                    let size = bytes.len() as u64;
+                    let from = (offset as usize).min(bytes.len());
+                    let to = from.saturating_add(length).min(bytes.len());
+                    Ok(FileAnswer::Window {
+                        path: full,
+                        offset,
+                        bytes: bytes[from..to].to_vec(),
+                        size,
+                    })
+                }
+                FileAsk::Put {
+                    path,
+                    offset,
+                    bytes,
+                    mode: _,
+                } => {
+                    let full = Disk::resolve(&path);
+                    let mut held = self.files.lock();
+                    let file = held.entry(full.clone()).or_default();
+                    // Offset zero truncates and anything else writes in place,
+                    // which is the contract `SftpSession::write_at` states and
+                    // the whole reason a chunk loop can resume.
+                    if offset == 0 {
+                        file.clear();
+                    }
+                    let at = offset as usize;
+                    if file.len() < at {
+                        file.resize(at, 0);
+                    }
+                    let end = at + bytes.len();
+                    if file.len() < end {
+                        file.resize(end, 0);
+                    }
+                    file[at..end].copy_from_slice(&bytes);
+                    Ok(FileAnswer::Wrote {
+                        path: full,
+                        offset,
+                        written: bytes.len() as u64,
+                        size: file.len() as u64,
+                    })
+                }
+                FileAsk::Mkdir { path } => {
+                    let full = Disk::resolve(&path);
+                    self.dirs.lock().insert(full.clone());
+                    Ok(FileAnswer::Path(full))
+                }
+                FileAsk::Remove { path, recursive } => {
+                    let full = Disk::resolve(&path);
+                    let mut held = self.files.lock();
+                    if held.remove(&full).is_none() {
+                        let prefix = format!("{full}/");
+                        let doomed: Vec<String> = held
+                            .keys()
+                            .filter(|key| key.starts_with(&prefix))
+                            .cloned()
+                            .collect();
+                        if !doomed.is_empty() && !recursive {
+                            return Err(FileRefusal::failed(format!(
+                                "sftp error: {full} is not empty; pass recursive"
+                            )));
+                        }
+                        for key in doomed {
+                            held.remove(&key);
+                        }
+                    }
+                    self.dirs.lock().remove(&full);
+                    Ok(FileAnswer::Path(full))
+                }
+                FileAsk::Rename { from, to } => {
+                    let from = Disk::resolve(&from);
+                    let to = Disk::resolve(&to);
+                    let mut held = self.files.lock();
+                    let bytes = held.remove(&from).ok_or_else(|| {
+                        FileRefusal::failed(format!("sftp error: no such file: {from}"))
+                    })?;
+                    held.insert(to.clone(), bytes);
+                    Ok(FileAnswer::Path(to))
+                }
+            }
+        }
+
+        /// The closure the plane holds, at the same boundary the application
+        /// installs its own at.
+        fn filer(self: Arc<Self>) -> Filer {
+            Arc::new(move |_session_id, ask, tell| {
+                let _ = tell.send(self.answer(ask));
+            })
         }
     }
 
@@ -2475,6 +3394,380 @@ mod tests {
         assert_eq!(refused.tag, Some("GEOMETRY_CHANGED"));
     }
 
+    // ---------------------------------------------------------------------
+    // The content fence. The screen a keystroke lands in, rather than the
+    // coordinate a click lands on.
+    //
+    // The incident these are written from is real. An agent ran
+    // `Start-Process notepad` on a remote Windows desktop and typed into it
+    // without looking. Notepad had come up holding the person's own file with
+    // all 2,378,798 characters selected, so the next keystroke would have
+    // replaced the file, and the only reason it did not is that a human looked
+    // at a screenshot before the typing step ran. The plane refused a stale
+    // CLICK and delivered that keystroke without a word, because
+    // `IntentKind::is_grounded` is false for `Type` and nothing was ever
+    // checked for it.
+    // ---------------------------------------------------------------------
+
+    /// One server update covering `width` x `height` from the origin, fed the
+    /// way `commands::session::forward_events` feeds one.
+    ///
+    /// Not [`paint`], which also consumes the damage: these tests care about
+    /// what the update did to the CONTENT counter and want the damage log left
+    /// exactly as a real update would leave it.
+    fn repaint(ctx: &Ctx, width: u16, height: u16) {
+        ctx.plane.feed(
+            "s1",
+            &[vnc_core::DecodedRect {
+                rect: Rect::new(0, 0, width, height),
+                payload: vnc_core::RectPayload::Rgba(
+                    [40u8, 80, 160, 255].repeat(width as usize * height as usize),
+                ),
+            }],
+        );
+    }
+
+    /// An attachment with a mirror, primed, and nothing observed yet.
+    async fn mirrored(fixture: &mut Fixture) -> Peer {
+        let mut peer = greeted(&fixture.ctx).await;
+        call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.attach",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0, "perceive": true }),
+        )
+        .await;
+        paint(&fixture.ctx, "s1", (1280, 720));
+        // The `03 §3.4` priming order, off the wire, so a later assertion that
+        // nothing was delivered is about the keystroke and not about it.
+        while fixture.commands.try_recv().is_ok() {}
+        peer
+    }
+
+    /// The agent looks. This is the only call that clears the fence.
+    async fn look(ctx: &Ctx, peer: &mut Peer) {
+        call(
+            ctx,
+            peer,
+            "screen.read",
+            json!({ "sessionId": "s1", "kind": "frame" }),
+        )
+        .await;
+    }
+
+    /// One keystroke down, the way a lowered `Type` reaches this socket.
+    async fn press_a(ctx: &Ctx, peer: &mut Peer) -> Result<Value, RpcError> {
+        dispatch(
+            ctx,
+            peer,
+            "limb.command",
+            &json!({
+                "sessionId": "s1",
+                "command": { "kind": "key", "keysym": 0x61, "down": true },
+            }),
+        )
+        .await
+    }
+
+    /// The incident, as a test. A window sized repaint arrived after the agent
+    /// last looked, so the keystroke is refused and NOTHING reaches the wire.
+    #[tokio::test]
+    async fn typing_is_refused_when_something_large_repainted_since_the_last_look() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        look(&fixture.ctx, &mut peer).await;
+
+        // A window. 1280x200 is 27.8 percent of this framebuffer, which is
+        // roughly what Notepad coming up costs on a real desktop.
+        repaint(&fixture.ctx, 1280, 200);
+
+        let refused = press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("the screen is not the one that was read");
+        assert_eq!(refused.tag, Some("SCREEN_CHANGED"));
+        // Both numbers, the way `GeometryRejected` carries both of its own: a
+        // refusal an agent cannot check against what it thought it knew is a
+        // refusal it will retry blind.
+        assert!(
+            refused.message.contains("content generation 2")
+                && refused.message.contains("now at 3"),
+            "both generations have to be in the sentence: {}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("Nothing was typed"),
+            "the agent has to be told nothing was delivered: {}",
+            refused.message
+        );
+        assert!(
+            fixture.commands.try_recv().is_err(),
+            "a refused keystroke must not reach the session"
+        );
+    }
+
+    /// The one that would make this feature worthless if it failed: the echo
+    /// of the agent's own typing must not trip its own fence.
+    ///
+    /// A glyph is a couple of hundred pixels against nine hundred thousand. A
+    /// caret blink is fewer. A fence that moved on those would refuse the
+    /// second character of every word and would be switched off within a day.
+    #[tokio::test]
+    async fn the_echo_of_the_agents_own_keystroke_does_not_trip_the_fence() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        look(&fixture.ctx, &mut peer).await;
+
+        for _ in 0..40 {
+            // One glyph cell, then the caret blinking beside it.
+            repaint(&fixture.ctx, 12, 20);
+            repaint(&fixture.ctx, 2, 20);
+            // And a menu opening, which is 6.5 percent of this framebuffer and
+            // is usually the direct result of what the agent just did. Typing
+            // a letter or an arrow into one is the ordinary next step, so this
+            // is on the allowed side of the threshold on purpose.
+            repaint(&fixture.ctx, 200, 300);
+            press_a(&fixture.ctx, &mut peer).await.unwrap_or_else(|e| {
+                panic!("an agent typing must not fence itself out: {}", e.message)
+            });
+            assert!(
+                fixture.commands.try_recv().is_ok(),
+                "the keystroke has to reach the session"
+            );
+        }
+    }
+
+    /// Typing blind into a machine nobody has looked at is the failure itself,
+    /// so it is refused before the first keystroke rather than after the first
+    /// large repaint.
+    #[tokio::test]
+    async fn an_attachment_that_has_never_looked_cannot_type_at_all() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+
+        let refused = press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("nothing has ever been observed on this limb");
+        assert_eq!(refused.tag, Some("SCREEN_CHANGED"));
+        assert!(
+            refused.message.contains("never read this screen"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("perceive"),
+            "the refusal has to say what to do next: {}",
+            refused.message
+        );
+        assert!(fixture.commands.try_recv().is_err());
+    }
+
+    /// The repair, and it is one call.
+    ///
+    /// Also the half that says WHICH call: `screen.damage` answers with
+    /// rectangles and no content, so it must not clear a fence that exists
+    /// because the agent does not know what is on the screen.
+    #[tokio::test]
+    async fn looking_again_clears_the_refusal_and_damage_alone_does_not() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        look(&fixture.ctx, &mut peer).await;
+        repaint(&fixture.ctx, 1280, 200);
+        press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("the screen changed");
+
+        // A damage call consumes the rectangles and tells the agent something
+        // moved. It does not tell it what is there now.
+        call(
+            &fixture.ctx,
+            &mut peer,
+            "screen.damage",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        let still = press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("rectangles are not a picture");
+        assert_eq!(still.tag, Some("SCREEN_CHANGED"));
+
+        // Pixels do.
+        look(&fixture.ctx, &mut peer).await;
+        press_a(&fixture.ctx, &mut peer)
+            .await
+            .unwrap_or_else(|e| panic!("the agent has seen the new screen: {}", e.message));
+        assert!(matches!(
+            fixture.commands.try_recv().expect("the keystroke went"),
+            ClientCommand::Key { down: true, .. }
+        ));
+    }
+
+    /// A key going UP is never refused, and neither is releasing everything.
+    ///
+    /// Refusing a release does not stop a keystroke that has already happened;
+    /// it strands a modifier held down on somebody's desktop, and every key
+    /// after it, the person's included, arrives with Ctrl stuck on.
+    #[tokio::test]
+    async fn a_release_is_never_fenced_so_no_modifier_is_ever_stranded() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        repaint(&fixture.ctx, 1280, 720);
+
+        for command in [
+            json!({ "kind": "key", "keysym": 0xffe3, "down": false }),
+            json!({ "kind": "release-all-keys" }),
+        ] {
+            call(
+                &fixture.ctx,
+                &mut peer,
+                "limb.command",
+                json!({ "sessionId": "s1", "command": command }),
+            )
+            .await;
+            assert!(
+                fixture.commands.try_recv().is_ok(),
+                "a release has to reach the session whatever the screen did"
+            );
+        }
+    }
+
+    /// No regression on the fence that already existed. A pointer command is
+    /// the geometry fence's business and the content fence does not touch it,
+    /// on a screen that has changed under an attachment that has never looked.
+    #[tokio::test]
+    async fn the_content_fence_does_not_reach_a_pointer_command() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        repaint(&fixture.ctx, 1280, 720);
+
+        call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.command",
+            json!({
+                "sessionId": "s1",
+                "command": { "kind": "pointer", "x": 7, "y": 9, "buttonMask": 1 },
+            }),
+        )
+        .await;
+        assert!(matches!(
+            fixture.commands.try_recv().expect("the pointer event went"),
+            ClientCommand::Pointer { x: 7, y: 9, .. }
+        ));
+    }
+
+    /// The fence that was already here still works, in both directions.
+    ///
+    /// A regression guard rather than a new rule: the content fence was added
+    /// to the same module and the same reply objects, and the failure worth
+    /// catching is a geometry generation quietly stopping being enforced
+    /// because a second counter appeared beside it.
+    #[tokio::test]
+    async fn the_geometry_fence_is_untouched_by_the_content_fence() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+
+        // The generation the mirror is actually on still reads.
+        let read = call(
+            &fixture.ctx,
+            &mut peer,
+            "screen.read",
+            json!({ "sessionId": "s1", "kind": "frame", "generation": 1 }),
+        )
+        .await;
+        assert_eq!(read["unchanged"], false);
+
+        // The two counters are reported side by side and are not each other.
+        let status = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.status",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(status["perception"]["geometryGeneration"], 1);
+        assert_eq!(status["perception"]["contentGeneration"], 2);
+
+        // And a coordinate computed against a screen that has gone is still
+        // refused with the tag an agent branches on.
+        fixture.ctx.plane.note_resize("s1", 1920, 1080);
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "screen.read",
+            &json!({ "sessionId": "s1", "kind": "frame", "generation": 1 }),
+        )
+        .await
+        .expect_err("that screen no longer exists");
+        assert_eq!(refused.tag, Some("GEOMETRY_CHANGED"));
+        assert!(
+            refused.message.contains("nothing was delivered"),
+            "{}",
+            refused.message
+        );
+    }
+
+    /// `limb.status` answers the question one call before the refusal, so an
+    /// adapter can decline to lower a `Type` at all rather than having the
+    /// socket refuse forty keystrokes one at a time.
+    #[tokio::test]
+    async fn limb_status_says_whether_text_may_be_sent_before_any_is() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+
+        let blind = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.status",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(blind["typing"]["allowed"], false);
+        assert_eq!(blind["typing"]["code"], "SCREEN_CHANGED");
+        assert_eq!(blind["perception"]["contentGeneration"], 2);
+
+        look(&fixture.ctx, &mut peer).await;
+        let seen = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.status",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(seen["typing"]["allowed"], true);
+
+        repaint(&fixture.ctx, 1280, 200);
+        let moved = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.status",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(moved["typing"]["allowed"], false);
+        assert_eq!(moved["perception"]["contentGeneration"], 3);
+    }
+
+    /// An attachment that asked to perceive nothing has observed nothing, so
+    /// it is fenced out of typing too. There is no cheaper way to be exempt
+    /// from looking than not looking.
+    #[tokio::test]
+    async fn an_attachment_that_asked_for_no_pixels_still_cannot_type() {
+        let mut fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.attach",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 }),
+        )
+        .await;
+        let refused = press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("nothing has been observed on this limb");
+        assert_eq!(refused.tag, Some("SCREEN_CHANGED"));
+        assert!(fixture.commands.try_recv().is_err());
+    }
+
     /// Asking for nothing costs nothing, which is the setting every ordinary
     /// attach gets and the one that changes nothing about a person's session.
     #[tokio::test]
@@ -2602,6 +3895,7 @@ mod tests {
             ctx,
             mut commands,
             events: _events,
+            disk: _disk,
             _dir,
         } = fixture;
         let mut peer = greeted(&ctx).await;
@@ -3057,6 +4351,514 @@ mod tests {
         .await
         .expect_err("open is not held here");
         assert_eq!(refused.tag, Some("MISSING_CAPABILITY"));
+    }
+
+    // ---------------------------------------------------------------------
+    // `files.*` (`02 §5.2`, PRD/08's sidecar).
+    // ---------------------------------------------------------------------
+
+    /// A connection holding exactly these capabilities, attached to the one
+    /// live session the fixture has.
+    async fn attached_holding(ctx: &Ctx, capabilities: &[&str]) -> Peer {
+        let mut peer = Peer::default();
+        call(
+            ctx,
+            &mut peer,
+            "hello",
+            json!({
+                "protocol": PROTOCOL,
+                "client": { "name": "test" },
+                "capabilities": capabilities,
+            }),
+        )
+        .await;
+        call(
+            ctx,
+            &mut peer,
+            "limb.attach",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 }),
+        )
+        .await;
+        peer
+    }
+
+    /// Reading somebody's disk costs `files.read`, and a connection that did
+    /// not ask for it does not get it by holding everything else.
+    ///
+    /// The interesting half is that `control` IS in the grant here. Holding
+    /// the keyboard on a machine is not authority to copy its files off it,
+    /// and every read verb refuses with the tag an agent branches on and the
+    /// capability named, rather than answering an empty listing that would
+    /// read as an empty directory.
+    #[tokio::test]
+    async fn every_read_verb_is_refused_without_files_read() {
+        let disk = Arc::new(Disk::default());
+        disk.put("~/notes.txt", b"hello");
+        let fixture = fixture_with_disk(disk);
+        let mut peer = attached_holding(&fixture.ctx, &["view", "capture", "control"]).await;
+
+        for (method, params) in [
+            ("files.home", json!({ "sessionId": "s1" })),
+            ("files.list", json!({ "sessionId": "s1", "path": "~" })),
+            (
+                "files.get",
+                json!({ "sessionId": "s1", "path": "~/notes.txt" }),
+            ),
+        ] {
+            let refused = dispatch(&fixture.ctx, &mut peer, method, &params)
+                .await
+                .expect_err("files.read is not held here");
+            assert_eq!(refused.tag, Some("MISSING_CAPABILITY"), "{method}");
+            assert!(
+                refused.message.contains("files.read"),
+                "{method} has to name the capability: {}",
+                refused.message
+            );
+        }
+    }
+
+    /// Every verb that changes something costs `files.write`, and holding
+    /// `files.read` buys none of it.
+    ///
+    /// `files.read` is deliberately in the grant for this test. The pair is
+    /// split because the two authorities are different, not because writing is
+    /// simply more of reading, and a build where one implied the other would
+    /// pass a test that only checked the empty grant.
+    #[tokio::test]
+    async fn every_write_verb_is_refused_on_a_grant_that_only_reads() {
+        let disk = Arc::new(Disk::default());
+        disk.put("~/keep.txt", b"still here");
+        let fixture = fixture_with_disk(disk.clone());
+        let mut peer = attached_holding(&fixture.ctx, &["view", "control", "files.read"]).await;
+
+        for (method, params) in [
+            (
+                "files.put",
+                json!({ "sessionId": "s1", "path": "~/keep.txt", "contentBase64": "" }),
+            ),
+            ("files.mkdir", json!({ "sessionId": "s1", "path": "~/new" })),
+            (
+                "files.remove",
+                json!({ "sessionId": "s1", "path": "~/keep.txt" }),
+            ),
+            (
+                "files.rename",
+                json!({ "sessionId": "s1", "from": "~/keep.txt", "to": "~/gone.txt" }),
+            ),
+        ] {
+            let refused = dispatch(&fixture.ctx, &mut peer, method, &params)
+                .await
+                .expect_err("files.write is not held here");
+            assert_eq!(refused.tag, Some("MISSING_CAPABILITY"), "{method}");
+            assert!(
+                refused.message.contains("files.write"),
+                "{method} has to name the capability: {}",
+                refused.message
+            );
+        }
+
+        // …and the machine is untouched. A refusal that had already deleted
+        // the file would be the worst possible kind.
+        assert_eq!(
+            disk.read("~/keep.txt").as_deref(),
+            Some(&b"still here"[..]),
+            "a refused write must not have happened"
+        );
+        assert!(
+            disk.read("~/gone.txt").is_none(),
+            "and must not have happened under another name either"
+        );
+    }
+
+    /// The path an agent names comes back resolved, and the resolved one is
+    /// the one the next call can use.
+    ///
+    /// `~` is the case worth pinning. An agent listing `~` is told the
+    /// absolute directory that was, so the path it puts a file into is a path
+    /// it was given rather than one it assembled, and a rename answers with
+    /// where the file ended up rather than echoing the argument back.
+    #[tokio::test]
+    async fn a_path_round_trips_from_home_through_a_listing_and_a_rename() {
+        let disk = Arc::new(Disk::default());
+        let fixture = fixture_with_disk(disk.clone());
+        let mut peer = attached_holding(
+            &fixture.ctx,
+            &["view", "control", "files.read", "files.write"],
+        )
+        .await;
+
+        let home = call(
+            &fixture.ctx,
+            &mut peer,
+            "files.home",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(home["path"], FAKE_HOME);
+
+        let wrote = call(
+            &fixture.ctx,
+            &mut peer,
+            "files.put",
+            json!({
+                "sessionId": "s1",
+                "path": "~/report.txt",
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode("done"),
+            }),
+        )
+        .await;
+        assert_eq!(wrote["path"], format!("{FAKE_HOME}/report.txt"));
+        assert_eq!(wrote["written"], 4);
+        assert_eq!(wrote["size"], 4);
+
+        let listed = call(
+            &fixture.ctx,
+            &mut peer,
+            "files.list",
+            json!({ "sessionId": "s1", "path": "~" }),
+        )
+        .await;
+        assert_eq!(
+            listed["path"], FAKE_HOME,
+            "a listing says which directory it is of, resolved"
+        );
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["entries"][0]["name"], "report.txt");
+        assert_eq!(
+            listed["entries"][0]["path"],
+            format!("{FAKE_HOME}/report.txt"),
+            "the entry carries the absolute path, so the next call does not build one"
+        );
+        assert_eq!(listed["entries"][0]["isDir"], false);
+        assert_eq!(
+            listed["entries"][0]["size"], 4,
+            "the listing is camelCase and carries the size the IPC contract spells"
+        );
+
+        // The path off the listing, used verbatim, is the one that works.
+        let renamed = call(
+            &fixture.ctx,
+            &mut peer,
+            "files.rename",
+            json!({
+                "sessionId": "s1",
+                "from": listed["entries"][0]["path"],
+                "to": "~/report.final.txt",
+            }),
+        )
+        .await;
+        assert_eq!(renamed["path"], format!("{FAKE_HOME}/report.final.txt"));
+        assert_eq!(renamed["renamed"], true);
+        assert!(disk.read("~/report.txt").is_none());
+        assert_eq!(
+            disk.read("~/report.final.txt").as_deref(),
+            Some(&b"done"[..])
+        );
+    }
+
+    /// The claim the whole feature stands on: a file is BYTES.
+    ///
+    /// The payload here is deliberately hostile to anything that treats a file
+    /// as text. It carries a NUL, a lone `0xFF` which is not valid UTF-8, a
+    /// CRLF that a line ending conversion would eat, and a `0x1A` which is
+    /// end of file on DOS. A `.exe` short by one byte, or with its line
+    /// endings helpfully fixed, is a `.exe` that fails on somebody else's
+    /// machine with nothing to point at, so this asserts equality of the whole
+    /// vector and not of its length.
+    #[tokio::test]
+    async fn a_binary_file_survives_the_envelope_byte_for_byte() {
+        let mut payload: Vec<u8> = vec![
+            0x4D, 0x5A, 0x90, 0x00, 0x00, 0xFF, 0x0D, 0x0A, 0x1A, 0x00, 0xC3, 0x28,
+        ];
+        // …and every byte value, so nothing can pass by accident.
+        payload.extend((0u16..=255).map(|b| b as u8));
+
+        let disk = Arc::new(Disk::default());
+        let fixture = fixture_with_disk(disk.clone());
+        let mut peer = attached_holding(
+            &fixture.ctx,
+            &["view", "control", "files.read", "files.write"],
+        )
+        .await;
+
+        let wrote = call(
+            &fixture.ctx,
+            &mut peer,
+            "files.put",
+            json!({
+                "sessionId": "s1",
+                "path": "~/setup.exe",
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(&payload),
+                "mode": 0o755,
+            }),
+        )
+        .await;
+        assert_eq!(wrote["written"], payload.len());
+        assert_eq!(
+            disk.read("~/setup.exe").as_deref(),
+            Some(payload.as_slice()),
+            "what reached the machine is what the agent sent"
+        );
+
+        let got = call(
+            &fixture.ctx,
+            &mut peer,
+            "files.get",
+            json!({ "sessionId": "s1", "path": "~/setup.exe" }),
+        )
+        .await;
+        assert_eq!(got["eof"], true);
+        assert_eq!(got["size"], payload.len());
+        let back = base64::engine::general_purpose::STANDARD
+            .decode(got["contentBase64"].as_str().expect("base64 content"))
+            .expect("the content decodes");
+        assert_eq!(
+            back, payload,
+            "and what came back is what is on the machine"
+        );
+    }
+
+    /// A file bigger than one envelope crosses in windows and arrives whole.
+    ///
+    /// This is the property that makes the cap a cap and not a ceiling on file
+    /// size: `offset` zero truncates, every later offset writes in place, and
+    /// `eof` is what tells a reader's loop to stop. A build where a second put
+    /// truncated would pass every single window test and still deliver a file
+    /// holding only its last chunk.
+    #[tokio::test]
+    async fn a_file_larger_than_one_call_crosses_in_windows_and_arrives_whole() {
+        // A pattern rather than a repeat, so a window written at the wrong
+        // offset shows up as wrong content and not just as a wrong length.
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let window = 1000;
+
+        let disk = Arc::new(Disk::default());
+        let fixture = fixture_with_disk(disk.clone());
+        let mut peer = attached_holding(
+            &fixture.ctx,
+            &["view", "control", "files.read", "files.write"],
+        )
+        .await;
+
+        let mut offset = 0usize;
+        while offset < payload.len() {
+            let end = (offset + window).min(payload.len());
+            let wrote = call(
+                &fixture.ctx,
+                &mut peer,
+                "files.put",
+                json!({
+                    "sessionId": "s1",
+                    "path": "~/big.bin",
+                    "offset": offset,
+                    "contentBase64": base64::engine::general_purpose::STANDARD
+                        .encode(&payload[offset..end]),
+                }),
+            )
+            .await;
+            assert_eq!(wrote["offset"], offset);
+            offset = end;
+        }
+        assert_eq!(
+            disk.read("~/big.bin").as_deref(),
+            Some(payload.as_slice()),
+            "fifty small writes are one whole file"
+        );
+
+        let mut read_back = Vec::new();
+        loop {
+            let got = call(
+                &fixture.ctx,
+                &mut peer,
+                "files.get",
+                json!({
+                    "sessionId": "s1",
+                    "path": "~/big.bin",
+                    "offset": read_back.len(),
+                    "length": window,
+                }),
+            )
+            .await;
+            read_back.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(got["contentBase64"].as_str().expect("base64 content"))
+                    .expect("the content decodes"),
+            );
+            if got["eof"].as_bool().expect("an eof flag") {
+                break;
+            }
+        }
+        assert_eq!(read_back, payload);
+    }
+
+    /// A window bigger than the envelope is refused BY NAME, in both
+    /// directions, and nothing is truncated on the way.
+    #[tokio::test]
+    async fn a_window_above_the_cap_is_refused_rather_than_clamped() {
+        let fixture = fixture();
+        let mut peer = attached_holding(
+            &fixture.ctx,
+            &["view", "control", "files.read", "files.write"],
+        )
+        .await;
+
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.get",
+            &json!({
+                "sessionId": "s1",
+                "path": "~/big.bin",
+                "length": MAX_FILE_CHUNK + 1,
+            }),
+        )
+        .await
+        .expect_err("above the cap");
+        assert_eq!(refused.code, -32602);
+        assert!(
+            refused.message.contains(&MAX_FILE_CHUNK.to_string()),
+            "the refusal has to name the number: {}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("windows"),
+            "and has to say what to do instead: {}",
+            refused.message
+        );
+
+        let too_big =
+            base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_FILE_CHUNK + 1]);
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.put",
+            &json!({ "sessionId": "s1", "path": "~/big.bin", "contentBase64": too_big }),
+        )
+        .await
+        .expect_err("above the cap");
+        assert!(
+            refused.message.contains("Nothing was written"),
+            "a refused put has to say the file is untouched: {}",
+            refused.message
+        );
+        assert!(
+            fixture.disk.read("~/big.bin").is_none(),
+            "and it has to be true"
+        );
+    }
+
+    /// Content that is not base64 is refused and nothing is written.
+    ///
+    /// Refused rather than decoded as far as it goes: a file written from a
+    /// half decoded payload is corrupt in a way nothing downstream detects.
+    #[tokio::test]
+    async fn a_put_whose_content_is_not_base64_writes_nothing() {
+        let fixture = fixture();
+        let mut peer = attached_holding(
+            &fixture.ctx,
+            &["view", "control", "files.read", "files.write"],
+        )
+        .await;
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.put",
+            &json!({ "sessionId": "s1", "path": "~/x.bin", "contentBase64": "not base64!!" }),
+        )
+        .await
+        .expect_err("that is not base64");
+        assert_eq!(refused.code, -32602);
+        assert!(fixture.disk.read("~/x.bin").is_none());
+    }
+
+    /// A machine with no SSH says so, in a sentence naming what is missing and
+    /// what to do instead.
+    ///
+    /// `04 §4.1`'s habit: an agent told "not available, because that machine
+    /// runs no SSH server" stops asking, and an agent told "error" retries
+    /// until something gives up.
+    #[tokio::test]
+    async fn a_machine_with_no_sftp_sidecar_is_refused_with_a_reason() {
+        let fixture = fixture_with_disk(Disk::offline());
+        let mut peer = attached_holding(&fixture.ctx, &["view", "files.read"]).await;
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.list",
+            &json!({ "sessionId": "s1", "path": "~" }),
+        )
+        .await
+        .expect_err("no ssh on that machine");
+        assert_eq!(refused.tag, Some("FILES_UNAVAILABLE"));
+        assert!(refused.message.contains("SSH"), "{}", refused.message);
+    }
+
+    /// A person taking the wheel stops a file transfer, exactly as it stops a
+    /// command.
+    ///
+    /// The lease check runs before the capability check and before a path is
+    /// parsed, so a revoked attachment cannot read a file by holding the right
+    /// capability, and it learns nothing about the machine on the way.
+    #[tokio::test]
+    async fn taking_the_wheel_stops_the_next_file_call() {
+        let disk = Arc::new(Disk::default());
+        disk.put("~/secret.txt", b"private");
+        let fixture = fixture_with_disk(disk);
+        let mut peer = attached_holding(
+            &fixture.ctx,
+            &["view", "control", "files.read", "files.write"],
+        )
+        .await;
+
+        fixture.ctx.plane.revoke("s1");
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.get",
+            &json!({ "sessionId": "s1", "path": "~/secret.txt" }),
+        )
+        .await
+        .expect_err("a person is driving");
+        assert_eq!(refused.tag, Some("LEASE_REVOKED"));
+    }
+
+    /// A file verb against a session this connection never attached is
+    /// refused, so `files.*` is no way around the attachment.
+    #[tokio::test]
+    async fn a_file_call_against_a_session_this_connection_never_attached_is_refused() {
+        let fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.list",
+            &json!({ "sessionId": "s1", "path": "~" }),
+        )
+        .await
+        .expect_err("nothing was attached");
+        assert_eq!(refused.tag, Some("NOT_ATTACHED"));
+    }
+
+    /// An empty path is refused rather than guessed at.
+    ///
+    /// The verb that makes this matter is `remove`: a guess that resolved an
+    /// empty path to the home directory would delete somebody's home
+    /// directory, and there is no version of that which is worth the
+    /// convenience.
+    #[tokio::test]
+    async fn an_empty_path_is_refused_rather_than_read_as_the_home_directory() {
+        let fixture = fixture();
+        let mut peer = attached_holding(&fixture.ctx, &["view", "files.write"]).await;
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "files.remove",
+            &json!({ "sessionId": "s1", "path": "" }),
+        )
+        .await
+        .expect_err("an empty path names nothing");
+        assert_eq!(refused.code, -32602);
+        assert!(refused.message.contains("path"), "{}", refused.message);
     }
 
     /// The plane starts from a thread with no reactor in context.

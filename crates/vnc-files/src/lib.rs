@@ -59,7 +59,7 @@ pub use config::{
 };
 pub use error::{Error, Result};
 pub use queue::{TransferQueue, MAX_CONCURRENT_TRANSFERS};
-pub use session::{RemoteEntry, SftpSession};
+pub use session::{FileWindow, RemoteEntry, SftpSession};
 pub use ssh_transport::{
     probe_ssh, HostKeyDecision, HostKeyPin, HostKeyStore, HostKeyVerifier, SshTunnel, TunnelStream,
 };

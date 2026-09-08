@@ -45,6 +45,16 @@
 //!   generation of the last observation IT SERVED, which is the only generation
 //!   the coordinate can have come from, and a resize since then still refuses.
 //!   An explicit `generation` from the caller always wins.
+//!
+//! And one thing this deliberately does NOT hold: the CONTENT generation. The
+//! second fence, the one that refuses text typed into a screen the agent has
+//! not read, keeps both of its numbers in the shell, because the shell is where
+//! the damage stream arrives and there is no push lane on this socket to carry
+//! a repaint here as it happens. So [`Plane::submit`] ASKS, through
+//! [`SessionSource::typing_fence`], and reports the shell's own sentence. That
+//! is the difference between the two fences and it is the right way round: a
+//! second copy of a counter that moves several times a second would be wrong
+//! within a frame of being read.
 
 use crate::clock;
 use crate::error::{codes, ToolError};
@@ -126,6 +136,135 @@ pub struct OpenRequest {
     pub perceive: bool,
 }
 
+/// One operation on a machine's own SFTP sidecar.
+///
+/// The vocabulary is the shell's `files.*` verbs and nothing more, because a
+/// skin that invented an operation the plane does not serve would be a skin
+/// with an opinion about somebody else's filesystem.
+///
+/// Bytes are `Vec<u8>` here and base64 only on the wire. That is the whole of
+/// the binary safety claim: a file is a sequence of bytes at every hop this
+/// crate owns, and the one place it becomes text is the JSON envelope, which
+/// encodes and decodes it losslessly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOp {
+    /// Where the remote user's home directory is.
+    Home,
+    List {
+        path: String,
+    },
+    /// One window of a file. `length` is what the caller can accept in one
+    /// envelope, and the answer says how big the whole file is, so a loop
+    /// knows when it is done.
+    Get {
+        path: String,
+        offset: u64,
+        length: u64,
+    },
+    /// One window of a file, written. Offset zero TRUNCATES and every other
+    /// offset writes in place, which is what makes a chunk loop resumable.
+    Put {
+        path: String,
+        offset: u64,
+        bytes: Vec<u8>,
+        mode: Option<u32>,
+    },
+    Mkdir {
+        path: String,
+    },
+    Remove {
+        path: String,
+        recursive: bool,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+}
+
+impl FileOp {
+    /// Which half of the file pair this operation costs.
+    ///
+    /// `02 §5.2` splits reading from writing and neither implies the other, so
+    /// this is the one table that decides which one an operation is, and every
+    /// caller goes through it rather than deciding for itself.
+    pub fn capability(&self) -> Capability {
+        match self {
+            FileOp::Home | FileOp::List { .. } | FileOp::Get { .. } => Capability::FilesRead,
+            FileOp::Put { .. }
+            | FileOp::Mkdir { .. }
+            | FileOp::Remove { .. }
+            | FileOp::Rename { .. } => Capability::FilesWrite,
+        }
+    }
+
+    /// The word an error message uses for it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            FileOp::Home => "reading a machine's home directory",
+            FileOp::List { .. } => "listing a machine's files",
+            FileOp::Get { .. } => "downloading from a machine",
+            FileOp::Put { .. } => "uploading to a machine",
+            FileOp::Mkdir { .. } => "making a directory on a machine",
+            FileOp::Remove { .. } => "deleting from a machine",
+            FileOp::Rename { .. } => "renaming on a machine",
+        }
+    }
+}
+
+/// One directory entry. **Every string here came off a remote machine**: it is
+/// data and never instruction, and the tool that renders it wraps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: Option<i64>,
+    pub mode: u32,
+    pub is_symlink: bool,
+}
+
+/// What a [`FileOp`] produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOutcome {
+    /// A path on the far side, resolved: the answer to `Home`, and to every
+    /// operation whose whole result is "that path, and it is done now".
+    Path(String),
+    Listing {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+    Window {
+        path: String,
+        offset: u64,
+        bytes: Vec<u8>,
+        size: u64,
+        /// True when this window reached the end of the file, so a loop stops
+        /// on the answer rather than on arithmetic it did itself.
+        eof: bool,
+    },
+    Wrote {
+        path: String,
+        offset: u64,
+        written: u64,
+        size: u64,
+    },
+}
+
+/// The shell will not carry text to this limb yet, and why.
+///
+/// A code and a sentence, which is `04 §4.4`'s pair: the code is what an agent
+/// branches on and the sentence is what it acts on. Both are minted where the
+/// two generations sit side by side and neither is rewritten on the way out, so
+/// there is exactly one place in this workspace that composes this refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingRefused {
+    pub code: String,
+    pub why: String,
+}
+
 /// Where limbs come from.
 ///
 /// The seam. Everything above it is the same whether a limb is a real RDP
@@ -162,6 +301,54 @@ pub trait SessionSource: Send + Sync {
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
         let _ = limb;
         None
+    }
+
+    /// Will this limb accept text right now, or has the screen changed under
+    /// the agent since it last looked?
+    ///
+    /// The content fence's near end. Both of its numbers live in the shell (the
+    /// count of material repaints, and how much of it this attachment has
+    /// actually observed), so this asks rather than computes, and what comes
+    /// back is the shell's own refusal carried through unchanged. There is no
+    /// second copy of either number on this side: a counter that moves with the
+    /// damage stream would be wrong within a frame of being read here.
+    ///
+    /// `None` means "nothing refuses this", which is the answer for a source
+    /// with no screen behind it. A recorder in a test and an SSH limb both take
+    /// that arm, and both are right to: a PTY echoes what it is sent into a
+    /// stream the agent reads back, so there is nothing to look at first.
+    ///
+    /// Called only for [`IntentKind::is_text_bearing`] intents, so a source
+    /// that has to make a round trip to answer makes it on typing and not on
+    /// every click.
+    fn typing_fence(&self, limb: &LimbId) -> Option<TypingRefused> {
+        let _ = limb;
+        None
+    }
+
+    /// One operation on this limb's own SFTP sidecar.
+    ///
+    /// Defaulted to a refusal that NAMES the source, rather than left
+    /// unimplemented, because a source that cannot move files is a normal
+    /// thing to be: file transfer rides SSH on a second connection, and a
+    /// recorder in a test has no SSH server behind it and never will.
+    ///
+    /// Synchronous, like every other method here, and for the same reason:
+    /// this trait is one blocking socket, one request, one reply, under one
+    /// lock. A file the size of an installer therefore crosses as several
+    /// calls rather than as one long one, which is also what keeps any single
+    /// call inside the envelope's own cap.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] naming what refused and why, never a stub that pretends
+    /// a file moved.
+    fn files(&self, limb: &LimbId, op: &FileOp) -> Result<FileOutcome, ToolError> {
+        let _ = op;
+        Err(ToolError::not_implemented(format!(
+            "{limb} comes from {}, which has no SFTP sidecar behind it, so there is no file to move and nothing was attempted",
+            self.describe()
+        )))
     }
 
     /// One sentence for `dvv doctor`, so a person can tell which source a
@@ -576,6 +763,39 @@ impl SessionSource for ShellSource {
         build_attach(&attached, request.slot)
     }
 
+    /// One file operation, over the shell's own `files.*` verbs.
+    ///
+    /// The sidecar is connected by the SHELL, on first use, so there is no
+    /// connect call here and no state on this side saying whether one is open.
+    /// That is deliberate: a second opinion about whether a machine has a
+    /// working SFTP connection is a second opinion that can be wrong, and the
+    /// only party that can answer it is the one holding the socket.
+    ///
+    /// Base64 is decoded here and encoded here, so the rest of this crate
+    /// never sees a file as text. A payload the shell sent that is not valid
+    /// base64 is a hard error rather than a best effort decode: a file
+    /// assembled from a half decoded window is corrupt in a way nothing
+    /// downstream can detect.
+    fn files(&self, limb: &LimbId, op: &FileOp) -> Result<FileOutcome, ToolError> {
+        if !socket_present() {
+            return Err(no_socket());
+        }
+        let session_id = lock(limb_sessions())
+            .get(limb.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ToolError::new(
+                    codes::LIMB_GONE,
+                    format!(
+                        "{limb} is not a limb this attachment holds a session for, so there is nothing to open a file transfer against. Call dvv_limbs, then dvv_open"
+                    ),
+                )
+            })?;
+        let (method, params) = files_request(&session_id, op)?;
+        let answer = call(method, params)?;
+        files_outcome(op, &answer)
+    }
+
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
         let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
         let answer = call(
@@ -584,6 +804,48 @@ impl SessionSource for ShellSource {
         )
         .ok()?;
         serde_json::from_value(answer.get("state")?.clone()).ok()
+    }
+
+    fn typing_fence(&self, limb: &LimbId) -> Option<TypingRefused> {
+        let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
+        // A round trip of its own rather than one folded into `state` above.
+        // `state` answers `None` for anything it cannot parse and the plane
+        // then keeps what it had, which is the correct shape for a lifecycle
+        // state and the wrong one for a fence: this has to be asked as its own
+        // question so that a shell which cannot answer it is visible as a shell
+        // which cannot answer it. It costs one call per typing intent, against
+        // the two keystrokes per character that follow it.
+        let answer = call(
+            "limb.status",
+            serde_json::json!({ "sessionId": session_id }),
+        )
+        .ok()?;
+        let typing = answer.get("typing")?;
+        if typing.get("allowed").and_then(serde_json::Value::as_bool) != Some(false) {
+            // Allowed, or a shell too old to have the field at all. An older
+            // shell is not refused here: it still applies its own fence on
+            // `limb.command` if it has one, and inventing a refusal for a field
+            // that was never sent would ground an agent against a plane that is
+            // working.
+            return None;
+        }
+        Some(TypingRefused {
+            code: typing
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(codes::SCREEN_CHANGED)
+                .to_string(),
+            // The shell's own sentence, verbatim. It is the one written where
+            // both generations sit side by side, and a paraphrase here would be
+            // a second, weaker copy of the only text that names the numbers.
+            why: typing
+                .get("why")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(
+                    "the shell refused to carry text to this limb and gave no reason, which is a plane newer than this build of dvv",
+                )
+                .to_string(),
+        })
     }
 
     fn describe(&self) -> &'static str {
@@ -672,6 +934,155 @@ fn boolean(value: &serde_json::Value, field: &str) -> bool {
         .get(field)
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Which verb one file operation is, and what it carries.
+///
+/// One table, so the spelling of a field exists once. The shell's verbs and
+/// this function are the only two places that name `contentBase64`, and a
+/// disagreement between them would be a transfer that silently moved nothing.
+fn files_request(
+    session_id: &str,
+    op: &FileOp,
+) -> Result<(&'static str, serde_json::Value), ToolError> {
+    use base64::Engine as _;
+    let params = match op {
+        FileOp::Home => return Ok(("files.home", serde_json::json!({ "sessionId": session_id }))),
+        FileOp::List { path } => serde_json::json!({ "sessionId": session_id, "path": path }),
+        FileOp::Get {
+            path,
+            offset,
+            length,
+        } => serde_json::json!({
+            "sessionId": session_id,
+            "path": path,
+            "offset": offset,
+            "length": length,
+        }),
+        FileOp::Put {
+            path,
+            offset,
+            bytes,
+            mode,
+        } => {
+            let mut params = serde_json::json!({
+                "sessionId": session_id,
+                "path": path,
+                "offset": offset,
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+            if let Some(mode) = mode {
+                params["mode"] = serde_json::json!(mode);
+            }
+            params
+        }
+        FileOp::Mkdir { path } => serde_json::json!({ "sessionId": session_id, "path": path }),
+        FileOp::Remove { path, recursive } => serde_json::json!({
+            "sessionId": session_id,
+            "path": path,
+            "recursive": recursive,
+        }),
+        FileOp::Rename { from, to } => serde_json::json!({
+            "sessionId": session_id,
+            "from": from,
+            "to": to,
+        }),
+    };
+    let method = match op {
+        FileOp::Home => "files.home",
+        FileOp::List { .. } => "files.list",
+        FileOp::Get { .. } => "files.get",
+        FileOp::Put { .. } => "files.put",
+        FileOp::Mkdir { .. } => "files.mkdir",
+        FileOp::Remove { .. } => "files.remove",
+        FileOp::Rename { .. } => "files.rename",
+    };
+    Ok((method, params))
+}
+
+/// The shell's answer, in this crate's vocabulary.
+///
+/// # Errors
+///
+/// A [`ToolError`] when the answer does not carry what the verb promises,
+/// which on the `get` path means the base64 did not decode. That is a hard
+/// error and not a partial file: an installer assembled from a window that
+/// decoded three quarters of the way is an installer that fails on somebody
+/// else's machine with nothing to point at.
+fn files_outcome(op: &FileOp, answer: &serde_json::Value) -> Result<FileOutcome, ToolError> {
+    use base64::Engine as _;
+    let number = |field: &str| {
+        answer
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    match op {
+        FileOp::Get { .. } => {
+            let encoded = answer
+                .get("contentBase64")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ToolError::new(
+                        codes::BAD_REQUEST,
+                        "the plane answered a files.get with no contentBase64 in it, so there are no bytes to hand back. Nothing was written locally",
+                    )
+                })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|e| {
+                    ToolError::new(
+                        codes::BAD_REQUEST,
+                        format!("the plane's answer did not decode as base64 and the window is therefore unusable: {e}. Nothing was written locally, because a file assembled from a partly decoded window is corrupt in a way nothing downstream can detect"),
+                    )
+                })?;
+            Ok(FileOutcome::Window {
+                path: string(answer, "path"),
+                offset: number("offset"),
+                bytes,
+                size: number("size"),
+                eof: boolean(answer, "eof"),
+            })
+        }
+        FileOp::List { .. } => {
+            let entries = answer
+                .get("entries")
+                .and_then(serde_json::Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| FileEntry {
+                            name: string(row, "name"),
+                            path: string(row, "path"),
+                            is_dir: boolean(row, "isDir"),
+                            size: row
+                                .get("size")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0),
+                            modified: row.get("modified").and_then(serde_json::Value::as_i64),
+                            mode: row
+                                .get("mode")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0) as u32,
+                            is_symlink: boolean(row, "isSymlink"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(FileOutcome::Listing {
+                path: string(answer, "path"),
+                entries,
+            })
+        }
+        FileOp::Put { .. } => Ok(FileOutcome::Wrote {
+            path: string(answer, "path"),
+            offset: number("offset"),
+            written: number("written"),
+            size: number("size"),
+        }),
+        FileOp::Home | FileOp::Mkdir { .. } | FileOp::Remove { .. } | FileOp::Rename { .. } => {
+            Ok(FileOutcome::Path(string(answer, "path")))
+        }
+    }
 }
 
 /// Turn the plane's attach reply into everything `agent-plane` needs.
@@ -1879,6 +2290,37 @@ impl Plane {
         self.source.describe()
     }
 
+    /// One file operation on a limb's own SFTP sidecar.
+    ///
+    /// The grant is checked here and it is checked split: `files.read` lists
+    /// and downloads, `files.write` uploads, renames, removes and makes
+    /// directories, and neither half implies the other. [`FileOp::capability`]
+    /// is the one table that decides which is which.
+    ///
+    /// Two things this deliberately does NOT do.
+    ///
+    /// **It does not take the control lease.** A lease is arbitration over who
+    /// is driving a screen, and two parties copying two different files off one
+    /// machine do not collide the way two parties moving one pointer do. The
+    /// check that matters is still made, one layer down: the shell refuses
+    /// every file verb on an attachment a person revoked, because somebody who
+    /// took the wheel has taken the machine and not just its pointer.
+    ///
+    /// **It does not ask the limb whether it can move files.** Whether SFTP
+    /// works is a property of the MACHINE, which is whether it runs an SSH
+    /// server this app can authenticate to, and not of the protocol its screen
+    /// happens to arrive on. A static capability set here would be a claim
+    /// this crate has no way to back. The shell asks the real machine and
+    /// refuses with a reason when the answer is no.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] carrying the grant's own refusal, or the source's.
+    pub fn files(&self, limb: &AttachedLimb, op: &FileOp) -> Result<FileOutcome, ToolError> {
+        self.require(op.capability(), op.name())?;
+        self.source.files(limb.id(), op)
+    }
+
     /// A new watcher. Every event from now on, and a lag report if it falls
     /// behind (`00 R24`: never silently).
     pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
@@ -2322,6 +2764,25 @@ impl Plane {
         let now = clock::lease_now();
         let expiries = limb.tick(now);
         self.honour(limb, &expiries, now).await;
+
+        // The content fence, before the geometry one and before an intent id is
+        // minted. Asked here rather than left to the shell alone because a
+        // `Type` is LOWERED: by the time it reaches the socket it is two
+        // keystrokes per character on a fire and forget channel, and a refusal
+        // there would be a warning in a log while this call reported that the
+        // text had been typed. Refusing the intent is the only way the agent
+        // finds out, and `00 R7` is that an action that ends silently is worse
+        // than one that fails loudly.
+        //
+        // It is not the check. The shell applies the same comparison again at
+        // `limb.command`, at the last instant before a keystroke reaches the
+        // session, because a window can open between this answer and the
+        // keystrokes that follow it.
+        if kind.is_text_bearing() {
+            if let Some(refused) = self.source.typing_fence(limb.id()) {
+                return Err(ToolError::new(refused.code, refused.why));
+            }
+        }
 
         let fence = self.fence_for(limb, &kind, generation)?;
         let intent = AgentIntent {
