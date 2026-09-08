@@ -60,6 +60,7 @@ import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
   PREF_FORWARD_INSERTED_TEXT,
+  PREF_TYPE_LOCAL_PASTE,
   PREF_CLIPBOARD_ON_FOCUS,
   PREF_HIDE_TOOLBAR,
   PREF_MATCH_LOCAL_LAYOUT,
@@ -296,6 +297,14 @@ function SessionView({
 
   // Honour the "show remote pointer" preference (Preferences ▸ Input). Purely
   // visual: hiding it does not change what input we send.
+  //
+  // Effects run in declaration order, and the renderer is created by a later
+  // one, so on mount this finds no renderer and does nothing. The creating
+  // effect therefore applies the value itself, from the ref; without that a
+  // fresh session showed the pointer whatever Preferences said, and only a
+  // change made while the session was open ever took effect.
+  const showRemoteCursorRef = useRef(settings.showRemoteCursor);
+  showRemoteCursorRef.current = settings.showRemoteCursor;
   useEffect(() => {
     rendererRef.current?.setCursorVisible(settings.showRemoteCursor);
   }, [settings.showRemoteCursor]);
@@ -432,6 +441,9 @@ function SessionView({
       return;
     }
     rendererRef.current = renderer;
+    // The pointer preference was read before this renderer existed; see the
+    // effect that owns `showRemoteCursorRef`.
+    renderer.setCursorVisible(showRemoteCursorRef.current);
     // Deliberately NOT acking frames back to the shell any more.
     //
     // There was a credit scheme here: the shell held frames until the webview
@@ -631,6 +643,7 @@ function SessionView({
     const sync = (): void => {
       inputRef.current?.setNaturalScroll(readBoolPref(PREF_NATURAL_SCROLL, true));
       inputRef.current?.setForwardInsertedText(readBoolPref(PREF_FORWARD_INSERTED_TEXT, true));
+      inputRef.current?.setTypeLocalPaste(readBoolPref(PREF_TYPE_LOCAL_PASTE, true));
       setHideToolbar(readBoolPref(PREF_HIDE_TOOLBAR, false));
       if (sid) {
         const matchLocal = readBoolPref(PREF_MATCH_LOCAL_LAYOUT, false);

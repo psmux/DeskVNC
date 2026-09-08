@@ -34,6 +34,13 @@ export const PREF_MATCH_LOCAL_LAYOUT = "matchLocalKeyboardLayout";
  */
 export const PREF_FORWARD_INSERTED_TEXT = "forwardInsertedText";
 /**
+ * Type the clipboard on the remote when a paste happens locally in a session:
+ * a Cmd+V that pass-through leaves to macOS, or Edit ▸ Paste. This is how
+ * dictation tools that paste (Wispr Flow) reach the remote desktop. Off, the
+ * paste is cancelled and nothing is sent.
+ */
+export const PREF_TYPE_LOCAL_PASTE = "typeLocalPaste";
+/**
  * Push the local clipboard to the remote right before a forwarded paste
  * chord, so Cmd/Ctrl+V pastes what the clipboard holds at that moment.
  */

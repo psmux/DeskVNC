@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trace-marks"
+description = "Enables the trace_marks command without any pre-configured scope."
+commands.allow = ["trace_marks"]
+
+[[permission]]
+identifier = "deny-trace-marks"
+description = "Denies the trace_marks command without any pre-configured scope."
+commands.deny = ["trace_marks"]

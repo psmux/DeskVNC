@@ -50,6 +50,12 @@ pub mod codes {
     pub const LEASE_NOT_HELD: &str = "LEASE_NOT_HELD";
     /// The lease went away underneath a call that had it.
     pub const LEASE_REVOKED: &str = "LEASE_REVOKED";
+    /// Text was about to be typed into a screen this attachment has not read.
+    ///
+    /// The content fence, `limb_core::fence::ContentFence`. Minted by the shell
+    /// and carried through here unchanged, so the sentence an agent reads is
+    /// the one written where both numbers live.
+    pub const SCREEN_CHANGED: &str = "SCREEN_CHANGED";
 }
 
 /// A tool execution error: something the model can read and self correct from.
@@ -180,6 +186,9 @@ pub fn hint_for(code: &str) -> &'static str {
         "GEOMETRY_CHANGED" => {
             "The screen resized under this action and nothing was delivered. Call dvv_screen again and recompute the coordinate against the new generation."
         }
+        "SCREEN_CHANGED" => {
+            "Something large repainted on that machine since you last looked at it, so nothing was typed. Call dvv_screen, read what has focus and what is selected, and only then type. Do not retry the same keystrokes without looking: this fires when a window, a dialog or an application has appeared over what you were working on."
+        }
         "UNFENCED" => {
             "This action carries a coordinate and no geometry generation. Read the generation from dvv_screen or dvv_status and send it back as generation."
         }
@@ -241,6 +250,7 @@ mod tests {
             "CREDENTIALS_REQUIRED",
             "RATE_LIMITED",
             "GEOMETRY_CHANGED",
+            "SCREEN_CHANGED",
             "UNFENCED",
             "OUT_OF_BOUNDS",
             "UNKNOWN_KEY",

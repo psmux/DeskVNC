@@ -27,7 +27,10 @@ pub struct DecodedRect {
 pub enum RectPayload {
     /// Tightly packed RGBA8888, `rect.width * rect.height * 4` bytes.
     Rgba(Vec<u8>),
-    /// Compressed image the webview can decode via `createImageBitmap`.
+    /// Compressed image. The shell decodes it natively before the update
+    /// reaches the webview (`framing::decode_jpeg_rects`); the webview's
+    /// `createImageBitmap` path remains as the fallback for a tile that
+    /// will not decode or whose size disagrees with its rect.
     Jpeg(Vec<u8>),
     /// Copy from elsewhere in the framebuffer.
     CopyRect { src_x: u16, src_y: u16 },

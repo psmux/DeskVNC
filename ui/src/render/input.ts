@@ -19,7 +19,8 @@
  *                   5=wheel-left 6=wheel-right
  */
 import type { WebGLRenderer } from "./WebGLRenderer";
-import { codePointToKeysym, keyEventToIds, type KeyIds } from "./keysyms";
+import { traceMark } from "./trace";
+import { codePointToKeysym, keyEventToIds, KEYSYM, type KeyIds } from "./keysyms";
 
 /**
  * Hand one packet to the transport.
@@ -248,6 +249,8 @@ export class SessionInput {
   private zoomLocked = false;
   private edgePan = true;
   private forwardInsertedText = true;
+  /** Preferences ▸ Input ▸ "Type a paste that stays on this Mac into the remote". */
+  private typeLocalPaste = true;
   private attached = false;
 
   private buttonMask = 0;
@@ -358,6 +361,11 @@ export class SessionInput {
     this.forwardInsertedText = v;
   }
 
+  /** Preferences ▸ Input ▸ "Type a paste that stays on this Mac into the remote". */
+  setTypeLocalPaste(v: boolean): void {
+    this.typeLocalPaste = v;
+  }
+
   attach(): void {
     if (this.attached) return;
     this.attached = true;
@@ -456,11 +464,7 @@ export class SessionInput {
     el.addEventListener("compositionend", this.onCompositionEnd);
     el.addEventListener("beforeinput", this.onBeforeInput);
     el.addEventListener("input", this.onInputFallback);
-    // A Cmd/Ctrl+V that is NOT being passed through to the remote used to hit
-    // the non-editable canvas and do nothing; keep that contract now that
-    // focus sits on an editable element. Remote paste has its own path
-    // (clipboard sync + the forwarded keystroke under pass-through).
-    el.addEventListener("paste", (ev) => ev.preventDefault());
+    el.addEventListener("paste", this.onLocalPaste);
     // Into the canvas's container (position:relative), so inset:0 tracks the
     // session area with no per-frame geometry syncing.
     (this.canvas.parentElement ?? document.body).appendChild(el);
@@ -980,6 +984,7 @@ export class SessionInput {
   // ------------------------------------------------------------ keyboard
 
   private sendKey(keysym: number, keycode: number, down: boolean): void {
+    traceMark(down ? "key_down" : "key_up", keysym);
     this.keyView.setUint8(0, KIND_KEY);
     this.keyView.setUint8(1, down ? 1 : 0);
     this.keyView.setUint32(2, keysym, true);
@@ -1090,13 +1095,62 @@ export class SessionInput {
       });
   }
 
-  /** Type a string on the remote, one keysym press+release per code point. */
+  /**
+   * A paste that reached the capture element is a paste chord this session
+   * did NOT forward. With pass-through off, a Cmd chord on macOS is left to
+   * the OS so that Cmd+Tab and friends keep meaning what they mean locally,
+   * and the OS answers Cmd+V through Edit ▸ Paste, which ends up here. That
+   * is exactly the chord dictation tools post: Wispr Flow writes the
+   * transcript to the clipboard and synthesizes Cmd+V, so cancelling this
+   * event (which is what it used to do) dropped every dictation aimed at
+   * the remote desktop, measured on the wire as no packet at all. The same
+   * event is also what Edit ▸ Paste picked with the mouse produces.
+   *
+   * The text is typed on the remote rather than pasted there: one key per
+   * code point works in a field or a terminal on any remote OS, and needs
+   * neither clipboard support on the server nor a guess at which chord
+   * pastes on the other side (Cmd+V on a Mac, Ctrl+V in a Windows field,
+   * Ctrl+Shift+V in a Linux terminal, and Super+V, which is what a forwarded
+   * Cmd+V is, opens the clipboard history on Windows). A chord that IS
+   * forwarded never gets here: its keydown is preventDefault'ed, so no paste
+   * happens locally, and `deferForPaste` pushes the clipboard ahead of it.
+   *
+   * Behind a preference, on by default, for anyone who would rather a paste
+   * the session did not forward stay exactly that. Off, the event is still
+   * cancelled: the capture element is not a place text may accumulate.
+   */
+  private onLocalPaste = (ev: ClipboardEvent): void => {
+    ev.preventDefault();
+    if (!this.typeLocalPaste) return;
+    const text = ev.clipboardData?.getData("text/plain") ?? "";
+    if (text) this.forwardText(text);
+  };
+
+  /**
+   * Type a string on the remote, one keysym press+release per code point.
+   *
+   * Line breaks and tabs are keys, not characters: a newline sent as keysym
+   * 0x0a is nothing any server maps, so a dictated or pasted paragraph would
+   * arrive with its lines run together. A CRLF pair is one Return.
+   */
   private forwardText(text: string): void {
     if (this.viewOnly) return;
+    let prev = "";
     for (const ch of text) {
       const cp = ch.codePointAt(0);
       if (cp === undefined) continue;
-      const keysym = codePointToKeysym(cp);
+      let keysym: number;
+      if (ch === "\r" || (ch === "\n" && prev !== "\r")) {
+        keysym = KEYSYM.Return;
+      } else if (ch === "\n") {
+        prev = ch;
+        continue;
+      } else if (ch === "\t") {
+        keysym = KEYSYM.Tab;
+      } else {
+        keysym = codePointToKeysym(cp);
+      }
+      prev = ch;
       this.sendKey(keysym, 0, true);
       this.sendKey(keysym, 0, false);
     }

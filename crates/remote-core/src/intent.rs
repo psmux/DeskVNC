@@ -555,6 +555,36 @@ impl IntentKind {
         )
     }
 
+    /// Does this intent put characters into whatever currently has focus, and
+    /// therefore need a content fence?
+    ///
+    /// The counterpart of [`IntentKind::is_grounded`], and the two lines are
+    /// drawn by the same argument from opposite ends. A grounded intent names
+    /// a place, so what invalidates it is the screen changing SIZE. A text
+    /// bearing intent names no place at all: it goes wherever focus happens to
+    /// be, so what invalidates it is the screen changing CONTENT, which is a
+    /// thing the plane used to have no counter for.
+    ///
+    /// All three keyboard intents are here and `Press` is not the marginal one
+    /// it looks like. The incident behind `ContentFence` was a text editor that
+    /// came up with the whole file selected, and in that state Enter, Delete,
+    /// Ctrl+V and the letter `a` all destroy the file identically. A chord is
+    /// not a safer keystroke than a character; on a selection it is usually a
+    /// more destructive one. `Scancode` is here for the same reason and one
+    /// more: a scancode types whatever the remote layout says that key is, and
+    /// nothing anywhere reports the difference.
+    ///
+    /// What is deliberately NOT here is [`IntentKind::SendBytes`], which is a
+    /// PTY's input. A terminal echoes what it was sent, into a stream the agent
+    /// reads, on a limb with no framebuffer to observe: fencing it would refuse
+    /// every SSH session forever for a screen that does not exist.
+    pub const fn is_text_bearing(&self) -> bool {
+        matches!(
+            self,
+            IntentKind::Type { .. } | IntentKind::Press { .. } | IntentKind::Scancode { .. }
+        )
+    }
+
     /// Must the asking grant hold the control lease?
     ///
     /// The `L` column of `02 §2.4`. Everything that drives, plus the two that

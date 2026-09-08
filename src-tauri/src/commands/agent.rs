@@ -38,6 +38,34 @@ fn ctx_for(app: &AppHandle, state: &AppState) -> Arc<agent::server::Ctx> {
         store: state.store.clone(),
         plane: state.agent.clone(),
         emit: emitter(app),
+        files: filer(app),
+    })
+}
+
+/// How a `files.*` verb reaches the SFTP sidecar.
+///
+/// The same shape as the opener below and for the same reason: the sidecar
+/// lives behind `State<'_, FilesState>`, `Ctx` holds no `AppHandle`, and this
+/// is one of the two places in the application that does. The work is spawned
+/// on the application's runtime and the outcome comes back on a channel,
+/// because `State` is not something a future can hold across an await.
+///
+/// A closure per `Ctx` rather than a process global, which is the difference
+/// from `install_opener`: a global installed by one test is still installed
+/// for the next, and the file verbs are the ones whose interesting behaviour
+/// is what they do when there is NO sidecar.
+fn filer(app: &AppHandle) -> agent::server::Filer {
+    let app = app.clone();
+    Arc::new(move |session_id, ask, tell| {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let answer = crate::commands::files::serve_agent(&app, &session_id, ask).await;
+            // The receiver is gone when the socket task that asked has already
+            // given up on its deadline. Nothing to do about it here: the
+            // transfer either happened or did not, and the plane's own
+            // timeout sentence says so rather than inventing an outcome.
+            let _ = tell.send(answer);
+        });
     })
 }
 

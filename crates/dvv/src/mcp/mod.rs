@@ -17,4 +17,4 @@ pub mod manifest;
 pub mod server;
 
 pub use manifest::{TOOLS_CACHE_SCOPE, TOOLS_TTL_MS, TOOL_COUNT};
-pub use server::{Server, WAIT_CLAMP_MS};
+pub use server::{Server, FILE_WINDOW_BYTES, INLINE_GET_BYTES, WAIT_CLAMP_MS};

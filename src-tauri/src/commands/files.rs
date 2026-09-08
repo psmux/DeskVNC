@@ -33,6 +33,8 @@ use vnc_files::{
     SshConfig, TransferEvent, TransferQueue, MAX_CONCURRENT_TRANSFERS,
 };
 
+use crate::agent::server::{FileAnswer, FileAsk, FileRefusal};
+
 /// Filename of the SSH host-key pin store inside the app data directory.
 /// Pins are not secrets (they are public-key fingerprints), so plain JSON next
 /// to the rest of the app data is the right place, same reasoning as the
@@ -663,6 +665,289 @@ pub async fn files_local_remove(path: String, recursive: Option<bool>) -> Result
         tokio::fs::remove_file(&path).await
     };
     result.map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// The agent plane's half (PRDAgentPlug/02 §5.2, `files.read` / `files.write`)
+// ---------------------------------------------------------------------------
+
+/// Which port the sidecar dials when nothing has said otherwise.
+///
+/// A VNC or RDP session's own port says nothing about SSH, so a machine opened
+/// on 5900 is still asked for SFTP on 22. An SSH session is the one case where
+/// the session already names the right port, and that case is handled by
+/// reading it off the entry rather than by assuming this constant.
+const AGENT_SSH_PORT: u16 = vnc_files::DEFAULT_SSH_PORT;
+
+/// Serve one file operation for the agent plane, connecting the sidecar if
+/// this session has not needed one yet.
+///
+/// This is the whole of what `crate::agent::server`'s `files.*` verbs reach.
+/// It lives here rather than there for the reason the plane's `Ctx` gives:
+/// nothing under `crate::agent` names a Tauri type, and `FilesState` is Tauri
+/// state. The plane holds a closure into this function and knows nothing else
+/// about the sidecar.
+///
+/// # Errors
+///
+/// A [`FileRefusal`] tagged `FILES_UNAVAILABLE` when there is no sidecar to be
+/// had on that machine, which is a fact about the machine rather than about
+/// the call, or `FILES_FAILED` when the sidecar is up and refused this path.
+pub async fn serve_agent(
+    app: &AppHandle,
+    session_id: &str,
+    ask: FileAsk,
+) -> Result<FileAnswer, FileRefusal> {
+    let entry = agent_sidecar(app, session_id).await?;
+    let sftp = &entry.sftp;
+    match ask {
+        FileAsk::Home => sftp
+            .home_dir()
+            .await
+            .map(FileAnswer::Path)
+            .map_err(sidecar_failed),
+        FileAsk::List { path } => {
+            // Resolved before the listing rather than after, so the `path` on
+            // the answer is the absolute one the entries hang off and an agent
+            // that asked for `~` learns what `~` actually was.
+            let resolved = sftp.resolve(&path).await.map_err(sidecar_failed)?;
+            let entries = sftp.list_dir(&resolved).await.map_err(sidecar_failed)?;
+            Ok(FileAnswer::Listing {
+                path: resolved,
+                entries,
+            })
+        }
+        FileAsk::Get {
+            path,
+            offset,
+            length,
+        } => {
+            let resolved = sftp.resolve(&path).await.map_err(sidecar_failed)?;
+            let window = sftp
+                .read_at(&resolved, offset, length)
+                .await
+                .map_err(sidecar_failed)?;
+            Ok(FileAnswer::Window {
+                path: resolved,
+                offset,
+                bytes: window.bytes,
+                size: window.size,
+            })
+        }
+        FileAsk::Put {
+            path,
+            offset,
+            bytes,
+            mode,
+        } => {
+            let written = bytes.len() as u64;
+            let size = sftp
+                .write_at(&path, offset, &bytes, mode)
+                .await
+                .map_err(sidecar_failed)?;
+            // Resolved AFTER the write, deliberately: a path that does not
+            // exist yet cannot be canonicalised, and the whole point of a put
+            // is that the file usually does not exist yet.
+            let path = sftp.resolve(&path).await.unwrap_or(path);
+            Ok(FileAnswer::Wrote {
+                path,
+                offset,
+                written,
+                size,
+            })
+        }
+        FileAsk::Mkdir { path } => {
+            sftp.mkdir(&path).await.map_err(sidecar_failed)?;
+            Ok(FileAnswer::Path(sftp.resolve(&path).await.unwrap_or(path)))
+        }
+        FileAsk::Remove { path, recursive } => {
+            // Resolved first, because after the remove there is nothing left
+            // to resolve and the answer would have to echo back the caller's
+            // own spelling of a path that is now gone.
+            let resolved = sftp.resolve(&path).await.map_err(sidecar_failed)?;
+            sftp.remove(&resolved, recursive)
+                .await
+                .map_err(sidecar_failed)?;
+            Ok(FileAnswer::Path(resolved))
+        }
+        FileAsk::Rename { from, to } => {
+            sftp.rename(&from, &to).await.map_err(sidecar_failed)?;
+            Ok(FileAnswer::Path(sftp.resolve(&to).await.unwrap_or(to)))
+        }
+    }
+}
+
+/// The sidecar for this session, opened now if it was not open already.
+///
+/// **Lazily, and on purpose.** A separate connect verb on the plane would be a
+/// round trip an agent has to know to make, and an agent that does not know to
+/// make it reads a refusal, guesses, and burns a turn. The Files panel gets
+/// the same treatment: it connects when it opens rather than making anybody
+/// press a button.
+///
+/// Two host-key outcomes are hard stops here where the panel prompts, and that
+/// asymmetry is the point. Trust on first use means a PERSON looks at a
+/// fingerprint and accepts it. An agent cannot do that on somebody's behalf,
+/// so an unknown key is refused with the fingerprint in the sentence and the
+/// repair named, and a CHANGED key is refused the way it is refused everywhere
+/// else in this product, with no way to continue.
+async fn agent_sidecar(app: &AppHandle, session_id: &str) -> Result<Arc<FilesEntry>, FileRefusal> {
+    let state = app
+        .try_state::<FilesState>()
+        .ok_or_else(|| FileRefusal::unavailable("this build has no file-transfer state"))?;
+    // Including one a PERSON opened by using the Files panel on this session.
+    // One sidecar per session and not one per party: a second SSH connection
+    // to the same machine would be a second host-key check, a second
+    // authentication and a second thing to close, all to reach the same disk.
+    if let Ok(existing) = state.entry(session_id) {
+        return Ok(existing);
+    }
+
+    // The endpoint comes from the SESSION and never from the agent. That is
+    // `00 R19` on this path: an agent names a machine it is already attached
+    // to and the shell decides which address, which port and which credential
+    // that means, exactly as `limb.open` refuses an arbitrary address.
+    let (address, port, profile_id, window_label) = {
+        let app_state = app
+            .try_state::<crate::state::AppState>()
+            .ok_or_else(|| FileRefusal::unavailable("this build has no session registry"))?;
+        let sessions = app_state.sessions.lock();
+        let entry = sessions.get(session_id).ok_or_else(|| {
+            FileRefusal::unavailable(format!(
+                "there is no session {session_id} in DeskVNCViewer, so there is no machine to open a file transfer to. Call limb.list for the sessions that exist"
+            ))
+        })?;
+        // An SSH session already names the port SFTP rides on.
+        //
+        // Anything else is on a port that says nothing about SSH, and 22 is
+        // only the right guess when nobody has said otherwise. Somebody who
+        // reaches a machine over SSH on another port has usually SAVED that:
+        // the host library is keyed on address and protocol, so a VNC session
+        // to a machine can ask whether a person already recorded how to SSH to
+        // the same one. Without this the sidecar dialled 22 on a machine whose
+        // SSH is on 2222, offered the VNC profile's credential to it, and
+        // refused with "no ssh agent is available" while a working SSH profile
+        // for that exact address sat in the library unused.
+        //
+        // This is still `00 R19`: the agent names a machine it is attached to
+        // and the shell decides what that means. The lookup reads the person's
+        // own saved configuration, never anything the agent supplied.
+        let ssh_profile = if entry.protocol() == vnc_core::ProtocolKind::Ssh {
+            None
+        } else {
+            app_state.store.list_hosts().ok().and_then(|hosts| {
+                hosts.into_iter().find(|h| {
+                    h.protocol == vnc_core::ProtocolKind::Ssh.as_str()
+                        && h.address
+                            .trim()
+                            .trim_end_matches('.')
+                            .eq_ignore_ascii_case(entry.address.trim().trim_end_matches('.'))
+                })
+            })
+        };
+        let (port, profile_id) =
+            match (entry.protocol() == vnc_core::ProtocolKind::Ssh, ssh_profile) {
+                (true, _) => (entry.port, entry.profile_id.clone()),
+                // The saved SSH host carries both halves: the port it listens on
+                // and the credential recorded against it. Taking the port without
+                // the profile would authenticate the wrong machine's password at
+                // the right door.
+                (false, Some(ssh)) => (ssh.port, Some(ssh.id)),
+                (false, None) => (AGENT_SSH_PORT, entry.profile_id.clone()),
+            };
+        (
+            entry.address.clone(),
+            port,
+            profile_id,
+            entry.window_label.clone(),
+        )
+    };
+
+    let auth = build_auth(app, AuthKind::Stored, None, profile_id.as_deref())
+        .await
+        .map_err(FileRefusal::unavailable)?;
+    let cfg = FileTransferConfig {
+        ssh: SshConfig {
+            host: address.clone(),
+            port,
+            // The same "the same user as here" the Files panel uses, which is
+            // right for a personal machine and is the only guess available
+            // when nobody typed a user name.
+            username: local_username().map_err(FileRefusal::unavailable)?,
+            auth,
+            connect_timeout_ms: 15_000,
+        },
+        default_remote_dir: None,
+        conflict: vnc_files::ConflictPolicy::Overwrite,
+    };
+
+    let pins = state.host_keys.clone();
+    let session = match SftpSession::connect(cfg, pins.clone()).await {
+        Ok(session) => session,
+        Err(FilesError::HostKeyUnknown {
+            host,
+            port,
+            key_type,
+            fingerprint,
+        }) => {
+            return Err(FileRefusal::unavailable(format!(
+                "the SSH host key for {host}:{port} has never been trusted on this machine ({key_type} {fingerprint}). Trust on first use means a PERSON looks at that fingerprint and accepts it, and an agent cannot accept it on their behalf. Nothing was transferred. Ask the user to open the Files panel for that machine once in DeskVNCViewer and accept the key, then call this again"
+            )))
+        }
+        Err(FilesError::HostKeyChanged {
+            host,
+            port,
+            expected,
+            actual,
+        }) => {
+            tracing::error!(%host, port, "ssh host key CHANGED, refusing an agent file transfer");
+            return Err(FileRefusal::unavailable(format!(
+                "the SSH host key for {host}:{port} CHANGED: it was {expected} and it is now {actual}. This is a hard stop with no way to continue, here and in the Files panel alike, because the machine answering on that address may not be the machine somebody trusted. Nothing was transferred and nothing will be until a person investigates it"
+            )))
+        }
+        Err(e) => {
+            return Err(FileRefusal::unavailable(format!(
+                "no SFTP sidecar could be opened to {address}:{port}: {e}. File transfer rides SSH on a second connection, so a machine with no SSH server, or one this app cannot authenticate to, has no file transfer at all however well its screen works. Nothing was transferred. Copying over an SSH command with limb.exec is the other way to move a file"
+            )))
+        }
+    };
+
+    pins.lock().touch(&address, port, now_secs());
+    state.persist_pins();
+
+    let home = session.home_dir().await.unwrap_or_else(|_| ".".to_string());
+    let entry = Arc::new(FilesEntry {
+        sftp: Arc::new(session),
+        queue: Arc::new(TransferQueue::new(MAX_CONCURRENT_TRANSFERS)),
+        // The session's own window, so a transfer the agent starts shows its
+        // progress where a person watching that machine would look for it.
+        window_label,
+        home,
+    });
+
+    // Two file verbs arriving at once on a session with no sidecar both get
+    // here, and one of them wins. The loser drops its connection rather than
+    // replacing the winner's, which closes it: `SftpSession` holds the russh
+    // handle and dropping that tears the transport down under the channel.
+    // The alternative, inserting unconditionally, would leave the first
+    // connection open with nothing holding it and no way to close it.
+    let mut sessions = state.sessions.lock();
+    match sessions.get(session_id) {
+        Some(won) => Ok(won.clone()),
+        None => {
+            sessions.insert(session_id.to_string(), entry.clone());
+            drop(sessions);
+            tracing::info!(session = %session_id, endpoint = %format!("{address}:{port}"), "sftp sidecar opened for an agent");
+            Ok(entry)
+        }
+    }
+}
+
+/// The sidecar answered and refused. Its own sentence, unedited: it is the
+/// party that knows whether that was a missing file, a permission or a full
+/// disk, and rewriting it here would lose the only detail worth having.
+fn sidecar_failed(error: FilesError) -> FileRefusal {
+    FileRefusal::failed(error.to_string())
 }
 
 // ---------------------------------------------------------------------------

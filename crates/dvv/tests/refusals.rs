@@ -210,24 +210,39 @@ async fn remote_content_is_labelled_even_when_it_forges_the_label() {
 ///
 /// BrowserGlass's habit, adopted for the reason `04 §4.1` gives: a tool that
 /// lies about being implemented burns an agent's turn and its user's money.
+///
+/// `dvv_files` used to be the example here and is not any more: it moves files
+/// now. `dvv_transfer` is, and its refusal is a different KIND of honest. It
+/// is not owed any wiring: transfers on this surface finish inside the
+/// `dvv_files` call that started them, so there is no id to poll and nothing
+/// in flight to cancel, and the refusal says exactly that rather than implying
+/// somebody forgot to build it.
 #[tokio::test]
 async fn a_tool_with_no_wiring_behind_it_reports_that_and_names_what_is_missing() {
     let (_source, plane) = fake_plane();
     let limb = open(&plane, "h_lab02", false);
     let mut client = Client::connect(plane);
 
-    let files = client
+    let transfer = client
         .tool(
-            "dvv_files",
-            json!({ "limbId": limb, "action": "list", "path": "/" }),
+            "dvv_transfer",
+            json!({ "limbId": limb, "action": "status", "transferId": "t1" }),
         )
         .await;
-    assert_eq!(error_code(&files), Some("NOT_IMPLEMENTED"));
-    assert!(structured(&files)["message"]
+    assert_eq!(error_code(&transfer), Some("NOT_IMPLEMENTED"));
+    let message = structured(&transfer)["message"]
         .as_str()
         .expect("a message")
-        .contains("SFTP"));
-    assert!(structured(&files)["hint"]
+        .to_string();
+    assert!(
+        message.contains("dvv_files"),
+        "the refusal has to name the tool that does the work: {message}"
+    );
+    assert!(
+        message.contains("no transfer id"),
+        "and has to say why there is nothing to poll: {message}"
+    );
+    assert!(structured(&transfer)["hint"]
         .as_str()
         .expect("a hint")
         .contains("Do not retry"));
@@ -245,4 +260,78 @@ async fn a_tool_with_no_wiring_behind_it_reports_that_and_names_what_is_missing(
         .await;
     assert_eq!(error_code(&sent), None, "{sent}");
     assert_eq!(structured(&sent)["outcome"], "delivered");
+}
+
+/// A `Type` the shell would refuse is refused HERE, before it is lowered, and
+/// not one keystroke reaches the wire.
+///
+/// This is the half that makes the content fence honest through this adapter.
+/// A `Type` is lowered: by the time it reaches the socket it is two key events
+/// per character on a fire and forget channel, and the shell refusing them one
+/// at a time would be a warning in a log while `dvv_type` reported that the
+/// text had been typed. `00 R7` is that an action which ends silently is worse
+/// than one that fails loudly, so the adapter asks first and turns the shell's
+/// own sentence into the refusal.
+#[tokio::test]
+async fn text_is_refused_before_it_is_lowered_when_the_shell_says_the_screen_changed() {
+    let (source, plane) = fake_plane();
+    let limb = open(&plane, "h_lab01", true);
+    let mut client = Client::connect(plane);
+    client
+        .tool(
+            "dvv_control",
+            json!({ "limbId": limb, "action": "acquire" }),
+        )
+        .await;
+    let recorder = source.recorder(&limb).expect("a recorder");
+
+    // First, the control: with nothing refusing, the keystrokes go. Without
+    // this the assertion below would pass on a fake that cannot type at all.
+    recorder.clear();
+    let typed = client
+        .tool("dvv_type", json!({ "limbId": limb, "text": "ok" }))
+        .await;
+    assert_eq!(error_code(&typed), None, "{typed}");
+    assert!(
+        recorder
+            .commands()
+            .iter()
+            .any(|command| matches!(command, ClientCommand::Key { .. })),
+        "the control has to actually type, or the refusal below proves nothing"
+    );
+
+    // Then the shell reports that something large repainted since this
+    // attachment last read the screen.
+    source.refuse_typing(
+        &limb,
+        "the screen changed materially since this attachment last read it: it read content generation 2 and the limb is now at 3. Nothing was typed",
+    );
+    recorder.clear();
+    let refused = client
+        .tool("dvv_type", json!({ "limbId": limb, "text": "hello" }))
+        .await;
+    assert_eq!(error_code(&refused), Some("SCREEN_CHANGED"));
+    let message = structured(&refused)["message"].as_str().expect("a message");
+    // The shell's own sentence, verbatim, with both generations in it. A
+    // paraphrase here would be a second, weaker copy of the only text that
+    // names the numbers.
+    assert!(message.contains("content generation 2"), "{message}");
+    assert!(message.contains("now at 3"), "{message}");
+    assert!(structured(&refused)["hint"]
+        .as_str()
+        .expect("a hint")
+        .contains("dvv_screen"));
+    assert!(
+        recorder.commands().is_empty(),
+        "a refusal happens before anything reaches the wire; {:?} did",
+        recorder.commands()
+    );
+
+    // A chord is fenced by the same rule and for the same reason: on a screen
+    // holding a selection, Enter destroys a document as thoroughly as a letter.
+    let key = client
+        .tool("dvv_key", json!({ "limbId": limb, "keys": "Enter" }))
+        .await;
+    assert_eq!(error_code(&key), Some("SCREEN_CHANGED"));
+    assert!(recorder.commands().is_empty());
 }

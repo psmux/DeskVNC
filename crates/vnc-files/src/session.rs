@@ -64,6 +64,21 @@ pub struct RemoteEntry {
     pub is_symlink: bool,
 }
 
+/// One window of a remote file, and the size of the file it came out of.
+///
+/// The size travels with the bytes because the caller that needs it is a
+/// chunk loop, and a loop that had to make a second round trip to ask how far
+/// it had left to go would be a loop that can disagree with itself when the
+/// file changes underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileWindow {
+    /// The bytes, exactly as they are on the far side. Never text: this is
+    /// what makes a `.exe` or a PNG survive the trip.
+    pub bytes: Vec<u8>,
+    /// How many bytes the whole file holds.
+    pub size: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -278,6 +293,138 @@ impl SftpSession {
             self.sftp.remove_dir(dir).await.map_err(Error::sftp)?;
         }
         self.sftp.remove_dir(full).await.map_err(Error::sftp)
+    }
+
+    // ------------------------------------------------------- windowed bytes
+
+    /// Read one window of a remote file, and say how big the whole file is.
+    ///
+    /// The two transfer loops further down move a file into another file,
+    /// which is what a person dragging something between two panes wants.
+    /// The agent plane wants a different shape: bytes it can carry inside a
+    /// JSON envelope that has a hard size cap on it, a window at a time,
+    /// because a 200 MB installer either crosses that envelope in pieces or
+    /// does not cross it at all.
+    ///
+    /// Three properties the caller is entitled to rely on.
+    ///
+    /// **A short read is not the end.** SFTP is free to answer a read with
+    /// fewer bytes than were asked for, so this loops until it has `len`
+    /// bytes or the file ends, and a caller that treated one short read as
+    /// EOF would silently hand back a truncated file.
+    /// **An offset past the end is empty and not an error**, so the caller's
+    /// loop terminates on a zero length window rather than on a failure it
+    /// would have to tell apart from a real one.
+    /// **Nothing is truncated silently.** The window carries the size of the
+    /// whole file beside the bytes, so a caller can see for itself whether it
+    /// has all of it.
+    ///
+    /// # Errors
+    ///
+    /// A [`Error::UnsafePath`] when `remote` names a directory, because a
+    /// directory opened as a file is an error the SFTP server words badly,
+    /// and anything the server itself refused.
+    pub async fn read_at(&self, remote: &str, offset: u64, len: usize) -> Result<FileWindow> {
+        let full = self.resolve(remote).await?;
+        let meta = self
+            .sftp
+            .metadata(full.clone())
+            .await
+            .map_err(Error::sftp)?;
+        if meta.file_type().is_dir() {
+            return Err(Error::UnsafePath(format!(
+                "{full} is a directory, not a file; list it instead of reading it"
+            )));
+        }
+        let size = meta.len();
+        let mut bytes = Vec::new();
+        if offset >= size || len == 0 {
+            return Ok(FileWindow { bytes, size });
+        }
+
+        // Never allocate what the caller asked for, only what the file can
+        // actually supply. A caller asking for four megabytes of a nine byte
+        // file must not cost four megabytes of memory here.
+        let want = len.min((size - offset) as usize);
+        bytes.reserve(want);
+        let mut file = self.sftp.open(full).await.map_err(Error::sftp)?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        let mut buf = vec![0u8; CHUNK.min(want)];
+        while bytes.len() < want {
+            let room = (want - bytes.len()).min(buf.len());
+            let read = file.read(&mut buf[..room]).await?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..read]);
+        }
+        Ok(FileWindow { bytes, size })
+    }
+
+    /// Write one window of bytes into a remote file, and say how big the file
+    /// is afterwards.
+    ///
+    /// `offset` zero TRUNCATES, any other offset writes in place, which is
+    /// what makes a caller's chunk loop resumable and what makes a second
+    /// call with offset zero replace a file rather than leave the tail of an
+    /// older, longer one behind it.
+    ///
+    /// **This is not atomic and does not pretend to be.** A caller whose loop
+    /// dies halfway leaves a short file on the far side, exactly as a killed
+    /// `scp` does. The size that comes back is how a caller notices.
+    ///
+    /// `mode` is applied when it is given and a failure to apply it is
+    /// cosmetic, never fatal, which is `upload_one`'s rule kept: a
+    /// filesystem that does not carry a permission bit should not fail a
+    /// transfer that otherwise worked.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the SFTP server refused, which is usually a missing parent
+    /// directory or a permission the remote user does not have.
+    pub async fn write_at(
+        &self,
+        remote: &str,
+        offset: u64,
+        bytes: &[u8],
+        mode: Option<u32>,
+    ) -> Result<u64> {
+        // Deliberately not `resolve`: resolve canonicalises, and a file that
+        // does not exist yet has nothing to canonicalise. The parent is what
+        // has to exist, so the parent is what is resolved and the name is
+        // joined back on afterwards.
+        let name = path::remote_file_name(remote)?;
+        let parent = self.resolve(&path::remote_parent(remote)?).await?;
+        let full = path::join_remote(&parent, &name)?;
+
+        let flags = if offset == 0 {
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE
+        } else {
+            OpenFlags::CREATE | OpenFlags::WRITE
+        };
+        let mut file = self
+            .sftp
+            .open_with_flags(full.clone(), flags)
+            .await
+            .map_err(Error::sftp)?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+        }
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        file.shutdown().await?;
+
+        if let Some(mode) = mode {
+            let attrs = FileAttributes {
+                permissions: Some(mode & 0o7777),
+                ..Default::default()
+            };
+            if let Err(e) = self.sftp.set_metadata(full.clone(), attrs).await {
+                tracing::debug!("could not set the mode on {full}: {e}");
+            }
+        }
+        let meta = self.sftp.metadata(full).await.map_err(Error::sftp)?;
+        Ok(meta.len())
     }
 
     /// Close the SFTP channel and the SSH connection.

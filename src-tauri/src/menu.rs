@@ -232,6 +232,28 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .close_window()
         .build()?;
 
+    // The six standard editing items, and on macOS they are not optional. A
+    // WKWebView does not perform Cmd+X/C/V/A/Z by itself: a key equivalent
+    // the page leaves unhandled is offered to the main menu, and the paste
+    // happens only when a Paste item with that key equivalent is there to
+    // send `paste:` back down the responder chain. Without this submenu,
+    // Cmd+V in one of the app's own fields did nothing at all, and so did
+    // every dictation tool that inserts by writing the clipboard and posting
+    // Cmd+V, which is how Wispr Flow delivers a transcript (typed keys
+    // arrived, the paste behind them never did). A session is not affected:
+    // its keyboard hook calls preventDefault on the chord it forwards, and a
+    // handled key equivalent never reaches the menu, so under pass-through the
+    // remote still gets the paste and the local field does not.
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
     let connection = SubmenuBuilder::new(app, "Connection")
         .item(&MenuItemBuilder::with_id("menu:connect", "Connect").build(app)?)
         .item(
@@ -534,7 +556,15 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let help = help_builder.build()?;
 
     let menu = builder
-        .items(&[&file, &connection, &view, &session, &window_menu, &help])
+        .items(&[
+            &file,
+            &edit,
+            &connection,
+            &view,
+            &session,
+            &window_menu,
+            &help,
+        ])
         .build()?;
     app.set_menu(menu)?;
 

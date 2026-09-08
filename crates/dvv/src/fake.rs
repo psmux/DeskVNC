@@ -21,8 +21,10 @@
 //! over an unrelated one. A real limb narrows the capability list and
 //! `CapabilitySet::intersect` does the rest.
 
-use crate::error::ToolError;
-use crate::plane::{HostRecord, OpenRequest, SessionSource};
+use crate::error::{codes, ToolError};
+use crate::plane::{
+    FileEntry, FileOp, FileOutcome, HostRecord, OpenRequest, SessionSource, TypingRefused,
+};
 use agent_plane::{Attach, Damage, Frame, FrameSource, LimbRegistry, PerceptionUnavailable};
 use limb_core::capability::Capability;
 use limb_core::fence::GeometryGeneration;
@@ -49,6 +51,13 @@ use tokio::sync::mpsc;
 /// and a smaller number here would make the plane shed in a test for reasons
 /// the test is not about.
 const CHANNEL: usize = 256;
+
+/// Where `~` goes on a fake machine.
+///
+/// Named rather than spelled inline, because the tests assert on the absolute
+/// path a listing comes back with and a second spelling of it would be a test
+/// that passes against itself.
+pub const FAKE_HOME: &str = "/home/agent";
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -381,6 +390,29 @@ pub struct FakeSource {
     channels: Mutex<BTreeMap<String, mpsc::Sender<ClientCommand>>>,
     mirrors: Mutex<BTreeMap<String, Arc<FakeFrames>>>,
     states: Mutex<BTreeMap<String, SessionState>>,
+    /// The SFTP sidecar every fake machine shares: a map from an absolute
+    /// path to the bytes at it.
+    ///
+    /// A map and NOT a filesystem. There are no permissions here, no
+    /// ownership, no symlinks and no disk that can be full, because what the
+    /// tests over this are about is the plane's own gates and a file surviving
+    /// them byte for byte. A fake that reimplemented SFTP would be a second
+    /// implementation to disagree with the first.
+    ///
+    /// Shared by every limb, which is the one place this is more generous than
+    /// the real thing, and it is the same generosity the rest of this file
+    /// already takes: a test about one refusal should not trip over an
+    /// unrelated one.
+    disk: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// Which limbs the shell would currently refuse text on, and the sentence
+    /// it would refuse with.
+    ///
+    /// Empty by default, which is the honest answer for a fake: the content
+    /// fence's two numbers live in the shell, beside the damage stream, and
+    /// there is no damage stream here. A test that wants to prove the adapter
+    /// stops a `Type` before lowering it says so with
+    /// [`FakeSource::refuse_typing`].
+    typing_refusals: Mutex<BTreeMap<String, TypingRefused>>,
 }
 
 impl FakeSource {
@@ -392,6 +424,8 @@ impl FakeSource {
             channels: Mutex::new(BTreeMap::new()),
             mirrors: Mutex::new(BTreeMap::new()),
             states: Mutex::new(BTreeMap::new()),
+            disk: Mutex::new(BTreeMap::new()),
+            typing_refusals: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -409,6 +443,18 @@ impl FakeSource {
         lock(&self.recorders).get(limb).cloned()
     }
 
+    /// Make this limb answer the way a shell whose screen has changed under
+    /// the agent answers.
+    pub fn refuse_typing(&self, limb: &str, why: &str) {
+        lock(&self.typing_refusals).insert(
+            limb.to_string(),
+            TypingRefused {
+                code: codes::SCREEN_CHANGED.to_string(),
+                why: why.to_string(),
+            },
+        );
+    }
+
     /// This limb's mirror, so a test can say that something changed.
     pub fn mirror(&self, limb: &str) -> Option<Arc<FakeFrames>> {
         lock(&self.mirrors).get(limb).cloned()
@@ -418,6 +464,34 @@ impl FakeSource {
     /// will.
     pub fn set_state(&self, limb: &str, state: SessionState) {
         lock(&self.states).insert(limb.to_string(), state);
+    }
+
+    /// Put a file on the fake machines, so a test can download one that was
+    /// already there rather than only one it uploaded a moment ago.
+    pub fn seed_file(&self, path: &str, bytes: &[u8]) {
+        lock(&self.disk).insert(FakeSource::resolve(path), bytes.to_vec());
+    }
+
+    /// What is at that path now, so a test can assert on what an upload
+    /// actually left behind rather than on what the answer said it did.
+    pub fn file(&self, path: &str) -> Option<Vec<u8>> {
+        lock(&self.disk).get(&FakeSource::resolve(path)).cloned()
+    }
+
+    /// `~` and a relative path both land under [`FAKE_HOME`], which is what
+    /// the real sidecar's own `resolve` does with them.
+    fn resolve(path: &str) -> String {
+        let path = path.trim();
+        if path == "~" {
+            return FAKE_HOME.to_string();
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return format!("{FAKE_HOME}/{rest}");
+        }
+        if path.starts_with('/') {
+            return path.trim_end_matches('/').to_string();
+        }
+        format!("{FAKE_HOME}/{path}")
     }
 
     /// What a machine at a slot would be called, without opening it.
@@ -562,6 +636,116 @@ impl SessionSource for FakeSource {
 
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
         lock(&self.states).get(limb.as_str()).cloned()
+    }
+
+    fn typing_fence(&self, limb: &LimbId) -> Option<TypingRefused> {
+        lock(&self.typing_refusals).get(limb.as_str()).cloned()
+    }
+
+    /// One file operation against the map.
+    ///
+    /// The interesting behaviour is the windowing, because that is what the
+    /// real sidecar does and what a test of a large file has to exercise:
+    /// `Get` answers at most `length` bytes and says whether it reached the
+    /// end, and `Put` truncates at offset zero and writes in place at any
+    /// other offset. Everything else is a `BTreeMap`.
+    fn files(&self, _limb: &LimbId, op: &FileOp) -> Result<FileOutcome, ToolError> {
+        match op {
+            FileOp::Home => Ok(FileOutcome::Path(FAKE_HOME.to_string())),
+            FileOp::List { path } => {
+                let dir = FakeSource::resolve(path);
+                let prefix = format!("{dir}/");
+                let entries = lock(&self.disk)
+                    .iter()
+                    .filter_map(|(full, bytes)| {
+                        let name = full.strip_prefix(&prefix)?;
+                        if name.contains('/') {
+                            return None;
+                        }
+                        Some(FileEntry {
+                            name: name.to_string(),
+                            path: full.clone(),
+                            is_dir: false,
+                            size: bytes.len() as u64,
+                            modified: Some(1),
+                            mode: 0o644,
+                            is_symlink: false,
+                        })
+                    })
+                    .collect();
+                Ok(FileOutcome::Listing { path: dir, entries })
+            }
+            FileOp::Get {
+                path,
+                offset,
+                length,
+            } => {
+                let full = FakeSource::resolve(path);
+                let disk = lock(&self.disk);
+                let bytes = disk.get(&full).ok_or_else(|| {
+                    ToolError::new(
+                        crate::error::codes::BAD_REQUEST,
+                        format!("no such file: {full}"),
+                    )
+                })?;
+                let size = bytes.len() as u64;
+                let from = (*offset as usize).min(bytes.len());
+                let to = from.saturating_add(*length as usize).min(bytes.len());
+                let window = bytes[from..to].to_vec();
+                let eof = to as u64 >= size;
+                Ok(FileOutcome::Window {
+                    path: full,
+                    offset: *offset,
+                    bytes: window,
+                    size,
+                    eof,
+                })
+            }
+            FileOp::Put {
+                path,
+                offset,
+                bytes,
+                mode: _,
+            } => {
+                let full = FakeSource::resolve(path);
+                let mut disk = lock(&self.disk);
+                let file = disk.entry(full.clone()).or_default();
+                if *offset == 0 {
+                    file.clear();
+                }
+                let at = *offset as usize;
+                let end = at + bytes.len();
+                if file.len() < end {
+                    file.resize(end, 0);
+                }
+                file[at..end].copy_from_slice(bytes);
+                Ok(FileOutcome::Wrote {
+                    path: full,
+                    offset: *offset,
+                    written: bytes.len() as u64,
+                    size: file.len() as u64,
+                })
+            }
+            FileOp::Mkdir { path } => Ok(FileOutcome::Path(FakeSource::resolve(path))),
+            FileOp::Remove { path, .. } => {
+                let full = FakeSource::resolve(path);
+                lock(&self.disk).remove(&full);
+                Ok(FileOutcome::Path(full))
+            }
+            FileOp::Rename { from, to } => {
+                let from = FakeSource::resolve(from);
+                let to = FakeSource::resolve(to);
+                let mut disk = lock(&self.disk);
+                let bytes = disk.remove(&from).ok_or_else(|| {
+                    ToolError::new(
+                        crate::error::codes::BAD_REQUEST,
+                        format!("no such file: {from}"),
+                    )
+                })?;
+                disk.insert(to.clone(), bytes);
+                Ok(FileOutcome::Path(to))
+            }
+        }
     }
 
     fn describe(&self) -> &'static str {

@@ -10,6 +10,98 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-08
+
+Typing into a terminal on a LAN Windows desktop felt like typing over a
+satellite link. Measured with the new trace (`DVV_TRACE_PROTOCOL=1` now also
+stamps the webview's own timeline: key seen by JavaScript, frame received,
+frame applied, frame drawn), a keystroke took a median 370 ms from the OS key
+event to the painted echo, and 440 ms at the slow end, on an 8 ms link. Two
+causes, both in the client.
+
+### Fixed
+
+- The once a second round-trip probe cost a whole screen. On a server
+  without Fence the client times the link by asking, non-incrementally, for
+  one pixel. Both of the author's Windows servers answer any non-incremental
+  request with the entire desktop, and the pipelined request behind it with
+  the entire desktop again: 136 rects and 3.7 MB decoded, twice, every quiet
+  second, on a still text screen. The probe now notices that its answer was
+  most of the screen twice running and switches itself off for the session;
+  the passive readout that already existed carries the round-trip figure
+  from then on. Over a 576 second session before the change the probe went
+  out 171 times and 311 full-screen repaints came back for it. After, one
+  probe and none.
+
+- JPEG tiles were decoded on the webview's main thread. Each of those
+  full-screen repaints took 89 to 116 ms inside `createImageBitmap`, on the
+  thread that also has to notice the next keystroke; a keydown posted during
+  one waited 63 ms to be seen by JavaScript at all. The shell now decodes
+  JPEG rects natively (zune-jpeg, already in the tree for thumbnails) on the
+  event forwarding task, before the update crosses into the webview. The
+  same 136-rect screen applies in 1 to 3 ms as RGBA and costs about 4 ms
+  more to cross the IPC. The webview decoder stays as the fallback for a
+  tile that will not decode or whose size disagrees with its rect, so the
+  wire format is unchanged. The agent mirror is fed from the same rects and
+  gets pixels without a decoder of its own.
+
+After both, the same keystrokes on the same host: median 51 ms from the OS
+key event to the painted echo, 111 ms at the slow end, of which 30 to 40 ms
+is the server noticing the change and encoding it. The client's share is
+about 16 ms to the socket and 5 to 10 ms from the frame arriving to the
+pixel.
+
+- **Cmd+V did nothing in the app's own text fields on macOS, and neither did
+  dictation.** Wispr Flow and its relatives insert a transcript by writing it
+  to the clipboard and posting Cmd+V, and that paste never landed in a host
+  name, a Connect box or a search field, while typed keys did. The menu bar
+  was built without an Edit menu. A WKWebView does not perform Cmd+X, C, V, A
+  or Z by itself: a key equivalent the page leaves alone is offered to the
+  main menu, and the paste happens only when a Paste item with that key
+  equivalent is there to send it back. The Edit menu now carries the six
+  standard items. A session is unaffected, since its keyboard hook takes the
+  forwarded chord before the menu is consulted, so pass-through still pastes
+  on the remote and never locally.
+
+- **Dictation now reaches the remote desktop from a Mac.** With pass-through
+  off (the default), a Cmd chord is left to macOS so that Cmd+Tab keeps
+  switching local windows, and that included Cmd+V: the session neither
+  forwarded it nor did anything with the paste it produced, measured on the
+  wire as no packet at all. Wispr Flow delivers every transcript that way,
+  by writing the clipboard and posting Cmd+V, so nothing dictated at a
+  session ever arrived; Ctrl+V, which is forwarded with a clipboard push
+  ahead of it, was the only paste that worked. The paste that lands on the
+  session's capture element is now typed on the remote, one key per
+  character, which works in a field or a terminal on any remote system and
+  needs no clipboard support on the server. Edit ▸ Paste picked with the
+  mouse does the same. Preferences ▸ Input ▸ "Type a paste that stays on
+  this Mac into the remote" switches it off for anyone who would rather such
+  a paste stay local. It is on by default. Line breaks and tabs in typed
+  text now go out as Return and Tab. A newline used to be sent as keysym
+  0x0a, which no server maps, so a dictated paragraph arrived with its lines
+  run together.
+
+- **"Show the remote pointer" was ignored by every new session.** The
+  preference was applied by an effect that ran before the session's renderer
+  existed, so a fresh session always drew the remote pointer, whatever
+  Preferences said, and only changing the setting while the session was open
+  made any difference. The renderer now takes the stored value the moment it
+  is created.
+
+### Added
+
+- `DVV_TRACE_PROTOCOL=1` marks the webview timeline in the same log as the
+  wire trace (`trace_enabled` and `trace_marks` commands, off unless the
+  variable is set; a mark costs one boolean test otherwise). `tools/keylatency`
+  holds the harness that produced the numbers above: it posts real OS key
+  events into the session window, reads the log, and prints one timeline per
+  keystroke.
+
+### Note on the version
+
+Minor. Two commands are added to the IPC contract and the frame path now
+carries RGBA where it carried JPEG. Nothing stored changes.
+
 ## [0.26.4] - 2026-09-08
 
 ### Changed

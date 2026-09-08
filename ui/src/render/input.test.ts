@@ -572,3 +572,85 @@ describe("what may be coalesced on the way to the wire", () => {
     expect(keys).toEqual([undefined, undefined]);
   });
 });
+
+const KIND_KEY = 1;
+const KEY_LEN = 10;
+const RETURN = 0xff0d;
+
+/** Decode every key event out of the packets that were sent: [keysym, down]. */
+function keyEvents(packets: Uint8Array[]): [number, boolean][] {
+  const out: [number, boolean][] = [];
+  for (const packet of packets) {
+    const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+    let at = 0;
+    while (at + KEY_LEN <= packet.byteLength && view.getUint8(at) === KIND_KEY) {
+      out.push([view.getUint32(at + 2, true), view.getUint8(at + 1) === 1]);
+      at += KEY_LEN;
+    }
+  }
+  return out;
+}
+
+/** Fire a paste at the capture element the way the OS does when a Cmd+V the
+ *  session left alone is answered through Edit ▸ Paste. jsdom has no
+ *  ClipboardEvent, so the clipboard payload is grafted onto a plain event. */
+function pasteInto(text: string): Event {
+  // The newest one: earlier suites leave their own capture elements behind.
+  const all = document.querySelectorAll<HTMLTextAreaElement>("[data-remote-capture]");
+  const el = all[all.length - 1];
+  if (!el) throw new Error("no capture element");
+  const ev = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(ev, "clipboardData", { value: { getData: () => text } });
+  el.dispatchEvent(ev);
+  return ev;
+}
+
+describe("a paste the session did not forward as a chord", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("is typed on the remote, with line breaks as Return", () => {
+    // Wispr Flow and its relatives deliver a transcript by writing the
+    // clipboard and posting Cmd+V; with pass-through off that chord is the
+    // OS's, and the paste it produces lands on the capture element.
+    const { sent } = setup();
+    const ev = pasteInto("hi\r\nx\n");
+    expect(ev.defaultPrevented).toBe(true);
+    expect(keyEvents(sent)).toEqual([
+      [0x68, true],
+      [0x68, false],
+      [0x69, true],
+      [0x69, false],
+      [RETURN, true],
+      [RETURN, false],
+      [0x78, true],
+      [0x78, false],
+      [RETURN, true],
+      [RETURN, false],
+    ]);
+  });
+
+  it("types nothing for an empty clipboard or a view-only session", () => {
+    const { input, sent } = setup();
+    pasteInto("");
+    expect(sent).toHaveLength(0);
+    input.setViewOnly(true);
+    pasteInto("abc");
+    expect(sent).toHaveLength(0);
+  });
+
+  it("is cancelled and sends nothing with the preference off", () => {
+    const { input, sent } = setup();
+    input.setTypeLocalPaste(false);
+    const ev = pasteInto("abc");
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sent).toHaveLength(0);
+    input.setTypeLocalPaste(true);
+    pasteInto("a");
+    expect(keyEvents(sent)).toEqual([
+      [0x61, true],
+      [0x61, false],
+    ]);
+  });
+});
