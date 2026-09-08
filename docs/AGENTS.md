@@ -52,6 +52,133 @@ how the agent reached it.
    (protocols and whether a credential is stored, never the credential itself),
    take screenshots, and send input, subject to the capabilities on its grant.
 
+## Other clients
+
+`dvv` is an ordinary MCP server. It answers the `initialize` handshake of
+every MCP revision shipped so far, and the 2026-07-28 revision's
+`server/discover`, so any client that speaks MCP over stdio or Streamable HTTP
+can use it. Two shapes cover all of them: a command to spawn, or a URL plus a
+bearer header. The paths below are the installed macOS bundle; on Windows and
+Linux use the `dvv` binary beside the app.
+
+The ones marked verified were connected from this repository's own machine
+against the 0.27.1 build. The others are the client's documented shape at the
+time of writing and are worth a glance at that client's current docs.
+
+**Claude Code** (verified, both transports):
+
+```sh
+claude mcp add --scope user deskvnc -- /Applications/DeskVNCViewer.app/Contents/MacOS/dvv mcp --stdio
+claude mcp add --scope user --transport http deskvnc http://127.0.0.1:7333/mcp --header "Authorization: Bearer $DVV_MCP_TOKEN"
+```
+
+**OpenCode** (verified, both transports), in `opencode.json` at the project
+root or `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "deskvnc": {
+      "type": "local",
+      "command": ["/Applications/DeskVNCViewer.app/Contents/MacOS/dvv", "mcp", "--stdio"],
+      "enabled": true
+    },
+    "deskvnc-http": {
+      "type": "remote",
+      "url": "http://127.0.0.1:7333/mcp",
+      "headers": { "Authorization": "Bearer <token>" },
+      "enabled": true
+    }
+  }
+}
+```
+
+**Codex CLI**, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.deskvnc]
+command = "/Applications/DeskVNCViewer.app/Contents/MacOS/dvv"
+args = ["mcp", "--stdio"]
+```
+
+**Cursor, Windsurf, VS Code** and the other editors that read an `mcp.json`
+(`.cursor/mcp.json`, `~/.codeium/windsurf/mcp_config.json`, `.vscode/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "deskvnc": {
+      "command": "/Applications/DeskVNCViewer.app/Contents/MacOS/dvv",
+      "args": ["mcp", "--stdio"]
+    }
+  }
+}
+```
+
+VS Code uses the key `servers` rather than `mcpServers` and takes
+`"type": "stdio"` on the entry. For the HTTP transport in any of these, replace
+`command` and `args` with `"url": "http://127.0.0.1:7333/mcp"` and a
+`"headers": { "Authorization": "Bearer <token>" }` block.
+
+**Gemini CLI**, in `~/.gemini/settings.json`, takes the same `mcpServers`
+block as above, with `httpUrl` in place of `url` for the HTTP transport.
+
+**Python agents.** With the official `mcp` package:
+
+```python
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+params = StdioServerParameters(
+    command="/Applications/DeskVNCViewer.app/Contents/MacOS/dvv",
+    args=["mcp", "--stdio"],
+)
+async with stdio_client(params) as (read, write):
+    async with ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        limbs = await session.call_tool("dvv_limbs", {})
+```
+
+With PydanticAI, the same two shapes are `MCPServerStdio(command, args=[...])`
+and `MCPServerStreamableHTTP(url, headers={...})`, passed in the agent's
+`toolsets`. LangChain's `langchain-mcp-adapters` takes a dictionary with
+`transport: "stdio"` or `transport: "streamable_http"` in the same terms.
+
+### Reaching it from another machine
+
+The HTTP listener binds `127.0.0.1` unless told otherwise. `dvv mcp --http
+--host 0.0.0.0` (or an interface address) makes it reachable from the network,
+and the server prints an exposure warning when you do, because the bearer
+token is then the only thing between the network and your desktops and it
+travels in clear over plain HTTP. On a network you do not control, keep the
+loopback bind and reach it over an SSH tunnel, or put a TLS terminator in
+front of it. Set the token yourself with `DVV_MCP_TOKEN` so it survives a
+restart; without it `dvv` mints one and prints it once.
+
+A client elsewhere connects to this machine's address on that network, not to
+the bind address, and DeskVNCViewer has to be running on this machine: it
+holds the sessions, the keychain and the windows the agent drives.
+
+### Several machines at once
+
+Every open machine is its own limb with its own lease, so an agent runs as
+many loops as it has machines. For the same action across a set,
+`dvv_group_open` returns a `groupId`, `dvv_group_run` runs one action on every
+member concurrently and reports each outcome separately, and any single limb
+tool takes `groupId` plus `member` to address one of them. `dvv_group_close`
+ends the set.
+
+### A skill for Claude Code
+
+`skills/deskvnc/SKILL.md` in this repository teaches the loop above, the lease
+rule and the group tools. Copy the `deskvnc` directory into `~/.claude/skills/`
+(or a project's `.claude/skills/`) and Claude Code loads it when a task
+involves driving a machine. The server's own `instructions`, sent on
+`initialize`, carry the four rules that matter most, so a client that passes
+those to its model already has the essentials without the skill.
+
 ## The loop, concretely
 
 Four calls. Open, take the wheel, look, act.

@@ -54,7 +54,10 @@ hand.
   that speaks MCP, at it. There is a one-click button that registers it with
   Claude Code for you. It answers the `initialize` handshake of every MCP
   revision shipped so far as well as the 2026-07-28 revision's
-  `server/discover`, so whichever one your client speaks, it connects.
+  `server/discover`, so whichever one your client speaks, it connects. Claude
+  Code and OpenCode are verified over both transports; the configuration for
+  Codex, Cursor, Gemini CLI, VS Code and Python agents is in
+  [the integration notes](docs/AGENTS.md#other-clients).
 - **The agent drives the same session you would.** It can open one of your saved
   machines, read your host library (never the stored passwords), take a
   screenshot, and send input. A badge shows when an agent is driving a pane.
