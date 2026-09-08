@@ -7,7 +7,10 @@
 //! reader, a dispatch table and a writer, and `04 §1` already rules that MCP is
 //! an adapter over the native surface rather than the contract, so an SDK here
 //! would be a dependency the DMG has to carry (`00 R40`) for about a hundred
-//! lines.
+//! lines. The earlier revisions' `initialize` is one more entry in that
+//! dispatch table (see [`crate::CLASSIC_PROTOCOL_VERSIONS`]), and their
+//! `initialized` notification is a notification like any other: read, and
+//! never answered.
 //!
 //! ## The framing
 //!
