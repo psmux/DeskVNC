@@ -56,6 +56,14 @@
 //! on the header while this server acts on the body is a security bug and not a
 //! cosmetic one.
 //!
+//! A client on one of the revisions before 2026-07-28 (every installed one at
+//! the time of writing, Claude Code included) is served on this same endpoint:
+//! its `initialize` is answered, its `MCP-Protocol-Version` header is accepted
+//! with the revision it names, and the mirrored `Mcp-Method` and `Mcp-Name`
+//! headers, which those revisions do not have, are not demanded of it. The
+//! header and body rules below apply in full to a request that claims
+//! 2026-07-28.
+//!
 //! The 2026-07-28 revision removed the GET stream and the `Mcp-Session-Id`
 //! session, so GET and DELETE answer `405` here, which is what the
 //! specification's own backward compatibility section asks a server of this
@@ -605,36 +613,56 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn header_refusal(headers: &HeaderMap, message: &Request) -> Option<Response<Full<Bytes>>> {
     let id = message.id.clone().unwrap_or(Value::Null);
 
-    let Some(version) = header_str(headers, PROTOCOL_VERSION_HEADER) else {
-        return Some(mismatch(
-            id,
-            format!(
-                "MCP-Protocol-Version is required on every POST to this endpoint. This server speaks MCP {} and nothing earlier, so a request without the header cannot be assumed to be an older client's.",
-                crate::MCP_PROTOCOL_VERSION
-            ),
-        ));
-    };
-    if version != crate::MCP_PROTOCOL_VERSION {
-        return Some(json_error(
-            StatusCode::BAD_REQUEST,
-            id,
-            UNSUPPORTED_PROTOCOL_VERSION,
-            format!(
-                "this server speaks MCP {} and not {version}. The two are not wire compatible: one has initialize and Mcp-Session-Id, the other has server/discover and _meta.",
-                crate::MCP_PROTOCOL_VERSION
-            ),
-            Some(json!({ "supported": [crate::MCP_PROTOCOL_VERSION] })),
-        ));
-    }
-    if let Some(in_body) = body_protocol_version(message) {
-        if in_body != version {
+    let in_header = header_str(headers, PROTOCOL_VERSION_HEADER);
+    let in_body = body_protocol_version(message);
+    if let (Some(header), Some(body)) = (&in_header, &in_body) {
+        if header != body {
             return Some(mismatch(
                 id,
                 format!(
-                    "MCP-Protocol-Version says {version:?} and the body's _meta says {in_body:?}. The body is the source of truth and the header must mirror it."
+                    "MCP-Protocol-Version says {header:?} and the body's _meta says {body:?}. The body is the source of truth and the header must mirror it."
                 ),
             ));
         }
+    }
+
+    // The revisions before 2026-07-28 carry the version in the header once
+    // the handshake is done and nowhere at all on the handshake itself, and
+    // they have no Mcp-Method or Mcp-Name to mirror. A request under one of
+    // them, or a request that names no revision anywhere, is served on its
+    // body alone: the mirrored headers exist so a gateway can route without
+    // parsing, and a client that does not send them has given a gateway
+    // nothing to disagree with. Refusing here is what made the one-click
+    // registration in the app produce a server no installed client could
+    // reach, and the stdio path never had these headers to refuse on.
+    let claimed = in_header.clone().or(in_body);
+    match claimed.as_deref() {
+        None => return None,
+        Some(version) if crate::is_classic_version(version) => return None,
+        Some(version) if version == crate::MCP_PROTOCOL_VERSION => {}
+        Some(version) => {
+            let mut supported = vec![crate::MCP_PROTOCOL_VERSION];
+            supported.extend_from_slice(crate::CLASSIC_PROTOCOL_VERSIONS);
+            return Some(json_error(
+                StatusCode::BAD_REQUEST,
+                id,
+                UNSUPPORTED_PROTOCOL_VERSION,
+                format!(
+                    "this server speaks MCP {} and the revisions before it, and {version} is none of them.",
+                    crate::MCP_PROTOCOL_VERSION
+                ),
+                Some(json!({ "supported": supported })),
+            ));
+        }
+    }
+    if in_header.is_none() {
+        return Some(mismatch(
+            id,
+            format!(
+                "MCP-Protocol-Version is required on every POST under MCP {}, and this body's _meta claims that revision without the header to match.",
+                crate::MCP_PROTOCOL_VERSION
+            ),
+        ));
     }
 
     let Some(method) = header_str(headers, METHOD_HEADER) else {
@@ -929,6 +957,44 @@ mod tests {
 
         let no_version = headers(&[("mcp-method", "tools/call"), ("mcp-name", "dvv_limbs")]);
         assert!(header_refusal(&no_version, &message).is_some());
+    }
+
+    #[test]
+    fn a_client_on_an_earlier_revision_is_served_on_its_body_alone() {
+        // Claude Code's opening request: no MCP-Protocol-Version yet (the
+        // handshake is what establishes one), no Mcp-Method, no Mcp-Name.
+        let initialize = Request {
+            id: Some(json!(0)),
+            method: "initialize".to_string(),
+            params: json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "claude-code", "version": "2" } }),
+            meta: json!({}),
+        };
+        assert!(header_refusal(&headers(&[]), &initialize).is_none());
+
+        // And every request after it, carrying the negotiated revision in
+        // the header and nothing else.
+        let call = Request {
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "dvv_limbs", "arguments": {} }),
+            meta: json!({}),
+        };
+        for version in crate::CLASSIC_PROTOCOL_VERSIONS {
+            let classic = headers(&[("mcp-protocol-version", version)]);
+            assert!(header_refusal(&classic, &call).is_none(), "{version}");
+        }
+
+        // A revision nobody speaks is still refused, and the refusal lists
+        // what would have worked.
+        let unknown = headers(&[("mcp-protocol-version", "2031-01-01")]);
+        assert!(header_refusal(&unknown, &call).is_some());
+
+        // A body that claims 2026-07-28 is held to that revision's rules.
+        let claims_new = Request {
+            meta: json!({ "protocolVersion": crate::MCP_PROTOCOL_VERSION }),
+            ..call.clone()
+        };
+        assert!(header_refusal(&headers(&[]), &claims_new).is_some());
     }
 
     #[test]

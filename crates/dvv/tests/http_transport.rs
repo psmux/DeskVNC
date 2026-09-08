@@ -420,24 +420,29 @@ async fn headers_that_disagree_with_the_body_are_refused() {
     assert_eq!(bare.status, 400, "{}", bare.body);
     assert_eq!(bare.json()["error"]["code"], HEADER_MISMATCH);
 
-    // A version this server does not speak, which is its own code and carries
-    // the list of versions that would have worked.
-    let old = post(
+    // A version nobody speaks, which is its own code and carries the list of
+    // versions that would have worked: the current revision first, then the
+    // earlier ones this server answers `initialize` for.
+    let unknown = post(
         live.address,
         &[
             ("Authorization", BEARER),
-            ("MCP-Protocol-Version", "2025-11-25"),
+            ("MCP-Protocol-Version", "2031-01-01"),
             ("Mcp-Method", "tools/call"),
             ("Mcp-Name", "dvv_limbs"),
         ],
         &body,
     )
     .await;
-    assert_eq!(old.status, 400, "{}", old.body);
-    assert_eq!(old.json()["error"]["code"], -32022);
+    assert_eq!(unknown.status, 400, "{}", unknown.body);
+    assert_eq!(unknown.json()["error"]["code"], -32022);
     assert_eq!(
-        old.json()["error"]["data"]["supported"][0],
+        unknown.json()["error"]["data"]["supported"][0],
         dvv::MCP_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        unknown.json()["error"]["data"]["supported"][1],
+        dvv::CLASSIC_PROTOCOL_VERSIONS[0]
     );
 }
 
@@ -547,4 +552,60 @@ async fn there_is_one_endpoint_and_it_is_not_the_root() {
     .await;
     assert_eq!(answer.status, 404, "{}", answer.body);
     assert!(answer.body.contains("/mcp"), "{}", answer.body);
+}
+
+/// Claude Code over HTTP: `initialize` with no MCP header at all, then every
+/// request carrying only the revision it negotiated. None of the mirrored
+/// headers exist under that revision, so none may be demanded.
+#[tokio::test]
+async fn a_client_on_an_earlier_revision_is_served_without_the_mirrored_headers() {
+    let live = listening(Vec::new()).await;
+    let init = post(
+        live.address,
+        &[("Authorization", BEARER)],
+        &json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "claude-code", "version": "2" } },
+        }),
+    )
+    .await;
+    assert_eq!(init.status, 200, "{}", init.body);
+    assert_eq!(init.json()["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(init.json()["result"]["serverInfo"]["name"], "deskvnc");
+
+    let classic = [
+        ("Authorization", BEARER),
+        ("MCP-Protocol-Version", "2025-06-18"),
+    ];
+    let done = post(
+        live.address,
+        &classic,
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .await;
+    assert_eq!(done.status, 202, "{}", done.body);
+
+    let list = post(
+        live.address,
+        &classic,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(list.status, 200, "{}", list.body);
+    assert_eq!(
+        list.json()["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .len(),
+        dvv::mcp::TOOL_COUNT
+    );
+
+    let call = post(
+        live.address,
+        &classic,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "dvv_limbs", "arguments": {} } }),
+    )
+    .await;
+    assert_eq!(call.status, 200, "{}", call.body);
+    assert!(call.json()["result"]["content"].is_array(), "{}", call.body);
 }

@@ -34,6 +34,10 @@
 //! `initialize`/`initialized` handshake and the `Mcp-Session-Id` header, so a
 //! server is a framed reader, a dispatch table and a writer, and continuity
 //! travels as explicit handles passed as ordinary tool arguments (`04 §3.1`).
+//! The revisions before it open with `initialize`, and this server answers
+//! that too (see [`CLASSIC_PROTOCOL_VERSIONS`]): the handshake is the only
+//! thing that differs on the wire for the tools this server has, and every
+//! client installed today opens with it.
 //! A `limbId` is that handle and [`limb_core::identity::LimbId`] was designed
 //! for exactly this: opaque, reproducible, `lmb_<protocol>_<12 hex>_<slot>`.
 //! An SDK for that is a dependency the DMG has to carry for a reader and a
@@ -89,16 +93,49 @@ pub use error::{ToolError, DVV_VERSION};
 pub use plane::{LimbCard, Plane, SessionSource};
 pub use watch::WatchEvent;
 
-/// The MCP revision this adapter speaks.
+/// The newest MCP revision this adapter speaks, and the one it describes
+/// itself under in `server/discover`.
 ///
-/// One value, not a range. `04 §8` OQ-4 recommends keeping a compatibility
-/// path for `2025-11-25` behind a flag, and this build does not have one: the
-/// two are not wire compatible, one has `initialize` and `Mcp-Session-Id` and
-/// the other has `server/discover` and `_meta`, and shipping half of the older
-/// one would be worse than shipping none of it. Recorded here rather than in a
-/// plan file, because the person who wonders where `--protocol` went will be
-/// reading this constant.
+/// `04 §8` OQ-4 recommended keeping a compatibility path for the earlier
+/// revisions behind a flag, and the first build did not have one, on the
+/// argument that `initialize` plus `Mcp-Session-Id` and `server/discover` plus
+/// `_meta` are not wire compatible. That argument was right about the
+/// handshake and wrong about what mattered: Claude Code, the client the README
+/// tells people to point at this server, opens with `initialize` and was
+/// refused with method not found, so the one-click registration produced a
+/// server nobody could reach. The handshake is now answered for every
+/// revision in [`CLASSIC_PROTOCOL_VERSIONS`] as well, with no flag: a server
+/// that must be configured to accept the client in front of it is a server
+/// that is not adopted. `tools/list` and `tools/call` are the same shape under
+/// every one of them, which is what makes this cheap.
 pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+
+/// The revisions before 2026-07-28, newest first, all of which open with
+/// `initialize` and are answered here.
+///
+/// A client asking for one of these is answered with the same one. A client
+/// asking for a version this build does not know, newer or stranger, is
+/// answered with the first entry, which is the specification's rule: the
+/// server offers what it speaks and the client decides whether to continue.
+pub const CLASSIC_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Is this one of the revisions that open with `initialize`?
+pub fn is_classic_version(version: &str) -> bool {
+    CLASSIC_PROTOCOL_VERSIONS.contains(&version)
+}
+
+/// The revision to answer an `initialize` with.
+pub fn negotiate_classic_version(asked: Option<&str>) -> &'static str {
+    asked
+        .and_then(|asked| {
+            CLASSIC_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|known| *known == asked)
+        })
+        .unwrap_or(CLASSIC_PROTOCOL_VERSIONS[0])
+}
 
 /// Build a `bytes::Bytes` without naming the crate.
 ///

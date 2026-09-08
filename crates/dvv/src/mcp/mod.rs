@@ -6,11 +6,11 @@
 //! are named at the top of [`server`], and each is there because MCP's shape
 //! forces it.
 //!
-//! Written against the 2026-07-28 revision and only that one. `04 §8` OQ-4
-//! recommends keeping a compatibility path for `2025-11-25` behind a flag; this
-//! build does not have one, and the reason is in [`crate::MCP_PROTOCOL_VERSION`]:
-//! the two are not wire compatible, and shipping half of the older one would be
-//! worse than shipping none of it.
+//! Written against the 2026-07-28 revision, and it answers the `initialize`
+//! handshake of every revision before it as well, with no flag. The history of
+//! that decision is on [`crate::MCP_PROTOCOL_VERSION`]; the short form is that
+//! the client the README names opens with `initialize`, and a server that
+//! refused it was a server nobody could reach.
 
 pub mod format;
 pub mod manifest;

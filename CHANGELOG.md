@@ -10,6 +10,33 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-09-08
+
+### Fixed
+
+- **Claude Code could not connect to the agent server.** `dvv mcp` spoke
+  only the 2026-07-28 revision of MCP, which opens with `server/discover`,
+  and answered the `initialize` handshake that Claude Code and every client
+  built on the official SDKs send first with method not found. The one-click
+  registration in the app therefore produced a server that no installed
+  client could reach, and `claude mcp list` showed it as failed. The server
+  now answers `initialize` for every earlier revision (2024-11-05 through
+  2025-11-25), echoing the revision the client asked for and offering the
+  newest it knows to a client asking for one it does not, and takes the
+  `initialized` notification in silence as the specification requires. Over
+  HTTP, a request under one of those revisions is served without the
+  `Mcp-Method` and `Mcp-Name` headers that only 2026-07-28 defines, and its
+  `MCP-Protocol-Version` header is accepted with the revision it names. A
+  request that claims 2026-07-28 is still held to that revision's rules.
+  `tools/list` and `tools/call` are the same shape under every revision, so
+  nothing else changes on the wire. Verified with Claude Code's own health
+  check against the installed build.
+
+### Note on the version
+
+Patch. Nothing stored changes and the shell to webview contract is untouched.
+The MCP surface gains a handshake it used to refuse, which is additive.
+
 ## [0.27.0] - 2026-09-08
 
 Typing into a terminal on a LAN Windows desktop felt like typing over a
