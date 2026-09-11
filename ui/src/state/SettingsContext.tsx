@@ -20,6 +20,12 @@ export type SortKey = "name" | "last-connected" | "frequency" | "group";
  * (`session-<id>`), so switching between machines means switching windows.
  * `tabs`: sessions are mounted inside the main window and switched between
  * with a tab strip, the way browser tabs work.
+ *
+ * `tabs` is the default. A connection manager's whole point is holding many
+ * machines at once, and one window with a tab strip shows what is open in a
+ * glance where a pile of overlapping OS windows does not. Anyone who prefers
+ * the old behaviour flips it in the library toolbar or in Preferences, and
+ * that choice persists; see {@link DEFAULTS}.
  */
 export type WindowMode = "windows" | "tabs";
 
@@ -49,7 +55,8 @@ export interface Settings {
    */
   localCursor: LocalCursor;
   /**
-   * Separate windows per session, or tabs inside the main window.
+   * Separate windows per session, or tabs inside the main window. Defaults
+   * to tabs.
    *
    * Only consulted when a session *starts*: flipping it does not move sessions
    * that are already running, because a live framebuffer lives in the WebGL
@@ -69,7 +76,7 @@ export interface Settings {
 
 export const MAX_QUICK_CONNECT_HISTORY = 8;
 
-const DEFAULTS: Settings = {
+export const DEFAULTS: Settings = {
   theme: "system",
   libraryView: "grid",
   sortKey: "name",
@@ -78,7 +85,7 @@ const DEFAULTS: Settings = {
   probeOnline: true,
   showRemoteCursor: true,
   localCursor: "standard",
-  windowMode: "windows",
+  windowMode: "tabs",
   quickConnectHistory: [],
 };
 
@@ -91,7 +98,7 @@ interface SettingsContextValue {
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
 
-function load(): Settings {
+export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULTS;
@@ -111,7 +118,7 @@ function load(): Settings {
 }
 
 export function SettingsProvider({ children }: { children: ReactNode }): ReactNode {
-  const [settings, setSettings] = useState<Settings>(load);
+  const [settings, setSettings] = useState<Settings>(loadSettings);
 
   const update = useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => {
