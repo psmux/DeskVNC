@@ -13,6 +13,10 @@ installed on the far end, and a person able to take the wheel back mid task.
 
 ![The host library, with live thumbnails of every saved machine](docs/images/library.png)
 
+<sub>Screenshots are a real build against demo servers on loopback, and are for
+reference only: the machines in them are invented, and the desktops being viewed
+are credited in [docs/images/CREDITS.md](docs/images/CREDITS.md).</sub>
+
 ## Why this exists
 
 Anyone who looks after more than a handful of machines ends up with a drawer
@@ -69,7 +73,7 @@ Things that matter once you actually use it all day:
 
 ## Several machines at once
 
-![Two desktops side by side in one window, Ubuntu and Windows 11](docs/images/split.png)
+![Two desktops side by side in one window, Ubuntu GNOME and Kubuntu KDE](docs/images/split.png)
 
 Sessions open as tabs, and any tab splits into panes that can each hold a
 different machine and a different protocol. A Windows desktop over RDP next to a
@@ -238,5 +242,6 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this work by you, as defined in the Apache-2.0 license, shall
 be dual licensed as above, without any additional terms or conditions.
 
-<sub>The machines in the screenshots are demo servers on this machine's
-loopback address, not anybody's network.</sub>
+<sub>The machines in the screenshots are demo servers on loopback, not anybody's
+network. The desktops being viewed in them, and the licences they carry, are
+listed in [docs/images/CREDITS.md](docs/images/CREDITS.md).</sub>
