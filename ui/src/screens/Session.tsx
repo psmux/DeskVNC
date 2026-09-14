@@ -1414,12 +1414,35 @@ function SessionView({
   }, [captureOnExit]);
   disconnectRef.current = disconnectWithThumbnail;
 
+  /**
+   * The menu bar has to go with it, which is why this goes through the backend
+   * rather than calling `setFullscreen` from here. On Windows and Linux the
+   * menu belongs to the window and keeps a strip of the display, so hiding it
+   * is the difference between fullscreen and nearly fullscreen; only
+   * `set_fullscreen_on_monitor` does that. Toggling the window straight from
+   * the webview skipped it, so this button and the F11 that shares its job
+   * produced two different screens (issue #1).
+   */
   const toggleFullscreen = useCallback(async (): Promise<void> => {
     if (inTauri()) {
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
-        await win.setFullscreen(!(await win.isFullscreen()));
+        const wanted = !(await win.isFullscreen());
+        const sid = params.sessionId;
+        if (sid) {
+          const ok = await safeInvoke<null | undefined>(
+            "fullscreen_session",
+            { sessionId: sid, fullscreen: wanted },
+            undefined,
+          );
+          // `undefined` is the sentinel for a call that failed; a session
+          // already gone from the registry is the reason it can. Falling
+          // through to the plain window toggle still puts the pane fullscreen,
+          // menu strip and all, which beats a button that does nothing.
+          if (ok !== undefined) return;
+        }
+        await win.setFullscreen(wanted);
         return;
       } catch {
         /* fall through to DOM fullscreen */
@@ -1427,7 +1450,7 @@ function SessionView({
     }
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen();
-  }, []);
+  }, [params.sessionId]);
 
   /**
    * Native menu items that act on the session.

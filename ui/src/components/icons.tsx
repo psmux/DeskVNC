@@ -103,6 +103,18 @@ export const IconCamera = (p: IconProps): ReactNode => (
 export const IconPower = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M12 2v10" /><path d="M18.4 6.6a9 9 0 1 1-12.8 0" /></Icon>
 );
+/**
+ * Leaving the session, for the toolbar's Disconnect button.
+ *
+ * Deliberately not [`IconPower`], which that button used to carry: a power
+ * symbol on a remote desktop reads as an offer to shut the remote machine
+ * down, and nobody should have to guess about that with their hand on the
+ * mouse (issue #1). An arrow leaving a frame says the connection closes and
+ * the machine is left running.
+ */
+export const IconDisconnect = (p: IconProps): ReactNode => (
+  <Icon {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></Icon>
+);
 export const IconPin = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="M12 17v5" /><path d="M9 3h6l-1 7 3 2v3H7v-3l3-2-1-7z" /></Icon>
 );

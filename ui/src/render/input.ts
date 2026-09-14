@@ -245,7 +245,12 @@ export class SessionInput {
 
   private viewOnly = false;
   private passthrough = false;
-  private naturalScroll = false;
+  /**
+   * Send the wheel the way this computer scrolls. On, which is the default and
+   * matches the preference's default, the browser's delta is forwarded as it
+   * arrives; off reverses it on the remote only. See [`onWheel`].
+   */
+  private naturalScroll = true;
   private zoomLocked = false;
   private edgePan = true;
   private forwardInsertedText = true;
@@ -947,7 +952,15 @@ export class SessionInput {
     const step = e.deltaMode === 0 ? WHEEL_STEP : 1;
     let dy = e.deltaY / step;
     let dx = e.deltaX / step;
-    if (this.naturalScroll) {
+    // The delta arrives already resolved by the operating system: macOS with
+    // natural scrolling on reports the opposite sign to macOS with it off, and
+    // Windows reports its own. Whatever a local window does with this gesture
+    // is what the remote desktop should do with it, so forwarding the delta
+    // unchanged is what "match my scroll direction" means. Negating it here
+    // reversed every session against its own machine (issue #1), and the
+    // preference defaults on, so that was everybody. The flip now belongs to
+    // the person who asks for it by turning the preference off.
+    if (!this.naturalScroll) {
       dy = -dy;
       dx = -dx;
     }

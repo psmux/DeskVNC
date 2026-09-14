@@ -228,6 +228,47 @@ describe("pinch to zoom", () => {
   });
 });
 
+describe("which way the wheel goes", () => {
+  // These assert against the setting a session actually runs with. The older
+  // scrolling test above passed while every real session scrolled backwards,
+  // because it never touched the preference and the class default disagreed
+  // with the preference default (issue #1).
+  const WHEEL_UP = 1 << 3;
+  const WHEEL_DOWN = 1 << 4;
+
+  function wheel(canvas: HTMLCanvasElement, deltaY: number): void {
+    canvas.dispatchEvent(new WheelEvent("wheel", { deltaY, clientX: 1, clientY: 1, bubbles: true }));
+  }
+
+  it("sends the remote the direction the OS already resolved", () => {
+    const { canvas, input, sent } = setup();
+    // What a session sets from the preference, whose default is on.
+    input.setNaturalScroll(true);
+
+    wheel(canvas, 40);
+    expect(pointers(sent).map((p) => p.mask)).toEqual([WHEEL_DOWN, 0]);
+
+    sent.length = 0;
+    wheel(canvas, -40);
+    expect(pointers(sent).map((p) => p.mask)).toEqual([WHEEL_UP, 0]);
+  });
+
+  it("scrolls the same way when nobody has set the preference", () => {
+    // A fresh install reads no stored value, so the class default has to land
+    // in the same place the preference default does.
+    const { canvas, sent } = setup();
+    wheel(canvas, 40);
+    expect(pointers(sent).map((p) => p.mask)).toEqual([WHEEL_DOWN, 0]);
+  });
+
+  it("reverses the remote only when the preference is turned off", () => {
+    const { canvas, input, sent } = setup();
+    input.setNaturalScroll(false);
+    wheel(canvas, 40);
+    expect(pointers(sent).map((p) => p.mask)).toEqual([WHEEL_UP, 0]);
+  });
+});
+
 describe("edge auto-scroll", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

@@ -2,7 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Dialog } from "../components/primitives";
 import { openExternal, safeInvoke, writeClipboard } from "../lib/tauri";
-import { classNames, modKeyLabel } from "../lib/util";
+import { classNames, fullscreenHint, modKeyLabel } from "../lib/util";
 
 export const AUTHOR_NAME = "Godwin Josh";
 export const AUTHOR_EMAIL = "godwin@cdtech.in";
@@ -73,7 +73,9 @@ const SHORTCUTS: Array<[string, string]> = [
   [`${modKeyLabel},`, "Preferences"],
   [`${modKeyLabel}⇧D`, "Disconnect session"],
   [`${modKeyLabel}⇧M`, "Show/hide session toolbar"],
-  [`${modKeyLabel}⌃F`, "Toggle fullscreen"],
+  // Not a ⌘-family chord on Windows and Linux: it is F11 there. See
+  // `fullscreenHint`.
+  [fullscreenHint, "Toggle fullscreen"],
   // Tabbed view only (Preferences → Connections). Harmless to list either
   // way: with no tabs open there is nothing for them to switch to.
   ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
