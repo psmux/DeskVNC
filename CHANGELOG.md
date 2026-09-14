@@ -10,6 +10,54 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-09-14
+
+### Fixed
+
+- **Scrolling ran backwards in every session, on every platform.** The wheel
+  delta a webview reports has already been resolved by the operating system:
+  macOS reports one sign with natural scrolling on and the other with it off,
+  and Windows reports its own. Forwarding that delta unchanged is what makes a
+  gesture on the remote desktop agree with the same gesture in every local
+  window, and the input handler negated it instead. The preference controlling
+  that negation defaults on, so this was not a minority with an unusual setting,
+  it was everybody. The test that covered scrolling passed throughout, because
+  it ran on the class default while a real session ran on the preference
+  default and the two disagreed; they now agree, and three tests cover the
+  setting a session actually runs with. The preference survives, relabelled:
+  turning it off reverses the direction on the remote only, for anyone who
+  wants that. Reported in #1.
+- **The toolbar's fullscreen button advertised a shortcut that does nothing.**
+  It showed Ctrl or Cmd plus Alt plus Enter, which is bound nowhere, so
+  pressing it typed into the remote desktop instead. The accelerator belongs to
+  the View menu item: F11 on Windows and Linux, Cmd+Ctrl+F on macOS. Both the
+  tooltip and the About window's shortcut list now read it from one constant,
+  so neither can drift from the menu again. Reported in #1.
+- **That same button left the menu bar on screen** while F11 hid it, so the two
+  ways to do one thing produced two different screens. It toggled the window
+  straight from the webview and skipped the backend helper that hides the menu
+  on the way in and restores it on the way out. It goes through that helper
+  now, and falls back to the plain window toggle if the session has already
+  gone. Reported in #1.
+- **Disconnect wore a power symbol.** On a remote desktop that reads as an
+  offer to shut the remote machine down, which is not a thing anybody should
+  have to guess about with their hand on the mouse. It is an arrow leaving a
+  frame now, and the tooltip says the machine keeps running. Reported in #1.
+- **Windows CI could not run the PuTTY key tests.** The fixture directory was
+  resolved from `XDG_CACHE_HOME` or `HOME` and panicked when neither was set,
+  which on Windows is always: it has `USERPROFILE`. Every Windows run went red
+  on the one suite whose subject, PuTTY key files, mostly comes from Windows.
+  It now falls back to the local application data directory, then to the
+  platform temporary directory, and it still refuses to write fixtures
+  anywhere inside the repository.
+
+### Note on the version
+
+Patch. Nothing stored changes, the IPC contract is untouched, and no protocol
+behaviour moves. One preference changes meaning rather than name: the wheel is
+no longer inverted by default, so anyone who had worked around the inversion by
+turning "natural scrolling" off should turn it back on.
+
 ## [0.27.1] - 2026-09-08
 
 ### Fixed

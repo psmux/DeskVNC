@@ -180,9 +180,16 @@ const REFUSED: &[&str] = &["dsa1024_v2", "dsa1024_v3"];
 /// Where generated keys live. Never inside the repository.
 ///
 /// Order: an explicit `DESKVNC_PPK_FIXTURE_DIR`, then the XDG cache
-/// directory, then `~/.cache`. The result is checked against
-/// `CARGO_MANIFEST_DIR` and rejected if it falls inside it, so a mistake in
-/// the environment cannot quietly start writing keys into the working tree.
+/// directory, then `~/.cache`, then the platform temporary directory. The
+/// result is checked against `CARGO_MANIFEST_DIR` and rejected if it falls
+/// inside it, so a mistake in the environment cannot quietly start writing
+/// keys into the working tree.
+///
+/// The temporary directory is the fallback rather than a panic because
+/// Windows sets neither `XDG_CACHE_HOME` nor `HOME`: it has `USERPROFILE`.
+/// Insisting on the two Unix names turned every Windows CI run red on a test
+/// whose subject is PuTTY key parsing, which is the one platform PuTTY files
+/// mostly come from.
 fn fixture_root() -> PathBuf {
     let dir = if let Ok(explicit) = std::env::var("DESKVNC_PPK_FIXTURE_DIR") {
         PathBuf::from(explicit)
@@ -190,7 +197,10 @@ fn fixture_root() -> PathBuf {
         let cache = std::env::var("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .expect("neither XDG_CACHE_HOME nor HOME is set");
+            .or_else(|_| {
+                std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("AppData").join("Local"))
+            })
+            .unwrap_or_else(|_| std::env::temp_dir());
         cache.join("deskvncviewer").join("ppk-fixtures")
     };
 
