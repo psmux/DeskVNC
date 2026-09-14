@@ -502,8 +502,8 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
             {tab === "Input" ? (
               <>
                 <Toggle
-                  label="Natural scrolling"
-                  description="Match your local scroll direction on the remote desktop"
+                  label="Match my scroll direction"
+                  description="Scroll the remote desktop the way this computer scrolls, whatever your trackpad and mouse settings say. Turn it off to reverse the direction on the remote only."
                   value={naturalScroll}
                   onChange={setNaturalScroll}
                 />

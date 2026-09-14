@@ -18,7 +18,12 @@ const PREFIX = "deskvnc.pref.";
 export const PREF_CLIPBOARD_AUTO = "clipboardAuto";
 /** Push the local clipboard when the session window regains focus. */
 export const PREF_CLIPBOARD_ON_FOCUS = "clipboardOnFocus";
-/** Match local scroll direction on the remote desktop ("natural" scrolling). */
+/**
+ * Scroll the remote desktop the way this computer scrolls. On by default: the
+ * wheel delta the webview reports has already been through the OS, so passing
+ * it straight to the remote is what makes the gesture agree with every local
+ * window. Off reverses it, for anyone who wants the remote to go the other way.
+ */
 export const PREF_NATURAL_SCROLL = "naturalScroll";
 /**
  * Keys type what they type on THIS keyboard's layout, rather than what the

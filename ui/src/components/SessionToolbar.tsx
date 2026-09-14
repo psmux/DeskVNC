@@ -23,11 +23,11 @@ import type {
 import { displayLabel } from "../lib/displays";
 import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
-import { classNames, formatBps, modKeyLabel } from "../lib/util";
+import { classNames, formatBps, fullscreenHint, modKeyLabel } from "../lib/util";
 import { usePaneVisible } from "./Pane";
 import {
-  IconActivity, IconCamera, IconChevronDown, IconClipboard, IconEye, IconFile,
-  IconGripVertical, IconKeyboard, IconMaximize, IconMonitor, IconPin, IconPower,
+  IconActivity, IconCamera, IconChevronDown, IconClipboard, IconDisconnect, IconEye,
+  IconFile, IconGripVertical, IconKeyboard, IconMaximize, IconMonitor, IconPin,
   IconCursor, IconRefresh, IconSearch, IconSplitDown, IconSplitRight, IconTerminal,
 } from "./icons";
 
@@ -711,7 +711,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
 
         <Divider />
 
-        <ToolButton label={`Fullscreen (${modKeyLabel}⌥Enter)`} onClick={props.onFullscreen}>
+        <ToolButton label={`Fullscreen (${fullscreenHint})`} onClick={props.onFullscreen}>
           <IconMaximize size={15} />
         </ToolButton>
 
@@ -770,8 +770,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
 
         <Divider />
 
-        <ToolButton label="Disconnect" danger onClick={props.onDisconnect}>
-          <IconPower size={15} />
+        <ToolButton
+          label="Disconnect (leaves the remote machine running)"
+          danger
+          onClick={props.onDisconnect}
+        >
+          <IconDisconnect size={15} />
         </ToolButton>
       </div>
 

@@ -129,3 +129,12 @@ export const isMac: boolean =
 
 /** Platform modifier label: ⌘ on macOS, Ctrl elsewhere. */
 export const modKeyLabel: string = isMac ? "⌘" : "Ctrl";
+
+/**
+ * The fullscreen shortcut, written once so nothing can advertise a chord the
+ * app does not answer to. The accelerator lives on the View menu item in
+ * `menu.rs`: F11 on Windows and Linux, ⌘⌃F on macOS. The toolbar button used
+ * to claim Ctrl/⌘+⌥+Enter, which was never bound anywhere and went to the
+ * remote desktop instead (issue #1).
+ */
+export const fullscreenHint: string = isMac ? "⌘⌃F" : "F11";
