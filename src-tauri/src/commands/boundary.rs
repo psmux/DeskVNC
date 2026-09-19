@@ -32,3 +32,70 @@ pub async fn connect_boundary(
     }
     result
 }
+
+// Requests deliberately have no Debug implementation: they contain credentials.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRequest {
+    provider: boundary_provision::Provider,
+    auth_key: String,
+    account_id: String,
+    team: String,
+    emails: Vec<String>,
+    configure_account: bool,
+    #[serde(default)]
+    remove_resources: bool,
+}
+static PROVIDER_SETUP: std::sync::Mutex<Option<boundary_provision::Setup>> =
+    std::sync::Mutex::new(None);
+
+#[tauri::command]
+pub async fn boundary_provider_start(request: ProviderRequest) -> Result<(), String> {
+    let mut job = PROVIDER_SETUP
+        .lock()
+        .map_err(|_| "Setup state unavailable")?;
+    if job
+        .as_ref()
+        .is_some_and(|job| !job.progress.borrow().finished)
+    {
+        return Err("Another provider setup is running".into());
+    }
+    if request.remove_resources {
+        if request.provider != boundary_provision::Provider::Cloudflare {
+            return Err("Account resource removal is only available for Cloudflare".into());
+        }
+        *job = Some(boundary_provision::start_cleanup(
+            request.account_id,
+            request.auth_key.into(),
+        ));
+        return Ok(());
+    }
+    *job = Some(boundary_provision::start(
+        boundary_provision::SetupRequest {
+            provider: request.provider,
+            auth_key: request.auth_key.into(),
+            account_id: request.account_id,
+            team: request.team,
+            emails: request.emails,
+            configure_account: request.configure_account,
+        },
+    ));
+    Ok(())
+}
+#[tauri::command]
+pub fn boundary_provider_status() -> Result<Option<boundary_provision::Progress>, String> {
+    let job = PROVIDER_SETUP
+        .lock()
+        .map_err(|_| "Setup state unavailable")?;
+    Ok(job.as_ref().map(|job| job.progress.borrow().clone()))
+}
+#[tauri::command]
+pub fn boundary_provider_cancel() -> Result<(), String> {
+    let job = PROVIDER_SETUP
+        .lock()
+        .map_err(|_| "Setup state unavailable")?;
+    if let Some(job) = job.as_ref() {
+        job.cancel();
+    }
+    Ok(())
+}

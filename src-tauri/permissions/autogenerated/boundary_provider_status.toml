@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-boundary-provider-status"
+description = "Enables the boundary_provider_status command without any pre-configured scope."
+commands.allow = ["boundary_provider_status"]
+
+[[permission]]
+identifier = "deny-boundary-provider-status"
+description = "Denies the boundary_provider_status command without any pre-configured scope."
+commands.deny = ["boundary_provider_status"]

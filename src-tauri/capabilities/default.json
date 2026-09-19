@@ -62,6 +62,9 @@
 
     "allow-connect-session",
     "allow-connect-boundary",
+    "allow-boundary-provider-start",
+    "allow-boundary-provider-status",
+    "allow-boundary-provider-cancel",
     "allow-disconnect-session",
     "allow-send-input",
     "allow-trace-enabled",

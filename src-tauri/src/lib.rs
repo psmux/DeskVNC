@@ -214,6 +214,9 @@ pub fn run() {
             // sessions
             commands::session::connect_session,
             commands::boundary::connect_boundary,
+            commands::boundary::boundary_provider_start,
+            commands::boundary::boundary_provider_status,
+            commands::boundary::boundary_provider_cancel,
             commands::session::disconnect_session,
             commands::session::send_input,
             commands::session::trace_enabled,

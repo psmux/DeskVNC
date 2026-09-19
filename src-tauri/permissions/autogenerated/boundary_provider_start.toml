@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-boundary-provider-start"
+description = "Enables the boundary_provider_start command without any pre-configured scope."
+commands.allow = ["boundary_provider_start"]
+
+[[permission]]
+identifier = "deny-boundary-provider-start"
+description = "Denies the boundary_provider_start command without any pre-configured scope."
+commands.deny = ["boundary_provider_start"]
