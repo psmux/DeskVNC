@@ -192,13 +192,17 @@ impl PendingCredentialSave {
 /// protocol that is not built in returns `None`, so the caller reports it
 /// rather than panicking.
 pub struct ProtocolRegistry {
+    pub boundary: Arc<boundary_driver::BoundaryDriver>,
     drivers: Vec<Arc<dyn ProtocolDriver>>,
 }
 
 impl ProtocolRegistry {
     pub fn new(host_keys: Arc<Mutex<ssh_transport::HostKeyStore>>) -> Self {
+        let boundary = Arc::new(boundary_driver::BoundaryDriver::default());
         Self {
+            boundary: boundary.clone(),
             drivers: vec![
+                boundary,
                 Arc::new(VncDriver::new()),
                 Arc::new(rdp_core::RdpDriver::new()),
                 // SSH is the only driver that needs anything from the shell

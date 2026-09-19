@@ -213,6 +213,7 @@ pub fn run() {
             commands::discovery::wake_host,
             // sessions
             commands::session::connect_session,
+            commands::boundary::connect_boundary,
             commands::session::disconnect_session,
             commands::session::send_input,
             commands::session::trace_enabled,

@@ -671,6 +671,12 @@ fn limb_attach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
                 "that session ended while this call was running",
             )
         })?;
+        if entry.handle.kind == remote_core::ProtocolKind::Boundary {
+            return Err(RpcError::tagged(
+                "UNSUPPORTED",
+                "Boundary support sessions do not yet have a separate host consent for agents",
+            ));
+        }
         let value = record(&session_id, entry, slot, Some(attachment_id.clone()));
         (session_id, value)
     };

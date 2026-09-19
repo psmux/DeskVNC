@@ -14,14 +14,14 @@
  * `remote_core::ProtocolKind`, serde `rename_all = "kebab-case"`, which for
  * these three spells them exactly as they are written here.
  */
-export type ProtocolKind = "vnc" | "rdp" | "ssh";
+export type ProtocolKind = "vnc" | "rdp" | "ssh" | "boundary";
 
 /**
  * The port a bare hostname gets, per protocol. The one place these numbers
  * live on this side; `address.ts` re-exports them under its own names for
  * the callers that already import those.
  */
-export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, ssh: 22 };
+export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, ssh: 22, boundary: 0 };
 
 /** The three protocols, in the order the UI offers them. */
 export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
@@ -32,7 +32,7 @@ export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
  * than being quietly relabelled.
  */
 export function isProtocolKind(value: unknown): value is ProtocolKind {
-  return value === "vnc" || value === "rdp" || value === "ssh";
+  return value === "vnc" || value === "rdp" || value === "ssh" || value === "boundary";
 }
 
 /**
@@ -56,6 +56,7 @@ export function protocolLabel(p: string): string {
  * happened to fall through to.
  */
 const PROTOCOL_NAMES: Record<ProtocolKind, string> = {
+  boundary: "Boundary support",
   rdp: "RDP (Windows Remote Desktop)",
   ssh: "SSH terminal",
   vnc: "VNC / screen sharing",
@@ -598,6 +599,7 @@ export interface DisplayOption extends RemoteScreen {
  * Cursor SHAPES are not here: they arrive as binary msg_type 2 on the channel.
  */
 export type SessionEvent =
+  | { type: "boundary-control"; control: boolean }
   | { type: "state-changed"; state: SessionState }
   | { type: "desktop-resize"; width: number; height: number }
   | { type: "desktop-name"; name: string }

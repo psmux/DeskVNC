@@ -29,6 +29,9 @@ pub async fn save_host(
     profile: HostProfile,
 ) -> Result<HostProfile, String> {
     let store = state.store.clone();
+    if profile.protocol == "boundary" {
+        return Err("Boundary invitations are temporary. Start a new support connection instead of saving a host".into());
+    }
     let returned = profile.clone();
     super::blocking(move || store.save_host(&profile)).await?;
     Ok(returned)
