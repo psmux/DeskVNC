@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connect-boundary"
+description = "Enables the connect_boundary command without any pre-configured scope."
+commands.allow = ["connect_boundary"]
+
+[[permission]]
+identifier = "deny-connect-boundary"
+description = "Denies the connect_boundary command without any pre-configured scope."
+commands.deny = ["connect_boundary"]

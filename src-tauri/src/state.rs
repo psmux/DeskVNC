@@ -897,7 +897,7 @@ mod protocol_registry_tests {
     /// The registry is what a third protocol changes, so pin its membership:
     /// a driver added without a decision here fails this test.
     #[test]
-    fn three_protocols_are_registered_today() {
+    fn four_protocols_are_registered_today() {
         let registry = test_registry();
         let built: Vec<_> = ProtocolKind::ALL
             .iter()
@@ -906,7 +906,12 @@ mod protocol_registry_tests {
             .collect();
         assert_eq!(
             built,
-            vec![ProtocolKind::Vnc, ProtocolKind::Rdp, ProtocolKind::Ssh]
+            vec![
+                ProtocolKind::Vnc,
+                ProtocolKind::Rdp,
+                ProtocolKind::Ssh,
+                ProtocolKind::Boundary
+            ]
         );
     }
 }

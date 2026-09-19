@@ -61,6 +61,7 @@
     "allow-wake-host",
 
     "allow-connect-session",
+    "allow-connect-boundary",
     "allow-disconnect-session",
     "allow-send-input",
     "allow-trace-enabled",
