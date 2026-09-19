@@ -147,6 +147,9 @@ fn main() {
             // sessions
             "connect_session",
             "connect_boundary",
+            "boundary_provider_start",
+            "boundary_provider_status",
+            "boundary_provider_cancel",
             "disconnect_session",
             "send_input",
             "trace_enabled",

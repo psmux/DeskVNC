@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-boundary-provider-cancel"
+description = "Enables the boundary_provider_cancel command without any pre-configured scope."
+commands.allow = ["boundary_provider_cancel"]
+
+[[permission]]
+identifier = "deny-boundary-provider-cancel"
+description = "Denies the boundary_provider_cancel command without any pre-configured scope."
+commands.deny = ["boundary_provider_cancel"]
