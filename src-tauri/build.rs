@@ -146,6 +146,7 @@ fn main() {
             "wake_host",
             // sessions
             "connect_session",
+            "connect_boundary",
             "disconnect_session",
             "send_input",
             "trace_enabled",
