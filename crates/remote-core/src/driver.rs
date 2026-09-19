@@ -34,14 +34,20 @@ pub enum ProtocolKind {
     /// stream rather than a framebuffer, which is why its payload travels as
     /// `ProtocolEvent::Ssh` rather than through the pixel variants.
     Ssh,
+    /// Attended support through a Boundary invitation.
+    Boundary,
 }
 
 impl ProtocolKind {
     /// Every protocol, for callers that must handle all of them. A slice
     /// rather than the fixed array `PinScheme::ALL` uses, so adding one is a
     /// one line change.
-    pub const ALL: &'static [ProtocolKind] =
-        &[ProtocolKind::Vnc, ProtocolKind::Rdp, ProtocolKind::Ssh];
+    pub const ALL: &'static [ProtocolKind] = &[
+        ProtocolKind::Vnc,
+        ProtocolKind::Rdp,
+        ProtocolKind::Ssh,
+        ProtocolKind::Boundary,
+    ];
 
     /// The stored spelling. Matches the serde representation and the
     /// `hosts.protocol` column.
@@ -50,6 +56,7 @@ impl ProtocolKind {
             ProtocolKind::Vnc => "vnc",
             ProtocolKind::Rdp => "rdp",
             ProtocolKind::Ssh => "ssh",
+            ProtocolKind::Boundary => "boundary",
         }
     }
 
@@ -61,6 +68,7 @@ impl ProtocolKind {
             "vnc" => Some(ProtocolKind::Vnc),
             "rdp" => Some(ProtocolKind::Rdp),
             "ssh" => Some(ProtocolKind::Ssh),
+            "boundary" => Some(ProtocolKind::Boundary),
             _ => None,
         }
     }
@@ -74,6 +82,7 @@ impl ProtocolKind {
             ProtocolKind::Rdp => 3389,
             // RFC 4253 §4: the SSH transport runs on TCP 22.
             ProtocolKind::Ssh => 22,
+            ProtocolKind::Boundary => 0,
         }
     }
 

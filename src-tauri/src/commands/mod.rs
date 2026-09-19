@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod agent;
+pub mod boundary;
 pub mod capture;
 pub mod credentials;
 pub mod discovery;

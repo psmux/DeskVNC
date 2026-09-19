@@ -1,0 +1,15 @@
+[package]
+name = "boundary-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.95"
+
+[dependencies]
+remote-core = { path = "../remote-core" }
+boundary-session = { path = "../../../PRDTraverseAllBoundaries/crates/boundary-session" }
+tokio.workspace = true
+tokio-util.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true

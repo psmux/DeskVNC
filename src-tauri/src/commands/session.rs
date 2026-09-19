@@ -137,6 +137,9 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         // asked for none of it (PRDAgentPlug/00 R51b).
         SessionEvent::AgentRefused(_) | SessionEvent::AgentServed(_) => return None,
         SessionEvent::Protocol(ProtocolEvent::Rdp(event)) => rdp_event_json(event)?,
+        SessionEvent::Protocol(ProtocolEvent::Boundary { control }) => {
+            json!({ "type": "boundary-control", "control": control })
+        }
         // Terminal bytes never become JSON. They go out on the binary channel
         // (`framing::encode_pty`) for the same reason framebuffer rectangles
         // do: base64 in a JSON envelope costs a third more bytes plus escaping
@@ -983,6 +986,7 @@ pub async fn connect_session(
     let mut options = match kind {
         ProtocolKind::Rdp => ConnectOptions::rdp(address, port),
         ProtocolKind::Ssh => ConnectOptions::ssh(address, port),
+        ProtocolKind::Boundary => ConnectOptions::boundary(address),
         _ => ConnectOptions::vnc(address, port),
     };
 
@@ -1032,6 +1036,7 @@ pub async fn connect_session(
 
     // The protocol specific half.
     match kind {
+        ProtocolKind::Boundary => {}
         ProtocolKind::Ssh => {
             // Same rule as RDP below: a blob that will not parse FAILS the
             // connect rather than falling back to defaults. Silently

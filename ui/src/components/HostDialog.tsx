@@ -188,6 +188,7 @@ interface ProtocolCaps {
 }
 
 const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
+  boundary: { graphical: true, rfbSecurity: false, username: false, domain: false },
   vnc: { graphical: true, rfbSecurity: true, username: false, domain: false },
   rdp: { graphical: true, rfbSecurity: false, username: true, domain: true },
   ssh: { graphical: false, rfbSecurity: false, username: true, domain: false },

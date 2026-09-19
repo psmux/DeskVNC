@@ -83,6 +83,10 @@ impl ConnectOptions {
         Self::with_protocol(host, port, ProtocolOptions::Ssh(SshOptions::default()))
     }
 
+    pub fn boundary(id: impl Into<String>) -> Self {
+        Self::with_protocol(id, 0, ProtocolOptions::Boundary)
+    }
+
     fn with_protocol(host: impl Into<String>, port: u16, protocol: ProtocolOptions) -> Self {
         Self {
             host: host.into(),
@@ -176,6 +180,7 @@ pub enum ProtocolOptions {
     Vnc(VncOptions),
     Rdp(RdpOptions),
     Ssh(SshOptions),
+    Boundary,
 }
 
 impl ProtocolOptions {
@@ -184,6 +189,7 @@ impl ProtocolOptions {
             ProtocolOptions::Vnc(_) => ProtocolKind::Vnc,
             ProtocolOptions::Rdp(_) => ProtocolKind::Rdp,
             ProtocolOptions::Ssh(_) => ProtocolKind::Ssh,
+            ProtocolOptions::Boundary => ProtocolKind::Boundary,
         }
     }
 }

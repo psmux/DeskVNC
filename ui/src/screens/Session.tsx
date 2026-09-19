@@ -337,7 +337,7 @@ function SessionView({
   const [passthrough, setPassthroughState] = useState(stored.passthrough);
   const [capture, setCapture] = useState<CaptureStatus>(CAPTURE_INACTIVE);
   const [showCaptureHelp, setShowCaptureHelp] = useState(false);
-  const [viewOnly, setViewOnlyState] = useState(stored.viewOnly);
+  const [requestedViewOnly, setViewOnlyState] = useState(stored.viewOnly);
   /** Manual staleness override; off by default because it costs bandwidth. */
   const [alwaysRefresh, setAlwaysRefresh] = useState(stored.alwaysRefresh);
   const [recallSignal, setRecallSignal] = useState(0);
@@ -363,7 +363,7 @@ function SessionView({
    * every keystroke.
    */
   const viewOnlyRef = useRef(false);
-  viewOnlyRef.current = viewOnly;
+
   const sendComboRef = useRef<((c: "ctrl-alt-del") => void) | null>(null);
   const disconnectRef = useRef<(() => void) | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ w: number; h: number } | null>(null);
@@ -423,6 +423,8 @@ function SessionView({
   );
 
   const session = useSession(params, bridge, frame);
+  const viewOnly = requestedViewOnly || session.boundaryControl === false;
+  viewOnlyRef.current = viewOnly;
   const sessionRef = useRef(session);
   sessionRef.current = session;
 

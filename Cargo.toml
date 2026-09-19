@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/boundary-driver",
     # Protocol-neutral layers. Every protocol crate depends on these; these
     # depend on no protocol crate (PRDRDP/01 §2.2, PRDRDP/02 §3).
     "crates/remote-core",

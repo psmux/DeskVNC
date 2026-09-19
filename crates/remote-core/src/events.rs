@@ -205,6 +205,10 @@ pub struct AudioPacket {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProtocolEvent {
+    /// Host permission for an attended support session.
+    Boundary {
+        control: bool,
+    },
     Rdp(RdpEvent),
     Ssh(SshEvent),
 }

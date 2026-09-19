@@ -117,6 +117,7 @@ export interface SshHostKeyPromptState {
 }
 
 export interface SessionApi {
+  boundaryControl: boolean | null;
   state: SessionState;
   desktopName: string;
   /**
@@ -322,6 +323,7 @@ export function useSession(
 ): SessionApi {
   const [state, setState] = useState<SessionState>({ state: "connecting" });
   const [desktopName, setDesktopName] = useState(params.name);
+  const [boundaryControl, setBoundaryControl] = useState<boolean | null>(params.protocol === "boundary" ? false : null);
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
@@ -447,6 +449,9 @@ export function useSession(
         }
         case "desktop-resize":
           bridgeRef.current.onDesktopResize(ev.width, ev.height);
+          break;
+        case "boundary-control":
+          setBoundaryControl(ev.control);
           break;
         case "desktop-name":
           setDesktopName(ev.name);
@@ -980,7 +985,7 @@ export function useSession(
   }, []);
 
   return {
-    state, desktopName, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
+    state, desktopName, boundaryControl, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
