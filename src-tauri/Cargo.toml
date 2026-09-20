@@ -15,6 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+boundary-codes = { path = "../../PRDTraverseAllBoundaries/crates/boundary-codes" }
 boundary-provision = { path = "../../PRDTraverseAllBoundaries/crates/boundary-provision" }
 boundary-driver = { path = "../crates/boundary-driver" }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }

@@ -638,6 +638,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "boundary-codes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "boundary-session",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "boundary-driver"
 version = "0.27.2"
 dependencies = [
@@ -1609,6 +1621,7 @@ dependencies = [
  "agent-perception",
  "anyhow",
  "base64 0.22.1",
+ "boundary-codes",
  "boundary-driver",
  "boundary-provision",
  "bytes",

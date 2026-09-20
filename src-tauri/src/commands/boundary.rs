@@ -8,7 +8,17 @@ pub async fn connect_boundary(
     state: State<'_, AppState>,
     invitation: String,
     helper_name: String,
+    code_service: Option<String>,
 ) -> Result<super::session::SessionWindowOutcome, String> {
+    let invitation = if invitation.trim().starts_with("boundary1:") {
+        invitation
+    } else {
+        boundary_codes::Client::new(code_service.as_deref().unwrap_or(""))
+            .map_err(|error| error.to_string())?
+            .resolve(&invitation)
+            .await
+            .map_err(|error| error.to_string())?
+    };
     let address = state
         .protocols
         .boundary
