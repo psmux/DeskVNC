@@ -25,7 +25,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow, Wry};
 
 /// Kept in step with `ui/src/screens/About.tsx`, which shows the same details
 /// in the in-app dialog used on every platform.
-const AUTHOR_EMAIL: &str = "godwin@cdtech.in";
+const CONTACT_URL: &str = "https://github.com/psmux";
 const PROJECT_URL: &str = "https://github.com/psmux/DeskVNC";
 
 /// The one check item that means something with no session in front: it is a
@@ -730,7 +730,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         "menu:project" | "menu:contact" => {
             use tauri_plugin_opener::OpenerExt;
             let url = if id == "menu:contact" {
-                format!("mailto:{AUTHOR_EMAIL}?subject=DeskVNCViewer")
+                CONTACT_URL.to_string()
             } else {
                 PROJECT_URL.to_string()
             };

@@ -233,7 +233,7 @@ mod tests {
             limb_id: "lmb_vnc_0123456789ab_0".to_string(),
             phase: "held".to_string(),
             holder_kind: Some("human".to_string()),
-            holder_label: Some("Godwin".to_string()),
+            holder_label: Some("Alex".to_string()),
             human_took_over: true,
             queue_depth: 0,
             released: vec!["pointer(0,0,mask=0)".to_string()],

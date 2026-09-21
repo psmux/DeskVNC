@@ -238,7 +238,7 @@ and the signed Windows builds.
 If your company depends on DeskVNC, or you want the agent control plane inside
 your own product (a no install tier for driving legacy or locked down Windows
 desktops, a hardened `dvv`, or protocol work on the Rust RDP, VNC and SSH
-cores), write to **godwin@altrosyn.com**. Paid priority support and fixed scope
+cores), [contact the maintainer](https://github.com/psmux). Paid priority support and fixed scope
 contracts are available.
 
 ## Contributing

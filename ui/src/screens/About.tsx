@@ -4,8 +4,8 @@ import { Dialog } from "../components/primitives";
 import { openExternal, safeInvoke, writeClipboard } from "../lib/tauri";
 import { classNames, fullscreenHint, modKeyLabel } from "../lib/util";
 
-export const AUTHOR_NAME = "Godwin Josh";
-export const AUTHOR_EMAIL = "godwin@cdtech.in";
+export const AUTHOR_NAME = "psmux";
+export const CONTACT_URL = "https://github.com/psmux";
 export const PROJECT_URL = "https://github.com/psmux/DeskVNC";
 
 type Tab = "About" | "Help";
@@ -217,9 +217,9 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
                 <button
                   type="button"
                   className="text-accent hover:underline"
-                  onClick={() => void openExternal(`mailto:${AUTHOR_EMAIL}`)}
+                  onClick={() => void openExternal(CONTACT_URL)}
                 >
-                  {AUTHOR_EMAIL}
+                  {AUTHOR_NAME}
                 </button>
               </dd>
             </div>
@@ -246,7 +246,7 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => void openExternal(`mailto:${AUTHOR_EMAIL}?subject=DeskVNCViewer`)}
+              onClick={() => void openExternal(CONTACT_URL)}
             >
               Contact developer
             </button>

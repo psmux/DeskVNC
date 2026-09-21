@@ -255,4 +255,4 @@ If you are building agent automation for legacy or locked-down Windows desktops,
 the no-install, protocol-level path DeskVNC takes reaches machines that a
 driver-based tool cannot: Citrix, VDI, jump hosts and client-owned PCs. For a
 hardened `dvv` tailored to your agent, a commercial integration, or protocol work
-on the Rust RDP, VNC and SSH cores, email **godwin@altrosyn.com**.
+on the Rust RDP, VNC and SSH cores, [contact the maintainer](https://github.com/psmux).

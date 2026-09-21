@@ -4,10 +4,8 @@
 
 **Please do not open a public issue for security problems.**
 
-Report privately to **godwin@cdtech.in**. If you use GitHub, the
-[private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
-tab on this repository works too and is preferred, since it keeps the discussion
-attached to the code.
+Use [private vulnerability reporting](https://github.com/psmux/DeskVNC/security/advisories/new)
+on this repository. It keeps the discussion private and attached to the code.
 
 Useful things to include, as far as you have them:
 
