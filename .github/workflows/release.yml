@@ -153,16 +153,70 @@ jobs:
           releaseDraft: true
           prerelease: false
 
-      - name: Build the DeskVNC Support recipient app
+      # The bundler signs the viewer from a keychain it creates and destroys
+      # within its own step, so nothing it set up survives to here. The support
+      # app needs the certificate in a keychain of its own, and this runs after
+      # tauri-action precisely so the two never share a search list.
+      - name: Import the Developer ID certificate for the support app
         if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "No certificate configured; the support app step will refuse to ship."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/boundary-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          P12="$RUNNER_TEMP/boundary-cert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Without this the keychain relocks mid-job and codesign fails with a
+          # bare "User interaction is not allowed".
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$P12"
+          security import "$P12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -f pkcs12
+          rm -f "$P12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+
+          # Prepend rather than replace, so the login keychain stays searchable.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '" ')
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Build, sign and notarize the DeskVNC Support recipient app
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # On a tag the app must be shippable or the build fails. Elsewhere a
+          # degraded build is still useful, and fork PRs have no secrets at all.
+          BOUNDARY_REQUIRE_SIGNING: ${{ (startsWith(github.ref, 'refs/tags/') && secrets.APPLE_CERTIFICATE != '') && '1' || '0' }}
         run: scripts/build-boundary-macos.sh
 
       - name: Package the DeskVNC Support recipient app
         if: runner.os == 'macOS'
+        shell: bash
         run: |
+          set -euo pipefail
+          # Zipped after the script stapled the ticket, so the download carries
+          # its own notarization rather than needing Apple on first launch.
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/DeskVNC Support.app" "DeskVNC-Support-macOS.zip"
           shasum -a 256 "DeskVNC-Support-macOS.zip" | tee SHA256SUMS-DeskVNC-Support-macOS.txt
+          # "Collect installers" below checksums everything in dist/, and a
+          # bundle directory sitting there makes shasum complain and skip it.
+          rm -rf "dist/DeskVNC Support.app"
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             gh release upload "${GITHUB_REF_NAME}" \
               "DeskVNC-Support-macOS.zip" \
@@ -285,3 +339,42 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+
+  # tauri-action creates the release as a draft, and a draft is visible only to
+  # accounts with push access. Every earlier tag stopped there, which is why
+  # v0.27.3 sat with a support app nobody outside the repo could download.
+  #
+  # Publishing is its own job so it waits for all three platforms. Flipping the
+  # draft from inside the matrix would race: the first job to finish would
+  # publish a release the other two were still uploading to.
+  publish:
+    name: Publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish once every platform has uploaded
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' | tee /tmp/assets.txt
+
+          # Name the platforms rather than counting files, so a partial upload
+          # is caught here instead of by whoever downloads the gap.
+          missing=0
+          for want in 'DeskVNC-Support-macOS.zip' '.dmg' '.msi' '-setup.exe' '.deb' '.AppImage'; do
+            if ! grep -qF "$want" /tmp/assets.txt; then
+              echo "::error::release $TAG is missing an asset matching '$want'"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          echo "Published $TAG"
