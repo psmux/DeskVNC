@@ -20,8 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REPO="${REPO:-psmux/DeskVNC}"
-IDENTITY="${IDENTITY:-Developer ID Application: Godwin Josh (LCYYV8JHN6)}"
-TEAM_ID="${TEAM_ID:-LCYYV8JHN6}"
+# Supply the certificate identity and team ID from your Apple developer account.
+: "${IDENTITY:?Set IDENTITY to your Developer ID Application certificate name}"
+: "${TEAM_ID:?Set TEAM_ID to your Apple developer team ID}"
 
 command -v gh >/dev/null || { echo "error: gh CLI not found" >&2; exit 1; }
 

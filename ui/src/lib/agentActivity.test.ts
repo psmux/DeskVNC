@@ -352,8 +352,8 @@ describe("labels", () => {
     expect(holderLabel(null)).toBe("Nobody");
     expect(holderLabel({ kind: "agent", name: "claude-ops", capability: null, since: 0 }))
       .toBe("Agent claude-ops");
-    expect(holderLabel({ kind: "human", name: "Godwin", capability: null, since: 0 }))
-      .toBe("Godwin");
+    expect(holderLabel({ kind: "human", name: "Alex", capability: null, since: 0 }))
+      .toBe("Alex");
     expect(holderLabel({ kind: "service", name: "backup", capability: null, since: 0 }))
       .toBe("Service backup");
     expect(holderLabel({ kind: "unknown", name: "rest-1", capability: null, since: 0 }))

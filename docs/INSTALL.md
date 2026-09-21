@@ -26,7 +26,7 @@ Check it yourself if you want:
 ```sh
 spctl -a -vv -t exec /Applications/DeskVNCViewer.app
 # source=Notarized Developer ID
-# origin=Developer ID Application: Godwin Josh (LCYYV8JHN6)
+# origin=Developer ID Application: <certificate holder> (<team ID>)
 ```
 
 On first use the app asks for two permissions:
