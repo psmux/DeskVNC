@@ -1,0 +1,23 @@
+[package]
+name = "boundary-codes"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[features]
+server = ["dep:axum", "dep:getrandom"]
+
+[dependencies]
+anyhow.workspace = true
+boundary-session.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+axum = { version = "0.8", optional = true }
+getrandom = { version = "0.3", optional = true }
+
+[[bin]]
+name = "boundary-code-server"
+path = "src/main.rs"
+required-features = ["server"]

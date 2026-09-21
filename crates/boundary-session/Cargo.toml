@@ -1,0 +1,17 @@
+[package]
+name = "boundary-session"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+iroh = "1.2"
+base64 = "0.22"
+getrandom = "0.3"
+subtle = "2"

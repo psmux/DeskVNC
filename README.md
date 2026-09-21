@@ -42,6 +42,29 @@ no account, no telemetry, and no paid tier holding a feature back.
    the top and press **Connect**, which saves nothing.
 3. Double click a tile. That is the whole flow.
 
+### Need to support someone outside your network?
+
+Download **DeskVNC Support** from the same release page and send it to the
+person who needs help. They open it, press **Create invitation**, and approve
+your connection. You open **Boundary support** in DeskVNC, paste the invitation,
+and connect. Boundary tries a direct encrypted path first and uses its relay
+fallback when the networks do not allow a direct path.
+
+For a shorter handoff, configure the shared Boundary code service or your own
+private service and share the displayed four digit groups, such as
+`1234 5678 9012`. The number expires after one lookup and the person at the
+remote computer still approves the session. A full invitation remains available
+when no code service is configured.
+
+No account is required for an attended support session. Screen Recording and
+Accessibility permissions are requested on macOS when sharing or control needs
+them. The recipient can revoke control or end the session at any time.
+
+DeskVNC Support is currently a macOS preview. Windows and Linux support apps,
+unattended access, browser access and automatic private provider deployment are
+still in development. The release page contains the runnable support app and
+the repository's `14-support-codes.md` file documents private code services.
+
 Addresses can be written the way you already think of them: `10.0.0.4`,
 `10.0.0.4:5901`, `rdp://frontdesk`, `ssh://ops@jump-01`. If you do not know the
 address, press **Scan network** and DeskVNC will find what is listening nearby.

@@ -1,0 +1,12 @@
+[package]
+name = "boundary-platform"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+boundary-session.workspace = true
+image.workspace = true
+xcap = "0.9.8"
+enigo = "0.6.1"

@@ -2,6 +2,11 @@
 resolver = "2"
 members = [
     "crates/boundary-driver",
+    "crates/boundary-session",
+    "crates/boundary-codes",
+    "crates/boundary-platform",
+    "crates/boundary-provision",
+    "crates/boundary-app",
     # Protocol-neutral layers. Every protocol crate depends on these; these
     # depend on no protocol crate (PRDRDP/01 §2.2, PRDRDP/02 §3).
     "crates/remote-core",
@@ -46,7 +51,7 @@ exclude = [
 [workspace.package]
 version = "0.27.2"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 authors = ["DeskVNCViewer contributors"]
 repository = "https://github.com/psmux/DeskVNC"
@@ -131,6 +136,22 @@ directories = "6"
 
 # images
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+xcap = "0.9.8"
+enigo = "0.6.1"
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+async-trait = "0.1"
+tempfile = "3"
+if-addrs = "0.15"
+open = "5"
+
+boundary-session = { path = "crates/boundary-session" }
+boundary-codes = { path = "crates/boundary-codes" }
+boundary-platform = { path = "crates/boundary-platform" }
+boundary-provision = { path = "crates/boundary-provision" }
+iroh = "1.2"
+getrandom = "0.3"
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 fast_image_resize = "6"
 
 # misc

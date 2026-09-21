@@ -145,9 +145,40 @@ jobs:
             your PC", and you continue with **More info** then **Run anyway**.
             **Linux** packages are unsigned.
 
+            On macOS, **DeskVNC Support** is also attached for people who need
+            to receive help. Download it on the computer being supported,
+            create an invitation, and share the displayed code or invitation.
+
             Full changes in [CHANGELOG.md](https://github.com/psmux/DeskVNC/blob/main/CHANGELOG.md).
           releaseDraft: true
           prerelease: false
+
+      - name: Build the DeskVNC Support recipient app
+        if: runner.os == 'macOS'
+        run: scripts/build-boundary-macos.sh
+
+      - name: Package the DeskVNC Support recipient app
+        if: runner.os == 'macOS'
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/DeskVNC Support.app" "DeskVNC-Support-macOS.zip"
+          shasum -a 256 "DeskVNC-Support-macOS.zip" | tee SHA256SUMS-DeskVNC-Support-macOS.txt
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              "DeskVNC-Support-macOS.zip" \
+              "SHA256SUMS-DeskVNC-Support-macOS.txt" --clobber
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload the DeskVNC Support recipient app artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskvnc-support-macos
+          path: |
+            DeskVNC-Support-macOS.zip
+            SHA256SUMS-DeskVNC-Support-macOS.txt
 
       # Fail loudly rather than shipping something users cannot open. The
       # bundler only warns when notarization credentials are missing, so

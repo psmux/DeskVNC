@@ -10,6 +10,21 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.3] - 2026-09-21
+
+### Added
+
+- DeskVNC now includes the Boundary support transport and the macOS DeskVNC
+  Support recipient app in the same source checkout and release workflow.
+- Attended support can use a temporary numeric code when a shared or private
+  Boundary code service is configured.
+
+### Fixed
+
+- Pasting into an SSH side terminal now captures keyboard, context menu and
+  system paste events before the xterm input element handles them, then sends
+  the text through the SSH input channel. Reported in issue #2.
+
 ## [0.27.2] - 2026-09-14
 
 ### Fixed
