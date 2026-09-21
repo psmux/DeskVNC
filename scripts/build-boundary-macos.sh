@@ -45,9 +45,16 @@ fail_or_warn() {
 # viewer must not be handed a support app it cannot launch. Build both slices
 # when both targets are installed and lipo them; fall back to a host-only build
 # so a plain `cargo build` checkout still works.
+#
+# Ask the compiler that will actually run, not rustup. `rustup target list`
+# describes the rustup toolchain, which is not always the rustc on PATH: a
+# Homebrew rust earlier in PATH reports x86_64-apple-darwin as installed and
+# then fails the build with "can't find crate for `core`". The presence of the
+# target's std in the sysroot is the fact that matters.
+sysroot=$(rustc --print sysroot)
 targets=()
 for candidate in aarch64-apple-darwin x86_64-apple-darwin; do
-    if rustup target list --installed 2>/dev/null | grep -qx "$candidate"; then
+    if [ -d "$sysroot/lib/rustlib/$candidate" ]; then
         targets+=("$candidate")
     fi
 done
