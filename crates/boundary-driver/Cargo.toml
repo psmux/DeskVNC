@@ -7,7 +7,7 @@ rust-version = "1.95"
 
 [dependencies]
 remote-core = { path = "../remote-core" }
-boundary-session = { path = "../../../PRDTraverseAllBoundaries/crates/boundary-session" }
+boundary-session = { path = "../boundary-session" }
 tokio.workspace = true
 tokio-util.workspace = true
 anyhow.workspace = true

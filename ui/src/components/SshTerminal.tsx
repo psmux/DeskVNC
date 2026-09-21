@@ -303,6 +303,18 @@ export function SshTerminal({
     // re-emit onResize for a subsequent fit that lands on the same grid.
     const dData = term.onData((d) => void sshSend(sessionId, new TextEncoder().encode(d)));
     const dResize = term.onResize(({ cols, rows }) => void sshResize(sessionId, cols, rows));
+    // xterm normally handles keyboard paste through onData. Context menu
+    // paste and paste services can arrive as a DOM event instead, especially
+    // in the Tauri WebView. Capture that event before xterm's textarea sees it
+    // so the bytes take the same bounded SSH input path and are not dropped.
+    const onPaste = (event: ClipboardEvent): void => {
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void sshSend(sessionId, new TextEncoder().encode(text));
+    };
+    container.addEventListener("paste", onPaste, true);
     term.open(container);
     fit.fit();
     term.focus();
@@ -410,6 +422,7 @@ export function SshTerminal({
       void sshDisconnect(sessionId);
       dData.dispose();
       dResize.dispose();
+      container.removeEventListener("paste", onPaste, true);
       term.dispose();
       termRef.current = null;
       connectRef.current = () => undefined;
