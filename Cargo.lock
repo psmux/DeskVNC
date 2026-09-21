@@ -943,7 +943,7 @@ dependencies = [
  "anyhow",
  "boundary-codes",
  "boundary-platform",
- "boundary-provision 0.27.2",
+ "boundary-provision",
  "boundary-session",
  "eframe",
  "serde",
@@ -989,25 +989,6 @@ dependencies = [
  "enigo",
  "image",
  "xcap",
-]
-
-[[package]]
-name = "boundary-provision"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "if-addrs",
- "open",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -2139,7 +2120,7 @@ dependencies = [
  "base64 0.22.1",
  "boundary-codes",
  "boundary-driver",
- "boundary-provision 0.1.0",
+ "boundary-provision",
  "bytes",
  "crossbeam-channel",
  "limb-core",
