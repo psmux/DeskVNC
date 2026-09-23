@@ -23,7 +23,7 @@ import type {
 import { displayLabel } from "../lib/displays";
 import type { LocalCursor } from "../state/SettingsContext";
 import type { CaptureStatus } from "../lib/tauri";
-import { classNames, formatBps, fullscreenHint, modKeyLabel } from "../lib/util";
+import { classNames, formatBps, fullscreenHint, isMac, modKeyLabel } from "../lib/util";
 import { usePaneVisible } from "./Pane";
 import {
   IconActivity, IconCamera, IconChevronDown, IconClipboard, IconDisconnect, IconEye,
@@ -1117,8 +1117,9 @@ function CaptureStatusNote({
   }
   return (
     <p className="px-2.5 pb-1 text-2xs text-tertiary">
-      Sends {modKeyLabel}Tab, {modKeyLabel}Space and the Windows key to the remote instead of this
-      computer.
+      {isMac
+        ? "Sends Cmd+Tab, Cmd+Space and other system shortcuts to the remote instead of this computer."
+        : "Sends Alt+Tab, the Windows key and other system shortcuts to the remote instead of this computer."}
     </p>
   );
 }

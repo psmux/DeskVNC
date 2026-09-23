@@ -9,6 +9,11 @@
 //! Ctrl+Alt+Shift+Esc is never swallowed, and the grab ends by itself.
 
 fn main() {
+    // On Windows the backend runs its hook in a copy of this executable, so a
+    // copy started as the helper must become the helper and nothing else.
+    if let Some(code) = vnc_input_capture::run_helper_if_requested() {
+        std::process::exit(code);
+    }
     let secs: u64 = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
@@ -27,7 +32,10 @@ fn main() {
         capture.stop();
     }
     capture.start().expect("start");
-    println!("capture {:?} for {secs}s after {cycles} stop/start cycles", capture.status());
+    println!(
+        "capture {:?} for {secs}s after {cycles} stop/start cycles",
+        capture.status()
+    );
     let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     while std::time::Instant::now() < until {
         if let Ok(k) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
