@@ -13,6 +13,10 @@
 //!
 //! - a low-level hook is only serviced while its owning thread pumps messages,
 //!   and Tauri's main-thread loop is not a plain `GetMessage` loop;
+//!
+//! Inside the application this is still not enough: while a DeskVNC window is
+//! in front the hook is not called at all. The application therefore runs this
+//! backend in a helper process, see `windows_helper`.
 //! - PRD/06 §3 records the known Tauri issue where an in-process hook installed
 //!   on the main thread stops firing once the Tauri window takes focus.
 //!
@@ -351,6 +355,14 @@ impl WindowsCapture {
             thread_id: Arc::new(AtomicU32::new(0)),
             thread: None,
         }
+    }
+}
+
+impl WindowsCapture {
+    /// The shared target cell, so the helper process can retarget the grab
+    /// from its command thread while the hook is running.
+    pub fn target_handle(&self) -> Arc<AtomicIsize> {
+        self.target.clone()
     }
 }
 
