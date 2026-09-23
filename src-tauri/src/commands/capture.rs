@@ -180,6 +180,22 @@ fn status_or_error(result: Result<CaptureStatus, CaptureError>) -> Result<Captur
     }
 }
 
+/// Windows does not arm and disarm the grab on window focus at all.
+///
+/// It used to, and that is why Alt+Tab and Win+Tab never reached the remote.
+/// tao reports a window as focused only while its top level `HWND` holds the
+/// keyboard focus, and wry answers that `WM_SETFOCUS` by moving the focus into
+/// the WebView2 child, which is where the session's keystrokes go. So every
+/// activation was a `Focused(true)` followed at once by a `Focused(false)`,
+/// and the blur handler uninstalled the hook right after the re-arm, while
+/// the badge could still say captured.
+///
+/// Instead the hook stays installed for as long as pass-through is on and
+/// checks for itself that the session's window is the foreground window before
+/// it swallows anything (`set_target_window` in `vnc_input_capture`). macOS
+/// and Linux keep the focus driven behaviour.
+const FOREGROUND_GATED: bool = cfg!(target_os = "windows");
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -204,8 +220,15 @@ pub async fn capture_start(
 
     // Installing a hook spawns a thread and waits briefly for it to report;
     // that must not happen on the main thread.
+    // The native window whose foreground the Windows grab is gated on.
+    #[cfg(target_os = "windows")]
+    let native = window.hwnd().ok().map(|h| h.0 as isize);
+    #[cfg(not(target_os = "windows"))]
+    let native: Option<isize> = None;
+
     let status = tauri::async_runtime::spawn_blocking(move || {
         let mut controller = capture.controller.lock();
+        controller.set_target_window(native);
         let result = controller.start(&id);
         if result.is_ok() {
             *capture.desired.lock() = Some(Desire {
@@ -284,6 +307,9 @@ pub fn capture_request_permission() {
 /// one that matters, which is the only thing that still works when the session
 /// is a tab inside `main`.
 pub fn disarm_for_window(app: &AppHandle, window_label: &str) {
+    if FOREGROUND_GATED {
+        return;
+    }
     let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
         return;
     };
@@ -309,6 +335,9 @@ pub fn disarm_for_window(app: &AppHandle, window_label: &str) {
 /// releases capture from the frontend (see `ui/src/screens/Session.tsx`); this
 /// hook only covers the whole window losing and regaining focus.
 pub fn rearm_for_window(app: &AppHandle, window_label: &str) {
+    if FOREGROUND_GATED {
+        return;
+    }
     let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
         return;
     };
@@ -318,31 +347,14 @@ pub fn rearm_for_window(app: &AppHandle, window_label: &str) {
     if desire.window_label != window_label {
         return;
     }
-    // Off the main thread, like `capture_start`. This is called from inside
-    // the window's focus event, on the thread that owns the window, and a
-    // hook installed while that thread sat blocked in `start` waiting for
-    // the install to report never received a single keystroke afterwards:
-    // the badge said captured and Windows kept Alt+Tab. Installing from a
-    // thread of its own is what the toolbar path always did, and that hook
-    // works.
-    let capture: Arc<CaptureState> = capture.inner().clone();
-    let app = app.clone();
-    let spawned = std::thread::Builder::new()
-        .name("vnc-capture-rearm".into())
-        .spawn(move || {
-            let status = match capture.controller.lock().start(&desire.session_id) {
-                Ok(status) => status,
-                Err(e) => {
-                    tracing::warn!(session = %desire.session_id, "could not re-arm capture: {e}");
-                    CaptureStatus::Inactive
-                }
-            };
-            tracing::debug!(session = %desire.session_id, ?status, "capture re-armed (window focused)");
-            emit_status(&app, status, Some(&desire.session_id));
-        });
-    if let Err(e) = spawned {
-        tracing::warn!("could not spawn the capture re-arm thread: {e}");
-    }
+    let status = match capture.controller.lock().start(&desire.session_id) {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::warn!(session = %desire.session_id, "could not re-arm capture: {e}");
+            CaptureStatus::Inactive
+        }
+    };
+    emit_status(app, status, Some(&desire.session_id));
 }
 
 /// Fully release capture for a session (disconnect, window close, view-only).

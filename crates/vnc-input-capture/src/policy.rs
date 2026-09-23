@@ -117,6 +117,11 @@ impl HeldKeys {
     pub fn clear(&mut self) {
         self.0.clear();
     }
+
+    /// Is this key's key-down currently swallowed and forwarded?
+    pub fn contains(&self, key: u32) -> bool {
+        self.0.contains(&key)
+    }
 }
 
 /// Stateful entry point platform backends should call instead of

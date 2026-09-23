@@ -32,7 +32,7 @@
 //! folding in `LLKHF_EXTENDED` as bit 7, see [`crate::windows_to_xt`].
 
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -40,9 +40,10 @@ use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
+    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, GA_ROOT, HHOOK,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use crate::keymap;
@@ -75,22 +76,29 @@ mod modbit {
 }
 
 /// Which modifier bit (if any) a virtual-key code represents.
+/// One bit per physical modifier key, left and right apart, so releasing one
+/// Shift while the other is still held does not clear Shift.
 fn modifier_bit(vk_code: u32) -> Option<u32> {
     Some(match vk_code {
-        vk::SHIFT | vk::LSHIFT | vk::RSHIFT => modbit::SHIFT,
-        vk::CONTROL | vk::LCONTROL | vk::RCONTROL => modbit::CTRL,
-        vk::MENU | vk::LMENU | vk::RMENU => modbit::ALT,
-        vk::LWIN | vk::RWIN => modbit::META,
+        vk::SHIFT | vk::LSHIFT => modbit::SHIFT,
+        vk::RSHIFT => modbit::SHIFT << 8,
+        vk::CONTROL | vk::LCONTROL => modbit::CTRL,
+        vk::RCONTROL => modbit::CTRL << 8,
+        vk::MENU | vk::LMENU => modbit::ALT,
+        vk::RMENU => modbit::ALT << 8,
+        vk::LWIN => modbit::META,
+        vk::RWIN => modbit::META << 8,
         _ => return None,
     })
 }
 
 fn modifiers_from_bits(bits: u32) -> Modifiers {
+    let either = bits | (bits >> 8);
     Modifiers {
-        shift: bits & modbit::SHIFT != 0,
-        ctrl: bits & modbit::CTRL != 0,
-        alt: bits & modbit::ALT != 0,
-        meta: bits & modbit::META != 0,
+        shift: either & modbit::SHIFT != 0,
+        ctrl: either & modbit::CTRL != 0,
+        alt: either & modbit::ALT != 0,
+        meta: either & modbit::META != 0,
     }
 }
 
@@ -113,6 +121,11 @@ struct HookCtx {
     /// `policy.rs`). Shared with `WindowsCapture` so `start`/`stop` can clear
     /// it the same way `mods` is reset.
     held: Arc<Mutex<HeldKeys>>,
+    /// The native top level window whose keys we take, as a raw `HWND`, or 0
+    /// for no restriction. A key-down is only swallowed while this window is
+    /// the foreground window, so the grab can stay installed for as long as
+    /// pass-through is on without ever taking a key typed somewhere else.
+    target: Arc<AtomicIsize>,
 }
 
 static HOOK_CTX: Mutex<Option<HookCtx>> = Mutex::new(None);
@@ -132,7 +145,6 @@ static HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 ///   body is wrapped in `catch_unwind` and falls back to passing the key
 ///   through.
 unsafe extern "system" fn keyboard_hook(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    trace_key(n_code as u32, false, "enter");
     if n_code < 0 {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
@@ -193,8 +205,21 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     let Some(scancode) = keymap::windows_to_xt(vk_code, info.scanCode, extended) else {
         return false;
     };
+    // Someone else's key. A key-up is still judged below, because a key-down
+    // we swallowed must have its key-up swallowed too even if the foreground
+    // changed in between.
     let mut held = ctx.held.lock();
-    if !should_intercept_key(HostOs::Windows, scancode, down, mods, &mut held) {
+    // An autorepeat of a key-down we already sent to the remote stays with the
+    // remote, whatever is in front now, so no other window ever sees a repeat
+    // it never saw the press for.
+    let repeat_of_ours = down && held.contains(scancode);
+    if down && !repeat_of_ours && !target_is_foreground(ctx.target.load(Ordering::Relaxed)) {
+        trace_key(vk_code, down, "pass-not-foreground");
+        return false;
+    }
+    if !repeat_of_ours
+        && !should_intercept_key(HostOs::Windows, scancode, down, mods, &mut held)
+    {
         trace_key(vk_code, down, "pass");
         return false;
     }
@@ -208,6 +233,19 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
         down,
     });
     true
+}
+
+/// Is `target` (a raw top level `HWND`, 0 for any window) the foreground
+/// window? Compared by root, so a key typed while focus sits in a child of the
+/// target (the WebView2 document) counts as the target's.
+fn target_is_foreground(target: isize) -> bool {
+    if target == 0 {
+        return true;
+    }
+    // SAFETY: both calls take and return plain window handles and have no
+    // preconditions; a null foreground window simply compares unequal.
+    let root = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOT) };
+    root.0 as isize == target
 }
 
 /// `DVV_CAPTURE_TRACE=<file>` appends every decision the hook makes to that
@@ -267,6 +305,7 @@ pub struct WindowsCapture {
     mods: Arc<AtomicU32>,
     /// Scancodes whose key-down was swallowed and forwarded; see `HookCtx`.
     held: Arc<Mutex<HeldKeys>>,
+    target: Arc<AtomicIsize>,
     /// Thread id of the message pump, for `PostThreadMessageW(WM_QUIT)`.
     thread_id: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
@@ -280,6 +319,7 @@ impl WindowsCapture {
             status: Arc::new(AtomicU8::new(STATUS_INACTIVE)),
             mods: Arc::new(AtomicU32::new(0)),
             held: Arc::new(Mutex::new(HeldKeys::new())),
+            target: Arc::new(AtomicIsize::new(0)),
             thread_id: Arc::new(AtomicU32::new(0)),
             thread: None,
         }
@@ -300,6 +340,7 @@ impl KeyboardCapture for WindowsCapture {
             running: self.running.clone(),
             mods: self.mods.clone(),
             held: self.held.clone(),
+            target: self.target.clone(),
         };
         let status = self.status.clone();
         let thread_id = self.thread_id.clone();
@@ -359,6 +400,10 @@ impl KeyboardCapture for WindowsCapture {
         // A key held from this session must never swallow a local key-up once
         // capture is stopped or force-released.
         self.held.lock().clear();
+    }
+
+    fn set_target_window(&mut self, native: Option<isize>) {
+        self.target.store(native.unwrap_or(0), Ordering::Relaxed);
     }
 
     fn status(&self) -> CaptureStatus {
@@ -426,11 +471,32 @@ mod tests {
 
     #[test]
     fn modifier_bits_cover_both_sides() {
-        assert_eq!(modifier_bit(vk::LWIN), Some(modbit::META));
-        assert_eq!(modifier_bit(vk::RWIN), Some(modbit::META));
-        assert_eq!(modifier_bit(vk::LMENU), Some(modbit::ALT));
-        assert_eq!(modifier_bit(vk::RCONTROL), Some(modbit::CTRL));
+        let reads_as = |vk| modifiers_from_bits(modifier_bit(vk).unwrap());
+        assert!(reads_as(vk::LWIN).meta && reads_as(vk::RWIN).meta);
+        assert!(reads_as(vk::LMENU).alt && reads_as(vk::RMENU).alt);
+        assert!(reads_as(vk::LCONTROL).ctrl && reads_as(vk::RCONTROL).ctrl);
+        assert!(reads_as(vk::LSHIFT).shift && reads_as(vk::RSHIFT).shift);
+        assert_ne!(modifier_bit(vk::LSHIFT), modifier_bit(vk::RSHIFT));
         assert_eq!(modifier_bit(0x41), None); // 'A'
+    }
+
+    #[test]
+    fn releasing_one_side_keeps_the_other_held() {
+        let both = modifier_bit(vk::LSHIFT).unwrap() | modifier_bit(vk::RSHIFT).unwrap();
+        let after_left_up = both & !modifier_bit(vk::LSHIFT).unwrap();
+        assert!(modifiers_from_bits(after_left_up).shift);
+        assert!(modifiers_from_bits(modifier_bit(vk::RMENU).unwrap()).alt);
+    }
+
+    #[test]
+    fn no_target_means_any_foreground() {
+        assert!(target_is_foreground(0));
+    }
+
+    #[test]
+    fn a_window_that_is_not_in_front_is_not_the_target() {
+        // No real window has this handle, so it is never the foreground.
+        assert!(!target_is_foreground(0x7fff_fff0));
     }
 
     #[test]
