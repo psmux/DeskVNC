@@ -186,12 +186,19 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
 
     // Track modifiers before deciding, so the modifier's own event sees itself
     // as held (Windows' Win key must be judged with meta already set).
+    //
+    // A modifier only counts if it went down while the target window was in
+    // front. Alt held in another application and still held when DeskVNC is
+    // clicked never reached the remote through the webview, so treating the
+    // Tab that follows as Alt+Tab would send the remote a bare Tab.
     if let Some(bit) = modifier_bit(vk_code) {
         let previous = ctx.mods.load(Ordering::Relaxed);
-        let updated = if down {
+        let updated = if !down {
+            previous & !bit
+        } else if target_is_foreground(ctx.target.load(Ordering::Relaxed)) {
             previous | bit
         } else {
-            previous & !bit
+            previous
         };
         ctx.mods.store(updated, Ordering::Relaxed);
     }
@@ -213,7 +220,15 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     // remote, whatever is in front now, so no other window ever sees a repeat
     // it never saw the press for.
     let repeat_of_ours = down && held.contains(scancode);
-    if down && !repeat_of_ours && !target_is_foreground(ctx.target.load(Ordering::Relaxed)) {
+    let foreground = target_is_foreground(ctx.target.load(Ordering::Relaxed));
+    if repeat_of_ours && !foreground {
+        // Swallowed so no other window sees a repeat it never saw the press
+        // for, but not forwarded: the window blur has already released the
+        // key on the remote, and the key-up will still be consumed.
+        trace_key(vk_code, down, "consume-repeat-not-foreground");
+        return true;
+    }
+    if down && !repeat_of_ours && !foreground {
         trace_key(vk_code, down, "pass-not-foreground");
         return false;
     }
