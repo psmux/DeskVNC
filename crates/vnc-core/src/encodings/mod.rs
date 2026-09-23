@@ -202,12 +202,27 @@ impl DecoderState {
     }
 
     /// Mid-session SetPixelFormat. Deliberately does NOT touch the zlib
-    /// streams, they are connection-scoped, not format-scoped. The colour
-    /// map IS cleared: it belongs to the palette period that just ended, and
-    /// keeping it would paint rects arriving before the server's next
-    /// SetColourMapEntries with a stale (and possibly wrong-format) palette.
+    /// streams, they are connection-scoped, not format-scoped.
+    ///
+    /// Nor does it touch the colour map. Whether the map on hand belongs to
+    /// the palette period that just ended or to the one starting is not
+    /// something this layer can tell: the server writes the new period's
+    /// SetColourMapEntries the moment it processes SetPixelFormat, which is
+    /// BEFORE it answers the fence the switch was guarded by, so by the time
+    /// the run loop learns the switch has landed the new map has often
+    /// already been through here. Clearing it at that point painted every
+    /// palette rect for the rest of the session through the grayscale
+    /// identity fallback, indices as grey levels. The run loop, which knows
+    /// when the SetPixelFormat went out, decides with [`Self::clear_colour_map`].
     pub fn set_pixel_format(&mut self, pf: PixelFormat) {
         self.pf = pf;
+    }
+
+    /// Forget the colour map. For the run loop's format switch: the map
+    /// belongs to a palette period that has ended and no replacement has
+    /// arrived, so rects until the next SetColourMapEntries must not be
+    /// painted with it.
+    pub fn clear_colour_map(&mut self) {
         self.colour_map = None;
     }
 
@@ -414,15 +429,19 @@ mod tests {
     }
 
     #[test]
-    fn set_pixel_format_clears_stale_colour_map() {
-        // Colour map entries belong to the palette period that ends at
-        // SetPixelFormat; a rect arriving between this SetPixelFormat and the
-        // server's next SetColourMapEntries must not be painted with the
-        // previous (and possibly wrong-format) palette.
+    fn set_pixel_format_keeps_the_colour_map_and_clearing_is_explicit() {
+        // A server writes the new period's SetColourMapEntries as soon as it
+        // processes SetPixelFormat, before it answers the guard fence, so the
+        // map on hand when the switch lands is usually the NEW one. The
+        // decoder therefore never drops it on its own; the run loop, which
+        // knows whether a map arrived since the SetPixelFormat went out,
+        // clears explicitly when none did.
         let mut state = DecoderState::new(PixelFormat::palette8());
         state.set_colour_map(0, &[[10, 20, 30]]);
         assert!(state.colour_map().is_some());
         state.set_pixel_format(PixelFormat::palette8());
+        assert!(state.colour_map().is_some());
+        state.clear_colour_map();
         assert!(state.colour_map().is_none());
     }
 

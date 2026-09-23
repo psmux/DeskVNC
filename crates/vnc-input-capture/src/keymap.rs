@@ -141,6 +141,7 @@ pub const KEYS: &[(&str, u32, u32)] = &[
 pub mod xt {
     pub const ESCAPE: u32 = 0x01;
     pub const TAB: u32 = 0x0f;
+    pub const KEY_W: u32 = 0x11;
     pub const ENTER: u32 = 0x1c;
     pub const CONTROL_LEFT: u32 = 0x1d;
     pub const SHIFT_LEFT: u32 = 0x2a;

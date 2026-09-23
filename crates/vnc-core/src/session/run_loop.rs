@@ -665,6 +665,18 @@ pub(crate) struct RunLoop {
     /// has processed the switch; everything it sent before that answer was
     /// encoded in the old format.
     pending_pf: VecDeque<PixelFormat>,
+    /// Whether a SetColourMapEntries has arrived since the newest
+    /// fence-guarded SetPixelFormat went out. A server writes the map for a
+    /// palette format the moment it processes the SetPixelFormat, which is
+    /// BEFORE it answers the fence (the fence is SYNC_NEXT: it is answered
+    /// once the message after it has been handled), so the map for the new
+    /// period is normally already on hand when the switch lands. Dropping it
+    /// then, on the theory that it belonged to the old period, left every
+    /// palette rect for the rest of the session decoding through the
+    /// grayscale identity fallback: the Low and Black and White presets
+    /// painted palette INDICES as grey levels, and the picture jumped
+    /// between right and wrong with every full repaint.
+    colour_map_since_pf: bool,
     /// Commands that arrived mid-update and cannot safely run between rects
     /// (they change encodings, format, or session state). Serviced by the
     /// run loop once the update has been fully consumed.
@@ -767,6 +779,7 @@ impl RunLoop {
             refresh_cost: Duration::ZERO,
             trace: ProtocolTrace::new(),
             pending_pf: VecDeque::new(),
+            colour_map_since_pf: false,
             deferred_cmds: Vec::new(),
             pending_quality: None,
             pending_paced: None,
@@ -906,6 +919,7 @@ impl RunLoop {
                 // palette INDICES as grey levels.
                 tracing::debug!(first, count = entries.len(), "SetColourMapEntries");
                 self.decoder.set_colour_map(first, &entries);
+                self.colour_map_since_pf = true;
                 Ok(())
             }
             server_msg::BELL => Ok(emit(events, SessionEvent::Bell).await?),
@@ -1566,6 +1580,13 @@ impl RunLoop {
                 self.pf = new_pf;
                 self.caps.pixel_format = Some(new_pf);
                 self.decoder.set_pixel_format(new_pf);
+                // The map on hand is the new period's if it arrived after
+                // the SetPixelFormat went out (see `colour_map_since_pf`);
+                // only a map older than that belongs to the period that just
+                // ended and must go. The first branch is the common one.
+                if !std::mem::take(&mut self.colour_map_since_pf) {
+                    self.decoder.clear_colour_map();
+                }
                 tracing::debug!(?new_pf, "pixel format switch synchronised");
             } else {
                 tracing::warn!("unmatched pixel-format fence response");
@@ -2299,6 +2320,7 @@ impl RunLoop {
         let msg = messages::set_pixel_format(&new_pf);
         self.send(&msg).await?;
         self.pending_pf.push_back(new_pf);
+        self.colour_map_since_pf = false;
         // Everything on screen is stale once the switch lands; the redraw
         // request is ordered after the SetPixelFormat on the wire, so the
         // server answers it in the new format, after the fence response.

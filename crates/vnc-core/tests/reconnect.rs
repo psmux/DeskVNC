@@ -489,6 +489,79 @@ async fn a_format_switch_defers_decoding_until_the_fence_answer() {
     handle.shutdown();
 }
 
+/// The colour map for the NEW palette period normally arrives BEFORE the
+/// fence answer: a server writes SetColourMapEntries the moment it processes
+/// SetPixelFormat, and the SYNC_NEXT fence is answered only once that message
+/// has been handled. The switch landing must therefore keep the map on hand,
+/// not drop it as stale; dropping it left every palette rect for the rest of
+/// the session decoding through the grayscale identity fallback, which is what
+/// the Low and Black and White presets painting nonsense looked like.
+#[tokio::test]
+async fn a_colour_map_sent_before_the_fence_answer_survives_the_switch() {
+    let server = MockServer::start(MockConfig::new().update(vec![RectSpec::FenceCapable])).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| {
+                r.messages
+                    .iter()
+                    .any(|m| matches!(m, ClientMessage::ClientFence { .. }))
+            })
+            .await,
+        "the client should probe once it has seen FenceCapable"
+    );
+
+    send(&handle, ClientCommand::SetQuality(QualityPreset::BlackAndWhite)).await;
+    assert!(
+        server
+            .wait_until(DEFAULT_TIMEOUT, |r| {
+                r.messages.iter().any(|m| {
+                    matches!(m,
+                    ClientMessage::ClientFence { payload, .. } if payload == b"pf-switch")
+                })
+            })
+            .await,
+        "the format switch must be guarded by a pf-switch fence"
+    );
+
+    // The server's order: the palette for the new format first...
+    const GREEN: Rgb = [0, 255, 0];
+    let mut map = vec![1u8, 0]; // SetColourMapEntries
+    map.extend_from_slice(&5u16.to_be_bytes()); // first
+    map.extend_from_slice(&1u16.to_be_bytes()); // count
+    for c in GREEN {
+        map.extend_from_slice(&(c as u16 * 257).to_be_bytes());
+    }
+    server.send_raw(map);
+
+    // ...then the fence answer (flags echoed minus Request)...
+    let mut echo = vec![248u8, 0, 0, 0];
+    echo.extend_from_slice(&5u32.to_be_bytes()); // BlockBefore | SyncNext
+    echo.push(9);
+    echo.extend_from_slice(b"pf-switch");
+    server.send_raw(echo);
+
+    // ...then an 8bpp rect of index 5, which must resolve through that map.
+    let mut new = vec![0u8, 0, 0, 1];
+    new.extend_from_slice(&[0, 0, 0, 0, 0, 4, 0, 4]);
+    new.extend_from_slice(&0i32.to_be_bytes()); // Raw
+    new.extend_from_slice(&[5u8; 16]); // palette indices
+    server.send_raw(new);
+    let (rects, _) = events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    match &rects[0].payload {
+        vnc_core::types::RectPayload::Rgba(px) => {
+            assert_eq!(
+                &px[0..4],
+                &expect_rgba(GREEN),
+                "the map sent before the fence answer is the new period's and must be kept"
+            );
+        }
+        other => panic!("expected Rgba, got {other:?}"),
+    }
+    handle.shutdown();
+}
+
 #[tokio::test]
 async fn a_reconnect_starts_with_fresh_decoder_state() {
     // zlib rects are decoded through a stream that lives for the whole
