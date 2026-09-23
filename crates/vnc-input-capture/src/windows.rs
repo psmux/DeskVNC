@@ -191,18 +191,34 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     // front. Alt held in another application and still held when DeskVNC is
     // clicked never reached the remote through the webview, so treating the
     // Tab that follows as Alt+Tab would send the remote a bare Tab.
-    if let Some(bit) = modifier_bit(vk_code) {
-        let previous = ctx.mods.load(Ordering::Relaxed);
-        let updated = if !down {
-            previous & !bit
-        } else if target_is_foreground(ctx.target.load(Ordering::Relaxed)) {
-            previous | bit
-        } else {
-            previous
-        };
-        ctx.mods.store(updated, Ordering::Relaxed);
+    //
+    // `ctx.mods` packs two masks: the low half is which modifiers count
+    // (pressed fresh while the target was in front), the high half is which
+    // are physically down. An autorepeat is a down for a key already
+    // physically down, and it never makes a modifier count, because the press
+    // it repeats may have happened elsewhere. Any key arriving while another
+    // window is in front drops every modifier's eligibility: the window blur
+    // has released them on the remote, so a held Alt must be pressed again
+    // before it turns Tab into a grabbed Alt+Tab.
+    let foreground = target_is_foreground(ctx.target.load(Ordering::Relaxed));
+    let packed = ctx.mods.load(Ordering::Relaxed);
+    let (mut counts, mut physical) = (packed & 0xffff, packed >> 16);
+    if !foreground {
+        counts = 0;
     }
-    let mods = modifiers_from_bits(ctx.mods.load(Ordering::Relaxed));
+    if let Some(bit) = modifier_bit(vk_code) {
+        if !down {
+            counts &= !bit;
+            physical &= !bit;
+        } else {
+            if physical & bit == 0 && foreground {
+                counts |= bit;
+            }
+            physical |= bit;
+        }
+    }
+    ctx.mods.store(counts | (physical << 16), Ordering::Relaxed);
+    let mods = modifiers_from_bits(counts);
 
     if !ctx.running.load(Ordering::Relaxed) {
         trace_key(vk_code, down, "not-running");
@@ -212,15 +228,12 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     let Some(scancode) = keymap::windows_to_xt(vk_code, info.scanCode, extended) else {
         return false;
     };
-    // Someone else's key. A key-up is still judged below, because a key-down
-    // we swallowed must have its key-up swallowed too even if the foreground
-    // changed in between.
+    // Key-ups are judged by `held` alone below, so a key-down we swallowed has
+    // its key-up swallowed too even if the foreground changed in between. An
+    // autorepeat of such a key-down is ours as well: forwarded while the
+    // target is in front, and consumed without forwarding once it is not.
     let mut held = ctx.held.lock();
-    // An autorepeat of a key-down we already sent to the remote stays with the
-    // remote, whatever is in front now, so no other window ever sees a repeat
-    // it never saw the press for.
     let repeat_of_ours = down && held.contains(scancode);
-    let foreground = target_is_foreground(ctx.target.load(Ordering::Relaxed));
     if repeat_of_ours && !foreground {
         // Swallowed so no other window sees a repeat it never saw the press
         // for, but not forwarded: the window blur has already released the
