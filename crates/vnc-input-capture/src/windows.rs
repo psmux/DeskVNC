@@ -132,6 +132,7 @@ static HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 ///   body is wrapped in `catch_unwind` and falls back to passing the key
 ///   through.
 unsafe extern "system" fn keyboard_hook(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+    trace_key(n_code as u32, false, "enter");
     if n_code < 0 {
         return CallNextHookEx(None, n_code, w_param, l_param);
     }
@@ -163,9 +164,11 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
 
     let Some(guard) = HOOK_CTX.try_lock() else {
         // Contended only while starting/stopping. Never block a keystroke.
+        trace_key(vk_code, down, "ctx-locked");
         return false;
     };
     let Some(ctx) = guard.as_ref() else {
+        trace_key(vk_code, down, "no-ctx");
         return false;
     };
 
@@ -183,6 +186,7 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     let mods = modifiers_from_bits(ctx.mods.load(Ordering::Relaxed));
 
     if !ctx.running.load(Ordering::Relaxed) {
+        trace_key(vk_code, down, "not-running");
         return false;
     }
 
@@ -191,9 +195,11 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
     };
     let mut held = ctx.held.lock();
     if !should_intercept_key(HostOs::Windows, scancode, down, mods, &mut held) {
+        trace_key(vk_code, down, "pass");
         return false;
     }
     drop(held);
+    trace_key(vk_code, down, "swallow");
 
     let keysym = keymap::xt_to_keysym(scancode, mods.shift).unwrap_or(0);
     let _ = ctx.tx.try_send(CapturedKey {
@@ -202,6 +208,36 @@ fn handle_key(message: u32, info: &KBDLLHOOKSTRUCT) -> bool {
         down,
     });
     true
+}
+
+/// `DVV_CAPTURE_TRACE=<file>` appends every decision the hook makes to that
+/// file. Off by default: the hook runs on every keystroke system wide, and a
+/// file rather than stderr because the hook runs on its own thread and a
+/// shared console pipe interleaves badly with the application's own log.
+fn trace_key(vk_code: u32, down: bool, what: &str) {
+    use std::io::Write;
+    static FILE: std::sync::OnceLock<Option<parking_lot::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    let Some(file) = FILE.get_or_init(|| {
+        let path = std::env::var_os("DVV_CAPTURE_TRACE")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(parking_lot::Mutex::new)
+    }) else {
+        return;
+    };
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() % 100_000)
+        .unwrap_or(0);
+    let _ = writeln!(
+        file.lock(),
+        "{ms:05} vk=0x{vk_code:02x} {} {what}",
+        if down { "down" } else { "up" }
+    );
 }
 
 /// Owns the installed hook and guarantees it is removed on every exit path from
