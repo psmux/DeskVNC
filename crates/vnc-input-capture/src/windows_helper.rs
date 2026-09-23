@@ -94,8 +94,13 @@ impl HelperCapture {
 
 impl KeyboardCapture for HelperCapture {
     fn start(&mut self) -> Result<()> {
-        if self.child.is_some() {
-            return Ok(());
+        if let Some(child) = self.child.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+            // The helper died on its own. Clear it away and start a fresh one,
+            // or switching pass-through back on would silently do nothing.
+            self.stop();
         }
         let exe = std::env::current_exe()
             .map_err(|e| Error::Backend(format!("cannot find the application executable: {e}")))?;
@@ -272,6 +277,13 @@ fn run_helper(target: isize) -> i32 {
             recv(quit_rx) -> _ => break,
         }
     }
+    // Unhook first, then hand over everything still queued: a key-up captured
+    // just before the end must still reach the application, or the remote is
+    // left holding the key down.
     capture.stop();
+    for key in rx.try_iter() {
+        let _ = writeln!(out, "k {} {} {}", key.scancode, key.keysym, u8::from(key.down));
+    }
+    let _ = out.flush();
     0
 }
