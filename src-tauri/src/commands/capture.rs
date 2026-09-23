@@ -180,6 +180,22 @@ fn status_or_error(result: Result<CaptureStatus, CaptureError>) -> Result<Captur
     }
 }
 
+/// Windows does not arm and disarm the grab on window focus at all.
+///
+/// It used to, and that is why Alt+Tab and Win+Tab never reached the remote.
+/// tao reports a window as focused only while its top level `HWND` holds the
+/// keyboard focus, and wry answers that `WM_SETFOCUS` by moving the focus into
+/// the WebView2 child, which is where the session's keystrokes go. So every
+/// activation was a `Focused(true)` followed at once by a `Focused(false)`,
+/// and the blur handler uninstalled the hook right after the re-arm, while
+/// the badge could still say captured.
+///
+/// Instead the hook stays installed for as long as pass-through is on and
+/// checks for itself that the session's window is the foreground window before
+/// it swallows anything (`set_target_window` in `vnc_input_capture`). macOS
+/// and Linux keep the focus driven behaviour.
+const FOREGROUND_GATED: bool = cfg!(target_os = "windows");
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -204,8 +220,24 @@ pub async fn capture_start(
 
     // Installing a hook spawns a thread and waits briefly for it to report;
     // that must not happen on the main thread.
+    // The native window whose foreground the Windows grab is gated on. No
+    // handle means no gate, and an ungated grab would take keys typed into
+    // every other application, so refuse rather than start one.
+    #[cfg(target_os = "windows")]
+    let native = match window.hwnd() {
+        Ok(h) if !h.0.is_null() => Some(h.0 as isize),
+        _ => {
+            return Ok(CaptureStatus::Unsupported {
+                reason: "could not find this window's handle, so shortcuts stay local",
+            })
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let native: Option<isize> = None;
+
     let status = tauri::async_runtime::spawn_blocking(move || {
         let mut controller = capture.controller.lock();
+        controller.set_target_window(native);
         let result = controller.start(&id);
         if result.is_ok() {
             *capture.desired.lock() = Some(Desire {
@@ -284,6 +316,9 @@ pub fn capture_request_permission() {
 /// one that matters, which is the only thing that still works when the session
 /// is a tab inside `main`.
 pub fn disarm_for_window(app: &AppHandle, window_label: &str) {
+    if FOREGROUND_GATED {
+        return;
+    }
     let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
         return;
     };
@@ -309,6 +344,9 @@ pub fn disarm_for_window(app: &AppHandle, window_label: &str) {
 /// releases capture from the frontend (see `ui/src/screens/Session.tsx`); this
 /// hook only covers the whole window losing and regaining focus.
 pub fn rearm_for_window(app: &AppHandle, window_label: &str) {
+    if FOREGROUND_GATED {
+        return;
+    }
     let Some(capture) = app.try_state::<Arc<CaptureState>>() else {
         return;
     };

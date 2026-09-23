@@ -10,6 +10,42 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.4] - 2026-09-23
+
+### Fixed
+
+- On Windows, Alt+Tab, Win+Tab, the Windows key and the other system
+  shortcuts now reach the remote computer when "Pass system shortcuts to
+  remote" is on. Before, the switch showed Captured but Windows kept the
+  shortcuts. The keyboard hook was installed inside the application, where
+  Windows does not call it while a DeskVNC window is in front, and it was also
+  removed on every window activation because WebView2 takes the keyboard focus
+  from the window that owns it. The grab now runs in a small helper process
+  started from the same executable. It only takes keys while the session
+  window is in front, and it ends when pass-through is switched off or the
+  application exits.
+- Pass-through on Windows also covers Alt+F4, F10, F11 and Ctrl+W. Alt+F4
+  closed the session window it was typed into, F10 opened the local menu bar,
+  and F11 and Ctrl+W were this application's own menu shortcuts.
+- A modifier held down in another application no longer turns a later Tab
+  into a grabbed Alt+Tab that the remote never saw the Alt for. Left and right
+  Shift, Ctrl and Alt are tracked separately, so releasing one no longer
+  clears the other.
+- The host dialog's "Capture system shortcuts by default" was saved with the
+  profile but never read. A session on that host now starts with pass-through
+  on. What the toolbar switch was last set to on that computer still wins.
+- The pass-through help text on Windows named Ctrl+Tab and Ctrl+Space. It now
+  names Alt+Tab and the Windows key.
+- Black and White and Low no longer paint palette indices as grey levels
+  after a pixel format switch on servers with Fence support (TigerVNC,
+  TurboVNC). The colour map the server sends before answering the guard fence
+  was being discarded as stale.
+- Black and White mode no longer flickers at scaled sizes. Grey levels are
+  now worked out per remote pixel and then filtered, rather than the other way
+  round, so a one unit change in one pixel cannot flip a run of screen pixels
+  between two levels. The 1-bit dither is anchored to the desktop rather than
+  the window.
+
 ## [0.27.3] - 2026-09-21
 
 ### Added
@@ -2451,7 +2487,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.4...HEAD
+[0.27.4]: https://github.com/psmux/DeskVNC/compare/v0.27.3...v0.27.4
 [0.14.0]: https://github.com/psmux/DeskVNC/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/psmux/DeskVNC/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/psmux/DeskVNC/compare/v0.13.2...v0.13.3

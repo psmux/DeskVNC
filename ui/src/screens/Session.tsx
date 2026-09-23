@@ -50,6 +50,7 @@ import {
 } from "../lib/displays";
 import {
   readViewPrefs,
+  hasStoredViewPref,
   sameViewPrefs,
   viewPrefsKey,
   writeViewPrefs,
@@ -855,6 +856,36 @@ function SessionView({
       cancelled = true;
     };
   }, [params.protocol, params.profileId]);
+
+  // Seed shortcut pass-through from the host profile's "Capture system
+  // shortcuts by default". The box has always been saved with the profile;
+  // it was never read, so the only way to get the keyboard grabbed was the
+  // toolbar switch, once per computer, after connecting. The remembered
+  // per-computer setting still wins once there is one: that is the more
+  // recent thing the user did, and the write effect below records the seed
+  // as exactly that the first time it applies.
+  const connectedRef = useRef(false);
+  connectedRef.current = session.state.state === "connected";
+  useEffect(() => {
+    const id = params.profileId;
+    if (!id || params.protocol === "ssh") return;
+    if (hasStoredViewPref(prefsKey, "passthrough")) return;
+    let cancelled = false;
+    void safeInvoke<{ passthrough?: boolean } | null>("get_host", { hostId: id }, null).then(
+      (host) => {
+        if (cancelled || !host?.passthrough) return;
+        setPassthroughState(true);
+        // Usually the profile is back before the session is up, and the
+        // reapply-on-connect effect arms the grab. When it is not, arm here,
+        // quietly, the way that effect would have.
+        const sid = params.sessionId;
+        if (connectedRef.current && sid) void captureStart(sid).then(setCapture);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [params.profileId, params.protocol, params.sessionId, prefsKey]);
 
   const guessDisplays = params.protocol !== "rdp";
   useEffect(() => {

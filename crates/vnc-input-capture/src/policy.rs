@@ -117,6 +117,11 @@ impl HeldKeys {
     pub fn clear(&mut self) {
         self.0.clear();
     }
+
+    /// Is this key's key-down currently swallowed and forwarded?
+    pub fn contains(&self, key: u32) -> bool {
+        self.0.contains(&key)
+    }
 }
 
 /// Stateful entry point platform backends should call instead of
@@ -181,6 +186,15 @@ fn intercept_macos(key: u32, mods: Modifiers) -> bool {
 /// - **Any Win+key** combo (Win+E, Win+R, Win+D, Win+L is handled by the OS
 ///   below us and cannot be taken).
 /// - **Alt+Tab / Alt+Esc / Alt+Space / Ctrl+Esc.**
+/// - **Alt+F4**, which would otherwise close the session window it was typed
+///   into, while a copy still went to the remote.
+/// - **F10**, which activates the native menu bar on Windows, and **F11** and
+///   **Ctrl+W**, which are this application's own menu accelerators
+///   (Toggle Fullscreen, Close Window). A menu accelerator is claimed by the
+///   OS before the webview sees the key, so without the hook these three
+///   never reach the remote desktop at all, and Ctrl+W in a remote browser
+///   closes the local window instead of the remote tab. With pass-through
+///   on, the remote wins and the menu items stay reachable from the menu.
 ///
 /// **Ctrl+Alt+Del (SAS) is not interceptable at all**, the Secure Attention
 /// Sequence is handled by winlogon in a different desktop session. PRD/06
@@ -196,10 +210,19 @@ fn intercept_windows(key: u32, mods: Modifiers) -> bool {
     if mods.meta {
         return true;
     }
-    if mods.alt && matches!(key, xt::TAB | xt::ESCAPE | xt::SPACE) {
+    if mods.alt && matches!(key, xt::TAB | xt::ESCAPE | xt::SPACE | xt::F4) {
         return true;
     }
-    mods.ctrl && key == xt::ESCAPE
+    if mods.ctrl && key == xt::ESCAPE {
+        return true;
+    }
+    // Plain Ctrl+W only: Ctrl+Shift+W (Close Tab) and Ctrl+Alt+W (Close
+    // Pane) are how tabs and panes are worked while the hook is swallowing
+    // everything else, and stay with the menu.
+    if mods.ctrl && !mods.shift && !mods.alt && key == xt::KEY_W {
+        return true;
+    }
+    matches!(key, xt::F10 | xt::F11)
 }
 
 #[cfg(test)]
@@ -306,8 +329,32 @@ mod tests {
         assert!(should_intercept(HostOs::Windows, xt::TAB, ALT)); // Alt+Tab
         assert!(should_intercept(HostOs::Windows, xt::ESCAPE, ALT)); // Alt+Esc
         assert!(should_intercept(HostOs::Windows, xt::SPACE, ALT)); // Alt+Space
+        assert!(should_intercept(HostOs::Windows, xt::F4, ALT)); // Alt+F4
         assert!(should_intercept(HostOs::Windows, xt::ESCAPE, CTRL)); // Ctrl+Esc
         assert!(should_intercept(HostOs::Windows, 0x12, META)); // Win+E
+    }
+
+    #[test]
+    fn windows_intercepts_what_our_own_menu_bar_would_take() {
+        // Plain F10 activates a Win32 menu bar; F11 and Ctrl+W are this
+        // application's own accelerators, claimed by the OS before the
+        // webview ever sees them.
+        assert!(should_intercept(HostOs::Windows, xt::F10, NONE));
+        assert!(should_intercept(HostOs::Windows, xt::F11, NONE));
+        assert!(should_intercept(HostOs::Windows, xt::KEY_W, CTRL));
+        // ...but Ctrl+Shift+W (Close Tab) and Ctrl+Tab (Next Tab) are left
+        // to the menu on purpose: they are how tabs are worked while the
+        // hook is swallowing everything else.
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..NONE
+        };
+        assert!(!should_intercept(HostOs::Windows, xt::KEY_W, ctrl_shift));
+        assert!(!should_intercept(HostOs::Windows, xt::TAB, CTRL));
+        // A bare F4 or a bare W is ordinary typing.
+        assert!(!should_intercept(HostOs::Windows, xt::F4, NONE));
+        assert!(!should_intercept(HostOs::Windows, xt::KEY_W, NONE));
     }
 
     #[test]

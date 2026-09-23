@@ -170,6 +170,19 @@ export function writeViewPrefs(key: string | null, value: ViewPrefs): void {
 }
 
 /**
+ * Whether this computer has its own remembered value for `field`, rather than
+ * following the defaults. The host profile carries a default of its own for
+ * shortcut pass-through ("Capture system shortcuts by default" in the host
+ * dialog), and that fills in only where nothing has been remembered yet: what
+ * the user last did in a session on that computer is the more recent thing.
+ */
+export function hasStoredViewPref(key: string | null, field: keyof ViewPrefs): boolean {
+  if (!key) return false;
+  const raw = read<ViewPrefs>(key);
+  return raw !== null && raw[field] !== undefined;
+}
+
+/**
  * Whether two sets are the same, so a session that has changed nothing can be
  * left with nothing stored against it and go on following the defaults.
  *
