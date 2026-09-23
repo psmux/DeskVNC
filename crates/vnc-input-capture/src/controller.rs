@@ -44,6 +44,12 @@ impl CaptureController {
         self.backend.status()
     }
 
+    /// Restrict the grab to one native top level window (see
+    /// [`KeyboardCapture::set_target_window`]).
+    pub fn set_target_window(&mut self, native: Option<isize>) {
+        self.backend.set_target_window(native);
+    }
+
     /// Grab the keyboard for `session_id`.
     ///
     /// Idempotent for the same session. A different session takes ownership

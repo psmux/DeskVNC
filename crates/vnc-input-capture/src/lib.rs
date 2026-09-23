@@ -123,6 +123,12 @@ pub trait KeyboardCapture: Send {
     fn stop(&mut self);
     /// The live status. Cheap enough to poll.
     fn status(&self) -> CaptureStatus;
+    /// Only swallow keys while this native top level window is in the
+    /// foreground. `None` means no restriction. Only Windows uses it: there
+    /// the grab stays installed while pass-through is on and checks the
+    /// foreground window itself, because the window focus events it used to
+    /// follow report a blur every time WebView2 takes the keyboard focus.
+    fn set_target_window(&mut self, _native: Option<isize>) {}
 }
 
 /// Create the platform capture backend. Events are delivered on the channel.
