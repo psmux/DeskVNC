@@ -74,11 +74,20 @@ async fn main() {
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                 let messages = server.messages();
                 for m in &messages[seen.min(messages.len())..] {
-                    if let mock_server::ClientMessage::KeyEvent { down, keysym, .. } = m {
-                        println!(
+                    match m {
+                        mock_server::ClientMessage::KeyEvent { down, keysym, .. } => println!(
                             "key {} keysym 0x{keysym:04x}",
                             if *down { "down" } else { "up  " }
-                        );
+                        ),
+                        mock_server::ClientMessage::QemuKeyEvent {
+                            down,
+                            keysym,
+                            keycode,
+                        } => println!(
+                            "key {} keysym 0x{keysym:04x} scancode 0x{keycode:02x} (qemu)",
+                            if *down { "down" } else { "up  " }
+                        ),
+                        _ => {}
                     }
                 }
                 seen = messages.len();

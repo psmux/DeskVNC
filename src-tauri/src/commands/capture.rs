@@ -318,14 +318,31 @@ pub fn rearm_for_window(app: &AppHandle, window_label: &str) {
     if desire.window_label != window_label {
         return;
     }
-    let status = match capture.controller.lock().start(&desire.session_id) {
-        Ok(status) => status,
-        Err(e) => {
-            tracing::warn!(session = %desire.session_id, "could not re-arm capture: {e}");
-            CaptureStatus::Inactive
-        }
-    };
-    emit_status(app, status, Some(&desire.session_id));
+    // Off the main thread, like `capture_start`. This is called from inside
+    // the window's focus event, on the thread that owns the window, and a
+    // hook installed while that thread sat blocked in `start` waiting for
+    // the install to report never received a single keystroke afterwards:
+    // the badge said captured and Windows kept Alt+Tab. Installing from a
+    // thread of its own is what the toolbar path always did, and that hook
+    // works.
+    let capture: Arc<CaptureState> = capture.inner().clone();
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("vnc-capture-rearm".into())
+        .spawn(move || {
+            let status = match capture.controller.lock().start(&desire.session_id) {
+                Ok(status) => status,
+                Err(e) => {
+                    tracing::warn!(session = %desire.session_id, "could not re-arm capture: {e}");
+                    CaptureStatus::Inactive
+                }
+            };
+            tracing::debug!(session = %desire.session_id, ?status, "capture re-armed (window focused)");
+            emit_status(&app, status, Some(&desire.session_id));
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("could not spawn the capture re-arm thread: {e}");
+    }
 }
 
 /// Fully release capture for a session (disconnect, window close, view-only).
