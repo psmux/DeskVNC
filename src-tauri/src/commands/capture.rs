@@ -220,9 +220,18 @@ pub async fn capture_start(
 
     // Installing a hook spawns a thread and waits briefly for it to report;
     // that must not happen on the main thread.
-    // The native window whose foreground the Windows grab is gated on.
+    // The native window whose foreground the Windows grab is gated on. No
+    // handle means no gate, and an ungated grab would take keys typed into
+    // every other application, so refuse rather than start one.
     #[cfg(target_os = "windows")]
-    let native = window.hwnd().ok().map(|h| h.0 as isize);
+    let native = match window.hwnd() {
+        Ok(h) if !h.0.is_null() => Some(h.0 as isize),
+        _ => {
+            return Ok(CaptureStatus::Unsupported {
+                reason: "could not find this window's handle, so shortcuts stay local",
+            })
+        }
+    };
     #[cfg(not(target_os = "windows"))]
     let native: Option<isize> = None;
 
