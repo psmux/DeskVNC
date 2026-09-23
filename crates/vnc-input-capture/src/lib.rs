@@ -49,6 +49,17 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+mod windows_helper;
+#[cfg(target_os = "windows")]
+pub use windows_helper::{run_helper_if_requested, HELPER_FLAG};
+
+/// Run as the Windows capture helper process if asked to (see
+/// `windows_helper`). Always `None` elsewhere.
+#[cfg(not(target_os = "windows"))]
+pub fn run_helper_if_requested() -> Option<i32> {
+    None
+}
 
 pub use controller::CaptureController;
 pub use keymap::{
@@ -143,7 +154,10 @@ pub fn create(tx: Sender<CapturedKey>) -> Result<Box<dyn KeyboardCapture>> {
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(Box::new(windows::WindowsCapture::new(tx)))
+        // The hook lives in a helper process: an in-process hook is not
+        // called while the application's own window is in front (see
+        // `windows_helper`).
+        Ok(Box::new(windows_helper::HelperCapture::new(tx)))
     }
     #[cfg(target_os = "linux")]
     {
