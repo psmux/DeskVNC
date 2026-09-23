@@ -10,6 +10,25 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+- Shortcut pass-through on Windows now also takes Alt+F4, F10, F11 and
+  Ctrl+W. Alt+F4 closed the session window it was typed into, F10 opened the
+  local menu bar, and F11 and Ctrl+W were this app's own menu accelerators,
+  claimed by the OS before the remote desktop could see them.
+- The host dialog's "Capture system shortcuts by default" was saved with the
+  profile but never read; a session on that host now starts with pass-through
+  on. What the toolbar switch was last set to on that computer still wins.
+- Black and White and Low no longer paint palette indices as grey levels
+  after a pixel-format switch on servers with Fence support (TigerVNC,
+  TurboVNC): the colour map the server sends before answering the guard
+  fence was being discarded as stale.
+- Black and White mode no longer flickers at scaled sizes. Grey levels are
+  now quantised per remote pixel and then filtered, rather than the other way
+  round, so a one-unit change in one pixel cannot flip a run of screen pixels
+  between two levels; the 1-bit dither is anchored to the desktop rather than
+  the window.
+
 ## [0.27.3] - 2026-09-21
 
 ### Added

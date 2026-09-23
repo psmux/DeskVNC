@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   FACTORY_DEFAULTS,
+  hasStoredViewPref,
   readViewDefaults,
   readViewPrefs,
   sameViewPrefs,
@@ -123,5 +124,25 @@ describe("sameViewPrefs", () => {
     expect(sameViewPrefs(a, { ...base, display: { ...display } })).toBe(true);
     expect(sameViewPrefs(a, { ...base, display: { ...display, x: 1920 } })).toBe(false);
     expect(sameViewPrefs(a, base)).toBe(false);
+  });
+});
+
+describe("hasStoredViewPref", () => {
+  const key = viewPrefsKey({ profileId: "abc", address: null, port: 5900 });
+
+  it("is false for a computer nothing has been remembered against", () => {
+    expect(hasStoredViewPref(key, "passthrough")).toBe(false);
+    expect(hasStoredViewPref(null, "passthrough")).toBe(false);
+  });
+
+  it("is true once the field has been written, whatever its value", () => {
+    writeViewPrefs(key, { ...FACTORY_DEFAULTS, passthrough: false });
+    expect(hasStoredViewPref(key, "passthrough")).toBe(true);
+  });
+
+  it("looks at the one field, not the blob", () => {
+    localStorage.setItem(key!, JSON.stringify({ zoom: 2 }));
+    expect(hasStoredViewPref(key, "zoom")).toBe(true);
+    expect(hasStoredViewPref(key, "passthrough")).toBe(false);
   });
 });
