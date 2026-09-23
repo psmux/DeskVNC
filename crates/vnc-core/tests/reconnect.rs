@@ -512,7 +512,11 @@ async fn a_colour_map_sent_before_the_fence_answer_survives_the_switch() {
         "the client should probe once it has seen FenceCapable"
     );
 
-    send(&handle, ClientCommand::SetQuality(QualityPreset::BlackAndWhite)).await;
+    send(
+        &handle,
+        ClientCommand::SetQuality(QualityPreset::BlackAndWhite),
+    )
+    .await;
     assert!(
         server
             .wait_until(DEFAULT_TIMEOUT, |r| {

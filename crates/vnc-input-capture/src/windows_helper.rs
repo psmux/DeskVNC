@@ -132,7 +132,8 @@ impl KeyboardCapture for HelperCapture {
                         }
                         Some("k") => {
                             let mut num = || parts.next().and_then(|p| p.parse::<u32>().ok());
-                            if let (Some(scancode), Some(keysym), Some(down)) = (num(), num(), num())
+                            if let (Some(scancode), Some(keysym), Some(down)) =
+                                (num(), num(), num())
                             {
                                 let _ = tx.send(CapturedKey {
                                     scancode,
@@ -282,7 +283,13 @@ fn run_helper(target: isize) -> i32 {
     // left holding the key down.
     capture.stop();
     for key in rx.try_iter() {
-        let _ = writeln!(out, "k {} {} {}", key.scancode, key.keysym, u8::from(key.down));
+        let _ = writeln!(
+            out,
+            "k {} {} {}",
+            key.scancode,
+            key.keysym,
+            u8::from(key.down)
+        );
     }
     let _ = out.flush();
     0
