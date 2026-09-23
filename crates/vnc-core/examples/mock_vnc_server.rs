@@ -64,7 +64,35 @@ async fn main() {
     );
     println!("  requested port {port} is ignored; use the address above");
 
-    // Serve until interrupted.
-    tokio::signal::ctrl_c().await.ok();
+    // Serve until interrupted, echoing every key event as it arrives so that
+    // keyboard pass-through can be checked end to end: a shortcut the local
+    // OS or this application's own menu bar took never shows up here.
+    let mut seen = 0usize;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                let messages = server.messages();
+                for m in &messages[seen.min(messages.len())..] {
+                    match m {
+                        mock_server::ClientMessage::KeyEvent { down, keysym, .. } => println!(
+                            "key {} keysym 0x{keysym:04x}",
+                            if *down { "down" } else { "up  " }
+                        ),
+                        mock_server::ClientMessage::QemuKeyEvent {
+                            down,
+                            keysym,
+                            keycode,
+                        } => println!(
+                            "key {} keysym 0x{keysym:04x} scancode 0x{keycode:02x} (qemu)",
+                            if *down { "down" } else { "up  " }
+                        ),
+                        _ => {}
+                    }
+                }
+                seen = messages.len();
+            }
+        }
+    }
     println!("shutting down");
 }

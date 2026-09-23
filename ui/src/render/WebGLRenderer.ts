@@ -48,8 +48,14 @@ void main() {
   gl_Position = vec4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
 }`;
 
+// highp, not mediump: GLSL ES 3.00 guarantees it in fragment shaders, and the
+// black-and-white path below does integer texel arithmetic and a threshold
+// comparison, both of which degrade silently at fp16 (integers above 2048 are
+// not representable, so the texel index and the dither phase were wrong past
+// that column on wide desktops, and on GPUs that honour mediump).
 const FS = `#version 300 es
-precision mediump float;
+precision highp float;
+precision highp int;
 uniform sampler2D u_tex;
 uniform float u_levels;   // 0 = passthrough color; 1 = 1-bit dithered; N>=2 = N gray levels
 // 0 = force opaque (the framebuffer quad), 1 = honour the texture's alpha.
@@ -66,24 +72,48 @@ const mat4 bayer = mat4(
   15.0,  7.0, 13.0,  5.0
 );
 
+// One remote pixel's grey level. Quantisation is a property of the REMOTE
+// pixel, computed at its own texel, so that the result cannot change unless
+// that pixel does. The earlier shader quantised the bilinearly filtered
+// sample instead: at any scale other than 1:1 a screen pixel then sat on a
+// blend of neighbours, and a one-unit change in one of them (a JPEG rect
+// replaced by its lossless refresh, a CopyRect landing a pixel over, a
+// cursor moving through a scaled edge) was enough to push the blend across
+// a threshold and flip a whole run of screen pixels between two levels. That
+// was the intermittent flicker in black-and-white mode. The 1-bit dither
+// keys on the texel too rather than on gl_FragCoord, so the pattern is
+// anchored to the desktop, not to the window: panning, zooming or resizing
+// no longer makes it crawl.
+float quantised(ivec2 texel, ivec2 size) {
+  ivec2 t = clamp(texel, ivec2(0), size - 1);
+  vec3 c = texelFetch(u_tex, t, 0).rgb;
+  float g = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  if (u_levels < 1.5) {
+    ivec2 p = t & ivec2(3);
+    float threshold = (bayer[p.x][p.y] + 0.5) / 16.0;
+    return g > threshold ? 1.0 : 0.0;
+  }
+  float n = u_levels - 1.0;
+  return floor(g * n + 0.5) / n;
+}
+
 void main() {
-  vec4 c = texture(u_tex, v_uv);
   if (u_levels < 0.5) {
+    vec4 c = texture(u_tex, v_uv);
     outColor = vec4(c.rgb, mix(1.0, c.a, u_texAlpha));
     return;
   }
-  float g = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
-  if (u_levels < 1.5) {
-    // 1-bit with ordered dithering
-    ivec2 p = ivec2(mod(gl_FragCoord.xy, 4.0));
-    float threshold = (bayer[p.x][p.y] + 0.5) / 16.0;
-    float v = g > threshold ? 1.0 : 0.0;
-    outColor = vec4(vec3(v), 1.0);
-  } else {
-    float n = u_levels - 1.0;
-    float v = floor(g * n + 0.5) / n;
-    outColor = vec4(vec3(v), 1.0);
-  }
+  // Bilinear across the four nearest ALREADY quantised texels: the same
+  // picture the sampler would give for a desktop that had been quantised
+  // before upload, which is smooth at scaled edges and exact at 1:1.
+  ivec2 size = textureSize(u_tex, 0);
+  vec2 st = v_uv * vec2(size) - 0.5;
+  vec2 f = fract(st);
+  ivec2 t = ivec2(floor(st));
+  float top = mix(quantised(t, size), quantised(t + ivec2(1, 0), size), f.x);
+  float bottom = mix(quantised(t + ivec2(0, 1), size), quantised(t + ivec2(1, 1), size), f.x);
+  float v = mix(top, bottom, f.y);
+  outColor = vec4(vec3(v), 1.0);
 }`;
 
 /** One live `VideoDecoder` plus the rect geometry it decodes into. */

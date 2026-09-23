@@ -49,6 +49,17 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+mod windows_helper;
+#[cfg(target_os = "windows")]
+pub use windows_helper::{run_helper_if_requested, HELPER_FLAG};
+
+/// Run as the Windows capture helper process if asked to (see
+/// `windows_helper`). Always `None` elsewhere.
+#[cfg(not(target_os = "windows"))]
+pub fn run_helper_if_requested() -> Option<i32> {
+    None
+}
 
 pub use controller::CaptureController;
 pub use keymap::{
@@ -123,6 +134,12 @@ pub trait KeyboardCapture: Send {
     fn stop(&mut self);
     /// The live status. Cheap enough to poll.
     fn status(&self) -> CaptureStatus;
+    /// Only swallow keys while this native top level window is in the
+    /// foreground. `None` means no restriction. Only Windows uses it: there
+    /// the grab stays installed while pass-through is on and checks the
+    /// foreground window itself, because the window focus events it used to
+    /// follow report a blur every time WebView2 takes the keyboard focus.
+    fn set_target_window(&mut self, _native: Option<isize>) {}
 }
 
 /// Create the platform capture backend. Events are delivered on the channel.
@@ -137,7 +154,10 @@ pub fn create(tx: Sender<CapturedKey>) -> Result<Box<dyn KeyboardCapture>> {
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(Box::new(windows::WindowsCapture::new(tx)))
+        // The hook lives in a helper process: an in-process hook is not
+        // called while the application's own window is in front (see
+        // `windows_helper`).
+        Ok(Box::new(windows_helper::HelperCapture::new(tx)))
     }
     #[cfg(target_os = "linux")]
     {
