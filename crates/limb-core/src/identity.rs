@@ -147,12 +147,10 @@ impl LimbId {
     /// glance.
     pub const PREFIX: &'static str = "lmb_";
 
-    /// The longest a derived id can be: `lmb_` plus three for the protocol,
-    /// twelve hex, five decimal digits of slot and two separators. Well inside
-    /// the shell's sixty four, and asserted by a test so that a fourth
-    /// protocol with a longer name is a failure here rather than a window that
-    /// refuses to open.
-    pub const MAX_LEN: usize = 26;
+    /// The longest derived id uses the eight character Boundary protocol name,
+    /// twelve hex digits, five decimal slot digits, the prefix and two separators.
+    /// The all protocols test checks this bound when another protocol is added.
+    pub const MAX_LEN: usize = 31;
 
     /// Derive the name of one machine at one slot.
     ///
