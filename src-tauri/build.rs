@@ -101,7 +101,8 @@ fn main() {
         assert_eq!(
             git_dirty().as_deref(),
             Some("clean"),
-            "release source must be a clean git checkout; inspect git status --short"
+            "release source must be a clean git checkout: {}",
+            git(&["status", "--short"]).unwrap_or_else(|| "git status unavailable".into())
         );
     }
     stamp_git_provenance();

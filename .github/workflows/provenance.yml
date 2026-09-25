@@ -1,0 +1,26 @@
+name: Diagnose release provenance
+on:
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: ui
+      - run: npm install -g @tauri-apps/cli@v2
+      - name: Inspect source after Tauri prepares the build
+        shell: bash
+        run: |
+          # Node deliberately rejects Cargo's build arguments. Tauri has already
+          # prepared its manifest, so this isolates changes made before rustc.
+          tauri build --no-bundle --runner node --target x86_64-pc-windows-msvc -- --locked || true
+          git status --short
+          git diff
+          git ls-files --others --exclude-standard
