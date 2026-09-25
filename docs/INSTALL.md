@@ -32,7 +32,8 @@ spctl -a -vv -t exec /Applications/DeskVNCViewer.app
 The macOS releases from v0.27.1 through v0.27.4 omitted the `dvv` executable.
 If the **AI Agents** panel says “This build has no dvv inside it to register”,
 the Claude Code registration button cannot work, even though the viewer itself
-works. Until a corrected release is available, build `dvv` from source with
+works. Install v0.27.5 or newer for the bundled executable. If you must stay
+on an older release, build `dvv` from source with
 `cargo build -p dvv` and register the absolute path to `target/debug/dvv`
 manually as described in [the agent integration notes](AGENTS.md). Reinstalling
 one of those releases will not fix it.
