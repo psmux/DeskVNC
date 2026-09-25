@@ -1,4 +1,4 @@
-name: Diagnose release provenance
+name: Verify release provenance
 on:
   workflow_dispatch:
 jobs:
@@ -24,3 +24,4 @@ jobs:
           git status --short
           git diff
           git ls-files --others --exclude-standard
+          test -z "$(git status --porcelain)"

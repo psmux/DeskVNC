@@ -10,10 +10,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.5] (2026-09-26)
+
 ### Fixed
 
 * macOS release bundles now include the universal `dvv` executable. Release
   checks verify that it runs, contains both architectures and has a valid signature.
+* Windows Cargo manifests now use LF on checkout, matching Tauri and preventing
+  a false dirty stamp caused by line ending rewrites.
 * Release builds require a clean checkout and the committed Cargo lockfile.
   Generated sidecars and installer output no longer affect the dirty stamp.
 * Both SSH views support native clipboard copy and paste with Cmd+C/V or
