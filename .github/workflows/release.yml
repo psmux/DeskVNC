@@ -78,6 +78,22 @@ jobs:
         run: npm ci
         working-directory: ui
 
+      - name: Build universal dvv for macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p dvv --target aarch64-apple-darwin
+          cargo build --release -p dvv --target x86_64-apple-darwin
+          mkdir -p src-tauri/binaries
+          cp target/aarch64-apple-darwin/release/dvv src-tauri/binaries/dvv-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/dvv src-tauri/binaries/dvv-x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/dvv \
+            target/x86_64-apple-darwin/release/dvv \
+            -output src-tauri/binaries/dvv-universal-apple-darwin
+          src-tauri/binaries/dvv-universal-apple-darwin version
+
       # notarytool rejects bad credentials instantly, whereas the bundler only
       # discovers them after compiling and signing. Fail in seconds instead.
       - name: Preflight the notarization credentials
@@ -132,7 +148,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          args: --target ${{ matrix.bundle-target }}
+          args: --target ${{ matrix.bundle-target }} ${{ runner.os == 'macOS' && '--config src-tauri/tauri.release-macos.conf.json' || '' }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
           releaseBody: |
@@ -246,6 +262,8 @@ jobs:
           APP=$(find "target/${{ matrix.bundle-target }}/release/bundle/macos" \
                   -maxdepth 1 -name '*.app' | head -1)
           [ -n "$APP" ] || { echo "no .app produced"; exit 1; }
+          [ -x "$APP/Contents/MacOS/dvv" ] || { echo "dvv missing from the release app"; exit 1; }
+          "$APP/Contents/MacOS/dvv" version
           echo "== signature =="
           codesign -dvv "$APP" 2>&1 | grep -E '^Authority|^TeamIdentifier' || true
 
