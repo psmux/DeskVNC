@@ -52,7 +52,7 @@ jobs:
         # break only surfaced during a release build.
         run: >
           cargo clippy
-          -p remote-core -p remote-pixel
+          -p remote-core -p remote-pixel -p limb-core
           -p rdp-pdu -p rdp-codecs -p rdp-auth -p rdp-core
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
@@ -62,7 +62,7 @@ jobs:
       - name: Test
         run: >
           cargo test
-          -p remote-core -p remote-pixel
+          -p remote-core -p remote-pixel -p limb-core
           -p rdp-pdu -p rdp-codecs -p rdp-auth -p rdp-core
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture

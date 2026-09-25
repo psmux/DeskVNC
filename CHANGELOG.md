@@ -20,6 +20,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   Ctrl+Shift+C/V. Pasting preserves terminal newline and bracketed paste handling.
 * The capture indicator detects a helper that exits unexpectedly, and the same
   session can restart capture. The Windows shortcut fix remains in v0.27.4.
+* Corrected the maximum limb ID length for Boundary and included limb identity
+  tests in CI.
 * Updated codec iteration for the current Rust lints so CI can run its tests.
 
 ## [0.27.4] - 2026-09-23
