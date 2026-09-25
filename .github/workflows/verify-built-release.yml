@@ -1,0 +1,102 @@
+name: Verify and publish built release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag with uploaded installers
+        required: true
+      build_run_id:
+        description: Release run stopped by the macOS architecture verification command
+        required: true
+jobs:
+  verify:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+    steps:
+      - name: Check the build belongs to this tag and completed packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh run view "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json headSha,status,jobs > build.json
+          gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha > tag-sha.txt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          run = json.loads(Path('build.json').read_text())
+          assert run['status'] == 'completed', 'wait for packaging to finish'
+          assert run['headSha'] == Path('tag-sha.txt').read_text().strip()
+          jobs = {j['name']: j for j in run['jobs']}
+          for name in ['Windows (x64 installer)', 'Linux (deb + AppImage)']:
+              assert jobs[name]['conclusion'] == 'success', name
+          mac = jobs['macOS (universal)']
+          failures = [s['name'] for s in mac['steps'] if s['conclusion'] == 'failure']
+          assert failures == ['Verify the macOS build is signed and notarized'], failures
+          PY
+
+      - name: Download and verify the signed applications
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir assets support mounted
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
+          VERSION=${TAG#v}
+          for name in \
+            "DeskVNCViewer_${VERSION}_x64-setup.exe" \
+            "DeskVNCViewer_${VERSION}_x64_en-US.msi" \
+            "DeskVNCViewer_${VERSION}_amd64.deb" \
+            "DeskVNCViewer_${VERSION}_amd64.AppImage" \
+            "DeskVNCViewer_${VERSION}_universal.dmg" \
+            "DeskVNC-Support-macOS.zip"; do
+            test -s "assets/$name"
+          done
+          DMG="assets/DeskVNCViewer_${VERSION}_universal.dmg"
+          hdiutil attach -readonly -nobrowse -mountpoint "$PWD/mounted" "$DMG"
+          trap 'hdiutil detach "$PWD/mounted" || true' EXIT
+          APP="$PWD/mounted/DeskVNCViewer.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
+          lipo "$APP/Contents/MacOS/dvv" -verify_arch arm64 x86_64
+          "$APP/Contents/MacOS/dvv" version | tee dvv-version.txt
+          grep -F "dvv $VERSION," dvv-version.txt
+          codesign --verify --strict --deep "$APP"
+          codesign -dvv "$APP" 2>&1 | grep 'Authority=Developer ID Application'
+          xcrun stapler validate "$APP"
+          spctl -a -vv -t exec "$APP"
+          ditto -x -k assets/DeskVNC-Support-macOS.zip support
+          codesign --verify --strict --deep "support/DeskVNC Support.app"
+          xcrun stapler validate "support/DeskVNC Support.app"
+          spctl -a -vv -t exec "support/DeskVNC Support.app"
+          (cd assets && shasum -a 256 -c SHA256SUMS-DeskVNC-Support-macOS.txt)
+          hdiutil detach "$PWD/mounted"
+          trap - EXIT
+
+      - name: Notarize the disk image and publish verified files
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          DMG="assets/DeskVNCViewer_${TAG#v}_universal.dmg"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -vv -t open --context context:primary-signature "$DMG"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$DMG" --clobber
+          (
+            cd assets
+            shasum -a 256 ./*.exe ./*.msi ./*.deb ./*.rpm ./*.AppImage ./*.dmg ./*.zip ./*.tar.gz \
+              > SHA256SUMS.txt
+          )
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" assets/SHA256SUMS.txt --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
