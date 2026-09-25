@@ -29,12 +29,13 @@ spctl -a -vv -t exec /Applications/DeskVNCViewer.app
 # origin=Developer ID Application: <certificate holder> (<team ID>)
 ```
 
-The v0.27.4 macOS release accidentally omitted the `dvv` executable. If its
-**AI Agents** panel says “This build has no dvv inside it to register”, the
-Claude Code registration button cannot work, even though the viewer itself
+The macOS releases from v0.27.1 through v0.27.4 omitted the `dvv` executable.
+If the **AI Agents** panel says “This build has no dvv inside it to register”,
+the Claude Code registration button cannot work, even though the viewer itself
 works. Until a corrected release is available, build `dvv` from source with
-`cargo build -p dvv` and register `target/debug/dvv` manually as described in
-[the agent integration notes](AGENTS.md). Reinstalling v0.27.4 will not fix it.
+`cargo build -p dvv` and register the absolute path to `target/debug/dvv`
+manually as described in [the agent integration notes](AGENTS.md). Reinstalling
+one of those releases will not fix it.
 
 On first use the app asks for two permissions:
 
