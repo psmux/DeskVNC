@@ -276,6 +276,11 @@ fn run_helper(target: isize) -> i32 {
                 }
             }
             recv(quit_rx) -> _ => break,
+            default(Duration::from_millis(250)) => {
+                if !capture.status().is_active() {
+                    break;
+                }
+            }
         }
     }
     // Unhook first, then hand over everything still queued: a key-up captured

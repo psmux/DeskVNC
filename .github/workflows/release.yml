@@ -51,6 +51,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -83,8 +85,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p dvv --target aarch64-apple-darwin
-          cargo build --release -p dvv --target x86_64-apple-darwin
+          cargo build --locked --release -p dvv --target aarch64-apple-darwin
+          cargo build --locked --release -p dvv --target x86_64-apple-darwin
           mkdir -p src-tauri/binaries
           cp target/aarch64-apple-darwin/release/dvv src-tauri/binaries/dvv-aarch64-apple-darwin
           cp target/x86_64-apple-darwin/release/dvv src-tauri/binaries/dvv-x86_64-apple-darwin
@@ -93,6 +95,16 @@ jobs:
             target/x86_64-apple-darwin/release/dvv \
             -output src-tauri/binaries/dvv-universal-apple-darwin
           src-tauri/binaries/dvv-universal-apple-darwin version
+
+      - name: Verify release source is clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          test -z "$(git status --porcelain)" || {
+            echo "::error::Release inputs differ from the checked out commit"
+            exit 1
+          }
 
       # notarytool rejects bad credentials instantly, whereas the bundler only
       # discovers them after compiling and signing. Fail in seconds instead.
@@ -140,6 +152,7 @@ jobs:
       # scripts/setup-github-signing-secrets.sh.
       - uses: tauri-apps/tauri-action@v0
         env:
+          DESKVNC_REQUIRE_CLEAN: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -148,7 +161,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          args: --target ${{ matrix.bundle-target }} ${{ runner.os == 'macOS' && '--config src-tauri/tauri.release-macos.conf.json' || '' }}
+          args: --target ${{ matrix.bundle-target }} ${{ runner.os == 'macOS' && '--config src-tauri/tauri.release-macos.conf.json' || '' }} -- --locked
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
           releaseBody: |
@@ -264,6 +277,8 @@ jobs:
           [ -n "$APP" ] || { echo "no .app produced"; exit 1; }
           [ -x "$APP/Contents/MacOS/dvv" ] || { echo "dvv missing from the release app"; exit 1; }
           "$APP/Contents/MacOS/dvv" version
+          lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/dvv"
+          codesign --verify --strict "$APP/Contents/MacOS/dvv"
           echo "== signature =="
           codesign -dvv "$APP" 2>&1 | grep -E '^Authority|^TeamIdentifier' || true
 

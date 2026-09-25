@@ -96,6 +96,14 @@ fn stamp_git_provenance() {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=DESKVNC_REQUIRE_CLEAN");
+    if std::env::var_os("DESKVNC_REQUIRE_CLEAN").is_some() {
+        assert_eq!(
+            git_dirty().as_deref(),
+            Some("clean"),
+            "release source must be a clean git checkout; inspect git status --short"
+        );
+    }
     stamp_git_provenance();
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[

@@ -215,7 +215,7 @@ where several of those releases came from.
 
 ## Building from source
 
-You need **Rust 1.82 or newer**, **Node 22 or newer**, and the
+You need **Rust 1.95 or newer**, **Node 22 or newer**, and the
 [Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/) for
 your platform.
 

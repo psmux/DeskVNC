@@ -695,6 +695,22 @@ function SessionView({
     };
   }, [params.sessionId]);
 
+  // A capture helper can exit without a window event. Refresh the indicator
+  // while it claims to be active so a dead helper cannot leave it stuck there.
+  useEffect(() => {
+    if (capture.state !== "active") return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void fetchCaptureStatus().then((status) => {
+        if (!cancelled) setCapture(status);
+      }).catch((error) => console.warn("[capture] status refresh failed:", error));
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [capture.state, params.sessionId]);
+
   // Release the grab when the session ends, whatever ended it.
   //
   // The GRAB, not the switch. The switch is what this computer remembers about

@@ -57,7 +57,7 @@ impl CaptureController {
     /// backend refuses, ownership is *not* recorded, so nothing can later think
     /// it needs releasing.
     pub fn start(&mut self, session_id: &str) -> Result<CaptureStatus> {
-        if self.owner.as_deref() == Some(session_id) {
+        if self.owner.as_deref() == Some(session_id) && self.status().is_active() {
             return Ok(self.status());
         }
         match self.backend.start() {
@@ -188,6 +188,34 @@ mod tests {
         c.start("s1").unwrap();
         assert_eq!(counters.starts.load(Ordering::SeqCst), 1);
         assert_eq!(c.owner(), Some("s1"));
+    }
+
+    #[test]
+    fn the_same_owner_can_restart_a_backend_that_exited() {
+        use std::sync::atomic::AtomicBool;
+        struct ExitingBackend(Arc<AtomicBool>);
+        impl KeyboardCapture for ExitingBackend {
+            fn start(&mut self) -> Result<()> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn stop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+            fn status(&self) -> CaptureStatus {
+                if self.0.load(Ordering::SeqCst) {
+                    CaptureStatus::Active
+                } else {
+                    CaptureStatus::Inactive
+                }
+            }
+        }
+        let alive = Arc::new(AtomicBool::new(false));
+        let mut c = CaptureController::new(Box::new(ExitingBackend(alive.clone())));
+        assert_eq!(c.start("s1").unwrap(), CaptureStatus::Active);
+        alive.store(false, Ordering::SeqCst);
+        assert_eq!(c.status(), CaptureStatus::Inactive);
+        assert_eq!(c.start("s1").unwrap(), CaptureStatus::Active);
     }
 
     #[test]

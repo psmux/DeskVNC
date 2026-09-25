@@ -1,3 +1,4 @@
+import { installTerminalClipboard } from "../lib/terminalClipboard";
 /**
  * The primary surface for a session whose protocol IS ssh: a full-window
  * terminal instead of the framebuffer canvas `SessionView` draws for VNC and
@@ -234,6 +235,7 @@ export function SshSession({
     // happened to read.
     const dData = term.onData((d) => sessionRef.current.sendTerminalInput(new TextEncoder().encode(d)));
     const dResize = term.onResize(({ cols, rows }) => sessionRef.current.sendTerminalResize(cols, rows));
+    const stopClipboard = installTerminalClipboard(term, container);
     term.open(container);
     fit.fit();
     termRef.current = term;
@@ -251,6 +253,7 @@ export function SshSession({
       stopResizeWatch();
       dData.dispose();
       dResize.dispose();
+      stopClipboard();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
