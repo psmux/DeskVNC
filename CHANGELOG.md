@@ -10,6 +10,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* macOS release bundles now include the universal `dvv` executable. Release
+  checks verify that it runs, contains both architectures and has a valid signature.
+* Release builds require a clean checkout and the committed Cargo lockfile.
+  Generated sidecars and installer output no longer affect the dirty stamp.
+* Both SSH views support native clipboard copy and paste with Cmd+C/V or
+  Ctrl+Shift+C/V. Pasting preserves terminal newline and bracketed paste handling.
+* The capture indicator detects a helper that exits unexpectedly, and the same
+  session can restart capture. The Windows shortcut fix remains in v0.27.4.
+* Updated codec iteration for the current Rust lints so CI can run its tests.
+
 ## [0.27.4] - 2026-09-23
 
 ### Fixed

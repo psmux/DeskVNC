@@ -38,11 +38,13 @@ coverage/
 .nyc_output/
 
 # ---- Tauri ------------------------------------------------------------------
+/src-tauri/binaries/
 /src-tauri/gen
 /src-tauri/WixTools
 /src-tauri/.cargo
 
 # ---- Packaged output --------------------------------------------------------
+/dist/
 # Normally under target/, but caught here in case anything is built elsewhere.
 *.dmg
 *.msi
