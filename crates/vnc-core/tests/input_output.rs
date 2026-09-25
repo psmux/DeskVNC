@@ -26,7 +26,7 @@ const RED: Rgb = [255, 0, 0];
 /// nothing in this file asserts on, and `nth` alternates the preset because
 /// `apply_quality` sends nothing when the settings already match.
 async fn flush(handle: &vnc_core::SessionHandle, server: &MockServer, nth: usize) {
-    let preset = if nth % 2 == 0 {
+    let preset = if nth.is_multiple_of(2) {
         vnc_core::types::QualityPreset::High
     } else {
         vnc_core::types::QualityPreset::Medium

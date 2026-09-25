@@ -505,7 +505,12 @@ impl ClearDecoder {
             };
             for y in 0..usize::from(h) {
                 let row = &px[y * usize::from(w) * 3..][..usize::from(w) * 3];
-                for (bgr, o) in row.chunks_exact(3).zip(dst.row(y).chunks_exact_mut(4)) {
+                for (bgr, o) in row
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(dst.row(y).as_chunks_mut::<4>().0.iter_mut())
+                {
                     put::<BGRA>(o, bgr[2], bgr[1], bgr[0], 0xFF);
                 }
             }
@@ -542,7 +547,12 @@ impl ClearDecoder {
                 for y in 0..usize::from(gh) {
                     let out = &mut slot[y * usize::from(gw) * 3..][..usize::from(gw) * 3];
                     let row = dst.row(y);
-                    for (o, px) in out.chunks_exact_mut(3).zip(row.chunks_exact(4)) {
+                    for (o, px) in out
+                        .as_chunks_mut::<3>()
+                        .0
+                        .iter_mut()
+                        .zip(row.as_chunks::<4>().0.iter())
+                    {
                         // Store the wire's own B, G, R whatever the
                         // destination order is.
                         let (r, g, b) = if BGRA {
@@ -598,7 +608,7 @@ impl ClearDecoder {
                 let x = at % w;
                 let n = left.min(w - x);
                 let row = dst.row(y);
-                for o in row[x * 4..(x + n) * 4].chunks_exact_mut(4) {
+                for o in row[x * 4..(x + n) * 4].as_chunks_mut::<4>().0.iter_mut() {
                     put::<BGRA>(o, red, g, b, 0xFF);
                 }
                 at += n;
@@ -646,7 +656,11 @@ impl ClearDecoder {
                         // A cached column shorter than the band is padded
                         // with the band background, which is what the
                         // background colour is for.
-                        for p in self.column[n * 3..height * 3].chunks_exact_mut(3) {
+                        for p in self.column[n * 3..height * 3]
+                            .as_chunks_mut::<3>()
+                            .0
+                            .iter_mut()
+                        {
                             p.copy_from_slice(&bkg);
                         }
                     }
@@ -670,7 +684,12 @@ impl ClearDecoder {
                         self.vbar.insert(&self.column[..height * 3]);
                     }
                 }
-                for (y, p) in self.column[..height * 3].chunks_exact(3).enumerate() {
+                for (y, p) in self.column[..height * 3]
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .enumerate()
+                {
                     let row = dst.row(y_start + y);
                     put::<BGRA>(&mut row[x * 4..x * 4 + 4], p[2], p[1], p[0], 0xFF);
                 }
@@ -715,8 +734,10 @@ impl ClearDecoder {
                         let px = d.take(rw * 3)?;
                         let out = dst.row(y + row);
                         for (p, o) in px
-                            .chunks_exact(3)
-                            .zip(out[x * 4..(x + rw) * 4].chunks_exact_mut(4))
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
+                            .zip(out[x * 4..(x + rw) * 4].as_chunks_mut::<4>().0.iter_mut())
                         {
                             put::<BGRA>(o, p[2], p[1], p[0], 0xFF);
                         }
@@ -833,13 +854,17 @@ fn build_column(column: &mut [u8], height: usize, y_on: usize, px: &[u8], bkg: &
     let count = px.len() / 3;
     let start = y_on.min(height);
     let end = (start + count).min(height);
-    for p in column[..start * 3].chunks_exact_mut(3) {
+    for p in column[..start * 3].as_chunks_mut::<3>().0.iter_mut() {
         p.copy_from_slice(bkg);
     }
     if end > start {
         column[start * 3..end * 3].copy_from_slice(&px[..(end - start) * 3]);
     }
-    for p in column[end * 3..height * 3].chunks_exact_mut(3) {
+    for p in column[end * 3..height * 3]
+        .as_chunks_mut::<3>()
+        .0
+        .iter_mut()
+    {
         p.copy_from_slice(bkg);
     }
 }
@@ -914,7 +939,7 @@ mod tests {
             let mut v = view(&mut buf, w, h);
             ClearDecoder::new().decode(&src, &mut v).unwrap();
         }
-        for (i, out) in buf.chunks_exact(4).enumerate() {
+        for (i, out) in buf.as_chunks::<4>().0.iter().enumerate() {
             assert_eq!(&out[..3], &px[i][..], "pixel {i}");
             assert_eq!(out[3], 0xFF);
         }
@@ -932,7 +957,7 @@ mod tests {
             let mut v = view(&mut buf, w, h);
             ClearDecoder::new().decode(&src, &mut v).unwrap();
         }
-        assert!(buf.chunks_exact(4).all(|p| p[..3] == [9, 8, 7]));
+        assert!(buf.as_chunks::<4>().0.iter().all(|p| p[..3] == [9, 8, 7]));
     }
 
     #[test]

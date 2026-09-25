@@ -141,7 +141,13 @@ pub(crate) fn row_1d(l: &[i16], h: &[i16], out: &mut [i16]) {
     }
     *o_last = last;
 
-    for ((c, &ev), &ov) in out.chunks_exact_mut(2).zip(e.iter()).zip(o.iter()) {
+    for ((c, &ev), &ov) in out
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(e.iter())
+        .zip(o.iter())
+    {
         c[0] = ev;
         c[1] = ov;
     }

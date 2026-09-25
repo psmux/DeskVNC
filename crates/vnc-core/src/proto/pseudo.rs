@@ -280,7 +280,7 @@ fn cursor_alpha_pixel_format() -> PixelFormat {
 /// (RFB spec); every downstream consumer composites assuming straight
 /// alpha, so antialiased cursor edges showed a dark fringe without this.
 fn unpremultiply(rgba: &mut [u8]) {
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
         let a = px[3] as u32;
         for c in px[..3].iter_mut() {
             // `checked_div` returns `None` for alpha == 0 (fully

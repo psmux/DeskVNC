@@ -97,7 +97,7 @@ pub(crate) async fn decode<R: AsyncRead + Unpin>(
 fn fill(out: &mut [u8], stride: usize, x: usize, y: usize, w: usize, h: usize, colour: [u8; 4]) {
     for row in y..y + h {
         let start = (row * stride + x) * 4;
-        for px in out[start..start + w * 4].chunks_exact_mut(4) {
+        for px in out[start..start + w * 4].as_chunks_mut::<4>().0.iter_mut() {
             px.copy_from_slice(&colour);
         }
     }

@@ -326,7 +326,7 @@ fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstV
                 .iter()
                 .zip(&gp[..w])
                 .zip(&bp[..w])
-                .zip(d.chunks_exact_mut(4))
+                .zip(d.as_chunks_mut::<4>().0.iter_mut())
             {
                 put::<BGRA>(o, r, g, b, 0xFF);
             }
@@ -340,7 +340,7 @@ fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstV
             let cg = &planes.p3[(y / 2) * geom.sw..][..geom.sw];
             for (x, (&yy, o)) in planes.p1[y * w..][..w]
                 .iter()
-                .zip(d.chunks_exact_mut(4))
+                .zip(d.as_chunks_mut::<4>().0.iter_mut())
                 .enumerate()
             {
                 let s = planar_shift(geom.cll);
@@ -358,7 +358,7 @@ fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstV
                 .iter()
                 .zip(&cop[..w])
                 .zip(&cgp[..w])
-                .zip(d.chunks_exact_mut(4))
+                .zip(d.as_chunks_mut::<4>().0.iter_mut())
             {
                 let s = planar_shift(geom.cll);
                 let (r, g, b) = ycocg_to_rgb_scaled(yy, chroma(co, s), chroma(cg, s));
@@ -371,7 +371,10 @@ fn interleave<const BGRA: bool>(planes: &Planes<'_>, geom: &Geom, dst: &mut DstV
         // bitmap path never has.
         if let Some(a) = planes.alpha {
             let d = dst.row(y);
-            for (&av, o) in a[y * w..][..w].iter().zip(d.chunks_exact_mut(4)) {
+            for (&av, o) in a[y * w..][..w]
+                .iter()
+                .zip(d.as_chunks_mut::<4>().0.iter_mut())
+            {
                 o[3] = av;
             }
         }
@@ -569,8 +572,8 @@ mod tests {
         let mut out = vec![0u8; dst_len(16, 1)];
         let mut v = view(&mut out, 16, 1, RowOrder::TopDown);
         decode(&src, false, &mut PlanarScratch::new(), &mut v).unwrap();
-        for px in out.chunks_exact(4) {
-            assert_eq!(px, [0x10, 0x20, 0x30, 0xFF]);
+        for px in out.as_chunks::<4>().0.iter() {
+            assert_eq!(*px, [0x10, 0x20, 0x30, 0xFF]);
         }
     }
 
@@ -743,7 +746,7 @@ mod tests {
         let mut out = vec![0u8; dst_len(4, 2)];
         let mut v = view(&mut out, 4, 2, RowOrder::TopDown);
         decode(&src, false, &mut PlanarScratch::new(), &mut v).unwrap();
-        for row in out.chunks_exact(16) {
+        for row in out.as_chunks::<16>().0.iter() {
             assert_eq!(&row[0..4], &[36, 100, 164, 0xFF]);
             assert_eq!(&row[4..8], &[36, 100, 164, 0xFF]);
             assert_eq!(&row[8..12], &[100, 100, 100, 0xFF]);
@@ -761,8 +764,8 @@ mod tests {
         let mut out = vec![0u8; dst_len(3, 3)];
         let mut v = view(&mut out, 3, 3, RowOrder::TopDown);
         decode(&src, false, &mut PlanarScratch::new(), &mut v).unwrap();
-        for px in out.chunks_exact(4) {
-            assert_eq!(px, [100, 100, 100, 0xFF]);
+        for px in out.as_chunks::<4>().0.iter() {
+            assert_eq!(*px, [100, 100, 100, 0xFF]);
         }
     }
 

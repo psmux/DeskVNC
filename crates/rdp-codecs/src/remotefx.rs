@@ -158,7 +158,7 @@ impl<'a> Region<'a> {
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = Rect> + '_ {
-        self.rects.chunks_exact(8).map(|c| Rect {
+        self.rects.as_chunks::<8>().0.iter().map(|c| Rect {
             x: u16::from_le_bytes([c[0], c[1]]),
             y: u16::from_le_bytes([c[2], c[3]]),
             w: u16::from_le_bytes([c[4], c[5]]),
@@ -813,7 +813,7 @@ mod tests {
                         })
                     );
                 }
-                for (i, px) in buf.chunks_exact(4).enumerate() {
+                for (i, px) in buf.as_chunks::<4>().0.iter().enumerate() {
                     assert!(
                         (i32::from(px[0]) - i32::from(r)).abs() <= 2
                             && (i32::from(px[1]) - i32::from(g)).abs() <= 2
@@ -847,7 +847,7 @@ mod tests {
             decode_message(&msg, &mut ctx, &mut scratch, &mut v).unwrap();
         }
         let mut worst = 0i32;
-        for (i, px) in buf.chunks_exact(4).enumerate() {
+        for (i, px) in buf.as_chunks::<4>().0.iter().enumerate() {
             for c in 0..3 {
                 worst = worst.max((i32::from(px[c]) - i32::from(src[i][c])).abs());
             }

@@ -67,7 +67,7 @@ pub fn respond_to_challenge(
 ) -> [u8; CHALLENGE_LEN] {
     let mut key = des_key_from_password(password);
     let mut response = *challenge;
-    for chunk in response.chunks_exact_mut(8) {
+    for chunk in response.as_chunks_mut::<8>().0.iter_mut() {
         let mut block = [0u8; 8];
         block.copy_from_slice(chunk);
         des_ecb_block(&key, &mut block);

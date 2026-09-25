@@ -68,7 +68,7 @@ fn a_flat_simple_tile_round_trips_exactly() {
                 h: 64
             })
         );
-        for (i, px) in buf.chunks_exact(4).enumerate() {
+        for (i, px) in buf.as_chunks::<4>().0.iter().enumerate() {
             assert!(
                 (i32::from(px[0]) - i32::from(rgb[0])).abs() <= 2
                     && (i32::from(px[1]) - i32::from(rgb[1])).abs() <= 2
@@ -145,7 +145,9 @@ fn a_first_pass_and_two_upgrades_converge_on_the_simple_tile() {
     let mut buf = vec![0u8; dst_len(64, 64)];
 
     let err_of = |buf: &[u8]| -> i64 {
-        buf.chunks_exact(4)
+        buf.as_chunks::<4>()
+            .0
+            .iter()
             .zip(px.iter())
             .map(|(got, w)| {
                 (0..3)
@@ -792,9 +794,11 @@ fn the_extrapolate_flag_reaches_the_band_table_and_the_wavelet() {
     assert_ne!(a, b);
     // Both are real pictures rather than a buffer left at zero.
     assert!(b
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0));
-    assert!(b.chunks_exact(4).all(|p| p[3] == 0xFF));
+    assert!(b.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
 }
 
 /// An upgrade under the extrapolated layout runs the SRL pass over the second

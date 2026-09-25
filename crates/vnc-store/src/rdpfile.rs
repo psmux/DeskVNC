@@ -685,7 +685,11 @@ fn decode(bytes: &[u8]) -> String {
 /// Decode UTF-16 with the given byte order, replacing anything unpaired. A
 /// trailing odd byte is dropped rather than being an error.
 fn utf16(bytes: &[u8], order: fn([u8; 2]) -> u16) -> String {
-    let units = bytes.chunks_exact(2).map(|pair| order([pair[0], pair[1]]));
+    let units = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| order([pair[0], pair[1]]));
     char::decode_utf16(units)
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()

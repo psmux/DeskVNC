@@ -179,7 +179,7 @@ mod tests {
 
     fn red_rect(x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
         let mut px = vec![0u8; w as usize * h as usize * 4];
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0.iter_mut() {
             p[0] = 255;
             p[3] = 255;
         }
@@ -212,14 +212,20 @@ mod tests {
     fn copy_rect_overlapping() {
         let mut fb = Framebuffer::new(4, 1);
         // Pixels 0..4 = [A B C D]; copy [0..3] to x=1 (overlap): -> [A A B C]
-        for (i, p) in fb.data.chunks_exact_mut(4).enumerate() {
+        for (i, p) in fb.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             p[0] = i as u8 + 1;
         }
         fb.apply(&DecodedRect {
             rect: Rect::new(1, 0, 3, 1),
             payload: RectPayload::CopyRect { src_x: 0, src_y: 0 },
         });
-        let reds: Vec<u8> = fb.as_rgba().chunks_exact(4).map(|p| p[0]).collect();
+        let reds: Vec<u8> = fb
+            .as_rgba()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[0])
+            .collect();
         assert_eq!(reds, vec![1, 1, 2, 3]);
     }
 
@@ -230,13 +236,19 @@ mod tests {
         // Each row is tagged with its index in the red channel.
         let build = || {
             let mut fb = Framebuffer::new(2, 6);
-            for (i, p) in fb.data.chunks_exact_mut(4).enumerate() {
+            for (i, p) in fb.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 p[0] = (i / 2) as u8 + 1;
             }
             fb
         };
-        let rows =
-            |fb: &Framebuffer| -> Vec<u8> { fb.as_rgba().chunks_exact(8).map(|r| r[0]).collect() };
+        let rows = |fb: &Framebuffer| -> Vec<u8> {
+            fb.as_rgba()
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|r| r[0])
+                .collect()
+        };
 
         // Scroll down: rows 0..5 land at y=1 -> [1,1,2,3,4,5].
         let mut fb = build();

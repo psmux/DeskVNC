@@ -439,7 +439,7 @@ fn derive_v3(file: &PpkFile, passphrase: &str, encrypted: bool) -> Result<Derive
 /// itself before encrypting, so the decrypted length is the stored length
 /// and there is no padding byte to strip.
 fn decrypt_cbc(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(), PpkError> {
-    if data.len() % 16 != 0 {
+    if !data.len().is_multiple_of(16) {
         return Err(PpkError::Malformed(
             "encrypted private blob is not a whole number of blocks".into(),
         ));

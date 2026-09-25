@@ -138,7 +138,7 @@ pub fn parse_nbstat_response(msg: &[u8], id: u16) -> Option<NodeStatus> {
     let table = rdata.get(1..table_end)?;
 
     let mut status = NodeStatus::default();
-    for entry in table.chunks_exact(NB_ENTRY_LEN) {
+    for entry in table.as_chunks::<NB_ENTRY_LEN>().0 {
         let flags = u16::from_be_bytes([entry[NB_NAME_LEN], entry[NB_NAME_LEN + 1]]);
         if flags & NB_FLAG_GROUP != 0 {
             continue; // a workgroup/domain, not this machine

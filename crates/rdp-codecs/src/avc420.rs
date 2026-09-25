@@ -252,8 +252,10 @@ impl<'a> Avc420Stream<'a> {
     /// exactly the regions it reads.
     pub fn regions(&self) -> impl ExactSizeIterator<Item = Region> + 'a {
         self.rects
-            .chunks_exact(RECT16_LEN)
-            .zip(self.quants.chunks_exact(QUANT_QUALITY_LEN))
+            .as_chunks::<RECT16_LEN>()
+            .0
+            .iter()
+            .zip(self.quants.as_chunks::<QUANT_QUALITY_LEN>().0.iter())
             .map(|(r, q)| Region {
                 rect: Rect16::from_wire(r),
                 quality: QuantQuality {
@@ -278,7 +280,7 @@ impl<'a> Avc420Stream<'a> {
     #[must_use]
     pub fn bounds(&self) -> Option<Rect16> {
         let mut acc: Option<Rect16> = None;
-        for c in self.rects.chunks_exact(RECT16_LEN) {
+        for c in self.rects.as_chunks::<RECT16_LEN>().0.iter() {
             let r = Rect16::from_wire(c);
             if r.is_empty() {
                 continue;

@@ -246,7 +246,9 @@ fn row_1d(l: &[i16], h: &[i16], out: &mut [i16]) {
     }
 
     for (c, (&ev, &ov)) in out
-        .chunks_exact_mut(2)
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
         .zip(evens[..no].iter().zip(odds[..no].iter()))
     {
         c[0] = ev;

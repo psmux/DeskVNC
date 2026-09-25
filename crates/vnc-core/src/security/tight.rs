@@ -55,7 +55,9 @@ pub struct Capability {
 
 impl Capability {
     pub fn parse_list(raw: &[u8]) -> Vec<Capability> {
-        raw.chunks_exact(CAPABILITY_LEN)
+        raw.as_chunks::<CAPABILITY_LEN>()
+            .0
+            .iter()
             .map(|c| {
                 let mut vendor = [0u8; 4];
                 vendor.copy_from_slice(&c[4..8]);

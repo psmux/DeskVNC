@@ -280,7 +280,9 @@ impl ProtocolTrace {
                 // compression-level pseudo-encodings, which is where the
                 // compression-to-0 bug actually lived, so print them.
                 let encodings: Vec<i32> = bytes[4..]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .take(n)
                     .map(|c| i32::from_be_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
