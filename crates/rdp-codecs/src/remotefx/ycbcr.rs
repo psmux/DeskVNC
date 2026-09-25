@@ -93,7 +93,12 @@ pub fn row<const BGRA: bool>(y: &[i16], cb: &[i16], cr: &[i16], dst: &mut [u8]) 
     debug_assert_eq!(y.len(), cb.len());
     debug_assert_eq!(y.len(), cr.len());
     debug_assert_eq!(dst.len(), y.len() * 4);
-    for (((&yv, &cbv), &crv), o) in y.iter().zip(cb).zip(cr).zip(dst.chunks_exact_mut(4)) {
+    for (((&yv, &cbv), &crv), o) in y
+        .iter()
+        .zip(cb)
+        .zip(cr)
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
         let (r, g, b) = pixel(yv, cbv, crv);
         put::<BGRA>(o, r, g, b, 0xFF);
     }

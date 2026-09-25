@@ -65,7 +65,7 @@ pub(crate) async fn decode<R: AsyncRead + Unpin>(
         0x08 => {
             let colour = read_tpixel(reader, pf, map).await?;
             let mut out = vec![0u8; rect.area() * 4];
-            for px in out.chunks_exact_mut(4) {
+            for px in out.as_chunks_mut::<4>().0.iter_mut() {
                 px.copy_from_slice(&colour);
             }
             Ok(RectPayload::Rgba(out))
@@ -158,7 +158,12 @@ async fn decode_basic<R: AsyncRead + Unpin>(
             // Compact TPIXELs are literally R, G, B, a straight widening
             // copy, with the format test hoisted out of the pixel loop.
             let mut out = vec![0u8; w * h * 4];
-            for (s, d) in data.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+            for (s, d) in data
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(out.as_chunks_mut::<4>().0.iter_mut())
+            {
                 d[0] = s[0];
                 d[1] = s[1];
                 d[2] = s[2];
@@ -249,8 +254,10 @@ fn undo_gradient_compact(data: &[u8], w: usize, h: usize) -> Vec<u8> {
         let mut left = [0u8; 3];
         let mut upleft = [0u8; 3];
         for ((s, d), up) in src_row
-            .chunks_exact(3)
-            .zip(out_row.chunks_exact_mut(4))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(out_row.as_chunks_mut::<4>().0.iter_mut())
             .zip(prev.iter_mut())
         {
             let u = *up;
@@ -541,7 +548,7 @@ mod tests {
         match payload {
             RectPayload::Rgba(px) => {
                 assert_eq!(px.len(), 3 * 2 * 4);
-                for p in px.chunks_exact(4) {
+                for p in px.as_chunks::<4>().0.iter() {
                     assert_eq!(p, &[10, 20, 30, 255]);
                 }
             }

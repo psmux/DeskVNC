@@ -323,7 +323,7 @@ pub(crate) fn emit_row<const BGRA: bool>(
     for (x, ((&yv, &av), o)) in luma
         .iter()
         .zip(alpha)
-        .zip(dst.chunks_exact_mut(4))
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
         .enumerate()
     {
         let cx = x >> shift;
@@ -508,7 +508,7 @@ mod tests {
                 let mut scratch = NscScratch::new();
                 decode(&src, &mut scratch, &mut v).unwrap();
             }
-            for (i, out) in buf.chunks_exact(4).enumerate() {
+            for (i, out) in buf.as_chunks::<4>().0.iter().enumerate() {
                 for c in 0..3 {
                     assert!(
                         (i32::from(out[c]) - i32::from(px[i][c])).abs() <= 2,
@@ -547,7 +547,7 @@ mod tests {
                 decode(&src, &mut scratch, &mut v).unwrap();
             }
             let tol = 1i32 << cll;
-            for (i, out) in buf.chunks_exact(4).enumerate() {
+            for (i, out) in buf.as_chunks::<4>().0.iter().enumerate() {
                 for c in 0..3 {
                     assert!(
                         (i32::from(out[c]) - i32::from(px[i][c])).abs() <= tol,
@@ -583,7 +583,7 @@ mod tests {
             let mut scratch = NscScratch::new();
             decode(&src, &mut scratch, &mut v).unwrap();
         }
-        for (i, out) in buf.chunks_exact(4).enumerate() {
+        for (i, out) in buf.as_chunks::<4>().0.iter().enumerate() {
             for c in 0..3 {
                 assert!(
                     (i32::from(out[c]) - i32::from(px[i][c])).abs() <= 3,
@@ -608,7 +608,7 @@ mod tests {
             let mut scratch = NscScratch::new();
             decode(&src, &mut scratch, &mut v).unwrap();
         }
-        for (i, out) in buf.chunks_exact(4).enumerate() {
+        for (i, out) in buf.as_chunks::<4>().0.iter().enumerate() {
             assert_eq!(out[3], alpha[i], "pixel {i}");
         }
 
@@ -619,7 +619,7 @@ mod tests {
             let mut scratch = NscScratch::new();
             decode(&src, &mut scratch, &mut v).unwrap();
         }
-        assert!(buf.chunks_exact(4).all(|p| p[3] == 0xFF));
+        assert!(buf.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
     }
 
     #[test]

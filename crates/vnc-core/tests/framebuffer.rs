@@ -40,9 +40,9 @@ fn px(d: &DecodedRect, x: usize, y: usize) -> [u8; 4] {
 /// Assert every pixel of `d` equals `colour`.
 fn assert_solid(d: &DecodedRect, colour: Rgb) {
     let want = expect_rgba(colour);
-    for chunk in rgba_of(d).chunks_exact(4) {
+    for chunk in rgba_of(d).as_chunks::<4>().0.iter() {
         assert_eq!(
-            chunk, want,
+            *chunk, want,
             "rect {:?} should be a solid {colour:?}",
             d.rect
         );

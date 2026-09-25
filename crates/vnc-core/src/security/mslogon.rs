@@ -145,7 +145,7 @@ fn des_cbc_encrypt(buf: &mut [u8], secret: &[u8; DH_BYTES]) {
     key.zeroize();
 
     let mut prev = *secret;
-    for chunk in buf.chunks_exact_mut(8) {
+    for chunk in buf.as_chunks_mut::<8>().0.iter_mut() {
         for (b, p) in chunk.iter_mut().zip(prev.iter()) {
             *b ^= *p;
         }
@@ -237,7 +237,7 @@ mod tests {
         let cipher = Des::new_from_slice(&key).unwrap();
         let mut prev = *secret;
         let mut out = Vec::with_capacity(buf.len());
-        for chunk in buf.chunks_exact(8) {
+        for chunk in buf.as_chunks::<8>().0.iter() {
             let mut block = [0u8; 8];
             block.copy_from_slice(chunk);
             let saved = block;

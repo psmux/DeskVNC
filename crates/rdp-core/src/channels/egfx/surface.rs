@@ -281,7 +281,7 @@ impl Surface {
                 self.id
             )));
         };
-        for chunk in row.chunks_exact_mut(BPP) {
+        for chunk in row.as_chunks_mut::<BPP>().0 {
             chunk.copy_from_slice(&px);
         }
         for y in 1..usize::from(h) {
@@ -727,10 +727,10 @@ mod tests {
         let mut out = Vec::new();
         s.copy_out(rect(0, 0, 2, 2), &mut out).expect("copies");
         assert_eq!(out.len(), 2 * 2 * 4);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0.iter() {
             // R, G, B, A. The wire's `XA` of 0x40 is ignored on an XRGB
             // surface, which is what MS-RDPEGFX 2.2.2.4 means by X.
-            assert_eq!(px, [0xFF, 0x00, 0x00, 0xFF]);
+            assert_eq!(*px, [0xFF, 0x00, 0x00, 0xFF]);
         }
 
         // A sub rectangle comes back with the right stride applied.
@@ -798,7 +798,7 @@ mod tests {
             .expect("blits");
         let mut out = Vec::new();
         s.copy_out(rect(0, 0, 1, 4), &mut out).expect("copies");
-        let rows: Vec<u8> = out.chunks_exact(4).map(|c| c[0]).collect();
+        let rows: Vec<u8> = out.as_chunks::<4>().0.iter().map(|c| c[0]).collect();
         assert_eq!(rows, vec![0, 0, 1, 2], "rows moved down by one");
     }
 

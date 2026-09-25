@@ -606,7 +606,9 @@ pub fn parse_wsl_distros(raw: &[u8]) -> Vec<String> {
     // always emit one.
     let text = if raw.iter().take(16).any(|b| *b == 0) {
         let units: Vec<u16> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| u16::from_le_bytes([p[0], p[1]]))
             .collect();
         String::from_utf16_lossy(&units)

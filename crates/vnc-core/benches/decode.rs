@@ -813,8 +813,10 @@ mod legacy {
             let mut left = [0u8; 3];
             let mut upleft = [0u8; 3];
             for ((s, d), up) in src_row
-                .chunks_exact(3)
-                .zip(out_row.chunks_exact_mut(4))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(out_row.as_chunks_mut::<4>().0.iter_mut())
                 .zip(prev.iter_mut())
             {
                 let u = *up;

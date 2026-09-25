@@ -300,7 +300,7 @@ fn decode_utf16_lossy(
     context: &'static str,
     offset: usize,
 ) -> PduResult<String> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Err(PduError::InvalidField {
             context,
             field: "UTF-16 field length",
@@ -308,12 +308,11 @@ fn decode_utf16_lossy(
             offset,
         });
     }
-    let units = raw.chunks_exact(2).map(|c| match c {
-        [lo, hi] => u16::from_le_bytes([*lo, *hi]),
-        // `chunks_exact(2)` yields nothing else; the arm keeps the match
-        // total without an `unwrap`.
-        _ => 0,
-    });
+    let units = raw
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c));
     let mut out = String::with_capacity(raw.len() / 2);
     let mut collected: Vec<u16> = Vec::with_capacity(raw.len() / 2);
     for u in units {

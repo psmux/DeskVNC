@@ -690,7 +690,7 @@ fn rfx_build(
     ts.extend_from_slice(&(tiles_data.len() as u32).to_le_bytes());
     // Ten nibbles of the quantization table, low nibble first
     // (MS-RDPRFX 2.2.2.1.6).
-    for pair in quant.chunks_exact(2) {
+    for pair in quant.as_chunks::<2>().0.iter() {
         ts.push(pair[0] | (pair[1] << 4));
     }
     ts.extend_from_slice(&tiles_data);

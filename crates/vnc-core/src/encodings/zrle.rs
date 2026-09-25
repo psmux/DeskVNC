@@ -122,11 +122,21 @@ async fn decode_tile<R: AsyncRead + Unpin>(
             };
             // Hoist the CPIXEL-form test out of the pixel loop.
             if compact {
-                for (c, d) in scratch.wire.chunks_exact(3).zip(tile.chunks_exact_mut(4)) {
+                for (c, d) in scratch
+                    .wire
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(tile.as_chunks_mut::<4>().0.iter_mut())
+                {
                     d.copy_from_slice(&cpixel_to_rgba(&[c[0], c[1], c[2]], pf));
                 }
             } else {
-                for (c, d) in scratch.wire.chunks_exact(cps).zip(tile.chunks_exact_mut(4)) {
+                for (c, d) in scratch
+                    .wire
+                    .chunks_exact(cps)
+                    .zip(tile.as_chunks_mut::<4>().0.iter_mut())
+                {
                     d.copy_from_slice(&pixel_to_rgba(c, pf, map));
                 }
             }
@@ -134,7 +144,7 @@ async fn decode_tile<R: AsyncRead + Unpin>(
         // Solid: one CPIXEL fills the tile.
         1 => {
             let colour = read_cpixel(reader, pf, map).await?;
-            for px in scratch.tile_mut(n * 4).chunks_exact_mut(4) {
+            for px in scratch.tile_mut(n * 4).as_chunks_mut::<4>().0.iter_mut() {
                 px.copy_from_slice(&colour);
             }
         }
@@ -166,7 +176,7 @@ async fn decode_tile<R: AsyncRead + Unpin>(
                 .chunks_exact(row_bytes)
                 .zip(tile.chunks_exact_mut(tw * 4))
             {
-                for (x, d) in out_row.chunks_exact_mut(4).enumerate() {
+                for (x, d) in out_row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     let bit_off = x * bits;
                     let byte = row[bit_off / 8];
                     let shift = 8 - bits - (bit_off % 8);
@@ -192,7 +202,11 @@ async fn decode_tile<R: AsyncRead + Unpin>(
                     return Err(derr(enc, "RLE run overflows tile"));
                 }
                 let tile = scratch.tile_mut(n * 4);
-                for px in tile[filled * 4..(filled + len) * 4].chunks_exact_mut(4) {
+                for px in tile[filled * 4..(filled + len) * 4]
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                {
                     px.copy_from_slice(&colour);
                 }
                 filled += len;
@@ -220,7 +234,11 @@ async fn decode_tile<R: AsyncRead + Unpin>(
                     return Err(derr(enc, "palette RLE run overflows tile"));
                 }
                 let tile = scratch.tile_mut(n * 4);
-                for px in tile[filled * 4..(filled + len) * 4].chunks_exact_mut(4) {
+                for px in tile[filled * 4..(filled + len) * 4]
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                {
                     px.copy_from_slice(&colour);
                 }
                 filled += len;
@@ -341,7 +359,7 @@ mod tests {
         match payload {
             RectPayload::Rgba(px) => {
                 assert_eq!(px.len(), 400);
-                for p in px.chunks_exact(4) {
+                for p in px.as_chunks::<4>().0.iter() {
                     assert_eq!(p, &[20, 30, 40, 255]);
                 }
             }
@@ -551,7 +569,7 @@ mod tests {
             .unwrap();
         match payload {
             RectPayload::Rgba(px) => {
-                for p in px.chunks_exact(4) {
+                for p in px.as_chunks::<4>().0.iter() {
                     assert_eq!(p, &[20, 30, 40, 255]);
                 }
             }

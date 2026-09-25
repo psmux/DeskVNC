@@ -84,6 +84,7 @@ trait Px: Copy + Eq {
     ///
     /// Overridden at 8 bpp, where the whole thing is `slice::fill` and lowers
     /// to a `memset`.
+    #[allow(clippy::chunks_exact_to_as_chunks)] // Self::BYTES is not a stable const generic.
     fn fill_slice(dst: &mut [u8], px: Self) {
         for d in dst.chunks_exact_mut(Self::BYTES) {
             px.write_le(d);
@@ -91,6 +92,7 @@ trait Px: Copy + Eq {
     }
 
     /// `dst[i] = src[i] ^ px`, pixel by pixel over two equal length slices.
+    #[allow(clippy::chunks_exact_to_as_chunks)] // Self::BYTES is not a stable const generic.
     fn xor_slice(src: &[u8], dst: &mut [u8], px: Self) {
         for (s, d) in src
             .chunks_exact(Self::BYTES)

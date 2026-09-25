@@ -214,7 +214,9 @@ pub fn select_subtype(
 /// do not recognise (SASL, Ident, vendor extensions).
 pub fn parse_subtypes(raw: &[u8], four_byte: bool) -> Vec<VeNCryptSubtype> {
     if four_byte {
-        raw.chunks_exact(4)
+        raw.as_chunks::<4>()
+            .0
+            .iter()
             .filter_map(|c| VeNCryptSubtype::from_u32(u32::from_be_bytes([c[0], c[1], c[2], c[3]])))
             .collect()
     } else {

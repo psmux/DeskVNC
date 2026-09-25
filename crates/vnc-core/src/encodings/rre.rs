@@ -31,7 +31,7 @@ pub(crate) async fn decode<R: AsyncRead + Unpin>(
 
     // Fill background.
     let mut out = vec![0u8; w * h * 4];
-    for px in out.chunks_exact_mut(4) {
+    for px in out.as_chunks_mut::<4>().0.iter_mut() {
         px.copy_from_slice(&bg);
     }
 
@@ -64,7 +64,7 @@ pub(crate) async fn decode<R: AsyncRead + Unpin>(
         }
         for y in sy..sy + sh {
             let row = (y * w + sx) * 4;
-            for px in out[row..row + sw * 4].chunks_exact_mut(4) {
+            for px in out[row..row + sw * 4].as_chunks_mut::<4>().0.iter_mut() {
                 px.copy_from_slice(&colour);
             }
         }

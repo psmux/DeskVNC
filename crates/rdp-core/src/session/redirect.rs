@@ -244,7 +244,9 @@ fn is_plausible_target(target: &str) -> bool {
 /// password we do not use, which the caller finds out by it not working.
 fn utf16_secret(bytes: &[u8]) -> Zeroizing<String> {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u16::from_le_bytes([p[0], p[1]]))
         // Every string in this packet carries its terminator inside its own
         // length (`crates/rdp-pdu/src/rdp/redirection.rs:422`).

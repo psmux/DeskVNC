@@ -343,7 +343,12 @@ fn interleave_zipped(r: &[u8], g: &[u8], b: &[u8], w: usize, h: usize, dst: &mut
     for y in 0..h {
         let (rr, gg, bb) = (&r[y * w..][..w], &g[y * w..][..w], &b[y * w..][..w]);
         let row = &mut dst[y * w * 4..][..w * 4];
-        for (((&r, &g), &b), o) in rr.iter().zip(gg).zip(bb).zip(row.chunks_exact_mut(4)) {
+        for (((&r, &g), &b), o) in rr
+            .iter()
+            .zip(gg)
+            .zip(bb)
+            .zip(row.as_chunks_mut::<4>().0.iter_mut())
+        {
             o[0] = r;
             o[1] = g;
             o[2] = b;

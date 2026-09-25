@@ -187,7 +187,10 @@ fn map_pixels<F: Fn(u32) -> [u8; 4]>(src: &[u8], dst: &mut [u8], bpp: usize, be:
     macro_rules! walk {
         ($n:expr, $get:expr) => {{
             let get = $get;
-            for (s, d) in src.chunks_exact($n).zip(dst.chunks_exact_mut(4)) {
+            for (s, d) in src
+                .chunks_exact($n)
+                .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+            {
                 d.copy_from_slice(&f(get(s)));
             }
         }};
@@ -243,7 +246,12 @@ pub fn convert_to_rgba_mapped(
 
     // Fast path: 32bpp little-endian BGRA (our canonical negotiated format), // a pure byte swizzle, no shifting or scaling at all.
     if is_canonical_bgra(pf) {
-        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        for (s, d) in src
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+        {
             d[0] = s[2];
             d[1] = s[1];
             d[2] = s[0];
@@ -338,7 +346,7 @@ impl Palette {
     /// bytes per entry. A short list leaves the remaining entries alone,
     /// because a server is allowed to send fewer than 256.
     pub fn load_rgb_triplets(&mut self, entries: &[u8]) {
-        for (i, e) in entries.chunks_exact(3).take(256).enumerate() {
+        for (i, e) in entries.as_chunks::<3>().0.iter().take(256).enumerate() {
             self.0[i] = [e[0], e[1], e[2], 0xFF];
         }
     }
@@ -422,17 +430,32 @@ fn convert_row_impl<const BGRA: bool>(fmt: Format, src: &[u8], dst: &mut [u8], p
         // (docs/PERFORMANCE.md §3.2). RDP's 32 bpp wire format is exactly
         // that layout.
         Format::BgrX32 => {
-            for (s, d) in src.chunks_exact(4).zip(head.chunks_exact_mut(DST_BPP)) {
+            for (s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(head.as_chunks_mut::<DST_BPP>().0.iter_mut())
+            {
                 put::<BGRA>(d, s[2], s[1], s[0], 0xFF);
             }
         }
         Format::BgrA32 => {
-            for (s, d) in src.chunks_exact(4).zip(head.chunks_exact_mut(DST_BPP)) {
+            for (s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(head.as_chunks_mut::<DST_BPP>().0.iter_mut())
+            {
                 put::<BGRA>(d, s[2], s[1], s[0], s[3]);
             }
         }
         Format::Bgr24 => {
-            for (s, d) in src.chunks_exact(3).zip(head.chunks_exact_mut(DST_BPP)) {
+            for (s, d) in src
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(head.as_chunks_mut::<DST_BPP>().0.iter_mut())
+            {
                 put::<BGRA>(d, s[2], s[1], s[0], 0xFF);
             }
         }
@@ -441,26 +464,36 @@ fn convert_row_impl<const BGRA: bool>(fmt: Format, src: &[u8], dst: &mut [u8], p
         // mask sequence is inlined instead of going through [`ChannelLuts`]
         // (PRDRDP/04 §4.2).
         Format::Rgb565 => {
-            for (s, d) in src.chunks_exact(2).zip(head.chunks_exact_mut(DST_BPP)) {
+            for (s, d) in src
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(head.as_chunks_mut::<DST_BPP>().0.iter_mut())
+            {
                 let v = u16::from_le_bytes([s[0], s[1]]);
                 put::<BGRA>(d, expand5(v >> 11), expand6(v >> 5), expand5(v), 0xFF);
             }
         }
         Format::Rgb555 => {
-            for (s, d) in src.chunks_exact(2).zip(head.chunks_exact_mut(DST_BPP)) {
+            for (s, d) in src
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(head.as_chunks_mut::<DST_BPP>().0.iter_mut())
+            {
                 let v = u16::from_le_bytes([s[0], s[1]]);
                 put::<BGRA>(d, expand5(v >> 10), expand5(v >> 5), expand5(v), 0xFF);
             }
         }
         Format::Palette8 => {
-            for (s, d) in src.iter().zip(head.chunks_exact_mut(DST_BPP)) {
+            for (s, d) in src.iter().zip(head.as_chunks_mut::<DST_BPP>().0.iter_mut()) {
                 let e = pal.entry(*s);
                 put::<BGRA>(d, e[0], e[1], e[2], e[3]);
             }
         }
         // MSB first within each byte, so bit 7 is the leftmost pixel.
         Format::Mono1 => {
-            for (i, d) in head.chunks_exact_mut(DST_BPP).enumerate() {
+            for (i, d) in head.as_chunks_mut::<DST_BPP>().0.iter_mut().enumerate() {
                 let byte = src[i / 8];
                 let v = if byte & (0x80 >> (i % 8)) != 0 {
                     0xFF
@@ -472,7 +505,7 @@ fn convert_row_impl<const BGRA: bool>(fmt: Format, src: &[u8], dst: &mut [u8], p
         }
     }
 
-    for d in tail.chunks_exact_mut(DST_BPP) {
+    for d in tail.as_chunks_mut::<DST_BPP>().0.iter_mut() {
         put::<BGRA>(d, 0, 0, 0, 0xFF);
     }
 }
