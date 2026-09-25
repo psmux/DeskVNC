@@ -62,7 +62,8 @@ jobs:
           trap 'hdiutil detach "$PWD/mounted" || true' EXIT
           APP="$PWD/mounted/DeskVNCViewer.app"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
-          lipo "$APP/Contents/MacOS/dvv" -verify_arch arm64 x86_64
+          lipo "$APP/Contents/MacOS/dvv" -verify_arch arm64
+          lipo "$APP/Contents/MacOS/dvv" -verify_arch x86_64
           "$APP/Contents/MacOS/dvv" version | tee dvv-version.txt
           grep -F "dvv $VERSION," dvv-version.txt
           codesign --verify --strict --deep "$APP"
