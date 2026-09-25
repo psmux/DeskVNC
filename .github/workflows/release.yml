@@ -280,7 +280,8 @@ jobs:
           [ -n "$APP" ] || { echo "no .app produced"; exit 1; }
           [ -x "$APP/Contents/MacOS/dvv" ] || { echo "dvv missing from the release app"; exit 1; }
           "$APP/Contents/MacOS/dvv" version
-          lipo "$APP/Contents/MacOS/dvv" -verify_arch arm64 x86_64
+          lipo "$APP/Contents/MacOS/dvv" -verify_arch arm64
+          lipo "$APP/Contents/MacOS/dvv" -verify_arch x86_64
           codesign --verify --strict "$APP/Contents/MacOS/dvv"
           echo "== signature =="
           codesign -dvv "$APP" 2>&1 | grep -E '^Authority|^TeamIdentifier' || true
