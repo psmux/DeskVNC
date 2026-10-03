@@ -45,12 +45,44 @@ how the agent reached it.
 ## Getting connected
 
 1. In DeskVNC, open the **AI Agents** panel and switch the plane on.
-2. Use the **Register with Claude Code** button, or copy the shown command for a
-   different agent. An installed build ships `dvv` inside the bundle, signed and
-   notarized, and reports its real path.
-3. The agent can now open a saved machine by name, read the host library
-   (protocols and whether a credential is stored, never the credential itself),
-   take screenshots, and send input, subject to the capabilities on its grant.
+2. Press **Set up** under "Connect OpenCode, Pi and Codex". It finds the agents
+   installed on this computer and wires each one. From a terminal the same
+   thing is:
+
+   ```sh
+   /Applications/DeskVNCViewer.app/Contents/MacOS/dvv setup
+   ```
+
+   `dvv setup opencode` (or `pi`, `codex`, `claude`) does just one. It adds an
+   MCP entry to OpenCode's and Codex's config, keeping a backup and any
+   comments, writes the skill where each agent reads skills, and runs
+   `claude mcp add` for Claude Code.
+3. Ask your agent to do something on one of your machines by name. It opens
+   the machine itself, recovers it if the screen stalls, and never needs you to
+   open or reconnect anything.
+
+### Pi, and other agents with no MCP client
+
+Pi drives tools through its shell rather than MCP, so `dvv setup pi` installs
+the skill into `~/.pi/agent/skills` and links `dvv` into `~/.local/bin`. The
+agent then runs `dvv open`, `dvv screen`, `dvv click` and the rest as shell
+commands. `dvv open` starts a small background holder so a machine stays open
+between commands, and `dvv screen` saves the picture to a file and prints its
+path, which Pi's `read` tool opens as an image.
+
+### Free models
+
+Desktops need a model that can see images. Text only models can still drive
+an SSH terminal.
+
+* In OpenCode, the free models that see images include
+  `opencode/muse-spark-1.3-contributor-free`. Verified end to end: it opened
+  a folder and a web page on a Windows machine with no help.
+* OpenCode's free models only work inside OpenCode. Pi gets a 403 from them.
+* In Pi, use OpenRouter's free models that take images, such as
+  `openrouter/qwen/qwen3.8-27b:free` (verified end to end) or
+  `openrouter/google/gemma-4-31b-it:free`. Free OpenRouter models are often
+  rate limited upstream; if one answers 429, try another.
 
 ## Other clients
 
@@ -170,12 +202,12 @@ member concurrently and reports each outcome separately, and any single limb
 tool takes `groupId` plus `member` to address one of them. `dvv_group_close`
 ends the set.
 
-### A skill for Claude Code
+### The skill
 
-`skills/deskvnc/SKILL.md` in this repository teaches the loop above, the lease
-rule and the group tools. Copy the `deskvnc` directory into `~/.claude/skills/`
-(or a project's `.claude/skills/`) and Claude Code loads it when a task
-involves driving a machine. The server's own `instructions`, sent on
+`skills/deskvnc/SKILL.md` teaches the loop, both as MCP tools and as shell
+commands, and how to recover a machine without the user. It is compiled into
+`dvv`, and `dvv setup` writes it where each agent looks: `~/.claude/skills`,
+`~/.config/opencode/skills`, `~/.pi/agent/skills` and `~/.codex/skills`. The server's own `instructions`, sent on
 `initialize`, carry the four rules that matter most, so a client that passes
 those to its model already has the essentials without the skill.
 
