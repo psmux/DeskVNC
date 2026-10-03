@@ -59,5 +59,9 @@ rand = { workspace = true }
 # spurious header mismatch.
 base64 = { workspace = true }
 
+# The named pipe the plane and the holder use on Windows (`04 §2.1`).
+[target.'cfg(windows)'.dependencies]
+local-pipe = { path = "../local-pipe" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

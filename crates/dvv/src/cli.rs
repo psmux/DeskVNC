@@ -328,10 +328,11 @@ fn tool_call(args: &Args) -> Result<(String, Value), ToolError> {
             let text = args.at(1).ok_or_else(|| {
                 ToolError::bad_request("dvv type needs a limbId and the text to type")
             })?;
-            (
-                "dvv_type".to_string(),
-                with_limb(json!({ "text": text }), 0),
-            )
+            let mut object = json!({ "text": text });
+            if let Some(wpm) = args.flag("wpm").and_then(|w| w.parse::<u16>().ok()) {
+                object["wpm"] = json!(wpm);
+            }
+            ("dvv_type".to_string(), with_limb(object, 0))
         }
         "key" => {
             let keys = args.at(1).ok_or_else(|| {
@@ -931,7 +932,7 @@ fn doctor(args: &Args) -> i32 {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "dvv".to_string());
     let socket = socket_path();
-    let reachable = std::path::Path::new(&socket).exists();
+    let reachable = crate::plane::socket_present();
     let line = format!("claude mcp add --scope user deskvnc -- {binary} mcp --stdio");
     let http = http_report(args);
 
@@ -1180,7 +1181,7 @@ dvv, the agent plane for DeskVNCViewer.
   dvv stop <limbId>                revoke the wheel: keys released, no grace
 
   dvv click <limbId> <x> <y> [--action move|click|double|right|middle|drag|scroll]
-  dvv type <limbId> \"<text>\"
+  dvv type <limbId> \"<text>\" [--wpm 3000]
   dvv key <limbId> ctrl+alt+Delete
   dvv screen <limbId> [--form full|region|damage-crop] [--scale 0.5] [--out file.png]
                                    saves the picture to a file and prints the path

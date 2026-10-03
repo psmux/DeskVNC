@@ -36,6 +36,8 @@ members = [
     "crates/limb-core",
     "crates/agent-perception",
     "crates/agent-plane",
+    # The named pipe both listeners use on Windows, with its owner only ACL.
+    "crates/local-pipe",
     "crates/dvv",
     "src-tauri",
 ]

@@ -28,14 +28,16 @@ const AGENTS: &[&str] = &["opencode", "pi", "codex", "claude"];
 /// Set up one agent, or every one that is installed.
 pub fn run(target: Option<&str>) -> i32 {
     let exe = match std::env::current_exe().and_then(|p| p.canonicalize()) {
-        Ok(exe) => exe,
+        Ok(exe) => plain(exe),
         Err(e) => {
             eprintln!("this binary cannot find itself, so there is no path to register: {e}");
             return 1;
         }
     };
     let Some(home) = home() else {
-        eprintln!("HOME is not set, so there is nowhere to write an agent's config");
+        eprintln!(
+            "neither HOME nor USERPROFILE is set, so there is nowhere to write an agent's config"
+        );
         return 1;
     };
     let chosen: Vec<&str> = match target {
@@ -88,16 +90,53 @@ pub fn run(target: Option<&str>) -> i32 {
     i32::from(failed)
 }
 
+/// The user's home. `HOME` first, because Git Bash and MSYS set it and the
+/// agents run under them read it; `USERPROFILE` is what a Windows process
+/// started from Explorer or cmd has instead.
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+/// A path without Windows' `\\?\` verbatim prefix.
+///
+/// `canonicalize` adds it, and the path is correct with it, but it ends up in
+/// other programs' config files, where Node's `spawn` and a person reading
+/// the file both do worse with it than without.
+fn plain(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+/// The file names a command called `name` can have here. On Windows that is
+/// the name with each executable extension, since `opencode` is
+/// `opencode.exe` and an npm installed `pi` is `pi.cmd`.
+fn executable_names(name: &str) -> Vec<String> {
+    if cfg!(windows) {
+        ["exe", "cmd", "bat", "com"]
+            .iter()
+            .map(|ext| format!("{name}.{ext}"))
+            .collect()
+    } else {
+        vec![name.to_string()]
+    }
+}
+
+fn find_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    executable_names(name)
+        .into_iter()
+        .map(|file| dir.join(file))
+        .find(|candidate| candidate.is_file())
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|candidate| candidate.is_file())
-    })
+    std::env::var_os("PATH")
+        .and_then(|paths| std::env::split_paths(&paths).find_map(|dir| find_in(&dir, name)))
 }
 
 /// Where an agent is installed, looking past PATH.
@@ -110,7 +149,7 @@ fn find_agent(name: &str) -> Option<PathBuf> {
         return Some(found);
     }
     let home = home()?;
-    [
+    let mut dirs = vec![
         home.join(".local/bin"),
         home.join(".bun/bin"),
         home.join(".opencode/bin"),
@@ -119,10 +158,13 @@ fn find_agent(name: &str) -> Option<PathBuf> {
         home.join(".cargo/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
-    ]
-    .into_iter()
-    .map(|dir| dir.join(name))
-    .find(|candidate| candidate.is_file())
+    ];
+    // Where npm and scoop put commands on Windows.
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(appdata).join("npm"));
+    }
+    dirs.push(home.join("scoop/shims"));
+    dirs.into_iter().find_map(|dir| find_in(&dir, name))
 }
 
 fn write_skill(dir: &Path) -> Result<String, String> {
@@ -295,8 +337,13 @@ fn link_onto_path(home: &Path, exe: &Path) -> Result<String, String> {
         }
     }
     let bin = home.join(".local/bin");
-    let link = bin.join("dvv");
-    if link.exists() || link.symlink_metadata().is_ok() {
+    let link = bin.join(if cfg!(windows) { "dvv.exe" } else { "dvv" });
+    if cfg!(windows) && link.is_file() && is_a_dvv(&link) {
+        // A copy rather than a link, since a symlink on Windows needs
+        // developer mode or an elevated prompt. A copy goes stale when the
+        // application updates, so the dvv already there is replaced.
+        std::fs::copy(exe, &link).map_err(|e| format!("{}: {e}", link.display()))?;
+    } else if link.exists() || link.symlink_metadata().is_ok() {
         let ours = std::fs::read_link(&link).ok().as_deref() == Some(exe);
         if !ours {
             return Ok(format!(
@@ -322,6 +369,16 @@ fn link_onto_path(home: &Path, exe: &Path) -> Result<String, String> {
             link.display()
         )
     })
+}
+
+/// Does the file at `path` answer `version` the way dvv does?
+fn is_a_dvv(path: &Path) -> bool {
+    std::process::Command::new(path)
+        .arg("version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).starts_with("dvv "))
 }
 
 fn codex(home: &Path, exe: &Path) -> Result<Vec<String>, String> {

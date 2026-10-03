@@ -68,5 +68,9 @@ crossbeam-channel = "0.5"
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 
+# The agent plane's named pipe on Windows, with its owner only ACL (04 §2.1).
+[target.'cfg(windows)'.dependencies]
+local-pipe = { path = "../crates/local-pipe" }
+
 [dev-dependencies]
 tempfile = "3"

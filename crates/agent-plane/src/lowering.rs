@@ -379,7 +379,10 @@ fn lower_type(text: &str, wpm: Option<u16>, ctx: &LowerContext) -> Result<Lowere
             "an empty type changes nothing and would still consume a lease and a settlement",
         ));
     }
-    let pause = per_code_point(wpm);
+    let pause = match (wpm, ctx.grounding) {
+        (None, Grounding::Pixels) => UNPACED_KEYSTROKE,
+        _ => per_code_point(wpm),
+    };
     let mut steps = Vec::new();
     for (c, keysym) in type_keysyms(text) {
         match ctx.grounding {
@@ -433,6 +436,18 @@ fn lower_type(text: &str, wpm: Option<u16>, ctx: &LowerContext) -> Result<Lowere
     }
     Ok(Lowered::Commands(steps))
 }
+
+/// The gap after each code point on a desktop when the caller named no `wpm`.
+///
+/// Zero used to be the default, and on a Windows machine behind a VNC server
+/// it lost text: typed with no gap into a new Notepad tab, a 65 character line
+/// arrived as "typodus" in one run and with Shift missing in another
+/// ("windows. exodus 20;8"). One millisecond (`wpm: 12000`) still dropped one
+/// character in about twelve hundred; four (`wpm: 3000`) dropped none in the
+/// same runs. Four is 250 characters a second, which is far faster than any
+/// field an agent fills, and a caller who wants more names a `wpm`. A
+/// terminal has no floor: a PTY takes bytes in order and loses none.
+const UNPACED_KEYSTROKE: Duration = Duration::from_millis(4);
 
 /// How long to wait after each code point.
 ///
