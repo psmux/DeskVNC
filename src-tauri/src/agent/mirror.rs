@@ -374,6 +374,10 @@ impl Mirrors {
         }
 
         let generation = held.generation;
+        // Whether THIS attach allocates the pixels, read before it does. A
+        // mirror the idle reaper freed leaves its entry behind, so the entry
+        // existing says nothing about whether there is a picture in it.
+        let allocating = !held.slot.is_attached();
         held.slot
             .attach(width, height, generation, others, now)
             .map_err(|e| MirrorRefused {
@@ -384,13 +388,20 @@ impl Mirrors {
         // Recorded only when this is the attach that allocated, so a second
         // attach on the same session cannot overwrite the preset the first one
         // is holding for the person.
-        let negotiate = if held.restore.is_none() {
+        if held.restore.is_none() {
             held.restore = Some(restore);
+        }
+        // Primed whenever the pixels are new, and only then. Keying this on
+        // `restore` instead was a mirror that never filled: the reaper frees
+        // an idle mirror and keeps the entry, the next attach allocates fresh
+        // black, sees a preset already recorded, sends no refresh, and on a
+        // desktop where nothing moves the tiles are never painted, so every
+        // read refuses with PRIMING for as long as the session lives. A mirror
+        // that is already allocated is already primed or priming, and sending
+        // the order again would be a second full repaint for nothing.
+        let negotiate = if allocating {
             priming_order(kind)
         } else {
-            // Already renegotiated and already primed or priming. Sending the
-            // preset again would be a second SetEncodings and a second full
-            // repaint for nothing.
             Vec::new()
         };
 
@@ -1146,6 +1157,57 @@ mod tests {
         mirrors.feed("s1", &[rgba(Rect::new(0, 0, 8, 8), [4, 5, 6, 255])], now());
         let (delta, _, _) = mirrors.take_damage("s1").expect("still subscribed");
         assert_eq!(delta.rects, vec![Rect::new(0, 0, 8, 8)]);
+    }
+
+    /// A mirror the reaper freed is allocated again black on the next attach,
+    /// and that attach has to send the refresh that paints it. It used to send
+    /// nothing because the session still had a preset recorded, and a still
+    /// desktop then refused every read with PRIMING for good.
+    #[test]
+    fn a_mirror_attached_again_after_the_reaper_freed_it_is_primed_again() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (64, 64));
+        mirrors.reap(Timestamp(now().0 + 60_001));
+        assert_eq!(mirrors.bytes_in_use(), 0);
+
+        let again = mirrors
+            .attach(
+                "s1",
+                Perceive::Frames,
+                ProtocolKind::Vnc,
+                Some((64, 64)),
+                QualityPreset::Low,
+                now(),
+            )
+            .expect("attached");
+        assert_eq!(
+            again.negotiate.len(),
+            2,
+            "fresh black pixels need the 03 §3.4 order, refresh included"
+        );
+        assert_eq!(
+            mirrors.detach("s1"),
+            Some(QualityPreset::Auto),
+            "the person's preset is the one from the FIRST attach, never the one a renegotiated session reports"
+        );
+    }
+
+    /// A second attach on a mirror that is still allocated sends nothing.
+    #[test]
+    fn a_second_attach_on_a_live_mirror_sends_no_second_refresh() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (64, 64));
+        let again = mirrors
+            .attach(
+                "s1",
+                Perceive::Frames,
+                ProtocolKind::Vnc,
+                Some((64, 64)),
+                QualityPreset::Auto,
+                now(),
+            )
+            .expect("attached");
+        assert!(again.negotiate.is_empty());
     }
 
     /// `00 R10`. A read fenced against a generation the session has moved past
