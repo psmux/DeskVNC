@@ -346,6 +346,12 @@ fn tool_call(args: &Args) -> Result<(String, Value), ToolError> {
                     .expect("an object")
                     .insert("form".to_string(), json!(form));
             }
+            if let Some(scale) = args.flag("scale").and_then(|s| s.parse::<f64>().ok()) {
+                object
+                    .as_object_mut()
+                    .expect("an object")
+                    .insert("scale".to_string(), json!(scale));
+            }
             ("dvv_screen".to_string(), with_limb(object, 0))
         }
         "wait" => {
@@ -481,17 +487,30 @@ fn tool_call(args: &Args) -> Result<(String, Value), ToolError> {
 /// property `04 §7.2` asks for and the reason the check is on the payload
 /// rather than on the outcome word.
 fn report(args: &Args, result: &Value) -> i32 {
-    let structured = result
+    let mut structured = result
         .get("structuredContent")
         .cloned()
         .unwrap_or(json!({}));
+    // A picture cannot go to a terminal, and an agent driving dvv through a
+    // shell (Pi, or any agent with no MCP client) only sees what is printed.
+    // So the image block is written to a file and the path is printed, which
+    // the agent then opens with whatever reads images for it.
+    let saved = save_image(args, result);
+    if let (Some(path), Some(map)) = (&saved, structured.as_object_mut()) {
+        map.insert("imagePath".to_string(), json!(path));
+    }
     if args.json {
         println!("{structured}");
-    } else if let Some(text) = result["content"][0]["text"].as_str() {
-        // Everything ours goes to stdout for a verb a person ran. Remote bytes
-        // are inside the wrapper, which is part of the text, so a script that
-        // wants only them uses --json and reads the field.
-        println!("{text}");
+    } else {
+        if let Some(text) = result["content"][0]["text"].as_str() {
+            // Everything ours goes to stdout for a verb a person ran. Remote
+            // bytes are inside the wrapper, which is part of the text, so a
+            // script that wants only them uses --json and reads the field.
+            println!("{text}");
+        }
+        if let Some(path) = &saved {
+            println!("\nScreenshot saved to {path}. Open that file to see the screen; the imageSpace above maps a point on it back to a remote coordinate.");
+        }
     }
     if result
         .get("isError")
@@ -502,6 +521,41 @@ fn report(args: &Args, result: &Value) -> i32 {
         return exit_code_for(code);
     }
     0
+}
+
+/// Write the result's image block to a file, and say where.
+///
+/// `--out` names the file. Without it the picture goes to the system temp
+/// directory under a name that does not collide with the last one, because an
+/// agent comparing two screens needs both.
+fn save_image(args: &Args, result: &Value) -> Option<String> {
+    use base64::Engine as _;
+    let block = result["content"]
+        .as_array()?
+        .iter()
+        .find(|c| c["type"] == "image")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(block["data"].as_str()?)
+        .ok()?;
+    let extension = match block["mimeType"].as_str() {
+        Some("image/jpeg") => "jpg",
+        Some("image/webp") => "webp",
+        _ => "png",
+    };
+    let path = match args.flag("out") {
+        Some(out) => std::path::PathBuf::from(out),
+        None => {
+            let dir = std::env::temp_dir().join("dvv");
+            std::fs::create_dir_all(&dir).ok()?;
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            dir.join(format!("screen-{stamp}.{extension}"))
+        }
+    };
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.display().to_string())
 }
 
 fn format_error(error: &ToolError) -> Value {
@@ -1120,7 +1174,8 @@ dvv, the agent plane for DeskVNCViewer.
   dvv click <limbId> <x> <y> [--action move|click|double|right|middle|drag|scroll]
   dvv type <limbId> \"<text>\"
   dvv key <limbId> ctrl+alt+Delete
-  dvv screen <limbId> [--form full|region|damage-crop]
+  dvv screen <limbId> [--form full|region|damage-crop] [--scale 0.5] [--out file.png]
+                                   saves the picture to a file and prints the path
   dvv wait <limbId> --until screen-stable [--quiet 750] [--timeout 8000]
 
   dvv clip get|set <limbId> [\"<text>\"]
