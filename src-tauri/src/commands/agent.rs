@@ -181,6 +181,10 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                                 "address": ask.address,
                                 "port": ask.port,
                                 "protocol": ask.protocol,
+                                // Open it behind whatever the person is
+                                // looking at: an agent's machine must not
+                                // take the screen or the keyboard.
+                                "background": true,
                             }),
                         );
                         // The webview's open claims the session within a few
@@ -217,6 +221,7 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                         Some(ask.protocol),
                         None,
                         None,
+                        Some(true),
                     )
                     .await;
                     let _ = tell.send(done.map(|out| agent::server::Opened {

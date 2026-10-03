@@ -167,6 +167,7 @@ export function Library({
       label: string,
       onConnected?: () => void,
     ): Promise<void> => {
+      const background = options.background === true;
       let outcome = await openSessionWindow({ ...options, asTab: tabbed });
       if (!outcome) return;
       // A tab the shell believes is still open, but which is not on the strip,
@@ -185,6 +186,7 @@ export function Library({
         // several, so the session has to be looked up rather than assumed to
         // be the tab's own name. This also lands the keyboard on the right
         // pane, not merely the right tab.
+        if (background) return;
         if (outcome.target === "tab") selectSession(outcome.sessionId);
         push("info", `${label} is already open, brought it to the front`);
         return;
@@ -199,7 +201,7 @@ export function Library({
           port: outcome.params.port,
           name: outcome.params.name,
           protocol: outcome.params.protocol,
-        });
+        }, undefined, background);
       }
       onConnected?.();
     },
@@ -773,9 +775,10 @@ export function Library({
       const ask = e.payload;
       if (!ask) return;
       const host = ask.hostId ? hostsRef.current.find((h) => h.id === ask.hostId) : undefined;
+      const background = ask.background === true;
       const options: OpenSessionOptions = host
-        ? { profileId: host.id }
-        : { address: ask.address, port: ask.port, protocol: ask.protocol };
+        ? { profileId: host.id, background }
+        : { address: ask.address, port: ask.port, protocol: ask.protocol, background };
       void openSession(options, host?.friendlyName || ask.address);
     }).then((un) => {
       stop = un;

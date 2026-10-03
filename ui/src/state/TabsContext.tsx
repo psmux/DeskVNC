@@ -120,7 +120,7 @@ interface TabsContextValue {
    * Mount a session. With no `target` it opens a tab of its own; with one it
    * fills that pane, which is how a split gets something in it.
    */
-  open: (id: string, params: SessionParams, target?: PaneTarget) => void;
+  open: (id: string, params: SessionParams, target?: PaneTarget, background?: boolean) => void;
   /** Close a tab and everything in it. Every viewer unmounts, disconnecting. */
   close: (id: string) => void;
   /** Bring a tab (or, for null, the library) to the front. */
@@ -262,7 +262,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
   );
 
   const open = useCallback(
-    (id: string, params: SessionParams, target?: PaneTarget): void => {
+    (id: string, params: SessionParams, target?: PaneTarget, background = false): void => {
       // A session may only be in one pane. Two panes naming it would mount two
       // viewers on one connection, and the shell would answer the second one's
       // frames into a canvas the first one also owns. `adopt` is the operation
@@ -314,7 +314,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
       if (placed) {
         const pane = paneForSession(placed.root, id);
         patchTab(placed.id, (tab) => ({ ...tab, focusedPaneId: pane?.id ?? tab.focusedPaneId }));
-        setActiveId(placed.id);
+        if (!background) setActiveId(placed.id);
         return;
       }
 
@@ -323,7 +323,9 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
         id: nextId("tab"), root: pane, focusedPaneId: pane.id, zoomedPaneId: null,
       };
       setTabs((prev) => [...prev, tab]);
-      setActiveId(tab.id);
+      // An agent's machine joins the strip without being selected, so the
+      // tab the person is working in stays in front.
+      if (!background) setActiveId(tab.id);
     },
     [patchTab],
   );

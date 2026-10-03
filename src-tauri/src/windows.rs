@@ -44,6 +44,9 @@ pub struct SessionWindowParams<'a> {
     /// and every URL a newer build produces for a VNC session is byte
     /// identical to today's.
     pub protocol: vnc_core::ProtocolKind,
+    /// Take focus when the window appears. False for a machine an agent
+    /// opened, so the window the person is typing into keeps the keyboard.
+    pub focus: bool,
 }
 
 /// Percent-encode a query-string value, keeping only the RFC 3986 unreserved
@@ -104,6 +107,7 @@ pub fn open_session_window(
         .inner_size(1280.0, 800.0)
         .min_inner_size(640.0, 480.0)
         .center()
+        .focused(params.focus)
         .build()?;
     Ok(window)
 }

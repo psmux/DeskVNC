@@ -2183,7 +2183,11 @@ pub async fn open_session_window(
     protocol: Option<String>,
     force_new: Option<bool>,
     as_tab: Option<bool>,
+    // An agent's open. Nothing is raised or focused, so whatever the person
+    // is doing keeps the screen and the keyboard.
+    background: Option<bool>,
 ) -> Result<SessionWindowOutcome, String> {
+    let quiet = background == Some(true);
     let id = match session_id {
         Some(id) => {
             validate_session_id(&id)?;
@@ -2248,7 +2252,9 @@ pub async fn open_session_window(
         // the library window is the one it lives in, and selecting the tab is
         // the caller's job. Report it and let them.
         if existing.window_label == windows::MAIN_WINDOW_LABEL {
-            windows::focus_session_window(&app, windows::MAIN_WINDOW_LABEL);
+            if !quiet {
+                windows::focus_session_window(&app, windows::MAIN_WINDOW_LABEL);
+            }
             tracing::info!(
                 session = %existing.session_id,
                 "already connected to this machine, selecting the existing tab"
@@ -2263,7 +2269,12 @@ pub async fn open_session_window(
         // Only report it as reused if the window really is still there;
         // `focus_session_window` says so, and anything else falls through to a
         // normal connect rather than leaving the user with nothing.
-        if windows::focus_session_window(&app, &existing.window_label) {
+        let still_there = if quiet {
+            app.get_webview_window(&existing.window_label).is_some()
+        } else {
+            windows::focus_session_window(&app, &existing.window_label)
+        };
+        if still_there {
             tracing::info!(
                 session = %existing.session_id,
                 "already connected to this machine, focusing the existing window"
@@ -2303,6 +2314,7 @@ pub async fn open_session_window(
         port,
         name: &name,
         protocol: kind,
+        focus: !quiet,
     };
     state.note_opening_window(&id, key, windows::session_label(&id));
     if let Err(e) = windows::open_session_window(&app, &params, &name) {
