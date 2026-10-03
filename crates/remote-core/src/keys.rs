@@ -339,6 +339,248 @@ pub static NAMED_KEYS: &[NamedKey] = &[
         keysym: 0xffec,
         scancode: 0xdc,
     },
+    // Letters, digits and punctuation, named by DOM `code`, so a chord such as
+    // ctrl+c or super+r can be pressed at all. The keysym is the character
+    // the key gives unshifted on a US layout, and the scancode is that key's
+    // position in `CODE_TO_XT_SCANCODE`, which is exactly what the webview
+    // sends when a person presses the same key. RDP needs the scancode,
+    // because a key with none goes out as a unicode event, and Windows does
+    // not treat Ctrl plus a unicode event as a shortcut.
+    NamedKey {
+        name: "KeyA",
+        keysym: 0x0061,
+        scancode: 0x1e,
+    },
+    NamedKey {
+        name: "KeyB",
+        keysym: 0x0062,
+        scancode: 0x30,
+    },
+    NamedKey {
+        name: "KeyC",
+        keysym: 0x0063,
+        scancode: 0x2e,
+    },
+    NamedKey {
+        name: "KeyD",
+        keysym: 0x0064,
+        scancode: 0x20,
+    },
+    NamedKey {
+        name: "KeyE",
+        keysym: 0x0065,
+        scancode: 0x12,
+    },
+    NamedKey {
+        name: "KeyF",
+        keysym: 0x0066,
+        scancode: 0x21,
+    },
+    NamedKey {
+        name: "KeyG",
+        keysym: 0x0067,
+        scancode: 0x22,
+    },
+    NamedKey {
+        name: "KeyH",
+        keysym: 0x0068,
+        scancode: 0x23,
+    },
+    NamedKey {
+        name: "KeyI",
+        keysym: 0x0069,
+        scancode: 0x17,
+    },
+    NamedKey {
+        name: "KeyJ",
+        keysym: 0x006a,
+        scancode: 0x24,
+    },
+    NamedKey {
+        name: "KeyK",
+        keysym: 0x006b,
+        scancode: 0x25,
+    },
+    NamedKey {
+        name: "KeyL",
+        keysym: 0x006c,
+        scancode: 0x26,
+    },
+    NamedKey {
+        name: "KeyM",
+        keysym: 0x006d,
+        scancode: 0x32,
+    },
+    NamedKey {
+        name: "KeyN",
+        keysym: 0x006e,
+        scancode: 0x31,
+    },
+    NamedKey {
+        name: "KeyO",
+        keysym: 0x006f,
+        scancode: 0x18,
+    },
+    NamedKey {
+        name: "KeyP",
+        keysym: 0x0070,
+        scancode: 0x19,
+    },
+    NamedKey {
+        name: "KeyQ",
+        keysym: 0x0071,
+        scancode: 0x10,
+    },
+    NamedKey {
+        name: "KeyR",
+        keysym: 0x0072,
+        scancode: 0x13,
+    },
+    NamedKey {
+        name: "KeyS",
+        keysym: 0x0073,
+        scancode: 0x1f,
+    },
+    NamedKey {
+        name: "KeyT",
+        keysym: 0x0074,
+        scancode: 0x14,
+    },
+    NamedKey {
+        name: "KeyU",
+        keysym: 0x0075,
+        scancode: 0x16,
+    },
+    NamedKey {
+        name: "KeyV",
+        keysym: 0x0076,
+        scancode: 0x2f,
+    },
+    NamedKey {
+        name: "KeyW",
+        keysym: 0x0077,
+        scancode: 0x11,
+    },
+    NamedKey {
+        name: "KeyX",
+        keysym: 0x0078,
+        scancode: 0x2d,
+    },
+    NamedKey {
+        name: "KeyY",
+        keysym: 0x0079,
+        scancode: 0x15,
+    },
+    NamedKey {
+        name: "KeyZ",
+        keysym: 0x007a,
+        scancode: 0x2c,
+    },
+    NamedKey {
+        name: "Digit0",
+        keysym: 0x0030,
+        scancode: 0x0b,
+    },
+    NamedKey {
+        name: "Digit1",
+        keysym: 0x0031,
+        scancode: 0x02,
+    },
+    NamedKey {
+        name: "Digit2",
+        keysym: 0x0032,
+        scancode: 0x03,
+    },
+    NamedKey {
+        name: "Digit3",
+        keysym: 0x0033,
+        scancode: 0x04,
+    },
+    NamedKey {
+        name: "Digit4",
+        keysym: 0x0034,
+        scancode: 0x05,
+    },
+    NamedKey {
+        name: "Digit5",
+        keysym: 0x0035,
+        scancode: 0x06,
+    },
+    NamedKey {
+        name: "Digit6",
+        keysym: 0x0036,
+        scancode: 0x07,
+    },
+    NamedKey {
+        name: "Digit7",
+        keysym: 0x0037,
+        scancode: 0x08,
+    },
+    NamedKey {
+        name: "Digit8",
+        keysym: 0x0038,
+        scancode: 0x09,
+    },
+    NamedKey {
+        name: "Digit9",
+        keysym: 0x0039,
+        scancode: 0x0a,
+    },
+    NamedKey {
+        name: "Minus",
+        keysym: 0x002d,
+        scancode: 0x0c,
+    },
+    NamedKey {
+        name: "Equal",
+        keysym: 0x003d,
+        scancode: 0x0d,
+    },
+    NamedKey {
+        name: "BracketLeft",
+        keysym: 0x005b,
+        scancode: 0x1a,
+    },
+    NamedKey {
+        name: "BracketRight",
+        keysym: 0x005d,
+        scancode: 0x1b,
+    },
+    NamedKey {
+        name: "Semicolon",
+        keysym: 0x003b,
+        scancode: 0x27,
+    },
+    NamedKey {
+        name: "Quote",
+        keysym: 0x0027,
+        scancode: 0x28,
+    },
+    NamedKey {
+        name: "Backquote",
+        keysym: 0x0060,
+        scancode: 0x29,
+    },
+    NamedKey {
+        name: "Backslash",
+        keysym: 0x005c,
+        scancode: 0x2b,
+    },
+    NamedKey {
+        name: "Comma",
+        keysym: 0x002c,
+        scancode: 0x33,
+    },
+    NamedKey {
+        name: "Period",
+        keysym: 0x002e,
+        scancode: 0x34,
+    },
+    NamedKey {
+        name: "Slash",
+        keysym: 0x002f,
+        scancode: 0x35,
+    },
     // Numpad.
     NamedKey {
         name: "NumpadEnter",

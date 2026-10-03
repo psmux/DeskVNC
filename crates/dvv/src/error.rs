@@ -196,7 +196,7 @@ pub fn hint_for(code: &str) -> &'static str {
             "The coordinate is outside the framebuffer and is rejected rather than clamped. Read the size from dvv_status first."
         }
         "UNKNOWN_KEY" => {
-            "That key name is not in the fixed table. Use a DOM code or key spelling such as Enter, Escape, Tab, ControlLeft. A numeric code is a different action and needs the scancode capability, which is in no role bundle."
+            "That key name is not in the fixed table. Use a DOM code or key spelling such as Enter, Escape, Tab, ControlLeft, or a shortcut such as ctrl+c or super+r. Plain text goes through dvv_type. A numeric code is a different action and needs the scancode capability, which is in no role bundle."
         }
         "NOT_EXPRESSIBLE" => {
             "The wire cannot carry what you asked for and the plane will not invent a conversion. The message says what it can carry instead."
