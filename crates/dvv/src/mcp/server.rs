@@ -1531,7 +1531,7 @@ fn group_requests(args: &Value) -> Result<Vec<OpenRequest>, ToolError> {
 fn terminal_bytes(args: &Value) -> Result<Vec<u8>, ToolError> {
     if let Some(hex) = opt_str(args, "bytesHex") {
         let hex: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-        if hex.len() % 2 != 0 {
+        if !hex.len().is_multiple_of(2) {
             return Err(ToolError::bad_request(
                 "bytesHex has an odd number of characters; it is two hex characters per byte",
             ));
