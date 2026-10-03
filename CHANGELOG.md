@@ -10,6 +10,31 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.6] (2026-10-03)
+
+### Fixed
+
+* AI agents can drive machines on Windows. The agent plane had no Windows
+  transport, so the app would not start it and `dvv` refused every call. Both
+  now use a named pipe that only the user who started DeskVNCViewer can open.
+* The Windows and Linux installers include `dvv`. Before this release only the
+  macOS bundle carried it.
+* Pi and other shell driven agents work on Windows. `dvv open` no longer hangs
+  when its output is read, and a machine stays held between commands, including
+  one first picked up from `dvv limbs`.
+* An agent started before DeskVNCViewer, or before a machine was saved, can
+  open that machine. It used to be refused for the whole session.
+* Typing no longer drops characters or Shift on a Windows desktop. Text goes at
+  250 characters a second unless the agent asks for a speed.
+* A screenshot after a minute or more of quiet works again instead of failing
+  for the rest of the task.
+* `dvv setup` finds OpenCode, Pi and Claude Code on Windows and writes paths
+  they can run. The Connect Claude Code button finds `claude.exe`.
+* `dvv open` accepts a machine's saved name as well as its id, and `dvv type`
+  takes `--wpm`.
+* CI passes again on Rust 1.99, and now tests the agent crates on every
+  platform.
+
 ## [0.27.5] (2026-09-26)
 
 ### Fixed
@@ -2505,7 +2530,9 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.4...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.6...HEAD
+[0.27.6]: https://github.com/psmux/DeskVNC/compare/v0.27.5...v0.27.6
+[0.27.5]: https://github.com/psmux/DeskVNC/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/psmux/DeskVNC/compare/v0.27.3...v0.27.4
 [0.14.0]: https://github.com/psmux/DeskVNC/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/psmux/DeskVNC/compare/v0.13.3...v0.13.4
