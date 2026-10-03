@@ -415,7 +415,8 @@ pub enum Nudge {
 use limb_core::identity::MachineKey;
 use limb_core::ClientCommand;
 
-/// The source that IS the shell, reached over the `dvvp.v1` unix socket.
+/// The source that IS the shell, reached over the `dvvp.v1` unix socket, or
+/// the named pipe of the same name on Windows.
 ///
 /// ## What changed, and what did not
 ///
@@ -467,8 +468,7 @@ const MAX_PAYLOAD: u32 = 8 * 1024 * 1024;
 
 /// The one connection, and what it costs to say it is not there.
 struct Link {
-    #[cfg(unix)]
-    stream: std::os::unix::net::UnixStream,
+    stream: Stream,
     next_id: u64,
     /// The attachment id the plane minted for this connection. Held so a
     /// refusal can name it, which is what makes an audit line joinable.
@@ -493,8 +493,33 @@ fn no_socket() -> ToolError {
 }
 
 /// Is there a socket to talk to?
-fn socket_present() -> bool {
-    std::path::Path::new(&crate::cli::socket_path()).exists()
+pub fn socket_present() -> bool {
+    #[cfg(windows)]
+    {
+        local_pipe::exists(&crate::cli::socket_path())
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::Path::new(&crate::cli::socket_path()).exists()
+    }
+}
+
+/// The connection to the plane: a unix socket, or on Windows the named pipe
+/// `04 §2.1` specifies, opened as a blocking file. Both are a byte stream read
+/// and written one request at a time, which is all [`request`] asks of it.
+#[cfg(unix)]
+type Stream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type Stream = std::fs::File;
+
+#[cfg(unix)]
+fn open_stream(path: &str) -> std::io::Result<Stream> {
+    std::os::unix::net::UnixStream::connect(path)
+}
+
+#[cfg(windows)]
+fn open_stream(path: &str) -> std::io::Result<Stream> {
+    local_pipe::connect(path)
 }
 
 /// One request, one reply, on the one connection.
@@ -502,7 +527,6 @@ fn socket_present() -> bool {
 /// Reconnects and says hello when there is no link, and drops the link on any
 /// I/O failure so the next call reconnects rather than talking into a socket
 /// the application has closed.
-#[cfg(unix)]
 fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
     let mut guard = lock(link());
     if guard.is_none() {
@@ -528,19 +552,11 @@ fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, To
     }
 }
 
-#[cfg(not(unix))]
-fn call(_method: &str, _params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-    Err(ToolError::not_implemented(
-        "the dvvp.v1 surface is a unix socket, and 00 R18 ships a unix socket and stdio in version 1 and nothing else. The named pipe 04 §2.1 specifies for Windows, with an ACL granting only the creating user, is not written on either side",
-    ))
-}
-
-#[cfg(unix)]
 fn connect() -> Result<Link, ToolError> {
     use std::io::ErrorKind;
 
     let path = crate::cli::socket_path();
-    let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| match e.kind() {
+    let stream = open_stream(&path).map_err(|e| match e.kind() {
         ErrorKind::NotFound | ErrorKind::ConnectionRefused => no_socket(),
         _ => ToolError::new(
             codes::LIMB_GONE,
@@ -569,7 +585,6 @@ fn connect() -> Result<Link, ToolError> {
 }
 
 /// Write one framed request and read the reply that matches its id.
-#[cfg(unix)]
 fn request(
     link: &mut Link,
     method: &str,
@@ -630,7 +645,6 @@ fn request(
     }
 }
 
-#[cfg(unix)]
 fn transport(error: std::io::Error) -> ToolError {
     ToolError::new(
         codes::LIMB_GONE,
@@ -647,7 +661,6 @@ fn transport(error: std::io::Error) -> ToolError {
 /// on, so it is carried through rather than flattened into one code. `04 §4.4`
 /// is why: the model has to get one decision right and only one, and that
 /// decision is whether a PERSON took the machine.
-#[cfg(unix)]
 fn from_rpc_error(error: &serde_json::Value) -> ToolError {
     let message = error
         .get("message")
@@ -700,7 +713,6 @@ fn limb_sessions() -> &'static Mutex<BTreeMap<String, String>> {
 /// `04 §1.3` forbids a skin from holding state the plane does not know about.
 /// This is not that: both ends are the plane's own, the mapping was handed over
 /// by the plane in the attach reply, and it is a handle rather than an opinion.
-#[cfg(unix)]
 fn answerable() -> &'static Mutex<BTreeMap<String, AttachedLimb>> {
     static ANSWERABLE: std::sync::OnceLock<Mutex<BTreeMap<String, AttachedLimb>>> =
         std::sync::OnceLock::new();
@@ -713,7 +725,6 @@ fn answerable() -> &'static Mutex<BTreeMap<String, AttachedLimb>> {
 /// the socket did not produce is not in [`limb_sessions`] and registers
 /// nothing, which is correct: a fake source answers its own intents and never
 /// reaches this path.
-#[cfg(unix)]
 fn register_answerable(limb: &AttachedLimb) {
     let session = lock(limb_sessions()).get(limb.id().as_str()).cloned();
     if let Some(session) = session {
@@ -722,19 +733,12 @@ fn register_answerable(limb: &AttachedLimb) {
 }
 
 /// Forget it, so a closed limb does not keep an attachment alive.
-#[cfg(unix)]
 fn forget_answerable(limb_id: &str) {
     let session = lock(limb_sessions()).remove(limb_id);
     if let Some(session) = session {
         lock(answerable()).remove(&session);
     }
 }
-
-#[cfg(not(unix))]
-fn register_answerable(_limb: &AttachedLimb) {}
-
-#[cfg(not(unix))]
-fn forget_answerable(_limb_id: &str) {}
 
 impl SessionSource for ShellSource {
     fn hosts(&self) -> Result<Vec<HostRecord>, ToolError> {
@@ -972,9 +976,9 @@ impl SessionSource for ShellSource {
 
     fn describe(&self) -> &'static str {
         if socket_present() {
-            "the shell, over the dvvp.v1 unix socket, driving the sessions DeskVNCViewer already has open"
+            "the shell, over the dvvp.v1 local socket, driving the sessions DeskVNCViewer already has open"
         } else {
-            "the shell, over the dvvp.v1 unix socket (no socket at that path: DeskVNCViewer is not running, or its agent plane is switched off, which is the default)"
+            "the shell, over the dvvp.v1 local socket (no socket at that path: DeskVNCViewer is not running, or its agent plane is switched off, which is the default)"
         }
     }
 }
@@ -988,7 +992,6 @@ impl SessionSource for ShellSource {
 /// A machine still negotiating attaches fine and every intent against it is
 /// refused with `NOT_READY` until the state says otherwise, which is the right
 /// way round.
-#[cfg(unix)]
 const ATTACH_AFTER_OPEN: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Attach to the session `limb.open` just spawned, once it exists.
@@ -1004,7 +1007,6 @@ const ATTACH_AFTER_OPEN: std::time::Duration = std::time::Duration::from_secs(20
 ///
 /// A [`ToolError`] naming the session that was opened, so an agent that gave up
 /// here can still find it with `dvv_limbs` rather than opening a second one.
-#[cfg(unix)]
 fn await_session(
     opened: &serde_json::Value,
     params: &serde_json::Value,
@@ -1042,16 +1044,6 @@ fn await_session(
 /// out instead of passing it to the agent.
 fn still_connecting(error: &ToolError) -> bool {
     error.message.contains("reported no framebuffer size")
-}
-
-#[cfg(not(unix))]
-fn await_session(
-    _opened: &serde_json::Value,
-    _params: &serde_json::Value,
-) -> Result<serde_json::Value, ToolError> {
-    Err(ToolError::not_implemented(
-        "00 R18 ships a unix socket and stdio in version 1, and this platform has neither wired",
-    ))
 }
 
 fn string(value: &serde_json::Value, field: &str) -> String {
@@ -1227,7 +1219,6 @@ fn files_outcome(op: &FileOp, answer: &serde_json::Value) -> Result<FileOutcome,
 /// plane above it sends into an ordinary channel and knows nothing about a
 /// socket, which is `04 §1.1`'s ruling holding: the lowering, the lease and
 /// the fencing are all unchanged by where the session actually lives.
-#[cfg(unix)]
 fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, ToolError> {
     let session_id = string(attached, "sessionId");
     let protocol = ProtocolKind::parse(&string(attached, "protocol")).ok_or_else(|| {
@@ -1331,12 +1322,10 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
 /// design: `04 §1.3` forbids a skin from holding a second opinion about the
 /// plane's state, and a cached screenshot is exactly that. Every call goes to
 /// the shell, which owns the mirror, the coverage and the geometry counter.
-#[cfg(unix)]
 struct ShellFrames {
     session_id: String,
 }
 
-#[cfg(unix)]
 impl FrameSource for ShellFrames {
     fn frame(
         &self,
@@ -1463,7 +1452,6 @@ impl FrameSource for ShellFrames {
 /// Overlapping rects are double counted and the result is clamped, which
 /// overstates rather than understates: a reader deciding whether a partial
 /// read is worth it should be given the pessimistic number.
-#[cfg(unix)]
 fn coverage_of(rects: &[Rect], bounds: Rect) -> f32 {
     let touched: u64 = rects
         .iter()
@@ -1476,7 +1464,6 @@ fn coverage_of(rects: &[Rect], bounds: Rect) -> f32 {
     (touched as f32 / area as f32).min(1.0)
 }
 
-#[cfg(unix)]
 fn rect_of(value: &serde_json::Value) -> Rect {
     let field = |name: &str| {
         value
@@ -1495,7 +1482,6 @@ fn rect_of(value: &serde_json::Value) -> Rect {
 /// process count to it. Anything above it is clamped, which turns an absurd
 /// generation into a stale one: every value above the plane's current
 /// generation is equally not current, and the comparison is for equality.
-#[cfg(unix)]
 const MAX_GENERATION: u64 = 1_000_000;
 
 /// A geometry generation the shell sent.
@@ -1504,7 +1490,6 @@ const MAX_GENERATION: u64 = 1_000_000;
 /// counter is minted by the fence that owns it, and a public constructor would
 /// let a client invent one. Stepping up from `FIRST` is the only honest way to
 /// name a value that arrived over a wire.
-#[cfg(unix)]
 fn generation_of(value: Option<&serde_json::Value>) -> GeometryGeneration {
     let want = value
         .and_then(serde_json::Value::as_u64)
@@ -1519,13 +1504,6 @@ fn generation_of(value: Option<&serde_json::Value>) -> GeometryGeneration {
         generation = next;
     }
     generation
-}
-
-#[cfg(not(unix))]
-fn build_attach(_attached: &serde_json::Value, _slot: Slot) -> Result<Attach, ToolError> {
-    Err(ToolError::not_implemented(
-        "00 R18 ships a unix socket and stdio in version 1, and this platform has neither wired",
-    ))
 }
 
 /// Rebuild the machine key the shell computed.
@@ -1575,7 +1553,6 @@ fn machine_from(value: Option<&serde_json::Value>) -> Result<MachineKey, ToolErr
 /// runtime in scope, so a `tokio::spawn` here would panic in exactly the
 /// configuration a test uses. The thread ends when the plane drops the sender,
 /// which is what `Plane::close` does.
-#[cfg(unix)]
 fn relay(session_id: String, mut receiver: tokio::sync::mpsc::Receiver<ClientCommand>) {
     std::thread::spawn(move || {
         // The last intent name reported, so a drag of two hundred pointer
@@ -1652,7 +1629,6 @@ fn relay(session_id: String, mut receiver: tokio::sync::mpsc::Receiver<ClientCom
 /// failure all reach `note_refused`, because the alternative is a dispatch that
 /// waits out its whole deadline for an answer that already exists, which is
 /// exactly the failure `00 R28` is about.
-#[cfg(unix)]
 fn serve_intent(session_id: &str, intent: &limb_core::intent::AgentIntent) {
     let Some(limb) = lock(answerable()).get(session_id).cloned() else {
         // Nothing to answer to. The plane registers the attachment before any
@@ -1700,7 +1676,6 @@ fn serve_intent(session_id: &str, intent: &limb_core::intent::AgentIntent) {
 /// There is no arm here for `pty_run` or `declare`: `ssh-core` refuses both
 /// with reasons of its own, and a second, weaker copy of that refusal here
 /// would be a place for the two to disagree.
-#[cfg(unix)]
 fn exec_params(
     session_id: &str,
     intent: &limb_core::intent::AgentIntent,
@@ -1745,7 +1720,6 @@ fn exec_params(
 ///
 /// A sentence naming what could not be read, which the caller turns into a
 /// refusal carrying it.
-#[cfg(unix)]
 fn run_from(answer: &serde_json::Value) -> Result<remote_core::intent::CommandRun, String> {
     use base64::Engine as _;
     use remote_core::intent::{CommandExit, CommandRun, Dropped, ExitTier, Truncation, Unanswered};
@@ -1872,7 +1846,6 @@ fn answer_window(kind: &IntentKind) -> Option<std::time::Duration> {
 ///
 /// `None` means "this surface does not carry that", which the caller reports
 /// rather than swallows.
-#[cfg(unix)]
 fn encode_command(command: &ClientCommand) -> Option<serde_json::Value> {
     use serde_json::json;
     Some(match command {
@@ -1927,7 +1900,6 @@ fn encode_command(command: &ClientCommand) -> Option<serde_json::Value> {
     })
 }
 
-#[cfg(unix)]
 fn quality_name(preset: remote_core::options::QualityPreset) -> &'static str {
     use remote_core::options::QualityPreset;
     match preset {
@@ -1940,7 +1912,6 @@ fn quality_name(preset: remote_core::options::QualityPreset) -> &'static str {
 }
 
 /// One word for a command, for a log line and for the in flight notice.
-#[cfg(unix)]
 fn command_kind(command: &ClientCommand) -> &'static str {
     match command {
         ClientCommand::Pointer { .. } => "pointer",
@@ -2505,6 +2476,8 @@ impl Plane {
     /// control, the host check and the slot check, each naming what the caller
     /// can do about it.
     pub fn open(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
+        let named = self.by_label(request)?;
+        let request = named.as_ref().unwrap_or(request);
         if request.host_id.is_some() && request.protocol.is_some() {
             return Err(ToolError::bad_request(
                 "protocol is refused beside hostId: with a saved machine the protocol is read from the machine, and overriding it would dial the wrong protocol at an endpoint somebody configured for something else",
@@ -3320,6 +3293,42 @@ impl Plane {
             queue_depth: view.queue_depth,
             queue_position: view.queue_position,
             human_took_over: took_over(&view),
+        }
+    }
+
+    /// The same request with a machine's label turned into its id.
+    ///
+    /// People name a machine by what they called it, "open MSI", and an agent
+    /// passes that on. The id is what the shell looks up, so a `hostId` that
+    /// is no id but is exactly one machine's label (ignoring case) is taken to
+    /// mean that machine. Two machines with the label is a refusal naming
+    /// both, rather than a guess. `None` when there is nothing to resolve.
+    fn by_label(&self, request: &OpenRequest) -> Result<Option<OpenRequest>, ToolError> {
+        let Some(name) = request.host_id.as_deref() else {
+            return Ok(None);
+        };
+        let hosts = self.source.hosts()?;
+        if hosts.iter().any(|host| host.host_id == name) {
+            return Ok(None);
+        }
+        let named: Vec<&HostRecord> = hosts
+            .iter()
+            .filter(|host| host.label.eq_ignore_ascii_case(name))
+            .collect();
+        match named.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(OpenRequest {
+                host_id: Some(one.host_id.clone()),
+                ..request.clone()
+            })),
+            many => Err(ToolError::bad_request(format!(
+                "{} saved machines are called {name}: {}. Open one by its hostId",
+                many.len(),
+                many.iter()
+                    .map(|host| format!("{} ({})", host.host_id, host.address))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
         }
     }
 

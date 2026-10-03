@@ -1153,7 +1153,6 @@ pub fn start(plane: &Arc<AgentPlane>, ctx: Arc<Ctx>, path: PathBuf) -> std::io::
 /// A quarter of the default idle timeout, so a mirror is freed within about
 /// fifteen seconds of earning it. The sweep itself is a lock and a subtraction
 /// per mirrored session, and there are at most a handful.
-#[cfg(unix)]
 const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Free mirrors nothing has read for the idle timeout (`00 R5`).
@@ -1165,7 +1164,6 @@ const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 ///
 /// It is tied to the socket's cancellation token, so a plane that is switched
 /// off stops sweeping along with everything else it owns.
-#[cfg(unix)]
 async fn reaper(plane: Arc<AgentPlane>, cancel: tokio_util::sync::CancellationToken) {
     loop {
         tokio::select! {
@@ -1184,15 +1182,106 @@ async fn reaper(plane: Arc<AgentPlane>, cancel: tokio_util::sync::CancellationTo
     }
 }
 
-/// `00 R18` says a unix socket and stdio, so there is nothing to bind here
-/// yet. The named pipe of `04 §2.1` is real work with its own ACL and it is
-/// not written; saying so is better than binding something weaker.
-#[cfg(not(unix))]
+/// Create the named pipe and start accepting, or say why not.
+///
+/// `04 §2.1`'s Windows transport: a pipe named for the user, with an ACL
+/// granting that user and nobody else and remote clients refused, which is
+/// the pipe's reading of a socket at mode 0600 in a directory the user owns.
+/// The first instance is created here, synchronously, so a caller told the
+/// plane is on finds the pipe listed, and creating it as the FIRST instance is
+/// what makes a second copy of the application report the plane as taken
+/// rather than share its clients.
+///
+/// # Errors
+///
+/// An [`std::io::Error`] when the pipe cannot be created, including when
+/// another DeskVNCViewer already serves it.
+#[cfg(windows)]
+pub fn start(plane: &Arc<AgentPlane>, ctx: Arc<Ctx>, path: PathBuf) -> std::io::Result<()> {
+    let mut running = plane.running.lock();
+    if running.is_some() {
+        return Ok(());
+    }
+    let name = path.to_string_lossy().into_owned();
+    // Inside the runtime for the same reason the unix listener is: creating
+    // an instance registers it with the reactor, and `setup` runs outside it.
+    let first = {
+        let handle = tauri::async_runtime::handle();
+        let _guard = handle.inner().enter();
+        local_pipe::create(&name, true)
+    }
+    .map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("another DeskVNCViewer is already serving the agent plane on {name}"),
+            )
+        } else {
+            e
+        }
+    })?;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    *running = Some(Running {
+        path: path.clone(),
+        cancel: cancel.clone(),
+        sessions: ctx.sessions.clone(),
+    });
+    drop(running);
+
+    tracing::info!(pipe = %name, "agent plane listening (dvvp.v1)");
+    tauri::async_runtime::spawn(reaper(plane.clone(), cancel.clone()));
+    tauri::async_runtime::spawn(accept_pipe(first, name, ctx, cancel));
+    Ok(())
+}
+
+/// Serve one pipe instance at a time, making the next as each is taken.
+///
+/// A pipe instance is one connection, so there is no accept: the listener
+/// waits for a client on the instance it has, hands that instance to
+/// [`serve`] and creates a fresh one for the next client before waiting again.
+#[cfg(windows)]
+async fn accept_pipe(
+    mut listening: tokio::net::windows::named_pipe::NamedPipeServer,
+    name: String,
+    ctx: Arc<Ctx>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            connected = listening.connect() => {
+                if let Err(e) = connected {
+                    tracing::debug!("an agent left the pipe before it was served: {e}");
+                    continue;
+                }
+                let next = match local_pipe::create(&name, false) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        tracing::warn!("the agent pipe stopped accepting: {e}");
+                        return;
+                    }
+                };
+                let stream = std::mem::replace(&mut listening, next);
+                tracing::info!("agent attached over dvvp.v1");
+                let ctx = ctx.clone();
+                let cancel = cancel.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = serve(stream, ctx, cancel).await {
+                        tracing::debug!("agent connection ended: {e}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn start(_plane: &Arc<AgentPlane>, _ctx: Arc<Ctx>, path: PathBuf) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         format!(
-            "the agent plane needs a named pipe at {} on this platform, with an ACL granting only the creating user, and this build does not create one",
+            "the agent plane has no local transport on this platform, so nothing is bound at {}",
             path.display()
         ),
     ))
@@ -1208,6 +1297,9 @@ pub fn stop(plane: &Arc<AgentPlane>) {
         return;
     };
     running.cancel.cancel();
+    // A pipe has no file to unlink: it goes when its last instance closes,
+    // which cancelling the accept loop and the connections does.
+    #[cfg(not(windows))]
     if let Err(e) = std::fs::remove_file(&running.path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(socket = %running.path.display(), "could not unlink the agent socket: {e}");
@@ -1283,12 +1375,14 @@ async fn accept_loop(
 }
 
 /// One connection, until it closes.
-#[cfg(unix)]
-async fn serve(
-    stream: tokio::net::UnixStream,
+async fn serve<S>(
+    stream: S,
     ctx: Arc<Ctx>,
     cancel: tokio_util::sync::CancellationToken,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
     use tokio::io::AsyncWriteExt;
 
     let (mut reader, mut writer) = tokio::io::split(stream);

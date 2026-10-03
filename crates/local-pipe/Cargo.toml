@@ -1,0 +1,25 @@
+[package]
+name = "local-pipe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The Windows named pipe the agent plane and the dvv holder listen on, created so only the user who made it can open it."
+
+# Empty on unix, where both listeners are unix sockets at mode 0600 and need
+# nothing from here. It exists so the ACL code is written once rather than
+# copied into the application and into dvv.
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["net"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "time"] }
