@@ -86,11 +86,17 @@ an SSH terminal.
 * In OpenCode, the free models that see images include
   `opencode/muse-spark-1.3-contributor-free`. Verified end to end: it opened
   a folder and a web page on a Windows machine with no help.
-* OpenCode's free models only work inside OpenCode. Pi gets a 403 from them.
+  On Windows it also opened Chrome on bible.com and read the verse of the
+  day, and typed into a new Notepad tab and closed it without saving.
+* OpenCode's free models only work inside OpenCode. From Pi they answer
+  "Model is unavailable", and OpenCode Go models ask for an OpenCode session.
 * In Pi, use OpenRouter's free models that take images, such as
-  `openrouter/qwen/qwen3.8-27b:free` (verified end to end) or
-  `openrouter/google/gemma-4-31b-it:free`. Free OpenRouter models are often
-  rate limited upstream; if one answers 429, try another.
+  `openrouter/qwen/qwen3.8-27b:free` (verified end to end on Windows and
+  macOS) or `openrouter/google/gemma-4-31b-it:free`. Pi's own model list
+  lags OpenRouter's, so a model it does not list still works by its full id
+  (Pi prints a warning and carries on). Free OpenRouter models are often rate
+  limited upstream; if one answers 429, try another.
+* Claude Code verified on Windows too, over MCP, with Sonnet.
 
 ## Other clients
 

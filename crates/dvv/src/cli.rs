@@ -195,7 +195,8 @@ pub async fn run(argv: Vec<String>) -> i32 {
     }
 }
 
-/// Send a tool verb to the holder, starting one for a verb that opens.
+/// Send a tool verb to the holder, starting one for a verb that opens or
+/// names a limb.
 ///
 /// `None` means serve it in process, which is what happens for a read such as
 /// `dvv hosts` with no holder running, and on a platform with no holder at
@@ -205,7 +206,14 @@ fn through_holder(tool: &str, arguments: &Value) -> Option<Result<Value, String>
     if let Some(routed) = crate::hold::call(tool, arguments) {
         return Some(routed);
     }
-    if tool != "dvv_open" && tool != "dvv_group_open" {
+    // A verb naming a limb adopts it when this process has not attached it,
+    // which `dvv limbs` tells an agent to rely on. Served in process, the
+    // adoption ended with the command, so the next verb was a new attachment
+    // that held no lease and had never looked: every `control acquire` was
+    // lost and every `type` refused. Such a verb starts the holder as an open
+    // does. A close does not, since there is nothing to keep.
+    let names_a_limb = arguments.get("limbId").is_some() && tool != "dvv_close";
+    if tool != "dvv_open" && tool != "dvv_group_open" && !names_a_limb {
         return None;
     }
     match crate::hold::spawn() {
