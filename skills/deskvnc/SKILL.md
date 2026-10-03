@@ -14,13 +14,15 @@ yourself with the steps below.
 
 ## With the shell (Pi, or any agent without MCP)
 
-`dvv` is on PATH after `dvv setup`. If it is not, it is at
-`/Applications/DeskVNCViewer.app/Contents/MacOS/dvv` on macOS.
+`dvv` is on PATH after `dvv setup`. If it is not, it sits beside the app:
+`/Applications/DeskVNCViewer.app/Contents/MacOS/dvv` on macOS,
+`%LOCALAPPDATA%\DeskVNCViewer\dvv.exe` (or `C:\Program Files\DeskVNCViewer\dvv.exe`)
+on Windows, and `/usr/bin/dvv` on Linux.
 
 ```sh
 dvv hosts                            # saved machines and their hostId
 dvv limbs                            # what is open, and its limbId
-dvv open <hostId> --perceive         # open a machine (keeps it open between commands)
+dvv open <name or hostId> --perceive # open a machine (keeps it open between commands)
 dvv wait <limbId> --until connected
 dvv control acquire <limbId>         # take control before any click or key
 dvv screen <limbId> --scale 0.5      # prints a path: open that image file to see the screen
@@ -60,7 +62,10 @@ screen you read into a click.
 * Screen black, priming, or not ready: `screen` already waits, refreshes and
   reconnects on its own. If it still fails, run `reconnect`, then `screen`.
 * `LIMB_GONE`: run `limbs`, then `open` the machine again.
-* `SCREEN_CHANGED`: read the screen, then retry the key or the text.
+* `SCREEN_CHANGED`: read the screen, then retry the key or the text. A
+  refused key pressed nothing, so a shortcut that should have opened a new
+  window or tab did not: read the screen and retry it before you type, or the
+  text goes into whatever already had focus.
 * `LEASE_REVOKED`: check `control yield_status`. If a person took over, stop
   and tell the user. That is the only case where you stop.
 

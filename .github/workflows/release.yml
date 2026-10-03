@@ -96,6 +96,22 @@ jobs:
             -output src-tauri/binaries/dvv-universal-apple-darwin
           src-tauri/binaries/dvv-universal-apple-darwin version
 
+      # The same sidecar on Windows and Linux. Without it the installers had no
+      # dvv at all, so no agent could reach the plane on either platform. Tauri
+      # installs it beside the app as dvv.exe, or as /usr/bin/dvv from the deb.
+      - name: Build dvv for Windows and Linux
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=${{ matrix.bundle-target }}
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          cargo build --locked --release -p dvv --target "$target"
+          mkdir -p src-tauri/binaries
+          cp "target/$target/release/dvv$ext" "src-tauri/binaries/dvv-$target$ext"
+          "src-tauri/binaries/dvv-$target$ext" version
+
       - name: Verify release source is clean
         shell: bash
         run: |
@@ -161,7 +177,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          args: --target ${{ matrix.bundle-target }} ${{ runner.os == 'macOS' && '--config src-tauri/tauri.release-macos.conf.json' || '' }} -- --locked
+          args: --target ${{ matrix.bundle-target }} --config src-tauri/tauri.release.conf.json -- --locked
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
           releaseBody: |
