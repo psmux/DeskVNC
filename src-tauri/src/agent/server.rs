@@ -4894,8 +4894,16 @@ mod tests {
     #[test]
     fn the_plane_starts_from_a_thread_with_no_reactor() {
         let fixture = fixture();
+        #[cfg(not(windows))]
         let dir = tempfile::tempdir().expect("a temporary directory");
+        #[cfg(not(windows))]
         let path = dir.path().join("agent.sock");
+        // A pipe name on Windows, where the plane listens on a named pipe.
+        #[cfg(windows)]
+        let path = std::path::PathBuf::from(format!(
+            r"\\.\pipe\deskvnc-reactor-test-{}",
+            std::process::id()
+        ));
         let plane = fixture.ctx.plane.clone();
 
         let started = crate::agent::start(&plane, Arc::new(fixture.ctx), path.clone());
@@ -4904,7 +4912,13 @@ mod tests {
             started.is_ok(),
             "the plane refused to start off the runtime: {started:?}"
         );
+        #[cfg(not(windows))]
         assert!(path.exists(), "the socket was not created at {path:?}");
+        #[cfg(windows)]
+        assert!(
+            local_pipe::exists(&path.to_string_lossy()),
+            "the pipe was not created at {path:?}"
+        );
         crate::agent::stop(&plane);
     }
 }

@@ -2290,7 +2290,16 @@ pub struct StopReport {
 /// One attachment's view of the world.
 pub struct Plane {
     registry: LimbRegistry,
-    grant: Grant,
+    /// Behind a lock so a local grant can be re-issued when the application
+    /// has saved a machine this process has not heard of: see
+    /// [`Plane::widen_local_grant`]. Every other grant is fixed for life.
+    grant: Mutex<Arc<Grant>>,
+    /// The grant's id, which never changes, kept apart so a lease can borrow
+    /// it without holding the lock above.
+    grant_id: limb_core::party::GrantId,
+    /// Issued by [`Plane::local`], whose hosts are "every machine the
+    /// application has saved" rather than a list a person approved.
+    local: bool,
     source: Arc<dyn SessionSource>,
     watch: broadcast::Sender<WatchEvent>,
     /// Intent ids this attachment has on the wire, per limb.
@@ -2310,6 +2319,30 @@ pub struct Plane {
     label: String,
 }
 
+/// The grant [`Plane::local`] issues: Operator plus Exec, over every machine
+/// the source has saved, read now.
+fn local_grant(source: &dyn SessionSource) -> Result<Grant, ToolError> {
+    let hosts: Vec<String> = source
+        .hosts()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|host| host.address)
+        .collect();
+    let hosts = if hosts.is_empty() {
+        // `Grant::issue` refuses a grant over no machines, and correctly: a
+        // grant that can do nothing, issued silently, presents later as
+        // every intent being refused for a reason nobody wrote down.
+        vec!["no-machine.invalid".to_string()]
+    } else {
+        hosts
+    };
+    let capabilities = limb_core::capability::RoleBundle::Operator
+        .expand()
+        .with(Capability::Exec);
+    Grant::issue("att_local", capabilities, hosts)
+        .map_err(|error| ToolError::new(codes::POLICY_DENIED, error.to_string()))
+}
+
 impl Plane {
     /// A plane over one grant and one source.
     pub fn new(grant: Grant, source: Arc<dyn SessionSource>, config: PlaneConfig) -> Plane {
@@ -2317,7 +2350,9 @@ impl Plane {
         let label = format!("agent {}", grant.id());
         Plane {
             registry: LimbRegistry::new(config),
-            grant,
+            grant_id: grant.id().clone(),
+            grant: Mutex::new(Arc::new(grant)),
+            local: false,
             source,
             watch,
             inflight: Mutex::new(BTreeMap::new()),
@@ -2362,31 +2397,33 @@ impl Plane {
     ///
     /// A [`ToolError`] when the grant cannot be issued.
     pub fn local(source: Arc<dyn SessionSource>) -> Result<Plane, ToolError> {
-        let hosts: Vec<String> = source
-            .hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|host| host.address)
-            .collect();
-        let hosts = if hosts.is_empty() {
-            // `Grant::issue` refuses a grant over no machines, and correctly: a
-            // grant that can do nothing, issued silently, presents later as
-            // every intent being refused for a reason nobody wrote down.
-            vec!["no-machine.invalid".to_string()]
-        } else {
-            hosts
-        };
-        let capabilities = limb_core::capability::RoleBundle::Operator
-            .expand()
-            .with(Capability::Exec);
-        Grant::issue("att_local", capabilities, hosts)
-            .map(|grant| Plane::new(grant, source, PlaneConfig::default()))
-            .map_err(|error| ToolError::new(codes::POLICY_DENIED, error.to_string()))
+        let grant = local_grant(source.as_ref())?;
+        let mut plane = Plane::new(grant, source, PlaneConfig::default());
+        plane.local = true;
+        Ok(plane)
+    }
+
+    /// Re-issue a local grant that does not yet name `host`.
+    ///
+    /// A local grant is "every machine the application has saved", read once
+    /// when this process starts. An agent started before DeskVNCViewer, which
+    /// is how an MCP client usually starts, read an empty list and could open
+    /// nothing for the rest of its life, and the same was true of any machine
+    /// saved after the agent started. So an open that names a host the grant
+    /// lacks asks the application again first. A grant a person approved is
+    /// never widened.
+    fn widen_local_grant(&self, host: &str) {
+        if !self.local || self.grant().allows_host(host) {
+            return;
+        }
+        if let Ok(fresh) = local_grant(self.source.as_ref()) {
+            *lock(&self.grant) = Arc::new(fresh);
+        }
     }
 
     /// What this attachment may do, and where.
-    pub fn grant(&self) -> &Grant {
-        &self.grant
+    pub fn grant(&self) -> Arc<Grant> {
+        lock(&self.grant).clone()
     }
 
     /// One sentence naming where limbs come from in this process.
@@ -2437,15 +2474,11 @@ impl Plane {
     /// the point: a person outranks an agent by default, so "the human takes
     /// the wheel" needs no application code anywhere above `agent-lease`.
     pub fn party(&self) -> Party {
-        Party::new(
-            self.grant.id().clone(),
-            HolderKind::Agent,
-            self.label.clone(),
-        )
+        Party::new(self.grant_id.clone(), HolderKind::Agent, self.label.clone())
     }
 
     fn party_id(&self) -> &PartyId {
-        self.grant.id()
+        &self.grant_id
     }
 
     /// Saved machines and discovered ones, never a secret.
@@ -2491,14 +2524,16 @@ impl Plane {
         // host outside the grant is refused before anything connects.
         self.require(Capability::Open, "opening a limb")?;
         let host = self.host_for(request)?;
-        if !self.grant.allows_host(&host) {
-            let refusal = self.grant.host_refusal(&host);
+        self.widen_local_grant(&host);
+        let grant = self.grant();
+        if !grant.allows_host(&host) {
+            let refusal = grant.host_refusal(&host);
             return Err(ToolError::new(codes::POLICY_DENIED, refusal.to_string()));
         }
         let attach = self.source.open(request)?;
         let host = attach.host.clone();
         let size = attach.size;
-        let attached = self.registry.attach(&self.grant, attach)?;
+        let attached = self.registry.attach(&grant, attach)?;
         // `00 R51b`'s last hop. The relay thread carrying a native intent over
         // the socket needs somewhere to deliver the driver's answer, and this
         // is the attachment it delivers to. Registered here rather than in
@@ -2533,7 +2568,7 @@ impl Plane {
                 limb.cancel_running(limb_core::intent::IntentId(intent));
             }
         }
-        self.registry.detach(&self.grant, &limb_id)?;
+        self.registry.detach(&self.grant(), &limb_id)?;
         forget_answerable(id);
         lock(&self.leases).remove(id);
         lock(&self.inflight).remove(id);
@@ -2664,7 +2699,7 @@ impl Plane {
     pub fn card(&self, limb: &AttachedLimb) -> LimbCard {
         self.refresh(limb);
         let offered = limb.offered();
-        let allows = offered.intersect(self.grant.capabilities());
+        let allows = offered.intersect(self.grant().capabilities());
         let card = limb.limb().describe();
         let (width, height) = self.size_of(limb);
         LimbCard {
@@ -2956,7 +2991,7 @@ impl Plane {
         let fence = self.fence_for(limb, &kind, generation)?;
         let intent = AgentIntent {
             id: limb.mint(),
-            grant: self.grant.id().clone(),
+            grant: self.grant_id.clone(),
             // How long the plane waits for a NATIVE answer, which is a
             // different question from how long a lowered plan takes and only
             // one intent answers it. `agent-plane` waits five seconds by
@@ -2981,7 +3016,7 @@ impl Plane {
             at: clock::unix_millis(),
         });
 
-        let settlement = limb.dispatch(&self.grant, intent, now).await;
+        let settlement = limb.dispatch(&self.grant(), intent, now).await;
 
         self.note_inflight(limb.id().as_str(), id, false);
         let _ = self.watch.send(WatchEvent::Settled {
@@ -3366,7 +3401,7 @@ impl Plane {
 
     fn require(&self, capability: Capability, operation: &str) -> Result<(), ToolError> {
         if self
-            .grant
+            .grant()
             .allows_all(limb_core::capability::CapabilitySet::of(&[capability]))
         {
             return Ok(());
@@ -3375,7 +3410,7 @@ impl Plane {
             codes::POLICY_DENIED,
             format!(
                 "{operation} needs {capability} and grant {} does not carry it; a grant's capabilities are fixed when a person approves it, so tell the user which one is missing rather than retrying",
-                self.grant.id()
+                self.grant_id
             ),
         ))
     }
