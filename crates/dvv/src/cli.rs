@@ -165,6 +165,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
         "watch" => watch(&args).await,
         "stop" => stop(&args).await,
         "hold" => hold(&args).await,
+        "setup" => crate::setup::run(args.at(0)),
         _ => match tool_call(&args) {
             Ok((tool, arguments)) => {
                 if !args.fake {
@@ -988,7 +989,11 @@ fn doctor(args: &Args) -> i32 {
             }
         );
         println!();
-        println!("Install into Claude Code with exactly this line:");
+        println!("Wire it into OpenCode, Pi, Codex and Claude Code, whichever are installed:");
+        println!();
+        println!("  {binary} setup");
+        println!();
+        println!("Or into Claude Code alone with exactly this line:");
         println!();
         println!("  {line}");
         println!();
@@ -1157,6 +1162,9 @@ dvv, the agent plane for DeskVNCViewer.
                                    including loopback: it is printed once at
                                    startup, or read from DVV_MCP_TOKEN.
   dvv selftest                     one full JSON-RPC round trip, printed
+  dvv setup [opencode|pi|codex|claude]
+                                   wire dvv into the agents installed here,
+                                   or into the one named
   dvv doctor                       what is wired, and the claude mcp add line
   dvv version
 

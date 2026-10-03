@@ -391,6 +391,24 @@ pub async fn agent_register_with_claude() -> Result<agent::RegistrationOutcome, 
     Ok(outcome)
 }
 
+/// Wire the bundled `dvv` into every agent installed here: OpenCode, Pi,
+/// Codex and Claude Code. Runs `dvv setup`, which owns the knowledge of each
+/// agent's config, and hands back what it printed, line for line.
+#[tauri::command]
+pub async fn agent_setup_agents() -> Result<String, String> {
+    let dvv = agent::bundled_dvv().ok_or("this build has no dvv beside it")?;
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new(dvv).arg("setup").output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("dvv setup could not run: {e}"))?;
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    tracing::info!(ok = output.status.success(), "dvv setup ran");
+    Ok(text.trim().to_string())
+}
+
 /// A person takes the wheel of a session an agent is driving (D5, `04 §5.4`).
 ///
 /// A revocation and not a request. The agent's next command is refused with

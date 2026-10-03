@@ -811,6 +811,12 @@ impl SessionSource for ShellSource {
                 // than assuming it already has.
                 await_session(&opened, &params)?
             }
+            // Open and still connecting: the size that sizes a mirror is not
+            // known yet. Wait for it rather than fail an open that is about
+            // to succeed, which is what every agent's first call hit.
+            Err(early) if still_connecting(&early) => {
+                await_session(&serde_json::json!({ "sessionId": "" }), &params)?
+            }
             Err(other) => return Err(other),
         };
         build_attach(&attached, request.slot)
@@ -1009,7 +1015,9 @@ fn await_session(
     while std::time::Instant::now() < deadline {
         match call("limb.attach", params.clone()) {
             Ok(attached) => return Ok(attached),
-            Err(gone) if gone.code == codes::LIMB_GONE => last = Some(gone),
+            Err(gone) if gone.code == codes::LIMB_GONE || still_connecting(&gone) => {
+                last = Some(gone);
+            }
             Err(other) => return Err(other),
         }
         // A tenth of a second. Short enough that a machine on a LAN is
@@ -1025,6 +1033,15 @@ fn await_session(
             last.map(|e| e.message).unwrap_or_default(),
         ),
     ))
+}
+
+/// A desktop that is attached before it has reported its framebuffer size.
+///
+/// The shell refuses a mirror it cannot size, and that refusal is only true
+/// for the second or two a session spends negotiating, so an open waits it
+/// out instead of passing it to the agent.
+fn still_connecting(error: &ToolError) -> bool {
+    error.message.contains("reported no framebuffer size")
 }
 
 #[cfg(not(unix))]
