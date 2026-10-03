@@ -286,6 +286,7 @@ fn tool_call(args: &Args) -> Result<(String, Value), ToolError> {
             ("dvv_open".to_string(), object)
         }
         "close" => ("dvv_close".to_string(), json!({ "limbId": limb(0) })),
+        "reconnect" => ("dvv_reconnect".to_string(), with_limb(json!({}), 0)),
         "status" => ("dvv_status".to_string(), with_limb(json!({}), 0)),
         "signals" => ("dvv_signals".to_string(), with_limb(json!({}), 0)),
         "control" => {
@@ -1109,6 +1110,7 @@ dvv, the agent plane for DeskVNCViewer.
   dvv limbs                        every open limb
   dvv open <host|addr[:port]> [--protocol vnc|rdp|ssh] [--slot N] [--perceive]
   dvv close <limbId>
+  dvv reconnect <limbId>           drop the connection and dial again
   dvv status <limbId>              the full observation object
   dvv signals <limbId>             which negotiated signals this session has
 

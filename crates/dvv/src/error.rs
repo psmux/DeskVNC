@@ -157,7 +157,7 @@ pub fn hint_for(code: &str) -> &'static str {
             "Call dvv_control with action yield_status before anything else. If humanTookOver is true, STOP: do not reacquire and do not act on this machine. Tell the user."
         }
         "NOT_READY" | "NOT_CONNECTED" => {
-            "The limb is not connected yet. Call dvv_wait with until connected, or read dvv_status for the retry time and back off rather than spinning."
+            "The limb is not connected yet, or its picture has not filled yet. Call dvv_wait with until connected and try again; if it stays like this, call dvv_reconnect. Do not ask the user to reopen the machine."
         }
         "WRONG_PROTOCOL" => {
             "This verb does not exist on this kind of limb. Call dvv_limbs and pick the sibling that does: read through the terminal, act through the desktop."

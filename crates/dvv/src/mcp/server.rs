@@ -36,7 +36,7 @@ use crate::actions::{self, PointerAction, PointerArgs};
 use crate::error::{codes, ToolError};
 use crate::jsonrpc::{self, Connection, Request};
 use crate::mcp::{format, manifest};
-use crate::plane::{outcome_word, FileOp, FileOutcome, OpenRequest, Plane, Selector};
+use crate::plane::{outcome_word, FileOp, FileOutcome, Nudge, OpenRequest, Plane, Selector};
 use agent_plane::Settlement;
 use base64::Engine as _;
 use limb_core::identity::Slot;
@@ -227,11 +227,24 @@ impl Server {
             }
             "dvv_limbs" => {
                 let limbs = plane.limbs();
+                let available = plane.available();
+                let mut text = summarise_limbs(&limbs);
+                if !available.is_empty() {
+                    let named: Vec<String> = available
+                        .iter()
+                        .map(|a| format!("{} ({})", a.limb_id, a.host))
+                        .collect();
+                    text.push_str(&format!(
+                        " Open in DeskVNCViewer and not attached here: {}. Pass one of those limbIds to any tool and it is attached for you; no dvv_open needed.",
+                        named.join(", ")
+                    ));
+                }
                 Ok(format::ok(
-                    summarise_limbs(&limbs),
-                    json!({ "limbs": limbs }),
+                    text,
+                    json!({ "limbs": limbs, "available": available }),
                 ))
             }
+            "dvv_reconnect" => self.reconnect(args).await,
             "dvv_open" => {
                 let card = plane.open(&open_request(args)?)?;
                 Ok(format::ok(
@@ -462,12 +475,86 @@ impl Server {
                 scale: args.get("scale").and_then(Value::as_f64).map(|s| s as f32),
             }
         };
-        let settlement = plane.submit(&limb, kind, None).await?;
-        if settlement.refused() {
-            return Ok(self.settled(&limb, &settlement, json!({})));
+        // A mirror that has not filled yet is the one refusal here that the
+        // agent should never have to manage. It waits, then asks the server
+        // for a full refresh, then reconnects the session, and only then
+        // reports, so a session that went quiet in the background is
+        // recovered without the agent or the person doing anything.
+        let started = std::time::Instant::now();
+        let mut refreshed = false;
+        let mut reconnected = false;
+        loop {
+            let settlement = plane.submit(&limb, kind.clone(), None).await?;
+            if !settlement.refused() {
+                let payload = read_payload(&settlement);
+                return Ok(screen_result(plane, &limb, form_word(form), &payload));
+            }
+            let refused = self.settled(&limb, &settlement, json!({}));
+            if !is_priming(&refused) {
+                return Ok(refused);
+            }
+            let waited = started.elapsed();
+            if !refreshed && waited >= Duration::from_secs(2) {
+                refreshed = true;
+                let _ = plane.nudge(&limb, Nudge::Refresh);
+            } else if !reconnected && waited >= Duration::from_secs(6) {
+                reconnected = true;
+                if plane.nudge(&limb, Nudge::Reconnect).is_ok() {
+                    self.until_connected(&limb, 15_000).await;
+                    let _ = plane.nudge(&limb, Nudge::Refresh);
+                }
+            } else if waited >= Duration::from_secs(if reconnected { 30 } else { 8 }) {
+                let mut out = refused;
+                out["content"][0]["text"] = json!(format!(
+                    "No picture yet. dvv waited {}s, asked the server for a full refresh{}, and the screen never filled. Call dvv_reconnect, then dvv_screen again. If that fails too, the machine itself is not sending frames.",
+                    waited.as_secs(),
+                    if reconnected { " and reconnected the session" } else { "" },
+                ));
+                return Ok(out);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        let payload = read_payload(&settlement);
-        Ok(screen_result(plane, &limb, form_word(form), &payload))
+    }
+
+    /// Drop the session and dial again, then wait for it to come back.
+    async fn reconnect(&self, args: &Value) -> Result<Value, ToolError> {
+        let plane = self.plane()?;
+        let limb = plane.resolve(&selector(args))?;
+        plane.nudge(&limb, Nudge::Reconnect)?;
+        let connected = self
+            .until_connected(&limb, opt_u64(args, "timeoutMs").unwrap_or(20_000))
+            .await;
+        let _ = plane.nudge(&limb, Nudge::Refresh);
+        Ok(format::ok(
+            if connected {
+                format!("{} reconnected. Call dvv_screen before typing: the typing fence wants a fresh look.", limb.id())
+            } else {
+                format!("{} was asked to reconnect and is not connected yet. Call dvv_wait with until connected; a machine that needs a password typed by a person will wait for that.", limb.id())
+            },
+            json!({ "limbId": limb.id().to_string(), "connected": connected }),
+        ))
+    }
+
+    /// Wait for a limb to report connected, true when it did.
+    async fn until_connected(&self, limb: &agent_plane::AttachedLimb, timeout_ms: u64) -> bool {
+        let Ok(plane) = self.plane() else {
+            return false;
+        };
+        // Give the reconnect a moment to drop the old connection first, or the
+        // wait sees the old state and returns at once.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        plane
+            .submit(
+                limb,
+                IntentKind::Wait {
+                    until: WaitUntil::Connected,
+                    quiet: None,
+                    timeout: Some(Duration::from_millis(timeout_ms.min(WAIT_CLAMP_MS))),
+                },
+                None,
+            )
+            .await
+            .is_ok_and(|settlement| !settlement.refused())
     }
 
     async fn wait(&self, args: &Value) -> Result<Value, ToolError> {
@@ -1074,9 +1161,16 @@ async fn futures_join<F: std::future::Future<Output = Value>>(futures: Vec<F>) -
     .await
 }
 
+/// Is this refusal a mirror that has not been painted yet?
+fn is_priming(refused: &Value) -> bool {
+    refused["structuredContent"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("priming"))
+}
+
 fn summarise_limbs(limbs: &[crate::plane::LimbCard]) -> String {
     if limbs.is_empty() {
-        return "No limb is attached. Open one with dvv_open, or ask the user to open a machine in DeskVNCViewer.".to_string();
+        return "No limb is attached. dvv_hosts lists the saved machines and dvv_open opens one; the person does not need to do anything.".to_string();
     }
     let held: Vec<&str> = limbs
         .iter()

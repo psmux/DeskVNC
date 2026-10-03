@@ -351,9 +351,62 @@ pub trait SessionSource: Send + Sync {
         )))
     }
 
+    /// Every session the source has open, attached here or not.
+    ///
+    /// What lets an agent find a machine that is already open without being
+    /// told an id, and what lets [`Plane::resolve`] adopt a limb a previous
+    /// process opened. Empty for a source that has no sessions of its own.
+    fn live(&self) -> Vec<LiveSession> {
+        Vec::new()
+    }
+
+    /// Ask the session under this limb to repaint or to reconnect.
+    ///
+    /// Recovery an agent does for itself. A session that stopped sending
+    /// frames is otherwise a person's problem, and the person may be in the
+    /// middle of something else entirely.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] when the source cannot carry it.
+    fn nudge(&self, limb: &LimbId, nudge: Nudge) -> Result<(), ToolError> {
+        let _ = (limb, nudge);
+        Err(ToolError::not_implemented(format!(
+            "{} has no session behind it to repaint or reconnect",
+            self.describe()
+        )))
+    }
+
     /// One sentence for `dvv doctor`, so a person can tell which source a
     /// running `dvv` is on without reading the code.
     fn describe(&self) -> &'static str;
+}
+
+/// A session the application has open, as `dvv_limbs` reports it.
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveSession {
+    /// The id this session gets once attached, derived the same way an
+    /// attach derives it, so an agent can name it before attaching.
+    pub limb_id: String,
+    pub host: String,
+    pub host_id: Option<String>,
+    pub port: u16,
+    pub protocol: String,
+    pub slot: u16,
+    pub state: serde_json::Value,
+    /// Another attachment holds it: a second agent, or one that hung up
+    /// without closing. Adopting it is still allowed, and the lease decides
+    /// who drives.
+    pub attached_elsewhere: bool,
+}
+
+/// What [`SessionSource::nudge`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nudge {
+    /// A full framebuffer refresh, for a picture that never filled.
+    Refresh,
+    /// Drop the connection and dial again, for a session that went quiet.
+    Reconnect,
 }
 
 // Named here rather than at the top of the file because they belong to the
@@ -846,6 +899,69 @@ impl SessionSource for ShellSource {
                 )
                 .to_string(),
         })
+    }
+
+    fn live(&self) -> Vec<LiveSession> {
+        if !socket_present() {
+            return Vec::new();
+        }
+        let Ok(answer) = call("limb.list", serde_json::json!({})) else {
+            return Vec::new();
+        };
+        let rows = answer
+            .get("limbs")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        rows.iter()
+            .filter_map(|row| {
+                let protocol = ProtocolKind::parse(&string(row, "protocol"))?;
+                let machine = machine_from(row.get("machine")).ok()?;
+                let slot = row
+                    .get("slot")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u16;
+                let limb_id = LimbRegistry::resolve(protocol, &machine, Slot(slot));
+                lock(limb_sessions()).insert(limb_id.to_string(), string(row, "sessionId"));
+                Some(LiveSession {
+                    limb_id: limb_id.to_string(),
+                    host: string(row, "address"),
+                    host_id: row
+                        .get("profileId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    port: row
+                        .get("port")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as u16,
+                    protocol: protocol.as_str().to_string(),
+                    slot,
+                    state: row.get("state").cloned().unwrap_or_default(),
+                    attached_elsewhere: row.get("attachmentId").is_some_and(|a| !a.is_null()),
+                })
+            })
+            .collect()
+    }
+
+    fn nudge(&self, limb: &LimbId, nudge: Nudge) -> Result<(), ToolError> {
+        let session_id = lock(limb_sessions())
+            .get(limb.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ToolError::new(
+                    codes::LIMB_GONE,
+                    format!("{limb} has no session in DeskVNCViewer to repaint or reconnect; call dvv_limbs"),
+                )
+            })?;
+        let kind = match nudge {
+            Nudge::Refresh => "refresh",
+            Nudge::Reconnect => "reconnect-now",
+        };
+        call(
+            "limb.command",
+            serde_json::json!({ "sessionId": session_id, "command": { "kind": kind } }),
+        )
+        .map(|_| ())
     }
 
     fn describe(&self) -> &'static str {
@@ -2451,10 +2567,13 @@ impl Plane {
         if let Some(id) = &selector.limb_id {
             let limb_id = LimbId::from_caller(id)
                 .map_err(|e| ToolError::new(codes::BAD_REQUEST, e.to_string()))?;
-            return self.registry.get(&limb_id).ok_or_else(|| {
+            if let Some(limb) = self.registry.get(&limb_id) {
+                return Ok(limb);
+            }
+            return self.adopt(&limb_id).ok_or_else(|| {
                 ToolError::new(
                     codes::LIMB_GONE,
-                    format!("no limb is attached as {id}; call dvv_limbs for the current ids"),
+                    format!("{id} is not open in DeskVNCViewer. Call dvv_limbs for what is open, or dvv_open with a hostId from dvv_hosts to open it again"),
                 )
             });
         }
@@ -2477,6 +2596,66 @@ impl Plane {
                 "limbId is required: {n} limbs are attached and defaulting would act on the wrong machine. Call dvv_limbs and name one"
             ))),
         }
+    }
+
+    /// Attach a session the application already has open under this id.
+    ///
+    /// The id is derived from the machine and the slot, so it is the same in
+    /// every process. An agent that restarted, or a CLI verb in a new process,
+    /// names the limb it was using and gets it back with no open call and
+    /// without the person doing anything. The attachment is new, so the
+    /// typing fence still wants one screen read before the first keystroke.
+    fn adopt(&self, id: &LimbId) -> Option<AttachedLimb> {
+        let live = self
+            .source
+            .live()
+            .into_iter()
+            .find(|session| session.limb_id == id.as_str())?;
+        let protocol = ProtocolKind::parse(&live.protocol)?;
+        let request = match live.host_id {
+            Some(host_id) => OpenRequest {
+                host_id: Some(host_id),
+                slot: Slot(live.slot),
+                perceive: true,
+                ..OpenRequest::default()
+            },
+            None => OpenRequest {
+                address: Some(live.host),
+                port: Some(live.port),
+                protocol: Some(protocol),
+                slot: Slot(live.slot),
+                perceive: true,
+                ..OpenRequest::default()
+            },
+        };
+        self.open(&request).ok()?;
+        self.registry.get(id)
+    }
+
+    /// Sessions the application has open that this attachment has not
+    /// attached, so `dvv_limbs` can show them.
+    pub fn available(&self) -> Vec<LiveSession> {
+        let mine: BTreeSet<String> = self
+            .registry
+            .list()
+            .iter()
+            .map(|limb| limb.id().to_string())
+            .collect();
+        self.source
+            .live()
+            .into_iter()
+            .filter(|session| !mine.contains(&session.limb_id))
+            .collect()
+    }
+
+    /// Ask this limb's session to repaint or reconnect.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] from the source.
+    pub fn nudge(&self, limb: &AttachedLimb, nudge: Nudge) -> Result<(), ToolError> {
+        self.require(Capability::View, "recovering a session")?;
+        self.source.nudge(limb.id(), nudge)
     }
 
     /// Take whatever the source has learned about this limb's lifecycle.
