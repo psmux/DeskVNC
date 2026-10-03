@@ -34,7 +34,10 @@ Three properties separate it from the version a person writes in an afternoon:
 
 `dvv` is one server behind two transports:
 
-- **stdio**, for agents that spawn a subprocess. This is the default.
+- **stdio**, for agents that spawn a subprocess. This is the default. `dvv`
+  reaches the application over a unix socket on macOS and Linux, and over a
+  named pipe on Windows (`\\.\pipe\deskvncviewer-agent-<user>`) whose ACL
+  admits only the user who started DeskVNCViewer.
 - **HTTP**, for agents that cannot. It is off by default, binds to loopback,
   always requires a bearer token, checks `Origin`, and refuses to start rather
   than start without a token.
@@ -52,6 +55,11 @@ how the agent reached it.
    ```sh
    /Applications/DeskVNCViewer.app/Contents/MacOS/dvv setup
    ```
+
+   On Windows `dvv.exe` is installed beside `DeskVNCViewer.exe`, in
+   `%LOCALAPPDATA%\DeskVNCViewer` for the per user installer or
+   `C:\Program Files\DeskVNCViewer` for the MSI. On Linux the packages put it
+   at `/usr/bin/dvv`.
 
    `dvv setup opencode` (or `pi`, `codex`, `claude`) does just one. It adds an
    MCP entry to OpenCode's and Codex's config, keeping a backup and any
