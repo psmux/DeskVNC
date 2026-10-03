@@ -88,6 +88,7 @@ pub mod jsonrpc;
 pub mod mcp;
 pub mod observation;
 pub mod plane;
+pub mod setup;
 pub mod watch;
 
 pub use error::{ToolError, DVV_VERSION};

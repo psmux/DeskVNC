@@ -326,6 +326,60 @@ function Register({ onFallback }: { onFallback: () => void }): ReactNode {
 }
 
 /**
+ * OpenCode, Pi, Codex and anything else `dvv setup` knows, in one press.
+ *
+ * Most people driving a machine with a free model use OpenCode or Pi rather
+ * than Claude Code, so this sits first. The shell runs the bundled
+ * `dvv setup`, which finds the agents installed here and wires each one, and
+ * what it printed is shown as it is, so the person sees every file touched.
+ */
+function SetupAgents(): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<string | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => {
+    alive.current = false;
+  }, []);
+
+  const run = useCallback((): void => {
+    setBusy(true);
+    void safeInvoke<string | null>("agent_setup_agents", undefined, null).then((text) => {
+      if (!alive.current) return;
+      setBusy(false);
+      setReport(text ?? "This build cannot run setup. Run dvv setup in a terminal instead.");
+    });
+  }, []);
+
+  return (
+    <section className="rounded-lg border border-accent/40 bg-accent/10 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-primary">Connect OpenCode, Pi and Codex</h3>
+          <p className="mt-0.5 text-xs text-secondary">
+            Finds the agents installed on this Mac and sets each one up. Claude Code too, if you have it.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={busy}
+          className={classNames("btn-primary shrink-0", busy && "opacity-70")}
+          onClick={run}
+        >
+          {busy ? "Setting up…" : "Set up"}
+        </button>
+      </div>
+      <div role="status" aria-live="polite" className="empty:hidden">
+        {report === null ? null : (
+          <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-inset px-2.5 py-2 text-xs text-secondary [overflow-wrap:anywhere]">
+            {report}
+          </pre>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/**
  * What an agent can do, and the one thing it will not.
  *
  * Four to one rather than a balanced pair of columns, because that is the
@@ -489,6 +543,8 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
       <div className="space-y-5">
         {plane.on ? (
           <>
+            <SetupAgents />
+
             <Register onFallback={openManual} />
 
             <p className="text-xs text-secondary">
