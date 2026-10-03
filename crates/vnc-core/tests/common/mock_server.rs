@@ -1214,11 +1214,7 @@ async fn serve(
                 updates_sent += 1;
                 rec.lock().unwrap().updates_sent += 1;
                 if cfg.drop_after_n_updates == Some(updates_sent)
-                    && drops_left
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                            (v > 0).then_some(v - 1)
-                        })
-                        .is_ok()
+                    && take_one(&drops_left)
                 {
                     break;
                 }
@@ -1364,4 +1360,20 @@ async fn read_client_message<R: AsyncReadExt + Unpin>(
         }
     };
     Ok(Some(msg))
+}
+
+/// Take one from a counter that stops at zero, and say whether there was one.
+///
+/// A compare loop rather than `fetch_update`, which Rust 1.99 deprecates in
+/// favour of `try_update`, and `try_update` is newer than this workspace's
+/// minimum Rust.
+fn take_one(counter: &AtomicUsize) -> bool {
+    let mut seen = counter.load(Ordering::SeqCst);
+    while seen > 0 {
+        match counter.compare_exchange(seen, seen - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => seen = now,
+        }
+    }
+    false
 }

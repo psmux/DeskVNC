@@ -212,7 +212,8 @@ pub fn encode_rgba(
             // is opaque by construction: `Framebuffer` fills with opaque black
             // and every rect that reaches it is opaque, so nothing is lost.
             let mut rgb = Vec::with_capacity(needed / 4 * 3);
-            for px in rgba[..needed].chunks_exact(4) {
+            let (pixels, _) = rgba[..needed].as_chunks::<4>();
+            for px in pixels {
                 rgb.extend_from_slice(&px[..3]);
             }
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, options.jpeg_quality)

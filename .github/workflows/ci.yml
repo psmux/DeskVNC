@@ -47,7 +47,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (library crates)
-        # Every library crate, not a subset. vnc-files was previously excluded,
+        # Every library crate, not a subset. The agent crates are here too:
+        # they were left out, and the agent plane did not work on Windows at
+        # all without CI noticing. vnc-files was previously excluded,
         # so its Windows-only SSH agent code was never compiled by CI and a
         # break only surfaced during a release build.
         run: >
@@ -57,6 +59,7 @@ jobs:
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
           -p ssh-transport -p ssh-core
+          -p agent-lease -p agent-perception -p agent-plane -p local-pipe -p dvv
           --all-targets -- -D warnings
 
       - name: Test
@@ -67,6 +70,7 @@ jobs:
           -p vnc-core -p vnc-transport -p vnc-discovery
           -p vnc-store -p vnc-files -p vnc-input-capture
           -p ssh-transport -p ssh-core
+          -p agent-lease -p agent-perception -p agent-plane -p local-pipe -p dvv
 
   legacy-tls:
     name: legacy-tls (${{ matrix.os }})
