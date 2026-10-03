@@ -432,8 +432,10 @@ pub fn parse_modifiers(
             }
             let alias = ALIASES
                 .iter()
-                .find(|(from, _)| from.eq_ignore_ascii_case(part));
-            match alias.and_then(|(_, to)| NamedKey::lookup(to)) {
+                .find(|(from, _)| from.eq_ignore_ascii_case(part))
+                .map(|(_, to)| (*to).to_string())
+                .or_else(|| character_code(part));
+            match alias.and_then(|to| NamedKey::lookup(&to)) {
                 Some(key) => {
                     resolved.push(format!("{part} => {}", key.name));
                     keys.push(key);
@@ -442,14 +444,71 @@ pub fn parse_modifiers(
                     return Err(ToolError::new(
                         "UNKNOWN_KEY",
                         format!(
-                            "{part:?} is not in the named key table. The table is the DOM code and key spellings, so a modifier is ControlLeft or ControlRight rather than Control, and a letter goes through dvv_type rather than here. A numeric code is a different action and needs the scancode capability, which is in no role bundle"
+                            "{part:?} is not in the named key table. The table is the DOM code and key spellings: a modifier is ctrl, alt, shift, super or ControlRight and so on, a letter or digit is r or KeyR, and text to enter goes through dvv_type rather than here. A numeric code is a different action and needs the scancode capability, which is in no role bundle"
                         ),
                     ))
                 }
             }
         }
     }
+    // A character key alone, or with only shift, is text, and text belongs to
+    // dvv_type, which follows the remote layout and the fence on what has
+    // focus. Pressing KeyA by position on an AZERTY machine would type q.
+    // With ctrl, alt or super held it is a shortcut, which is what the
+    // character keys are in the table for.
+    let shortcut = keys.iter().any(|k| {
+        k.name.starts_with("Control") || k.name.starts_with("Alt") || k.name.starts_with("Meta")
+    });
+    if let Some(key) = keys.iter().find(|k| is_character(k)) {
+        if !shortcut {
+            return Err(ToolError::new(
+                "UNKNOWN_KEY",
+                format!(
+                    "{} is a character, and a character with no ctrl, alt or super held is text: send it with dvv_type, which follows the remote keyboard layout. In a chord such as ctrl+c or super+r it is accepted here",
+                    key.name
+                ),
+            ));
+        }
+    }
     Ok((keys, resolved))
+}
+
+/// True for the letter, digit and punctuation keys, the ones that type a
+/// character when pressed on their own.
+fn is_character(key: &NamedKey) -> bool {
+    (0x21..0x7f).contains(&key.keysym)
+}
+
+/// The DOM `code` for a single printable character on a US layout, so a
+/// chord can say `ctrl+c` or `super+r` rather than `ControlLeft+KeyC`.
+///
+/// Only the unshifted characters, because a chord names key positions and
+/// `ctrl+A` already means the same key as `ctrl+a`. A shifted symbol such as
+/// `!` is left out rather than turned into shift plus Digit1, which would be
+/// pressing a modifier the caller did not name.
+fn character_code(part: &str) -> Option<String> {
+    let mut chars = part.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    let code = match c {
+        'a'..='z' | 'A'..='Z' => format!("Key{}", c.to_ascii_uppercase()),
+        '0'..='9' => format!("Digit{c}"),
+        '-' => "Minus".into(),
+        '=' => "Equal".into(),
+        '[' => "BracketLeft".into(),
+        ']' => "BracketRight".into(),
+        ';' => "Semicolon".into(),
+        '\'' => "Quote".into(),
+        '`' => "Backquote".into(),
+        '\\' => "Backslash".into(),
+        ',' => "Comma".into(),
+        '.' => "Period".into(),
+        '/' => "Slash".into(),
+        _ => return None,
+    };
+    Some(code)
 }
 
 fn point(x: Option<u16>, y: Option<u16>, which: &str) -> Result<Point, ToolError> {
@@ -551,6 +610,46 @@ mod tests {
         let error = parse_keys(&["c".to_string()]).unwrap_err();
         assert_eq!(error.code, "UNKNOWN_KEY");
         assert!(error.message.contains("dvv_type"));
+    }
+
+    #[test]
+    fn a_letter_in_a_shortcut_is_pressed_by_its_key() {
+        let (keys, resolved) = parse_keys(&["super+r".to_string()]).unwrap();
+        assert_eq!(
+            keys.iter().map(|k| k.name).collect::<Vec<_>>(),
+            ["MetaLeft", "KeyR"]
+        );
+        assert_eq!(resolved, ["super => MetaLeft", "r => KeyR"]);
+
+        let (keys, _) = parse_keys(&["ctrl+shift+T".to_string()]).unwrap();
+        assert_eq!(
+            keys.iter().map(|k| k.name).collect::<Vec<_>>(),
+            ["ControlLeft", "ShiftLeft", "KeyT"]
+        );
+
+        // The DOM code spelling is in the table itself, so nothing resolves.
+        let (keys, resolved) = parse_keys(&["ControlLeft+KeyL".to_string()]).unwrap();
+        assert_eq!(keys[1].name, "KeyL");
+        assert!(resolved.is_empty());
+
+        let (keys, _) = parse_keys(&["alt+4".to_string(), "ctrl+/".to_string()]).unwrap();
+        assert_eq!(
+            keys.iter().map(|k| k.name).collect::<Vec<_>>(),
+            ["AltLeft", "Digit4", "ControlLeft", "Slash"]
+        );
+    }
+
+    #[test]
+    fn a_shifted_letter_alone_is_still_text() {
+        let error = parse_keys(&["shift+a".to_string()]).unwrap_err();
+        assert_eq!(error.code, "UNKNOWN_KEY");
+        assert!(error.message.contains("dvv_type"));
+    }
+
+    #[test]
+    fn a_shifted_symbol_is_not_turned_into_a_chord() {
+        let error = parse_keys(&["ctrl+!".to_string()]).unwrap_err();
+        assert_eq!(error.code, "UNKNOWN_KEY");
     }
 
     #[test]
