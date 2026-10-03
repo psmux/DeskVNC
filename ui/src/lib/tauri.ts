@@ -187,6 +187,11 @@ export interface OpenSessionOptions {
    * resolution, one session per machine) and hands back `params` to mount.
    */
   asTab?: boolean;
+  /**
+   * Raise and focus nothing. For a machine an agent opened, so the person
+   * keeps the screen and the keyboard they were using.
+   */
+  background?: boolean;
 }
 
 /**
@@ -209,6 +214,7 @@ export function openSessionWindow(
       protocol: options.protocol ?? null,
       forceNew: options.forceNew ?? false,
       asTab: options.asTab ?? false,
+      background: options.background ?? false,
     },
     null,
   );

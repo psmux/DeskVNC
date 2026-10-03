@@ -2138,7 +2138,15 @@ impl RunLoop {
                 // nothing to do while connected.
             }
             ClientCommand::ReconnectNow => {
-                // Already connected, nothing to do.
+                // Asked for while connected, this used to do nothing, and that
+                // left no way out of a session that reports connected and has
+                // stopped sending frames: the Connection menu's Reconnect did
+                // nothing, and an agent that found the screen dead could only
+                // ask the person to close the tab. Dropping the connection as
+                // a transient failure hands it to the supervisor, which dials
+                // again with the same options and the same stored credential.
+                let _ = self.release_all_input(settings).await;
+                return Err(VncError::ConnectionClosed);
             }
             ClientCommand::Agent(intent) => {
                 // `PRDAgentPlug/00 R28`. RFB carries pointer messages, key

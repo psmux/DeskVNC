@@ -35,6 +35,7 @@ pub async fn connect_boundary(
         Some("boundary".into()),
         Some(true),
         Some(false),
+        None,
     )
     .await;
     if result.is_err() {

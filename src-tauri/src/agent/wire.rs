@@ -153,6 +153,10 @@ pub fn decode_command(value: &Value) -> Result<ClientCommand, String> {
             height: number(value, "height")?,
         }),
         "refresh" => Ok(ClientCommand::Refresh),
+        // Recovery an agent does for itself: a session that stopped sending
+        // frames is dropped and dialled again, with the credential the
+        // application already holds, so nobody has to close a tab.
+        "reconnect-now" => Ok(ClientCommand::ReconnectNow),
         "set-always-refresh" => Ok(ClientCommand::SetAlwaysRefresh(flag(value, "on")?)),
         "set-view-only" => Ok(ClientCommand::SetViewOnly(flag(value, "on")?)),
         "set-prefer-scancodes" => Ok(ClientCommand::SetPreferScancodes(flag(value, "on")?)),

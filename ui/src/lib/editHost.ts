@@ -33,6 +33,8 @@ export interface AgentOpenRequest {
   address: string;
   port: number;
   protocol: "vnc" | "rdp" | "ssh";
+  /** Open behind what the person is looking at, without selecting it. */
+  background?: boolean;
 }
 
 export interface EditHostRequest {
