@@ -1001,6 +1001,16 @@ fn screen_read(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
     ctx.plane.check_allowed(&session_id, &attachment_id)?;
     require(peer, Capability::Capture)?;
 
+    // A frame asked for with no mirror allocated gets one, primed exactly as
+    // an attach primes it, and the read below then answers PRIMING, which a
+    // caller already waits out. The idle reaper frees a mirror nothing has
+    // read for a minute, and a slow model thinks for longer than that between
+    // looks: refusing here with "attach again" left a CLI agent, which has no
+    // verb that attaches, blind for the rest of its task.
+    if !ctx.plane.mirrors.status(&session_id).mirror {
+        perceive(ctx, peer, &session_id, Perceive::Frames)?;
+    }
+
     let request = read_request(ctx, &session_id, params)?;
     let read = ctx
         .plane
