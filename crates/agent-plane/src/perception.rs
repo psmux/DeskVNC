@@ -267,6 +267,17 @@ pub struct Damage {
 #[error("{0}")]
 pub struct PerceptionUnavailable(pub String);
 
+impl PerceptionUnavailable {
+    /// Is this a mirror that is allocated and not painted yet?
+    ///
+    /// Read from the sentence because the error crosses the shell's socket as
+    /// one, and every source that produces it, the shell's `screen.read` and
+    /// `agent_perception`'s own `PRIMING`, says "priming" in it.
+    pub fn is_priming(&self) -> bool {
+        self.0.contains("priming")
+    }
+}
+
 /// The observation half of one limb.
 ///
 /// Holds the mirror if there is one, applies the capability gate, and returns
@@ -393,7 +404,17 @@ impl Observatory {
             // `00 R39b` at the one call site where it can be got wrong.
             Crop::Changes(damage) => source.changed(&damage, scale, at),
         }
-        .map_err(|e| Refusal::limb(RefusalCode::NotSupported, e.0))?;
+        .map_err(|e| {
+            // A mirror still waiting for its first full paint is NOT_READY:
+            // it resolves on its own, and NOT_SUPPORTED told an agent to stop
+            // asking, which is the opposite of what it should do.
+            let code = if e.is_priming() {
+                RefusalCode::NotReady
+            } else {
+                RefusalCode::NotSupported
+            };
+            Refusal::limb(code, e.0)
+        })?;
         // Wrapped, because everything a remote screen says is data and never
         // instruction (`AGENT_BRIEF` D6). The generation travels inside the
         // wrapper rather than beside it for the reason `Untrusted::new`

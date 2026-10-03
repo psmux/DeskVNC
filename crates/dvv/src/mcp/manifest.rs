@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 /// A constant so that the count `00 R44` fixed is asserted rather than
 /// counted by hand in four documents. A twenty fifth tool is a decision, not
 /// an accident.
-pub const TOOL_COUNT: usize = 24;
+pub const TOOL_COUNT: usize = 25;
 
 /// How long a client may cache `tools/list`, in milliseconds.
 ///
@@ -120,7 +120,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "dvv_limbs",
-            "Every limb this attachment can see: id, protocol, address, state, size, what it can do, and who holds control. Cheap and local, no round trip to any machine. Call it first: a limb id is the handle every other tool takes, and it is reproducible, so the same machine at the same slot has the same id tomorrow.",
+            "Every limb this attachment can see: id, protocol, address, state, size, what it can do, and who holds control. Also lists under available every machine DeskVNCViewer already has open that this attachment has not attached yet; pass one of those limbIds to any tool and it is attached automatically. Call it first: a limb id is the handle every other tool takes, and it is reproducible, so the same machine at the same slot has the same id tomorrow and after a restart.",
             json!({}),
             &[],
         ),
@@ -144,6 +144,17 @@ pub fn tools() -> Vec<Value> {
                 "limbId": { "type": "string", "description": "From dvv_limbs." },
             }),
             &["limbId"],
+        ),
+        tool(
+            "dvv_reconnect",
+            "Drop this limb's connection and dial the machine again, then wait until it is back. For a session that stopped answering: dvv_screen already refreshes and reconnects by itself before it gives up, so call this when it tells you to, or when the limb reports a disconnected or failed state. The person does not need to do anything, and the credential is applied by the application as it is for any open.",
+            merge(
+                selector(),
+                json!({
+                    "timeoutMs": { "type": "number", "description": "How long to wait for the session to come back. Default 20000." },
+                }),
+            ),
+            &[],
         ),
         tool(
             "dvv_status",
