@@ -164,8 +164,20 @@ pub async fn run(argv: Vec<String>) -> i32 {
         "selftest" => selftest(&args).await,
         "watch" => watch(&args).await,
         "stop" => stop(&args).await,
+        "hold" => hold(&args).await,
         _ => match tool_call(&args) {
             Ok((tool, arguments)) => {
+                if !args.fake {
+                    if let Some(routed) = through_holder(&tool, &arguments) {
+                        return match routed {
+                            Ok(result) => report(&args, &result),
+                            Err(message) => {
+                                eprintln!("{message}");
+                                1
+                            }
+                        };
+                    }
+                }
                 let server = match server_for(&args) {
                     Ok(server) => server,
                     Err(error) => return report(&args, &format_error(&error)),
@@ -179,6 +191,49 @@ pub async fn run(argv: Vec<String>) -> i32 {
                 exit_code_for(&error.code)
             }
         },
+    }
+}
+
+/// Send a tool verb to the holder, starting one for a verb that opens.
+///
+/// `None` means serve it in process, which is what happens for a read such as
+/// `dvv hosts` with no holder running, and on a platform with no holder at
+/// all. See [`crate::hold`] for why a limb cannot outlive the process that
+/// opened it without one.
+fn through_holder(tool: &str, arguments: &Value) -> Option<Result<Value, String>> {
+    if let Some(routed) = crate::hold::call(tool, arguments) {
+        return Some(routed);
+    }
+    if tool != "dvv_open" && tool != "dvv_group_open" {
+        return None;
+    }
+    match crate::hold::spawn() {
+        Ok(pid) => {
+            eprintln!(
+                "started a dvv holder (pid {pid}) so this session outlives the command. Later dvv verbs go through it; it exits when the last limb is closed, or after {} minutes with no call.",
+                crate::hold::DEFAULT_IDLE.as_secs() / 60
+            );
+            crate::hold::call(tool, arguments)
+        }
+        Err(message) => {
+            eprintln!("{message}. Serving this open in process instead, so the limb ends when this command does.");
+            None
+        }
+    }
+}
+
+/// Run the holder until its last limb closes or it sits idle.
+async fn hold(args: &Args) -> i32 {
+    let idle = args
+        .flag("idle")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(crate::hold::DEFAULT_IDLE, std::time::Duration::from_secs);
+    match plane_for(args) {
+        Ok(plane) => crate::hold::run(Arc::new(plane), idle).await,
+        Err(error) => {
+            eprintln!("{}: {}", error.code, error.message);
+            exit_code_for(&error.code)
+        }
     }
 }
 
@@ -1075,6 +1130,10 @@ dvv, the agent plane for DeskVNCViewer.
   dvv group list|grow|shrink|close|run <groupId> ...
 
   dvv watch                        lease changes, intents and settlements, live
+  dvv hold [--idle 1800]           keep limbs open between commands. dvv open
+                                   starts one when none is running; it exits
+                                   when the last limb closes or after --idle
+                                   seconds with no call.
 
 Flags on everything:
   --json    the plane's own result object, unchanged. This is the contract;

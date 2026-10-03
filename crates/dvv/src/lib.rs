@@ -82,6 +82,7 @@ pub mod cli;
 pub mod clock;
 pub mod error;
 pub mod fake;
+pub mod hold;
 pub mod http;
 pub mod jsonrpc;
 pub mod mcp;
