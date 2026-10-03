@@ -276,15 +276,24 @@ pub fn claude_candidates(path_var: Option<&str>, home: Option<&str>) -> Vec<Path
         let home = PathBuf::from(home);
         // The local installer, then the native one, then the runtimes people
         // install the npm package with.
-        for rest in [
-            ".claude/local/claude",
-            ".local/bin/claude",
-            ".bun/bin/claude",
-            ".volta/bin/claude",
-            ".npm-global/bin/claude",
-            ".yarn/bin/claude",
+        // Joined with `exe` rather than spelled out, because on Windows the
+        // native installer puts `claude.exe` in `.local\bin` and a bare
+        // `claude` there is never a file.
+        for dir in [
+            ".claude/local",
+            ".local/bin",
+            ".bun/bin",
+            ".volta/bin",
+            ".npm-global/bin",
+            ".yarn/bin",
         ] {
-            push(home.join(rest));
+            push(home.join(dir).join(exe));
+        }
+    }
+    // npm's global shim on Windows, which is a batch file.
+    if cfg!(target_os = "windows") {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            push(PathBuf::from(appdata).join("npm").join("claude.cmd"));
         }
     }
     for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
@@ -317,7 +326,11 @@ pub fn register_with_claude() -> RegistrationOutcome {
         return RegistrationOutcome::NoBinary;
     };
     let path_var = std::env::var("PATH").ok();
-    let home = std::env::var("HOME").ok();
+    // A Windows app started from the Start menu has USERPROFILE and no HOME.
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok());
     let candidates = claude_candidates(path_var.as_deref(), home.as_deref());
     let Some(claude) = candidates.iter().find(|path| is_executable(path)) else {
         return RegistrationOutcome::ClaudeNotFound {
@@ -2345,8 +2358,26 @@ mod tests {
         assert_eq!(register_argv(&dvv)[4], MCP_SERVER_NAME);
     }
 
+    /// On Windows the native installer's `claude.exe` in `.local\bin` is
+    /// looked for under that name, never as a bare `claude`.
+    #[cfg(windows)]
+    #[test]
+    fn claude_exe_is_looked_for_where_the_windows_installer_puts_it() {
+        let looked = claude_candidates(Some(r"C:\tools;"), Some(r"C:\Users\x"));
+        assert_eq!(looked.first(), Some(&PathBuf::from(r"C:\tools\claude.exe")));
+        assert!(looked.contains(
+            &PathBuf::from(r"C:\Users\x")
+                .join(".local/bin")
+                .join("claude.exe")
+        ));
+        assert!(!looked
+            .iter()
+            .any(|p| p.file_name() == Some(std::ffi::OsStr::new("claude"))));
+    }
+
     /// PATH is searched first and the installers' own locations after it, and
     /// nothing appears twice.
+    #[cfg(unix)]
     #[test]
     fn claude_is_looked_for_on_path_and_then_where_the_installers_put_it() {
         let looked = claude_candidates(Some("/opt/homebrew/bin:/usr/bin:"), Some("/Users/x"));
@@ -2366,7 +2397,8 @@ mod tests {
     }
 
     /// A machine with no Claude Code reports that, rather than panicking or
-    /// blaming the exec.
+    /// blaming the exec. Unix only: it rests on a missing execute bit.
+    #[cfg(unix)]
     #[test]
     fn a_missing_claude_is_a_reported_outcome_and_not_a_panic() {
         let dir = tempfile::tempdir().expect("a temporary directory");
