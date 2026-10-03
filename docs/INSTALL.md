@@ -38,6 +38,10 @@ on an older release, build `dvv` from source with
 manually as described in [the agent integration notes](AGENTS.md). Reinstalling
 one of those releases will not fix it.
 
+On Windows and Linux, releases before v0.27.6 shipped no `dvv` at all, and on
+Windows the agent plane could not start. Install v0.27.6 or newer to drive
+machines from an agent on either platform.
+
 On first use the app asks for two permissions:
 
 - **Local Network**, for mDNS discovery and the subnet scan. Decline it and you
