@@ -313,7 +313,12 @@ const APP_PATH_FILE: &str = "app-path";
 /// says where it is instead. A failure is logged and changes nothing else.
 fn record_app_path(app: &AppHandle) {
     use tauri::Manager as _;
-    let (Ok(dir), Ok(exe)) = (app.path().app_data_dir(), std::env::current_exe()) else {
+    // An AppImage runs from a mount that is gone once it quits, so what to
+    // start next time is the AppImage file itself, which its runtime names.
+    let exe = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .map_or_else(std::env::current_exe, Ok);
+    let (Ok(dir), Ok(exe)) = (app.path().app_data_dir(), exe) else {
         return;
     };
     if let Err(e) = std::fs::write(dir.join(APP_PATH_FILE), exe.to_string_lossy().as_bytes()) {

@@ -940,7 +940,7 @@ fn doctor(args: &Args) -> i32 {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "dvv".to_string());
     let socket = socket_path();
-    let reachable = crate::plane::socket_present();
+    let reachable = crate::plane::alive();
     let line = format!("claude mcp add --scope user deskvnc -- {binary} mcp --stdio");
     let http = http_report(args);
 
@@ -1087,7 +1087,18 @@ pub fn socket_path() -> String {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        // Empty counts as unset: a blank value would put the socket at the
+        // root of the filesystem, where a user cannot create it.
+        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR")
+            .map(|r| r.trim().to_string())
+            .and_then(|r| {
+                if r.is_empty() {
+                    Err(std::env::VarError::NotPresent)
+                } else {
+                    Ok(r)
+                }
+            })
+        {
             return format!("{runtime}/deskvncviewer/agent.sock");
         }
         let home = std::env::var("HOME").unwrap_or_default();
