@@ -1,6 +1,71 @@
 //! Boundary invitations stay in the Rust process and never enter window URLs or host storage.
 use crate::state::AppState;
-use tauri::{AppHandle, State};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Give Boundary this helper's lasting identity, and save a computer to the
+/// Library when the person there lets this helper connect any time.
+///
+/// The identity is what a paired computer recognises, so it is kept in the
+/// app's data folder, readable by this user only, and made once. Without it
+/// every session would connect as somebody new and a pairing could never be
+/// used.
+pub fn install(app: &AppHandle, data_dir: &std::path::Path) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    match boundary_session::unattended::load_or_create_key(&data_dir.join("boundary-helper.key")) {
+        Ok(key) => state.protocols.boundary.set_identity(key),
+        Err(error) => tracing::warn!("Boundary helper identity unavailable: {error:#}"),
+    }
+    let app = app.clone();
+    state
+        .protocols
+        .boundary
+        .on_paired(Arc::new(move |machine: String, name: String| {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = save_paired(&app, machine, name).await {
+                    tracing::warn!("could not save a paired computer: {error}");
+                }
+            });
+        }));
+}
+
+/// Put a paired computer in the Library, or rename it if it is there already.
+async fn save_paired(app: &AppHandle, machine: String, name: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let store = state.store.clone();
+    let profile = super::blocking(move || {
+        let existing = store
+            .list_hosts()?
+            .into_iter()
+            .find(|h| h.protocol == "boundary" && h.address == machine);
+        let mut profile = existing.unwrap_or_else(|| vnc_store::HostProfile {
+            id: uuid::Uuid::new_v4().to_string(),
+            address: machine.clone(),
+            port: 0,
+            protocol: "boundary".into(),
+            ..Default::default()
+        });
+        profile.friendly_name = name;
+        store.save_host(&profile)?;
+        Ok::<_, vnc_store::Error>(profile)
+    })
+    .await?;
+    tracing::info!(profile = %profile.id, "saved a computer that paired this helper");
+    let _ = app.emit(
+        super::session::SESSIONS_EVENT,
+        serde_json::json!({
+            "type": "host-adopted",
+            "profileId": profile.id,
+            "address": profile.address,
+            "port": profile.port,
+            "protocol": profile.protocol,
+        }),
+    );
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn connect_boundary(
