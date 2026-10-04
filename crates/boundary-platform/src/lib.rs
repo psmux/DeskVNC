@@ -8,7 +8,32 @@ pub struct Display {
     pub id: u32,
     pub name: String,
 }
+/// Make this process see physical pixels on a scaled Windows display.
+///
+/// Windows gives a process that has not declared DPI awareness a scaled down
+/// screen and rescales its coordinates. Capture then reports physical pixels
+/// while a pointer move is read as scaled ones, so on a 200% display a click at
+/// a quarter of the way across landed half way across. The support app's window
+/// declared awareness by accident of its toolkit; a background host does not
+/// have one, so it is declared here, once, for whatever process uses this
+/// crate. Declaring it again, or after a toolkit did, is refused by Windows and
+/// harmless.
+fn dpi_aware() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+        };
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        // SAFETY: a process wide setting with no pointers passed.
+        ONCE.call_once(|| unsafe {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        });
+    }
+}
+
 pub fn displays() -> Result<Vec<Display>> {
+    dpi_aware();
     Monitor::all()?
         .into_iter()
         .map(|m| {
@@ -20,6 +45,7 @@ pub fn displays() -> Result<Vec<Display>> {
         .collect()
 }
 pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
+    dpi_aware();
     ensure!(
         screen_permission(),
         "Allow Boundary in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
