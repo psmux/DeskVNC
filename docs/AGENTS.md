@@ -59,6 +59,18 @@ or straight away with **Connect now** in the AI Agents panel. An agent that was
 already open when it was connected needs a restart to see the new tools. After
 an update, the next launch points every agent at the new `dvv`.
 
+On macOS and Linux an app opened from the Dock or a desktop menu has none of
+the PATH your terminal has, so setup reads your login shell's PATH and also
+looks where nvm, fnm, Volta, asdf, mise, Homebrew and npm put commands. An
+agent installed any of those ways is found. The Linux AppImage runs from a
+folder that disappears when it quits, so its `dvv` is copied to
+`~/.local/share/DeskVNCViewer/bin/dvv` and agents are pointed there.
+
+All of this is checked on every change by the "Agents end to end" workflow,
+on macOS, the Linux `.deb` and the AppImage. It installs OpenCode and Pi
+through nvm, opens the app once, and has both drive a machine with the app
+closed.
+
 The plane is on unless somebody switches it off in the AI Agents panel, and
 off is remembered. It is reachable only by the user who started the app.
 
