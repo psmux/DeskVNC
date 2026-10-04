@@ -47,32 +47,35 @@ how the agent reached it.
 
 ## Getting connected
 
-1. In DeskVNC, open the **AI Agents** panel and switch the plane on.
-2. Press **Set up** under "Connect OpenCode, Pi and Codex". It finds the agents
-   installed on this computer and wires each one. From a terminal the same
-   thing is:
+There is nothing to do. Install DeskVNCViewer, open it once, and save a
+machine with its password. Each time the app starts it finds the agents
+installed on the computer (OpenCode, Pi, Claude Code and Codex) and connects
+each one to it. Then ask your agent to do something on one of your machines by
+name. It opens the machine itself, recovers it if the screen stalls, and starts
+DeskVNCViewer if it is closed.
 
-   ```sh
-   /Applications/DeskVNCViewer.app/Contents/MacOS/dvv setup
-   ```
+An agent installed after the app last started is picked up on the next launch,
+or straight away with **Connect now** in the AI Agents panel. An agent that was
+already open when it was connected needs a restart to see the new tools. After
+an update, the next launch points every agent at the new `dvv`.
 
-   On Windows `dvv.exe` is installed beside `DeskVNCViewer.exe`, in
-   `%LOCALAPPDATA%\DeskVNCViewer` for the per user installer or
-   `C:\Program Files\DeskVNCViewer` for the MSI. On Linux the packages put it
-   at `/usr/bin/dvv`.
+The plane is on unless somebody switches it off in the AI Agents panel, and
+off is remembered. It is reachable only by the user who started the app.
 
-   `dvv setup opencode` (or `pi`, `codex`, `claude`) does just one. It adds an
-   MCP entry to OpenCode's and Codex's config, keeping a backup and any
-   comments, writes the skill where each agent reads skills, and runs
-   `claude mcp add` for Claude Code.
-3. Ask your agent to do something on one of your machines by name. It opens
-   the machine itself, recovers it if the screen stalls, and never needs you to
-   open or reconnect anything.
+The same wiring from a terminal is `dvv setup`, or `dvv setup opencode` (or
+`pi`, `codex`, `claude`) for one agent. `dvv` sits beside the app: in
+`/Applications/DeskVNCViewer.app/Contents/MacOS/` on macOS, in
+`%LOCALAPPDATA%\DeskVNCViewer` or `C:\Program Files\DeskVNCViewer` on
+Windows, and at `/usr/bin/dvv` on Linux. It adds an MCP entry to OpenCode's and
+Codex's config, keeping a backup and any comments, and repoints one that names
+an older `dvv`; writes the skill where each agent reads skills; and runs
+`claude mcp add` for Claude Code.
 
 ### Pi, and other agents with no MCP client
 
-Pi drives tools through its shell rather than MCP, so `dvv setup pi` installs
-the skill into `~/.pi/agent/skills` and links `dvv` into `~/.local/bin`. The
+Pi drives tools through its shell rather than MCP, so setup installs the skill
+into `~/.pi/agent/skills` and puts `dvv` beside the `pi` command, which is on
+PATH because that is how `pi` itself runs. The
 agent then runs `dvv open`, `dvv screen`, `dvv click` and the rest as shell
 commands. `dvv open` starts a small background holder so a machine stays open
 between commands, and `dvv screen` saves the picture to a file and prints its
