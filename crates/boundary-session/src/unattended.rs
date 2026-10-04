@@ -25,7 +25,9 @@ use crate::{
     wire::{self, Message},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use iroh::{EndpointAddr, EndpointId, SecretKey};
+/// A lasting identity, for a machine or a helper.
+pub use iroh::SecretKey;
+use iroh::{EndpointAddr, EndpointId};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
