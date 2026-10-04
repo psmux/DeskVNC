@@ -10,3 +10,8 @@ boundary-session.workspace = true
 image.workspace = true
 xcap = "0.9.8"
 enigo = "0.6.1"
+
+# Per monitor DPI awareness, so a pointer position and a captured pixel are
+# the same coordinate on a scaled Windows display.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_HiDpi"] }

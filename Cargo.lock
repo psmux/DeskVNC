@@ -988,6 +988,7 @@ dependencies = [
  "boundary-session",
  "enigo",
  "image",
+ "windows-sys 0.59.0",
  "xcap",
 ]
 
