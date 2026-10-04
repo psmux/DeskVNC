@@ -30,8 +30,10 @@ const AGENTS: &[&str] = &["opencode", "pi", "codex", "claude"];
 
 /// Set up one agent, or every one that is installed.
 pub fn run(target: Option<&str>) -> i32 {
+    #[cfg(unix)]
+    adopt_login_path();
     let exe = match std::env::current_exe().and_then(|p| p.canonicalize()) {
-        Ok(exe) => plain(exe),
+        Ok(exe) => stable(plain(exe)),
         Err(e) => {
             eprintln!("this binary cannot find itself, so there is no path to register: {e}");
             return 1;
@@ -91,6 +93,137 @@ pub fn run(target: Option<&str>) -> i32 {
     println!();
     println!("Restart an agent that was already open so it picks this up. dvv starts DeskVNCViewer itself when an agent needs it.");
     i32::from(failed)
+}
+
+/// Put the user's login shell PATH ahead of this process's.
+///
+/// An app opened from the Dock, Finder or a Linux desktop menu gets a bare
+/// PATH, `/usr/bin:/bin:/usr/sbin:/sbin`, because shell profiles never ran.
+/// DeskVNCViewer runs this at launch with exactly that PATH, so an agent
+/// installed through Homebrew, nvm, fnm, Volta or npm was not found, and a
+/// `claude` that is a Node script could not find `node` when it was. The
+/// login shell's PATH is what the person's own terminal has, so it is asked
+/// for, the way editors launched from the Dock do it. Bounded, because a
+/// profile that waits on input must not hang a launch.
+#[cfg(unix)]
+fn adopt_login_path() {
+    use std::io::Read;
+    const MARK: &str = "__DVV_PATH__";
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(account_shell)
+        .unwrap_or_else(|| "/bin/sh".to_string());
+    // fish keeps PATH as a list, and "$PATH" there joins it with spaces.
+    let script = if shell.ends_with("fish") {
+        format!("printf '{MARK}%s{MARK}' (string join : $PATH)")
+    } else {
+        format!("printf '{MARK}%s{MARK}' \"$PATH\"")
+    };
+    let Ok(mut child) = std::process::Command::new(&shell)
+        .args(["-ilc", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut out);
+    }
+    let Some(login) = out.split(MARK).nth(1).filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = std::env::split_paths(login).collect();
+    if let Some(own) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&own) {
+            if !paths.contains(&dir) {
+                paths.push(dir);
+            }
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// The login shell on the user's account, for a process started without
+/// `SHELL`, which an app launched by launchd or a desktop menu can be.
+#[cfg(unix)]
+fn account_shell() -> Option<String> {
+    let user = std::env::var("USER").ok()?;
+    let output = if cfg!(target_os = "macos") {
+        std::process::Command::new("dscl")
+            .args([".", "-read", &format!("/Users/{user}"), "UserShell"])
+            .output()
+            .ok()?
+    } else {
+        std::process::Command::new("getent")
+            .args(["passwd", &user])
+            .output()
+            .ok()?
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    // `UserShell: /bin/zsh` from dscl, and the seventh field from getent.
+    let shell = if cfg!(target_os = "macos") {
+        text.split_whitespace().last()?.to_string()
+    } else {
+        text.trim().rsplit(':').next()?.to_string()
+    };
+    shell.starts_with('/').then_some(shell)
+}
+
+/// A `dvv` path that will still exist after this process ends.
+///
+/// The Linux AppImage runs from a mount that disappears when the app quits,
+/// so an agent pointed at the `dvv` inside it would find nothing next time.
+/// Run from an AppImage (the runtime sets `APPIMAGE`), this `dvv` is copied
+/// to `~/.local/share/DeskVNCViewer/bin` and that copy is what every agent is
+/// pointed at. Anywhere else the path is already stable and comes back as is.
+fn stable(exe: PathBuf) -> PathBuf {
+    if std::env::var_os("APPIMAGE").is_none() {
+        return exe;
+    }
+    let Some(home) = home() else {
+        return exe;
+    };
+    let dir = home.join(".local/share/DeskVNCViewer/bin");
+    let copy = dir.join("dvv");
+    let current = std::fs::read(&copy).ok() == std::fs::read(&exe).ok();
+    if !current {
+        let tmp = dir.join("dvv.new");
+        let placed = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::copy(&exe, &tmp))
+            .and_then(|_| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+                }
+                // A rename over the old copy works while an agent is running it.
+                std::fs::rename(&tmp, &copy)
+            });
+        if placed.is_err() {
+            return exe;
+        }
+    }
+    copy
 }
 
 /// The user's home. `HOME` first, because Git Bash and MSYS set it and the
@@ -159,15 +292,49 @@ fn find_agent(name: &str) -> Option<PathBuf> {
         home.join(".npm-global/bin"),
         home.join(".claude/local"),
         home.join(".cargo/bin"),
+        home.join(".volta/bin"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/mise/shims"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/snap/bin"),
     ];
+    // nvm and fnm keep one folder per Node version. Newest name last, so it
+    // is searched after the others and a stale version is not preferred.
+    for versions in [
+        home.join(".nvm/versions/node"),
+        home.join(".local/share/fnm/node-versions"),
+        home.join("Library/Application Support/fnm/node-versions"),
+    ] {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&versions)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        found.sort();
+        for version in found.into_iter().rev() {
+            dirs.push(version.join("bin"));
+            dirs.push(version.join("installation/bin"));
+        }
+    }
     // Where npm and scoop put commands on Windows.
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs.push(PathBuf::from(appdata).join("npm"));
     }
     dirs.push(home.join("scoop/shims"));
-    dirs.into_iter().find_map(|dir| find_in(&dir, name))
+    let found = dirs.into_iter().find_map(|dir| find_in(&dir, name))?;
+    // Found off PATH, so its folder goes on PATH for what this runs next. An
+    // npm installed agent is a Node script, and nvm and fnm keep `node` in
+    // that same folder: without this, `claude mcp add` failed to find it.
+    if let (Some(dir), Some(paths)) = (found.parent(), std::env::var_os("PATH")) {
+        let mut all: Vec<PathBuf> = vec![dir.to_path_buf()];
+        all.extend(std::env::split_paths(&paths).filter(|p| p != dir));
+        if let Ok(joined) = std::env::join_paths(all) {
+            std::env::set_var("PATH", joined);
+        }
+    }
+    Some(found)
 }
 
 fn write_skill(dir: &Path) -> Result<String, String> {

@@ -504,6 +504,31 @@ pub fn socket_present() -> bool {
     }
 }
 
+/// Is an application answering on the socket?
+///
+/// On macOS and Linux a socket file outlives an app that crashed or was
+/// killed, and treating the file as the app meant `dvv` never started a new
+/// one: every call failed until somebody opened the app by hand. So a file
+/// that refuses a connection counts as no app. A link this process already
+/// holds is proof enough and costs nothing; on Windows a pipe goes with its
+/// process, so being listed is the answer.
+pub fn alive() -> bool {
+    if lock(link()).is_some() {
+        return true;
+    }
+    if !socket_present() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(crate::cli::socket_path()).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// Is the plane there, starting DeskVNCViewer first when it is not running?
 ///
 /// An agent should not need the person to open the app before asking for a
@@ -512,7 +537,7 @@ pub fn socket_present() -> bool {
 /// waits for its plane to come up. Once only, because an app that is running
 /// with its plane switched off would otherwise be started again on every call.
 fn reachable() -> bool {
-    if socket_present() {
+    if alive() {
         return true;
     }
     static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -524,7 +549,7 @@ fn reachable() -> bool {
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        if socket_present() {
+        if alive() {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));

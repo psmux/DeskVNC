@@ -109,7 +109,17 @@ pub fn socket_path() -> PathBuf {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        // Empty counts as unset, exactly as `dvv` reads it.
+        if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR")
+            .map(|r| r.trim().to_string())
+            .and_then(|r| {
+                if r.is_empty() {
+                    Err(std::env::VarError::NotPresent)
+                } else {
+                    Ok(r)
+                }
+            })
+        {
             return PathBuf::from(format!("{runtime}/deskvncviewer/agent.sock"));
         }
         let home = std::env::var("HOME").unwrap_or_default();
