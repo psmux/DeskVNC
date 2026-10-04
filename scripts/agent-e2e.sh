@@ -33,17 +33,25 @@ case "$(uname -s)" in
     stop_app() { osascript -e 'quit app "DeskVNCViewer"' >/dev/null 2>&1 || true; pkill -x deskvncviewer || true; pkill -f "$APP/Contents/MacOS/" || true; }
     ;;
   Linux)
-    DVV=/usr/bin/dvv
     DATA="${XDG_DATA_HOME:-$HOME/.local/share}/com.deskvncviewer.desktop"
+    if [ -n "${APPIMAGE_FILE:-}" ]; then
+      # The AppImage: its own dvv lives in a mount that goes when it quits,
+      # so agents must be pointed at the copy setup makes outside it.
+      APP_EXE="$APPIMAGE_FILE"
+      DVV="$HOME/.local/share/DeskVNCViewer/bin/dvv"
+    else
+      APP_EXE=/usr/bin/deskvncviewer
+      DVV=/usr/bin/dvv
+    fi
     # The way a desktop menu starts it: a bare PATH and no shell profile.
     start_app() {
       local runtime=()
       [ -n "${XDG_RUNTIME_DIR:-}" ] && runtime=(XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR")
       env -i HOME="$HOME" USER="$USER" DISPLAY="$DISPLAY" SHELL=/bin/bash \
         "${runtime[@]}" PATH=/usr/bin:/bin \
-        setsid /usr/bin/deskvncviewer >"$OUT/app.log" 2>&1 &
+        setsid "$APP_EXE" >"$OUT/app.log" 2>&1 &
     }
-    stop_app() { pkill -x deskvncviewer || true; }
+    stop_app() { pkill -x deskvncviewer || true; pkill -f "$APP_EXE" || true; }
     ;;
   *) fail "unsupported platform $(uname -s)" ;;
 esac
@@ -56,7 +64,9 @@ wait_for() { # seconds, description, command...
   done
   fail "$what did not happen within ${seconds}s"
 }
-plane_up() { "$DVV" doctor | grep -q '^ *present'; }
+# A dvv that exists before the app has run, for watching the plane. With the
+# AppImage the agents' copy only appears once the app has wired them.
+plane_up() { "${CHECK_DVV:-$DVV}" doctor | grep -q '^ *present'; }
 plane_down() { ! plane_up; }
 opencode_config() { ls "$HOME/.config/opencode/"opencode.json* 2>/dev/null | head -1; }
 opencode_wired() { local f; f=$(opencode_config) && grep -q '"deskvnc"' "$f" && grep -q "$DVV" "$f"; }
@@ -76,7 +86,10 @@ test -f "$HOME/.pi/agent/skills/deskvnc/SKILL.md" || fail "Pi's skill was not wr
 PI_DIR=$(dirname "$(ls "$HOME"/.nvm/versions/node/*/bin/pi | tail -1)")
 test -x "$PI_DIR/dvv" || fail "no dvv beside pi in $PI_DIR"
 pass "Pi has the skill and a dvv beside pi in $PI_DIR"
-grep -q "$(dirname "$DVV")" "$DATA/app-path" 2>/dev/null || [ "$(uname -s)" = Darwin ] || fail "the app did not record where it is"
+if [ "$(uname -s)" = Linux ]; then
+  grep -qF "$APP_EXE" "$DATA/app-path" || fail "the app recorded $(cat "$DATA/app-path" 2>&1), not $APP_EXE"
+  pass "the app recorded where it is: $APP_EXE"
+fi
 
 step "save a machine, as a person does in the app"
 DB="$DATA/deskvnc.db"
