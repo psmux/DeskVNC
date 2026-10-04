@@ -75,9 +75,13 @@ pub fn run() {
             // the SSH protocol driver. One store is the invariant, so it is
             // constructed once here rather than by whichever of them happens
             // to start first.
+            let boundary_dir = data_dir.clone();
             let files_state = commands::files::FilesState::new(data_dir);
             let host_keys = files_state.host_key_verifier();
             app.manage(AppState::new(store, credentials, host_keys));
+            // Boundary's lasting helper identity, and saving computers that
+            // pair this helper, so they appear in the Library to reopen.
+            commands::boundary::install(app.handle(), &boundary_dir);
             // File-transfer sidecars live in their own managed state so the
             // SFTP registry stays independent of the session registry
             // (PRD/08 §2.1).

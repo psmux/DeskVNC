@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
-use anyhow::{anyhow, ensure, Result};
-use boundary_session::{Button, Event, HostOptions, Input, Invitation, Key, Session};
+use anyhow::{anyhow, bail, ensure, Result};
+use boundary_session::{
+    unattended::{self, SecretKey},
+    Button, Event, HostOptions, Input, Invitation, Key, Session,
+};
 use parking_lot::Mutex;
 use remote_core::{
     ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch, ProtocolDriver, ProtocolKind,
@@ -19,11 +22,25 @@ struct Pending {
     helper: String,
     created: Instant,
 }
+/// Told when a person being helped lets this helper come back any time:
+/// the machine's ID and its name, to save in the Library.
+pub type OnPaired = std::sync::Arc<dyn Fn(String, String) + Send + Sync>;
 #[derive(Default)]
 pub struct BoundaryDriver {
     pending: std::sync::Arc<Mutex<HashMap<String, Pending>>>,
+    identity: std::sync::Arc<Mutex<Option<SecretKey>>>,
+    paired: std::sync::Arc<Mutex<Option<OnPaired>>>,
 }
 impl BoundaryDriver {
+    /// This helper's lasting identity. Without it every session uses a fresh
+    /// one, so a pairing could never be recognised later.
+    pub fn set_identity(&self, key: SecretKey) {
+        *self.identity.lock() = Some(key);
+    }
+    /// What to do when a session tells this helper it was paired.
+    pub fn on_paired(&self, paired: OnPaired) {
+        *self.paired.lock() = Some(paired);
+    }
     /// Register a short lived, single use invitation without putting its secret in window URLs.
     pub fn prepare(&self, ticket: String, helper: String) -> Result<String> {
         Invitation::decode(&ticket)?;
@@ -75,22 +92,56 @@ impl ProtocolDriver for BoundaryDriver {
             });
         }
         let pending = self.pending.lock().remove(&options.host);
+        // A saved machine is opened by its ID; an invitation by the one use
+        // token `prepare` handed out. Only a saved machine can be retried.
+        let unattended =
+            pending.is_none() && unattended::validate_machine_id(&options.host).is_ok();
+        let identity = self.identity.lock().clone();
+        let paired = self.paired.lock().clone();
         let (commands, mut receiver) = mpsc::channel(128);
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         tokio::spawn(async move {
             let work = async {
-                let pending = pending.ok_or_else(|| anyhow!("This support invitation is no longer available. Paste a new invitation in the Library"))?;
-                ensure!(
-                    pending.created.elapsed() < Duration::from_secs(60),
-                    "Support connection expired before the window opened"
-                );
-                let mut session = boundary_session::viewer(
-                    pending.ticket,
-                    pending.helper,
-                    HostOptions::default(),
-                );
-                drive(&mut session, &mut receiver, &events, options.view_only).await
+                let mut session = match pending {
+                    Some(pending) => {
+                        ensure!(
+                            pending.created.elapsed() < Duration::from_secs(60),
+                            "Support connection expired before the window opened"
+                        );
+                        boundary_session::viewer_as(
+                            pending.ticket,
+                            pending.helper,
+                            HostOptions::default(),
+                            identity,
+                        )
+                    }
+                    None if unattended => {
+                        let key = identity.ok_or_else(|| anyhow!("This copy of DeskVNC has no helper identity, so it cannot be recognised by a computer it was paired with"))?;
+                        let name = options
+                            .credentials
+                            .username
+                            .clone()
+                            .filter(|n| !n.trim().is_empty())
+                            .unwrap_or_else(helper_name);
+                        unattended::connect(
+                            options.host.clone(),
+                            name,
+                            options.credentials.password.clone().filter(|p| !p.is_empty()),
+                            key,
+                            HostOptions::default(),
+                        )
+                    }
+                    None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
+                };
+                drive(
+                    &mut session,
+                    &mut receiver,
+                    &events,
+                    options.view_only,
+                    paired,
+                )
+                .await
             };
             let result = tokio::select! {
                 biased;
@@ -104,7 +155,7 @@ impl ProtocolDriver for BoundaryDriver {
             let _ = events
                 .send(SessionEvent::StateChanged(SessionState::Disconnected {
                     reason,
-                    can_retry: false,
+                    can_retry: unattended,
                     symbol: None,
                 }))
                 .await;
@@ -130,11 +181,20 @@ async fn permission(events: &mpsc::Sender<SessionEvent>, allowed: bool) -> Resul
     )
     .await
 }
+/// The name a helper is shown by when none was given: the account name.
+fn helper_name() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .ok()
+        .filter(|n| !n.trim().is_empty() && n.len() <= 80)
+        .unwrap_or_else(|| "DeskVNC helper".into())
+}
 async fn drive(
     session: &mut Session,
     commands: &mut mpsc::Receiver<ClientCommand>,
     events: &mpsc::Sender<SessionEvent>,
     mut view_only: bool,
+    paired: Option<OnPaired>,
 ) -> Result<()> {
     let mut size = (0u16, 0u16);
     let mut input = InputState::default();
@@ -155,6 +215,9 @@ async fn drive(
                     input = InputState::default();
                     session.input(Input::Release)?;
                     permission(events, allowed).await?;
+                }
+                Some(Event::Paired { machine, name }) => {
+                    if let Some(paired) = paired.as_ref() { paired(machine, name); }
                 }
                 Some(Event::Finished(result)) => return result,
                 None => return Ok(()),

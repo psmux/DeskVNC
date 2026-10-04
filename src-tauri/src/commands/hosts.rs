@@ -29,8 +29,12 @@ pub async fn save_host(
     profile: HostProfile,
 ) -> Result<HostProfile, String> {
     let store = state.store.clone();
-    if profile.protocol == "boundary" {
-        return Err("Boundary invitations are temporary. Start a new support connection instead of saving a host".into());
+    // A Boundary computer is saved by its lasting ID, for unattended
+    // access. An invitation is temporary and is never a host.
+    if profile.protocol == "boundary"
+        && boundary_session::unattended::validate_machine_id(&profile.address).is_err()
+    {
+        return Err("Boundary invitations are temporary. Save a computer by its unattended ID, or start a new support connection".into());
     }
     let returned = profile.clone();
     super::blocking(move || store.save_host(&profile)).await?;

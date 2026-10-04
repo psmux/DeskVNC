@@ -2123,6 +2123,7 @@ dependencies = [
  "boundary-codes",
  "boundary-driver",
  "boundary-provision",
+ "boundary-session",
  "bytes",
  "crossbeam-channel",
  "limb-core",
