@@ -38,6 +38,19 @@ fn main() -> std::process::ExitCode {
         }
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // A one shot verb whose reader stops early, `dvv hosts | head` or a
+    // `grep -q`, exits quietly like any other command line tool. Rust ignores
+    // SIGPIPE, so printing to the closed pipe panicked instead, and an agent
+    // saw a crash where there was none. The MCP server and the holder keep
+    // ignoring it: a client hanging up on them must not take them down.
+    #[cfg(unix)]
+    if !matches!(argv.first().map(String::as_str), Some("mcp") | Some("hold")) {
+        // SAFETY: restoring the default disposition of one signal at startup,
+        // before any other thread is running, is what the C runtime does.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     let code = runtime.block_on(dvv::cli::run(argv));
     std::process::ExitCode::from(code.clamp(0, 255) as u8)
 }

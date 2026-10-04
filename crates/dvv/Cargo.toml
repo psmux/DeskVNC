@@ -59,6 +59,11 @@ rand = { workspace = true }
 # spurious header mismatch.
 base64 = { workspace = true }
 
+# Restoring SIGPIPE for the one shot CLI verbs, so `dvv hosts | head` exits
+# quietly instead of panicking.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The named pipe the plane and the holder use on Windows (`04 §2.1`).
 [target.'cfg(windows)'.dependencies]
 local-pipe = { path = "../local-pipe" }
