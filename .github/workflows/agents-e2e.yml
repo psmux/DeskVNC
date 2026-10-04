@@ -1,0 +1,140 @@
+name: Agents end to end
+
+# Installs the app the way a person does, with OpenCode and Pi installed
+# through nvm, and checks that an agent can drive a machine with nothing set
+# up by hand: the app wires the agents at launch, and dvv starts the app when
+# an agent needs it. The machine is the repository's mock VNC server.
+#
+# Windows is covered by hand on a real PC (see docs/AGENTS.md); this covers
+# macOS and Linux, where the paths, the socket and the GUI launch environment
+# all differ.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/dvv/**"
+      - "crates/agent-*/**"
+      - "crates/local-pipe/**"
+      - "src-tauri/src/agent/**"
+      - "src-tauri/src/commands/agent.rs"
+      - "skills/**"
+      - "scripts/agent-e2e.sh"
+      - "scripts/agent_e2e_mcp.py"
+      - ".github/workflows/agents-e2e.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: Linux (deb)
+            bundle: deb
+          - os: macos-latest
+            label: macOS (app)
+            bundle: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libssl-dev libdbus-1-dev pkg-config xvfb sqlite3
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agents-e2e
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ui
+
+      - name: Build dvv and the mock VNC server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p dvv
+          cargo build -p vnc-core --example mock_vnc_server
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p src-tauri/binaries
+          cp target/debug/dvv "src-tauri/binaries/dvv-$triple"
+
+      - name: Build the app bundle
+        shell: bash
+        run: npx --yes @tauri-apps/cli@^2 build --debug --bundles ${{ matrix.bundle }} --config src-tauri/tauri.release.conf.json
+
+      - name: Install the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y ./target/debug/bundle/deb/*.deb
+            ls -l /usr/bin/dvv /usr/bin/deskvncviewer
+          else
+            cp -R target/debug/bundle/macos/DeskVNCViewer.app /Applications/
+            ls -l /Applications/DeskVNCViewer.app/Contents/MacOS/
+          fi
+
+      - name: Install Node, OpenCode and Pi through nvm, as many people have them
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE="$HOME/.bashrc" bash
+          export NVM_DIR="$HOME/.nvm"
+          . "$NVM_DIR/nvm.sh"
+          nvm install 22
+          npm install -g opencode-ai @mariozechner/pi-coding-agent
+          ls -l "$(dirname "$(command -v pi)")"
+
+      - name: Start the mock machine
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup target/debug/examples/mock_vnc_server 0 > mock.log 2>&1 &
+          for _ in $(seq 1 30); do grep -q listening mock.log && break; sleep 1; done
+          cat mock.log
+          port=$(sed -n 's/.*listening on [^:]*:\([0-9]*\).*/\1/p' mock.log | head -1)
+          echo "MOCK_PORT=$port" >> "$GITHUB_ENV"
+
+      - name: Run the scenario
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner's own PATH has setup-node's node on it, which a person
+          # does not. Take it away so only what nvm installed is found.
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v hostedtoolcache | paste -sd: -)
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+            export DISPLAY=:99
+          fi
+          OUT="$PWD/agent-e2e" bash scripts/agent-e2e.sh
+
+      - name: Keep what the run saw
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-e2e-${{ matrix.os }}
+          path: |
+            agent-e2e/
+            mock.log
+            ~/.config/opencode/
+          if-no-files-found: ignore
