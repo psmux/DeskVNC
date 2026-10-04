@@ -10,6 +10,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* On macOS and Linux, agents installed through nvm, fnm, Volta, asdf, mise,
+  Homebrew or npm are found and connected when the app is opened from the
+  Dock or a desktop menu, which gives it a bare PATH.
+* The Linux AppImage connects agents to a copy of `dvv` that stays put, and an
+  agent starts the AppImage itself when the app is closed.
+* An agent starts the app after it crashed or was killed on macOS and Linux.
+  The socket it left behind used to be taken for a running app.
+* `dvv hosts | head` and similar no longer end in a broken pipe panic.
+* The skill sends OpenCode, Claude Code and Codex to the `dvv_` tools, which
+  hand over the screenshot directly. A model following the shell route saved
+  pictures where OpenCode would not read them without asking the user.
+* The agent plane no longer tries to put its socket at the root of the
+  filesystem when `XDG_RUNTIME_DIR` is set but empty.
+
 ## [0.27.7] (2026-10-04)
 
 ### Changed

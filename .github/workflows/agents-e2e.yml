@@ -155,7 +155,7 @@ jobs:
             export DISPLAY=:99
           fi
           cd "$(mktemp -d)"
-          timeout 600 opencode run -m opencode/muse-spark-1.3-contributor-free             "On my computer called mock, use the deskvnc tools: open it, look at the screen, and tell me the colour of each quarter of the screen. Then close it."             2>&1 | tee "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt"
+          opencode run -m opencode/muse-spark-1.3-contributor-free             "On my computer called mock, use the deskvnc tools: open it, look at the screen, and tell me the colour of each quarter of the screen. Then close it."             2>&1 | tee "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt"
           answer=$(tr 'A-Z' 'a-z' < "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt")
           for colour in red green blue yellow; do
             echo "$answer" | grep -q "$colour" || { echo "the answer does not name $colour"; exit 1; }
