@@ -257,7 +257,10 @@ pub(crate) async fn endpoint_with(
             .address_lookup(iroh::address_lookup::PkarrResolver::n0_dns())
             .address_lookup(iroh::address_lookup::DnsAddressLookup::n0_dns()),
     };
-    builder = builder.relay_mode(relay).alpns(vec![wire::ALPN.to_vec()]);
+    builder = builder
+        .relay_mode(relay)
+        .alpns(vec![wire::ALPN.to_vec()])
+        .dns_resolver(crate::dns::resolver());
     if let Some(key) = key {
         builder = builder.secret_key(key);
     }
