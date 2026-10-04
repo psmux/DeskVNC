@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
 mod session;
+pub mod unattended;
 mod wire;
 use anyhow::{Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
 pub use session::{
     Approval, Connectivity, Event, HostOptions, Route, Session, host, validate_relay_url, viewer,
+    viewer_as,
 };
 use std::io::Cursor;
 pub use wire::{Button, Input, Invitation, Key};

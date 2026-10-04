@@ -32,6 +32,12 @@ pub enum Event {
         control: bool,
     },
     Control(bool),
+    /// On the helper's side: the person helped chose to let this helper in
+    /// any time. `machine` is the ID to save and connect to later.
+    Paired {
+        machine: String,
+        name: String,
+    },
     Finished(Result<()>),
 }
 /// Observed selected transport. This does not infer a NAT type or failure cause.
@@ -75,9 +81,22 @@ pub struct Session {
     pub connectivity: watch::Receiver<Connectivity>,
     input: mpsc::Sender<Input>,
     control: watch::Sender<Permission>,
+    pairing: mpsc::Sender<(String, String)>,
     cancel: CancellationToken,
 }
 impl Session {
+    pub(crate) fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+    /// On the host's side, during a session: tell the helper it may connect
+    /// any time to the unattended machine `machine`, named `name`. Saving the
+    /// helper as trusted is the caller's job, in the same place it keeps the
+    /// unattended access list.
+    pub fn offer_pairing(&self, machine: String, name: String) -> Result<()> {
+        self.pairing
+            .try_send((machine, name))
+            .map_err(|_| anyhow!("The session has ended"))
+    }
     pub fn stop(&self) {
         self.set_control(false);
         self.cancel.cancel();
@@ -103,20 +122,22 @@ impl Drop for Session {
         self.stop();
     }
 }
-struct Worker {
+pub(crate) struct Worker {
     connectivity: watch::Sender<Connectivity>,
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<Frame>>>,
     input: mpsc::Receiver<Input>,
     control: watch::Receiver<Permission>,
     control_tx: watch::Sender<Permission>,
+    pairing: mpsc::Receiver<(String, String)>,
     cancel: CancellationToken,
 }
-fn channels() -> (Session, Worker) {
+pub(crate) fn channels() -> (Session, Worker) {
     let (connectivity_tx, connectivity) = watch::channel(Connectivity::default());
     let (events_tx, events) = mpsc::channel(32);
     let (frames_tx, frames) = watch::channel(None);
     let (input, input_rx) = mpsc::channel(128);
+    let (pairing, pairing_rx) = mpsc::channel(4);
     let (control, control_rx) = watch::channel(Permission {
         allowed: false,
         generation: 0,
@@ -129,6 +150,7 @@ fn channels() -> (Session, Worker) {
             frames,
             input,
             control: control.clone(),
+            pairing,
             cancel: cancel.clone(),
         },
         Worker {
@@ -138,12 +160,16 @@ fn channels() -> (Session, Worker) {
             input: input_rx,
             control: control_rx,
             control_tx: control.clone(),
+            pairing: pairing_rx,
             cancel,
         },
     )
 }
 impl Worker {
-    async fn emit(&self, event: Event) -> Result<()> {
+    pub(crate) fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+    pub(crate) async fn emit(&self, event: Event) -> Result<()> {
         self.events
             .send(event)
             .await
@@ -168,20 +194,50 @@ where
     session
 }
 pub fn viewer(ticket: String, name: String, options: HostOptions) -> Session {
+    viewer_as(ticket, name, options, None)
+}
+/// A viewer that connects with a lasting identity, so that if the person
+/// being helped pairs this helper, later unattended connections are
+/// recognised. `None` is a fresh identity for this session only.
+pub fn viewer_as(
+    ticket: String,
+    name: String,
+    options: HostOptions,
+    key: Option<iroh::SecretKey>,
+) -> Session {
     let (session, mut worker) = channels();
     tokio::spawn(async move {
         let cancel = worker.cancel.clone();
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ok(()),
-            result = run_viewer(&mut worker, ticket, name, options) => result,
+            result = run_viewer(&mut worker, ticket, name, options, key) => result,
         };
         worker.cancel.cancel();
         let _ = worker.emit(Event::Finished(result)).await;
     });
     session
 }
+/// Whether an endpoint's address goes into, or comes out of, the public
+/// address directory that lets a machine be reached by its ID alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lookup {
+    /// Attended sessions: the invitation carries the address.
+    Off,
+    /// An unattended machine, so helpers can find it by ID.
+    Publish,
+    /// A helper finding an unattended machine by ID. Nothing is published
+    /// about the helper.
+    Resolve,
+}
 async fn endpoint(options: &HostOptions) -> Result<Endpoint> {
+    endpoint_with(options, None, Lookup::Off).await
+}
+pub(crate) async fn endpoint_with(
+    options: &HostOptions,
+    key: Option<iroh::SecretKey>,
+    lookup: Lookup,
+) -> Result<Endpoint> {
     ensure!(
         options.bind_ip.is_none() || !options.relay,
         "Private interface mode cannot enable a relay"
@@ -193,10 +249,18 @@ async fn endpoint(options: &HostOptions) -> Result<Endpoint> {
     } else {
         RelayMode::Default
     };
-    // The invitation includes the address; publishing a directory entry is unnecessary.
-    let mut builder = Endpoint::builder(presets::Minimal)
-        .relay_mode(relay)
-        .alpns(vec![wire::ALPN.to_vec()]);
+    let mut builder = match lookup {
+        // The invitation includes the address; publishing a directory entry is unnecessary.
+        Lookup::Off => Endpoint::builder(presets::Minimal),
+        Lookup::Publish => Endpoint::builder(presets::N0),
+        Lookup::Resolve => Endpoint::builder(presets::Minimal)
+            .address_lookup(iroh::address_lookup::PkarrResolver::n0_dns())
+            .address_lookup(iroh::address_lookup::DnsAddressLookup::n0_dns()),
+    };
+    builder = builder.relay_mode(relay).alpns(vec![wire::ALPN.to_vec()]);
+    if let Some(key) = key {
+        builder = builder.secret_key(key);
+    }
     if let Some(ip) = options.bind_ip {
         ensure!(
             !ip.is_unspecified() && !ip.is_multicast(),
@@ -314,7 +378,7 @@ where
             let name = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
             Ok::<_, anyhow::Error>((guard, send, recv, name))
         };
-        let Ok(Ok((guard, mut send, mut recv, name))) =
+        let Ok(Ok((guard, mut send, recv, name))) =
             tokio::time::timeout(Duration::from_secs(5), handshake).await
         else {
             continue;
@@ -342,72 +406,99 @@ where
             }
         };
         // The invitation is consumed by this session, even if the peer later disconnects.
-        worker.control_tx.send_modify(|p| {
-            p.allowed = allowed;
-            p.generation += 1;
-        });
-        let permission_rx = worker.control.clone();
-        let input_permission = worker.control.clone();
-        let (input_tx, input_rx) = mpsc::channel(128);
-        let (screen_tx, screen_rx) = watch::channel(None::<Arc<Vec<u8>>>);
-        let cancel = worker.cancel.clone();
-        let capture = tokio::task::spawn_blocking(move || {
-            desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel)
-        });
-        wire::write(&mut send, &Message::Granted { control: allowed }).await?;
-        worker
-            .emit(Event::Connected {
-                peer,
-                control: allowed,
-            })
-            .await?;
-        // Ignore the initial false UI value; subsequent changes are local permission decisions.
-        worker.control.borrow_and_update();
-        let read_input = async {
-            loop {
-                let message: Message =
-                    tokio::time::timeout(Duration::from_secs(5), wire::read(&mut recv))
-                        .await
-                        .context("Helper stopped responding")??;
-                match message {
-                    Message::Ping => {}
-                    Message::Input(input) => {
-                        input.validate()?;
-                        let permission = *input_permission.borrow();
-                        if permission.allowed || matches!(input, Input::Release) {
-                            input_tx
-                                .try_send((permission.generation, input))
-                                .map_err(|_| anyhow!("Input rate exceeded. Session stopped"))?;
-                        }
-                    }
-                    _ => bail!("Unexpected helper message"),
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        };
-        let write_control = async {
-            loop {
-                worker.control.changed().await?;
-                let control = worker.control.borrow_and_update().allowed;
-                wire::write(&mut send, &Message::Control(control)).await?;
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), anyhow::Error>(())
-        };
-        let result = tokio::select! {
-            _ = monitor_route(connection, &worker.connectivity) => Ok(()),
-            result = read_input => result,
-            result = write_control => result,
-            result = send_screens(connection, screen_rx) => result,
-            result = capture => result.context("Capture worker failed")?,
-            _ = connection.closed() => Ok(()),
-        };
+        let result = serve(worker, connection, send, recv, peer, allowed, desktop).await;
         drop(guard);
         endpoint.close().await;
         return result;
     }
 }
+/// Run one session that has been let in: start the desktop, send screens,
+/// apply input within the permission the person set, and stop when either
+/// side does. Shared by attended and unattended sessions, so the rules for
+/// what a helper can do are written once.
+pub(crate) async fn serve<F>(
+    worker: &mut Worker,
+    connection: &Connection,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    peer: String,
+    allowed: bool,
+    desktop: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<Box<dyn Desktop>> + Send + 'static,
+{
+    worker.control_tx.send_modify(|p| {
+        p.allowed = allowed;
+        p.generation += 1;
+    });
+    let permission_rx = worker.control.clone();
+    let input_permission = worker.control.clone();
+    let (input_tx, input_rx) = mpsc::channel(128);
+    let (screen_tx, screen_rx) = watch::channel(None::<Arc<Vec<u8>>>);
+    let cancel = worker.cancel.clone();
+    let capture = tokio::task::spawn_blocking(move || {
+        desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel)
+    });
+    wire::write(&mut send, &Message::Granted { control: allowed }).await?;
+    worker
+        .emit(Event::Connected {
+            peer,
+            control: allowed,
+        })
+        .await?;
+    // Ignore the initial false UI value; subsequent changes are local permission decisions.
+    worker.control.borrow_and_update();
+    let read_input = async {
+        loop {
+            let message: Message =
+                tokio::time::timeout(Duration::from_secs(5), wire::read(&mut recv))
+                    .await
+                    .context("Helper stopped responding")??;
+            match message {
+                Message::Ping => {}
+                Message::Input(input) => {
+                    input.validate()?;
+                    let permission = *input_permission.borrow();
+                    if permission.allowed || matches!(input, Input::Release) {
+                        input_tx
+                            .try_send((permission.generation, input))
+                            .map_err(|_| anyhow!("Input rate exceeded. Session stopped"))?;
+                    }
+                }
+                _ => bail!("Unexpected helper message"),
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    let write_control = async {
+        loop {
+            tokio::select! {
+                changed = worker.control.changed() => {
+                    changed?;
+                    let control = worker.control.borrow_and_update().allowed;
+                    wire::write(&mut send, &Message::Control(control)).await?;
+                }
+                Some((machine, name)) = worker.pairing.recv() => {
+                    wire::write(&mut send, &Message::Paired { machine, name }).await?;
+                }
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    let result = tokio::select! {
+        _ = monitor_route(connection, &worker.connectivity) => Ok(()),
+        result = read_input => result,
+        result = write_control => result,
+        result = send_screens(connection, screen_rx) => result,
+        result = capture => result.context("Capture worker failed")?,
+        _ = connection.closed() => Ok(()),
+    };
+    result
+}
+
 fn desktop_loop<F>(
     factory: F,
     mut input: mpsc::Receiver<(u64, Input)>,
@@ -512,6 +603,7 @@ async fn run_viewer(
     ticket: String,
     name: String,
     options: HostOptions,
+    key: Option<iroh::SecretKey>,
 ) -> Result<()> {
     let invitation = Invitation::decode(&ticket)?;
     // A host without a relay address must not cause the helper to use public relays.
@@ -526,7 +618,7 @@ async fn run_viewer(
             "Connecting to the person needing help".into(),
         ))
         .await?;
-    let endpoint = endpoint(&options).await?;
+    let endpoint = endpoint_with(&options, key, Lookup::Off).await?;
     let _endpoint_guard = EndpointGuard(endpoint.clone());
     let connection = tokio::time::timeout(
         Duration::from_secs(25),
@@ -535,7 +627,7 @@ async fn run_viewer(
     .await
     .context("Connection timed out")??;
     let guard = Close(connection.clone());
-    let (mut send, mut recv) = connection.open_bi().await?;
+    let (mut send, recv) = connection.open_bi().await?;
     wire::write(
         &mut send,
         &Message::Hello {
@@ -545,6 +637,20 @@ async fn run_viewer(
         },
     )
     .await?;
+    let result = watch_session(worker, &connection, send, recv).await;
+    drop(guard);
+    endpoint.close().await;
+    result
+}
+/// The helper's side of a session once its request is on the wire: wait to
+/// be let in, then show screens, send input and keep the session alive.
+/// Shared by invitations and unattended connections.
+pub(crate) async fn watch_session(
+    worker: &mut Worker,
+    connection: &Connection,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
     worker
         .emit(Event::Status(
             "Waiting for the person to approve sharing".into(),
@@ -553,8 +659,10 @@ async fn run_viewer(
     let grant: Message = tokio::time::timeout(Duration::from_secs(65), wire::read(&mut recv))
         .await
         .context("Approval timed out")??;
-    let Message::Granted { control } = grant else {
-        bail!("The person declined this connection");
+    let control = match grant {
+        Message::Granted { control } => control,
+        Message::Refused(reason) => bail!("{reason}"),
+        _ => bail!("The person declined this connection"),
     };
     worker
         .emit(Event::Connected {
@@ -568,6 +676,9 @@ async fn run_viewer(
             match wire::read::<Message>(&mut recv).await? {
                 Message::Control(value) => {
                     events.send(Event::Control(value)).await?;
+                }
+                Message::Paired { machine, name } => {
+                    events.send(Event::Paired { machine, name }).await?;
                 }
                 _ => bail!("Unexpected host message"),
             }
@@ -614,16 +725,13 @@ async fn run_viewer(
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
-    let result = tokio::select! {
-        _ = monitor_route(&connection, &worker.connectivity) => Ok(()),
+    tokio::select! {
+        _ = monitor_route(connection, &worker.connectivity) => Ok(()),
         result = read_control => result,
         result = write_input => result,
         result = read_frames => result,
         _ = connection.closed() => Ok(()),
-    };
-    drop(guard);
-    endpoint.close().await;
-    result
+    }
 }
 
 #[cfg(test)]
