@@ -549,7 +549,9 @@ fn reachable() -> bool {
     if !crate::launch::start_app() {
         return false;
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // A minute: the first start of a desktop app after login can take tens
+    // of seconds, and an app that is quick returns as soon as it is up.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         if alive() {
             return true;

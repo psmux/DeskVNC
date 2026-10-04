@@ -88,7 +88,7 @@ pass "machine 'mock' saved"
 step "quit the app; OpenCode must start it on its own"
 stop_app
 wait_for 30 "the app quitting" plane_down
-python3 "$(dirname "$0")/agent_e2e_mcp.py" mock "$OUT/opencode.png"
+python3 "$(dirname "$0")/agent_e2e_mcp.py" mock "$OUT/opencode.png" || fail "the OpenCode route did not work"
 if [ -x "$PI_DIR/opencode" ]; then
   PATH="$PI_DIR:/usr/bin:/bin" opencode mcp list 2>&1 | tee "$OUT/opencode-mcp-list.txt" | grep -q "deskvnc.*connected" \
     && pass "opencode mcp list: deskvnc connected" || fail "opencode mcp list does not show deskvnc connected"
