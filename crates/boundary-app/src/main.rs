@@ -1,7 +1,10 @@
+// No console window behind the app on Windows.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
 mod codes;
 mod network;
+mod unattended;
 
 use boundary_session::{Approval, Button, Event, HostOptions, Input, Key, Session};
 use eframe::egui;
@@ -52,10 +55,21 @@ struct App {
     permission_check: Instant,
     remote_focus: bool,
     modifiers: egui::Modifiers,
+    unattended: unattended::Unattended,
+    /// The helper in the current attended session, as (name, key), so the
+    /// person can choose to let them come back unattended.
+    helper: Option<(String, String)>,
+    approved_name: String,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        // Started at sign in for unattended access: out of the way until a
+        // helper connects, when the window comes forward to say so.
+        if std::env::args().any(|a| a == "--background") {
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         let context = cc.egui_ctx.clone();
         tokio::spawn(async move {
             loop {
@@ -94,6 +108,9 @@ impl App {
             permission_check: Instant::now(),
             remote_focus: false,
             modifiers: egui::Modifiers::default(),
+            unattended: unattended::Unattended::new(),
+            helper: None,
+            approved_name: String::new(),
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -111,6 +128,7 @@ impl App {
         self.texture = None;
         self.remote_focus = false;
         self.modifiers = egui::Modifiers::default();
+        self.helper = None;
         self.status = "Session ended. The invitation is no longer usable".into();
         self.error = false;
     }
@@ -123,6 +141,10 @@ impl App {
         }
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        if self.unattended.poll() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
             self.hosting = false;
@@ -152,6 +174,7 @@ impl App {
                             "Waiting for a helper. Invitation expires in 10 minutes".into();
                     }
                     Event::Approval { name, peer, answer } => {
+                        self.approved_name = name.clone();
                         self.pending = Some(Pending { name, peer, answer });
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
@@ -162,10 +185,13 @@ impl App {
                         self.control = control;
                         self.invitation.clear();
                         self.status = format!("Connected to {}", &peer[..16.min(peer.len())]);
+                        self.helper = Some((self.approved_name.clone(), peer));
                     }
                     Event::Control(control) => {
                         self.control = control;
                     }
+                    // Only a helper is told it was paired; nothing to do here.
+                    Event::Paired { .. } => {}
                     Event::Finished(result) => {
                         finished = Some(result);
                     }
@@ -274,7 +300,9 @@ impl App {
             self.wizard.begin(&self.network);
         }
         ui.add_space(12.0);
-        ui.small("macOS preview · Attended sessions only · No DeskVNC installation required");
+        self.unattended.settings(ui);
+        ui.add_space(12.0);
+        ui.small("Attended and unattended support · No DeskVNC installation required");
     }
     fn sharing(&mut self, ui: &mut egui::Ui) {
         ui.add_space(24.0);
@@ -300,6 +328,18 @@ impl App {
             ui.label("Control needs Accessibility permission. Viewing works without it.");
             if ui.button("Open Accessibility settings").clicked() {
                 let _ = boundary_platform::open_input_settings();
+            }
+        }
+        ui.add_space(16.0);
+        if let (Some((name, peer)), Some(session)) = (self.helper.clone(), self.session.as_ref()) {
+            if self.unattended.is_paired(&peer) {
+                ui.label(format!("{name} can connect to this computer any time. Remove them under Unattended access to stop it."));
+            } else if ui
+                .button(format!("Let {name} connect any time, even when I am away"))
+                .on_hover_text("They are remembered by their connection's key. You can remove them later under Unattended access.")
+                .clicked()
+            {
+                self.unattended.pair(session, &peer, &name);
             }
         }
         ui.add_space(16.0);
@@ -473,6 +513,7 @@ impl App {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
+        self.unattended.banner(ui);
         ui.colored_label(
             if self.error {
                 egui::Color32::from_rgb(170, 40, 40)
