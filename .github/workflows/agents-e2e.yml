@@ -38,6 +38,9 @@ jobs:
           - os: ubuntu-22.04
             label: Linux (deb)
             bundle: deb
+          - os: ubuntu-22.04
+            label: Linux (AppImage)
+            bundle: appimage
           - os: macos-latest
             label: macOS (app)
             bundle: app
@@ -50,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
-            libssl-dev libdbus-1-dev pkg-config xvfb sqlite3
+            libssl-dev libdbus-1-dev pkg-config xvfb sqlite3 libfuse2
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -86,7 +89,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$RUNNER_OS" = "Linux" ]; then
+          if [ "${{ matrix.bundle }}" = "appimage" ]; then
+            # Where a person keeps a downloaded AppImage.
+            mkdir -p "$HOME/Applications"
+            cp target/debug/bundle/appimage/*.AppImage "$HOME/Applications/DeskVNCViewer.AppImage"
+            chmod +x "$HOME/Applications/DeskVNCViewer.AppImage"
+            echo "APPIMAGE_FILE=$HOME/Applications/DeskVNCViewer.AppImage" >> "$GITHUB_ENV"
+            echo "CHECK_DVV=$PWD/target/debug/dvv" >> "$GITHUB_ENV"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get install -y ./target/debug/bundle/deb/*.deb
             ls -l /usr/bin/dvv /usr/bin/deskvncviewer
           else
@@ -128,11 +138,35 @@ jobs:
           fi
           OUT="$PWD/agent-e2e" bash scripts/agent-e2e.sh
 
+      # A real model, not a script, driving the machine through OpenCode with
+      # the app closed. OpenCode's free models need no account. Kept apart
+      # and allowed to fail, because a free model being busy or renamed says
+      # nothing about DeskVNC; the answer is checked for the four colours the
+      # mock machine shows when it does run.
+      - name: A free model drives it through OpenCode
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -uo pipefail
+          export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            pgrep Xvfb >/dev/null || (Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &)
+            export DISPLAY=:99
+          fi
+          cd "$(mktemp -d)"
+          timeout 600 opencode run -m opencode/muse-spark-1.3-contributor-free             "On my computer called mock, use the deskvnc tools: open it, look at the screen, and tell me the colour of each quarter of the screen. Then close it."             2>&1 | tee "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt"
+          answer=$(tr 'A-Z' 'a-z' < "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt")
+          for colour in red green blue yellow; do
+            echo "$answer" | grep -q "$colour" || { echo "the answer does not name $colour"; exit 1; }
+          done
+          echo "PASS: a free model on OpenCode saw all four colours"
+
       - name: Keep what the run saw
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent-e2e-${{ matrix.os }}
+          name: agent-e2e-${{ matrix.os }}-${{ matrix.bundle }}
           path: |
             agent-e2e/
             mock.log
