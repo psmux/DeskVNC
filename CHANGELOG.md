@@ -10,6 +10,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.7] (2026-10-04)
+
+### Changed
+
+* AI agents work with nothing to set up. The agent plane is on unless you
+  switch it off in the AI Agents panel, and off is remembered.
+* Each time DeskVNCViewer starts it connects the agents installed on the
+  computer: OpenCode, Pi, Claude Code and Codex. An agent installed later is
+  picked up on the next launch, or at once with Connect now in the panel.
+* After an update, every agent is pointed at the new `dvv` on the next launch.
+  Before, an agent kept calling the `dvv` of the version it was set up with.
+* An agent can be used with DeskVNCViewer closed. `dvv` starts it when it is
+  needed.
+* Pi finds `dvv` without any change to PATH: it is placed beside the `pi`
+  command.
+
 ## [0.27.6] (2026-10-03)
 
 ### Fixed
@@ -2530,7 +2546,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.6...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.7...HEAD
+[0.27.7]: https://github.com/psmux/DeskVNC/compare/v0.27.6...v0.27.7
 [0.27.6]: https://github.com/psmux/DeskVNC/compare/v0.27.5...v0.27.6
 [0.27.5]: https://github.com/psmux/DeskVNC/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/psmux/DeskVNC/compare/v0.27.3...v0.27.4
