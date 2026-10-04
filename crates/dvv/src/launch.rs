@@ -4,7 +4,8 @@
 //! nothing without it. Asking the person to open it first was one more step
 //! between installing an agent and using it, so `dvv` opens it instead.
 //!
-//! Where it looks, in order: beside this `dvv`, which is where every installer
+//! Where it looks, in order: the path the app recorded the last time it ran;
+//! beside this `dvv`, which is where every installer
 //! puts the two; then where the installers put the app when this `dvv` is a
 //! copy elsewhere, which is how Pi runs it on Windows. On macOS `open -b` asks
 //! Launch Services for the bundle id, which finds the app wherever it lives.
@@ -51,9 +52,27 @@ pub fn find_app() -> Option<PathBuf> {
     candidates().into_iter().find(|path| path.is_file())
 }
 
+/// Where the app last said it was: it writes its own path to `app-path` in
+/// its data folder at every start (`src-tauri/src/commands/agent.rs`), and
+/// that beats every guess below when two copies are installed.
+#[cfg(not(target_os = "macos"))]
+fn recorded() -> Option<PathBuf> {
+    const IDENTIFIER: &str = "com.deskvncviewer.desktop";
+    #[cfg(windows)]
+    let data = PathBuf::from(std::env::var_os("APPDATA")?);
+    #[cfg(not(windows))]
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+        })?;
+    let text = std::fs::read_to_string(data.join(IDENTIFIER).join("app-path")).ok()?;
+    Some(PathBuf::from(text.trim()))
+}
+
 #[cfg(not(target_os = "macos"))]
 fn candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    let mut out: Vec<PathBuf> = recorded().into_iter().collect();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             out.push(dir.join(APP_FILE));

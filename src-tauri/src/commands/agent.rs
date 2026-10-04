@@ -300,11 +300,33 @@ fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
     "the agent plane panicked with a payload that carried no message".to_string()
 }
 
+/// The file `dvv` reads to find the app it should start. Shared with
+/// `crates/dvv/src/launch.rs`; if one moves, move the other.
+const APP_PATH_FILE: &str = "app-path";
+
+/// Write where this executable is, so `dvv` starts this app and not some
+/// other copy.
+///
+/// `dvv` starts the app when an agent needs it, and a copy of `dvv` on PATH
+/// has no app beside it to find. Guessing install folders found a stale
+/// install on a machine that also had a newer one, so the app that ran last
+/// says where it is instead. A failure is logged and changes nothing else.
+fn record_app_path(app: &AppHandle) {
+    use tauri::Manager as _;
+    let (Ok(dir), Ok(exe)) = (app.path().app_data_dir(), std::env::current_exe()) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(dir.join(APP_PATH_FILE), exe.to_string_lossy().as_bytes()) {
+        tracing::debug!("could not record where the app is for dvv: {e}");
+    }
+}
+
 /// Read the setting at startup and apply it.
 pub fn install(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    record_app_path(app);
     // Before the switch is read, and whether or not it is on. Two of the three
     // counts are zero with the plane off but the live session total is not,
     // and a person switching the plane off has to watch the other two fall
