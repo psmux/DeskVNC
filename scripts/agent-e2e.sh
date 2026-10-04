@@ -12,7 +12,16 @@ set -euo pipefail
 OUT=${OUT:-$PWD/agent-e2e}
 mkdir -p "$OUT"
 step() { printf '\n== %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*"; exit 1; }
+fail() {
+  printf 'FAIL: %s\n' "$*"
+  printf '\n-- what was running\n'; ps aux | grep -i -e deskvnc -e 'dvv ' | grep -v grep || true
+  printf '\n-- the socket\n'; ls -la "${XDG_RUNTIME_DIR:-/nonexistent}/deskvncviewer" "$HOME/.local/share/DeskVNCViewer" "$HOME/Library/Application Support/DeskVNCViewer" 2>&1 || true
+  printf '\n-- recorded app path\n'; cat "$DATA/app-path" 2>&1 || true
+  printf '\n-- output of the app dvv started\n'; cat "${TMPDIR:-/tmp}/deskvncviewer-started-by-dvv.log" 2>&1 || true
+  printf '\n-- first app log\n'; tail -40 "$OUT/app.log" 2>&1 || true
+  printf '\n-- dvv doctor\n'; "$DVV" doctor 2>&1 | head -12 || true
+  exit 1
+}
 pass() { printf 'PASS: %s\n' "$*"; }
 
 case "$(uname -s)" in
