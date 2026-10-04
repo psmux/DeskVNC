@@ -35,14 +35,31 @@ const APP_FILE: &str = if cfg!(windows) {
 pub fn start_app() -> bool {
     #[cfg(target_os = "macos")]
     {
-        detached(Command::new("open").args(["-g", "-b", BUNDLE_ID]))
+        detached(
+            Command::new("open")
+                .args(["-g", "-b", BUNDLE_ID])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
-        match find_app() {
-            Some(app) => detached(&mut Command::new(app)),
-            None => false,
+        let Some(app) = find_app() else {
+            return false;
+        };
+        let mut command = Command::new(app);
+        // What the app says while starting goes to a file rather than
+        // nowhere: an app that will not start is otherwise a thirty second
+        // wait and a sentence with no reason in it.
+        // Never inherited: on Windows that hands the app the agent's pipe,
+        // and the agent waits for an end of output that never comes.
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        if let Ok(log) = std::fs::File::create(launch_log()) {
+            if let Ok(err) = log.try_clone() {
+                command.stdout(log).stderr(err);
+            }
         }
+        detached(&mut command)
     }
 }
 
@@ -98,12 +115,16 @@ fn candidates() -> Vec<PathBuf> {
     out
 }
 
-/// Spawn and let go.
+/// Where the output of an app `dvv` started is kept, for when it did not come
+/// up.
+pub fn launch_log() -> std::path::PathBuf {
+    std::env::temp_dir().join("deskvncviewer-started-by-dvv.log")
+}
+
+/// Spawn and let go. Output goes wherever the caller pointed it, nowhere by
+/// default.
 fn detached(command: &mut Command) -> bool {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    command.stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
