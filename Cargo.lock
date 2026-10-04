@@ -1016,6 +1016,7 @@ name = "boundary-session"
 version = "0.27.8"
 dependencies = [
  "anyhow",
+ "argon2 0.5.3",
  "base64 0.22.1",
  "getrandom 0.3.4",
  "image",

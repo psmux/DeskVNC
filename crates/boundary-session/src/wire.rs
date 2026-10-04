@@ -127,6 +127,23 @@ pub enum Message {
     Control(bool),
     Input(Input),
     Ping,
+    /// A helper asking an unattended machine to let it in. The helper's
+    /// identity is the key it connected with, which the encrypted handshake
+    /// has already proved, so a paired helper sends no password at all.
+    Knock {
+        version: u8,
+        name: String,
+        password: Option<String>,
+    },
+    /// Sent during an attended session when the person being helped chooses
+    /// to let this helper connect any time. `machine` is the ID the helper
+    /// connects to later, which is not the ID of this attended session.
+    Paired {
+        machine: String,
+        name: String,
+    },
+    /// An unattended machine turning a helper away, and why.
+    Refused(String),
 }
 pub async fn write<T: Serialize>(stream: &mut SendStream, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
