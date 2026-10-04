@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod dns;
 mod session;
 pub mod unattended;
 mod wire;
