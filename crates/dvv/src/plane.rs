@@ -510,22 +510,24 @@ pub fn socket_present() -> bool {
 /// killed, and treating the file as the app meant `dvv` never started a new
 /// one: every call failed until somebody opened the app by hand. So a file
 /// that refuses a connection counts as no app. A link this process already
-/// holds is proof enough and costs nothing; on Windows a pipe goes with its
-/// process, so being listed is the answer.
+/// holds is proof enough and costs nothing.
 pub fn alive() -> bool {
-    if lock(link()).is_some() {
+    let mut held = lock(link());
+    if held.is_some() {
         return true;
     }
     if !socket_present() {
         return false;
     }
-    #[cfg(unix)]
-    {
-        std::os::unix::net::UnixStream::connect(crate::cli::socket_path()).is_ok()
-    }
-    #[cfg(not(unix))]
-    {
-        true
+    // Connect for real and keep it: the link every later call uses, so the
+    // check costs no extra connection, and an app that is there but does not
+    // answer `hello` counts as not there.
+    match connect() {
+        Ok(fresh) => {
+            *held = Some(fresh);
+            true
+        }
+        Err(_) => false,
     }
 }
 
