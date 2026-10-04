@@ -970,7 +970,7 @@ fn doctor(args: &Args) -> i32 {
             if reachable {
                 "present"
             } else {
-                "not present: DeskVNCViewer is not running, or the agent plane is switched off (it is off by default)"
+                "not present: DeskVNCViewer is not running (an agent call starts it), or a person switched the agent plane off in the AI Agents panel"
             }
         );
         println!(

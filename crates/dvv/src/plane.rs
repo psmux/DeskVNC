@@ -487,7 +487,7 @@ fn link() -> &'static Mutex<Option<Link>> {
 /// running" and "the plane is switched off" need different fixes.
 fn no_socket() -> ToolError {
     ToolError::not_implemented(format!(
-        "there is no agent plane socket at {}. Either DeskVNCViewer is not running, or its agent plane is switched off, which is the default: it is a setting in the application and a person has to turn it on. Nothing is saved and nothing is lost by this call failing. Run `dvv doctor` for the path this build expects",
+        "there is no agent plane socket at {}, and starting DeskVNCViewer did not bring one up. Either DeskVNCViewer is not installed where dvv looked, or a person switched its agent plane off in the AI Agents panel, and only they can switch it back on. Nothing is saved and nothing is lost by this call failing. Tell the user which of the two it is; run `dvv doctor` for the path this build expects",
         crate::cli::socket_path()
     ))
 }
@@ -502,6 +502,34 @@ pub fn socket_present() -> bool {
     {
         std::path::Path::new(&crate::cli::socket_path()).exists()
     }
+}
+
+/// Is the plane there, starting DeskVNCViewer first when it is not running?
+///
+/// An agent should not need the person to open the app before asking for a
+/// machine, and a person should not need to know the app has to be open. So
+/// when no socket is there, the app is started, once per process, and this
+/// waits for its plane to come up. Once only, because an app that is running
+/// with its plane switched off would otherwise be started again on every call.
+fn reachable() -> bool {
+    if socket_present() {
+        return true;
+    }
+    static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    if !crate::launch::start_app() {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if socket_present() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
 }
 
 /// The connection to the plane: a unix socket, or on Windows the named pipe
@@ -742,7 +770,7 @@ fn forget_answerable(limb_id: &str) {
 
 impl SessionSource for ShellSource {
     fn hosts(&self) -> Result<Vec<HostRecord>, ToolError> {
-        if !socket_present() {
+        if !reachable() {
             return Err(no_socket());
         }
         let answer = call("hosts.list", serde_json::json!({}))?;
@@ -769,7 +797,7 @@ impl SessionSource for ShellSource {
     }
 
     fn open(&self, request: &OpenRequest) -> Result<Attach, ToolError> {
-        if !socket_present() {
+        if !reachable() {
             return Err(no_socket());
         }
         let mut params = serde_json::json!({
@@ -840,7 +868,7 @@ impl SessionSource for ShellSource {
     /// assembled from a half decoded window is corrupt in a way nothing
     /// downstream can detect.
     fn files(&self, limb: &LimbId, op: &FileOp) -> Result<FileOutcome, ToolError> {
-        if !socket_present() {
+        if !reachable() {
             return Err(no_socket());
         }
         let session_id = lock(limb_sessions())
@@ -912,7 +940,7 @@ impl SessionSource for ShellSource {
     }
 
     fn live(&self) -> Vec<LiveSession> {
-        if !socket_present() {
+        if !reachable() {
             return Vec::new();
         }
         let Ok(answer) = call("limb.list", serde_json::json!({})) else {
@@ -978,7 +1006,7 @@ impl SessionSource for ShellSource {
         if socket_present() {
             "the shell, over the dvvp.v1 local socket, driving the sessions DeskVNCViewer already has open"
         } else {
-            "the shell, over the dvvp.v1 local socket (no socket at that path: DeskVNCViewer is not running, or its agent plane is switched off, which is the default)"
+            "the shell, over the dvvp.v1 local socket (no socket at that path yet: DeskVNCViewer is started on the first call that needs it)"
         }
     }
 }

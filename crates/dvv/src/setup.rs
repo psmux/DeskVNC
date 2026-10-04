@@ -14,7 +14,10 @@
 //! A config file is edited by inserting text rather than parsed and written
 //! back, because OpenCode's is JSONC and a round trip through a JSON parser
 //! would delete every comment in it. The original is kept beside it. A file
-//! that already names deskvnc is left alone.
+//! that already names deskvnc has its command pointed at this `dvv` if it
+//! names another one, and is otherwise left alone, so DeskVNCViewer runs this
+//! at every launch: nothing changes on a launch with nothing to do, and after
+//! an update every agent follows the new `dvv` without anyone touching it.
 
 use std::path::{Path, PathBuf};
 
@@ -86,7 +89,7 @@ pub fn run(target: Option<&str>) -> i32 {
         }
     }
     println!();
-    println!("DeskVNCViewer has to be running with its agent plane switched on (AI Agents panel).");
+    println!("Restart an agent that was already open so it picks this up. dvv starts DeskVNCViewer itself when an agent needs it.");
     i32::from(failed)
 }
 
@@ -218,10 +221,19 @@ fn opencode(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
             let text =
                 std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             if text.contains("\"deskvnc\"") {
-                lines.push(format!(
-                    "{} already has a deskvnc entry, left as it is",
-                    file.display()
-                ));
+                let path = serde_json::to_string(&exe.display().to_string()).unwrap_or_default();
+                match repoint_json_command(&text, &path) {
+                    Some(edited) => {
+                        backup(&file)?;
+                        std::fs::write(&file, edited)
+                            .map_err(|e| format!("{}: {e}", file.display()))?;
+                        lines.push(format!(
+                            "pointed the deskvnc MCP server in {} at this dvv",
+                            file.display()
+                        ));
+                    }
+                    None => lines.push(format!("{} already uses this dvv", file.display())),
+                }
             } else {
                 let edited = insert_mcp_entry(&text, &entry).ok_or_else(|| {
                     format!(
@@ -241,6 +253,52 @@ fn opencode(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     lines.push(write_skill(&dir.join("skills"))?);
     lines.push("check it with: opencode mcp list".to_string());
     Ok(lines)
+}
+
+/// Point an existing `"deskvnc"` entry's command at `path` (a JSON string,
+/// quotes included), or `None` when it already points there or is not one
+/// this can safely edit.
+///
+/// An update moves `dvv`, or the person reinstalls somewhere else, and an
+/// entry left naming the old one makes every agent call fail with a missing
+/// file. Only the first string in the entry's `"command"` array is replaced,
+/// and only when it names a `dvv`, so a wrapper somebody wrote on purpose is
+/// left alone. Comments and layout survive because nothing else is touched.
+pub fn repoint_json_command(text: &str, path: &str) -> Option<String> {
+    let key = text.find("\"deskvnc\"")?;
+    let command = key + text[key..].find("\"command\"")?;
+    // A `}` between the two means the `"command"` found belongs to a later
+    // entry, because this one has none.
+    if text[key..command].contains('}') {
+        return None;
+    }
+    let open = command + text[command..].find('[')?;
+    let start = open + text[open..].find('"')?;
+    let bytes = text.as_bytes();
+    let mut end = start + 1;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'\\' => end += 2,
+            b'"' => break,
+            _ => end += 1,
+        }
+    }
+    let old = text.get(start..=end)?;
+    if old == path {
+        return None;
+    }
+    let old_path: String = serde_json::from_str(old).ok()?;
+    if !names_a_dvv(&old_path) {
+        return None;
+    }
+    Some(format!("{}{path}{}", &text[..start], &text[end + 1..]))
+}
+
+/// Is this the path of a `dvv` executable, whichever install it came from?
+fn names_a_dvv(path: &str) -> bool {
+    Path::new(path)
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("dvv"))
 }
 
 /// Put an entry inside the top level `"mcp"` object, adding one if there is
@@ -321,7 +379,16 @@ fn find_top_level_key(text: &str, name: &str) -> Option<usize> {
 
 fn pi(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     let mut lines = vec![write_skill(&home.join(".pi/agent/skills"))?];
-    lines.push(link_onto_path(home, exe)?);
+    // Beside `pi` itself when that folder takes a file, because it is on PATH
+    // by definition: the person runs `pi` from it. `~/.local/bin` is the
+    // fallback, and on Windows it is usually not on PATH, which used to leave
+    // the person editing their environment by hand.
+    let pi_dir = find_agent("pi").and_then(|pi| pi.parent().map(Path::to_path_buf));
+    let placed = pi_dir
+        .filter(|dir| writable(dir))
+        .map(|dir| place_dvv(&dir, exe))
+        .unwrap_or_else(|| link_onto_path(home, exe))?;
+    lines.push(placed);
     lines.push(
         "Pi has no MCP client, so it drives dvv through its shell with the skill. Use a model that can see images for desktops."
             .to_string(),
@@ -329,46 +396,92 @@ fn pi(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
-/// Make `dvv` runnable by name, which is how a shell driven agent calls it.
+/// Make `dvv` runnable by name in `~/.local/bin`, when there is nowhere
+/// better.
 fn link_onto_path(home: &Path, exe: &Path) -> Result<String, String> {
     if let Some(found) = on_path("dvv") {
-        if found.canonicalize().ok().as_deref() == Some(exe) {
+        if found.canonicalize().ok().map(plain).as_deref() == Some(exe) {
             return Ok(format!("dvv is already on PATH at {}", found.display()));
         }
     }
     let bin = home.join(".local/bin");
-    let link = bin.join(if cfg!(windows) { "dvv.exe" } else { "dvv" });
-    if cfg!(windows) && link.is_file() && is_a_dvv(&link) {
-        // A copy rather than a link, since a symlink on Windows needs
-        // developer mode or an elevated prompt. A copy goes stale when the
-        // application updates, so the dvv already there is replaced.
-        std::fs::copy(exe, &link).map_err(|e| format!("{}: {e}", link.display()))?;
-    } else if link.exists() || link.symlink_metadata().is_ok() {
-        let ours = std::fs::read_link(&link).ok().as_deref() == Some(exe);
-        if !ours {
+    std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
+    place_dvv(&bin, exe)
+}
+
+/// Put a `dvv` in `dir` that runs this one: a symlink on unix, a copy on
+/// Windows, where a symlink needs developer mode or an elevated prompt.
+///
+/// A `dvv` already there from an older install is replaced, which is what an
+/// update needs. Anything else of that name is left alone and said so.
+fn place_dvv(dir: &Path, exe: &Path) -> Result<String, String> {
+    let link = dir.join(if cfg!(windows) { "dvv.exe" } else { "dvv" });
+    let present = link.symlink_metadata().is_ok();
+    #[cfg(unix)]
+    {
+        if present {
+            match std::fs::read_link(&link) {
+                Ok(target) if target == exe => {
+                    return Ok(format!("dvv is on PATH at {}", link.display()))
+                }
+                Ok(target) if names_a_dvv(&target.to_string_lossy()) => {
+                    std::fs::remove_file(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+                }
+                _ if is_a_dvv(&link) => {
+                    std::fs::remove_file(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+                }
+                _ => return Ok(not_ours(&link, exe)),
+            }
+        }
+        std::os::unix::fs::symlink(exe, &link).map_err(|e| format!("{}: {e}", link.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        if present {
+            if same_file_contents(&link, exe) {
+                return Ok(format!("dvv is on PATH at {}", link.display()));
+            }
+            if !is_a_dvv(&link) {
+                return Ok(not_ours(&link, exe));
+            }
+        }
+        // A copy that is in use, by a holder an agent left running, cannot be
+        // replaced. That is reported and not fatal: the next launch replaces
+        // it, and the old one still works until then.
+        if let Err(e) = std::fs::copy(exe, &link) {
             return Ok(format!(
-                "{} already exists and is not this dvv, so it was left alone. Point it at {} yourself if you want this one",
-                link.display(),
-                exe.display()
+                "{} is in use and was not updated this time ({e}); it is replaced on a later launch",
+                link.display()
             ));
         }
-    } else {
-        std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(exe, &link).map_err(|e| format!("{}: {e}", link.display()))?;
-        #[cfg(not(unix))]
-        std::fs::copy(exe, &link).map_err(|e| format!("{}: {e}", link.display()))?;
     }
-    let on = std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir == bin));
-    Ok(if on {
-        format!("dvv linked at {}", link.display())
-    } else {
-        format!(
-            "dvv linked at {}, which is not on PATH: add it to your shell profile",
-            link.display()
-        )
-    })
+    Ok(format!("dvv is on PATH at {}", link.display()))
+}
+
+fn not_ours(link: &Path, exe: &Path) -> String {
+    format!(
+        "{} already exists and is not a dvv, so it was left alone. The agent can still run {}",
+        link.display(),
+        exe.display()
+    )
+}
+
+/// Can this process create a file in `dir`?
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(".dvv-write-probe");
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// Do these two files hold the same bytes? Sizes first, which settles it for
+/// nearly every update.
+#[cfg(not(unix))]
+fn same_file_contents(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    ma.len() == mb.len() && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// Does the file at `path` answer `version` the way dvv does?
@@ -387,10 +500,16 @@ fn codex(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     let file = dir.join("config.toml");
     let text = std::fs::read_to_string(&file).unwrap_or_default();
     if text.contains("[mcp_servers.deskvnc]") {
-        return Ok(vec![format!(
-            "{} already has deskvnc, left as it is",
-            file.display()
-        )]);
+        let path = serde_json::to_string(&exe.display().to_string()).unwrap_or_default();
+        let line = match repoint_toml_command(&text, &path) {
+            Some(edited) => {
+                backup(&file)?;
+                std::fs::write(&file, edited).map_err(|e| format!("{}: {e}", file.display()))?;
+                format!("pointed deskvnc in {} at this dvv", file.display())
+            }
+            None => format!("{} already uses this dvv", file.display()),
+        };
+        return Ok(vec![line, write_skill(&home.join(".codex/skills"))?]);
     }
     if file.exists() {
         backup(&file)?;
@@ -408,25 +527,98 @@ fn codex(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     ])
 }
 
+/// The TOML twin of [`repoint_json_command`]: the `command = "..."` line in
+/// the `[mcp_servers.deskvnc]` table, pointed at `path` (a quoted string).
+pub fn repoint_toml_command(text: &str, path: &str) -> Option<String> {
+    let table = text.find("[mcp_servers.deskvnc]")?;
+    let body = table + text[table..].find('\n')? + 1;
+    let end = text[body..]
+        .find("\n[")
+        .map_or(text.len(), |offset| body + offset);
+    let mut offset = body;
+    for line in text[body..end].split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("command") {
+            let value = rest.trim_start().strip_prefix('=')?.trim();
+            if value == path {
+                return None;
+            }
+            let old: String = serde_json::from_str(value).ok()?;
+            if !names_a_dvv(&old) {
+                return None;
+            }
+            let newline = if line.ends_with("\r\n") {
+                "\r\n"
+            } else if line.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            return Some(format!(
+                "{}command = {path}{newline}{}",
+                &text[..offset],
+                &text[offset + line.len()..]
+            ));
+        }
+        offset += line.len();
+    }
+    None
+}
+
 fn claude(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     let claude = find_agent("claude").ok_or("Claude Code is not installed")?;
-    let status = std::process::Command::new(claude)
-        .args(["mcp", "add", "--scope", "user", "deskvnc", "--"])
-        .arg(exe)
-        .args(["mcp", "--stdio"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| format!("could not run claude: {e}"))?;
+    let run = |args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(&claude)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run claude: {e}"))
+    };
+    let add = || {
+        run(&[
+            "mcp".as_ref(),
+            "add".as_ref(),
+            "--scope".as_ref(),
+            "user".as_ref(),
+            "deskvnc".as_ref(),
+            "--".as_ref(),
+            exe.as_os_str(),
+            "mcp".as_ref(),
+            "--stdio".as_ref(),
+        ])
+    };
     let mut lines = Vec::new();
-    if status.status.success() {
+    let added = add()?;
+    if added.status.success() {
         lines.push("registered deskvnc with claude mcp add".to_string());
     } else {
-        let why = String::from_utf8_lossy(&status.stderr);
-        if why.contains("already exists") {
-            lines.push("deskvnc was already registered with Claude Code".to_string());
-        } else {
+        let why = String::from_utf8_lossy(&added.stderr).to_string();
+        if !why.contains("already exists") {
             return Err(format!("claude mcp add failed: {}", why.trim()));
+        }
+        // Registered already: by this dvv, or by the one an earlier version
+        // installed. `claude mcp get` names the command, and a different one
+        // is replaced so the agent is not left calling a file that is gone.
+        let got = run(&["mcp".as_ref(), "get".as_ref(), "deskvnc".as_ref()])?;
+        let described = String::from_utf8_lossy(&got.stdout).to_string();
+        if described.contains(&exe.display().to_string()) {
+            lines.push("deskvnc is registered with Claude Code and uses this dvv".to_string());
+        } else {
+            run(&[
+                "mcp".as_ref(),
+                "remove".as_ref(),
+                "--scope".as_ref(),
+                "user".as_ref(),
+                "deskvnc".as_ref(),
+            ])?;
+            let again = add()?;
+            if !again.status.success() {
+                return Err(format!(
+                    "claude mcp add failed: {}",
+                    String::from_utf8_lossy(&again.stderr).trim()
+                ));
+            }
+            lines.push("pointed deskvnc in Claude Code at this dvv".to_string());
         }
     }
     lines.push(write_skill(&home.join(".claude/skills"))?);
@@ -438,6 +630,58 @@ mod tests {
     use super::*;
 
     const ENTRY: &str = r#""deskvnc": {}"#;
+
+    #[test]
+    fn a_stale_opencode_entry_is_pointed_at_this_dvv_and_keeps_its_comments() {
+        let text = "{\n  // mine\n  \"mcp\": {\n    \"deskvnc\": { \"type\": \"local\", \"command\": [\"/old/App/dvv\", \"mcp\", \"--stdio\"], \"enabled\": true },\n    \"other\": { \"command\": [\"/x/other\"] }\n  }\n}\n";
+        let out = repoint_json_command(text, "\"/new/dvv\"").unwrap();
+        assert!(out.contains("[\"/new/dvv\", \"mcp\", \"--stdio\"]"));
+        assert!(out.contains("// mine"));
+        assert!(out.contains("\"/x/other\""));
+        assert_eq!(
+            repoint_json_command(&out, "\"/new/dvv\""),
+            None,
+            "already current"
+        );
+    }
+
+    #[test]
+    fn a_windows_path_is_compared_in_its_json_form() {
+        let path = serde_json::to_string(r"C:\Program Files\DeskVNCViewer\dvv.exe").unwrap();
+        let text =
+            format!("{{ \"mcp\": {{ \"deskvnc\": {{ \"command\": [{path}, \"mcp\"] }} }} }}");
+        assert_eq!(repoint_json_command(&text, &path), None);
+        let old = serde_json::to_string(r"C:\Users\x\target\debug\dvv.exe").unwrap();
+        let stale = text.replace(&path, &old);
+        assert_eq!(
+            repoint_json_command(&stale, &path).as_deref(),
+            Some(text.as_str())
+        );
+    }
+
+    #[test]
+    fn a_wrapper_someone_wrote_is_left_alone() {
+        let text =
+            "{ \"mcp\": { \"deskvnc\": { \"command\": [\"/usr/local/bin/my-wrapper\", \"x\"] } } }";
+        assert_eq!(repoint_json_command(text, "\"/new/dvv\""), None);
+    }
+
+    #[test]
+    fn a_remote_entry_does_not_borrow_the_next_entrys_command() {
+        let text = "{ \"mcp\": { \"deskvnc\": { \"type\": \"remote\", \"url\": \"http://x\" }, \"b\": { \"command\": [\"/a/dvv\"] } } }";
+        assert_eq!(repoint_json_command(text, "\"/new/dvv\""), None);
+    }
+
+    #[test]
+    fn a_stale_codex_table_gets_the_new_command_and_nothing_else_moves() {
+        let text = "[model]\nname = \"x\"\n\n[mcp_servers.deskvnc]\ncommand = \"/old/dvv\"\nargs = [\"mcp\", \"--stdio\"]\n\n[mcp_servers.other]\ncommand = \"/old/dvv\"\n";
+        let out = repoint_toml_command(text, "\"/new/dvv\"").unwrap();
+        assert_eq!(
+            out,
+            "[model]\nname = \"x\"\n\n[mcp_servers.deskvnc]\ncommand = \"/new/dvv\"\nargs = [\"mcp\", \"--stdio\"]\n\n[mcp_servers.other]\ncommand = \"/old/dvv\"\n"
+        );
+        assert_eq!(repoint_toml_command(&out, "\"/new/dvv\""), None);
+    }
 
     #[test]
     fn an_mcp_object_gets_the_entry_and_keeps_its_comments() {
