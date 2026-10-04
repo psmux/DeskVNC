@@ -104,8 +104,10 @@ stop_app
 wait_for 30 "the app quitting" plane_down
 python3 "$(dirname "$0")/agent_e2e_mcp.py" mock "$OUT/opencode.png" || fail "the OpenCode route did not work"
 if [ -x "$PI_DIR/opencode" ]; then
-  PATH="$PI_DIR:/usr/bin:/bin" opencode mcp list 2>&1 | tee "$OUT/opencode-mcp-list.txt" | grep -q "deskvnc.*connected" \
-    && pass "opencode mcp list: deskvnc connected" || fail "opencode mcp list does not show deskvnc connected"
+  PATH="$PI_DIR:/usr/bin:/bin" opencode mcp list >"$OUT/opencode-mcp-list.txt" 2>&1 || true
+  grep -q "deskvnc.*connected" "$OUT/opencode-mcp-list.txt" \
+    && pass "opencode mcp list: deskvnc connected" \
+    || fail "opencode mcp list does not show deskvnc connected: $(cat "$OUT/opencode-mcp-list.txt")"
 fi
 
 step "quit the app; Pi's shell commands must start it on its own"

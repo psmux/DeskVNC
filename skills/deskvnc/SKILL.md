@@ -6,13 +6,25 @@ description: Drive real Windows, Linux and macOS desktops through DeskVNC, eithe
 # Driving machines through DeskVNC
 
 DeskVNCViewer holds the sessions and the passwords. You drive them through
-`dvv`, either as MCP tools named `dvv_*` or as the `dvv` command in a shell.
-Use whichever your agent has. Nothing is installed on the remote machine.
+`dvv`. Nothing is installed on the remote machine.
 
-You never need the user to open, reopen or reconnect a machine. Do it
-yourself with the steps below.
+**If you have tools whose names start with `dvv_` (or `deskvnc_dvv_`), use
+them and not the shell.** They hand you the screenshot directly. The `dvv`
+shell commands are for agents without those tools, such as Pi.
 
-## With the shell (Pi, or any agent without MCP)
+You never need the user to open, reopen or reconnect a machine, or to open
+DeskVNCViewer: `dvv` starts it when it is closed. Do it yourself with the
+steps below.
+
+## With the dvv_ tools (OpenCode, Claude Code, Codex and other MCP clients)
+
+`dvv_hosts`, `dvv_limbs`, `dvv_open` with `perceive: true` (a machine's saved
+name works as `hostId`), `dvv_wait` with `until: "connected"`, `dvv_control`
+with `action: "acquire"`, `dvv_screen` (use `scale: 0.5`), `dvv_click`,
+`dvv_type`, `dvv_key`, `dvv_reconnect`, `dvv_close`. Carry the `generation`
+from the screen you read into a click.
+
+## With the shell, only when you have no `dvv_` tools (Pi)
 
 `dvv` is on PATH after `dvv setup`. If it is not, it sits beside the app:
 `/Applications/DeskVNCViewer.app/Contents/MacOS/dvv` on macOS,
@@ -25,7 +37,7 @@ dvv limbs                            # what is open, and its limbId
 dvv open <name or hostId> --perceive # open a machine (keeps it open between commands)
 dvv wait <limbId> --until connected
 dvv control acquire <limbId>         # take control before any click or key
-dvv screen <limbId> --scale 0.5      # prints a path: open that image file to see the screen
+dvv screen <limbId> --scale 0.5 --out ./dvv-screen.png  # then open that image file to see the screen
 dvv click <limbId> <x> <y>           # x and y are REMOTE pixels, see below
 dvv click <limbId> <x> <y> --action double
 dvv type <limbId> "text to type"     # then dvv key <limbId> Enter to submit
@@ -35,17 +47,13 @@ dvv reconnect <limbId>               # if the screen stays black or frozen
 dvv close <limbId>                   # when done
 ```
 
+Save screenshots inside your working folder with `--out`, as above: an agent
+that asks permission for files elsewhere would otherwise stop at every look.
+Delete them when you are done.
+
 Coordinates: `dvv screen` prints an imageSpace line. With `--scale 0.5` a
 point at (mx, my) on the picture is (mx*2, my*2) on the machine. Always
 convert before clicking.
-
-## With MCP tools
-
-Same steps, same names: `dvv_hosts`, `dvv_limbs`, `dvv_open` with
-`perceive: true`, `dvv_wait` with `until: "connected"`, `dvv_control` with
-`action: "acquire"`, `dvv_screen` (use `scale: 0.5`), `dvv_click`, `dvv_type`,
-`dvv_key`, `dvv_reconnect`, `dvv_close`. Carry the `generation` from the
-screen you read into a click.
 
 ## The loop
 
