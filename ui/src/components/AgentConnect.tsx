@@ -1,12 +1,11 @@
 /**
  * How somebody connects an agent, in one modal, in one press.
  *
- * WHAT THIS IS FOR. The agent plane is off in every install and there is
- * nothing on screen to discover it by, which is correct (`AGENT_BRIEF` D2) and
- * leaves exactly one problem: a person who wants it has no idea it is there.
- * This is that door. It is reachable with the plane off, it is the only agent
- * chrome that is, and everything else in the product stays exactly as it was
- * until somebody presses the switch in here.
+ * WHAT THIS IS FOR. The agent plane is on in every install, and the app wires
+ * the agents it finds (OpenCode, Pi, Claude Code, Codex) each time it starts,
+ * so most people never open this. It is here to show what is connected, to
+ * connect again after installing an agent, and to switch the plane off for
+ * somebody who does not want it. Off stays off.
  *
  * WHAT CHANGED, AND WHY IT IS THE WHOLE POINT. This used to hand somebody a
  * command and ask them to go and run it. Asking a person to do work an
@@ -354,9 +353,10 @@ function SetupAgents(): ReactNode {
     <section className="rounded-lg border border-accent/40 bg-accent/10 p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-primary">Connect OpenCode, Pi and Codex</h3>
+          <h3 className="text-sm font-semibold text-primary">OpenCode, Pi, Claude Code and Codex</h3>
           <p className="mt-0.5 text-xs text-secondary">
-            Finds the agents installed on this Mac and sets each one up. Claude Code too, if you have it.
+            Connected automatically each time DeskVNC starts. Installed a new agent just now? Connect it
+            without restarting.
           </p>
         </div>
         <button
@@ -365,7 +365,7 @@ function SetupAgents(): ReactNode {
           className={classNames("btn-primary shrink-0", busy && "opacity-70")}
           onClick={run}
         >
-          {busy ? "Setting up…" : "Set up"}
+          {busy ? "Connecting…" : "Connect now"}
         </button>
       </div>
       <div role="status" aria-live="polite" className="empty:hidden">
@@ -589,8 +589,8 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
               watch and take over whenever you want.
             </p>
             <p className="text-sm text-secondary">
-              None of it exists until you switch it on. With the plane off there is no socket,
-              nothing is listening, and this application behaves exactly as it does now.
+              It is off because it was switched off on this computer. While it is off there is no
+              socket, nothing is listening, and your agents cannot reach your machines.
             </p>
             {plane.error ? (
               <p className="rounded-md border border-warning bg-warning-subtle px-3 py-2 text-xs text-warning">
@@ -604,7 +604,7 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
                 className="btn-primary"
                 onClick={() => setPlaneEnabled(true)}
               >
-                Turn on the agent plane
+                Turn it back on
               </button>
               <span className="text-xs text-tertiary">
                 One socket, on this computer only. Nothing opens on the network.

@@ -1,4 +1,4 @@
-//! The agent plane's shell half: one local socket, off by default.
+//! The agent plane's shell half: one local socket, on unless a person switches it off.
 //!
 //! ## What is here
 //!
@@ -7,11 +7,14 @@
 //! socket, named `dvvp.v1`. [`wire`] is its framing, [`server`] is its verbs,
 //! and this file is the switch, the path and the bookkeeping the panes render.
 //!
-//! ## Off by default, and what "off" has to mean
+//! ## On by default, and what "off" has to mean
 //!
-//! `AGENT_BRIEF` D2 requires the interactive product not to regress and
-//! `00 R40`'s DMG constraints require an ordinary install to be unchanged. So
-//! the setting lives in the store's KV table beside
+//! It was off by default, and almost nobody found the switch, so agents on
+//! Windows and elsewhere simply could not reach anything. It is now on unless
+//! a person switches it off, and the app wires the installed agents to it at
+//! launch. The pipe or socket admits only the user who started the app, so
+//! what this opens is the user's own agents, not the network. The setting
+//! lives in the store's KV table beside
 //! `ALLOW_MULTIPLE_SESSIONS_KEY` and it is read the same way, and **a build
 //! with the plane off creates no socket, spawns no task and opens no file.**
 //! That is asserted rather than asserted about: see the tests at the bottom.
@@ -60,8 +63,10 @@ use server::{Ctx, Peer, RpcError};
 /// The protocol string, which is a hard gate (`04 §2.7` rule 1).
 pub const PROTOCOL: &str = "dvvp.v1";
 
-/// Preference key: is the agent plane switched on? Default **false**, in which
-/// case no socket exists at all.
+/// Preference key: is the agent plane switched on? Default **true**: an agent
+/// on this computer reaches the user's machines with nothing to configure.
+/// Switched off in the AI Agents panel, it stays off, and then no socket
+/// exists at all.
 ///
 /// Lives in the store's KV table rather than the webview for the same reason
 /// `ALLOW_MULTIPLE_SESSIONS_KEY` does: the decision is made here, in Rust, and
@@ -77,13 +82,15 @@ pub const AGENT_PLANE_ENABLED_KEY: &str = "agent_plane_enabled";
 /// table is in `IPC_CONTRACT.md`.
 pub const AGENT_EVENT: &str = "agent://event";
 
-/// Interpret the stored value. Anything but an explicit "on" means off, so a
-/// missing, empty or corrupt setting lands on the safe default, which for a
-/// surface that drives other people's machines is the only defensible one.
+/// Interpret the stored value. On unless a person switched it off, so a fresh
+/// install works with OpenCode, Pi, Claude Code and Codex the moment it is
+/// opened, and asking a user to find a switch first was the step most of them
+/// never took. Only an explicit "off" turns it off, and that is remembered.
 pub fn plane_enabled(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(str::trim),
-        Some("true") | Some("1") | Some("yes") | Some("on")
+    !matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("false") | Some("0") | Some("no") | Some("off")
     )
 }
 
@@ -1785,13 +1792,14 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explicit_on_switches_the_plane_on() {
-        assert!(!plane_enabled(None), "the default is off, always");
-        assert!(!plane_enabled(Some("")));
-        assert!(!plane_enabled(Some("maybe")));
-        assert!(!plane_enabled(Some("false")));
+    fn only_an_explicit_off_switches_the_plane_off() {
+        assert!(plane_enabled(None), "the default is on");
+        assert!(plane_enabled(Some("")));
         for on in ["true", "1", "yes", "on", " on "] {
             assert!(plane_enabled(Some(on)), "{on}");
+        }
+        for off in ["false", "0", "no", "off", " OFF "] {
+            assert!(!plane_enabled(Some(off)), "{off}");
         }
     }
 

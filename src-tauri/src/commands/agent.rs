@@ -265,6 +265,7 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                     "socket": path.display().to_string(),
                 }),
             );
+            wire_agents_in_background();
         }
         Err(e) => {
             // Non fatal, and loud. The interactive product is unaffected by a
@@ -396,17 +397,49 @@ pub async fn agent_register_with_claude() -> Result<agent::RegistrationOutcome, 
 /// agent's config, and hands back what it printed, line for line.
 #[tauri::command]
 pub async fn agent_setup_agents() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(run_setup)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Run the bundled `dvv setup` and hand back what it printed.
+///
+/// Blocking: it waits on `dvv`, which in turn may wait on `claude mcp add`.
+fn run_setup() -> Result<String, String> {
     let dvv = agent::bundled_dvv().ok_or("this build has no dvv beside it")?;
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        std::process::Command::new(dvv).arg("setup").output()
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("dvv setup could not run: {e}"))?;
+    let mut command = std::process::Command::new(dvv);
+    command.arg("setup");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console window flashing up behind the app on every launch.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("dvv setup could not run: {e}"))?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     tracing::info!(ok = output.status.success(), "dvv setup ran");
     Ok(text.trim().to_string())
+}
+
+/// Wire every installed agent to this build, in the background.
+///
+/// Run each time the plane comes up, so nobody has to press anything: an agent
+/// installed since the last launch is picked up, and one still pointing at the
+/// `dvv` of a previous version is pointed at this one. `dvv setup` leaves a
+/// config that already names this `dvv` untouched, so a launch with nothing to
+/// do changes no file. A build with no `dvv` beside it wires nothing.
+fn wire_agents_in_background() {
+    if agent::bundled_dvv().is_none() {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(|| match run_setup() {
+        Ok(text) => tracing::info!("agents wired at launch:\n{text}"),
+        Err(e) => tracing::warn!("could not wire agents at launch: {e}"),
+    });
 }
 
 /// A person takes the wheel of a session an agent is driving (D5, `04 §5.4`).

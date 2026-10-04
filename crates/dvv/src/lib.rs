@@ -85,6 +85,7 @@ pub mod fake;
 pub mod hold;
 pub mod http;
 pub mod jsonrpc;
+pub mod launch;
 pub mod mcp;
 pub mod observation;
 pub mod plane;
