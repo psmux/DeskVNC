@@ -295,10 +295,14 @@ pub fn repoint_json_command(text: &str, path: &str) -> Option<String> {
 }
 
 /// Is this the path of a `dvv` executable, whichever install it came from?
+///
+/// Split on both separators rather than through `Path`, which on macOS and
+/// Linux does not treat `\` as one, so the answer is the same on every
+/// platform for a config written on any of them.
 fn names_a_dvv(path: &str) -> bool {
-    Path::new(path)
-        .file_stem()
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("dvv"))
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+    lower == "dvv" || lower == "dvv.exe"
 }
 
 /// Put an entry inside the top level `"mcp"` object, adding one if there is
