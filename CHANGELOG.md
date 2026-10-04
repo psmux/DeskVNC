@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.8] (2026-10-04)
+
 ### Fixed
 
 * On macOS and Linux, agents installed through nvm, fnm, Volta, asdf, mise,
@@ -2562,7 +2564,8 @@ Core capability at this point:
 - Adaptive quality presets, remote desktop resize, and automatic reconnect with
   backoff and jitter.
 
-[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.7...HEAD
+[Unreleased]: https://github.com/psmux/DeskVNC/compare/v0.27.8...HEAD
+[0.27.8]: https://github.com/psmux/DeskVNC/compare/v0.27.7...v0.27.8
 [0.27.7]: https://github.com/psmux/DeskVNC/compare/v0.27.6...v0.27.7
 [0.27.6]: https://github.com/psmux/DeskVNC/compare/v0.27.5...v0.27.6
 [0.27.5]: https://github.com/psmux/DeskVNC/compare/v0.27.4...v0.27.5
