@@ -70,3 +70,37 @@ async fn deskvnc_driver_receives_boundary_frames_and_obeys_host_consent() {
         host.stop();
     }).await.expect("support driver test timed out");
 }
+
+/// A pairing offered during an attended session reaches the callback DeskVNC
+/// uses to save the computer, and the host saw DeskVNC's lasting identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pairing_reaches_deskvnc_with_the_machine_id_and_its_lasting_identity() {
+    timeout(Duration::from_secs(20), async {
+        let identity = boundary_session::unattended::SecretKey::generate();
+        let expected_peer = identity.public().to_string();
+        let mut host = boundary_session::host(HostOptions { relay: false, relay_url: None, bind_ip: None }, || Ok(Box::new(Fake(Arc::new(AtomicUsize::new(0))))));
+        let ticket = loop { if let Some(Event::Invitation(ticket)) = host.events.recv().await { break ticket; } };
+        let driver = BoundaryDriver::default();
+        driver.set_identity(identity);
+        let (paired_tx, mut paired_rx) = mpsc::channel::<(String, String)>(1);
+        driver.on_paired(Arc::new(move |machine, name| { let _ = paired_tx.try_send((machine, name)); }));
+        let id = driver.prepare(ticket, "DeskVNC helper".into()).unwrap();
+        let (tx, mut rx) = mpsc::channel(32);
+        let handle = driver.spawn("pairing".into(), ConnectOptions::boundary(id), tx).unwrap();
+        let peer = loop {
+            match host.events.recv().await {
+                Some(Event::Approval { answer, .. }) => { answer.send(Approval::Control).ok().unwrap(); }
+                Some(Event::Connected { peer, .. }) => break peer,
+                _ => {}
+            }
+        };
+        assert_eq!(peer, expected_peer, "the host must see DeskVNC's lasting key, or pairing could never match it again");
+        loop { if let Some(SessionEvent::StateChanged(SessionState::Connected)) = rx.recv().await { break; } }
+        let machine = boundary_session::unattended::SecretKey::generate().public().to_string();
+        host.offer_pairing(machine.clone(), "Office PC".into()).unwrap();
+        let (got, name) = paired_rx.recv().await.unwrap();
+        assert_eq!((got.as_str(), name.as_str()), (machine.as_str(), "Office PC"));
+        handle.shutdown();
+        host.stop();
+    }).await.expect("pairing test timed out");
+}
