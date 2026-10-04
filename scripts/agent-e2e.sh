@@ -66,7 +66,7 @@ wait_for() { # seconds, description, command...
 }
 # A dvv that exists before the app has run, for watching the plane. With the
 # AppImage the agents' copy only appears once the app has wired them.
-plane_up() { "${CHECK_DVV:-$DVV}" doctor | grep -q '^ *present'; }
+plane_up() { local out; out=$("${CHECK_DVV:-$DVV}" doctor 2>&1) && grep -q '^ *present' <<<"$out"; }
 plane_down() { ! plane_up; }
 opencode_config() { ls "$HOME/.config/opencode/"opencode.json* 2>/dev/null | head -1; }
 opencode_wired() { local f; f=$(opencode_config) && grep -q '"deskvnc"' "$f" && grep -q "$DVV" "$f"; }
@@ -95,7 +95,8 @@ step "save a machine, as a person does in the app"
 DB="$DATA/deskvnc.db"
 now=$(date +%s)
 sqlite3 "$DB" "insert into hosts (id, friendly_name, address, port, protocol, created_at, updated_at) values ('e2e-mock', 'mock', '127.0.0.1', $MOCK_PORT, 'vnc', $now, $now);"
-"$DVV" hosts | grep -q mock || fail "the saved machine is not listed"
+hosts=$("$DVV" hosts 2>&1) || true
+grep -q mock <<<"$hosts" || fail "the saved machine is not listed: $hosts"
 pass "machine 'mock' saved"
 
 step "quit the app; OpenCode must start it on its own"
