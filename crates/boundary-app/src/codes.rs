@@ -1,11 +1,14 @@
 use eframe::egui;
 use tokio::{sync::oneshot, task::JoinHandle};
 
+use crate::theme;
+
 enum Reply {
     Published(boundary_codes::Lease),
     Resolved(String),
 }
 struct Pending {
+    publish: bool,
     task: JoinHandle<()>,
     reply: oneshot::Receiver<anyhow::Result<Reply>>,
 }
@@ -26,6 +29,31 @@ impl Codes {
     pub fn busy(&self) -> bool {
         self.pending.is_some()
     }
+    /// A code is being created for this computer's invitation.
+    pub fn publishing(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.publish)
+    }
+    /// A code typed by the helper is being looked up.
+    pub fn resolving(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| !p.publish)
+    }
+    /// The numeric code for this computer, as four digit groups.
+    pub fn code(&self) -> Option<String> {
+        self.lease.as_ref().map(|lease| lease.display())
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    /// Whether a code service can be used at all: the shared one, or the
+    /// private one a person set. Private infrastructure never falls back to
+    /// the shared service.
+    pub fn available(&self) -> bool {
+        if self.url.trim().is_empty() {
+            !self.private_required && !boundary_codes::default_service().is_empty()
+        } else {
+            true
+        }
+    }
     pub fn clear(&mut self) {
         self.pending = None;
         self.lease = None;
@@ -33,6 +61,10 @@ impl Codes {
     }
     pub fn resolve(&mut self, value: String) {
         self.start(value, false);
+    }
+    /// Turn this computer's invitation into a short code.
+    pub fn publish(&mut self, ticket: String) {
+        self.start(ticket, true);
     }
     fn start(&mut self, value: String, publish: bool) {
         if self.private_required && self.url.trim().is_empty() {
@@ -49,6 +81,7 @@ impl Codes {
         let (send, reply) = oneshot::channel();
         self.message.clear();
         self.pending = Some(Pending {
+            publish,
             reply,
             task: tokio::spawn(async move {
                 let result = if publish {
@@ -80,40 +113,28 @@ impl Codes {
         }
         None
     }
-    pub fn invitation(&mut self, ui: &mut egui::Ui, ticket: &str) {
-        ui.small("The code service receives this invitation. Use a service you trust.");
-        if let Some(lease) = &self.lease {
-            ui.heading(lease.display());
-            if ui.button("Copy support code").clicked() {
-                ui.ctx().copy_text(lease.display());
-            }
-            ui.small("Share privately. One lookup, expires with this invitation. The helper must use the same code service.");
-        } else if ui
-            .add_enabled(
-                (!self.url.trim().is_empty() || !boundary_codes::default_service().is_empty())
-                    && !self.busy(),
-                egui::Button::new("Create numeric support code"),
-            )
-            .clicked()
-        {
-            self.start(ticket.to_owned(), true);
-        }
-    }
+    /// The code service setting, on the Settings page.
     pub fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("Numeric support codes (optional)", |ui| {
-            ui.label("Private code service URL (optional override)");
-            ui.small("Leave empty for the shared Boundary service. Private infrastructure mode requires an explicit service override.");
-            ui.add_enabled(self.lease.is_none() && !self.busy(), egui::TextEdit::singleline(&mut self.url).hint_text("https://codes.example.com"));
-            ui.small("Both people use the same trusted service. Creating a code uploads the invitation to it. The service can read and replace invitations. Full invitations work without it.");
-        });
-        if self.busy() {
-            ui.label("Contacting support code service…");
-            if ui.button("Cancel code request").clicked() {
-                self.clear();
-            }
-        }
+        theme::muted(
+            ui,
+            "A short code is easier to read out than a full invitation. Both people must use the same code service, and it can read the invitations it is given, so use one you trust.",
+        );
+        ui.add_space(6.0);
+        theme::caption(ui, "Code service URL");
+        ui.add_enabled(
+            self.lease.is_none() && !self.busy(),
+            theme::field(&mut self.url, "https://codes.example.com"),
+        );
+        theme::small(
+            ui,
+            if boundary_codes::default_service().is_empty() {
+                "Leave empty to use full invitations only."
+            } else {
+                "Leave empty for the shared Boundary service. Private infrastructure needs its own service here."
+            },
+        );
         if !self.message.is_empty() {
-            ui.colored_label(egui::Color32::DARK_RED, &self.message);
+            ui.colored_label(theme::BAD, &self.message);
         }
     }
 }
@@ -127,6 +148,7 @@ mod tests {
             private_required: true,
             ..Default::default()
         };
+        assert!(!codes.available());
         codes.resolve("123456789012".into());
         assert!(!codes.busy());
         assert!(codes.message.contains("explicit private code service"));
