@@ -45,8 +45,8 @@ no account, no telemetry, and no paid tier holding a feature back.
 ### Need to support someone outside your network?
 
 Download **DeskVNC Support** from the same release page and send it to the
-person who needs help. They open it, press **Create invitation**, and approve
-your connection. You open **Boundary support** in DeskVNC, paste the invitation,
+person who needs help. They open it, press **Get a code** (or **Create
+invitation** when no code service is configured), and approve your connection. You open **Boundary support** in DeskVNC, paste the invitation,
 and connect. Boundary tries a direct encrypted path first and uses its relay
 fallback when the networks do not allow a direct path.
 

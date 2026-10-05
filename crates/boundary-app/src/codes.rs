@@ -134,7 +134,7 @@ impl Codes {
             },
         );
         if !self.message.is_empty() {
-            ui.colored_label(theme::BAD, &self.message);
+            ui.colored_label(theme::pal(ui.ctx()).danger, &self.message);
         }
     }
 }

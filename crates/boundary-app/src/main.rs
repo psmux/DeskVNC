@@ -261,8 +261,11 @@ impl App {
                             self.codes.publish(ticket.clone());
                         }
                         self.invitation = ticket;
-                        self.status =
-                            "Waiting for your helper. The code expires in 10 minutes".into();
+                        self.status = if self.codes.available() {
+                            "Waiting for your helper. The code expires in 10 minutes".into()
+                        } else {
+                            "Waiting for your helper. The invitation expires in 10 minutes".into()
+                        };
                     }
                     Event::Approval { name, peer, answer } => {
                         self.approved_name = name.clone();
@@ -332,7 +335,7 @@ impl App {
     /// Allow remote control: the code this computer is reached by.
     fn share_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
-            ui.set_min_height(360.0);
+            ui.set_min_height(ui.available_height().max(360.0));
             theme::title(ui, "Allow remote control");
             theme::muted(
                 ui,
@@ -361,7 +364,7 @@ impl App {
                         "After granting it, quit and reopen Boundary if sharing still fails.",
                     );
                 } else if self.displays.is_empty() {
-                    ui.colored_label(theme::BAD, "No display found to share.");
+                    ui.colored_label(theme::pal(ui.ctx()).danger, "No display found to share.");
                 } else {
                     let can = !self.codes.busy() && self.network_error.is_none();
                     let label = if with_codes {
@@ -372,7 +375,8 @@ impl App {
                     if ui
                         .add_enabled(
                             can,
-                            theme::primary(label).min_size(egui::vec2(ui.available_width(), 46.0)),
+                            theme::primary(ui, label)
+                                .min_size(egui::vec2(ui.available_width(), 46.0)),
                         )
                         .clicked()
                     {
@@ -401,7 +405,7 @@ impl App {
                     self.codes.clear();
                 }
             } else if let Some(code) = self.codes.code() {
-                if theme::value_box(ui, &code, 30.0) {
+                if theme::value_box(ui, &code, 26.0) {
                     ui.ctx().copy_text(code.clone());
                 }
                 theme::small(
@@ -415,15 +419,19 @@ impl App {
                     ui.ctx().copy_text(self.invitation.clone());
                 }
             } else {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.invitation.as_str())
-                        .font(egui::TextStyle::Small)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
-                );
+                egui::ScrollArea::vertical()
+                    .max_height(84.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.invitation.as_str())
+                                .font(egui::TextStyle::Small)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
                 if ui
                     .add(
-                        theme::primary("Copy invitation")
+                        theme::primary(ui, "Copy invitation")
                             .min_size(egui::vec2(ui.available_width(), 42.0)),
                     )
                     .clicked()
@@ -435,7 +443,7 @@ impl App {
                     "Send it in any chat and keep it private. It is valid for one session.",
                 );
                 if !self.codes.message().is_empty() {
-                    ui.colored_label(theme::BAD, self.codes.message());
+                    ui.colored_label(theme::pal(ui.ctx()).danger, self.codes.message());
                 }
             }
             if !idle && self.hosting && ui.small_button("Cancel").clicked() {
@@ -466,32 +474,35 @@ impl App {
                 theme::caption(ui, "Unattended access");
                 if self.unattended.enabled() {
                     ui.colored_label(
-                        theme::GOOD,
+                        theme::pal(ui.ctx()).success,
                         if self.unattended.reachable() {
                             "On"
                         } else {
                             "Starting"
                         },
                     );
+                } else {
+                    theme::muted(ui, "Off");
+                }
+                if ui.small_button("Change").clicked() {
+                    self.page = Page::Settings;
+                }
+            });
+            if self.unattended.enabled() {
+                ui.horizontal(|ui| {
+                    theme::small(ui, "This computer's ID");
                     ui.monospace(unattended::short(self.unattended.machine_id()));
                     if ui.small_button("Copy ID").clicked() {
                         ui.ctx().copy_text(self.unattended.machine_id().to_owned());
                     }
-                } else {
-                    theme::muted(ui, "Off");
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Change").clicked() {
-                        self.page = Page::Settings;
-                    }
                 });
-            });
+            }
         });
     }
     /// Control remote computer: where the other side's code goes.
     fn connect_card(&mut self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
-            ui.set_min_height(360.0);
+            ui.set_min_height(ui.available_height().max(360.0));
             theme::title(ui, "Control remote computer");
             theme::muted(
                 ui,
@@ -503,7 +514,7 @@ impl App {
                 theme::caption(ui, "Partner code or ID");
                 ui.add(
                     theme::field(&mut self.ticket, "1234 5678 9012")
-                        .font(egui::FontId::monospace(20.0))
+                        .font(egui::FontId::monospace(17.0))
                         .char_limit(16384),
                 );
                 let machine =
@@ -527,7 +538,8 @@ impl App {
                 if ui
                     .add_enabled(
                         ready,
-                        theme::primary("Connect").min_size(egui::vec2(ui.available_width(), 46.0)),
+                        theme::primary(ui, "Connect")
+                            .min_size(egui::vec2(ui.available_width(), 46.0)),
                     )
                     .clicked()
                 {
@@ -544,7 +556,7 @@ impl App {
                 });
             }
             if !self.hosting && !self.codes.message().is_empty() {
-                ui.colored_label(theme::BAD, self.codes.message());
+                ui.colored_label(theme::pal(ui.ctx()).danger, self.codes.message());
             }
             if let Some((machine, name)) = self.paired.clone() {
                 ui.add_space(12.0);
@@ -604,7 +616,7 @@ impl App {
                 ui.add_space(6.0);
                 theme::muted(ui, self.network.label());
                 if let Some(error) = &self.network_error {
-                    ui.colored_label(theme::BAD, error);
+                    ui.colored_label(theme::pal(ui.ctx()).danger, error);
                 }
                 if ui
                     .add_enabled(
@@ -822,14 +834,14 @@ impl eframe::App for App {
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::CARD)
+                    .fill(theme::pal(ui.ctx()).surface)
                     .inner_margin(Margin::symmetric(24, 10)),
             )
             .show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(theme::PAGE)
+                    .fill(theme::pal(ui.ctx()).canvas)
                     .inner_margin(Margin::symmetric(24, 14)),
             )
             .show(ui, |ui| self.content(ui));
@@ -841,18 +853,18 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let color = if self.error {
-                theme::BAD
+                theme::pal(ui.ctx()).danger
             } else if self.connected || self.session.is_none() {
-                theme::GOOD
+                theme::pal(ui.ctx()).success
             } else {
-                theme::WARN
+                theme::pal(ui.ctx()).warning
             };
             theme::dot(ui, color);
-            ui.label(RichText::new(&self.status).color(theme::TEXT));
+            ui.label(RichText::new(&self.status).color(theme::pal(ui.ctx()).text));
             if let Some(session) = &self.session {
                 let connectivity = session.connectivity.borrow();
                 if let Some(warning) = &connectivity.warning {
-                    ui.colored_label(theme::WARN, warning);
+                    ui.colored_label(theme::pal(ui.ctx()).warning, warning);
                 }
                 if self.connected
                     && let Some(route) = connectivity.route
@@ -883,15 +895,17 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("Boundary")
-                    .size(26.0)
-                    .strong()
-                    .color(theme::TEXT),
+                    .font(egui::FontId::new(
+                        20.0,
+                        egui::FontFamily::Name("system-bold".into()),
+                    ))
+                    .color(theme::pal(ui.ctx()).text),
             );
             ui.add_space(4.0);
             theme::muted(ui, "Remote support");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.session.is_some() {
-                    if ui.add(theme::danger("End session")).clicked() {
+                    if ui.add(theme::danger(ui, "End session")).clicked() {
                         self.stop();
                     }
                 } else if self.page == Page::Settings {
@@ -924,7 +938,7 @@ impl App {
                     ui.set_width(420.0);
                     ui.label(
                         RichText::new(format!("{} wants to see your screen.", pending.name))
-                            .size(17.0),
+                            .size(15.0),
                     );
                     theme::small(ui, "The name is supplied by the helper. Confirm it with the person you invited.");
                     ui.add_space(6.0);
@@ -935,7 +949,7 @@ impl App {
                         if ui
                             .add_enabled(
                                 self.input_permission,
-                                theme::primary("Allow viewing and control"),
+                                theme::primary(ui, "Allow viewing and control"),
                             )
                             .clicked()
                         {
