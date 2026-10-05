@@ -225,7 +225,7 @@ impl Unattended {
         let control = active.control;
         let mut end = false;
         egui::Frame::new()
-            .fill(theme::BAD)
+            .fill(theme::pal(ui.ctx()).danger)
             .inner_margin(14.0)
             .corner_radius(10.0)
             .show(ui, |ui| {
@@ -385,7 +385,11 @@ impl Unattended {
         }
         if !self.message.is_empty() {
             ui.colored_label(
-                if self.error { theme::BAD } else { theme::GOOD },
+                if self.error {
+                    theme::pal(ui.ctx()).danger
+                } else {
+                    theme::pal(ui.ctx()).success
+                },
                 &self.message,
             );
         }
