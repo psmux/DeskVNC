@@ -15,6 +15,8 @@ use boundary_session::{
 use eframe::egui;
 use std::path::PathBuf;
 
+use crate::theme;
+
 /// A helper connected with nobody's approval, held so the person at the
 /// computer can see it and end it.
 pub struct Active {
@@ -142,6 +144,17 @@ impl Unattended {
     pub fn is_paired(&self, peer: &str) -> bool {
         self.access.helpers.iter().any(|h| h.id == peer)
     }
+    pub fn enabled(&self) -> bool {
+        self.access.enabled
+    }
+    /// This computer's lasting ID, the one a helper saves.
+    pub fn machine_id(&self) -> &str {
+        &self.machine
+    }
+    /// Whether the listener has confirmed it can be found by that ID.
+    pub fn reachable(&self) -> bool {
+        self.reachable
+    }
     /// Drain the listener. `true` when a helper has just come in, so the
     /// caller brings the window forward.
     pub fn poll(&mut self) -> bool {
@@ -212,9 +225,9 @@ impl Unattended {
         let control = active.control;
         let mut end = false;
         egui::Frame::new()
-            .fill(egui::Color32::from_rgb(170, 40, 40))
-            .inner_margin(12.0)
-            .corner_radius(6.0)
+            .fill(theme::BAD)
+            .inner_margin(14.0)
+            .corner_radius(10.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -244,96 +257,143 @@ impl Unattended {
             self.say(format!("Ended {name}'s session"));
         }
     }
-    /// The Unattended access settings.
+    /// The Unattended access settings, drawn inside a card on the Settings
+    /// page.
     pub fn settings(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Unattended access")
-            .default_open(self.access.enabled)
-            .show(ui, |ui| {
-                ui.label("Let people you trust connect to this computer when nobody is here to approve. Off unless you switch it on.");
-                ui.add_space(6.0);
-                let mut enabled = self.access.enabled;
-                if ui.checkbox(&mut enabled, "Allow unattended access to this computer").changed() {
-                    self.access.enabled = enabled;
-                    if self.save() {
-                        if enabled { self.start(); } else { self.halt(); self.say("Unattended access is off. Nobody can connect without your approval"); }
-                    }
+        theme::muted(
+            ui,
+            "Let people you trust connect to this computer when nobody is here to approve. Off unless you switch it on.",
+        );
+        ui.add_space(6.0);
+        let mut enabled = self.access.enabled;
+        if ui
+            .checkbox(&mut enabled, "Allow unattended access to this computer")
+            .changed()
+        {
+            self.access.enabled = enabled;
+            if self.save() {
+                if enabled {
+                    self.start();
+                } else {
+                    self.halt();
+                    self.say("Unattended access is off. Nobody can connect without your approval");
                 }
-                if self.access.enabled {
-                    ui.horizontal(|ui| {
-                        ui.label(if self.reachable { "Reachable as" } else { "This computer's ID" });
-                        ui.monospace(short(&self.machine));
-                        if ui.button("Copy ID").clicked() {
-                            ui.ctx().copy_text(self.machine.clone());
+            }
+        }
+        if self.access.enabled {
+            ui.add_space(4.0);
+            theme::caption(
+                ui,
+                if self.reachable {
+                    "This computer's ID, reachable now"
+                } else {
+                    "This computer's ID"
+                },
+            );
+            if theme::value_box(ui, &short(&self.machine), 16.0) {
+                ui.ctx().copy_text(self.machine.clone());
+            }
+            theme::small(
+                ui,
+                "Copy gives the whole ID. A helper enters it as the partner ID, with the unattended password unless they were paired here.",
+            );
+        }
+        let mut autostart = self.autostart;
+        if ui
+            .checkbox(
+                &mut autostart,
+                "Start Boundary when I sign in, so it is ready",
+            )
+            .changed()
+        {
+            match autostart::set(autostart) {
+                Ok(()) => self.autostart = autostart,
+                Err(error) => self.fail(format!("{error:#}")),
+            }
+        }
+        ui.add_space(10.0);
+        theme::caption(ui, "Paired helpers");
+        if self.access.helpers.is_empty() {
+            theme::small(
+                ui,
+                "None yet. During a support session, choose Let them connect any time to pair the helper.",
+            );
+        }
+        let mut remove = None;
+        let mut changed = false;
+        for (index, helper) in self.access.helpers.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(&helper.name);
+                ui.small(short(&helper.id));
+                changed |= ui.checkbox(&mut helper.control, "may control").changed();
+                if ui.button("Remove").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            let gone = self.access.helpers.remove(index);
+            changed = true;
+            self.say(format!("{} can no longer connect unattended", gone.name));
+        }
+        if changed {
+            self.save();
+        }
+        ui.add_space(10.0);
+        theme::caption(ui, "Unattended password");
+        theme::small(
+            ui,
+            format!(
+                "Optional. Lets a helper who was never paired connect with this computer's ID and the password. At least {MIN_PASSWORD} characters. Five wrong tries pause it for 15 minutes."
+            ),
+        );
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.password)
+                    .password(true)
+                    .hint_text("New password")
+                    .desired_width(180.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.confirm)
+                    .password(true)
+                    .hint_text("Repeat it")
+                    .desired_width(180.0),
+            );
+            if ui.button("Set password").clicked() {
+                if self.password != self.confirm {
+                    self.fail("The two passwords differ".into());
+                } else {
+                    match self.access.set_password(Some(&self.password)) {
+                        Ok(()) => {
+                            if self.save() {
+                                self.say("Unattended password set");
+                            }
                         }
-                    });
-                }
-                let mut autostart = self.autostart;
-                if ui.checkbox(&mut autostart, "Start Boundary when I sign in, so it is ready").changed() {
-                    match autostart::set(autostart) {
-                        Ok(()) => self.autostart = autostart,
                         Err(error) => self.fail(format!("{error:#}")),
                     }
                 }
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Paired helpers").strong());
-                if self.access.helpers.is_empty() {
-                    ui.small("None yet. During a support session, choose Let them connect any time to pair the helper.");
-                }
-                let mut remove = None;
-                let mut changed = false;
-                for (index, helper) in self.access.helpers.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(&helper.name);
-                        ui.small(short(&helper.id));
-                        changed |= ui.checkbox(&mut helper.control, "may control").changed();
-                        if ui.button("Remove").clicked() { remove = Some(index); }
-                    });
-                }
-                if let Some(index) = remove {
-                    let gone = self.access.helpers.remove(index);
-                    changed = true;
-                    self.say(format!("{} can no longer connect unattended", gone.name));
-                }
-                if changed {
-                    self.save();
-                }
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Unattended password").strong());
-                ui.small(format!("Optional. Lets a helper who was never paired connect with this computer's ID and the password. At least {MIN_PASSWORD} characters. Five wrong tries pause it for 15 minutes."));
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true).hint_text("New password").desired_width(180.0));
-                    ui.add(egui::TextEdit::singleline(&mut self.confirm).password(true).hint_text("Repeat it").desired_width(180.0));
-                    if ui.button("Set password").clicked() {
-                        if self.password != self.confirm {
-                            self.fail("The two passwords differ".into());
-                        } else {
-                            match self.access.set_password(Some(&self.password)) {
-                                Ok(()) => {
-                                    if self.save() { self.say("Unattended password set"); }
-                                }
-                                Err(error) => self.fail(format!("{error:#}")),
-                            }
-                        }
-                        self.password.clear();
-                        self.confirm.clear();
-                    }
-                });
-                if self.access.has_password() && ui.button("Remove the password").clicked() {
-                    let _ = self.access.set_password(None);
-                    if self.save() { self.say("Unattended password removed"); }
-                }
-                if !self.message.is_empty() {
-                    ui.colored_label(
-                        if self.error { egui::Color32::from_rgb(170, 40, 40) } else { egui::Color32::from_rgb(30, 90, 80) },
-                        &self.message,
-                    );
-                }
-            });
+                self.password.clear();
+                self.confirm.clear();
+            }
+        });
+        if self.access.has_password() && ui.button("Remove the password").clicked() {
+            let _ = self.access.set_password(None);
+            if self.save() {
+                self.say("Unattended password removed");
+            }
+        }
+        if !self.message.is_empty() {
+            ui.colored_label(
+                if self.error { theme::BAD } else { theme::GOOD },
+                &self.message,
+            );
+        }
     }
 }
 
 /// An ID shortened for display; the Copy button gives the whole one.
-fn short(id: &str) -> String {
+pub fn short(id: &str) -> String {
     if id.len() > 16 {
         format!("{}…{}", &id[..8], &id[id.len() - 8..])
     } else {
