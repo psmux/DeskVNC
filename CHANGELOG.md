@@ -10,6 +10,44 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.9] (2026-10-05)
+
+### Added
+
+* Unattended access in DeskVNC Support. During a session the person being
+  helped can let that helper connect any time, and the helper's computer is
+  told this computer's ID to save. An Unattended access section turns it on or
+  off, shows the ID, lists paired helpers and whether each may control, sets or
+  removes an unattended password, and starts the app at sign in. While a helper
+  is in with nobody's approval, a red banner says who, and one button ends it.
+* DeskVNC opens paired and unattended Boundary computers from the Library like
+  any other machine, with one lasting helper identity so a computer that paired
+  it recognises it next time. The Boundary dialog adds a computer by its ID,
+  with an optional password kept in the keychain.
+* A Windows build of DeskVNC Support is attached to the release alongside the
+  macOS one.
+
+### Changed
+
+* DeskVNC Support opens on the screen people know from other remote support
+  tools: Allow remote control on the left with one button and a large code or
+  invitation to copy, Control remote computer on the right with a partner code
+  field and a Connect button, a status bar at the bottom, and everything else
+  behind Settings. It uses DeskVNC's colours and the system font, in light or
+  dark with the operating system.
+* The partner field in DeskVNC Support also takes a computer's ID for
+  unattended access, and the app keeps a lasting helper identity so pairing
+  works from it too.
+* With a code service configured, the short code appears on its own as soon as
+  the invitation exists, instead of after a second button press.
+
+### Fixed
+
+* On a scaled Windows display a helper's pointer landed in the wrong place;
+  clicks now go where the helper clicked.
+* Boundary name lookups ask the operating system first. iroh's own resolver
+  timed out on a Windows PC with a VPN and a disconnected Wi-Fi adapter.
+
 ## [0.27.8] (2026-10-04)
 
 ### Fixed

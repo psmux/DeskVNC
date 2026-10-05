@@ -60,10 +60,11 @@ No account is required for an attended support session. Screen Recording and
 Accessibility permissions are requested on macOS when sharing or control needs
 them. The recipient can revoke control or end the session at any time.
 
-DeskVNC Support is currently a macOS preview. Windows and Linux support apps,
-unattended access, browser access and automatic private provider deployment are
-still in development. The release page contains the runnable support app and
-the repository's `14-support-codes.md` file documents private code services.
+DeskVNC Support ships for macOS, signed and notarized, and for Windows, where
+it is unsigned and SmartScreen asks you to confirm. A Linux support app,
+browser access and automatic private provider deployment are still in
+development. The release page contains the runnable support apps and the
+repository's `14-support-codes.md` file documents private code services.
 
 Addresses can be written the way you already think of them: `10.0.0.4`,
 `10.0.0.4:5901`, `rdp://frontdesk`, `ssh://ops@jump-01`. If you do not know the

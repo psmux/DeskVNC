@@ -190,9 +190,9 @@ jobs:
             your PC", and you continue with **More info** then **Run anyway**.
             **Linux** packages are unsigned.
 
-            On macOS, **DeskVNC Support** is also attached for people who need
-            to receive help. Download it on the computer being supported,
-            create an invitation, and share the displayed code or invitation.
+            **DeskVNC Support** is also attached, for macOS and Windows, for
+            people who need to receive help. Download it on the computer being
+            supported, press Get a code, and share the code or invitation.
 
             Full changes in [CHANGELOG.md](https://github.com/psmux/DeskVNC/blob/main/CHANGELOG.md).
           releaseDraft: true
@@ -281,6 +281,33 @@ jobs:
           path: |
             DeskVNC-Support-macOS.zip
             SHA256SUMS-DeskVNC-Support-macOS.txt
+
+      # The same app for Windows. It is unsigned, like the viewer's installer,
+      # so SmartScreen asks once; the zip carries the checksum beside it.
+      - name: Build and package the DeskVNC Support recipient app for Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p boundary --target x86_64-pc-windows-msvc
+          mkdir -p support
+          cp target/x86_64-pc-windows-msvc/release/boundary.exe "support/DeskVNC Support.exe"
+          (cd support && 7z a -tzip ../DeskVNC-Support-Windows.zip "DeskVNC Support.exe")
+          sha256sum DeskVNC-Support-Windows.zip | tee SHA256SUMS-DeskVNC-Support-Windows.txt
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            gh release upload "${GITHUB_REF_NAME}"               DeskVNC-Support-Windows.zip               SHA256SUMS-DeskVNC-Support-Windows.txt --clobber
+          fi
+
+      - name: Upload the Windows DeskVNC Support artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskvnc-support-windows
+          path: |
+            DeskVNC-Support-Windows.zip
+            SHA256SUMS-DeskVNC-Support-Windows.txt
 
       # Fail loudly rather than shipping something users cannot open. The
       # bundler only warns when notarization credentials are missing, so
@@ -421,7 +448,7 @@ jobs:
           # Name the platforms rather than counting files, so a partial upload
           # is caught here instead of by whoever downloads the gap.
           missing=0
-          for want in 'DeskVNC-Support-macOS.zip' '.dmg' '.msi' '-setup.exe' '.deb' '.AppImage'; do
+          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' '.dmg' '.msi' '-setup.exe' '.deb' '.AppImage'; do
             if ! grep -qF "$want" /tmp/assets.txt; then
               echo "::error::release $TAG is missing an asset matching '$want'"
               missing=1
