@@ -21,6 +21,10 @@ jobs:
     # accessible by integration".
     permissions:
       contents: write
+    # Code sign Windows binaries on release tags.
+    environment: ${{ github.ref_type == 'tag' && 'windows-signing' || '' }}
+    env:
+      CERTUM_CONFIGURED: ${{ github.ref_type == 'tag' && secrets.CERTUM_USERNAME != '' && secrets.CERTUM_TOTP_SECRET != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +54,14 @@ jobs:
             artifact: macos-universal
 
     steps:
+      # A release tag ships a signed Windows build or nothing.
+      - name: Require Windows signing for a release
+        if: runner.os == 'Windows' && github.ref_type == 'tag' && env.CERTUM_CONFIGURED != 'true'
+        shell: bash
+        run: |
+          echo "::error::Windows signing is not configured, and a release must be signed."
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -150,6 +162,41 @@ jobs:
             exit 1
           fi
 
+      # Code sign Windows binaries on release tags.
+      - name: Log in to Certum SimplySign
+        id: certum
+        if: runner.os == 'Windows' && env.CERTUM_CONFIGURED == 'true'
+        uses: jay0lee/certum-cloud-code-sign@a3324503499c49090869856eeeecfe95fb613d87 # v1, reviewed 2026-10-07
+        with:
+          username: ${{ secrets.CERTUM_USERNAME }}
+          totp_secret: ${{ secrets.CERTUM_TOTP_SECRET }}
+          totp_algorithm: ${{ vars.CERTUM_TOTP_ALGORITHM || 'SHA-256' }}
+          cert_sha1: ${{ vars.CERTUM_CERT_SHA1 }}
+
+      # Hand the certificate to the Tauri bundler, which then signs the app,
+      # the NSIS installer and its uninstaller, and the MSI. The config goes
+      # in the runner's temp directory rather than the checkout, so the clean
+      # source check still holds. The dvv sidecar is signed here as well,
+      # before the bundler copies it into the installers.
+      - name: Prepare Windows signing
+        if: steps.certum.outcome == 'success'
+        shell: pwsh
+        env:
+          SIGNTOOL: ${{ steps.certum.outputs.signtool-path }}
+          CERTUM_THUMBPRINT: ${{ steps.certum.outputs.cert-thumbprint }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signArgs = @('sign', '/sha1', $env:CERTUM_THUMBPRINT, '/tr', 'http://time.certum.pl',
+                        '/td', 'SHA256', '/fd', 'SHA256', '/d', 'DeskVNCViewer')
+          $conf = @{ bundle = @{ windows = @{ signCommand = @{ cmd = $env:SIGNTOOL; args = $signArgs + '%1' } } } }
+          $path = Join-Path $env:RUNNER_TEMP 'windows-sign.conf.json'
+          $conf | ConvertTo-Json -Depth 6 | Set-Content -Path $path -Encoding utf8
+          Add-Content $env:GITHUB_ENV "WINDOWS_SIGN_CONFIG=--config $path"
+          Add-Content $env:GITHUB_ENV "SIGNTOOL=$env:SIGNTOOL"
+          Add-Content $env:GITHUB_ENV "CERTUM_THUMBPRINT=$env:CERTUM_THUMBPRINT"
+          & $env:SIGNTOOL @signArgs 'src-tauri/binaries/dvv-x86_64-pc-windows-msvc.exe'
+          if ($LASTEXITCODE -ne 0) { throw "signtool could not sign dvv.exe" }
+
       # tauri-action runs the frontend build via beforeBuildCommand, bundles
       # for the host platform, and on a tag creates a draft release.
       #
@@ -164,7 +211,8 @@ jobs:
       # The bundler falls back to an ad-hoc signature there instead of failing,
       # so contributor PRs still build.
       #
-      # Windows and Linux are intentionally unsigned. Populate the secrets with
+      # Windows is signed by the two steps above when the Certum secrets are
+      # set, and Linux is unsigned. The macOS secrets come from
       # scripts/setup-github-signing-secrets.sh.
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -177,7 +225,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          args: --target ${{ matrix.bundle-target }} --config src-tauri/tauri.release.conf.json -- --locked
+          args: --target ${{ matrix.bundle-target }} --config src-tauri/tauri.release.conf.json ${{ env.WINDOWS_SIGN_CONFIG }} -- --locked
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
           releaseBody: |
@@ -186,8 +234,7 @@ jobs:
             edited; see docs/INSTALL.md for the current guidance.
 
             **macOS** is signed and notarized, so it opens normally.
-            **Windows** is unsigned: SmartScreen will say "Windows protected
-            your PC", and you continue with **More info** then **Run anyway**.
+            ${{ env.CERTUM_CONFIGURED == 'true' && '**Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.' || '**Windows** is unsigned: SmartScreen will say "Windows protected your PC", and you continue with **More info** then **Run anyway**.' }}
             **Linux** packages are unsigned.
 
             **DeskVNC Support** is also attached, for macOS and Windows, for
@@ -282,16 +329,29 @@ jobs:
             DeskVNC-Support-macOS.zip
             SHA256SUMS-DeskVNC-Support-macOS.txt
 
-      # The same app for Windows. It is unsigned, like the viewer's installer,
-      # so SmartScreen asks once; the zip carries the checksum beside it.
-      - name: Build and package the DeskVNC Support recipient app for Windows
+      # The same app for Windows, signed with the viewer's certificate when
+      # signing is configured. The zip carries the checksum beside it.
+      - name: Build the DeskVNC Support recipient app for Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo build --locked --release -p boundary --target x86_64-pc-windows-msvc
+
+      - name: Sign the DeskVNC Support recipient app for Windows
+        if: runner.os == 'Windows' && steps.certum.outcome == 'success'
+        shell: pwsh
+        run: |
+          & $env:SIGNTOOL sign /sha1 $env:CERTUM_THUMBPRINT /tr http://time.certum.pl `
+            /td SHA256 /fd SHA256 /d "DeskVNC Support" `
+            target/x86_64-pc-windows-msvc/release/boundary.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool could not sign DeskVNC Support" }
+
+      - name: Package the DeskVNC Support recipient app for Windows
         if: runner.os == 'Windows'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          cargo build --locked --release -p boundary --target x86_64-pc-windows-msvc
           mkdir -p support
           cp target/x86_64-pc-windows-msvc/release/boundary.exe "support/DeskVNC Support.exe"
           (cd support && 7z a -tzip ../DeskVNC-Support-Windows.zip "DeskVNC Support.exe")
@@ -405,6 +465,39 @@ jobs:
             for f in $p; do [ -e "$f" ] && cp "$f" dist/ ; done
           done
           echo "Collected:"; ls -la dist
+
+      # Every Windows file a user runs, checked against the Windows trust
+      # chain. When signing is configured a missing signature fails the build
+      # rather than shipping a file SmartScreen blocks. A build run by hand is
+      # unsigned on purpose and this only says so.
+      - name: Verify the Windows build is signed
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist/*.exe, dist/*.msi) +
+                   @(Get-Item target/x86_64-pc-windows-msvc/release/deskvncviewer.exe,
+                              src-tauri/binaries/dvv-x86_64-pc-windows-msvc.exe,
+                              target/x86_64-pc-windows-msvc/release/boundary.exe)
+          if ($env:CERTUM_CONFIGURED -ne 'true') {
+            # A release tag never ships unsigned.
+            if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              Write-Host "::error::Windows signing is not configured, and a release must be signed."
+              exit 1
+            }
+            Write-Host "Not a release tag, so the Windows build is unsigned on purpose."
+            exit 0
+          }
+          $bad = 0
+          foreach ($f in $files) {
+            & $env:SIGNTOOL verify /pa /q $f.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::not signed: $($f.Name)"; $bad = 1 }
+            else { Write-Host "signed: $($f.Name)" }
+          }
+          if ($bad) { exit 1 }
+
+      - name: Log out of Certum SimplySign
+        if: always() && steps.certum.outcome != 'skipped'
+        uses: jay0lee/certum-cloud-code-sign/teardown@a3324503499c49090869856eeeecfe95fb613d87
 
       - name: Checksums
         shell: bash
