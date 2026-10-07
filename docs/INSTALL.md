@@ -51,29 +51,21 @@ On first use the app asks for two permissions:
 
 ## Windows
 
-**The installer is not code signed**, so Windows SmartScreen shows a blue
-dialog reading "Windows protected your PC" and "Windows Defender SmartScreen
-prevented an unrecognised app from starting".
+From 0.27.10 the installer, the MSI and the app inside them are code signed by
+**Open Source Developer Godwin Josh**, with a certificate from Certum. Windows
+shows that name as the publisher when it asks to install.
 
-To install anyway: click **More info**, then **Run anyway**.
+The certificate is new, and SmartScreen builds reputation from a certificate
+plus download volume. Until it has seen enough downloads it may still show
+"Windows protected your PC". The publisher line in that dialog should read
+Open Source Developer Godwin Josh. Click **More info**, then **Run anyway**.
 
-That warning means the publisher is unrecognised, not that anything harmful was
-detected. SmartScreen builds reputation from an Authenticode certificate plus
-download volume, and this project has neither yet. Signing requires a
-commercial certificate, and an Extended Validation certificate to skip the
-reputation-building period entirely.
+To check a download yourself, right click it, open **Properties**, then
+**Digital Signatures**, or compare the checksum published with the release:
+`certutil -hashfile DeskVNCViewer_<version>_x64-setup.exe SHA256`
 
-If clicking through an unknown-publisher warning is not acceptable in your
-environment, the honest options are:
-
-1. **Verify the checksum first** against the value published with the release,
-   then decide. `certutil -hashfile DeskVNCViewer_<version>_x64-setup.exe SHA256`
-2. **Build from source.** See the README. You get the same binary, compiled by
-   you.
-3. **Wait for a signed release.** Tracked, but not scheduled.
-
-The MSI is provided for Group Policy and other deployment tooling. It is
-equally unsigned.
+The MSI is provided for Group Policy and other deployment tooling, and is
+signed the same way. Releases before 0.27.10 are unsigned.
 
 ## Linux
 

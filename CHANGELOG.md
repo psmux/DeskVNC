@@ -10,6 +10,15 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.27.10] (2026-10-07)
+
+### Changed
+
+* The Windows downloads are now code signed by Open Source Developer Godwin
+  Josh, through Certum. That covers the setup exe, the MSI, the app inside them,
+  dvv and DeskVNC Support. SmartScreen may still ask once while the new
+  certificate builds a reputation.
+
 ## [0.27.9] (2026-10-05)
 
 ### Added
