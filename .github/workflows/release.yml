@@ -474,10 +474,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $files = @(Get-ChildItem dist/*.exe, dist/*.msi) +
-                   @(Get-Item target/x86_64-pc-windows-msvc/release/deskvncviewer.exe,
-                              src-tauri/binaries/dvv-x86_64-pc-windows-msvc.exe,
-                              target/x86_64-pc-windows-msvc/release/boundary.exe)
           if ($env:CERTUM_CONFIGURED -ne 'true') {
             # A release tag never ships unsigned.
             if ($env:GITHUB_REF_TYPE -eq 'tag') {
@@ -487,11 +483,28 @@ jobs:
             Write-Host "Not a release tag, so the Windows build is unsigned on purpose."
             exit 0
           }
+          # The bundler signs the app exe as it packs each installer and
+          # leaves the copy in target unsigned, so the app is checked inside
+          # the MSI and the NSIS installer, which is what people install.
+          $inside = Join-Path $env:RUNNER_TEMP 'installed'
+          New-Item -ItemType Directory -Force $inside | Out-Null
+          foreach ($msi in Get-ChildItem dist/*.msi) {
+            $to = Join-Path $inside $msi.BaseName
+            Start-Process msiexec -Wait -ArgumentList '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$to`""
+          }
+          foreach ($setup in Get-ChildItem dist/*-setup.exe) {
+            7z x -y -bso0 "-o$(Join-Path $inside $setup.BaseName)" $setup.FullName | Out-Null
+          }
+          $apps = @(Get-ChildItem -Recurse $inside -Filter deskvncviewer.exe)
+          if ($apps.Count -lt 2) { Write-Host "::error::the app exe was not found inside both installers"; exit 1 }
+          $files = @(Get-ChildItem dist/*.exe, dist/*.msi) + $apps +
+                   @(Get-Item src-tauri/binaries/dvv-x86_64-pc-windows-msvc.exe,
+                              target/x86_64-pc-windows-msvc/release/boundary.exe)
           $bad = 0
           foreach ($f in $files) {
             & $env:SIGNTOOL verify /pa /q $f.FullName
-            if ($LASTEXITCODE -ne 0) { Write-Host "::error::not signed: $($f.Name)"; $bad = 1 }
-            else { Write-Host "signed: $($f.Name)" }
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::not signed: $($f.FullName)"; $bad = 1 }
+            else { Write-Host "signed: $($f.FullName)" }
           }
           if ($bad) { exit 1 }
 
