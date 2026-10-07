@@ -35,9 +35,9 @@ no account, no telemetry, and no paid tier holding a feature back.
 
 1. Download the build for your machine from the
    [latest release](https://github.com/psmux/DeskVNC/releases/latest).
-   macOS is signed and notarized, so it opens normally. On Windows, SmartScreen
-   will warn because the installer is not signed yet: choose **More info**, then
-   **Run anyway**, or check the published checksum first.
+   macOS is signed and notarized, so it opens normally. The Windows installer
+   is signed too. Because the certificate is new, SmartScreen may still ask
+   once: choose **More info**, then **Run anyway**.
 2. Open it and press **New Host**, or paste an address straight into the bar at
    the top and press **Connect**, which saves nothing.
 3. Double click a tile. That is the whole flow.
@@ -60,8 +60,8 @@ No account is required for an attended support session. Screen Recording and
 Accessibility permissions are requested on macOS when sharing or control needs
 them. The recipient can revoke control or end the session at any time.
 
-DeskVNC Support ships for macOS, signed and notarized, and for Windows, where
-it is unsigned and SmartScreen asks you to confirm. A Linux support app,
+DeskVNC Support ships for macOS, signed and notarized, and for Windows,
+signed. A Linux support app,
 browser access and automatic private provider deployment are still in
 development. The release page contains the runnable support apps and the
 repository's `14-support-codes.md` file documents private code services.
