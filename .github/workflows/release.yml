@@ -13,8 +13,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One draft release, made before the platforms build. Each platform used to
+  # create it if missing, and when two finished together the second made its
+  # own and failed, which held back the publish.
+  draft:
+    name: Create the draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      id: ${{ steps.draft.outputs.id }}
+    steps:
+      - id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "Not a tag, so there is no release to draft."
+            exit 0
+          fi
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+                 --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -n1)
+          if [ -z "$id" ]; then
+            cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          Download the file for your platform below. See docs/INSTALL.md for
+          install guidance and checksums.
+
+          **macOS** is signed and notarized, so it opens normally.
+          **Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.
+          **Linux** packages are unsigned.
+
+          **DeskVNC Support** is also attached, for macOS and Windows, for
+          people who need to receive help. Download it on the computer being
+          supported, press Get a code, and share the code or invitation.
+
+          Full changes in [CHANGELOG.md](https://github.com/psmux/DeskVNC/blob/main/CHANGELOG.md).
+          NOTES
+            sed -i 's/^          //' "$RUNNER_TEMP/notes.md"
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+                   -f tag_name="$GITHUB_REF_NAME" -f name="DeskVNCViewer $GITHUB_REF_NAME" \
+                   -F body=@"$RUNNER_TEMP/notes.md" -F draft=true -F prerelease=false --jq .id)
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "Release $GITHUB_REF_NAME is $id"
+
   build:
     name: ${{ matrix.label }}
+    needs: draft
     runs-on: ${{ matrix.os }}
     # tauri-action creates the GitHub release and uploads to it. The default
     # token is read-only for contents, which fails with "Resource not
@@ -226,6 +273,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: --target ${{ matrix.bundle-target }} --config src-tauri/tauri.release.conf.json ${{ env.WINDOWS_SIGN_CONFIG }} -- --locked
+          releaseId: ${{ needs.draft.outputs.id }}
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: DeskVNCViewer ${{ github.ref_name }}
           releaseBody: |
