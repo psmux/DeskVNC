@@ -594,9 +594,10 @@ jobs:
         run: |
           sudo apt-get update
           # xcb for X11 capture, PipeWire for Wayland capture through the
-          # desktop portal, xkbcommon for input, and clang because
-          # pipewire-sys generates its bindings at build time.
-          sudo apt-get install -y             libssl-dev libdbus-1-dev pkg-config             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev clang libclang-dev
+          # desktop portal, EGL and GBM for the GL window and Wayland buffers,
+          # xkbcommon for input, and clang because pipewire-sys generates its
+          # bindings at build time.
+          sudo apt-get install -y             libssl-dev libdbus-1-dev pkg-config             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev             clang libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
 

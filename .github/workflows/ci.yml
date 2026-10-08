@@ -32,9 +32,10 @@ jobs:
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
             libssl-dev libdbus-1-dev pkg-config
           # The DeskVNC Support app: xcb for X11 capture, PipeWire for Wayland
-          # capture through the desktop portal, xkbcommon for input, and clang
-          # because pipewire-sys generates its bindings at build time.
-          sudo apt-get install -y             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev clang libclang-dev
+          # capture through the desktop portal, EGL and GBM for its GL window
+          # and Wayland buffers, xkbcommon for input, and clang because
+          # pipewire-sys generates its bindings at build time.
+          sudo apt-get install -y             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev             clang libclang-dev
           # `puttygen`, for the PuTTY key tests. Those fixtures are generated
           # at test time and deliberately never committed (no private keys in
           # this repository), so without this the tests skip instead of run.

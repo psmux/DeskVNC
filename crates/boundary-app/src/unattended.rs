@@ -428,6 +428,8 @@ pub fn computer_name() -> String {
 pub mod autostart {
     use anyhow::{Context, Result};
 
+    // The entry's name on Windows and Linux; macOS names its agent by label.
+    #[cfg(not(target_os = "macos"))]
     const NAME: &str = "DeskVNC Support";
 
     fn exe() -> Result<std::path::PathBuf> {
