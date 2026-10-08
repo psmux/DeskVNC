@@ -60,10 +60,10 @@ No account is required for an attended support session. Screen Recording and
 Accessibility permissions are requested on macOS when sharing or control needs
 them. The recipient can revoke control or end the session at any time.
 
-DeskVNC Support ships for macOS, signed and notarized, and for Windows,
-signed. A Linux support app,
-browser access and automatic private provider deployment are still in
-development. The release page contains the runnable support apps and the
+DeskVNC Support ships for macOS, signed and notarized; for Windows, signed;
+and for Linux as an x86_64 binary in a tarball. Browser access and automatic
+private provider deployment are still in development. The release page
+contains the runnable support apps and the
 repository's `14-support-codes.md` file documents private code services.
 
 Addresses can be written the way you already think of them: `10.0.0.4`,
