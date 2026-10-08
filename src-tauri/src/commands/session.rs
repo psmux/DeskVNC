@@ -985,6 +985,7 @@ pub async fn connect_session(
 
     let mut options = match kind {
         ProtocolKind::Rdp => ConnectOptions::rdp(address, port),
+        ProtocolKind::Radmin => ConnectOptions::radmin(address, port),
         ProtocolKind::Ssh => ConnectOptions::ssh(address, port),
         ProtocolKind::Boundary => ConnectOptions::boundary(address),
         _ => ConnectOptions::vnc(address, port),
@@ -1036,7 +1037,7 @@ pub async fn connect_session(
 
     // The protocol specific half.
     match kind {
-        ProtocolKind::Boundary => {}
+        ProtocolKind::Boundary | ProtocolKind::Radmin => {}
         ProtocolKind::Ssh => {
             // Same rule as RDP below: a blob that will not parse FAILS the
             // connect rather than falling back to defaults. Silently
@@ -1106,6 +1107,11 @@ pub async fn connect_session(
             match super::blocking(move || credentials.load(&lookup)).await {
                 Ok(Some(stored)) => {
                     options.credentials = match kind {
+                        ProtocolKind::Radmin => vnc_core::Credentials {
+                            username: stored.radmin_user,
+                            password: stored.radmin_password,
+                            domain: None,
+                        },
                         ProtocolKind::Rdp => vnc_core::Credentials {
                             username: stored.rdp_user,
                             password: stored.rdp_password,

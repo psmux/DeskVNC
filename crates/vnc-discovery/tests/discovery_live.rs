@@ -129,6 +129,8 @@ async fn live_scan_finds_and_labels_the_local_server() {
         // a connection this test has nothing to say about.
         probe_rdp: false,
         rdp_ports: Vec::new(),
+        probe_radmin: false,
+        radmin_ports: Vec::new(),
     };
     let (tx, rx) = mpsc::channel(64);
     let collector = tokio::spawn(drain(rx));
@@ -209,6 +211,8 @@ async fn live_scan_of_a_dead_port_finds_nothing() {
         resolve_budget: Duration::from_millis(500),
         probe_rdp: false,
         rdp_ports: Vec::new(),
+        probe_radmin: false,
+        radmin_ports: Vec::new(),
     };
     let (tx, rx) = mpsc::channel(16);
     let collector = tokio::spawn(drain(rx));

@@ -163,6 +163,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [losslessRefresh, setLosslessRefresh] = useAppSetting("lossless_refresh", true);
   const [deepNames, setDeepNames] = useAppSetting("probe_other_services", true);
   const [probeRdp, setProbeRdp] = useAppSetting("probe_rdp", true);
+  const [probeRadmin, setProbeRadmin] = useAppSetting("probe_radmin", true);
   // Defaults for NEW Remote Desktop hosts. They live in the Rust key-value
   // table rather than the webview so the connect path can read them later
   // without a round trip through JS.
@@ -609,6 +610,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Also tries port 3389 on each address, so a Windows machine that runs no VNC server still appears. One extra connection per address, at the same polite rate as the rest of the scan."
                   value={probeRdp}
                   onChange={setProbeRdp}
+                />
+                <Toggle
+                  label="Look for Radmin while scanning"
+                  description="Also checks port 4899 on each address and verifies the Radmin greeting. No login is attempted. Uses the same connection limits as the rest of the scan."
+                  value={probeRadmin}
+                  onChange={setProbeRadmin}
                 />
                 <Toggle
                   label="Discover computers automatically (mDNS/Bonjour)"

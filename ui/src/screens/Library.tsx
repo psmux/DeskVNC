@@ -800,6 +800,7 @@ export function Library({
         scalingMode: draft.scalingMode,
         keyboardMode: draft.keyboardMode,
         passthrough: draft.passthrough,
+        viewOnly: draft.viewOnly,
         sshTunnel: serializeSshTunnel(draft.sshTunnel),
         wolMac: draft.wolMac,
         tags: draft.tagIds,
@@ -821,6 +822,14 @@ export function Library({
             domain: draft.rdpDomain,
             password: draft.password,
           });
+        } else if (draft.protocol === "radmin") {
+          const creds: Record<string, string> = {};
+          if (draft.radminUser) creds.radminUser = draft.radminUser;
+          if (draft.password) creds.radminPassword = draft.password;
+          if (Object.keys(creds).length) {
+            await safeInvoke("save_password", { hostId: id, creds }, null);
+            await refresh();
+          }
         } else if (draft.protocol === "ssh") {
           // `save_password` (Rust) already carries `sshUser` / `sshPassword`
           // fields alongside the existing `sshPassphrase` (see

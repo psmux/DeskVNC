@@ -290,9 +290,21 @@ pub struct StoredCredentials {
     /// SSH password, for a host that allows password authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_password: Option<String>,
+    /// Radmin-security account, independent of the RDP/Windows identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radmin_user: Option<String>,
+    /// Radmin password; never stored in the host profile database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radmin_password: Option<String>,
 }
 
 impl StoredCredentials {
+    /// Replace the identity proven by a successful Radmin authentication.
+    pub fn set_radmin_identity(&mut self, user: Option<&str>, password: &str) {
+        self.radmin_user = non_empty(user);
+        self.radmin_password = Some(password.to_string());
+    }
+
     /// Record an RDP identity that one successful exchange proved.
     ///
     /// Replaces the whole triple rather than merging it field by field: the
@@ -351,6 +363,7 @@ impl StoredCredentials {
     pub fn has_for(&self, protocol: ProtocolKind) -> bool {
         match protocol {
             ProtocolKind::Rdp => self.rdp_password.is_some(),
+            ProtocolKind::Radmin => self.radmin_password.is_some(),
             ProtocolKind::Vnc => self.vnc_password.is_some() || self.vencrypt_pass.is_some(),
             // A key passphrase counts as a stored credential just as much as
             // a password: reporting otherwise would make the UI prompt for
@@ -421,6 +434,8 @@ impl zeroize::Zeroize for StoredCredentials {
             &mut self.rdp_password,
             &mut self.ssh_user,
             &mut self.ssh_password,
+            &mut self.radmin_user,
+            &mut self.radmin_password,
         ] {
             if let Some(value) = field.as_mut() {
                 value.zeroize();
@@ -451,6 +466,8 @@ impl std::fmt::Debug for StoredCredentials {
             .field("rdp_user", &redact(&self.rdp_user))
             .field("rdp_domain", &redact(&self.rdp_domain))
             .field("rdp_password", &redact(&self.rdp_password))
+            .field("radmin_user", &redact(&self.radmin_user))
+            .field("radmin_password", &redact(&self.radmin_password))
             .finish()
     }
 }
@@ -540,11 +557,13 @@ mod tests {
             rdp_user: Some("leak-5".into()),
             rdp_domain: Some("leak-6".into()),
             rdp_password: Some("leak-7".into()),
+            radmin_user: Some("leak-8".into()),
+            radmin_password: Some("leak-9".into()),
             ssh_user: None,
             ssh_password: None,
         };
         let rendered = format!("{creds:?}");
-        for i in 1..=7 {
+        for i in 1..=9 {
             assert!(
                 !rendered.contains(&format!("leak-{i}")),
                 "Debug leaked: {rendered}"
@@ -554,7 +573,7 @@ mod tests {
 
         let json = serde_json::to_value(&creds).unwrap();
         let keys: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
-        assert_eq!(keys.len(), 7, "every field must serialize: {keys:?}");
+        assert_eq!(keys.len(), 9, "every field must serialize: {keys:?}");
         for key in keys {
             let snake = camel_to_snake(&key);
             assert!(
@@ -641,6 +660,22 @@ mod tests {
     }
 
     #[test]
+    fn radmin_credentials_are_separate_and_round_trip() {
+        let mut creds = StoredCredentials::default();
+        creds.set_vnc_credential(Some("vnc-user"), "vnc-pass");
+        creds.set_rdp_identity(Some("rdp-user"), Some("domain"), "rdp-pass");
+        assert!(!creds.has_for(ProtocolKind::Radmin));
+        creds.set_radmin_identity(Some("radmin-user"), "radmin-pass");
+        let restored: StoredCredentials =
+            serde_json::from_str(&serde_json::to_string(&creds).unwrap()).unwrap();
+        assert!(restored.has_for(ProtocolKind::Radmin));
+        assert_eq!(restored.radmin_user.as_deref(), Some("radmin-user"));
+        assert_eq!(restored.radmin_password.as_deref(), Some("radmin-pass"));
+        assert_eq!(restored.vencrypt_pass.as_deref(), Some("vnc-pass"));
+        assert_eq!(restored.rdp_password.as_deref(), Some("rdp-pass"));
+    }
+
+    #[test]
     fn zeroize_clears_every_field() {
         use zeroize::Zeroize as _;
         let mut creds = StoredCredentials {
@@ -651,6 +686,8 @@ mod tests {
             rdp_user: Some("leak-5".into()),
             rdp_domain: Some("leak-6".into()),
             rdp_password: Some("leak-7".into()),
+            radmin_user: Some("leak-8".into()),
+            radmin_password: Some("leak-9".into()),
             ssh_user: None,
             ssh_password: None,
         };
@@ -679,6 +716,8 @@ mod tests {
             rdp_domain: Some("d".repeat(255)),
             // Windows caps an interactive logon password at 127.
             rdp_password: Some("w".repeat(127)),
+            radmin_user: Some("a".repeat(256)),
+            radmin_password: Some("p".repeat(256)),
             ssh_user: None,
             ssh_password: None,
         };

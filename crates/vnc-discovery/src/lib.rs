@@ -17,6 +17,9 @@
 //! as well as by this comment: this crate depends on `rdp-pdu` for the wire
 //! format and on none of the crates that know how to authenticate
 //! (PRDRDP/00 R44).
+//!
+//! Radmin discovery exchanges its fixed pre-authentication greeting on port
+//! 4899, then closes. It neither authenticates nor opens a desktop session.
 
 #![forbid(unsafe_code)]
 
@@ -109,6 +112,14 @@ impl Discovery {
     ) -> Option<RdpCaps> {
         probe::rdp_fingerprint(addr, connect_timeout).await
     }
+
+    /// Check a Radmin pre-authentication greeting, without attempting login.
+    pub async fn radmin_fingerprint(
+        addr: SocketAddr,
+        connect_timeout: std::time::Duration,
+    ) -> bool {
+        probe::radmin_fingerprint(addr, connect_timeout).await
+    }
 }
 
 impl Default for Discovery {
@@ -166,6 +177,8 @@ mod integration_tests {
             // in tests/rdp_probe.rs is the other half.
             probe_rdp: false,
             rdp_ports: Vec::new(),
+            probe_radmin: false,
+            radmin_ports: Vec::new(),
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);

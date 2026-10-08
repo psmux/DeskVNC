@@ -30,6 +30,7 @@ pub enum ProtocolKind {
     #[default]
     Vnc,
     Rdp,
+    Radmin,
     /// A remote shell on a PTY. Unlike the other two this carries a byte
     /// stream rather than a framebuffer, which is why its payload travels as
     /// `ProtocolEvent::Ssh` rather than through the pixel variants.
@@ -45,6 +46,7 @@ impl ProtocolKind {
     pub const ALL: &'static [ProtocolKind] = &[
         ProtocolKind::Vnc,
         ProtocolKind::Rdp,
+        ProtocolKind::Radmin,
         ProtocolKind::Ssh,
         ProtocolKind::Boundary,
     ];
@@ -55,6 +57,7 @@ impl ProtocolKind {
         match self {
             ProtocolKind::Vnc => "vnc",
             ProtocolKind::Rdp => "rdp",
+            ProtocolKind::Radmin => "radmin",
             ProtocolKind::Ssh => "ssh",
             ProtocolKind::Boundary => "boundary",
         }
@@ -67,6 +70,7 @@ impl ProtocolKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "vnc" => Some(ProtocolKind::Vnc),
             "rdp" => Some(ProtocolKind::Rdp),
+            "radmin" => Some(ProtocolKind::Radmin),
             "ssh" => Some(ProtocolKind::Ssh),
             "boundary" => Some(ProtocolKind::Boundary),
             _ => None,
@@ -80,6 +84,7 @@ impl ProtocolKind {
         match self {
             ProtocolKind::Vnc => 5900,
             ProtocolKind::Rdp => 3389,
+            ProtocolKind::Radmin => 4899,
             // RFC 4253 §4: the SSH transport runs on TCP 22.
             ProtocolKind::Ssh => 22,
             ProtocolKind::Boundary => 0,

@@ -87,6 +87,10 @@ impl ConnectOptions {
         Self::with_protocol(id, 0, ProtocolOptions::Boundary)
     }
 
+    pub fn radmin(host: impl Into<String>, port: u16) -> Self {
+        Self::with_protocol(host, port, ProtocolOptions::Radmin)
+    }
+
     fn with_protocol(host: impl Into<String>, port: u16, protocol: ProtocolOptions) -> Self {
         Self {
             host: host.into(),
@@ -177,6 +181,7 @@ impl ConnectOptions {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProtocolOptions {
+    Radmin,
     Vnc(VncOptions),
     Rdp(RdpOptions),
     Ssh(SshOptions),
@@ -187,6 +192,7 @@ impl ProtocolOptions {
     pub fn kind(&self) -> ProtocolKind {
         match self {
             ProtocolOptions::Vnc(_) => ProtocolKind::Vnc,
+            ProtocolOptions::Radmin => ProtocolKind::Radmin,
             ProtocolOptions::Rdp(_) => ProtocolKind::Rdp,
             ProtocolOptions::Ssh(_) => ProtocolKind::Ssh,
             ProtocolOptions::Boundary => ProtocolKind::Boundary,
