@@ -10,6 +10,16 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* A Linux build of DeskVNC Support is attached to the release, as an x86_64
+  binary in a tarball.
+
+### Changed
+
+* The Boundary crates are compiled, linted and tested in CI on Linux, macOS
+  and Windows, so a platform break shows up before a release.
+
 ## [0.27.10] (2026-10-07)
 
 ### Changed
