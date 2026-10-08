@@ -10,6 +10,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+// async_trait's expansion marks the returned future `#[must_use]` on top of
+// the `Result` it already carries, which clippy reports as a double.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Api: Send + Sync {
     async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value>;
