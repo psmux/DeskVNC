@@ -59,6 +59,8 @@ pub async fn save_password(
             rdp_user: creds.rdp_user.or(existing.rdp_user),
             rdp_domain: creds.rdp_domain.or(existing.rdp_domain),
             rdp_password: creds.rdp_password.or(existing.rdp_password),
+            radmin_user: creds.radmin_user.or(existing.radmin_user),
+            radmin_password: creds.radmin_password.or(existing.radmin_password),
             ssh_user: creds.ssh_user.or(existing.ssh_user),
             ssh_password: creds.ssh_password.or(existing.ssh_password),
         };

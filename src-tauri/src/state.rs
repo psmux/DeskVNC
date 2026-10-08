@@ -171,6 +171,9 @@ impl PendingCredentialSave {
     ) -> vnc_store::StoredCredentials {
         let mut creds = existing.unwrap_or_default();
         match self.protocol {
+            ProtocolKind::Radmin => {
+                creds.set_radmin_identity(self.username.as_deref(), &self.password)
+            }
             ProtocolKind::Rdp => creds.set_rdp_identity(
                 self.username.as_deref(),
                 self.domain.as_deref(),
@@ -205,6 +208,7 @@ impl ProtocolRegistry {
                 boundary,
                 Arc::new(VncDriver::new()),
                 Arc::new(rdp_core::RdpDriver::new()),
+                Arc::new(radmin_core::RadminDriver),
                 // SSH is the only driver that needs anything from the shell
                 // to construct: its trust decision reads the shared pin
                 // store, so it cannot make its own.
@@ -897,7 +901,7 @@ mod protocol_registry_tests {
     /// The registry is what a third protocol changes, so pin its membership:
     /// a driver added without a decision here fails this test.
     #[test]
-    fn four_protocols_are_registered_today() {
+    fn five_protocols_are_registered_today() {
         let registry = test_registry();
         let built: Vec<_> = ProtocolKind::ALL
             .iter()
@@ -909,6 +913,7 @@ mod protocol_registry_tests {
             vec![
                 ProtocolKind::Vnc,
                 ProtocolKind::Rdp,
+                ProtocolKind::Radmin,
                 ProtocolKind::Ssh,
                 ProtocolKind::Boundary
             ]
@@ -1128,6 +1133,26 @@ mod tests {
         assert_eq!(merged.rdp_password.as_deref(), Some("rdp-pass"));
         assert_eq!(merged.vnc_password.as_deref(), Some("vnc-pass"));
         assert_eq!(merged.ssh_passphrase.as_deref(), Some("ssh-pass"));
+    }
+
+    #[test]
+    fn a_radmin_prompt_save_preserves_other_protocol_credentials() {
+        let mut existing = vnc_store::StoredCredentials::default();
+        existing.set_vnc_credential(None, "vnc-pass");
+        existing.set_rdp_identity(Some("rdp-user"), Some("DOMAIN"), "rdp-pass");
+        let merged = PendingCredentialSave {
+            protocol: ProtocolKind::Radmin,
+            username: Some("radmin-user".into()),
+            domain: None,
+            password: "radmin-pass".into(),
+        }
+        .merge_into(Some(existing));
+        assert_eq!(merged.radmin_user.as_deref(), Some("radmin-user"));
+        assert_eq!(merged.radmin_password.as_deref(), Some("radmin-pass"));
+        assert_eq!(merged.vnc_password.as_deref(), Some("vnc-pass"));
+        assert_eq!(merged.rdp_user.as_deref(), Some("rdp-user"));
+        assert_eq!(merged.rdp_domain.as_deref(), Some("DOMAIN"));
+        assert_eq!(merged.rdp_password.as_deref(), Some("rdp-pass"));
     }
 
     /// The VNC rule is unchanged: a username means an identity-carrying

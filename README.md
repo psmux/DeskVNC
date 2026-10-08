@@ -1,5 +1,10 @@
 # DeskVNC
 
+> **Experimental Radmin support:** connect to [Radmin Server](https://www.radmin.com/)
+> using a native Rust protocol driver. See [RADMIN.md](RADMIN.md) for setup,
+> network discovery, verification status and current limitations. Build from
+> source to try this integration; existing published installers may not include it.
+
 One window for every machine you look after, whether it speaks **VNC**, **RDP**
 or **SSH**. Native, written in Rust on Tauri 2, and it runs on Windows, macOS
 and Linux.

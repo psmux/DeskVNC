@@ -20,6 +20,7 @@ members = [
     "crates/rdp-codecs",
     "crates/rdp-auth",
     "crates/rdp-core",
+    "crates/radmin-core",
     "crates/vnc-core",
     "crates/vnc-transport",
     "crates/vnc-discovery",

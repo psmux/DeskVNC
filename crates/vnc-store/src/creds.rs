@@ -495,6 +495,8 @@ mod tests {
             rdp_user: Some("rdp-user-sentinel".into()),
             rdp_domain: Some("corp.example".into()),
             rdp_password: Some("rdp-pass-sentinel".into()),
+            radmin_user: Some("radmin-user-sentinel".into()),
+            radmin_password: Some("radmin-pass-sentinel".into()),
             ssh_user: None,
             ssh_password: None,
         }
@@ -541,6 +543,8 @@ mod tests {
         assert_eq!(got.rdp_user.as_deref(), Some("rdp-user-sentinel"));
         assert_eq!(got.rdp_domain.as_deref(), Some("corp.example"));
         assert_eq!(got.rdp_password.as_deref(), Some("rdp-pass-sentinel"));
+        assert_eq!(got.radmin_user.as_deref(), Some("radmin-user-sentinel"));
+        assert_eq!(got.radmin_password.as_deref(), Some("radmin-pass-sentinel"));
         assert!(store.load("unknown-host").unwrap().is_none());
 
         // A fresh store instance (new process) can also unlock and read.

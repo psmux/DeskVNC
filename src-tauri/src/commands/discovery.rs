@@ -33,7 +33,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -146,7 +146,11 @@ fn host_json(host: &DiscoveredHost) -> serde_json::Value {
         .copied()
         .find_map(security_type_label)
         .map(str::to_string)
-        .or_else(|| host.rfb_version.clone());
+        .or_else(|| host.rfb_version.clone())
+        .or_else(|| {
+            (host.protocol == vnc_discovery::ProtocolKind::Radmin)
+                .then(|| "Login not probed".into())
+        });
     serde_json::json!({
         "id": discovered_id(&host.address, host.port),
         "name": host.hostname.clone().unwrap_or_else(|| host.address.to_string()),
@@ -390,9 +394,18 @@ pub async fn scan_network(
         .map(|v| v != "false")
         .unwrap_or(true);
 
+    let probe_radmin = state
+        .store
+        .get_setting("probe_radmin")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
     let options = ScanOptions {
         probe_other_services,
         probe_rdp,
+        probe_radmin,
         subnets: parsed,
         ..ScanOptions::default()
     };
@@ -439,6 +452,13 @@ pub async fn deep_probe(
         .next()
         .ok_or_else(|| format!("could not resolve {address}"))?;
     match protocol.unwrap_or_default() {
+        vnc_discovery::ProtocolKind::Radmin => {
+            let recognized = Discovery::radmin_fingerprint(addr, Duration::from_millis(1500)).await;
+            if !recognized {
+                return Err("The endpoint did not return a recognized Radmin greeting".into());
+            }
+            Ok(serde_json::json!({ "protocol": "radmin", "recognized": true, "securityTypes": [] }))
+        }
         vnc_discovery::ProtocolKind::Rdp => {
             let caps = Discovery::rdp_deep_probe(addr)
                 .await

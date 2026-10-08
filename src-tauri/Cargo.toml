@@ -43,6 +43,7 @@ limb-core = { path = "../crates/limb-core" }
 # one straight from the decoded PTY-input payload, no intermediate Vec copy.
 bytes = { workspace = true }
 rdp-core = { path = "../crates/rdp-core" }
+radmin-core = { path = "../crates/radmin-core" }
 vnc-core = { path = "../crates/vnc-core" }
 vnc-discovery = { path = "../crates/vnc-discovery" }
 vnc-files = { path = "../crates/vnc-files" }

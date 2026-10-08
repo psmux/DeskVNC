@@ -2130,6 +2130,7 @@ dependencies = [
  "local-pipe",
  "os_info",
  "parking_lot",
+ "radmin-core",
  "rdp-core",
  "remote-core",
  "serde",
@@ -7298,6 +7299,27 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "radmin-core"
+version = "0.27.10"
+dependencies = [
+ "aes 0.8.4",
+ "anyhow",
+ "cbc 0.1.2",
+ "cipher 0.4.4",
+ "flate2",
+ "getrandom 0.3.4",
+ "hex",
+ "md4",
+ "num-bigint-dig",
+ "remote-core",
+ "sha1 0.10.7",
+ "subtle",
+ "tokio",
+ "tokio-util",
+ "zeroize",
+]
 
 [[package]]
 name = "rand"
