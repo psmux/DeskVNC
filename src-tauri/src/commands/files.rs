@@ -679,6 +679,111 @@ pub async fn files_local_remove(path: String, recursive: Option<bool>) -> Result
 /// reading it off the entry rather than by assuming this constant.
 const AGENT_SSH_PORT: u16 = vnc_files::DEFAULT_SSH_PORT;
 
+/// A file operation on a Boundary session, over the session's own
+/// connection rather than SFTP. The ask comes back untouched when the session
+/// is not a Boundary one, so the caller goes on to the sidecar with it.
+///
+/// A Boundary computer is reached by its ID through a relay, and usually runs
+/// no SSH server an agent could dial, so there is no sidecar to fall back to
+/// and none is tried: a refusal here says why in the person's own terms.
+async fn serve_boundary(
+    app: &AppHandle,
+    session_id: &str,
+    ask: FileAsk,
+) -> Result<Result<FileAnswer, FileRefusal>, FileAsk> {
+    use boundary_session::tools::{Reply, Request};
+    let Some(state) = app.try_state::<crate::state::AppState>() else {
+        return Err(ask);
+    };
+    let boundary = state
+        .sessions
+        .lock()
+        .get(session_id)
+        .is_some_and(|entry| entry.protocol() == remote_core::ProtocolKind::Boundary);
+    if !boundary {
+        return Err(ask);
+    }
+    let Some(client) = state.protocols.boundary.tools(session_id) else {
+        return Ok(Err(FileRefusal::unavailable(boundary_driver::TOO_OLD)));
+    };
+    if !client.allowed() {
+        return Ok(Err(FileRefusal::unavailable(boundary_driver::NOT_ALLOWED)));
+    }
+    let (request, body) = match ask {
+        FileAsk::Home => (Request::Home, Vec::new()),
+        FileAsk::List { path } => (Request::List { path }, Vec::new()),
+        FileAsk::Get {
+            path,
+            offset,
+            length,
+        } => (
+            Request::Get {
+                path,
+                offset,
+                length: length as u64,
+            },
+            Vec::new(),
+        ),
+        FileAsk::Put {
+            path,
+            offset,
+            bytes,
+            mode,
+        } => (Request::Put { path, offset, mode }, bytes),
+        FileAsk::Mkdir { path } => (Request::Mkdir { path }, Vec::new()),
+        FileAsk::Remove { path, recursive } => (Request::Remove { path, recursive }, Vec::new()),
+        FileAsk::Rename { from, to } => (Request::Rename { from, to }, Vec::new()),
+    };
+    let reply = client
+        .call(&request, &body, Duration::from_secs(100))
+        .await
+        .map_err(|e| {
+            FileRefusal::failed(format!(
+                "the Boundary session did not carry that file operation: {e:#}. It may have run on the far side; check with a listing before writing again"
+            ))
+        });
+    Ok(reply.and_then(|(reply, bytes)| match reply {
+        Reply::Path(path) => Ok(FileAnswer::Path(path)),
+        Reply::Listing { path, entries } => Ok(FileAnswer::Listing {
+            path,
+            entries: entries
+                .into_iter()
+                .map(|e| vnc_files::RemoteEntry {
+                    name: e.name,
+                    path: e.path,
+                    is_dir: e.is_dir,
+                    size: e.size,
+                    modified: e.modified,
+                    mode: e.mode,
+                    is_symlink: e.is_symlink,
+                })
+                .collect(),
+        }),
+        Reply::Window { path, offset, size } => Ok(FileAnswer::Window {
+            path,
+            offset,
+            bytes,
+            size,
+        }),
+        Reply::Wrote {
+            path,
+            offset,
+            written,
+            size,
+        } => Ok(FileAnswer::Wrote {
+            path,
+            offset,
+            written,
+            size,
+        }),
+        Reply::Refused(why) => Err(FileRefusal::unavailable(why)),
+        Reply::Failed(why) => Err(FileRefusal::failed(why)),
+        Reply::Ran { .. } => Err(FileRefusal::failed(
+            "the computer answered a file operation with a command's result, so nothing is reported rather than a guess",
+        )),
+    }))
+}
+
 /// Serve one file operation for the agent plane, connecting the sidecar if
 /// this session has not needed one yet.
 ///
@@ -698,6 +803,10 @@ pub async fn serve_agent(
     session_id: &str,
     ask: FileAsk,
 ) -> Result<FileAnswer, FileRefusal> {
+    let ask = match serve_boundary(app, session_id, ask).await {
+        Ok(answer) => return answer,
+        Err(ask) => ask,
+    };
     let entry = agent_sidecar(app, session_id).await?;
     let sftp = &entry.sftp;
     match ask {

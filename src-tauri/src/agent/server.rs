@@ -671,10 +671,12 @@ fn limb_attach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
                 "that session ended while this call was running",
             )
         })?;
-        if entry.handle.kind == remote_core::ProtocolKind::Boundary {
+        // The person at a Boundary computer agreed to a helper, and an agent
+        // is let on only once they have also allowed that helper's tools.
+        if entry.handle.kind == remote_core::ProtocolKind::Boundary && !entry.facts.lock().tools {
             return Err(RpcError::tagged(
                 "UNSUPPORTED",
-                "Boundary support sessions do not yet have a separate host consent for agents",
+                "the person at that Boundary computer has not allowed the helper's tools, so no agent may attach. Ask them to tick Allow the helper's tools to run commands and copy files in DeskVNC Support, or, for an unattended computer, to allow it for this helper under Settings, Unattended access. Then call limb.attach again",
             ));
         }
         let value = record(&session_id, entry, slot, Some(attachment_id.clone()));

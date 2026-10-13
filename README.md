@@ -149,6 +149,13 @@ The rest has the same shape: `dvv_files` for transfers, `dvv_clipboard`,
 `dvv_wait` to block until the screen settles, and `dvv_group_*` to address
 several machines as one.
 
+`dvv_run` and `dvv_files` work over SSH, and over a Boundary support session
+with no SSH on the far side at all. On Boundary the person at that computer
+has to allow it first: DeskVNC Support asks them separately from viewing and
+control, shows each command as it runs, and lets them take it back. For an
+unattended computer they allow it per paired helper under Settings,
+Unattended access. Until they do, an agent cannot attach to the session.
+
 It is quick enough to sit inside a loop. Measured against a real 1920x1080
 Windows desktop on a LAN:
 

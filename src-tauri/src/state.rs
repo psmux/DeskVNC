@@ -277,6 +277,11 @@ pub struct SessionFacts {
     /// "not known", and a limb with `Grounding::Cells` carries no coordinate
     /// for the size to bound anyway.
     pub size: Option<(u16, u16)>,
+    /// A Boundary session only: whether the person at that computer lets the
+    /// helper's tools run commands and copy files. It is also the consent an
+    /// agent needs to attach to the session, because the person agreed to a
+    /// helper and not, until they say so, to that helper's agents.
+    pub tools: bool,
 }
 
 impl Default for SessionFacts {
@@ -287,6 +292,7 @@ impl Default for SessionFacts {
         SessionFacts {
             state: SessionState::Idle,
             size: None,
+            tools: false,
         }
     }
 }

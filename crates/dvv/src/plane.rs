@@ -2086,8 +2086,31 @@ impl limb_core::limb::Limb for RemoteLimb {
     /// it there would be a card promising a command that every call refuses.
     /// Being on the card is not being granted it: `exec` is in no role bundle
     /// (`00 R19`), so it is still only reachable by a grant naming the string.
+    ///
+    /// A Boundary desktop is the one framebuffer that does offer it. Its
+    /// session carries a command stream beside the screen, and the person at
+    /// that computer has to allow it before an agent can attach at all.
     fn capabilities(&self) -> &'static [Capability] {
         match self.grounding {
+            Grounding::Pixels if self.kind == ProtocolKind::Boundary && self.has_mirror => &[
+                Capability::View,
+                Capability::Capture,
+                Capability::Control,
+                Capability::Close,
+                Capability::HostsRead,
+                Capability::ClipboardRead,
+                Capability::ClipboardWrite,
+                Capability::Exec,
+            ],
+            Grounding::Pixels if self.kind == ProtocolKind::Boundary => &[
+                Capability::View,
+                Capability::Control,
+                Capability::Close,
+                Capability::HostsRead,
+                Capability::ClipboardRead,
+                Capability::ClipboardWrite,
+                Capability::Exec,
+            ],
             Grounding::Cells => &[
                 Capability::View,
                 Capability::Control,
@@ -2154,8 +2177,13 @@ impl limb_core::limb::Limb for RemoteLimb {
             // answer comes back over `limb.exec` as the reply to the request
             // that sent it. On a desktop limb there is no such channel and no
             // honest way to invent one.
+            //
+            // A Boundary session is the exception among desktops: the support
+            // app on that computer runs the command itself and answers with the
+            // process's own exit status, over a stream beside the screen.
             Exec => match self.grounding {
                 Grounding::Cells => Support::Native,
+                _ if self.kind == ProtocolKind::Boundary => Support::Native,
                 _ => Support::Unsupported {
                     because: "a framebuffer has no command channel: an exec needs a shell, so run it on the SSH limb for this machine. Typing a command into a terminal window on the desktop is not the same thing and has no exit status",
                 },

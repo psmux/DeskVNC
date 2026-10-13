@@ -137,8 +137,8 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         // asked for none of it (PRDAgentPlug/00 R51b).
         SessionEvent::AgentRefused(_) | SessionEvent::AgentServed(_) => return None,
         SessionEvent::Protocol(ProtocolEvent::Rdp(event)) => rdp_event_json(event)?,
-        SessionEvent::Protocol(ProtocolEvent::Boundary { control }) => {
-            json!({ "type": "boundary-control", "control": control })
+        SessionEvent::Protocol(ProtocolEvent::Boundary { control, tools }) => {
+            json!({ "type": "boundary-control", "control": control, "tools": tools })
         }
         // Terminal bytes never become JSON. They go out on the binary channel
         // (`framing::encode_pty`) for the same reason framebuffer rectangles
@@ -572,6 +572,24 @@ fn forward_events(
                 SessionEvent::StateChanged(state) => {
                     if let Some(entry) = sessions.lock().get(&session_id) {
                         entry.facts.lock().state = state.clone();
+                    }
+                }
+                // The person at a Boundary computer allowing, or taking back,
+                // commands and files. That is the consent an agent needs to be
+                // on the session at all, so taking it back also takes the
+                // wheel from any agent already attached.
+                SessionEvent::Protocol(ProtocolEvent::Boundary { tools, .. }) => {
+                    let was = sessions
+                        .lock()
+                        .get(&session_id)
+                        .map(|entry| std::mem::replace(&mut entry.facts.lock().tools, *tools));
+                    let revoked = (was == Some(true) && !*tools)
+                        .then(|| app.try_state::<AppState>())
+                        .flatten()
+                        .and_then(|state| state.agent.revoke(&session_id));
+                    if let Some(event) = revoked {
+                        let _ = app.emit(crate::agent::AGENT_EVENT, event);
+                        tracing::info!(session = %session_id, "the person at a Boundary computer took back commands and files, so its agent was stopped");
                     }
                 }
                 SessionEvent::DesktopResize { width, height } => {
