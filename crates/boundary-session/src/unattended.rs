@@ -87,6 +87,11 @@ pub struct Helper {
     /// Whether they may use mouse and keyboard, or only watch.
     #[serde(default = "yes")]
     pub control: bool,
+    /// Whether their tools may run commands and copy files. Off unless the
+    /// person turned it on for this helper, including for every helper paired
+    /// before it existed.
+    #[serde(default)]
+    pub tools: bool,
     /// Unix seconds.
     pub added: u64,
 }
@@ -121,9 +126,21 @@ impl Access {
             id: id.trim().to_string(),
             name: name.trim().to_string(),
             control,
+            tools: false,
             added: wire::now(),
         });
         Ok(())
+    }
+    /// Allow or stop a paired helper's commands and file requests. `false`
+    /// when no helper has that ID.
+    pub fn allow_tools(&mut self, id: &str, allowed: bool) -> bool {
+        match self.helpers.iter_mut().find(|h| h.id == id.trim()) {
+            Some(helper) => {
+                helper.tools = allowed;
+                true
+            }
+            None => false,
+        }
     }
     pub fn forget(&mut self, id: &str) {
         self.helpers.retain(|h| h.id != id);
@@ -288,6 +305,7 @@ where
             version: 2,
             name,
             password,
+            tools,
         } = message
         else {
             refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -303,8 +321,8 @@ where
             Ok(access) => authorize(&access, &peer, password.as_deref(), &mut throttle).await,
             Err(error) => Err(format!("{error:#}")),
         };
-        let control = match decision {
-            Ok(control) => control,
+        let (control, allowed_tools) = match decision {
+            Ok(grant) => grant,
             Err(reason) => {
                 refuse(connection, send, reason.clone());
                 let _ = notices.send(Notice::Refused { name, peer, reason }).await;
@@ -312,6 +330,7 @@ where
             }
         };
         let (session, mut worker) = session::channels();
+        worker.tools_tx.send_replace(tools && allowed_tools);
         let desktop = desktop.clone();
         // The session ends when whoever holds it lets go, or when this
         // listener stops: either cancels the same token.
@@ -328,7 +347,7 @@ where
         let result = tokio::select! {
             _ = stop.cancelled() => Ok(()),
             _ = ended.cancelled() => Ok(()),
-            result = session::serve(&mut worker, &connection, send, recv, peer, control, move || desktop()) => result,
+            result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, move || desktop()) => result,
         };
         connection.close(0u8.into(), b"Session ended");
         if let Err(error) = result {
@@ -358,18 +377,20 @@ fn refuse(
     });
 }
 
-/// Let a helper in, and with what, or say why not.
+/// Let a helper in, and with what, or say why not: whether it may control,
+/// and whether its tools may run commands and copy files. A password never
+/// grants the second; only a paired helper's own entry can.
 async fn authorize(
     access: &Access,
     peer: &str,
     password: Option<&str>,
     throttle: &mut Throttle,
-) -> std::result::Result<bool, String> {
+) -> std::result::Result<(bool, bool), String> {
     if !access.enabled {
         return Err("Unattended access is switched off on that computer".into());
     }
     if let Some(helper) = access.helper(peer) {
-        return Ok(helper.control);
+        return Ok((helper.control, helper.tools));
     }
     match password {
         Some(password) if access.has_password() => {
@@ -386,7 +407,7 @@ async fn authorize(
                 .await
                 .unwrap_or(false);
             if matches {
-                Ok(true)
+                Ok((true, false))
             } else {
                 throttle.failed();
                 // A wrong guess costs the guesser time as well as an attempt.
@@ -433,14 +454,28 @@ pub fn connect(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    let target = EndpointId::from_str(machine.trim())
+    open(machine_addr(&machine), name, password, key, options, false)
+}
+/// [`connect`] for a helper whose tools send commands and file requests,
+/// such as DeskVNC's agent plane. They run only if the computer allows them
+/// for this helper.
+pub fn connect_with_tools(
+    machine: String,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+) -> Session {
+    open(machine_addr(&machine), name, password, key, options, true)
+}
+fn machine_addr(machine: &str) -> Result<EndpointAddr> {
+    EndpointId::from_str(machine.trim())
         .map(EndpointAddr::from)
         .map_err(|_| {
             anyhow!(
                 "That is not a machine ID. Copy it from the computer's unattended access settings"
             )
-        });
-    connect_to(target, name, password, key, options)
+        })
 }
 
 /// [`connect`] with a full address, for a helper that already knows where
@@ -452,13 +487,33 @@ pub fn connect_to(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
+    open(target, name, password, key, options, false)
+}
+/// [`connect_to`] for a helper whose tools send commands and file requests.
+pub fn connect_to_with_tools(
+    target: Result<EndpointAddr>,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+) -> Session {
+    open(target, name, password, key, options, true)
+}
+fn open(
+    target: Result<EndpointAddr>,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+    tools: bool,
+) -> Session {
     let (session, mut worker) = session::channels();
     tokio::spawn(async move {
         let cancel = worker.cancel_token();
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ok(()),
-            result = run_connect(&mut worker, target, name, password, key, options) => result,
+            result = run_connect(&mut worker, target, name, password, key, options, tools) => result,
         };
         cancel.cancel();
         let _ = worker.emit(Event::Finished(result)).await;
@@ -472,6 +527,7 @@ async fn run_connect(
     password: Option<String>,
     key: SecretKey,
     options: HostOptions,
+    tools: bool,
 ) -> Result<()> {
     let target = target?;
     ensure!(
@@ -494,6 +550,7 @@ async fn run_connect(
             version: 2,
             name,
             password,
+            tools,
         },
     )
     .await?;

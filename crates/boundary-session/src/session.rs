@@ -1,5 +1,5 @@
 use crate::{
-    Desktop, Frame, Input, Invitation,
+    Desktop, Frame, Input, Invitation, tools,
     wire::{self, Message},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -22,9 +22,13 @@ pub enum Approval {
 pub enum Event {
     Status(String),
     Invitation(String),
+    /// On the host's side: a helper asks to be let in. `tools` is whether
+    /// the helper can send commands and file requests. To allow them, call
+    /// [`Session::set_tools`] before answering.
     Approval {
         name: String,
         peer: String,
+        tools: bool,
         answer: oneshot::Sender<Approval>,
     },
     Connected {
@@ -32,6 +36,12 @@ pub enum Event {
         control: bool,
     },
     Control(bool),
+    /// On the helper's side: the person changed whether commands and files
+    /// are allowed.
+    Tools(bool),
+    /// On the host's side: one line for each command or file request the
+    /// helper ran, so the person can see what was done.
+    Activity(String),
     /// On the helper's side: the person helped chose to let this helper in
     /// any time. `machine` is the ID to save and connect to later.
     Paired {
@@ -81,12 +91,32 @@ pub struct Session {
     pub connectivity: watch::Receiver<Connectivity>,
     input: mpsc::Sender<Input>,
     control: watch::Sender<Permission>,
+    /// On the host's side, whether the person allows commands and files. On
+    /// the helper's side, what the host last said about it.
+    tools: watch::Sender<bool>,
+    client: watch::Receiver<Option<tools::Client>>,
     pairing: mpsc::Sender<(String, String)>,
     cancel: CancellationToken,
 }
 impl Session {
     pub(crate) fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
+    }
+    /// On the host's side: allow or stop the helper's commands and file
+    /// requests. It takes effect for the next request that arrives, and the
+    /// helper is told.
+    pub fn set_tools(&self, allowed: bool) {
+        self.tools.send_replace(allowed);
+    }
+    /// On the host's side, whether commands and files are allowed now.
+    pub fn tools_allowed(&self) -> bool {
+        *self.tools.borrow()
+    }
+    /// On the helper's side: how to send commands and file requests, once the
+    /// host has let this helper in and said it serves them. `None` before
+    /// that, after the session ends, and with a host too old to serve them.
+    pub fn tools(&self) -> Option<tools::Client> {
+        self.client.borrow().clone()
     }
     /// On the host's side, during a session: tell the helper it may connect
     /// any time to the unattended machine `machine`, named `name`. Saving the
@@ -129,6 +159,8 @@ pub(crate) struct Worker {
     input: mpsc::Receiver<Input>,
     control: watch::Receiver<Permission>,
     control_tx: watch::Sender<Permission>,
+    pub(crate) tools_tx: watch::Sender<bool>,
+    client: watch::Sender<Option<tools::Client>>,
     pairing: mpsc::Receiver<(String, String)>,
     cancel: CancellationToken,
 }
@@ -142,6 +174,9 @@ pub(crate) fn channels() -> (Session, Worker) {
         allowed: false,
         generation: 0,
     });
+    // Off until somebody says otherwise, on both sides.
+    let (tools_tx, _) = watch::channel(false);
+    let (client_tx, client) = watch::channel(None);
     let cancel = CancellationToken::new();
     (
         Session {
@@ -150,6 +185,8 @@ pub(crate) fn channels() -> (Session, Worker) {
             frames,
             input,
             control: control.clone(),
+            tools: tools_tx.clone(),
+            client,
             pairing,
             cancel: cancel.clone(),
         },
@@ -160,6 +197,8 @@ pub(crate) fn channels() -> (Session, Worker) {
             input: input_rx,
             control: control_rx,
             control_tx: control.clone(),
+            tools_tx,
+            client: client_tx,
             pairing: pairing_rx,
             cancel,
         },
@@ -205,13 +244,33 @@ pub fn viewer_as(
     options: HostOptions,
     key: Option<iroh::SecretKey>,
 ) -> Session {
+    viewer_inner(ticket, name, options, key, false)
+}
+/// [`viewer_as`] for a helper whose tools send commands and file requests,
+/// such as DeskVNC's agent plane. The person is asked about those
+/// separately, and [`Session::tools`] is how they are sent once allowed.
+pub fn viewer_with_tools(
+    ticket: String,
+    name: String,
+    options: HostOptions,
+    key: Option<iroh::SecretKey>,
+) -> Session {
+    viewer_inner(ticket, name, options, key, true)
+}
+fn viewer_inner(
+    ticket: String,
+    name: String,
+    options: HostOptions,
+    key: Option<iroh::SecretKey>,
+    tools: bool,
+) -> Session {
     let (session, mut worker) = channels();
     tokio::spawn(async move {
         let cancel = worker.cancel.clone();
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ok(()),
-            result = run_viewer(&mut worker, ticket, name, options, key) => result,
+            result = run_viewer(&mut worker, ticket, name, options, key, tools) => result,
         };
         worker.cancel.cancel();
         let _ = worker.emit(Event::Finished(result)).await;
@@ -334,6 +393,13 @@ impl Drop for EndpointGuard {
         });
     }
 }
+/// Takes the tools client away when a helper's session ends, however it ends.
+struct ForgetClient<'a>(&'a watch::Sender<Option<tools::Client>>);
+impl Drop for ForgetClient<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(None);
+    }
+}
 struct Close(Connection);
 impl Drop for Close {
     fn drop(&mut self) {
@@ -378,10 +444,10 @@ where
             let connection = incoming.await?;
             let guard = Close(connection.clone());
             let (send, mut recv) = connection.accept_bi().await?;
-            let name = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
-            Ok::<_, anyhow::Error>((guard, send, recv, name))
+            let (name, tools) = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
+            Ok::<_, anyhow::Error>((guard, send, recv, name, tools))
         };
-        let Ok(Ok((guard, mut send, recv, name))) =
+        let Ok(Ok((guard, mut send, recv, name, tools))) =
             tokio::time::timeout(Duration::from_secs(5), handshake).await
         else {
             continue;
@@ -389,10 +455,13 @@ where
         let connection = &guard.0;
         let peer = connection.remote_id().to_string();
         let (answer, decision) = oneshot::channel();
+        // Whatever an earlier helper was allowed is not this one's.
+        worker.tools_tx.send_replace(false);
         worker
             .emit(Event::Approval {
                 name,
                 peer: peer.clone(),
+                tools,
                 answer,
             })
             .await?;
@@ -409,7 +478,7 @@ where
             }
         };
         // The invitation is consumed by this session, even if the peer later disconnects.
-        let result = serve(worker, connection, send, recv, peer, allowed, desktop).await;
+        let result = serve(worker, connection, send, recv, peer, allowed, tools, desktop).await;
         drop(guard);
         endpoint.close().await;
         return result;
@@ -419,6 +488,11 @@ where
 /// apply input within the permission the person set, and stop when either
 /// side does. Shared by attended and unattended sessions, so the rules for
 /// what a helper can do are written once.
+///
+/// `tools` is whether the helper said it can send commands and file
+/// requests. Whether it may is the session's own tools permission, which the
+/// caller set before this and the person can change at any time.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve<F>(
     worker: &mut Worker,
     connection: &Connection,
@@ -426,11 +500,18 @@ pub(crate) async fn serve<F>(
     mut recv: iroh::endpoint::RecvStream,
     peer: String,
     allowed: bool,
+    tools: bool,
     desktop: F,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<Box<dyn Desktop>> + Send + 'static,
 {
+    let mut tools_rx = worker.tools_tx.subscribe();
+    if !tools {
+        // A helper that cannot send them is never allowed them, whatever was set.
+        worker.tools_tx.send_replace(false);
+    }
+    let tools_now = *tools_rx.borrow_and_update();
     worker.control_tx.send_modify(|p| {
         p.allowed = allowed;
         p.generation += 1;
@@ -443,7 +524,14 @@ where
     let capture = tokio::task::spawn_blocking(move || {
         desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel)
     });
-    wire::write(&mut send, &Message::Granted { control: allowed }).await?;
+    wire::write(
+        &mut send,
+        &Message::Granted {
+            control: allowed,
+            tools: tools.then_some(tools_now),
+        },
+    )
+    .await?;
     worker
         .emit(Event::Connected {
             peer,
@@ -486,15 +574,34 @@ where
                 Some((machine, name)) = worker.pairing.recv() => {
                     wire::write(&mut send, &Message::Paired { machine, name }).await?;
                 }
+                changed = tools_rx.changed(), if tools => {
+                    changed?;
+                    let now = *tools_rx.borrow_and_update();
+                    wire::write(&mut send, &Message::Tools(now)).await?;
+                }
             }
         }
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
+    let activity = worker.events.clone();
+    let serve_tools = async {
+        if !tools {
+            return std::future::pending::<Result<()>>().await;
+        }
+        tools::serve(connection, worker.tools_tx.subscribe(), move |line| {
+            let activity = activity.clone();
+            tokio::spawn(async move {
+                let _ = activity.send(Event::Activity(line)).await;
+            });
+        })
+        .await
+    };
     let result = tokio::select! {
         _ = monitor_route(connection, &worker.connectivity) => Ok(()),
         result = read_input => result,
         result = write_control => result,
+        result = serve_tools => result,
         result = send_screens(connection, screen_rx) => result,
         result = capture => result.context("Capture worker failed")?,
         _ = connection.closed() => Ok(()),
@@ -607,6 +714,7 @@ async fn run_viewer(
     name: String,
     options: HostOptions,
     key: Option<iroh::SecretKey>,
+    tools: bool,
 ) -> Result<()> {
     let invitation = Invitation::decode(&ticket)?;
     // A host without a relay address must not cause the helper to use public relays.
@@ -637,6 +745,7 @@ async fn run_viewer(
             version: 1,
             secret: invitation.secret,
             name,
+            tools,
         },
     )
     .await?;
@@ -662,11 +771,22 @@ pub(crate) async fn watch_session(
     let grant: Message = tokio::time::timeout(Duration::from_secs(65), wire::read(&mut recv))
         .await
         .context("Approval timed out")??;
-    let control = match grant {
-        Message::Granted { control } => control,
+    let (control, tools) = match grant {
+        Message::Granted { control, tools } => (control, tools),
         Message::Refused(reason) => bail!("{reason}"),
         _ => bail!("The person declined this connection"),
     };
+    // Only a host that answered about tools serves them. One that did not is
+    // older than they are, and a request sent to it would wait on a stream
+    // nothing reads.
+    if let Some(allowed) = tools {
+        worker.tools_tx.send_replace(allowed);
+        worker.client.send_replace(Some(tools::Client::new(
+            connection.clone(),
+            worker.tools_tx.subscribe(),
+        )));
+    }
+    let _forget = ForgetClient(&worker.client);
     worker
         .emit(Event::Connected {
             peer: connection.remote_id().to_string(),
@@ -674,11 +794,16 @@ pub(crate) async fn watch_session(
         })
         .await?;
     let events = worker.events.clone();
+    let tools_tx = worker.tools_tx.clone();
     let read_control = async {
         loop {
             match wire::read::<Message>(&mut recv).await? {
                 Message::Control(value) => {
                     events.send(Event::Control(value)).await?;
+                }
+                Message::Tools(value) if tools.is_some() => {
+                    tools_tx.send_replace(value);
+                    events.send(Event::Tools(value)).await?;
                 }
                 Message::Paired { machine, name } => {
                     events.send(Event::Paired { machine, name }).await?;

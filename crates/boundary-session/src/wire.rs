@@ -119,12 +119,24 @@ pub enum Message {
         version: u8,
         secret: [u8; 32],
         name: String,
+        /// The helper can send commands and file requests (`crate::tools`).
+        /// An older helper leaves it out, and is never offered them.
+        #[serde(default)]
+        tools: bool,
     },
     Granted {
         control: bool,
+        /// Present only for a helper that declared `tools`, and only from a
+        /// host that serves them: whether they are allowed right now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<bool>,
     },
     Denied,
     Control(bool),
+    /// The person changed whether commands and files are allowed. Sent only
+    /// to a helper that declared `tools`, since an older one ends the session
+    /// on a message it does not know.
+    Tools(bool),
     Input(Input),
     Ping,
     /// A helper asking an unattended machine to let it in. The helper's
@@ -134,6 +146,8 @@ pub enum Message {
         version: u8,
         name: String,
         password: Option<String>,
+        #[serde(default)]
+        tools: bool,
     },
     /// Sent during an attended session when the person being helped chooses
     /// to let this helper connect any time. `machine` is the ID the helper
@@ -166,12 +180,14 @@ pub async fn read<T: DeserializeOwned>(stream: &mut RecvStream) -> Result<T> {
     stream.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
-pub fn validate_hello(message: Message, invite: &Invitation) -> Result<String> {
+/// The helper's name, and whether it can send commands and file requests.
+pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool)> {
     use subtle::ConstantTimeEq;
     if let Message::Hello {
         version,
         secret,
         name,
+        tools,
     } = message
     {
         ensure!(
@@ -183,7 +199,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<String> {
             !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
             "Invalid helper name"
         );
-        Ok(name)
+        Ok((name, tools))
     } else {
         bail!("Expected session handshake")
     }
