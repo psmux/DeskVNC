@@ -205,9 +205,13 @@ pub struct AudioPacket {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProtocolEvent {
-    /// Host permission for an attended support session.
+    /// Host permission for a support session: whether the helper may use
+    /// the mouse and keyboard, and whether the person at that computer lets
+    /// the helper's tools (DeskVNC's agents) run commands and copy files.
+    /// `tools` is also the consent an agent needs to attach to the session.
     Boundary {
         control: bool,
+        tools: bool,
     },
     Rdp(RdpEvent),
     Ssh(SshEvent),

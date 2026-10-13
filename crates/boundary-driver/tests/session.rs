@@ -42,7 +42,7 @@ async fn deskvnc_driver_receives_boundary_frames_and_obeys_host_consent() {
         let mut permission = false;
         loop {
             match rx.recv().await.unwrap() {
-                SessionEvent::Protocol(ProtocolEvent::Boundary { control }) => { assert!(!control); permission = true; }
+                SessionEvent::Protocol(ProtocolEvent::Boundary { control, tools }) => { assert!(!control && !tools); permission = true; }
                 SessionEvent::FramebufferUpdate { rects, .. } => {
                     assert!(permission);
                     assert!(matches!(&rects[0].payload, RectPayload::Rgba(pixels) if pixels == &vec![128; 16]));
@@ -57,7 +57,7 @@ async fn deskvnc_driver_receives_boundary_frames_and_obeys_host_consent() {
         tokio::time::sleep(Duration::from_millis(180)).await;
         assert_eq!(inputs.load(Ordering::SeqCst), 0);
         host.set_control(true);
-        loop { if let Some(SessionEvent::Protocol(ProtocolEvent::Boundary { control: true })) = rx.recv().await { break; } }
+        loop { if let Some(SessionEvent::Protocol(ProtocolEvent::Boundary { control: true, .. })) = rx.recv().await { break; } }
         handle.send(ClientCommand::Pointer { x: 1, y: 1, button_mask: 1 }).await.unwrap();
         while inputs.load(Ordering::SeqCst) == 0 { tokio::time::sleep(Duration::from_millis(10)).await; }
         handle.shutdown();
