@@ -10,6 +10,31 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.28.0] (2026-10-13)
+
+### Added
+
+* `dvv_run` and `dvv_files` work over a Boundary support session, with no SSH
+  on the far side. DeskVNC Support runs the command itself and answers with the
+  process's own exit status and output, and file operations travel over the
+  session.
+* DeskVNC Support asks the person being helped, separately from viewing and
+  control, whether the helper's tools may run commands and copy files. It is
+  off until they tick it, they can turn it off at any time, and each command
+  and file operation is listed on their screen as it runs. For unattended
+  access it is a setting on each paired helper, off for helpers paired before
+  this release, and an unattended password never grants it.
+* An agent can attach to a Boundary session once that consent is given, and is
+  stopped the moment it is taken back.
+
+### Changed
+
+* A command that passes its timeout on a Boundary computer ends with everything
+  it started, not just its shell.
+* Both ends of a Boundary session need 0.28.0 for commands and files. An older
+  DeskVNC Support still works for viewing and control, and an agent is told to
+  update it rather than left waiting.
+
 ## [0.27.11] (2026-10-08)
 
 ### Added
