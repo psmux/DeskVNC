@@ -33,8 +33,15 @@ fn main() -> eframe::Result {
 struct Pending {
     name: String,
     peer: String,
+    /// The helper can send commands and file requests, so the person is
+    /// asked about those too.
+    tools: bool,
+    /// What the person ticked for them. Off until they tick it.
+    allow_tools: bool,
     answer: oneshot::Sender<Approval>,
 }
+/// How many lines of what a helper's tools did the sharing screen keeps.
+const ACTIVITY_LINES: usize = 8;
 /// What the window shows when no session is on screen.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -47,6 +54,12 @@ struct App {
     hosting: bool,
     connected: bool,
     control: bool,
+    /// Whether this helper can send commands and file requests at all.
+    tools_offered: bool,
+    /// Whether the person allows them now.
+    tools: bool,
+    /// What they did, newest last.
+    activity: Vec<String>,
     invitation: String,
     ticket: String,
     password: String,
@@ -116,6 +129,9 @@ impl App {
             hosting: false,
             connected: false,
             control: false,
+            tools_offered: false,
+            tools: false,
+            activity: Vec::new(),
             invitation: String::new(),
             ticket: String::new(),
             password: String::new(),
@@ -158,6 +174,9 @@ impl App {
         self.pending = None;
         self.connected = false;
         self.control = false;
+        self.tools_offered = false;
+        self.tools = false;
+        self.activity.clear();
         self.invitation.clear();
         self.texture = None;
         self.remote_focus = false;
@@ -267,9 +286,20 @@ impl App {
                             "Waiting for your helper. The invitation expires in 10 minutes".into()
                         };
                     }
-                    Event::Approval { name, peer, answer } => {
+                    Event::Approval {
+                        name,
+                        peer,
+                        tools,
+                        answer,
+                    } => {
                         self.approved_name = name.clone();
-                        self.pending = Some(Pending { name, peer, answer });
+                        self.pending = Some(Pending {
+                            name,
+                            peer,
+                            tools,
+                            allow_tools: false,
+                            answer,
+                        });
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     Event::Connected { peer, control } => {
@@ -283,6 +313,14 @@ impl App {
                     }
                     Event::Control(control) => {
                         self.control = control;
+                    }
+                    // On the helper's side. This app sends no commands of its
+                    // own, so there is nothing to show.
+                    Event::Tools(_) => {}
+                    Event::Activity(line) => {
+                        self.activity.push(line);
+                        let excess = self.activity.len().saturating_sub(ACTIVITY_LINES);
+                        self.activity.drain(..excess);
                     }
                     Event::Paired { machine, name } => {
                         self.status = format!(
@@ -676,6 +714,19 @@ impl App {
                     let _ = boundary_platform::open_input_settings();
                 }
             }
+            if self.tools_offered {
+                let before = self.tools;
+                ui.checkbox(
+                    &mut self.tools,
+                    "Allow the helper's tools to run commands and copy files",
+                );
+                if before != self.tools
+                    && let Some(session) = &self.session
+                {
+                    session.set_tools(self.tools);
+                }
+                activity(ui, &self.activity);
+            }
             ui.add_space(14.0);
             if let (Some((name, peer)), Some(session)) =
                 (self.helper.clone(), self.session.as_ref())
@@ -687,7 +738,8 @@ impl App {
                     .on_hover_text("They are remembered by their connection's key. You can remove them later under Settings.")
                     .clicked()
                 {
-                    self.unattended.pair(session, &peer, &name);
+                    // What they may do later starts as what they may do now.
+                    self.unattended.pair(session, &peer, &name, self.tools);
                 }
             }
             ui.add_space(14.0);
@@ -928,7 +980,7 @@ impl App {
         } else {
             self.home(ui);
         }
-        if let Some(pending) = self.pending.as_ref() {
+        if let Some(pending) = self.pending.as_mut() {
             let mut decision = None;
             egui::Window::new("Approve this helper?")
                 .collapsible(false)
@@ -944,6 +996,14 @@ impl App {
                     ui.add_space(6.0);
                     theme::caption(ui, "Helper connection identity");
                     ui.monospace(&pending.peer);
+                    if pending.tools {
+                        ui.add_space(10.0);
+                        ui.checkbox(
+                            &mut pending.allow_tools,
+                            "Also let their tools run commands and copy files on this computer",
+                        );
+                        theme::small(ui, "Their tools act as you, outside what the screen shows. Leave this off unless you asked for it. You can turn it off at any time, and each command shows here as it runs.");
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -969,9 +1029,29 @@ impl App {
             if let Some(decision) = decision
                 && let Some(pending) = self.pending.take()
             {
+                let allow = pending.allow_tools && !matches!(decision, Approval::Deny);
+                if let Some(session) = &self.session {
+                    // Set before the answer, so the grant the helper reads
+                    // already says it.
+                    session.set_tools(allow);
+                }
+                self.tools_offered = pending.tools;
+                self.tools = allow;
                 let _ = pending.answer.send(decision);
             }
         }
+    }
+}
+/// What a helper's tools did, newest last, so the person at the computer
+/// can see it.
+pub(crate) fn activity(ui: &mut egui::Ui, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    theme::caption(ui, "What their tools did");
+    for line in lines {
+        theme::small(ui, line);
     }
 }
 fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {

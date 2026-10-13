@@ -22,6 +22,10 @@ use crate::theme;
 pub struct Active {
     pub name: String,
     pub control: bool,
+    /// Whether their tools may run commands and copy files.
+    pub tools: bool,
+    /// What their tools did, newest last.
+    pub activity: Vec<String>,
     pub session: Session,
 }
 
@@ -124,11 +128,12 @@ impl Unattended {
     }
     /// Let the helper of the current attended session in any time, and tell
     /// them this computer's ID so they can save it.
-    pub fn pair(&mut self, session: &Session, peer: &str, name: &str) {
+    pub fn pair(&mut self, session: &Session, peer: &str, name: &str, tools: bool) {
         if let Err(error) = self.access.trust(peer, name, true) {
             self.fail(format!("{error:#}"));
             return;
         }
+        self.access.allow_tools(peer, tools);
         self.access.enabled = true;
         if !self.save() {
             return;
@@ -182,6 +187,8 @@ impl Unattended {
                         self.active = Some(Active {
                             name,
                             control,
+                            tools: session.tools_allowed(),
+                            activity: Vec::new(),
                             session,
                         });
                         arrived = true;
@@ -198,6 +205,11 @@ impl Unattended {
             while let Ok(event) = active.session.events.try_recv() {
                 match event {
                     boundary_session::Event::Control(control) => active.control = control,
+                    boundary_session::Event::Activity(line) => {
+                        active.activity.push(line);
+                        let excess = active.activity.len().saturating_sub(crate::ACTIVITY_LINES);
+                        active.activity.drain(..excess);
+                    }
                     boundary_session::Event::Finished(_) => {
                         self.active = None;
                         break;
@@ -223,7 +235,10 @@ impl Unattended {
         };
         let name = active.name.clone();
         let control = active.control;
+        let tools = active.tools;
+        let activity = active.activity.clone();
         let mut end = false;
+        let mut stop_tools = false;
         egui::Frame::new()
             .fill(theme::pal(ui.ctx()).danger)
             .inner_margin(14.0)
@@ -246,10 +261,27 @@ impl Unattended {
                         if ui.button("End their session").clicked() {
                             end = true;
                         }
+                        if tools && ui.button("Stop their commands").clicked() {
+                            stop_tools = true;
+                        }
                     });
                 });
+                if tools {
+                    ui.label(
+                        egui::RichText::new("Their tools can run commands and copy files on this computer.")
+                            .color(egui::Color32::WHITE),
+                    );
+                }
+                for line in &activity {
+                    ui.label(egui::RichText::new(line).color(egui::Color32::WHITE).small());
+                }
             });
         ui.add_space(8.0);
+        if stop_tools && let Some(active) = self.active.as_mut() {
+            active.session.set_tools(false);
+            active.tools = false;
+            self.say(format!("{name}'s tools can no longer run commands in this session"));
+        }
         if end {
             if let Some(active) = self.active.take() {
                 active.session.stop();
@@ -326,6 +358,10 @@ impl Unattended {
                 ui.label(&helper.name);
                 ui.small(short(&helper.id));
                 changed |= ui.checkbox(&mut helper.control, "may control").changed();
+                changed |= ui
+                    .checkbox(&mut helper.tools, "may run commands and copy files")
+                    .on_hover_text("For a helper whose tools, such as DeskVNC's agents, work on this computer while you are away. Commands run as you.")
+                    .changed();
                 if ui.button("Remove").clicked() {
                     remove = Some(index);
                 }
