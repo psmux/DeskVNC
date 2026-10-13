@@ -44,6 +44,30 @@ pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<
     // stream dropped here, no bytes ever written back.
 }
 
+/// Identify a Radmin-compatible endpoint using only the 14-byte pre-authentication
+/// greeting. No username, SRP request, password or desktop negotiation is sent.
+/// Keep these literal wire bytes in discovery so it need not depend on an
+/// authentication crate. They match radmin-core's pinned modern-family greeting.
+pub async fn radmin_fingerprint(addr: SocketAddr, connect_timeout: Duration) -> bool {
+    const GREETING: [u8; 14] = [1, 0, 0, 0, 5, 0, 0, 2, 0x27, 0x27, 2, 0, 0, 0];
+    const ACK: [u8; 14] = [1, 0, 0, 0, 5, 0, 0, 0, 0x27, 0x27, 0, 0, 0, 0];
+    let mut stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => stream,
+        _ => return false,
+    };
+    timeout(BANNER_READ_TIMEOUT, async {
+        stream.write_all(&GREETING).await.ok()?;
+        let mut reply = [0u8; 14];
+        stream.read_exact(&mut reply).await.ok()?;
+        Some(reply == ACK)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+    // Dropping the socket ends the probe before any authentication attempt.
+}
+
 /// Deep probe: complete the RFB version handshake and read the server's
 /// security-type list, then close the socket **without authenticating**.
 ///

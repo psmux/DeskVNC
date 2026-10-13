@@ -23,6 +23,10 @@ pub enum ClientCommand {
     },
     /// Release every key we believe is pressed (blur / disconnect safety).
     ReleaseAllKeys,
+    /// Request the protocol's dedicated secure-attention operation. This is
+    /// distinct from synthesizing Ctrl, Alt and Delete as ordinary key input.
+    /// Currently emitted by the shell only for Radmin sessions.
+    SecureAttention,
     ClipboardText(String),
     ClipboardRequest {
         formats: u32,

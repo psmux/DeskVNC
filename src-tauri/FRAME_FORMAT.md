@@ -185,6 +185,12 @@ already uses for the same reason, applied to PTY bytes.
 
 ## Input events (JS → Rust, body of `send_input`), continued
 
+Radmin's explicit secure-attention action uses **kind 5**, a one-byte event
+`[u8 kind = 5]`. It decodes to `ClientCommand::SecureAttention`, participates in
+the existing input sequencing/backpressure path, and is never coalesced as mouse
+motion. The Radmin driver enforces control mode before encoding it. The UI uses
+this for Radmin Ctrl+Alt+Delete; VNC/RDP keep their existing key-combination path.
+
 Two more event kinds, for a remote shell session, added after the pointer,
 key, and release-all kinds documented above:
 
@@ -211,4 +217,3 @@ truncated or lying `len` returns an error rather than panicking or reading
 out of bounds, and they participate in the same concatenated-events loop, so
 a terminal-input event can appear between, say, two pointer events in one
 `send_input` call.
-

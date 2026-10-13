@@ -12,19 +12,19 @@
 
 /**
  * `remote_core::ProtocolKind`, serde `rename_all = "kebab-case"`, which for
- * these three spells them exactly as they are written here.
+ * these protocols spells them exactly as they are written here.
  */
-export type ProtocolKind = "vnc" | "rdp" | "ssh" | "boundary";
+export type ProtocolKind = "vnc" | "rdp" | "radmin" | "ssh" | "boundary";
 
 /**
  * The port a bare hostname gets, per protocol. The one place these numbers
  * live on this side; `address.ts` re-exports them under its own names for
  * the callers that already import those.
  */
-export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, ssh: 22, boundary: 0 };
+export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, radmin: 4899, ssh: 22, boundary: 0 };
 
-/** The three protocols, in the order the UI offers them. */
-export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
+/** Direct connection protocols, in the order the UI offers them. */
+export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh", "radmin"];
 
 /**
  * Is this a protocol this build knows? A profile written by a newer version
@@ -32,7 +32,7 @@ export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
  * than being quietly relabelled.
  */
 export function isProtocolKind(value: unknown): value is ProtocolKind {
-  return value === "vnc" || value === "rdp" || value === "ssh" || value === "boundary";
+  return value === "vnc" || value === "rdp" || value === "radmin" || value === "ssh" || value === "boundary";
 }
 
 /**
@@ -58,6 +58,7 @@ export function protocolLabel(p: string): string {
 const PROTOCOL_NAMES: Record<ProtocolKind, string> = {
   boundary: "Boundary support",
   rdp: "RDP (Windows Remote Desktop)",
+  radmin: "Radmin (Radmin security)",
   ssh: "SSH terminal",
   vnc: "VNC / screen sharing",
 };
@@ -322,6 +323,8 @@ export interface StoredCredentials {
   rdpUser?: string | null;
   rdpDomain?: string | null;
   rdpPassword?: string | null;
+  radminUser?: string | null;
+  radminPassword?: string | null;
 }
 
 /** Where secrets live; mirrors `vnc_store::CredentialBackend`. */

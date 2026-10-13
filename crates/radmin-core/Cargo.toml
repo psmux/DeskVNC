@@ -1,0 +1,24 @@
+[package]
+name = "radmin-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Radmin driver for the shared remote-core session interface"
+
+[dependencies]
+remote-core = { path = "../remote-core" }
+tokio.workspace = true
+tokio-util.workspace = true
+anyhow.workspace = true
+zeroize.workspace = true
+aes.workspace = true
+cipher.workspace = true
+cbc.workspace = true
+sha1.workspace = true
+md4.workspace = true
+subtle.workspace = true
+num-bigint-dig.workspace = true
+getrandom.workspace = true
+flate2.workspace = true
+hex.workspace = true

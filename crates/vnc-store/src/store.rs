@@ -1727,7 +1727,7 @@ mod tests {
     /// the DB file (or its WAL).
     #[test]
     fn no_secrets_in_db_file() {
-        // Seven sentinels, one per credential field. The RDP domain and
+        // Sentinels cover the original credential fields and the Radmin pair. The RDP domain and
         // username are not secrets in the way a password is, and they are
         // treated as secrets here anyway: a domain name in a SQLite file is an
         // organisational disclosure, and `StoredCredentials` is the one place
@@ -1740,6 +1740,8 @@ mod tests {
             "rdp-user-sentinel",
             "rdp-domain-sentinel",
             "rdp-pass-sentinel",
+            "radmin-user-sentinel",
+            "radmin-pass-sentinel",
         ];
         let secret = sentinels[0];
         let dir = tempfile::tempdir().unwrap();
@@ -1770,6 +1772,8 @@ mod tests {
                     rdp_user: Some(sentinels[4].to_string()),
                     rdp_domain: Some(sentinels[5].to_string()),
                     rdp_password: Some(sentinels[6].to_string()),
+                    radmin_user: Some(sentinels[7].to_string()),
+                    radmin_password: Some(sentinels[8].to_string()),
                     ssh_user: None,
                     ssh_password: None,
                 },

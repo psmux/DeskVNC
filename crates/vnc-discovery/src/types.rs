@@ -320,6 +320,12 @@ pub struct ScanOptions {
     /// of running RDP on a range.
     pub rdp_ports: Vec<u16>,
 
+    /// Include Radmin endpoints in an explicitly requested subnet scan.
+    /// Uses the same global connection rate/concurrency limits as VNC and RDP.
+    pub probe_radmin: bool,
+    /// Radmin ports to probe on every address, normally TCP 4899. No login is attempted.
+    pub radmin_ports: Vec<u16>,
+
     /// Also read names disclosed by non-name services (MSRPC endpoint mapper
     /// on 135, RDP certificate on 3389).
     ///
@@ -346,6 +352,8 @@ impl Default for ScanOptions {
             probe_other_services: true,
             probe_rdp: true,
             rdp_ports: vec![crate::tlsname::RDP_PORT],
+            probe_radmin: true,
+            radmin_ports: vec![ProtocolKind::Radmin.default_port()],
         }
     }
 }

@@ -461,7 +461,11 @@ export function DiscoveredTile({
     : address;
 
   const secIcon =
-    host.security === "unencrypted" ? (
+    host.security === "unknown" ? (
+      <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-secondary">
+        {host.securityHint ?? "Not verified"}
+      </span>
+    ) : host.security === "unencrypted" ? (
       <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-warning">
         <IconAlert size={13} className="shrink-0" /> {host.securityHint ?? "Unencrypted"}
       </span>

@@ -32,7 +32,7 @@ export interface AgentOpenRequest {
   hostId?: string | null;
   address: string;
   port: number;
-  protocol: "vnc" | "rdp" | "ssh";
+  protocol: "vnc" | "rdp" | "ssh" | "radmin";
   /** Open behind what the person is looking at, without selecting it. */
   background?: boolean;
 }

@@ -10,6 +10,7 @@
  *   ReleaseAll : u8 kind=2                                            (1 byte)
  *   TerminalInput  : u8 kind=3 | u32 len | len bytes of payload  (5 + len bytes)
  *   TerminalResize : u8 kind=4 | u16 cols | u16 rows                  (5 bytes)
+ *   SecureAttention : u8 kind=5                                       (1 byte)
  * Packets may be concatenated in one buffer (e.g. wheel press+release, or a
  * terminal input chunk followed by a resize). The whole buffer is the raw
  * invoke body; the session id travels in the `x-session-id` invoke header
@@ -1010,6 +1011,12 @@ export class SessionInput {
     if (this.viewOnly) return;
     for (const k of combo) this.sendKey(k.keysym, k.keycode, true);
     for (let i = combo.length - 1; i >= 0; i--) this.sendKey(combo[i].keysym, combo[i].keycode, false);
+  }
+
+  /** Protocol-native Ctrl+Alt+Delete; uses the same ordered input transport. */
+  sendSecureAttention(): void {
+    if (this.viewOnly) return;
+    this.dispatch(new Uint8Array([5]));
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {

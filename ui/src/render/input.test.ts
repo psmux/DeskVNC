@@ -612,6 +612,17 @@ describe("what may be coalesced on the way to the wire", () => {
     expect(sent).toHaveLength(2);
     expect(keys).toEqual([undefined, undefined]);
   });
+
+  it("sends secure attention once without coalescing or synthesized key events", () => {
+    const { input, sent, keys } = setup();
+    input.sendSecureAttention();
+    expect(sent.map((packet) => Array.from(packet))).toEqual([[5]]);
+    expect(keys).toEqual([undefined]);
+    input.setViewOnly(true);
+    const before = sent.length;
+    input.sendSecureAttention();
+    expect(sent).toHaveLength(before);
+  });
 });
 
 const KIND_KEY = 1;

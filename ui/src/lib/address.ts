@@ -123,6 +123,9 @@ function endpoint(address: string, digits: string, allowDisplayNumber: boolean):
 
 /** The scheme a URL-ish input names, and the rest of the input after it. */
 function readScheme(raw: string): { protocol: ProtocolKind | null; rest: string; url: boolean } {
+  if (/^radmin:\/\//i.test(raw)) {
+    return { protocol: "radmin", rest: raw.replace(/^radmin:\/\//i, ""), url: true };
+  }
   if (/^(?:rdps?):\/\//i.test(raw)) {
     return { protocol: "rdp", rest: raw.replace(/^(?:rdps?):\/\//i, ""), url: true };
   }
@@ -293,6 +296,10 @@ export function formatTarget(
   username?: string | null,
 ): string {
   const host = isIpv6Literal(address) ? `[${address}]` : address;
+  if (protocol === "radmin") {
+    const user = username ? `${username}@` : "";
+    return `radmin://${user}${host}${port === DEFAULT_PORT.radmin ? "" : `:${port}`}`;
+  }
   if (protocol === "rdp") {
     const user = username ? `${username}@` : "";
     return port === DEFAULT_RDP_PORT
@@ -335,6 +342,7 @@ export function formatEndpoint(address: string, port: number): string {
  * adds one.
  */
 export function presetProtocol(target: { port: number }): ProtocolKind {
+  if (target.port === DEFAULT_PORT.radmin) return "radmin";
   if (target.port === DEFAULT_SSH_PORT) return "ssh";
   return target.port === DEFAULT_RDP_PORT ? "rdp" : "vnc";
 }

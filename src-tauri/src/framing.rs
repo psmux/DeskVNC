@@ -65,6 +65,7 @@
 //! kind 2 release-all:  [u8 2]                                        (1 byte)
 //! kind 3 terminal input: [u8 3][u32 len][payload...]      (5 + len bytes)
 //! kind 4 terminal resize: [u8 4][u16 cols][u16 rows]                (5 bytes)
+//! kind 5 secure attention: [u8 5]                                  (1 byte)
 //! ```
 
 use bytes::Bytes;
@@ -336,6 +337,10 @@ pub fn decode_input(body: &[u8]) -> Result<Vec<ClientCommand>, String> {
                 commands.push(ClientCommand::ResizeTerminal { cols, rows });
                 i += 5;
             }
+            5 => {
+                commands.push(ClientCommand::SecureAttention);
+                i += 1;
+            }
             other => return Err(format!("unknown input event kind: {other}")),
         }
     }
@@ -345,6 +350,20 @@ pub fn decode_input(body: &[u8]) -> Result<Vec<ClientCommand>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secure_attention_preserves_input_order_and_rejects_invalid_tail() {
+        let commands = decode_input(&[2, 5, 2]).unwrap();
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                ClientCommand::ReleaseAllKeys,
+                ClientCommand::SecureAttention,
+                ClientCommand::ReleaseAllKeys
+            ]
+        ));
+        assert!(decode_input(&[5, 255]).is_err());
+    }
 
     fn raw(x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
         DecodedRect {

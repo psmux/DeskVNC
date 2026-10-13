@@ -55,6 +55,7 @@ export interface HostDraft {
   scalingMode: ScalingMode;
   keyboardMode: string;
   passthrough: boolean;
+  viewOnly: boolean;
   /** Parsed `sshTunnel` blob; `null` when the host has never configured one. */
   sshTunnel: SshTunnelSettings | null;
   /**
@@ -82,6 +83,8 @@ export interface HostDraft {
    * field already has.
    */
   rdpUser: string;
+  /** Write-only Radmin-security identity; kept separate from RDP when switching protocols. */
+  radminUser: string;
   /** Logon domain, part of the stored credential rather than the profile
    *  blob's `domain`. Blank means "leave what is stored alone". */
   rdpDomain: string;
@@ -124,6 +127,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     scalingMode: h?.scalingMode ?? "aspect-fit",
     keyboardMode: h?.keyboardMode ?? "auto",
     passthrough: h?.passthrough ?? false,
+    viewOnly: h?.viewOnly ?? false,
     sshTunnel: parseSshTunnel(h?.sshTunnel),
     sshPassphrase: "",
     // Falls through to the prefill so a MAC learned by discovery survives into
@@ -134,6 +138,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     // back verbatim, because its own settings are the answer.
     rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? newRdpSettings()) : null,
     rdpUser: "",
+    radminUser: "",
     rdpDomain: "",
     ssh: protocol === "ssh" ? (parseSshSettings(h?.sshSettings) ?? newSshSettings()) : null,
     sshUser: "",
@@ -191,6 +196,7 @@ const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
   boundary: { graphical: true, rfbSecurity: false, username: false, domain: false },
   vnc: { graphical: true, rfbSecurity: true, username: false, domain: false },
   rdp: { graphical: true, rfbSecurity: false, username: true, domain: true },
+  radmin: { graphical: true, rfbSecurity: false, username: true, domain: false },
   ssh: { graphical: false, rfbSecurity: false, username: true, domain: false },
 };
 
@@ -413,6 +419,21 @@ export function HostDialog({
           logon is user first, so the name field sits above the password
           rather than beside the security type.
         */}
+        {d.protocol === "radmin" ? (
+          <label className="flex items-start gap-2.5 text-sm text-primary">
+            <input
+              type="checkbox"
+              checked={d.viewOnly}
+              onChange={(e) => set({ viewOnly: e.target.checked })}
+            />
+            <span>
+              Connect in view-only mode
+              <span className="block text-xs text-tertiary">
+                Server-enforced. Disable this and reconnect to allow control.
+              </span>
+            </span>
+          </label>
+        ) : null}
         {caps.username ? (
           caps.domain ? (
             <div className="grid grid-cols-2 gap-3">
@@ -457,6 +478,22 @@ export function HostDialog({
                 />
               </Field>
             </div>
+          ) : d.protocol === "radmin" ? (
+            <Field
+              label="Radmin user name"
+              hint="Use an account configured under Radmin security on the remote computer."
+            >
+              <input
+                className="field"
+                value={d.radminUser}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder={d.hasPassword ? "(unchanged)" : "Radmin user name"}
+                onChange={(e) => set({ radminUser: e.target.value })}
+              />
+            </Field>
           ) : (
             <Field
               label="User name"
@@ -659,6 +696,7 @@ export function HostDialog({
                       }
                     >
                       <Select
+                        disabled={d.protocol === "radmin"}
                         value={d.qualityPref}
                         onChange={(e) => set({ qualityPref: e.target.value as QualityPreset })}
                       >
@@ -687,11 +725,12 @@ export function HostDialog({
                         <option value="aspect-fit">Aspect fit</option>
                         <option value="fit">Fit to window</option>
                         <option value="actual">Actual size (1:1)</option>
-                        <option value="remote-resize">Remote resize</option>
+                        {d.protocol !== "radmin" ? <option value="remote-resize">Remote resize</option> : null}
                       </Select>
                     </Field>
                     <Field label="Keyboard mode" hint="How keystrokes are translated">
                       <Select
+                        disabled={d.protocol === "radmin"}
                         value={d.keyboardMode}
                         onChange={(e) => set({ keyboardMode: e.target.value })}
                       >

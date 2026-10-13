@@ -484,6 +484,7 @@ pub fn command_name(command: &ClientCommand) -> &'static str {
         ClientCommand::Pointer { .. } => "pointer",
         ClientCommand::Key { .. } => "key",
         ClientCommand::ReleaseAllKeys => "release-all-keys",
+        ClientCommand::SecureAttention => "secure-attention",
         ClientCommand::ClipboardText(_) => "clipboard-text",
         ClientCommand::ClipboardRequest { .. } => "clipboard-request",
         ClientCommand::SetQuality(_) => "set-quality",

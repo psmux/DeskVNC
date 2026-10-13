@@ -3,7 +3,7 @@
 use crate::banner::server_label;
 use crate::error::Result;
 use crate::filter::{self, LocalNetwork};
-use crate::probe::{fingerprint, rdp_fingerprint};
+use crate::probe::{fingerprint, radmin_fingerprint, rdp_fingerprint};
 use crate::resolve::{self, Resolved};
 use crate::types::{DiscoveredHost, DiscoveryEvent, DiscoverySource, ScanOptions};
 use remote_core::ProtocolKind;
@@ -246,7 +246,7 @@ pub async fn scan_subnet(
     let scanned = Arc::new(AtomicU32::new(0));
     let found = Arc::new(AtomicU32::new(0));
 
-    // ---- Phase 1: probe base_port, and 3389, across all hosts. ----
+    // ---- Phase 1: probe VNC and enabled RDP/Radmin ports across all hosts. ----
     //
     // One task per address per service rather than one per address. Both take
     // the same semaphore permit and the same rate limiter slot before
@@ -329,6 +329,38 @@ pub async fn scan_subnet(
                 host.rdp = Some(caps);
                 Some(Hit { host, cert_name })
             });
+        }
+        if opts.probe_radmin {
+            for &port in &opts.radmin_ports {
+                let sem = semaphore.clone();
+                let lim = limiter.clone();
+                let cancel = cancel.clone();
+                set.spawn(async move {
+                    let _permit = sem.acquire_owned().await.ok()?;
+                    if cancel.is_cancelled() {
+                        return None;
+                    }
+                    lim.acquire().await;
+                    if cancel.is_cancelled() {
+                        return None;
+                    }
+                    let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                    if !radmin_fingerprint(addr, connect_timeout).await {
+                        return None;
+                    }
+                    let mut host = DiscoveredHost::new(
+                        IpAddr::V4(ip),
+                        port,
+                        DiscoverySource::Scan,
+                        "Radmin server".into(),
+                    );
+                    host.protocol = ProtocolKind::Radmin;
+                    Some(Hit {
+                        host,
+                        cert_name: None,
+                    })
+                });
+            }
         }
     }
 

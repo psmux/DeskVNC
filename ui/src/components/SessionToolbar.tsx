@@ -127,6 +127,7 @@ export interface SessionToolbarProps {
   /** Live native-capture state from the shell (PRD/06 §3 Tier 2). */
   captureStatus: CaptureStatus;
   viewOnly: boolean;
+  viewOnlyLocked?: boolean;
   recallSignal: number;
   onScalingMode: (m: ScalingMode) => void;
   onZoom: (z: number) => void;
@@ -649,7 +650,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           <IconCursor size={15} />
         </ToolButton>
 
-        <ToolButton label="Quality" active={openMenu === "quality"} onClick={() => setOpenMenu(openMenu === "quality" ? null : "quality")}>
+        <ToolButton disabled={props.protocol === "radmin"} label={props.protocol === "radmin" ? "Radmin: lossless 24-bit colour" : "Quality"} active={openMenu === "quality"} onClick={() => setOpenMenu(openMenu === "quality" ? null : "quality")}>
           <IconActivity size={15} />
           <span className="text-xs uppercase text-secondary">{props.quality === "bw" ? "B&W" : props.quality}</span>
         </ToolButton>
@@ -735,7 +736,8 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         ) : null}
 
         <ToolButton
-          label={props.viewOnly ? "View only: on, click to allow input" : "View only: off, click to block input"}
+          disabled={props.viewOnlyLocked}
+          label={props.viewOnlyLocked ? "Server-enforced view only: edit the profile and reconnect to allow control" : props.viewOnly ? "View only: on, click to allow input" : "View only: off, click to block input"}
           toggled={props.viewOnly}
           onClick={() => props.onViewOnly(!props.viewOnly)}
         >
@@ -746,7 +748,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           <IconCamera size={15} />
         </ToolButton>
 
-        <ToolButton label="Request full screen refresh" onClick={props.onRefresh}>
+        <ToolButton disabled={props.protocol === "radmin"} label="Request full screen refresh" onClick={props.onRefresh}>
           <IconRefresh size={15} />
         </ToolButton>
 
@@ -824,12 +826,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                 implemented and tested for a while, and the native View menu
                 never gated the same row, so the two disagreed.
               */}
-              <MenuRow
+              {props.protocol !== "radmin" ? <MenuRow
                 selected={props.scalingMode === "remote-resize"}
                 onClick={() => props.onScalingMode("remote-resize")}
               >
                 Remote resize (match window)
-              </MenuRow>
+              </MenuRow> : null}
               {props.protocol === "rdp" ? (
                 <p className="px-2.5 pb-1 text-2xs text-tertiary">
                   View, then Resolution, also sets the remote desktop to a fixed

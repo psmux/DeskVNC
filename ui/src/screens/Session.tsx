@@ -339,6 +339,7 @@ function SessionView({
   const [capture, setCapture] = useState<CaptureStatus>(CAPTURE_INACTIVE);
   const [showCaptureHelp, setShowCaptureHelp] = useState(false);
   const [requestedViewOnly, setViewOnlyState] = useState(stored.viewOnly);
+  const [radminViewOnly, setRadminViewOnly] = useState(false);
   /** Manual staleness override; off by default because it costs bandwidth. */
   const [alwaysRefresh, setAlwaysRefresh] = useState(stored.alwaysRefresh);
   const [recallSignal, setRecallSignal] = useState(0);
@@ -424,7 +425,7 @@ function SessionView({
   );
 
   const session = useSession(params, bridge, frame);
-  const viewOnly = requestedViewOnly || session.boundaryControl === false;
+  const viewOnly = requestedViewOnly || radminViewOnly || session.boundaryControl === false;
   viewOnlyRef.current = viewOnly;
   const sessionRef = useRef(session);
   sessionRef.current = session;
@@ -872,6 +873,15 @@ function SessionView({
       cancelled = true;
     };
   }, [params.protocol, params.profileId]);
+
+  useEffect(() => {
+    if (params.protocol !== "radmin" || !params.profileId) return;
+    let cancelled = false;
+    void safeInvoke<{ viewOnly: boolean } | null>("get_host", { hostId: params.profileId }, null).then((host) => {
+      if (!cancelled) setRadminViewOnly(host?.viewOnly === true);
+    });
+    return () => { cancelled = true; };
+  }, [params.protocol, params.profileId, session.state.state]);
 
   // Seed shortcut pass-through from the host profile's "Capture system
   // shortcuts by default". The box has always been saved with the profile;
@@ -1546,7 +1556,8 @@ function SessionView({
       if (!input) return;
       switch (combo) {
         case "ctrl-alt-del":
-          input.sendKeyCombo([KEY_COMBO.Control_L, KEY_COMBO.Alt_L, KEY_COMBO.Delete]);
+          if (params.protocol === "radmin") input.sendSecureAttention();
+          else input.sendKeyCombo([KEY_COMBO.Control_L, KEY_COMBO.Alt_L, KEY_COMBO.Delete]);
           break;
         case "cmd-tab":
           input.sendKeyCombo([KEY_COMBO.Alt_L, KEY_COMBO.Tab]);
@@ -1562,7 +1573,7 @@ function SessionView({
           break;
       }
     },
-    [],
+    [params.protocol],
   );
 
   const screenshot = useCallback(async (): Promise<void> => {
@@ -1922,6 +1933,7 @@ function SessionView({
           passthrough={passthrough}
           captureStatus={capture}
           viewOnly={viewOnly}
+          viewOnlyLocked={radminViewOnly}
           recallSignal={recallSignal}
           onScalingMode={setScalingModeState}
           onZoom={(z) => {

@@ -2137,6 +2137,13 @@ impl RunLoop {
                 // Certificate trust is resolved during the security handshake;
                 // nothing to do while connected.
             }
+            ClientCommand::SecureAttention => {
+                // The shell uses ordinary key combinations for VNC. This
+                // dedicated operation belongs to the Radmin protocol path.
+                emit(events, SessionEvent::Error(
+                    "VNC uses the normal Ctrl+Alt+Delete key combination, not a dedicated secure-attention command".into(),
+                )).await?;
+            }
             ClientCommand::ReconnectNow => {
                 // Asked for while connected, this used to do nothing, and that
                 // left no way out of a session that reports connected and has
