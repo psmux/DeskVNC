@@ -119,7 +119,9 @@ async fn an_agent_runs_commands_and_moves_files_only_while_the_person_allows_it(
         assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "carried");
 
         // Files, through the client the shell's file verbs use.
-        let client = driver.tools("tools").expect("a tools client while connected");
+        let client = driver
+            .tools("tools")
+            .expect("a tools client while connected");
         let path = std::env::temp_dir()
             .join(format!("boundary-driver-tools-{}.txt", std::process::id()))
             .to_string_lossy()
@@ -137,7 +139,10 @@ async fn an_agent_runs_commands_and_moves_files_only_while_the_person_allows_it(
             )
             .await
             .unwrap();
-        assert!(matches!(reply, Reply::Wrote { written: 13, .. }), "{reply:?}");
+        assert!(
+            matches!(reply, Reply::Wrote { written: 13, .. }),
+            "{reply:?}"
+        );
         let (reply, bytes) = client
             .call(
                 &Request::Get {
@@ -160,7 +165,10 @@ async fn an_agent_runs_commands_and_moves_files_only_while_the_person_allows_it(
                 seen.push(line);
             }
         }
-        assert!(seen.iter().any(|l| l.contains("BOUNDARY_TOOLS_TEST")), "{seen:?}");
+        assert!(
+            seen.iter().any(|l| l.contains("BOUNDARY_TOOLS_TEST")),
+            "{seen:?}"
+        );
 
         // Taken back: the helper is told, and the host refuses even a request
         // that ignores what it was told.
@@ -176,9 +184,20 @@ async fn an_agent_runs_commands_and_moves_files_only_while_the_person_allows_it(
         let SessionEvent::AgentRefused(refused) = answer(&mut rx).await else {
             panic!("a command ran after the person took it back");
         };
-        assert!(refused.reason.contains("has not allowed"), "{}", refused.reason);
+        assert!(
+            refused.reason.contains("has not allowed"),
+            "{}",
+            refused.reason
+        );
         let (reply, _) = client
-            .call(&Request::Remove { path: path.clone(), recursive: false }, &[], wait)
+            .call(
+                &Request::Remove {
+                    path: path.clone(),
+                    recursive: false,
+                },
+                &[],
+                wait,
+            )
             .await
             .unwrap();
         assert!(matches!(reply, Reply::Refused(_)), "{reply:?}");
@@ -237,7 +256,11 @@ async fn nothing_runs_when_the_person_only_allowed_viewing() {
         let SessionEvent::AgentRefused(refused) = answer(&mut rx).await else {
             panic!("a command ran without the person's say so");
         };
-        assert!(refused.reason.contains("has not allowed"), "{}", refused.reason);
+        assert!(
+            refused.reason.contains("has not allowed"),
+            "{}",
+            refused.reason
+        );
         handle.shutdown();
         host.stop();
     })

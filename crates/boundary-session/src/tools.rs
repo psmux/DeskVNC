@@ -229,7 +229,12 @@ impl Client {
     }
     /// Send one request and wait for its answer. `wait` bounds the whole
     /// exchange, so it should be the command's own timeout plus a margin.
-    pub async fn call(&self, request: &Request, body: &[u8], wait: Duration) -> Result<(Reply, Vec<u8>)> {
+    pub async fn call(
+        &self,
+        request: &Request,
+        body: &[u8],
+        wait: Duration,
+    ) -> Result<(Reply, Vec<u8>)> {
         tokio::time::timeout(wait, async {
             let (mut send, mut recv) = self
                 .connection
@@ -262,11 +267,9 @@ pub(crate) async fn serve(
         let told = told.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let Ok(Ok((request, body))) = tokio::time::timeout(
-                Duration::from_secs(30),
-                read_frame::<Request>(&mut recv),
-            )
-            .await
+            let Ok(Ok((request, body))) =
+                tokio::time::timeout(Duration::from_secs(30), read_frame::<Request>(&mut recv))
+                    .await
             else {
                 let _ = send.reset(1u8.into());
                 return;
@@ -372,8 +375,16 @@ async fn run(
     let started = Instant::now();
     let stdout = Arc::new(Mutex::new(Collector::default()));
     let stderr = Arc::new(Mutex::new(Collector::default()));
-    let out = pump(child.stdout.take().context("No output pipe")?, stdout.clone(), cap as usize);
-    let err = pump(child.stderr.take().context("No error pipe")?, stderr.clone(), cap as usize);
+    let out = pump(
+        child.stdout.take().context("No output pipe")?,
+        stdout.clone(),
+        cap as usize,
+    );
+    let err = pump(
+        child.stderr.take().context("No error pipe")?,
+        stderr.clone(),
+        cap as usize,
+    );
     if let Some(mut pipe) = child.stdin.take() {
         // Written off to the side and then closed, which is load bearing: a
         // command that reads its input blocks for good on an open pipe.
@@ -391,7 +402,11 @@ async fn run(
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
-    let drain = DRAIN.min(timeout.saturating_sub(started.elapsed()).max(Duration::from_millis(200)));
+    let drain = DRAIN.min(
+        timeout
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_millis(200)),
+    );
     // Readers that are still going after this keep running detached, and
     // what they had collected is taken below either way.
     let _ = tokio::time::timeout(drain, async {
@@ -573,7 +588,9 @@ fn files(request: Request, body: Vec<u8>) -> Result<(Reply, Vec<u8>)> {
         Request::List { path } => {
             let dir = named(&path)?;
             let mut entries = Vec::new();
-            for item in std::fs::read_dir(&dir).with_context(|| format!("Cannot list {}", dir.display()))? {
+            for item in
+                std::fs::read_dir(&dir).with_context(|| format!("Cannot list {}", dir.display()))?
+            {
                 let Ok(item) = item else { continue };
                 if let Ok(entry) = entry(&item.path()) {
                     entries.push(entry);
@@ -666,7 +683,8 @@ fn files(request: Request, body: Vec<u8>) -> Result<(Reply, Vec<u8>)> {
                 }
             } else {
                 // A link to a folder on Windows is removed as a folder.
-                std::fs::remove_file(&target).or_else(|e| std::fs::remove_dir(&target).map_err(|_| e))
+                std::fs::remove_file(&target)
+                    .or_else(|e| std::fs::remove_dir(&target).map_err(|_| e))
             };
             result.with_context(|| format!("Cannot delete {}", target.display()))?;
             Ok((Reply::Path(shown_path), Vec::new()))
@@ -686,7 +704,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("boundary-tools-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("boundary-tools-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -755,7 +774,10 @@ mod tests {
             panic!("{reply:?}");
         };
         assert_eq!(code, Some(0));
-        assert_eq!(String::from_utf8_lossy(&body[..stdout as usize]).trim(), "x marks");
+        assert_eq!(
+            String::from_utf8_lossy(&body[..stdout as usize]).trim(),
+            "x marks"
+        );
     }
 
     #[tokio::test]
@@ -803,8 +825,14 @@ mod tests {
                 bytes.to_vec(),
             )
         };
-        assert!(matches!(put(0, b"hello ").await.0, Reply::Wrote { size: 6, .. }));
-        assert!(matches!(put(6, b"world").await.0, Reply::Wrote { size: 11, .. }));
+        assert!(matches!(
+            put(0, b"hello ").await.0,
+            Reply::Wrote { size: 6, .. }
+        ));
+        assert!(matches!(
+            put(6, b"world").await.0,
+            Reply::Wrote { size: 11, .. }
+        ));
         let (reply, bytes) = answer(
             Request::Get {
                 path: path.clone(),
@@ -814,7 +842,14 @@ mod tests {
             Vec::new(),
         )
         .await;
-        assert!(matches!(reply, Reply::Window { size: 11, offset: 6, .. }));
+        assert!(matches!(
+            reply,
+            Reply::Window {
+                size: 11,
+                offset: 6,
+                ..
+            }
+        ));
         assert_eq!(bytes, b"world");
         let (reply, _) = answer(
             Request::List {
@@ -827,14 +862,33 @@ mod tests {
             panic!("{reply:?}");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!((entries[0].name.as_str(), entries[0].size), ("data.bin", 11));
+        assert_eq!(
+            (entries[0].name.as_str(), entries[0].size),
+            ("data.bin", 11)
+        );
         let renamed = dir.join("moved.bin").to_string_lossy().to_string();
         assert!(matches!(
-            answer(Request::Rename { from: path, to: renamed.clone() }, Vec::new()).await.0,
+            answer(
+                Request::Rename {
+                    from: path,
+                    to: renamed.clone()
+                },
+                Vec::new()
+            )
+            .await
+            .0,
             Reply::Path(_)
         ));
         assert!(matches!(
-            answer(Request::Remove { path: renamed, recursive: false }, Vec::new()).await.0,
+            answer(
+                Request::Remove {
+                    path: renamed,
+                    recursive: false
+                },
+                Vec::new()
+            )
+            .await
+            .0,
             Reply::Path(_)
         ));
         let _ = std::fs::remove_dir_all(&dir);

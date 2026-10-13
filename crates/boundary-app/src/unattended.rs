@@ -268,19 +268,27 @@ impl Unattended {
                 });
                 if tools {
                     ui.label(
-                        egui::RichText::new("Their tools can run commands and copy files on this computer.")
-                            .color(egui::Color32::WHITE),
+                        egui::RichText::new(
+                            "Their tools can run commands and copy files on this computer.",
+                        )
+                        .color(egui::Color32::WHITE),
                     );
                 }
                 for line in &activity {
-                    ui.label(egui::RichText::new(line).color(egui::Color32::WHITE).small());
+                    ui.label(
+                        egui::RichText::new(line)
+                            .color(egui::Color32::WHITE)
+                            .small(),
+                    );
                 }
             });
         ui.add_space(8.0);
         if stop_tools && let Some(active) = self.active.as_mut() {
             active.session.set_tools(false);
             active.tools = false;
-            self.say(format!("{name}'s tools can no longer run commands in this session"));
+            self.say(format!(
+                "{name}'s tools can no longer run commands in this session"
+            ));
         }
         if end {
             if let Some(active) = self.active.take() {

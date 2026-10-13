@@ -228,7 +228,11 @@ impl Drop for Tools {
 /// not start is a refusal, because nothing ran. A link lost after the
 /// request went out is a served answer saying so, because the command may
 /// well have run.
-fn exec(client: Client, intent: remote_core::intent::AgentIntent, events: mpsc::Sender<SessionEvent>) {
+fn exec(
+    client: Client,
+    intent: remote_core::intent::AgentIntent,
+    events: mpsc::Sender<SessionEvent>,
+) {
     use remote_core::intent::{
         CommandExit, CommandRun, Dropped, ExitTier, IntentKind, ServedAnswer, Truncation,
         Unanswered,

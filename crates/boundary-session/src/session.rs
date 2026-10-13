@@ -478,7 +478,10 @@ where
             }
         };
         // The invitation is consumed by this session, even if the peer later disconnects.
-        let result = serve(worker, connection, send, recv, peer, allowed, tools, desktop).await;
+        let result = serve(
+            worker, connection, send, recv, peer, allowed, tools, desktop,
+        )
+        .await;
         drop(guard);
         endpoint.close().await;
         return result;
