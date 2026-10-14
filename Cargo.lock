@@ -2123,6 +2123,7 @@ dependencies = [
  "base64 0.22.1",
  "boundary-codes",
  "boundary-driver",
+ "boundary-platform",
  "boundary-provision",
  "boundary-session",
  "bytes",

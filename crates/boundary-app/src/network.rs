@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use boundary_provision::{Provider, Setup, SetupRequest};
 pub use boundary_provision::network::Profile;
 use boundary_provision::network::save;
+use boundary_provision::{Provider, Setup, SetupRequest};
 use eframe::egui;
 use std::net::IpAddr;
 

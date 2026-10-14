@@ -48,7 +48,7 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
     dpi_aware();
     ensure!(
         screen_permission(),
-        "Allow Boundary in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
+        "Allow this app in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
     );
     let monitor = Monitor::all()?
         .into_iter()
@@ -71,7 +71,7 @@ impl NativeDesktop {
     fn injector(&mut self) -> Result<&mut Enigo> {
         ensure!(
             input_permission(),
-            "Allow Boundary in System Settings > Privacy & Security > Accessibility to use control"
+            "Allow this app in System Settings > Privacy & Security > Accessibility to use control"
         );
         if self.enigo.is_none() {
             self.enigo = Some(Enigo::new(&Settings {

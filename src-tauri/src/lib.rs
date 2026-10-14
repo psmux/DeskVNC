@@ -82,6 +82,16 @@ pub fn run() {
             // Boundary's lasting helper identity, and saving computers that
             // pair this helper, so they appear in the Library to reopen.
             commands::boundary::install(app.handle(), &boundary_dir);
+            // Get help: sharing this computer, and unattended access when
+            // the person switched it on.
+            commands::support::install(app.handle());
+            // Started at sign in for unattended access: out of the way until
+            // a helper connects, when the window comes forward to say so.
+            if std::env::args().any(|a| a == boundary_provision::autostart::BACKGROUND) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.minimize();
+                }
+            }
             // File-transfer sidecars live in their own managed state so the
             // SFTP registry stays independent of the session registry
             // (PRD/08 §2.1).
@@ -221,6 +231,28 @@ pub fn run() {
             commands::boundary::boundary_provider_start,
             commands::boundary::boundary_provider_status,
             commands::boundary::boundary_provider_cancel,
+            // get help (this computer shared over Boundary)
+            commands::support::support_state,
+            commands::support::support_refresh_displays,
+            commands::support::support_set_display,
+            commands::support::support_set_code_service,
+            commands::support::support_share,
+            commands::support::support_stop,
+            commands::support::support_full_invitation,
+            commands::support::support_answer,
+            commands::support::support_set_control,
+            commands::support::support_set_tools,
+            commands::support::support_pair,
+            commands::support::support_set_unattended,
+            commands::support::support_set_helper,
+            commands::support::support_remove_helper,
+            commands::support::support_set_password,
+            commands::support::support_set_autostart,
+            commands::support::support_end_unattended,
+            commands::support::support_stop_unattended_tools,
+            commands::support::support_request_screen_permission,
+            commands::support::support_open_input_settings,
+            commands::support::support_save_network,
             commands::session::disconnect_session,
             commands::session::send_input,
             commands::session::trace_enabled,
