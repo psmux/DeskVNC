@@ -1,8 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { mustInvoke } from "../lib/tauri";
 
 type Progress = { message: string; address: string | null; finished: boolean; failed: boolean };
-export function BoundaryProviderSetup({ active }: { active: boolean }) {
+/**
+ * Enrol this device in the person's own Tailscale or Cloudflare network.
+ * `onAddress` receives this device's address on that network when setup
+ * finishes, for a caller that saves it as the connection to use.
+ */
+export function BoundaryProviderSetup({ active, intro, onAddress }: { active: boolean; intro?: string; onAddress?: (address: string) => void }) {
+  const reported = useRef(onAddress);
+  reported.current = onAddress;
   const [provider, setProvider] = useState("Tailscale");
   const [token, setToken] = useState("");
   const [team, setTeam] = useState("");
@@ -21,7 +28,11 @@ export function BoundaryProviderSetup({ active }: { active: boolean }) {
       try {
         const state = await mustInvoke<Progress | null>("boundary_provider_status");
         if (!alive) return;
-        if (state) { setMessage(state.message); setBusy(!state.finished); }
+        if (state) {
+          setMessage(state.message);
+          setBusy(!state.finished);
+          if (state.finished && state.address) reported.current?.(state.address);
+        }
       } catch { if (alive) setMessage("Could not read setup status. Reopen this dialog to reconnect."); }
       if (alive) timer = setTimeout(() => { void poll(); }, 700);
     };
@@ -44,7 +55,7 @@ export function BoundaryProviderSetup({ active }: { active: boolean }) {
   return <details className="rounded border border-subtle p-3 text-sm">
     <summary className="cursor-pointer">Set up my private infrastructure</summary>
     <div className="mt-3 flex flex-col gap-3">
-      <p>Install and connect this helper device to your own provider account. Run setup in Boundary on the recipient device as well, then create a new invitation.</p>
+      <p>{intro ?? "Install and connect this helper device to your own provider account. Run setup in Boundary on the recipient device as well, then create a new invitation."}</p>
       <fieldset disabled={busy} className="flex flex-col gap-3">
         <label>Provider<select className={inputClass} value={provider} onChange={event => { setProvider(event.target.value); setToken(""); setConsent(false); }}><option>Tailscale</option><option>Cloudflare</option></select></label>
         {provider === "Cloudflare" && <>

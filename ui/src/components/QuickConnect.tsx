@@ -12,6 +12,7 @@
  * else connects ad-hoc.
  */
 import { BoundaryConnect } from "./BoundaryConnect";
+import { GetHelp } from "./GetHelp";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
 import { DEFAULT_PORT, PROTOCOLS, hostProtocol, protocolLabel, protocolName } from "../lib/types";
@@ -327,6 +328,7 @@ export function QuickConnect({
   return (
     <div className="flex items-center gap-2 border-b border-subtle bg-surface/40 px-4 py-2">
       <BoundaryConnect />
+      <GetHelp />
       <div className="relative min-w-0 flex-1 md:max-w-xl">
         <IconMonitor
           size={15}
