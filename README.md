@@ -44,10 +44,12 @@ no account, no telemetry, and no paid tier holding a feature back.
 
 ### Need to support someone outside your network?
 
-Download **DeskVNC Support** from the same release page and send it to the
-person who needs help. They open it, press **Get a code** (or **Create
-invitation** when no code service is configured), and approve your connection. You open **Boundary support** in DeskVNC, paste the invitation,
-and connect. Boundary tries a direct encrypted path first and uses its relay
+If the person who needs help has DeskVNC, they press **Get help** in it. If
+not, send them **DeskVNC Support** from the same release page, a small app that
+runs without installing. Either way they press **Get a code** (or **Create
+invitation** when no code service is configured) and approve your connection.
+You press **Help someone** in DeskVNC, enter their code or paste the
+invitation, and connect. Boundary tries a direct encrypted path first and uses its relay
 fallback when the networks do not allow a direct path.
 
 For a shorter handoff, configure the shared Boundary code service or your own
@@ -151,7 +153,7 @@ several machines as one.
 
 `dvv_run` and `dvv_files` work over SSH, and over a Boundary support session
 with no SSH on the far side at all. On Boundary the person at that computer
-has to allow it first: DeskVNC Support asks them separately from viewing and
+has to allow it first: Get help or DeskVNC Support asks them separately from viewing and
 control, shows each command as it runs, and lets them take it back. For an
 unattended computer they allow it per paired helper under Settings,
 Unattended access. Until they do, an agent cannot attach to the session.

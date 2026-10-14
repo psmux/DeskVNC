@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-end-unattended"
+description = "Enables the support_end_unattended command without any pre-configured scope."
+commands.allow = ["support_end_unattended"]
+
+[[permission]]
+identifier = "deny-support-end-unattended"
+description = "Denies the support_end_unattended command without any pre-configured scope."
+commands.deny = ["support_end_unattended"]

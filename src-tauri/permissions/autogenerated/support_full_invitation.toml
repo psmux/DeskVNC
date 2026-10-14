@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-full-invitation"
+description = "Enables the support_full_invitation command without any pre-configured scope."
+commands.allow = ["support_full_invitation"]
+
+[[permission]]
+identifier = "deny-support-full-invitation"
+description = "Denies the support_full_invitation command without any pre-configured scope."
+commands.deny = ["support_full_invitation"]

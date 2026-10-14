@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-stop"
+description = "Enables the support_stop command without any pre-configured scope."
+commands.allow = ["support_stop"]
+
+[[permission]]
+identifier = "deny-support-stop"
+description = "Denies the support_stop command without any pre-configured scope."
+commands.deny = ["support_stop"]

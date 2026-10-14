@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-setup-agents"
+description = "Enables the agent_setup_agents command without any pre-configured scope."
+commands.allow = ["agent_setup_agents"]
+
+[[permission]]
+identifier = "deny-agent-setup-agents"
+description = "Denies the agent_setup_agents command without any pre-configured scope."
+commands.deny = ["agent_setup_agents"]

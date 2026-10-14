@@ -10,6 +10,27 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* **Get help** in DeskVNC. Someone who already has DeskVNC can now be helped
+  without downloading DeskVNC Support. It has everything that app offers the
+  person being helped: a short code or a full invitation, the approval dialog,
+  control and the helper's tools as separate choices with a list of what the
+  tools did, letting a helper connect any time, and unattended access with
+  paired helpers, a password, and starting DeskVNC at sign in.
+* The approval and a banner naming whoever is connected show over the whole
+  DeskVNC window, and the window comes forward when a helper asks to be let in.
+
+### Changed
+
+* The **Boundary support** button is now **Help someone**, so it is clear it
+  is for connecting to another person, and it accepts a short code as well as
+  an invitation.
+* DeskVNC and DeskVNC Support on the same computer share one computer ID, one
+  list of paired helpers and one connection setting. Only one of them answers
+  unattended connections at a time; if both have it switched on, DeskVNC takes
+  over when DeskVNC Support quits.
+
 ## [0.28.0] (2026-10-13)
 
 ### Added

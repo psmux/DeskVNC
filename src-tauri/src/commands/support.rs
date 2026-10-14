@@ -1036,4 +1036,104 @@ mod tests {
         assert_eq!(lines.len(), ACTIVITY_LINES);
         assert_eq!(lines.first().map(String::as_str), Some("3"));
     }
+
+    /// Poll the model until `done` says so.
+    async fn until(model: &mut Model, what: &str, mut done: impl FnMut(&mut Model) -> bool) {
+        for _ in 0..300 {
+            model.poll();
+            if done(model) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("timed out waiting for {what}. Status: {}", model.status);
+    }
+
+    /// The whole attended path on this computer's real screen: share, a
+    /// helper with tools knocks, the person allows viewing and their tools,
+    /// a command runs and shows in the activity, then stopping the tools
+    /// stops the next command and ending the session ends it.
+    ///
+    /// Ignored by default because it captures the real display, which a
+    /// headless CI runner does not have. Run it with `--ignored`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn a_helper_is_approved_runs_a_command_and_is_stopped() {
+        use boundary_session::tools::{Reply, Request};
+        let mut model = Model::new();
+        // Loopback only: no relay, no code service, nothing leaves this
+        // computer. `options` does not validate, so loopback is allowed here.
+        model.network = Profile::Private {
+            address: "127.0.0.1".parse().unwrap(),
+        };
+        model.network_error = None;
+        model.share().unwrap();
+        until(&mut model, "the invitation", |m| !m.invitation.is_empty()).await;
+        assert!(
+            !model.codes_available(),
+            "a private network uses no code service"
+        );
+
+        let helper = boundary_session::viewer_with_tools(
+            model.invitation.clone(),
+            "Test helper".into(),
+            boundary_session::HostOptions {
+                relay: false,
+                relay_url: None,
+                bind_ip: None,
+            },
+            None,
+        );
+        until(&mut model, "the approval", |m| m.pending.is_some()).await;
+        let pending = model.view().pending.unwrap();
+        assert_eq!(pending.name, "Test helper");
+        assert!(pending.tools);
+        model.answer(Approval::View, true).unwrap();
+        until(&mut model, "the connection", |m| m.connected).await;
+        assert!(model.tools && model.tools_offered && !model.control);
+
+        let client = {
+            let mut client = None;
+            for _ in 0..100 {
+                client = helper.tools();
+                if client.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            client.expect("the helper got no tools client")
+        };
+        let run = Request::Run {
+            command: "echo get-help-works".into(),
+            cwd: None,
+            env: vec![],
+            timeout_ms: 20_000,
+            max_output: 65_536,
+        };
+        let (reply, body) = client
+            .call(&run, &[], Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(
+            matches!(reply, Reply::Ran { code: Some(0), .. }),
+            "{reply:?}"
+        );
+        assert!(String::from_utf8_lossy(&body).contains("get-help-works"));
+        until(&mut model, "the activity line", |m| {
+            m.activity.iter().any(|l| l.contains("get-help-works"))
+        })
+        .await;
+
+        model.session.as_ref().unwrap().set_tools(false);
+        model.tools = false;
+        let (reply, _) = client
+            .call(&run, &[], Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(matches!(reply, Reply::Refused(_)), "{reply:?}");
+
+        model.stop();
+        assert!(model.session.is_none() && !model.connected);
+        drop(helper);
+    }
 }

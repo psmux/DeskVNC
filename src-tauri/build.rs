@@ -159,6 +159,30 @@ fn main() {
             "boundary_provider_start",
             "boundary_provider_status",
             "boundary_provider_cancel",
+            // Get help: sharing THIS computer. Granted to the main window
+            // only. A session window has no business approving a helper or
+            // switching on unattended access.
+            "support_state",
+            "support_refresh_displays",
+            "support_set_display",
+            "support_set_code_service",
+            "support_share",
+            "support_stop",
+            "support_full_invitation",
+            "support_answer",
+            "support_set_control",
+            "support_set_tools",
+            "support_pair",
+            "support_set_unattended",
+            "support_set_helper",
+            "support_remove_helper",
+            "support_set_password",
+            "support_set_autostart",
+            "support_end_unattended",
+            "support_stop_unattended_tools",
+            "support_request_screen_permission",
+            "support_open_input_settings",
+            "support_save_network",
             "disconnect_session",
             "send_input",
             "trace_enabled",
@@ -243,6 +267,8 @@ fn main() {
             // reading the plane's state and spawning a process are not the
             // same act.
             "agent_register_with_claude",
+            // The setup text the agent panel shows for each agent. Reads only.
+            "agent_setup_agents",
         ]),
     ))
     .expect("failed to run tauri-build");
