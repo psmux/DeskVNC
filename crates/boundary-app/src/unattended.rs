@@ -35,6 +35,9 @@ pub struct Unattended {
     key: Option<boundary_session::unattended::SecretKey>,
     pub access: Access,
     listener: Option<Listener>,
+    /// Held while listening, so DeskVNC on this computer does not listen
+    /// as the same ID at the same time.
+    claim: Option<std::fs::File>,
     pub active: Option<Active>,
     reachable: bool,
     password: String,
@@ -52,6 +55,7 @@ impl Unattended {
             key: None,
             access: Access::default(),
             listener: None,
+            claim: None,
             active: None,
             reachable: false,
             password: String::new(),
@@ -113,6 +117,17 @@ impl Unattended {
             self.fail("No display found to share unattended".into());
             return;
         };
+        match boundary_provision::platform::claim_unattended() {
+            Ok(Some(claim)) => self.claim = Some(claim),
+            Ok(None) => {
+                self.fail("DeskVNC on this computer is already answering unattended connections. Quit it, or leave unattended access to it".into());
+                return;
+            }
+            Err(error) => {
+                self.fail(format!("{error:#}"));
+                return;
+            }
+        }
         self.listener = Some(unattended::listen(
             boundary_session::HostOptions::default(),
             key,
@@ -123,6 +138,7 @@ impl Unattended {
     }
     fn halt(&mut self) {
         self.listener = None;
+        self.claim = None;
         self.active = None;
         self.reachable = false;
     }
@@ -451,136 +467,23 @@ pub fn short(id: &str) -> String {
 
 /// What to call this computer when a helper saves it.
 pub fn computer_name() -> String {
-    let name = if cfg!(target_os = "macos") {
-        std::process::Command::new("scutil")
-            .args(["--get", "ComputerName"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else if cfg!(windows) {
-        std::env::var("COMPUTERNAME").ok()
-    } else {
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|s| s.trim().to_string())
-    };
-    name.filter(|n| !n.is_empty() && n.len() <= 80)
-        .unwrap_or_else(|| "This computer".into())
+    boundary_provision::platform::computer_name()
 }
 
 /// Starting the app, in the background, when the person signs in.
 pub mod autostart {
-    use anyhow::{Context, Result};
+    use anyhow::Result;
+    use boundary_provision::autostart::{self, Entry};
 
-    // The entry's name on Windows and Linux; macOS names its agent by label.
-    #[cfg(not(target_os = "macos"))]
-    const NAME: &str = "DeskVNC Support";
-
-    fn exe() -> Result<std::path::PathBuf> {
-        std::env::current_exe().context("This app cannot find itself")
-    }
-
-    #[cfg(windows)]
+    const ENTRY: Entry = Entry {
+        name: "DeskVNC Support",
+        label: "com.psmux.deskvnc.support",
+        file: "deskvnc-support",
+    };
     pub fn enabled() -> bool {
-        std::process::Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                NAME,
-            ])
-            .output()
-            .is_ok_and(|o| o.status.success())
+        autostart::enabled(ENTRY)
     }
-    #[cfg(windows)]
     pub fn set(on: bool) -> Result<()> {
-        let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let status = if on {
-            let value = format!("\"{}\" --background", exe()?.display());
-            std::process::Command::new("reg")
-                .args(["add", key, "/v", NAME, "/t", "REG_SZ", "/d", &value, "/f"])
-                .output()?
-                .status
-        } else {
-            std::process::Command::new("reg")
-                .args(["delete", key, "/v", NAME, "/f"])
-                .output()?
-                .status
-        };
-        anyhow::ensure!(
-            status.success(),
-            "Windows did not accept the sign in setting"
-        );
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn plist() -> Result<std::path::PathBuf> {
-        Ok(
-            std::path::PathBuf::from(std::env::var_os("HOME").context("No home folder")?)
-                .join("Library/LaunchAgents/com.psmux.deskvnc.support.plist"),
-        )
-    }
-    #[cfg(target_os = "macos")]
-    pub fn enabled() -> bool {
-        plist().is_ok_and(|p| p.exists())
-    }
-    #[cfg(target_os = "macos")]
-    pub fn set(on: bool) -> Result<()> {
-        let path = plist()?;
-        if !on {
-            let _ = std::fs::remove_file(&path);
-            return Ok(());
-        }
-        let body = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>com.psmux.deskvnc.support</string>
-<key>ProgramArguments</key><array><string>{}</string><string>--background</string></array>
-<key>RunAtLoad</key><true/>
-<key>LimitLoadToSessionType</key><string>Aqua</string>
-</dict></plist>
-"#,
-            exe()?.display()
-        );
-        std::fs::create_dir_all(path.parent().context("No LaunchAgents folder")?)?;
-        std::fs::write(&path, body)?;
-        Ok(())
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn desktop_file() -> Result<std::path::PathBuf> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
-            })
-            .context("No configuration folder")?;
-        Ok(config.join("autostart/deskvnc-support.desktop"))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub fn enabled() -> bool {
-        desktop_file().is_ok_and(|p| p.exists())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub fn set(on: bool) -> Result<()> {
-        let path = desktop_file()?;
-        if !on {
-            let _ = std::fs::remove_file(&path);
-            return Ok(());
-        }
-        // An AppImage runs from a mount that goes when it quits; start the
-        // AppImage file itself.
-        let exe = std::env::var_os("APPIMAGE")
-            .map(std::path::PathBuf::from)
-            .map_or_else(exe, Ok)?;
-        let body = format!(
-            "[Desktop Entry]\nType=Application\nName={NAME}\nExec=\"{}\" --background\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n",
-            exe.display()
-        );
-        std::fs::create_dir_all(path.parent().context("No autostart folder")?)?;
-        std::fs::write(&path, body)?;
-        Ok(())
+        autostart::set(ENTRY, on)
     }
 }

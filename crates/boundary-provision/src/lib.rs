@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
+pub mod autostart;
 pub mod cloudflare;
+pub mod network;
 pub mod platform;
 mod process;
 
