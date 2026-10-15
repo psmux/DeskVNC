@@ -143,6 +143,7 @@ fn main() {
             // credentials (write/query only, passwords never flow back to JS)
             "save_password",
             "has_password",
+            "saved_user_names",
             "delete_password",
             "credential_backend",
             "unlock_credentials",
@@ -156,6 +157,7 @@ fn main() {
             // sessions
             "connect_session",
             "connect_boundary",
+            "boundary_permission",
             "boundary_provider_start",
             "boundary_provider_status",
             "boundary_provider_cancel",
@@ -243,6 +245,10 @@ fn main() {
             // reading the plane's state and spawning a process are not the
             // same act.
             "agent_register_with_claude",
+            // Writing the dvv entry into the config of each coding agent this
+            // machine has, which is what the AI Agents panel's Set up button
+            // runs.
+            "agent_setup_agents",
         ]),
     ))
     .expect("failed to run tauri-build");

@@ -31,7 +31,7 @@ import type { MultiplexerKind, SshAuthKind, SshSettings } from "../lib/ssh";
 import { blankSshSettings, parseSshSettings } from "../lib/ssh";
 import { sshDefaults } from "../lib/sshDefaults";
 import type { LocalKeys } from "../lib/tauri";
-import { pickPrivateKeyFile, sshListLocalKeys, sshListWslDistros } from "../lib/tauri";
+import { pickPrivateKeyFile, savedUserNames, sshListLocalKeys, sshListWslDistros } from "../lib/tauri";
 import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
@@ -76,10 +76,9 @@ export interface HostDraft {
   /**
    * RDP account name, written on save alongside the password.
    *
-   * Seeded BLANK even for a saved host, like `password`: there is no
-   * `get_password` and there is not going to be one, so this field carries
-   * the same "leave blank to keep what is stored" affordance the password
-   * field already has.
+   * Seeded blank, then filled in for a saved host from `saved_user_names`
+   * once the dialog opens. A blank box still means "keep what is stored",
+   * the same as the password box, which is never filled in.
    */
   rdpUser: string;
   /** Logon domain, part of the stored credential rather than the profile
@@ -255,6 +254,27 @@ export function HostDialog({
   const [touched, setTouched] = useState(false);
 
   const set = (patch: Partial<HostDraft>): void => setD((prev) => ({ ...prev, ...patch }));
+
+  // A saved host shows the account names it signs in with. They start blank
+  // in the draft and arrive a moment later from the keychain; a box the user
+  // has already typed in is left alone.
+  useEffect(() => {
+    if (!initial.id) return;
+    let live = true;
+    void savedUserNames(initial.id).then((names) => {
+      if (!live || !names) return;
+      setD((prev) => ({
+        ...prev,
+        vncUser: prev.vncUser || names.vncUser || "",
+        rdpUser: prev.rdpUser || names.rdpUser || "",
+        rdpDomain: prev.rdpDomain || names.rdpDomain || "",
+        sshUser: prev.sshUser || names.sshUser || "",
+      }));
+    });
+    return () => {
+      live = false;
+    };
+  }, [initial.id]);
 
   // `isRdp` still names one protocol on purpose: it only selects between the
   // two GRAPHICAL protocols' own quirks (RdpOptionsSection, SecuritySection,

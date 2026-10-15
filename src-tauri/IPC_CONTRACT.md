@@ -234,6 +234,7 @@ direction, but it still fails.
 |---|---|---|
 | `save_password` | `invoke("save_password", { hostId, creds })` | `void` |
 | `has_password` | `invoke("has_password", { hostId, protocol? })` | `boolean` |
+| `saved_user_names` | `invoke("saved_user_names", { hostId })` | `{ vncUser, rdpUser, rdpDomain, sshUser }`, each `string \| null` |
 | `delete_password` | `invoke("delete_password", { hostId })` | `void` |
 | `credential_backend` | `invoke("credential_backend")` | `"OsKeychain" \| "EncryptedFile" \| "Locked"` |
 | `unlock_credentials` | `invoke("unlock_credentials", { masterPassword })` | `void` |
@@ -241,6 +242,11 @@ direction, but it still fails.
 `creds` is a `StoredCredentials`:
 `{ vncPassword? vencryptUser? vencryptPass? sshPassphrase? rdpUser? rdpDomain?
 rdpPassword? }`.
+
+`save_password` also sets the host's `hasPassword` when the stored blob then
+holds a password of any kind (an SSH key passphrase alone does not count), and
+`delete_password` clears it. `saved_user_names` returns account names only, so
+the editor can show them; no password ever comes back.
 
 `has_password`'s `protocol` narrows the question to "a credential this
 protocol could use": `"rdp"` asks for `rdpPassword`, `"vnc"` for
