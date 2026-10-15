@@ -237,6 +237,9 @@ async fn establish(
     let (mut stream, security, trust) =
         crate::security::authenticate_with_trust(tcp, version_info, &offered, options, creds)
             .await?;
+    // The security result was OK, so whatever the user typed for this attempt
+    // is now proven, whatever happens to the connection after this line.
+    creds.mark_authenticated();
 
     // First contact with a server key we have no pin for, a TLS certificate
     // (VeNCrypt) or a bare RSA key (RA2). Surface it so the UI can run its
@@ -364,7 +367,7 @@ async fn serve_credential_ask(
 /// one TCP connection, because looping on a saved credential locks accounts
 /// out.
 async fn establish_interactive(
-    options: &ConnectOptions,
+    options: &mut ConnectOptions,
     settings: &SessionSettings,
     events: &mpsc::Sender<SessionEvent>,
     commands: &mut mpsc::Receiver<ClientCommand>,
@@ -405,6 +408,17 @@ async fn establish_interactive(
             }
         };
 
+        // Keep what the server accepted for every later attempt this session
+        // makes, the way `rdp-core` keeps a typed credential for the
+        // connection after the one it was typed on. Without this an automatic
+        // reconnect, after a link drop or a tunnel that went away, raised the
+        // same prompt again and the person typed it all a second time. Done
+        // before the result is looked at because the attempt can fail after
+        // the security handshake succeeded, and the answer is still proven.
+        if let Some(accepted) = source.accepted() {
+            options.credentials = accepted;
+        }
+
         match result {
             Ok(established) => return Ok(established),
             Err(VncError::AuthFailed(reason))
@@ -427,7 +441,7 @@ async fn establish_interactive(
 /// disconnect; every failure (including cancellation) is an `Err` so the
 /// supervisor can classify it.
 pub(crate) async fn run_once(
-    options: &ConnectOptions,
+    options: &mut ConnectOptions,
     settings: &mut SessionSettings,
     events: &mpsc::Sender<SessionEvent>,
     commands: &mut mpsc::Receiver<ClientCommand>,
