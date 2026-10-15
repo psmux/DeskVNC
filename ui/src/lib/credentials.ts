@@ -47,3 +47,46 @@ export function joinDomainUser(domain: string | null, user: string): string {
   if (!d || !user || user.includes("\\") || user.includes("@")) return user;
   return `${d}\\${user}`;
 }
+
+/**
+ * What the person put into the last credential prompt in this window, minus
+ * the password. Held by `useSession` so the next prompt can start from it.
+ */
+export interface PromptAnswer {
+  username: string | null;
+  domain: string | null;
+  save: boolean;
+}
+
+export interface PromptStart {
+  username: string;
+  domain: string;
+  save: boolean;
+}
+
+/**
+ * What a credential prompt opens with.
+ *
+ * The prompt is unmounted the moment it is answered, so every later prompt
+ * (a rejected password asked again, or the first prompt of a Reconnect after
+ * the connection failed) used to open from nothing: the domain blank and
+ * "Remember" unticked. Somebody who ticked it, mistyped once and then typed
+ * the right password got nothing saved, because the second answer went out
+ * as "do not remember" and revoked the first (issue #9).
+ *
+ * The user name the person typed last wins over the hint, which is only the
+ * stored or local account name. "Remember" stays an opt in: it starts ticked
+ * only when this person ticked it in this window. The password is never
+ * carried, and there is nowhere here to carry it.
+ */
+export function promptStart(
+  usernameHint: string | null | undefined,
+  previous: PromptAnswer | null | undefined,
+): PromptStart {
+  const typed = previous?.username?.trim() ? previous.username : null;
+  return {
+    username: typed ?? usernameHint ?? "",
+    domain: previous?.domain ?? "",
+    save: previous?.save ?? false,
+  };
+}

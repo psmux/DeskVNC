@@ -482,6 +482,7 @@ export function SshSession({
             request={session.credentialRequest}
             hostName={params.name}
             protocol={params.protocol}
+            previous={session.lastCredentialAnswer}
             onSubmit={session.submitCredentials}
             onCancel={session.dismissCredentialPrompt}
           />
