@@ -161,7 +161,16 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
             if paired.frames.has_changed().unwrap_or(false)
                 && let Some(frame) = paired.frames.borrow_and_update().as_ref()
             {
-                assert_eq!(frame.rgba, vec![200; 16]);
+                // JPEG is lossy and has no alpha, so the colour comes back
+                // near 200 and the alpha opaque.
+                assert!(
+                    frame
+                        .rgba
+                        .chunks_exact(4)
+                        .all(|p| p[..3].iter().all(|c| c.abs_diff(200) <= 4) && p[3] == 255),
+                    "{:?}",
+                    frame.rgba
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

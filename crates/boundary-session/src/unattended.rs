@@ -329,6 +329,7 @@ where
             name,
             password,
             tools,
+            jpeg,
         } = message
         else {
             refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -375,7 +376,7 @@ where
         let result = tokio::select! {
             _ = stop.cancelled() => Ok(()),
             _ = ended.cancelled() => Ok(()),
-            result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, move || desktop()) => result,
+            result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
         };
         connection.close(0u8.into(), b"Session ended");
         if let Err(error) = result {
@@ -644,6 +645,7 @@ async fn run_connect(
             name,
             password,
             tools,
+            jpeg: true,
         },
     )
     .await?;
