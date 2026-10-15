@@ -269,8 +269,8 @@ struct CredentialSaveCtx {
 /// Write a proven credential to the keychain and flip the profile's
 /// `has_password` flag.
 ///
-/// Only ever called from the `SessionState::Connected` transition, i.e. after
-/// the server accepted the password, see [`PendingCredentialSave`]. Keychain
+/// Only ever called once the server has accepted the password (see
+/// [`authentication_proves_the_credential`] and [`PendingCredentialSave`]). Keychain
 /// and SQLite IO are synchronous, hence `spawn_blocking`.
 fn persist_credentials(
     ctx: &CredentialSaveCtx,
@@ -501,6 +501,29 @@ fn connected_proves_the_credential(protocol: ProtocolKind, auth_method: Option<&
     }
 }
 
+/// Whether this state change is the point at which the server has accepted
+/// the credential, so a "remember" request can be written.
+///
+/// `Connected` follows [`connected_proves_the_credential`]. `Negotiating`
+/// proves it for VNC only: RFB sends it straight after a security result of
+/// OK, and before ServerInit, so a session that authenticated and then died
+/// (an SSH tunnel dropping under it is the case from issue #9) used to throw
+/// away a password the server had just accepted. RDP is deliberately left on
+/// `Connected` and the logon notification. Its `Negotiating` also follows a
+/// fallback from failed network level authentication to plain TLS, which
+/// proves nothing about the password.
+fn authentication_proves_the_credential(
+    protocol: ProtocolKind,
+    state: &SessionState,
+    auth_method: Option<&str>,
+) -> bool {
+    match state {
+        SessionState::Connected => connected_proves_the_credential(protocol, auth_method),
+        SessionState::Negotiating => protocol == ProtocolKind::Vnc,
+        _ => false,
+    }
+}
+
 /// Write whatever this session asked to remember, now that something has
 /// proved it. Called from at most one place per session.
 fn persist_now(
@@ -532,9 +555,9 @@ fn persist_now(
 
 /// React to a state change for the pending-credential lifecycle.
 ///
-/// `Connected` is the only state that persists anything, and for RDP only
-/// when NLA proved the credential; every terminal state drops the intent
-/// without touching the keychain.
+/// Only a state that proves the credential persists anything, see
+/// [`authentication_proves_the_credential`]; every terminal state drops the
+/// intent without touching the keychain.
 fn settle_pending_credentials(
     app: &AppHandle,
     ctx: &CredentialSaveCtx,
@@ -544,15 +567,15 @@ fn settle_pending_credentials(
     auth_method: Option<&str>,
 ) {
     match state {
-        SessionState::Connected => {
+        SessionState::Connected | SessionState::Negotiating => {
             let protocol = sessions
                 .lock()
                 .get(session_id)
                 .map(SessionEntry::protocol)
                 .unwrap_or_default();
-            if connected_proves_the_credential(protocol, auth_method) {
+            if authentication_proves_the_credential(protocol, state, auth_method) {
                 persist_now(app, ctx, sessions, session_id);
-            } else {
+            } else if matches!(state, SessionState::Connected) {
                 // Held, not dropped: the logon notification may still arrive
                 // and prove it. The event stream closing drops it unwritten.
                 tracing::debug!(
@@ -562,7 +585,8 @@ fn settle_pending_credentials(
             }
         }
         SessionState::Disconnected { .. } => {
-            // Never persist a password the connection did not survive.
+            // Never persist a password the server did not accept. Anything
+            // still pending here was never proved.
             let dropped = ctx.pending.lock().remove(session_id).is_some();
             if dropped {
                 tracing::debug!(session = %session_id, "dropped unsaved credentials (disconnected)");
@@ -977,6 +1001,49 @@ fn viewport(
     measured.filter(|(w, h)| *w > 0 && *h > 0)
 }
 
+/// The credentials a connect starts with, from the host's keychain blob.
+///
+/// `with_password` false is a retry that asked to be prompted. The password
+/// is left out so the driver asks for one, but the user name (and the RDP
+/// domain) still come from the store: throwing them away with the password
+/// is what made the Reconnect after a rejected password reopen the dialog
+/// blank (issue #9).
+fn credentials_from_store(
+    kind: ProtocolKind,
+    stored: vnc_store::StoredCredentials,
+    configured_domain: Option<String>,
+    with_password: bool,
+    vnc_password_only: bool,
+) -> vnc_core::Credentials {
+    let mut creds = stored_credentials_for(kind, stored, configured_domain, vnc_password_only);
+    if !with_password {
+        creds.password = None;
+    }
+    creds
+}
+
+/// Put the user name last typed for this machine into a connect that is
+/// going to prompt anyway.
+///
+/// Only when no password is about to be sent: then the driver is certain to
+/// ask, and the name is nothing more than the prefill of that dialog. Beside
+/// a stored password it would be a credential pair nobody ever typed, and
+/// for RDP sending one is a bad logon against somebody's account. Only for
+/// the two graphical protocols; an SSH session resolves its account its own
+/// way and is left as it was.
+fn prefill_typed_username(
+    kind: ProtocolKind,
+    creds: &mut vnc_core::Credentials,
+    typed: Option<String>,
+) {
+    if !matches!(kind, ProtocolKind::Vnc | ProtocolKind::Rdp) || creds.password.is_some() {
+        return;
+    }
+    if let Some(name) = typed.filter(|n| !n.trim().is_empty()) {
+        creds.username = Some(name);
+    }
+}
+
 /// Connect to a remote desktop.
 ///
 /// `on_event` is the binary channel that will receive framebuffer/cursor
@@ -988,8 +1055,9 @@ fn viewport(
 /// opened first and connect from inside); if omitted a fresh uuid is used.
 /// Returns a [`SessionConnectOutcome`]; the session id is in `Started`.
 ///
-/// `ignore_stored_credentials` skips the keychain lookup for this attempt, so
-/// the handshake raises an interactive prompt instead. The Reconnect button
+/// `ignore_stored_credentials` leaves the stored password out of this
+/// attempt, so the handshake raises an interactive prompt instead; the stored
+/// user name still prefills it. The Reconnect button
 /// sets it after an authentication failure: replaying a password the server has
 /// already rejected only reproduces the failure (and, on some servers, walks
 /// the account towards a lockout).
@@ -1173,29 +1241,46 @@ pub async fn connect_session(
     // Stored credentials, loaded in Rust on a blocking thread (keychain IO is
     // synchronous); never routed through the webview.
     //
-    // Skipped entirely when the caller asked to be prompted: a driver only
-    // prompts for a secret it does not already have, so leaving the stored
-    // one in place here is exactly what suppresses the dialog.
+    // When the caller asked to be prompted, the stored PASSWORD is left out:
+    // a driver only prompts for a secret it does not already have, so leaving
+    // it in place is exactly what would suppress the dialog. The user name
+    // stays, so the prompt that follows is prefilled rather than blank
+    // (issue #9).
     if let Some(pid) = &profile_id {
-        if ignore_stored_credentials == Some(true) {
+        let with_password = ignore_stored_credentials != Some(true);
+        if !with_password {
             tracing::info!(profile = %pid, "ignoring the stored password for this attempt");
-        } else {
-            let credentials = state.credentials.clone();
-            let lookup = pid.clone();
-            match super::blocking(move || credentials.load(&lookup)).await {
-                Ok(Some(stored)) => {
-                    let configured_domain = options.rdp_options().and_then(|r| r.domain.clone());
-                    let vnc_password_only =
-                        profile.as_ref().and_then(|p| p.security_pref.as_deref())
-                            == Some("vncauth");
-                    options.credentials =
-                        stored_credentials_for(kind, stored, configured_domain, vnc_password_only);
-                }
-                Ok(None) => {}
-                // A locked/unavailable keychain shouldn't kill the connect, // the session will surface an auth prompt instead.
-                Err(e) => tracing::warn!("could not load stored credentials: {e}"),
-            }
         }
+        let credentials = state.credentials.clone();
+        let lookup = pid.clone();
+        match super::blocking(move || credentials.load(&lookup)).await {
+            Ok(Some(stored)) => {
+                // The profile's configured domain wins over the stored one:
+                // the blob is where a domain typed at a prompt lands, the
+                // setting is where the user deliberately put one.
+                let configured_domain = options
+                    .rdp_options()
+                    .and_then(|r| r.domain.clone())
+                    .filter(|d| !d.is_empty());
+                let vnc_password_only =
+                    profile.as_ref().and_then(|p| p.security_pref.as_deref()) == Some("vncauth");
+                options.credentials = credentials_from_store(
+                    kind,
+                    stored,
+                    configured_domain,
+                    with_password,
+                    vnc_password_only,
+                );
+            }
+            Ok(None) => {}
+            // A locked/unavailable keychain shouldn't kill the connect, // the session will surface an auth prompt instead.
+            Err(e) => tracing::warn!("could not load stored credentials: {e}"),
+        }
+    }
+    {
+        let key = MachineKey::new(kind, profile_id.as_deref(), &options.host, port);
+        let typed = state.typed_usernames.lock().get(&key).cloned();
+        prefill_typed_username(kind, &mut options.credentials, typed);
     }
 
     // SSH tunnel (PRD/10 §5): dial the gateway now, so an unknown host key or
@@ -1896,12 +1981,16 @@ pub async fn provide_credentials(
 ) -> Result<(), String> {
     // Resolve the sender first so an unknown session id rejects *before* the
     // secret is copied anywhere.
-    let (sender, protocol) = {
+    let (sender, protocol, machine) = {
         let sessions = state.sessions.lock();
         let entry = sessions
             .get(&session_id)
             .ok_or_else(|| format!("unknown session: {session_id}"))?;
-        (entry.handle.commands.clone(), entry.protocol())
+        (
+            entry.handle.commands.clone(),
+            entry.protocol(),
+            entry.machine_key(),
+        )
     };
 
     // The question has been answered; a late-subscribing window must not be
@@ -1925,9 +2014,19 @@ pub async fn provide_credentials(
         state.pending_credentials.lock().remove(&session_id);
     }
 
+    let username = qualified_username(protocol, username, domain.as_deref());
+    // Kept whatever happens next, so a retry after this attempt fails is
+    // prefilled with it (see `AppState::typed_usernames`).
+    if let Some(name) = username.as_deref().filter(|n| !n.trim().is_empty()) {
+        state
+            .typed_usernames
+            .lock()
+            .insert(machine, name.to_string());
+    }
+
     let result = sender
         .send(ClientCommand::ProvideCredentials {
-            username: qualified_username(protocol, username, domain.as_deref()),
+            username,
             password,
             save,
         })
@@ -2630,5 +2729,163 @@ mod stored_credentials_tests {
         assert_eq!(got.domain.as_deref(), Some("CORP"));
         let got = stored_credentials_for(ProtocolKind::Rdp, stored, Some(String::new()), false);
         assert_eq!(got.domain.as_deref(), Some("STORED"));
+    }
+}
+
+/// Issue #9: what was typed into a prompt survives a connection that failed.
+#[cfg(test)]
+mod credential_keeping_tests {
+    use super::*;
+
+    fn disconnected() -> SessionState {
+        SessionState::Disconnected {
+            reason: "the tunnel closed".into(),
+            can_retry: true,
+            symbol: None,
+        }
+    }
+
+    /// The reported case. A Mac accepted the Apple user name and password
+    /// over the tunnel, then the connection failed before the first frame.
+    /// The server had already said yes, so the save happens there and does
+    /// not wait for a `Connected` that never comes.
+    #[test]
+    fn a_vnc_password_is_proved_by_the_security_result_not_by_the_first_frame() {
+        assert!(authentication_proves_the_credential(
+            ProtocolKind::Vnc,
+            &SessionState::Negotiating,
+            Some("AppleRemoteDesktop"),
+        ));
+        assert!(authentication_proves_the_credential(
+            ProtocolKind::Vnc,
+            &SessionState::Connected,
+            None,
+        ));
+    }
+
+    /// Nothing before the security result proves anything, and a failure
+    /// never does.
+    #[test]
+    fn no_other_state_proves_a_password() {
+        for state in [
+            SessionState::Connecting,
+            SessionState::Authenticating {
+                method: "VncAuth".into(),
+            },
+            disconnected(),
+        ] {
+            for protocol in [ProtocolKind::Vnc, ProtocolKind::Rdp] {
+                assert!(
+                    !authentication_proves_the_credential(protocol, &state, Some("nla-ntlm")),
+                    "{protocol:?} in {state:?}"
+                );
+            }
+        }
+    }
+
+    /// RDP keeps its old rule. Its `Negotiating` also follows a fallback from
+    /// failed network level authentication to plain TLS, so it cannot be the
+    /// proof, whatever method was announced before the fallback.
+    #[test]
+    fn rdp_still_waits_for_connected_after_nla() {
+        assert!(!authentication_proves_the_credential(
+            ProtocolKind::Rdp,
+            &SessionState::Negotiating,
+            Some("nla-ntlm"),
+        ));
+        assert!(authentication_proves_the_credential(
+            ProtocolKind::Rdp,
+            &SessionState::Connected,
+            Some("nla-ntlm"),
+        ));
+        assert!(!authentication_proves_the_credential(
+            ProtocolKind::Rdp,
+            &SessionState::Connected,
+            Some("tls"),
+        ));
+    }
+
+    fn stored() -> vnc_store::StoredCredentials {
+        let mut s = vnc_store::StoredCredentials::default();
+        s.set_vnc_credential(Some("mac-user"), "mac-pass");
+        s.set_rdp_identity(Some("alice"), Some("CORP"), "rdp-pass");
+        s.ssh_passphrase = Some("tunnel-pass".into());
+        s
+    }
+
+    /// Reconnect after a rejected password used to skip the keychain
+    /// entirely, so the prompt came back with the user name blank (or the
+    /// local account's) as well as the password.
+    #[test]
+    fn a_reprompt_keeps_the_stored_user_name_and_drops_only_the_password() {
+        let vnc = credentials_from_store(ProtocolKind::Vnc, stored(), None, false, false);
+        assert_eq!(vnc.username.as_deref(), Some("mac-user"));
+        assert_eq!(vnc.password, None);
+
+        let rdp = credentials_from_store(ProtocolKind::Rdp, stored(), None, false, false);
+        assert_eq!(rdp.username.as_deref(), Some("alice"));
+        assert_eq!(rdp.domain.as_deref(), Some("CORP"));
+        assert_eq!(rdp.password, None);
+    }
+
+    #[test]
+    fn an_ordinary_connect_still_sends_the_whole_stored_credential() {
+        let vnc = credentials_from_store(ProtocolKind::Vnc, stored(), None, true, false);
+        assert_eq!(vnc.username.as_deref(), Some("mac-user"));
+        assert_eq!(vnc.password.as_deref(), Some("mac-pass"));
+
+        // The tunnel's own secret is a different slot and never leaks into
+        // the inner login.
+        let tunnel_only = vnc_store::StoredCredentials {
+            ssh_passphrase: Some("tunnel-pass".into()),
+            ..Default::default()
+        };
+        let inner = credentials_from_store(ProtocolKind::Vnc, tunnel_only, None, true, false);
+        assert_eq!(inner.password, None);
+
+        let rdp = credentials_from_store(
+            ProtocolKind::Rdp,
+            stored(),
+            Some("SITE".into()),
+            true,
+            false,
+        );
+        assert_eq!(
+            rdp.domain.as_deref(),
+            Some("SITE"),
+            "the configured domain wins"
+        );
+        assert_eq!(rdp.password.as_deref(), Some("rdp-pass"));
+    }
+
+    /// A user name typed at the prompt of an attempt that then failed comes
+    /// back as the prefill of the next prompt, ahead of an older stored one.
+    #[test]
+    fn the_last_typed_user_name_prefills_the_next_prompt() {
+        let mut creds = vnc_core::Credentials::default();
+        prefill_typed_username(ProtocolKind::Vnc, &mut creds, Some("godwin".into()));
+        assert_eq!(creds.username.as_deref(), Some("godwin"));
+        assert_eq!(creds.password, None);
+
+        let mut creds = credentials_from_store(ProtocolKind::Rdp, stored(), None, false, false);
+        prefill_typed_username(ProtocolKind::Rdp, &mut creds, Some("CORP\\bob".into()));
+        assert_eq!(creds.username.as_deref(), Some("CORP\\bob"));
+    }
+
+    /// Never beside a stored password: that pair was never typed together,
+    /// and for RDP sending it is a bad logon against an account.
+    #[test]
+    fn a_typed_user_name_never_rides_with_a_stored_password() {
+        let mut creds = credentials_from_store(ProtocolKind::Rdp, stored(), None, true, false);
+        prefill_typed_username(ProtocolKind::Rdp, &mut creds, Some("bob".into()));
+        assert_eq!(creds.username.as_deref(), Some("alice"));
+
+        let mut ssh = vnc_core::Credentials::default();
+        prefill_typed_username(ProtocolKind::Ssh, &mut ssh, Some("bob".into()));
+        assert_eq!(ssh.username, None, "an SSH session is left as it was");
+
+        let mut blank = vnc_core::Credentials::default();
+        prefill_typed_username(ProtocolKind::Vnc, &mut blank, Some("  ".into()));
+        assert_eq!(blank.username, None);
     }
 }

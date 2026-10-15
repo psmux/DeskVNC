@@ -17,8 +17,21 @@ pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     pub discovery: Arc<DiscoveryState>,
     /// Credentials the user asked to remember, keyed by session id, held in
-    /// memory ONLY until that session proves them by reaching `Connected`.
+    /// memory ONLY until that session proves them (for VNC, a security
+    /// result of OK; otherwise `Connected`).
     pub pending_credentials: Arc<Mutex<HashMap<String, PendingCredentialSave>>>,
+    /// The user name last typed at a credential prompt for each machine, kept
+    /// for the life of the app whether or not that connection went on to
+    /// work. An RDP domain rides along in the `DOMAIN\user` form the wire
+    /// already uses (see `qualified_username`).
+    ///
+    /// A user name is not a secret, and dropping it with the failed attempt
+    /// is what made a retry cost the whole form again (issue #9). It only
+    /// ever prefills the next prompt: `connect_session` applies it only when
+    /// no stored password is about to be sent, so it never travels with a
+    /// password it was not typed beside. Never written to disk; the keychain
+    /// still gets only what a server has proved.
+    pub typed_usernames: Arc<Mutex<HashMap<MachineKey, String>>>,
     /// The credential prompt a session is currently blocked on, keyed by
     /// session id.
     ///
@@ -126,7 +139,9 @@ pub const OPENING_GRACE: std::time::Duration = std::time::Duration::from_secs(15
 ///
 /// SECURITY INVARIANT (PRD/10 §3.4): a password is never written to the
 /// keychain until the server has actually accepted it. This lives in memory
-/// between `provide_credentials` and `SessionState::Connected`, and is dropped
+/// between `provide_credentials` and the state that proves it (`Negotiating`
+/// for VNC, which follows a security result of OK, otherwise `Connected`),
+/// and is dropped
 /// without a write on cancel, failure or disconnect. `Debug` is hand-written
 /// so the secret can never leak into a log line or a crash report.
 #[derive(Clone)]
@@ -601,6 +616,7 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             discovery: Arc::new(DiscoveryState::default()),
             pending_credentials: Arc::new(Mutex::new(HashMap::new())),
+            typed_usernames: Arc::new(Mutex::new(HashMap::new())),
             pending_prompts: Arc::new(Mutex::new(HashMap::new())),
             opening_windows: Arc::new(Mutex::new(HashMap::new())),
             protocols: Arc::new(ProtocolRegistry::new(host_keys)),
