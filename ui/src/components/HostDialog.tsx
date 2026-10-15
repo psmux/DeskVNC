@@ -33,7 +33,7 @@ import { sshDefaults } from "../lib/sshDefaults";
 import type { LocalKeys } from "../lib/tauri";
 import { pickPrivateKeyFile, sshListLocalKeys, sshListWslDistros } from "../lib/tauri";
 import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
-import { portOnProtocolChange, portWasTouched } from "../lib/hostDraft";
+import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
 import { IconChevronDown, IconChevronRight } from "./icons";
@@ -100,6 +100,15 @@ export interface HostDraft {
    */
   sshUser: string;
   /**
+   * VNC account name, for the security types that sign in with one (see
+   * `vncTakesUsername`), written on save as `StoredCredentials.vencryptUser`.
+   *
+   * Seeded BLANK even for a saved host, for the same reason `rdpUser` is.
+   * Blank is also a legitimate end state: the connect path then asks for the
+   * name at the prompt, as it always has.
+   */
+  vncUser: string;
+  /**
    * UI-only: the user has deliberately set the port, so switching protocol
    * must not move it. Never persisted.
    */
@@ -137,6 +146,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     rdpDomain: "",
     ssh: protocol === "ssh" ? (parseSshSettings(h?.sshSettings) ?? newSshSettings()) : null,
     sshUser: "",
+    vncUser: "",
     portTouched: portWasTouched(h),
   };
 }
@@ -181,7 +191,8 @@ interface ProtocolCaps {
    *  security below (see `SecuritySection`), and SSH's transport security
    *  is not a setting this app exposes a knob for. */
   rfbSecurity: boolean;
-  /** A logon account name field. */
+  /** A logon account name field, always. VNC has one only for some security
+   *  types, which `vncTakesUsername` decides from the draft. */
   username: boolean;
   /** A separate logon domain field, alongside username. */
   domain: boolean;
@@ -254,6 +265,9 @@ export function HostDialog({
   const isSsh = d.protocol === "ssh";
   const isBoundary = d.protocol === "boundary";
   const caps = PROTOCOL_CAPS[d.protocol];
+  // Keyed on `rfbSecurity` rather than on the protocol's name: the security
+  // type is what decides whether an RFB logon has an account in it.
+  const showVncUser = caps.rfbSecurity && vncTakesUsername(d.securityPref, d.osHint);
   const rdp = d.rdp ?? blankRdpSettings();
   const setRdp = (patch: Partial<RdpSettings>): void => set({ rdp: { ...rdp, ...patch } });
   const ssh = d.ssh ?? blankSshSettings();
@@ -419,11 +433,39 @@ export function HostDialog({
           The logon fields are driven by capability, not by protocol name:
           RDP needs a user name and, for a directory account, a domain; SSH
           needs only a user name, and treats a blank one as "the same account
-          as this computer" rather than as something it has to guess; VNC has
-          no concept of a logon account at all, so nothing renders here. A
-          logon is user first, so the name field sits above the password
-          rather than beside the security type.
+          as this computer" rather than as something it has to guess. VNC
+          only has an account when its security type signs in with one, Apple
+          Screen Sharing above all, so its field comes and goes with that
+          choice. A logon is user first, so the name field sits above the
+          password rather than beside the security type.
         */}
+        {showVncUser ? (
+          <Field
+            label="User name"
+            hint={
+              d.hasPassword && !d.vncUser
+                ? "Leave blank to keep the saved one."
+                : "Leave blank to be asked when you connect"
+            }
+          >
+            <input
+              className="field"
+              value={d.vncUser}
+              placeholder={
+                d.hasPassword
+                  ? "(unchanged)"
+                  : d.osHint === "macos"
+                    ? "Your account on that Mac"
+                    : "Optional"
+              }
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(e) => set({ vncUser: e.target.value })}
+            />
+          </Field>
+        ) : null}
         {caps.username ? (
           caps.domain ? (
             <div className="grid grid-cols-2 gap-3">

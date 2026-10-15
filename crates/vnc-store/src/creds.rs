@@ -556,6 +556,36 @@ mod tests {
         assert!(store3.load("host-1").unwrap().is_none());
     }
 
+    /// The VNC account name the host editor saves for Apple Screen Sharing
+    /// (issue #9) survives a save and a fresh load, in camelCase JSON as
+    /// the webview sends it, and a name with no password is not mistaken for
+    /// a credential the connect path could use on its own.
+    #[test]
+    fn a_vnc_user_name_round_trips_through_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        store.unlock("pw").unwrap();
+
+        let sent: StoredCredentials = serde_json::from_str(r#"{"vencryptUser":"godwin"}"#).unwrap();
+        store.save("mac", &sent).unwrap();
+        let named = store.load("mac").unwrap().expect("saved");
+        assert_eq!(named.vencrypt_user.as_deref(), Some("godwin"));
+        assert!(!named.has_for(crate::ProtocolKind::Vnc));
+
+        let paired = StoredCredentials {
+            vencrypt_pass: Some("secret".into()),
+            ..named
+        };
+        store.save("mac", &paired).unwrap();
+
+        let reopened = file_store(dir.path());
+        reopened.unlock("pw").unwrap();
+        let got = reopened.load("mac").unwrap().expect("saved");
+        assert_eq!(got.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(got.vencrypt_pass.as_deref(), Some("secret"));
+        assert!(got.has_for(crate::ProtocolKind::Vnc));
+    }
+
     /// Locking must wipe the decrypted entries, not merely drop the map.
     ///
     /// Safe Rust cannot read freed memory, so "the heap is clean" is not a

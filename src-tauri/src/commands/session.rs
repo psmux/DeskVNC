@@ -425,6 +425,52 @@ fn adopt_session_host(
     });
 }
 
+/// What a stored credential blob gives the driver for one protocol.
+///
+/// Split out of `connect_session` so the choice of fields can be tested
+/// without a keychain or a window. `configured_domain` is the RDP profile's
+/// own domain setting, `None` for every other protocol.
+fn stored_credentials_for(
+    kind: ProtocolKind,
+    stored: vnc_store::StoredCredentials,
+    configured_domain: Option<String>,
+) -> vnc_core::Credentials {
+    match kind {
+        ProtocolKind::Rdp => vnc_core::Credentials {
+            username: stored.rdp_user,
+            password: stored.rdp_password,
+            // The profile's configured domain wins over the stored one: the
+            // blob is where a domain typed at a prompt lands, the setting is
+            // where the user deliberately put one.
+            domain: configured_domain
+                .filter(|d| !d.is_empty())
+                .or(stored.rdp_domain),
+        },
+        // SSH has no logon domain. The username is the remote account; an
+        // empty one means "the same user as here", which the driver resolves,
+        // so it is left empty rather than guessed at here.
+        ProtocolKind::Ssh => vnc_core::Credentials {
+            username: stored.ssh_user,
+            // The account password, not the key passphrase: those unlock
+            // different things and conflating them would offer a passphrase
+            // as a password.
+            password: stored.ssh_password,
+            domain: None,
+        },
+        // VeNCrypt user/pass wins when present; the plain VNC password is the
+        // fallback (vnc-core picks what the negotiated security type needs).
+        // The user name is the one the host editor saves for Apple Screen
+        // Sharing too, so a Mac with both stored connects without a prompt,
+        // and one with only the name gets a prompt with the name filled in.
+        // RFB has no logon domain.
+        _ => vnc_core::Credentials {
+            username: stored.vencrypt_user,
+            password: stored.vencrypt_pass.or(stored.vnc_password),
+            domain: None,
+        },
+    }
+}
+
 /// Whether reaching `Connected` is proof that the credential was accepted.
 ///
 /// For VNC it always is: every RFB security type either authenticates or
@@ -1124,42 +1170,8 @@ pub async fn connect_session(
             let lookup = pid.clone();
             match super::blocking(move || credentials.load(&lookup)).await {
                 Ok(Some(stored)) => {
-                    options.credentials = match kind {
-                        ProtocolKind::Rdp => vnc_core::Credentials {
-                            username: stored.rdp_user,
-                            password: stored.rdp_password,
-                            // The profile's configured domain wins over the
-                            // stored one: the blob is where a domain typed at
-                            // a prompt lands, the setting is where the user
-                            // deliberately put one.
-                            domain: options
-                                .rdp_options()
-                                .and_then(|r| r.domain.clone())
-                                .filter(|d| !d.is_empty())
-                                .or(stored.rdp_domain),
-                        },
-                        // SSH has no logon domain. The username is the
-                        // remote account; an empty one means "the same user
-                        // as here", which the driver resolves, so it is left
-                        // empty rather than guessed at here.
-                        ProtocolKind::Ssh => vnc_core::Credentials {
-                            username: stored.ssh_user,
-                            // The account password, not the key passphrase:
-                            // those unlock different things and conflating
-                            // them would offer a passphrase as a password.
-                            password: stored.ssh_password,
-                            domain: None,
-                        },
-                        // VeNCrypt user/pass wins when present; the plain VNC
-                        // password is the fallback (vnc-core picks what the
-                        // negotiated security type needs). RFB has no logon
-                        // domain.
-                        _ => vnc_core::Credentials {
-                            username: stored.vencrypt_user,
-                            password: stored.vencrypt_pass.or(stored.vnc_password),
-                            domain: None,
-                        },
-                    };
+                    let configured_domain = options.rdp_options().and_then(|r| r.domain.clone());
+                    options.credentials = stored_credentials_for(kind, stored, configured_domain);
                 }
                 Ok(None) => {}
                 // A locked/unavailable keychain shouldn't kill the connect, // the session will surface an auth prompt instead.
@@ -2506,5 +2518,79 @@ mod input_order_tests {
             // An error return would drop the guard here.
         }
         assert!(order.admit(2, Duration::from_millis(40)).await);
+    }
+}
+
+#[cfg(test)]
+mod stored_credentials_tests {
+    use super::*;
+    use vnc_store::StoredCredentials;
+
+    #[test]
+    fn a_vnc_host_connects_with_the_saved_user_name_and_password() {
+        // What the host editor writes for a Mac on Apple Screen Sharing.
+        let stored = StoredCredentials {
+            vencrypt_user: Some("godwin".into()),
+            vencrypt_pass: Some("secret".into()),
+            ..Default::default()
+        };
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password.as_deref(), Some("secret"));
+        assert_eq!(got.domain, None);
+    }
+
+    #[test]
+    fn a_saved_user_name_pairs_with_the_plain_vnc_password_when_that_is_all_there_is() {
+        // A host whose password was saved before it had a user name field:
+        // the name typed later still reaches the driver beside it.
+        let stored = StoredCredentials {
+            vnc_password: Some("old".into()),
+            vencrypt_user: Some("godwin".into()),
+            ..Default::default()
+        };
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn a_user_name_alone_is_passed_on_for_the_prompt_to_fill_in() {
+        let stored = StoredCredentials {
+            vencrypt_user: Some("godwin".into()),
+            ..Default::default()
+        };
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password, None);
+    }
+
+    #[test]
+    fn a_vnc_host_never_picks_up_another_protocols_account() {
+        let stored = StoredCredentials {
+            vnc_password: Some("pw".into()),
+            rdp_user: Some("rdp-user".into()),
+            ssh_user: Some("ssh-user".into()),
+            ..Default::default()
+        };
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        assert_eq!(got.username, None);
+        assert_eq!(got.password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn rdp_still_prefers_the_configured_domain() {
+        let stored = StoredCredentials {
+            rdp_user: Some("alice".into()),
+            rdp_domain: Some("STORED".into()),
+            rdp_password: Some("pw".into()),
+            vencrypt_user: Some("not-me".into()),
+            ..Default::default()
+        };
+        let got = stored_credentials_for(ProtocolKind::Rdp, stored.clone(), Some("CORP".into()));
+        assert_eq!(got.username.as_deref(), Some("alice"));
+        assert_eq!(got.domain.as_deref(), Some("CORP"));
+        let got = stored_credentials_for(ProtocolKind::Rdp, stored, Some(String::new()));
+        assert_eq!(got.domain.as_deref(), Some("STORED"));
     }
 }

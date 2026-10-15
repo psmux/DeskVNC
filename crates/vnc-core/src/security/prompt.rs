@@ -388,6 +388,67 @@ mod tests {
         assert_eq!(src.last_username().as_deref(), Some("alice"));
     }
 
+    /// A Mac saved with its account name and password (issue #9) signs in
+    /// with Apple auth without raising the prompt at all.
+    #[tokio::test]
+    async fn a_saved_user_name_and_password_skip_the_apple_prompt() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut o = opts();
+        o.credentials = Credentials::user_pass("godwin", "secret");
+        let src = CredentialSource::interactive(&tx, 1, None, None);
+        let got = src
+            .obtain(
+                "Apple Remote Desktop",
+                CredentialKind::UsernameAndPassword,
+                false,
+                &o,
+            )
+            .await
+            .unwrap();
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password.as_deref(), Some("secret"));
+        assert!(!src.prompted(), "no prompt should have been raised");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A Mac saved with only its account name still asks for the password,
+    /// but the prompt arrives with the saved name in it, not the local one.
+    #[tokio::test]
+    async fn a_saved_user_name_prefills_the_prompt() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut o = opts();
+        o.credentials = Credentials {
+            username: Some("godwin".into()),
+            password: None,
+            domain: None,
+        };
+        let src = CredentialSource::interactive(&tx, 1, None, None);
+        tokio::spawn(async move {
+            let ask = rx.recv().await.unwrap();
+            assert_eq!(ask.request.username_hint.as_deref(), Some("godwin"));
+            // The person only types the password; the name box is left as
+            // the prompt filled it, which the shell sends back empty.
+            ask.reply
+                .send(Some(Credentials {
+                    username: None,
+                    password: Some("typed".into()),
+                    domain: None,
+                }))
+                .unwrap();
+        });
+        let got = src
+            .obtain(
+                "Apple Remote Desktop",
+                CredentialKind::UsernameAndPassword,
+                false,
+                &o,
+            )
+            .await
+            .unwrap();
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password.as_deref(), Some("typed"));
+    }
+
     #[tokio::test]
     async fn an_empty_username_answer_falls_back_to_the_hint() {
         let (tx, mut rx) = mpsc::channel(1);

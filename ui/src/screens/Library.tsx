@@ -16,6 +16,7 @@ import type { DiscoveredHost, HostGroup, HostProfile, ProtocolKind } from "../li
 import { serializeRdpSettings } from "../lib/rdp";
 import { serializeSshSettings } from "../lib/ssh";
 import { loadSshDefaults } from "../lib/sshDefaults";
+import { vncCredentialPayload, vncTakesUsername } from "../lib/hostDraft";
 import {
   hostMac,
   hostProtocol,
@@ -846,6 +847,25 @@ export function Library({
             // refresh gets the library's key icon to the same correct end
             // state by re-reading it from the backend instead.
             if (payload.sshPassword) await refresh();
+          }
+        } else if (draft.protocol === "vnc") {
+          // A Mac's Screen Sharing, and the other RFB methods that sign in
+          // with an account, keep the user name beside the password in the
+          // `vencrypt*` pair, which is where `connect_session` looks first
+          // and where a post-connect save puts them too. The password only
+          // case is still `savePassword`, unchanged.
+          const payload = vncCredentialPayload(
+            draft.vncUser,
+            draft.password,
+            vncTakesUsername(draft.securityPref, draft.osHint),
+          );
+          if (payload?.vncPassword && !payload.vencryptUser && !payload.vencryptPass) {
+            await savePassword(id, payload.vncPassword);
+          } else if (payload) {
+            await safeInvoke("save_password", { hostId: id, creds: payload }, null);
+            // Same reason as the SSH branch: the key icon is re-read rather
+            // than flipped here.
+            if (payload.vencryptPass) await refresh();
           }
         } else if (draft.password) {
           await savePassword(id, draft.password);
