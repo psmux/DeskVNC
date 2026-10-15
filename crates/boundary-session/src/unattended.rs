@@ -20,7 +20,7 @@
 //! the ID. Only one session runs at a time.
 
 use crate::{
-    Desktop, Event, HostOptions, Session,
+    Approval, Desktop, Event, HostOptions, Session,
     session::{self, Lookup},
     wire::{self, Message},
 };
@@ -189,6 +189,19 @@ fn derive(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
+/// How long the person at the computer has to answer a helper who asks.
+/// The helper waits a little longer than this for the grant.
+pub const ASK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The person's answer to a helper who asked to come in.
+pub struct Asked {
+    pub approval: Approval,
+    /// Let their tools run commands and copy files.
+    pub tools: bool,
+    /// Pair them, so they come in later without asking.
+    pub pair: bool,
+}
+
 /// What an unattended machine reports while it listens.
 pub enum Notice {
     /// Listening, and reachable by `machine`. `address` is the full current
@@ -206,6 +219,16 @@ pub enum Notice {
         peer: String,
         control: bool,
         session: Session,
+    },
+    /// A helper that is not paired, and has no password, asks to come in.
+    /// The person at the computer answers on `answer`. Nobody answering
+    /// within a minute, or dropping it, turns the helper away.
+    Ask {
+        name: String,
+        peer: String,
+        /// The helper can send commands and file requests.
+        tools: bool,
+        answer: tokio::sync::oneshot::Sender<Asked>,
     },
     /// A helper was turned away, and why.
     Refused {
@@ -319,11 +342,16 @@ where
             };
         let decision = match Access::load(access_path) {
             Ok(access) => authorize(&access, &peer, password.as_deref(), &mut throttle).await,
-            Err(error) => Err(format!("{error:#}")),
+            Err(error) => Decision::Refuse(format!("{error:#}")),
+        };
+        let decision = match decision {
+            Decision::Ask => ask(notices, access_path, &name, &peer, tools).await,
+            other => other,
         };
         let (control, allowed_tools) = match decision {
-            Ok(grant) => grant,
-            Err(reason) => {
+            Decision::Grant(control, tools) => (control, tools),
+            Decision::Ask => unreachable!("answered above"),
+            Decision::Refuse(reason) => {
                 refuse(connection, send, reason.clone());
                 let _ = notices.send(Notice::Refused { name, peer, reason }).await;
                 continue;
@@ -377,25 +405,88 @@ fn refuse(
     });
 }
 
+/// What happens to a helper that knocks.
+#[derive(Debug, PartialEq, Eq)]
+enum Decision {
+    /// In, with control or not, and with its tools allowed or not.
+    Grant(bool, bool),
+    /// Not paired and no password: the person at the computer decides.
+    Ask,
+    Refuse(String),
+}
+
+/// Ask the person at the computer about a helper, and pair it if they say so.
+async fn ask(
+    notices: &mpsc::Sender<Notice>,
+    access_path: &Path,
+    name: &str,
+    peer: &str,
+    tools: bool,
+) -> Decision {
+    let (answer, reply) = tokio::sync::oneshot::channel();
+    if notices
+        .send(Notice::Ask {
+            name: name.to_string(),
+            peer: peer.to_string(),
+            tools,
+            answer,
+        })
+        .await
+        .is_err()
+    {
+        return Decision::Refuse("Nobody is at that computer to approve you".into());
+    }
+    let asked = match tokio::time::timeout(ASK_TIMEOUT, reply).await {
+        Ok(Ok(asked)) => asked,
+        Ok(Err(_)) => return Decision::Refuse("The person at that computer did not answer".into()),
+        Err(_) => return Decision::Refuse("Nobody answered at that computer within a minute. Ask the person there to approve you, or to pair you".into()),
+    };
+    let control = match asked.approval {
+        Approval::Deny => {
+            return Decision::Refuse("The person at that computer declined this connection".into());
+        }
+        Approval::View => false,
+        Approval::Control => true,
+    };
+    let tools = tools && asked.tools;
+    if asked.pair {
+        // A failed save still lets this session in; it only means the next
+        // one asks again.
+        let saved = Access::load(access_path).and_then(|mut access| {
+            access.trust(peer, name, control)?;
+            access.allow_tools(peer, tools);
+            access.save(access_path)
+        });
+        if let Err(error) = saved {
+            let _ = notices
+                .send(Notice::Status(format!("Could not pair {name}: {error:#}")))
+                .await;
+        }
+    }
+    Decision::Grant(control, tools)
+}
+
 /// Let a helper in, and with what, or say why not: whether it may control,
 /// and whether its tools may run commands and copy files. A password never
-/// grants the second; only a paired helper's own entry can.
+/// grants the second; only a paired helper's own entry, or the person at the
+/// computer, can.
 async fn authorize(
     access: &Access,
     peer: &str,
     password: Option<&str>,
     throttle: &mut Throttle,
-) -> std::result::Result<(bool, bool), String> {
+) -> Decision {
+    use Decision::{Ask, Grant, Refuse};
     if !access.enabled {
-        return Err("Unattended access is switched off on that computer".into());
+        return Refuse("Unattended access is switched off on that computer".into());
     }
     if let Some(helper) = access.helper(peer) {
-        return Ok((helper.control, helper.tools));
+        return Grant(helper.control, helper.tools);
     }
     match password {
         Some(password) if access.has_password() => {
             if throttle.locked() {
-                return Err(
+                return Refuse(
                     "Too many wrong passwords. Password access to that computer is paused for 15 minutes"
                         .into(),
                 );
@@ -407,15 +498,17 @@ async fn authorize(
                 .await
                 .unwrap_or(false);
             if matches {
-                Ok((true, false))
+                Grant(true, false)
             } else {
                 throttle.failed();
                 // A wrong guess costs the guesser time as well as an attempt.
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                Err("Wrong password for that computer".into())
+                Refuse("Wrong password for that computer".into())
             }
         }
-        _ => Err("This helper is not allowed on that computer. Ask the person there to pair you during a support session, or use the unattended password".into()),
+        // No password, or one sent to a computer that has none: whoever is
+        // there decides, the same way they would for an invitation.
+        _ => Ask,
     }
 }
 
