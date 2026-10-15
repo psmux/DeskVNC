@@ -50,7 +50,7 @@ pub async fn save_password(
         if holds_password(&merged) {
             mark_saved(&store, &host_id, true);
         }
-        Ok(())
+        Ok::<(), vnc_store::Error>(())
     })
     .await
 }
@@ -110,7 +110,9 @@ pub async fn saved_user_names(
     super::blocking(move || {
         credentials
             .load(&host_id)
-            .map(|blob| blob.as_ref().map(SavedUserNames::from).unwrap_or_default())
+            .map(|blob: Option<StoredCredentials>| {
+                blob.as_ref().map(SavedUserNames::from).unwrap_or_default()
+            })
     })
     .await
 }
@@ -177,7 +179,7 @@ pub async fn delete_password(state: State<'_, AppState>, host_id: String) -> Res
         credentials.delete(&host_id)?;
         // Without this the key icon came back on the next start.
         mark_saved(&store, &host_id, false);
-        Ok(())
+        Ok::<(), vnc_store::Error>(())
     })
     .await
 }
