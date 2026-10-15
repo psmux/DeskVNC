@@ -338,7 +338,13 @@ function SessionView({
   const [passthrough, setPassthroughState] = useState(stored.passthrough);
   const [capture, setCapture] = useState<CaptureStatus>(CAPTURE_INACTIVE);
   const [showCaptureHelp, setShowCaptureHelp] = useState(false);
-  const [requestedViewOnly, setViewOnlyState] = useState(stored.viewOnly);
+  // A Boundary computer decides control itself, and builds before this one
+  // saved view only for every Boundary window whether or not the person chose
+  // it. So a Boundary session starts with the choice open; View only still
+  // turns it on for the session.
+  const [requestedViewOnly, setViewOnlyState] = useState(
+    params.protocol === "boundary" ? false : stored.viewOnly,
+  );
   /** Manual staleness override; off by default because it costs bandwidth. */
   const [alwaysRefresh, setAlwaysRefresh] = useState(stored.alwaysRefresh);
   const [recallSignal, setRecallSignal] = useState(0);
@@ -992,7 +998,10 @@ function SessionView({
       quality,
       bwLevels,
       alwaysRefresh,
-      viewOnly,
+      // What the person chose, never what this window derived: a Boundary
+      // session is view only until its computer says otherwise, and saving
+      // that made every later session view only for good.
+      viewOnly: requestedViewOnly,
       passthrough,
       display: desiredDisplay,
     };
@@ -1011,7 +1020,7 @@ function SessionView({
     quality,
     bwLevels,
     alwaysRefresh,
-    viewOnly,
+    requestedViewOnly,
     passthrough,
     desiredDisplay,
   ]);
