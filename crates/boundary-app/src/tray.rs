@@ -5,7 +5,9 @@
 //! connected, and its menu brings the window back or quits. Linux has no tray
 //! that works without GTK, so there the window stays minimized as before.
 
-/// What the person picked from the icon's menu.
+/// What the person picked from the icon's menu. Never built where there is
+/// no tray.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub enum Action {
     Show,
     Quit,
