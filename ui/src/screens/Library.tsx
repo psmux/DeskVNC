@@ -118,7 +118,7 @@ export function Library({
   autoAddDiscoveredId?: string | null;
   onAutoAddHandled?: () => void;
 }): ReactNode {
-  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, wakeHost, refresh, refreshThumbnail } = useHosts();
+  const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, saveVncCredentials, wakeHost, refresh, refreshThumbnail } = useHosts();
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
@@ -847,6 +847,8 @@ export function Library({
             // state by re-reading it from the backend instead.
             if (payload.sshPassword) await refresh();
           }
+        } else if (draft.protocol === "vnc") {
+          await saveVncCredentials(id, { user: draft.vncUser, password: draft.password });
         } else if (draft.password) {
           await savePassword(id, draft.password);
         }
@@ -856,7 +858,7 @@ export function Library({
       setHostDialog(null);
       push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
     },
-    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push],
+    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, saveVncCredentials, setHostTags, refresh, push],
   );
 
   const paletteActions = useMemo((): PaletteAction[] => {

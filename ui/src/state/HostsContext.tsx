@@ -10,6 +10,7 @@ import {
 } from "react";
 import { blankHostProfile, type HostGroup, type HostProfile, type HostTag } from "../lib/types";
 import { inTauri, mustInvoke, safeInvoke, safeListen } from "../lib/tauri";
+import { vncCredentialPayload } from "../lib/hostDraft";
 import {
   MOCK_GROUPS,
   MOCK_HOSTS,
@@ -78,6 +79,12 @@ interface HostsContextValue {
     hostId: string,
     creds: { user: string; domain: string; password: string },
   ) => Promise<void>;
+  /**
+   * A VNC host's user name and password, from the host editor. The user name
+   * is for the servers that ask for one, a Mac with Screen Sharing being the
+   * common case. See `vncCredentialPayload`.
+   */
+  saveVncCredentials: (hostId: string, creds: { user: string; password: string }) => Promise<void>;
   deletePassword: (hostId: string) => Promise<void>;
   wakeHost: (hostId: string) => Promise<void>;
   /**
@@ -500,6 +507,18 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     [],
   );
 
+  const saveVncCredentials = useCallback(
+    async (hostId: string, creds: { user: string; password: string }): Promise<void> => {
+      const payload = vncCredentialPayload(creds.user, creds.password);
+      if (Object.keys(payload).length === 0) return;
+      await safeInvoke("save_password", { hostId, creds: payload }, null);
+      if (payload.vncPassword) {
+        setHosts((prev) => prev.map((h) => (h.id === hostId ? { ...h, hasPassword: true } : h)));
+      }
+    },
+    [],
+  );
+
   const deletePassword = useCallback(
     async (hostId: string): Promise<void> => {
       await safeInvoke("delete_password", { hostId }, null);
@@ -585,13 +604,15 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     () => ({
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
       deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
-      removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, deletePassword,
+      removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, saveVncCredentials,
+      deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     }),
     [
       hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
       deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
-      removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, deletePassword,
+      removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, saveVncCredentials,
+      deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     ],
   );

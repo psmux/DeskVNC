@@ -42,3 +42,30 @@ export function portWasTouched(host: HostProfile | null | undefined): boolean {
   if (!host) return false;
   return host.port !== DEFAULT_PORT[hostProtocol(host)];
 }
+
+/**
+ * The `save_password` fields a VNC host's editor writes.
+ *
+ * The editor used to have nowhere to put a user name for VNC, so a Mac with
+ * Screen Sharing (Apple's security type wants a user name AND a password)
+ * could never be satisfied from the keychain: the password typed here was
+ * stored, the prompt still came up for the user name, and it would not let
+ * the person through without the password typed again (issue #9).
+ *
+ * A user name goes in `vencryptUser`, the field `connect_session` reads as
+ * the VNC user name. A password goes in both password fields. The shell
+ * prefers `vencryptPass` over `vncPassword`, so writing only the second
+ * would leave an older answer to a prompt shadowing the one typed here.
+ *
+ * Only non-empty fields are sent: an empty box means "keep what is stored",
+ * exactly as for the RDP and SSH fields.
+ */
+export function vncCredentialPayload(user: string, password: string): Record<string, string> {
+  const payload: Record<string, string> = {};
+  if (user.trim()) payload.vencryptUser = user.trim();
+  if (password) {
+    payload.vncPassword = password;
+    payload.vencryptPass = password;
+  }
+  return payload;
+}

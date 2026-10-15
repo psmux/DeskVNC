@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { portOnProtocolChange, portWasTouched } from "./hostDraft";
+import { portOnProtocolChange, portWasTouched, vncCredentialPayload } from "./hostDraft";
 import { blankHostProfile } from "./types";
 
 describe("portOnProtocolChange", () => {
@@ -47,5 +47,30 @@ describe("portWasTouched", () => {
     expect(portWasTouched({ ...blankHostProfile("rdp"), port: 3389 })).toBe(false);
     expect(portWasTouched({ ...blankHostProfile("rdp"), port: 3390 })).toBe(true);
     expect(portWasTouched(null)).toBe(false);
+  });
+});
+
+describe("vncCredentialPayload", () => {
+  // Issue #9. A Mac with Screen Sharing needs a user name as well as a
+  // password, and the editor had no field for it, so what was typed here
+  // could never be used without the prompt asking for both again.
+  it("stores the user name a Mac asks for beside the password", () => {
+    expect(vncCredentialPayload(" godwin ", "secret")).toEqual({
+      vencryptUser: "godwin",
+      vencryptPass: "secret",
+      vncPassword: "secret",
+    });
+  });
+
+  it("writes both password fields so an older prompt answer cannot shadow this one", () => {
+    expect(vncCredentialPayload("", "secret")).toEqual({
+      vencryptPass: "secret",
+      vncPassword: "secret",
+    });
+  });
+
+  it("leaves what is stored alone for an empty box", () => {
+    expect(vncCredentialPayload("godwin", "")).toEqual({ vencryptUser: "godwin" });
+    expect(vncCredentialPayload("  ", "")).toEqual({});
   });
 });

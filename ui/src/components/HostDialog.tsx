@@ -100,6 +100,13 @@ export interface HostDraft {
    */
   sshUser: string;
   /**
+   * VNC account name, for the servers that ask for one (a Mac with Screen
+   * Sharing, VeNCrypt Plain). Written on save as
+   * `StoredCredentials.vencryptUser`, the field the shell reads as the VNC
+   * user name. Seeded BLANK for the same reason `rdpUser` is.
+   */
+  vncUser: string;
+  /**
    * UI-only: the user has deliberately set the port, so switching protocol
    * must not move it. Never persisted.
    */
@@ -137,6 +144,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     rdpDomain: "",
     ssh: protocol === "ssh" ? (parseSshSettings(h?.sshSettings) ?? newSshSettings()) : null,
     sshUser: "",
+    vncUser: "",
     portTouched: portWasTouched(h),
   };
 }
@@ -189,7 +197,10 @@ interface ProtocolCaps {
 
 const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
   boundary: { graphical: true, rfbSecurity: false, username: false, domain: false },
-  vnc: { graphical: true, rfbSecurity: true, username: false, domain: false },
+  // VNC has a user name only for some servers, but a Mac is one of them,
+  // and with nowhere to type it here the password saved beside it could never
+  // be used on its own (issue #9).
+  vnc: { graphical: true, rfbSecurity: true, username: true, domain: false },
   rdp: { graphical: true, rfbSecurity: false, username: true, domain: true },
   ssh: { graphical: false, rfbSecurity: false, username: true, domain: false },
 };
@@ -408,8 +419,9 @@ export function HostDialog({
           The logon fields are driven by capability, not by protocol name:
           RDP needs a user name and, for a directory account, a domain; SSH
           needs only a user name, and treats a blank one as "the same account
-          as this computer" rather than as something it has to guess; VNC has
-          no concept of a logon account at all, so nothing renders here. A
+          as this computer" rather than as something it has to guess; VNC
+          needs one only for the security types that carry an identity
+          (Apple's, VeNCrypt Plain), so its field is optional and says so. A
           logon is user first, so the name field sits above the password
           rather than beside the security type.
         */}
@@ -457,7 +469,7 @@ export function HostDialog({
                 />
               </Field>
             </div>
-          ) : (
+          ) : isSsh ? (
             <Field
               label="User name"
               hint={
@@ -475,6 +487,26 @@ export function HostDialog({
                 autoCorrect="off"
                 spellCheck={false}
                 onChange={(e) => set({ sshUser: e.target.value })}
+              />
+            </Field>
+          ) : (
+            <Field
+              label="User name"
+              hint={
+                d.hasPassword && !d.vncUser
+                  ? "Leave blank to keep the saved one."
+                  : "Only for servers that ask for one, such as a Mac with Screen Sharing"
+              }
+            >
+              <input
+                className="field"
+                value={d.vncUser}
+                placeholder={d.hasPassword ? "(unchanged)" : "Optional"}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => set({ vncUser: e.target.value })}
               />
             </Field>
           )
