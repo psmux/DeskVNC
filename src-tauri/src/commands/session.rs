@@ -1140,6 +1140,10 @@ pub async fn connect_session(
                     .into());
             }
             let mut rdp = settings.options;
+            // The host's "Share my clipboard" box. It lives on the settings
+            // envelope rather than in `RdpOptions`, so it is carried across
+            // here or it is never read at all.
+            rdp.redirect_clipboard = settings.clipboard;
             // The name for SNI, the certificate pin and (from phase 3) the
             // Kerberos service name is the address the user configured, never
             // the socket we end up dialling: an SSH tunnel hands back a

@@ -57,6 +57,7 @@ import {
   type ViewPrefs,
 } from "../lib/viewPrefs";
 import { syncSessionMenu, type SessionMenuState } from "../lib/menuSync";
+import { ClipboardEcho } from "../lib/clipboardEcho";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
@@ -1098,20 +1099,19 @@ function SessionView({
 
   /**
    * The text most recently moved in either direction, so neither automatic
-   * half of the sync repeats itself: without it, text copied on the remote is
-   * written to the local clipboard and then pushed straight back the next time
-   * this window is focused.
+   * half of the sync repeats itself. Forgotten on every (re)connect: see
+   * `ClipboardEcho`.
    */
-  const lastClipboardRef = useRef<string | null>(null);
+  const [clipboardEcho] = useState(() => new ClipboardEcho());
 
   // Remote clipboard -> local (text only). The write is native: the webview's
   // own clipboard API is gesture-gated and this text arrives from the socket.
   useEffect(() => {
     const text = session.remoteClipboard;
     if (text === null) return;
-    lastClipboardRef.current = text;
+    clipboardEcho.moved(text);
     void writeClipboard(text);
-  }, [session.remoteClipboard]);
+  }, [session.remoteClipboard, clipboardEcho]);
 
   /**
    * Local clipboard -> remote.
@@ -1124,15 +1124,15 @@ function SessionView({
     async (force: boolean): Promise<"sent" | "unchanged" | "unreadable"> => {
       const text = await readClipboard();
       if (text === null) return "unreadable";
-      if (!text || (!force && text === lastClipboardRef.current)) return "unchanged";
-      lastClipboardRef.current = text;
+      if (!clipboardEcho.shouldPush(text, force)) return "unchanged";
+      clipboardEcho.moved(text);
       // Await the enqueue: the paste-chord sync (SessionInput.deferForPaste)
       // relies on this resolving only once the text is ordered ahead of any
       // keystroke sent after it.
       await session.sendClipboard(text);
       return "sent";
     },
-    [session],
+    [session, clipboardEcho],
   );
 
   /**
@@ -1161,6 +1161,12 @@ function SessionView({
   pushClipboardRef.current = pushClipboard;
 
   const clipboardReady = session.state.state === "connected";
+  // Declared ahead of the sync below so it runs first: a reconnect brings up
+  // a fresh clipboard channel, and the text pushed before the drop has to be
+  // offered on it again rather than skipped as a repeat.
+  useEffect(() => {
+    if (clipboardReady) clipboardEcho.connected();
+  }, [clipboardReady, clipboardEcho]);
   useEffect(() => {
     if (!clipboardReady || !owns) return;
     const sync = (): void => {

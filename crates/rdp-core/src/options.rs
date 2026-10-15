@@ -258,11 +258,12 @@ impl ResolvedOptions {
         // implement is a channel the server will send data on and we will
         // have to ignore, so it is not requested (PRDRDP/03 §2.4).
         let mut channels = vec![CHANNEL_DRDYNVC];
-        if rdp.codecs.uncompressed {
-            // The clipboard is not a codec; the flag is checked because a
-            // profile with everything off is a profile that wants nothing.
+        // A host with clipboard sharing off never asks for the channel, so
+        // there is nothing for the server to send on and nothing for the
+        // shell's offers to reach, whatever the shell does.
+        if rdp.redirect_clipboard {
+            channels.push(CHANNEL_CLIPRDR);
         }
-        channels.push(CHANNEL_CLIPRDR);
 
         // The size to ask for in the Client Core Data, and the size actually
         // wanted, which are not always the same number.
@@ -522,6 +523,21 @@ mod tests {
         let mut warnings = Vec::new();
         let r = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect("valid");
         assert_eq!(r.domain, None);
+    }
+
+    /// The host's clipboard switch decides whether `cliprdr` is requested.
+    /// It is on unless the host turned it off.
+    #[test]
+    fn the_clipboard_channel_follows_the_host_switch() {
+        let (opts, mut rdp) = options();
+        let mut warnings = Vec::new();
+        let on = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect("valid");
+        assert!(on.channels.contains(&CHANNEL_CLIPRDR));
+
+        rdp.redirect_clipboard = false;
+        let off = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect("valid");
+        assert!(!off.channels.contains(&CHANNEL_CLIPRDR));
+        assert!(off.channels.contains(&CHANNEL_DRDYNVC));
     }
 
     /// A phase 3 feature the profile asked for fails with a message rather

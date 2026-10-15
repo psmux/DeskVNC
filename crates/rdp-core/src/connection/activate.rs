@@ -547,6 +547,32 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                 data.channel_id
             )));
         }
+        if channels
+            .statics
+            .iter()
+            .any(|(_, id)| *id == data.channel_id)
+        {
+            // Virtual channel traffic does not wait for the Font Map. A
+            // Windows server sends the clipboard's capabilities and Monitor
+            // Ready, and the drdynvc capabilities, as soon as the channel is
+            // joined and the service behind it is up, which on a resumed
+            // logon is before the sequence has finished. None of it has a
+            // security header or a Share Control header, so decoding it as an
+            // I/O channel PDU failed the connect; dropping it instead would
+            // lose the Monitor Ready, and the clipboard with it, for the
+            // whole session (issue #9). It is parked for the connected pump,
+            // which hands it to the channel's own handler.
+            tracing::debug!(
+                channel_id = data.channel_id,
+                len = frame.len(),
+                "virtual channel data arrived before the sequence finished; keeping it"
+            );
+            pending.push(Framed {
+                kind: FramedKind::Tpkt,
+                frame,
+            });
+            continue;
+        }
 
         let class = classify(data.channel_id, channels, phase, &data.payload);
         let mut r = Reader::new(&data.payload);

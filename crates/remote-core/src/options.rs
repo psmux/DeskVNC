@@ -330,6 +330,17 @@ pub struct RdpOptions {
     /// DISPLAYCONTROL_MONITOR_LAYOUT `DeviceScaleFactor` and the connector's
     /// `desktopScaleFactor`. 100 means no scaling.
     pub desktop_scale_factor: u32,
+
+    /// Whether to ask for the clipboard channel (MS-RDPECLIP) at all.
+    ///
+    /// Not serialized. The stored per host switch is `clipboard` on the
+    /// settings envelope in `vnc-store` (`RdpSettings::clipboard`), which
+    /// flattens this struct into the same JSON object, so a field of the same
+    /// meaning here would write the key twice. The shell copies the switch in
+    /// at connect time. Before it did, the host's "Share my clipboard" box was
+    /// stored and never read, and the channel was requested whatever it said.
+    #[serde(skip)]
+    pub redirect_clipboard: bool,
 }
 
 impl Default for RdpOptions {
@@ -355,6 +366,7 @@ impl Default for RdpOptions {
             send_mstshash_cookie: false,
             allow_auto_reconnect: true,
             desktop_scale_factor: 100,
+            redirect_clipboard: true,
         }
     }
 }

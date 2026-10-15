@@ -246,6 +246,17 @@ pub enum SessionBehaviour {
     /// (`docs/RDP_SPEC_NOTES.md` §1.1), and the client has to report it
     /// rather than draw whatever fell out.
     ServeMalformedEgfx,
+    /// [`SessionBehaviour::ServeChannels`], except that both channels open
+    /// before the Font Map rather than after it: the drdynvc version
+    /// handshake, the clipboard's `CB_CLIP_CAPS` and its `CB_MONITOR_READY`
+    /// all arrive while the client is still finishing the connection.
+    ///
+    /// Windows sends channel traffic as soon as the channels are joined, and
+    /// a session that resumes a disconnected logon already has `rdpclip`
+    /// running, so its first clipboard PDUs overtake the finalisation. A
+    /// client that reads them as I/O channel PDUs loses the Monitor Ready,
+    /// and with it the clipboard for the whole session.
+    ServeChannelsDuringActivation,
     /// Phases 6 to 10, then a Save Session Info PDU carrying an auto
     /// reconnect cookie (MS-RDPBCGR 2.2.10.1.1.4 wrapping 2.2.4.2), and then
     /// the socket closes with no ultimatum.
@@ -823,6 +834,15 @@ async fn serve(
     }
 
     // ---- Phase 10: the server's four, the Font Map last -----------------
+    let mut early_script = None;
+    if config.session == SessionBehaviour::ServeChannelsDuringActivation {
+        // Channel traffic ahead of the Font Map, in the order a Windows
+        // server sends it: capabilities first, then Monitor Ready
+        // (MS-RDPECLIP 1.3.2.1).
+        let mut script = ChannelScript::new(&recorded, false)?;
+        script.open_with_capabilities(&mut stream).await?;
+        early_script = Some(script);
+    }
     for pdu in [
         ShareDataPdu::Synchronize(SynchronizePdu::client(USER_CHANNEL_ID)),
         ShareDataPdu::Control(ControlPdu::cooperate()),
@@ -845,6 +865,9 @@ async fn serve(
     // drdynvc, runs the graphics channel and the clipboard, and never sends a
     // legacy bitmap at all, which is what a Windows host with the graphics
     // pipeline on actually does.
+    if let Some(mut script) = early_script {
+        return drain(&mut stream, &recorded, Some(&mut script)).await;
+    }
     if matches!(
         config.session,
         SessionBehaviour::ServeChannels | SessionBehaviour::ServeMalformedEgfx
@@ -1238,6 +1261,15 @@ impl ChannelScript {
         .await?;
         self.send_clip(stream, clip_msg::MONITOR_READY, 0, &[])
             .await
+    }
+
+    /// [`Self::open`], with the server's `CB_CLIP_CAPS` ahead of the
+    /// Monitor Ready, which is the order MS-RDPECLIP 1.3.2.1 gives and the
+    /// order Windows uses.
+    async fn open_with_capabilities(&mut self, stream: &mut TcpStream) -> std::io::Result<()> {
+        self.send_clip(stream, clip_msg::CLIP_CAPS, 0, &general_capability())
+            .await?;
+        self.open(stream).await
     }
 
     /// One MCS Send Data Request on a virtual channel.

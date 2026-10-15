@@ -202,12 +202,25 @@ impl StaticChannels {
     /// (PRDRDP/05 §5.1 rule 6), which is the same reason the fast path
     /// reassembler is reset at that point
     /// (`crate::session::run_loop`, the `DeactivateAll` arm).
+    ///
+    /// `cliprdr` is left exactly as it is, reassembly included. A
+    /// Deactivation Reactivation Sequence rebuilds the share, not the MCS
+    /// channels (MS-RDPBCGR 1.3.1.3), and the clipboard service on a Windows
+    /// server lives in `rdpclip`, which neither knows nor cares that the share
+    /// was rebuilt: it does not send a second `CB_MONITOR_READY`. Forgetting
+    /// the negotiation here is what used to switch the clipboard off for the
+    /// rest of the session on any server that resizes or reconnects a logon
+    /// by reactivating, while a server that never reactivates kept working
+    /// (issue #9). Should a server restart its clipboard anyway, its new
+    /// Monitor Ready is answered as the first one was.
     pub fn reset(&mut self) {
         for entry in &mut self.entries {
-            entry.reassembler.reset();
             match &mut entry.handler {
-                Handler::Dvc(mux) => mux.reset(),
-                Handler::Cliprdr(clip) => clip.reset(),
+                Handler::Dvc(mux) => {
+                    entry.reassembler.reset();
+                    mux.reset();
+                }
+                Handler::Cliprdr(_) => {}
             }
         }
     }
@@ -478,11 +491,11 @@ mod tests {
         assert_eq!(frames.len(), 1);
     }
 
-    /// A deactivation drops every partial reassembly. Without this, the first
-    /// chunk of the new share is appended to the tail of the old one and the
-    /// channel is desynchronised for the rest of the session.
+    /// A deactivation drops a partial drdynvc reassembly. Without this, the
+    /// first chunk of the new share is appended to the tail of the old one
+    /// and the channel is desynchronised for the rest of the session.
     #[test]
-    fn a_reset_drops_partial_reassemblies_on_every_channel() {
+    fn a_reset_drops_a_partial_drdynvc_reassembly() {
         use rdp_pdu::vc::static_vc::channel_flags;
 
         let mut channels = StaticChannels::new(&map());
@@ -499,7 +512,7 @@ mod tests {
         .expect("encodes");
         first.extend_from_slice(&[0x11; 16]);
         channels
-            .deliver(1006, &first, ctx(), &mut out)
+            .deliver(1004, &first, ctx(), &mut out)
             .expect("buffered");
 
         channels.reset();
@@ -514,6 +527,152 @@ mod tests {
         .encode(&mut Writer::new(&mut cont))
         .expect("encodes");
         cont.extend_from_slice(&[0x22; 48]);
-        assert!(channels.deliver(1006, &cont, ctx(), &mut out).is_err());
+        assert!(channels.deliver(1004, &cont, ctx(), &mut out).is_err());
+    }
+
+    /// One `cliprdr` message from the server, in as many chunks as it takes
+    /// at `chunk` bytes each, each chunk a `CHANNEL_PDU_HEADER` and its slice
+    /// as a Send Data Indication body carries it (MS-RDPBCGR 2.2.6.1).
+    fn clip_chunks(msg_type: u16, flags: u16, body: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+        use rdp_pdu::vc::static_vc::channel_flags;
+
+        let mut pdu = Vec::new();
+        let mut w = Writer::new(&mut pdu);
+        w.u16(msg_type);
+        w.u16(flags);
+        w.u32(u32::try_from(body.len()).expect("small"));
+        w.bytes(body);
+
+        let pieces: Vec<&[u8]> = pdu.chunks(chunk).collect();
+        let last = pieces.len() - 1;
+        pieces
+            .iter()
+            .enumerate()
+            .map(|(i, piece)| {
+                let mut flags = channel_flags::SHOW_PROTOCOL;
+                if i == 0 {
+                    flags |= channel_flags::FIRST;
+                }
+                if i == last {
+                    flags |= channel_flags::LAST;
+                }
+                let mut out = Vec::new();
+                ChannelPduHeader {
+                    length: u32::try_from(pdu.len()).expect("small"),
+                    flags,
+                }
+                .encode(&mut Writer::new(&mut out))
+                .expect("encodes");
+                out.extend_from_slice(piece);
+                out
+            })
+            .collect()
+    }
+
+    /// The `msgType` of every `cliprdr` frame queued.
+    fn clip_types(out: &Outbox) -> Vec<u16> {
+        out.frames
+            .iter()
+            .map(|f| {
+                let pdu = crate::channels::dvc::unwrap_channel_frame(f);
+                u16::from_le_bytes([pdu[0], pdu[1]])
+            })
+            .collect()
+    }
+
+    /// A deactivation leaves the clipboard alone (issue #9).
+    ///
+    /// Windows does not send a second `CB_MONITOR_READY` after a
+    /// Deactivation Reactivation Sequence, because the channel was never
+    /// closed. Forgetting the first one switched the clipboard off for the
+    /// rest of the session, silently, in both directions: our offers were
+    /// held for a Monitor Ready that would never come, and the server's were
+    /// never pulled.
+    #[test]
+    fn a_reset_keeps_the_clipboard_negotiated() {
+        use crate::channels::cliprdr::msg_type;
+
+        let mut channels = StaticChannels::new(&map());
+        let mut out = Outbox::new();
+        for chunk in clip_chunks(msg_type::MONITOR_READY, 0, &[], CHANNEL_CHUNK_LENGTH) {
+            channels
+                .deliver(1006, &chunk, ctx(), &mut out)
+                .expect("ready");
+        }
+        assert_eq!(
+            clip_types(&out),
+            [msg_type::CLIP_CAPS, msg_type::FORMAT_LIST]
+        );
+
+        channels.reset();
+
+        // Text the shell offers after the reactivation is announced at once.
+        let mut out = Outbox::new();
+        channels
+            .clipboard_text("after", ctx(), &mut out)
+            .expect("offer");
+        assert_eq!(clip_types(&out), [msg_type::FORMAT_LIST]);
+    }
+
+    /// A clipboard payload larger than one chunk, split the way Windows
+    /// splits it and with `CHANNEL_FLAG_SHOW_PROTOCOL` on every chunk,
+    /// reaches the shell whole.
+    #[test]
+    fn a_chunked_clipboard_payload_reaches_the_shell_whole() {
+        use crate::channels::cliprdr::{format_id, msg_flags, msg_type};
+
+        let mut channels = StaticChannels::new(&map());
+        let mut out = Outbox::new();
+        let mut deliver = |chunks: Vec<Vec<u8>>, out: &mut Outbox| {
+            for chunk in chunks {
+                channels
+                    .deliver(1006, &chunk, ctx(), out)
+                    .expect("delivered");
+            }
+        };
+        deliver(
+            clip_chunks(msg_type::MONITOR_READY, 0, &[], CHANNEL_CHUNK_LENGTH),
+            &mut out,
+        );
+        let mut list = Vec::new();
+        list.extend_from_slice(&format_id::UNICODE_TEXT.to_le_bytes());
+        list.extend_from_slice(&[0; 32]);
+        let mut out = Outbox::new();
+        deliver(
+            clip_chunks(msg_type::FORMAT_LIST, 0, &list, CHANNEL_CHUNK_LENGTH),
+            &mut out,
+        );
+        assert_eq!(
+            clip_types(&out),
+            [
+                msg_type::FORMAT_LIST_RESPONSE,
+                msg_type::FORMAT_DATA_REQUEST
+            ],
+            "the server's text is pulled without the shell asking"
+        );
+
+        // About 9 KiB of UTF-16, which is six chunks at 1600 bytes.
+        let line = "a line of text pasted from the server\r\n";
+        let text = line.repeat(120);
+        let mut body = Vec::new();
+        for unit in text.encode_utf16() {
+            body.extend_from_slice(&unit.to_le_bytes());
+        }
+        body.extend_from_slice(&[0, 0]);
+        let chunks = clip_chunks(
+            msg_type::FORMAT_DATA_RESPONSE,
+            msg_flags::RESPONSE_OK,
+            &body,
+            CHANNEL_CHUNK_LENGTH,
+        );
+        assert!(chunks.len() > 5, "{} chunks", chunks.len());
+        let mut out = Outbox::new();
+        deliver(chunks, &mut out);
+        match out.events.as_slice() {
+            [SessionEvent::ClipboardText(got)] => {
+                assert_eq!(*got, text.replace("\r\n", "\n"));
+            }
+            other => panic!("expected one clipboard text, got {other:?}"),
+        }
     }
 }

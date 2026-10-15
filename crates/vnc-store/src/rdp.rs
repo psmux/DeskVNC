@@ -239,6 +239,22 @@ mod tests {
         assert_eq!(newer, RdpSettings::default());
     }
 
+    /// The host's clipboard switch is stored once, on the envelope, and the
+    /// connect time copy in `RdpOptions` never reaches the blob. Writing it
+    /// from both would put two `clipboard` keys in one JSON object.
+    #[test]
+    fn the_clipboard_switch_is_stored_once() {
+        let mut settings = RdpSettings {
+            clipboard: false,
+            ..RdpSettings::default()
+        };
+        settings.options.redirect_clipboard = false;
+        let json = settings.to_json().unwrap();
+        assert_eq!(json.matches("lipboard").count(), 1, "{json}");
+        let back = RdpSettings::parse(Some(&json)).unwrap().unwrap();
+        assert!(!back.clipboard, "the switch survives a round trip");
+    }
+
     /// V3-B: a blob written before `legacyTls` existed reads as off. A
     /// relaxation that switched itself on during an upgrade would be the worst
     /// bug this field can have.
