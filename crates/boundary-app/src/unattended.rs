@@ -72,6 +72,12 @@ impl Unattended {
             error: false,
             autostart: autostart::enabled(),
         };
+        // Rewrite an existing sign in entry, so one written by an older copy
+        // picks up what this one adds (a restart after a crash on macOS) and
+        // points at where this copy is now.
+        if this.autostart {
+            let _ = autostart::set(true);
+        }
         match Self::load() {
             Ok((path, key, access)) => {
                 this.machine = unattended::machine_id(&key);
@@ -651,6 +657,7 @@ pub mod autostart {
 <key>Label</key><string>com.psmux.deskvnc.support</string>
 <key>ProgramArguments</key><array><string>{}</string><string>--background</string></array>
 <key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
 </dict></plist>
 "#,

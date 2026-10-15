@@ -16,6 +16,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 fn main() -> eframe::Result {
+    // A copy started at sign in steps aside for one already running. Two
+    // copies would listen as the same machine ID and keep pushing each other
+    // off the relay, so neither could be reached.
+    let _instance = match only_instance() {
+        Some(lock) => Some(lock),
+        None if std::env::args().any(|a| a == "--background") => return Ok(()),
+        None => None,
+    };
     let runtime = tokio::runtime::Runtime::new().expect("Cannot start the connection runtime");
     let _guard = runtime.enter();
     let result = eframe::run_native(
@@ -30,6 +38,20 @@ fn main() -> eframe::Result {
     );
     runtime.shutdown_timeout(Duration::from_secs(3));
     result
+}
+/// A lock held for as long as this copy runs, or `None` when another copy
+/// holds it already.
+fn only_instance() -> Option<std::fs::File> {
+    let dir = boundary_provision::platform::data_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("running.lock"))
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 struct Pending {
     name: String,
@@ -92,6 +114,8 @@ struct App {
     approved_name: String,
     /// A computer that let this helper in any time, as (ID, name).
     paired: Option<(String, String)>,
+    /// Set when this copy closes on purpose, for a moved copy to take over.
+    quitting: bool,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -160,6 +184,7 @@ impl App {
             helper: None,
             approved_name: String::new(),
             paired: None,
+            quitting: false,
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -382,7 +407,10 @@ impl App {
             ui.add_space(6.0);
             if ui.button("Move to Applications and reopen").clicked() {
                 match install::move_to_applications(&source) {
-                    Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                    Ok(_) => {
+                        self.quitting = true;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                     Err(error) => self.status = format!("{error:#}"),
                 }
             }
@@ -906,6 +934,17 @@ impl App {
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // With unattended access on, the window closing must not take the
+        // listener with it: that left a computer unreachable until somebody
+        // opened the app again by hand. It goes to the Dock instead.
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.unattended.enabled()
+            && !self.quitting
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.status = "Still running, so helpers can reach this computer. Turn off unattended access to quit.".into();
+        }
         self.poll(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
