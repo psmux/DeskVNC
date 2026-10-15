@@ -59,7 +59,9 @@ mod imp {
             }
             self.said = text.to_owned();
             self.status.set_text(text);
-            let _ = self.icon.set_tooltip(Some(format!("DeskVNC Support: {text}")));
+            let _ = self
+                .icon
+                .set_tooltip(Some(format!("DeskVNC Support: {text}")));
         }
 
         pub fn poll(&self) -> Option<Action> {

@@ -41,7 +41,10 @@ fn manifest() -> BTreeSet<String> {
 #[test]
 fn every_registered_command_is_in_the_manifest() {
     let missing: Vec<_> = registered().difference(&manifest()).cloned().collect();
-    assert!(missing.is_empty(), "add these to build.rs and a capability: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "add these to build.rs and a capability: {missing:?}"
+    );
 }
 
 #[test]
@@ -51,5 +54,8 @@ fn the_main_window_is_granted_every_command() {
         .into_iter()
         .filter(|c| !default.contains(&format!("\"allow-{}\"", c.replace('_', "-"))))
         .collect();
-    assert!(missing.is_empty(), "grant these in capabilities/default.json: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "grant these in capabilities/default.json: {missing:?}"
+    );
 }

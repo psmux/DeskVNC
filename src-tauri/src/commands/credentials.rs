@@ -246,7 +246,9 @@ mod tests {
     fn a_passphrase_alone_is_not_a_saved_password() {
         let key = sent(r#"{"sshPassphrase":"k"}"#);
         assert!(!holds_password(&key));
-        assert!(holds_password(&sent(r#"{"vencryptUser":"a","vencryptPass":"p"}"#)));
+        assert!(holds_password(&sent(
+            r#"{"vencryptUser":"a","vencryptPass":"p"}"#
+        )));
         assert!(holds_password(&sent(r#"{"rdpPassword":"p"}"#)));
     }
 
