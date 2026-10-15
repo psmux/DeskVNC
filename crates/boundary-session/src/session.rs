@@ -671,18 +671,32 @@ where
     }
     Ok(())
 }
+/// How long one screen may take to reach the helper before it is given up.
+/// A whole screen is several hundred kilobytes, and on a slow uplink, such as
+/// a cellular one through a relay, it can take seconds. Giving up sooner threw
+/// away nearly every screen there and left the helper looking at a still
+/// picture. Only the newest screen is ever waiting, so a slow link gets fewer
+/// screens rather than late ones.
+const SCREEN_DEADLINE: Duration = Duration::from_secs(15);
+
 async fn send_screens(
     connection: &Connection,
     mut screens: watch::Receiver<Option<Arc<Vec<u8>>>>,
 ) -> Result<()> {
+    let mut last: Option<Arc<Vec<u8>>> = None;
     loop {
         screens.changed().await?;
         let bytes = screens
             .borrow_and_update()
             .clone()
             .context("Missing screen")?;
+        // A still screen is captured eight times a second; sending the same
+        // picture again only costs the link.
+        if last.as_ref().is_some_and(|last| **last == *bytes) {
+            continue;
+        }
         let mut stream = connection.open_uni().await?;
-        let result = tokio::time::timeout(Duration::from_millis(750), async {
+        let result = tokio::time::timeout(SCREEN_DEADLINE, async {
             stream.write_all(&bytes).await?;
             stream.finish()?;
             stream.stopped().await?;
@@ -690,7 +704,10 @@ async fn send_screens(
         })
         .await;
         match result {
-            Ok(result) => result?,
+            Ok(result) => {
+                result?;
+                last = Some(bytes);
+            }
             Err(_) => {
                 let _ = stream.reset(1u8.into());
             }
@@ -834,22 +851,20 @@ pub(crate) async fn watch_session(
     let read_frames = async {
         loop {
             let mut stream = connection.accept_uni().await?;
-            let bytes = match tokio::time::timeout(
-                Duration::from_secs(2),
-                stream.read_to_end(wire::MAX_FRAME),
-            )
-            .await
-            {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(iroh::endpoint::ReadToEndError::Read(
-                    iroh::endpoint::ReadError::Reset(_),
-                ))) => continue,
-                Ok(Err(error)) => return Err(error.into()),
-                Err(_) => {
-                    let _ = stream.stop(1u8.into());
-                    continue;
-                }
-            };
+            let bytes =
+                match tokio::time::timeout(SCREEN_DEADLINE, stream.read_to_end(wire::MAX_FRAME))
+                    .await
+                {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(iroh::endpoint::ReadToEndError::Read(
+                        iroh::endpoint::ReadError::Reset(_),
+                    ))) => continue,
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(_) => {
+                        let _ = stream.stop(1u8.into());
+                        continue;
+                    }
+                };
             let frame = tokio::task::spawn_blocking(move || Frame::decode(&bytes)).await??;
             worker.frames.send_replace(Some(Arc::new(frame)));
         }
