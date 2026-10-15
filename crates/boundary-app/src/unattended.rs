@@ -180,6 +180,8 @@ impl Unattended {
     }
     /// Drain the listener. `true` when a helper has just come in, so the
     /// caller brings the window forward.
+    /// Take in what the listener reported. True when a question arrived that
+    /// somebody at this computer has to answer, so the window should show.
     pub fn poll(&mut self) -> bool {
         let mut arrived = false;
         let mut finished = None;
@@ -209,7 +211,8 @@ impl Unattended {
                             activity: Vec::new(),
                             session,
                         });
-                        arrived = true;
+                        // A paired helper needs no answer, so the window stays
+                        // where it is; the tray icon says who is connected.
                     }
                     Notice::Ask {
                         name,

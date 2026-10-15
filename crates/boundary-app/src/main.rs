@@ -6,6 +6,7 @@ mod codes;
 mod install;
 mod network;
 mod theme;
+mod tray;
 mod unattended;
 
 use boundary_session::{
@@ -26,12 +27,17 @@ fn main() -> eframe::Result {
     };
     let runtime = tokio::runtime::Runtime::new().expect("Cannot start the connection runtime");
     let _guard = runtime.enter();
+    let background = std::env::args().any(|a| a == "--background");
     let result = eframe::run_native(
         "Boundary",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([980.0, 660.0])
-                .with_min_inner_size([820.0, 600.0]),
+                .with_min_inner_size([820.0, 600.0])
+                // Started at sign in, the window waits hidden behind the tray
+                // icon. Where there is no tray it is minimized instead.
+                .with_visible(!background || !TRAY),
+            event_loop_builder: background_policy(background),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
@@ -39,6 +45,25 @@ fn main() -> eframe::Result {
     runtime.shutdown_timeout(Duration::from_secs(3));
     result
 }
+/// Whether this platform has a tray icon to hide the window behind.
+const TRAY: bool = cfg!(any(target_os = "macos", windows));
+
+/// Started at sign in on macOS, the app keeps out of the Dock and the app
+/// switcher: the menu bar icon is how it is reached.
+#[cfg(target_os = "macos")]
+fn background_policy(background: bool) -> Option<eframe::EventLoopBuilderHook> {
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+    background.then(|| -> eframe::EventLoopBuilderHook {
+        Box::new(|builder| {
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })
+    })
+}
+#[cfg(not(target_os = "macos"))]
+fn background_policy(_: bool) -> Option<eframe::EventLoopBuilderHook> {
+    None
+}
+
 /// A lock held for as long as this copy runs, or `None` when another copy
 /// holds it already.
 fn only_instance() -> Option<std::fs::File> {
@@ -116,13 +141,15 @@ struct App {
     paired: Option<(String, String)>,
     /// Set when this copy closes on purpose, for a moved copy to take over.
     quitting: bool,
+    tray: Option<tray::Tray>,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
-        // Started at sign in for unattended access: out of the way until a
-        // helper connects, when the window comes forward to say so.
-        if std::env::args().any(|a| a == "--background") {
+        // Started at sign in for unattended access: out of the way, in the
+        // tray. The window comes forward only for a question somebody has to
+        // answer, never just because a paired helper connected.
+        if std::env::args().any(|a| a == "--background") && !TRAY {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
@@ -185,6 +212,7 @@ impl App {
             approved_name: String::new(),
             paired: None,
             quitting: false,
+            tray: tray::Tray::new(),
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -274,8 +302,7 @@ impl App {
     }
     fn poll(&mut self, ctx: &egui::Context) {
         if self.unattended.poll() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            show(ctx);
         }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
@@ -329,7 +356,7 @@ impl App {
                             allow_tools: false,
                             answer,
                         });
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        show(ctx);
                     }
                     Event::Connected { peer, control } => {
                         self.codes.clear();
@@ -932,6 +959,12 @@ impl App {
         }
     }
 }
+/// Bring the window back from the tray, the Dock or the taskbar.
+fn show(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         // With unattended access on, the window closing must not take the
@@ -942,8 +975,28 @@ impl eframe::App for App {
             && !self.quitting
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
             self.status = "Still running, so helpers can reach this computer. Turn off unattended access to quit.".into();
+        }
+        if let Some(tray) = self.tray.as_mut() {
+            match tray.poll() {
+                Some(tray::Action::Show) => show(ctx),
+                Some(tray::Action::Quit) => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                None => {}
+            }
+            let line = match &self.unattended.active {
+                Some(active) => format!("{} is connected", active.name),
+                None if self.unattended.enabled() => "Waiting for helpers".to_owned(),
+                None => "Unattended access is off".to_owned(),
+            };
+            tray.say(&line);
         }
         self.poll(ctx);
     }

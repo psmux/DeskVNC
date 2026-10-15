@@ -19,3 +19,9 @@ zeroize = "1"
 tempfile = "3"
 
 boundary-codes = { path = "../boundary-codes" }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+tray-icon = "0.24"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = "0.30"
