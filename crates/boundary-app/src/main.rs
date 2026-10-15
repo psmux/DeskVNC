@@ -142,6 +142,10 @@ struct App {
     /// Set when this copy closes on purpose, for a moved copy to take over.
     quitting: bool,
     tray: Option<tray::Tray>,
+    /// Frames left in which to hide the window at a background start. eframe
+    /// shows the window once its first frame is drawn, whatever it was built
+    /// with, so it has to be hidden again after that.
+    hide_frames: u8,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -213,6 +217,11 @@ impl App {
             paired: None,
             quitting: false,
             tray: tray::Tray::new(),
+            hide_frames: if std::env::args().any(|a| a == "--background") && TRAY {
+                3
+            } else {
+                0
+            },
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -981,6 +990,14 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
             self.status = "Still running, so helpers can reach this computer. Turn off unattended access to quit.".into();
+        }
+        if self.hide_frames > 0 {
+            self.hide_frames -= 1;
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
         }
         if let Some(tray) = self.tray.as_mut() {
             match tray.poll() {
