@@ -282,6 +282,10 @@ pub struct SessionFacts {
     /// agent needs to attach to the session, because the person agreed to a
     /// helper and not, until they say so, to that helper's agents.
     pub tools: bool,
+    /// A Boundary session only: whether the person at that computer lets the
+    /// helper use the mouse and keyboard. `None` until the computer has said.
+    /// Kept so a window that started listening after it was said can ask.
+    pub control: Option<bool>,
 }
 
 impl Default for SessionFacts {
@@ -293,6 +297,7 @@ impl Default for SessionFacts {
             state: SessionState::Idle,
             size: None,
             tools: false,
+            control: None,
         }
     }
 }

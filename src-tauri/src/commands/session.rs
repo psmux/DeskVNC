@@ -578,11 +578,12 @@ fn forward_events(
                 // commands and files. That is the consent an agent needs to be
                 // on the session at all, so taking it back also takes the
                 // wheel from any agent already attached.
-                SessionEvent::Protocol(ProtocolEvent::Boundary { tools, .. }) => {
-                    let was = sessions
-                        .lock()
-                        .get(&session_id)
-                        .map(|entry| std::mem::replace(&mut entry.facts.lock().tools, *tools));
+                SessionEvent::Protocol(ProtocolEvent::Boundary { control, tools }) => {
+                    let was = sessions.lock().get(&session_id).map(|entry| {
+                        let mut facts = entry.facts.lock();
+                        facts.control = Some(*control);
+                        std::mem::replace(&mut facts.tools, *tools)
+                    });
                     let revoked = (was == Some(true) && !*tools)
                         .then(|| app.try_state::<AppState>())
                         .flatten()
@@ -1964,6 +1965,23 @@ pub fn pending_credential_request(
     session_id: String,
 ) -> Option<vnc_core::CredentialRequest> {
     state.pending_prompts.lock().get(&session_id).cloned()
+}
+
+/// What the person at a Boundary computer last allowed: `{ control, tools }`,
+/// or `None` before the computer has answered or for another protocol.
+///
+/// The window is told with a `boundary-control` event, once, when it changes.
+/// A window that subscribed after that, or missed it, asks here instead of
+/// staying view only for the whole session.
+#[tauri::command]
+pub fn boundary_permission(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Option<serde_json::Value> {
+    let sessions = state.sessions.lock();
+    let facts = sessions.get(&session_id)?.facts.lock();
+    let control = facts.control?;
+    Some(serde_json::json!({ "control": control, "tools": facts.tools }))
 }
 
 /// One row of [`list_active_sessions`], the same identity every

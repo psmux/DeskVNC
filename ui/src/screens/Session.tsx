@@ -626,9 +626,15 @@ function SessionView({
 
   useEffect(() => {
     inputRef.current?.setViewOnly(viewOnly);
-    session.setViewOnly(viewOnly);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewOnly]);
+  // The core is told only what the person chose. Whether a Boundary computer
+  // allows control is that computer's to enforce, and pushing this window's
+  // guess about it down left the session view only when the guess was stale.
+  useEffect(() => {
+    session.setViewOnly(requestedViewOnly);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedViewOnly]);
 
   useEffect(() => {
     inputRef.current?.setPassthrough(passthrough);
@@ -1024,8 +1030,8 @@ function SessionView({
    * time any one of them changed, and `useSession` hands back a new object on
    * every stats tick.
    */
-  const restoreRef = useRef({ quality, viewOnly, alwaysRefresh, passthrough });
-  restoreRef.current = { quality, viewOnly, alwaysRefresh, passthrough };
+  const restoreRef = useRef({ quality, viewOnly: requestedViewOnly, alwaysRefresh, passthrough });
+  restoreRef.current = { quality, viewOnly: requestedViewOnly, alwaysRefresh, passthrough };
   useEffect(() => {
     if (session.state.state !== "connected") return;
     const want = restoreRef.current;

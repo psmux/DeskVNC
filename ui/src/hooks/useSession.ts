@@ -630,6 +630,17 @@ export function useSession(
 
         if (outcome.sessionId) sessionIdRef.current = outcome.sessionId;
 
+        // The same safety net for Boundary's permission: it is announced once,
+        // and a window that missed it would stay view only for good.
+        if (params.protocol === "boundary") {
+          const permission = await safeInvoke<{ control: boolean } | null>(
+            "boundary_permission",
+            { sessionId: sessionIdRef.current },
+            null,
+          );
+          if (!cancelled && permission) setBoundaryControl(permission.control);
+        }
+
         // Safety net for a prompt raised between the session starting and this
         // window being ready to hear about it. Events are fire-and-forget, so
         // without this a missed `credentials-required` hangs the connection
