@@ -434,6 +434,7 @@ fn stored_credentials_for(
     kind: ProtocolKind,
     stored: vnc_store::StoredCredentials,
     configured_domain: Option<String>,
+    vnc_password_only: bool,
 ) -> vnc_core::Credentials {
     match kind {
         ProtocolKind::Rdp => vnc_core::Credentials {
@@ -463,6 +464,15 @@ fn stored_credentials_for(
         // Sharing too, so a Mac with both stored connects without a prompt,
         // and one with only the name gets a prompt with the name filled in.
         // RFB has no logon domain.
+        //
+        // A host set to "VNC password only" takes the plain VNC password
+        // first: one saved earlier under Apple auth would otherwise win over
+        // the password typed after switching, and connect with the wrong one.
+        _ if vnc_password_only => vnc_core::Credentials {
+            username: None,
+            password: stored.vnc_password.or(stored.vencrypt_pass),
+            domain: None,
+        },
         _ => vnc_core::Credentials {
             username: stored.vencrypt_user,
             password: stored.vencrypt_pass.or(stored.vnc_password),
@@ -1171,7 +1181,11 @@ pub async fn connect_session(
             match super::blocking(move || credentials.load(&lookup)).await {
                 Ok(Some(stored)) => {
                     let configured_domain = options.rdp_options().and_then(|r| r.domain.clone());
-                    options.credentials = stored_credentials_for(kind, stored, configured_domain);
+                    let vnc_password_only =
+                        profile.as_ref().and_then(|p| p.security_pref.as_deref())
+                            == Some("vncauth");
+                    options.credentials =
+                        stored_credentials_for(kind, stored, configured_domain, vnc_password_only);
                 }
                 Ok(None) => {}
                 // A locked/unavailable keychain shouldn't kill the connect, // the session will surface an auth prompt instead.
@@ -2527,6 +2541,21 @@ mod stored_credentials_tests {
     use vnc_store::StoredCredentials;
 
     #[test]
+    fn a_host_switched_to_vnc_password_only_uses_the_newer_vnc_password() {
+        let stored = StoredCredentials {
+            vencrypt_user: Some("alice".into()),
+            vencrypt_pass: Some("old apple password".into()),
+            vnc_password: Some("new vnc password".into()),
+            ..Default::default()
+        };
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored.clone(), None, true);
+        assert_eq!(got.password.as_deref(), Some("new vnc password"));
+        assert_eq!(got.username, None);
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
+        assert_eq!(got.password.as_deref(), Some("old apple password"));
+    }
+
+    #[test]
     fn a_vnc_host_connects_with_the_saved_user_name_and_password() {
         // What the host editor writes for a Mac on Apple Screen Sharing.
         let stored = StoredCredentials {
@@ -2534,7 +2563,7 @@ mod stored_credentials_tests {
             vencrypt_pass: Some("secret".into()),
             ..Default::default()
         };
-        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
         assert_eq!(got.username.as_deref(), Some("godwin"));
         assert_eq!(got.password.as_deref(), Some("secret"));
         assert_eq!(got.domain, None);
@@ -2549,7 +2578,7 @@ mod stored_credentials_tests {
             vencrypt_user: Some("godwin".into()),
             ..Default::default()
         };
-        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
         assert_eq!(got.username.as_deref(), Some("godwin"));
         assert_eq!(got.password.as_deref(), Some("old"));
     }
@@ -2560,7 +2589,7 @@ mod stored_credentials_tests {
             vencrypt_user: Some("godwin".into()),
             ..Default::default()
         };
-        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
         assert_eq!(got.username.as_deref(), Some("godwin"));
         assert_eq!(got.password, None);
     }
@@ -2573,7 +2602,7 @@ mod stored_credentials_tests {
             ssh_user: Some("ssh-user".into()),
             ..Default::default()
         };
-        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None);
+        let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
         assert_eq!(got.username, None);
         assert_eq!(got.password.as_deref(), Some("pw"));
     }
@@ -2587,10 +2616,15 @@ mod stored_credentials_tests {
             vencrypt_user: Some("not-me".into()),
             ..Default::default()
         };
-        let got = stored_credentials_for(ProtocolKind::Rdp, stored.clone(), Some("CORP".into()));
+        let got = stored_credentials_for(
+            ProtocolKind::Rdp,
+            stored.clone(),
+            Some("CORP".into()),
+            false,
+        );
         assert_eq!(got.username.as_deref(), Some("alice"));
         assert_eq!(got.domain.as_deref(), Some("CORP"));
-        let got = stored_credentials_for(ProtocolKind::Rdp, stored, Some(String::new()));
+        let got = stored_credentials_for(ProtocolKind::Rdp, stored, Some(String::new()), false);
         assert_eq!(got.domain.as_deref(), Some("STORED"));
     }
 }
