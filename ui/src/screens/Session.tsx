@@ -2133,6 +2133,7 @@ function SessionView({
             request={session.credentialRequest}
             hostName={session.desktopName}
             protocol={params.protocol}
+            previous={session.lastCredentialAnswer}
             onSubmit={session.submitCredentials}
             onCancel={session.dismissCredentialPrompt}
           />

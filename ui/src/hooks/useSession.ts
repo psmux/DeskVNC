@@ -28,6 +28,7 @@ import {
   type FrameMessage,
 } from "../render/frameProtocol";
 import { encodeTerminalInput, encodeTerminalResize } from "../render/input";
+import type { PromptAnswer } from "../lib/credentials";
 import { initTrace, traceMark } from "../render/trace";
 import type {
   CredentialRequest,
@@ -132,6 +133,12 @@ export interface SessionApi {
   sshHostKeyPrompt: SshHostKeyPromptState | null;
   /** Handshake is parked waiting for a password (PRD/10 §3.4). */
   credentialRequest: CredentialRequest | null;
+  /**
+   * The last prompt answer in this window, without its password, so the next
+   * prompt (a rejection asked again, or a Reconnect) starts from it. Kept
+   * across `retryConnect` on purpose: that is the case it exists for.
+   */
+  lastCredentialAnswer: PromptAnswer | null;
   remoteClipboard: string | null;
   bellTick: number;
   /**
@@ -329,6 +336,7 @@ export function useSession(
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
   const [sshHostKeyPrompt, setSshHostKeyPrompt] = useState<SshHostKeyPromptState | null>(null);
   const [credentialRequest, setCredentialRequest] = useState<CredentialRequest | null>(null);
+  const [lastCredentialAnswer, setLastCredentialAnswer] = useState<PromptAnswer | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<string | null>(null);
   const [bellTick, setBellTick] = useState(0);
   const [sshAttached, setSshAttached] = useState<{ multiplexer: string | null; resumed: boolean } | null>(
@@ -954,6 +962,7 @@ export function useSession(
       // The session state stays whatever the core reported (`authenticating`);
       // it drives the connecting overlay on its own from here.
       setCredentialRequest(null);
+      setLastCredentialAnswer({ username, domain, save });
       if (mockAuthRef.current) {
         mockAuthRef.current.submit(username, password);
         return;
@@ -996,7 +1005,7 @@ export function useSession(
   }, []);
 
   return {
-    state, desktopName, boundaryControl, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, remoteClipboard, bellTick,
+    state, desktopName, boundaryControl, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,
