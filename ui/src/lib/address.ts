@@ -150,6 +150,27 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
   if (trimmed === "") return { ok: false, error: "Enter an address" };
 
   const { protocol: named, rest, url } = readScheme(trimmed);
+
+  // A Boundary computer has no host or port, only the machine ID that
+  // DeskVNC Support shows under unattended access.
+  if (assume === "boundary" && named === null) {
+    if (!/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+      return {
+        ok: false,
+        error: "Enter the 64 character ID shown under Unattended access in DeskVNC Support",
+      };
+    }
+    return {
+      ok: true,
+      target: {
+        address: trimmed.toLowerCase(),
+        port: 0,
+        explicitPort: false,
+        protocol: "boundary",
+        username: null,
+      },
+    };
+  }
   let raw = rest;
   let username: string | null = null;
   let protocol = named;

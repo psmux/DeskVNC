@@ -12,7 +12,7 @@ import type {
 } from "../lib/types";
 import {
   DEFAULT_PORT,
-  PROTOCOLS,
+  HOST_PROTOCOLS,
   blankSshTunnel,
   hostProtocol,
   parseSshTunnel,
@@ -252,6 +252,7 @@ export function HostDialog({
   // whether a field exists AT ALL for a protocol goes through `caps` instead.
   const isRdp = d.protocol === "rdp";
   const isSsh = d.protocol === "ssh";
+  const isBoundary = d.protocol === "boundary";
   const caps = PROTOCOL_CAPS[d.protocol];
   const rdp = d.rdp ?? blankRdpSettings();
   const setRdp = (patch: Partial<RdpSettings>): void => set({ rdp: { ...rdp, ...patch } });
@@ -330,7 +331,7 @@ export function HostDialog({
             role="radiogroup"
             aria-label="Connection protocol"
           >
-            {PROTOCOLS.map((p) => (
+            {HOST_PROTOCOLS.map((p) => (
               <button
                 key={p}
                 type="button"
@@ -350,12 +351,20 @@ export function HostDialog({
           </div>
         </Field>
 
-        <div className="grid grid-cols-[1fr_120px] gap-3">
-          <Field label="Address" error={addressError}>
+        <div className={isBoundary ? "grid grid-cols-1 gap-3" : "grid grid-cols-[1fr_120px] gap-3"}>
+          <Field
+            label={isBoundary ? "Machine ID" : "Address"}
+            error={addressError}
+            hint={
+              isBoundary
+                ? "Shown under Unattended access in DeskVNC Support on that computer. If you are not paired, the person there approves you, or you use the unattended password below."
+                : undefined
+            }
+          >
             <input
               className="field mono"
               value={d.address}
-              placeholder="192.168.1.42 or hostname"
+              placeholder={isBoundary ? "64 character machine ID" : "192.168.1.42 or hostname"}
               spellCheck={false}
               onBlur={() => {
                 setTouched(true);
@@ -387,21 +396,23 @@ export function HostDialog({
               }}
             />
           </Field>
-          <Field label="Port">
-            <input
-              className="field mono"
-              type="number"
-              min={1}
-              max={65535}
-              value={d.port}
-              onChange={(e) =>
-                set({
-                  port: parseInt(e.target.value, 10) || DEFAULT_PORT[d.protocol],
-                  portTouched: true,
-                })
-              }
-            />
-          </Field>
+          {isBoundary ? null : (
+            <Field label="Port">
+              <input
+                className="field mono"
+                type="number"
+                min={1}
+                max={65535}
+                value={d.port}
+                onChange={(e) =>
+                  set({
+                    port: parseInt(e.target.value, 10) || DEFAULT_PORT[d.protocol],
+                    portTouched: true,
+                  })
+                }
+              />
+            </Field>
+          )}
         </div>
 
         {/*
@@ -531,7 +542,13 @@ export function HostDialog({
         */}
         {isSsh && ssh.auth === "agent" ? null : (
           <Field
-            label={isSsh && ssh.auth === "key-file" ? "Key passphrase" : "Password"}
+            label={
+              isSsh && ssh.auth === "key-file"
+                ? "Key passphrase"
+                : isBoundary
+                  ? "Unattended password"
+                  : "Password"
+            }
             hint={
               d.hasPassword && !d.password
                 ? "A secret is saved in your system keychain. Leave blank to keep it."
