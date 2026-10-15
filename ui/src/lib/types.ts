@@ -25,6 +25,13 @@ export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389
 
 /** The three protocols, in the order the UI offers them. */
 export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
+/**
+ * What a saved host can be. Boundary is here and not in `PROTOCOLS`: a
+ * Boundary computer is reached by its machine ID, which is nothing anyone
+ * types into the quick connect bar, but it is saved and reopened like any
+ * other computer.
+ */
+export const HOST_PROTOCOLS: readonly ProtocolKind[] = [...PROTOCOLS, "boundary"];
 
 /**
  * Is this a protocol this build knows? A profile written by a newer version

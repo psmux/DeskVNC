@@ -41,30 +41,35 @@ pub async fn save_password(
                 StoredCredentials::default()
             }
         };
-        // Every field is `sent.or(stored)`, and the literal is exhaustive on
-        // purpose: adding a credential field to the store breaks this line
-        // rather than silently defaulting the new field away, which is what
-        // forces a decision about the merge rule here (PRDRDP/08 §3.4).
-        //
-        // `.or` is the rule for THIS caller and not for every caller. This is
-        // a dialog write, and a dialog that did not show a field must not
-        // erase it. The post-connect save is the other case: it runs after a
-        // handshake with a complete set, so it replaces rather than fills in,
-        // and it lives in `PendingCredentialSave::merge_into`.
-        let merged = StoredCredentials {
-            vnc_password: creds.vnc_password.or(existing.vnc_password),
-            vencrypt_user: creds.vencrypt_user.or(existing.vencrypt_user),
-            vencrypt_pass: creds.vencrypt_pass.or(existing.vencrypt_pass),
-            ssh_passphrase: creds.ssh_passphrase.or(existing.ssh_passphrase),
-            rdp_user: creds.rdp_user.or(existing.rdp_user),
-            rdp_domain: creds.rdp_domain.or(existing.rdp_domain),
-            rdp_password: creds.rdp_password.or(existing.rdp_password),
-            ssh_user: creds.ssh_user.or(existing.ssh_user),
-            ssh_password: creds.ssh_password.or(existing.ssh_password),
-        };
-        credentials.save(&host_id, &merged)
+        credentials.save(&host_id, &merge_dialog_write(creds, existing))
     })
     .await
+}
+
+/// Fill the stored blob in with what the host editor sent.
+///
+/// Every field is `sent.or(stored)`, and the literal is exhaustive on
+/// purpose: adding a credential field to the store breaks this line rather
+/// than silently defaulting the new field away, which is what forces a
+/// decision about the merge rule here (PRDRDP/08 §3.4).
+///
+/// `.or` is the rule for THIS caller and not for every caller. This is a
+/// dialog write, and a dialog that did not show a field must not erase it.
+/// The post-connect save is the other case: it runs after a handshake with a
+/// complete set, so it replaces rather than fills in, and it lives in
+/// `PendingCredentialSave::merge_into`.
+fn merge_dialog_write(creds: StoredCredentials, existing: StoredCredentials) -> StoredCredentials {
+    StoredCredentials {
+        vnc_password: creds.vnc_password.or(existing.vnc_password),
+        vencrypt_user: creds.vencrypt_user.or(existing.vencrypt_user),
+        vencrypt_pass: creds.vencrypt_pass.or(existing.vencrypt_pass),
+        ssh_passphrase: creds.ssh_passphrase.or(existing.ssh_passphrase),
+        rdp_user: creds.rdp_user.or(existing.rdp_user),
+        rdp_domain: creds.rdp_domain.or(existing.rdp_domain),
+        rdp_password: creds.rdp_password.or(existing.rdp_password),
+        ssh_user: creds.ssh_user.or(existing.ssh_user),
+        ssh_password: creds.ssh_password.or(existing.ssh_password),
+    }
 }
 
 /// Whether a credential exists for this host (drives the key icon in the
@@ -123,4 +128,51 @@ pub async fn unlock_credentials(
 ) -> Result<(), String> {
     let credentials = state.credentials.clone();
     super::blocking(move || credentials.unlock(&master_password)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The payload exactly as `vncCredentialPayload` in
+    /// `ui/src/lib/hostDraft.ts` sends it over IPC.
+    fn sent(json: &str) -> StoredCredentials {
+        serde_json::from_str(json).expect("the IPC shape parses")
+    }
+
+    #[test]
+    fn a_vnc_user_name_from_the_editor_is_stored_beside_its_password() {
+        let merged = merge_dialog_write(
+            sent(r#"{"vencryptUser":"godwin","vencryptPass":"secret"}"#),
+            StoredCredentials::default(),
+        );
+        assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(merged.vencrypt_pass.as_deref(), Some("secret"));
+        assert_eq!(merged.vnc_password, None);
+    }
+
+    #[test]
+    fn a_user_name_typed_alone_keeps_the_saved_password() {
+        let existing = StoredCredentials {
+            vnc_password: Some("old".into()),
+            ssh_passphrase: Some("key".into()),
+            ..Default::default()
+        };
+        let merged = merge_dialog_write(sent(r#"{"vencryptUser":"godwin"}"#), existing);
+        assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(merged.vnc_password.as_deref(), Some("old"));
+        assert_eq!(merged.ssh_passphrase.as_deref(), Some("key"));
+    }
+
+    #[test]
+    fn a_password_typed_alone_keeps_the_saved_user_name() {
+        let existing = StoredCredentials {
+            vencrypt_user: Some("godwin".into()),
+            vencrypt_pass: Some("old".into()),
+            ..Default::default()
+        };
+        let merged = merge_dialog_write(sent(r#"{"vencryptPass":"new"}"#), existing);
+        assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(merged.vencrypt_pass.as_deref(), Some("new"));
+    }
 }

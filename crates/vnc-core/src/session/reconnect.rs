@@ -108,7 +108,7 @@ impl remote_core::reconnect::ConnectOnce for VncConnect {
     ) -> Pin<Box<dyn Future<Output = Result<RunOutcome, VncError>> + Send + 'a>> {
         Box::pin(async move {
             connection::run_once(
-                &self.options,
+                &mut self.options,
                 &mut self.settings,
                 events,
                 commands,

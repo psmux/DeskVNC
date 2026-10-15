@@ -139,12 +139,18 @@ impl Session {
     }
     pub fn input(&self, input: Input) -> Result<()> {
         input.validate()?;
-        if self.input.try_send(input).is_err() {
-            // Never silently lose a key release when the queue fills.
-            self.stop();
-            bail!("Input queue is full or disconnected. Session stopped");
+        match self.input.try_send(input) {
+            Ok(()) => Ok(()),
+            // A move is superseded by the next one, so while the link is
+            // slow a full queue drops it. Ending the session for it froze
+            // the picture for the person moving the mouse.
+            Err(mpsc::error::TrySendError::Full(Input::Move { .. })) => Ok(()),
+            Err(_) => {
+                // Never silently lose a key release when the queue fills.
+                self.stop();
+                bail!("Input queue is full or disconnected. Session stopped");
+            }
         }
-        Ok(())
     }
 }
 impl Drop for Session {
@@ -444,10 +450,10 @@ where
             let connection = incoming.await?;
             let guard = Close(connection.clone());
             let (send, mut recv) = connection.accept_bi().await?;
-            let (name, tools) = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
-            Ok::<_, anyhow::Error>((guard, send, recv, name, tools))
+            let (name, tools, jpeg) = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
+            Ok::<_, anyhow::Error>((guard, send, recv, name, tools, jpeg))
         };
-        let Ok(Ok((guard, mut send, recv, name, tools))) =
+        let Ok(Ok((guard, mut send, recv, name, tools, jpeg))) =
             tokio::time::timeout(Duration::from_secs(5), handshake).await
         else {
             continue;
@@ -479,7 +485,7 @@ where
         };
         // The invitation is consumed by this session, even if the peer later disconnects.
         let result = serve(
-            worker, connection, send, recv, peer, allowed, tools, desktop,
+            worker, connection, send, recv, peer, allowed, tools, jpeg, desktop,
         )
         .await;
         drop(guard);
@@ -504,6 +510,7 @@ pub(crate) async fn serve<F>(
     peer: String,
     allowed: bool,
     tools: bool,
+    jpeg: bool,
     desktop: F,
 ) -> Result<()>
 where
@@ -525,7 +532,7 @@ where
     let (screen_tx, screen_rx) = watch::channel(None::<Arc<Vec<u8>>>);
     let cancel = worker.cancel.clone();
     let capture = tokio::task::spawn_blocking(move || {
-        desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel)
+        desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel, jpeg)
     });
     wire::write(
         &mut send,
@@ -555,9 +562,13 @@ where
                     input.validate()?;
                     let permission = *input_permission.borrow();
                     if permission.allowed || matches!(input, Input::Release) {
-                        input_tx
-                            .try_send((permission.generation, input))
-                            .map_err(|_| anyhow!("Input rate exceeded. Session stopped"))?;
+                        match input_tx.try_send((permission.generation, input)) {
+                            Ok(()) => {}
+                            // The next move supersedes this one; dropping it
+                            // while the screen is busy beats ending the session.
+                            Err(mpsc::error::TrySendError::Full((_, Input::Move { .. }))) => {}
+                            Err(_) => bail!("Input rate exceeded. Session stopped"),
+                        }
                     }
                 }
                 _ => bail!("Unexpected helper message"),
@@ -618,6 +629,7 @@ fn desktop_loop<F>(
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Vec<u8>>>>,
     cancel: CancellationToken,
+    jpeg: bool,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<Box<dyn Desktop>>,
@@ -661,7 +673,11 @@ where
         }
         if Instant::now() >= capture_at {
             let frame = desktop.0.capture()?;
-            let encoded = Arc::new(frame.encode()?);
+            let encoded = Arc::new(if jpeg {
+                frame.encode_jpeg()?
+            } else {
+                frame.encode()?
+            });
             if !cancel.is_cancelled() {
                 screens.send_replace(Some(encoded));
             }
@@ -671,18 +687,32 @@ where
     }
     Ok(())
 }
+/// How long one screen may take to reach the helper before it is given up.
+/// A whole screen is several hundred kilobytes, and on a slow uplink, such as
+/// a cellular one through a relay, it can take seconds. Giving up sooner threw
+/// away nearly every screen there and left the helper looking at a still
+/// picture. Only the newest screen is ever waiting, so a slow link gets fewer
+/// screens rather than late ones.
+const SCREEN_DEADLINE: Duration = Duration::from_secs(15);
+
 async fn send_screens(
     connection: &Connection,
     mut screens: watch::Receiver<Option<Arc<Vec<u8>>>>,
 ) -> Result<()> {
+    let mut last: Option<Arc<Vec<u8>>> = None;
     loop {
         screens.changed().await?;
         let bytes = screens
             .borrow_and_update()
             .clone()
             .context("Missing screen")?;
+        // A still screen is captured eight times a second; sending the same
+        // picture again only costs the link.
+        if last.as_ref().is_some_and(|last| **last == *bytes) {
+            continue;
+        }
         let mut stream = connection.open_uni().await?;
-        let result = tokio::time::timeout(Duration::from_millis(750), async {
+        let result = tokio::time::timeout(SCREEN_DEADLINE, async {
             stream.write_all(&bytes).await?;
             stream.finish()?;
             stream.stopped().await?;
@@ -690,7 +720,10 @@ async fn send_screens(
         })
         .await;
         match result {
-            Ok(result) => result?,
+            Ok(result) => {
+                result?;
+                last = Some(bytes);
+            }
             Err(_) => {
                 let _ = stream.reset(1u8.into());
             }
@@ -749,6 +782,7 @@ async fn run_viewer(
             secret: invitation.secret,
             name,
             tools,
+            jpeg: true,
         },
     )
     .await?;
@@ -834,22 +868,20 @@ pub(crate) async fn watch_session(
     let read_frames = async {
         loop {
             let mut stream = connection.accept_uni().await?;
-            let bytes = match tokio::time::timeout(
-                Duration::from_secs(2),
-                stream.read_to_end(wire::MAX_FRAME),
-            )
-            .await
-            {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(iroh::endpoint::ReadToEndError::Read(
-                    iroh::endpoint::ReadError::Reset(_),
-                ))) => continue,
-                Ok(Err(error)) => return Err(error.into()),
-                Err(_) => {
-                    let _ = stream.stop(1u8.into());
-                    continue;
-                }
-            };
+            let bytes =
+                match tokio::time::timeout(SCREEN_DEADLINE, stream.read_to_end(wire::MAX_FRAME))
+                    .await
+                {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(iroh::endpoint::ReadToEndError::Read(
+                        iroh::endpoint::ReadError::Reset(_),
+                    ))) => continue,
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(_) => {
+                        let _ = stream.stop(1u8.into());
+                        continue;
+                    }
+                };
             let frame = tokio::task::spawn_blocking(move || Frame::decode(&bytes)).await??;
             worker.frames.send_replace(Some(Arc::new(frame)));
         }

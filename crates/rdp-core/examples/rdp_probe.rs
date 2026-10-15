@@ -13,7 +13,10 @@
 //!   cargo run -p rdp-core --example rdp_probe
 //! ```
 //!
-//! `RDP_DOMAIN` and `RDP_PORT` are optional. `RUST_LOG` defaults to a level
+//! `RDP_DOMAIN` and `RDP_PORT` are optional. `RDP_CLIP=some text` puts that
+//! text on the server's clipboard once the picture is up, and every clipboard
+//! text the server offers back is printed, which is how clipboard sharing is
+//! checked against a real server. `RDP_SECS` sets how long the probe runs. `RUST_LOG` defaults to a level
 //! that prints the diagnostic frame dumps, which is the point of running it.
 
 use remote_core::{ConnectOptions, Credentials, SessionEvent};
@@ -69,7 +72,12 @@ async fn main() {
     let mut cursors = 0usize;
     let (mut fb_w, mut fb_h) = (0usize, 0usize);
     let mut fb: Vec<u8> = Vec::new();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let secs: u64 = std::env::var("RDP_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let clip = std::env::var("RDP_CLIP").ok().filter(|c| !c.is_empty());
 
     while let Some(ev) = events_rx.recv().await {
         match &ev {
@@ -79,6 +87,12 @@ async fn main() {
                 frames += 1;
                 if frames == 1 {
                     println!("  FIRST FRAME received");
+                    if let Some(text) = &clip {
+                        println!("  sending clipboard text to the server: {text}");
+                        let _ = handle
+                            .send(remote_core::ClientCommand::ClipboardText(text.clone()))
+                            .await;
+                    }
                 }
                 // Blit into a framebuffer so the result can be written out and
                 // looked at. Judging a decoder by whether frames arrive is how
@@ -105,6 +119,7 @@ async fn main() {
                 println!("  desktop {fb_w}x{fb_h}");
             }
             SessionEvent::CursorUpdate(_) => cursors += 1,
+            SessionEvent::ClipboardText(text) => println!("  CLIPBOARD FROM SERVER: {text}"),
             SessionEvent::CertificatePrompt {
                 fingerprint,
                 subject,
@@ -130,7 +145,7 @@ async fn main() {
             other => println!("  event: {other:?}"),
         }
         if std::time::Instant::now() > deadline {
-            println!("  (20 seconds elapsed, stopping)");
+            println!("  ({secs} seconds elapsed, stopping)");
             let _ = handle.send(remote_core::ClientCommand::Disconnect).await;
             break;
         }

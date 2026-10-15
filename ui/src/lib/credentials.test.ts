@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { joinDomainUser, splitDomainUser } from "./credentials";
+import { joinDomainUser, promptStart, splitDomainUser } from "./credentials";
 
 describe("splitDomainUser", () => {
   it("splits a down-level name", () => {
@@ -39,5 +39,36 @@ describe("joinDomainUser", () => {
   it("does nothing without a domain", () => {
     expect(joinDomainUser(null, "alice")).toBe("alice");
     expect(joinDomainUser("  ", "alice")).toBe("alice");
+  });
+});
+
+describe("promptStart", () => {
+  it("opens the first prompt from the hint, with Remember off", () => {
+    expect(promptStart("godwin", null)).toEqual({ username: "godwin", domain: "", save: false });
+    expect(promptStart(null, undefined)).toEqual({ username: "", domain: "", save: false });
+  });
+
+  // Issue #9. The dialog unmounts when answered, so the next prompt used to
+  // open with Remember unticked. Ticking it, mistyping once and then typing
+  // the right password saved nothing.
+  it("keeps Remember ticked for the next prompt in the same window", () => {
+    const previous = { username: "mac-user", domain: null, save: true };
+    expect(promptStart("mac-user", previous).save).toBe(true);
+  });
+
+  it("keeps the user name and domain typed last ahead of the hint", () => {
+    const previous = { username: "alice", domain: "CORP", save: false };
+    expect(promptStart("Administrator", previous)).toEqual({
+      username: "alice",
+      domain: "CORP",
+      save: false,
+    });
+  });
+
+  it("falls back to the hint when the last answer had no user name", () => {
+    // A password only prompt (VNC Authentication) answers with no user name.
+    const previous = { username: null, domain: null, save: true };
+    expect(promptStart("godwin", previous)).toEqual({ username: "godwin", domain: "", save: true });
+    expect(promptStart("godwin", { ...previous, username: "  " }).username).toBe("godwin");
   });
 });

@@ -17,7 +17,8 @@ use common::*;
 use vnc_core::security::ra2;
 use vnc_core::security::VeNCryptSubtype;
 use vnc_core::types::{
-    ClientCommand, CredentialKind, CredentialRequest, SecurityType, SessionEvent, SessionState,
+    ClientCommand, CredentialKind, CredentialRequest, Rect, SecurityType, SessionEvent,
+    SessionState,
 };
 
 // ---------------------------------------------------------------------------
@@ -392,6 +393,93 @@ async fn vencrypt_plain_reprompts_after_a_bad_username() {
 
 // ---------------------------------------------------------------------------
 // The declaration table the dialog renders from (PRD/10 §3.4)
+// ---------------------------------------------------------------------------
+// A typed answer the server accepted outlives the connection it was typed on
+// (issue #9)
+// ---------------------------------------------------------------------------
+
+fn prompts_seen(events: &Events) -> usize {
+    events
+        .summary()
+        .iter()
+        .filter(|line| line.contains("CredentialsRequired"))
+        .count()
+}
+
+/// The link drops after the session is up, the way it does when the SSH
+/// tunnel under it goes away, and the supervisor reconnects. The password the
+/// user typed a moment ago was accepted, so the reconnect must use it rather
+/// than stop and ask again.
+#[tokio::test]
+async fn an_accepted_answer_is_reused_by_the_automatic_reconnect() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .security(&[SEC_VNC_AUTH])
+            .password("swordfish")
+            .update(vec![RectSpec::Raw {
+                rect: Rect::new(0, 0, 4, 4),
+                colour: [255, 0, 0],
+            }])
+            .drop_after_n_updates(1)
+            .max_drops(1),
+    )
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    wait_prompt(&mut events, DEFAULT_TIMEOUT).await;
+    send(&handle, provide("swordfish")).await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // Dropped, then back without anybody answering anything.
+    events
+        .wait_state(DEFAULT_TIMEOUT, "Reconnecting", |s| {
+            matches!(s, SessionState::Reconnecting { .. }).then_some(())
+        })
+        .await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    assert_eq!(
+        prompts_seen(&events),
+        1,
+        "the reconnect asked again for a password the server had just accepted: {:?}",
+        events.summary()
+    );
+    assert!(server.wait_for_connections(2, DEFAULT_TIMEOUT).await);
+    handle.shutdown();
+}
+
+/// The other half of the rule: only an ACCEPTED answer is kept. A user name
+/// and password the server refused must never be replayed by a reconnect.
+#[tokio::test]
+async fn a_rejected_answer_is_not_kept_for_the_next_connection() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .security(&[SEC_VENCRYPT])
+            .username("alice")
+            .password("hunter2")
+            .update(vec![RectSpec::Raw {
+                rect: Rect::new(0, 0, 4, 4),
+                colour: [255, 0, 0],
+            }])
+            .drop_after_n_updates(1)
+            .max_drops(1),
+    )
+    .await;
+
+    let (handle, mut events) = spawn_session(options(server.port()));
+    wait_prompt(&mut events, DEFAULT_TIMEOUT).await;
+    send(&handle, provide_user("alice", "wrong")).await;
+    let second = wait_prompt(&mut events, DEFAULT_TIMEOUT).await;
+    assert_eq!(second.attempt, 2);
+    send(&handle, provide_user("alice", "hunter2")).await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    // The reconnect logs in with the right pair, the second one, at once.
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    assert_eq!(prompts_seen(&events), 2, "{:?}", events.summary());
+    handle.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 
 /// Every security type must declare the right `kind`/`truncates_password`.

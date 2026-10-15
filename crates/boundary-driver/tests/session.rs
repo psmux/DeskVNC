@@ -45,7 +45,8 @@ async fn deskvnc_driver_receives_boundary_frames_and_obeys_host_consent() {
                 SessionEvent::Protocol(ProtocolEvent::Boundary { control, tools }) => { assert!(!control && !tools); permission = true; }
                 SessionEvent::FramebufferUpdate { rects, .. } => {
                     assert!(permission);
-                    assert!(matches!(&rects[0].payload, RectPayload::Rgba(pixels) if pixels == &vec![128; 16]));
+                    // JPEG, which DeskVNC takes, is lossy, so the grey comes back near 128.
+                    assert!(matches!(&rects[0].payload, RectPayload::Rgba(pixels) if pixels.len() == 16 && pixels.iter().all(|p| p.abs_diff(128) <= 4 || *p == 255)));
                     break;
                 }
                 SessionEvent::StateChanged(SessionState::Disconnected { reason, .. }) => panic!("{reason}"),

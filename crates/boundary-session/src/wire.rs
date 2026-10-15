@@ -123,6 +123,10 @@ pub enum Message {
         /// An older helper leaves it out, and is never offered them.
         #[serde(default)]
         tools: bool,
+        /// The helper decodes JPEG screens, which are a tenth the size of
+        /// PNG. An older helper leaves it out and is sent PNG.
+        #[serde(default)]
+        jpeg: bool,
     },
     Granted {
         control: bool,
@@ -148,6 +152,10 @@ pub enum Message {
         password: Option<String>,
         #[serde(default)]
         tools: bool,
+        /// The helper decodes JPEG screens, which are a tenth the size of
+        /// PNG. An older helper leaves it out and is sent PNG.
+        #[serde(default)]
+        jpeg: bool,
     },
     /// Sent during an attended session when the person being helped chooses
     /// to let this helper connect any time. `machine` is the ID the helper
@@ -180,14 +188,16 @@ pub async fn read<T: DeserializeOwned>(stream: &mut RecvStream) -> Result<T> {
     stream.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
-/// The helper's name, and whether it can send commands and file requests.
-pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool)> {
+/// The helper's name, whether it can send commands and file requests, and
+/// whether it takes JPEG screens.
+pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool, bool)> {
     use subtle::ConstantTimeEq;
     if let Message::Hello {
         version,
         secret,
         name,
         tools,
+        jpeg,
     } = message
     {
         ensure!(
@@ -199,7 +209,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
             !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
             "Invalid helper name"
         );
-        Ok((name, tools))
+        Ok((name, tools, jpeg))
     } else {
         bail!("Expected session handshake")
     }

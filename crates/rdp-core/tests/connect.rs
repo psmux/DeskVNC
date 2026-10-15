@@ -1352,22 +1352,30 @@ async fn a_malformed_egfx_message_after_decompression_is_reported_and_names_zgfx
 // ---------------------------------------------------------------------------
 
 /// Both directions in one session: the server offers text, the client raises
-/// a notify, the shell asks and gets it with its line endings converted; then
-/// the shell offers text, the server pulls it, and it arrives as UTF-16LE
-/// with CRLF.
+/// a notify and pulls the text, which reaches the shell with its line endings
+/// converted; then the shell offers text, the server pulls it, and it arrives
+/// as UTF-16LE with CRLF.
+///
+/// The shell's explicit `ClipboardRequest` is what an agent's clipboard read
+/// sends. It is also what orders this test: it goes out after our offer, so
+/// the second `ClipboardText` cannot arrive before the server has pulled the
+/// offer, and the disconnect it releases cannot cut the pull short.
 #[tokio::test]
 async fn a_clipboard_round_trip_goes_both_ways() {
     let (server, events, outcome) = run_session_steps(
         channel_config(SessionBehaviour::ServeChannels),
         vec![
             // The notify means the server has announced text, so there is
-            // something to ask for and something to answer with.
+            // something to offer back against.
             Step::after(
                 |e| matches!(e, SessionEvent::ClipboardNotify { .. }),
-                vec![
-                    ClientCommand::ClipboardText("local\nclipboard".into()),
-                    ClientCommand::ClipboardRequest { formats: 1 },
-                ],
+                vec![ClientCommand::ClipboardText("local\nclipboard".into())],
+            ),
+            // The text the session pulled on its own, with no request from
+            // the shell.
+            Step::after(
+                |e| matches!(e, SessionEvent::ClipboardText(_)),
+                vec![ClientCommand::ClipboardRequest { formats: 1 }],
             ),
             Step::after(
                 |e| matches!(e, SessionEvent::ClipboardText(_)),
@@ -1378,9 +1386,8 @@ async fn a_clipboard_round_trip_goes_both_ways() {
     .await;
     assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
 
-    // Inbound. The notify is raised rather than the text being pulled
-    // unasked: a remote session that helps itself to the local clipboard is
-    // the behaviour PRDRDP/05 §4.3 rules out.
+    // Inbound. The notify is still raised, ahead of the text the session
+    // pulled for it.
     let notified = events
         .iter()
         .find_map(|e| match e {
@@ -1435,6 +1442,54 @@ async fn a_clipboard_round_trip_goes_both_ways() {
         "the offer names CF_UNICODETEXT: {:?}",
         recorded.clipboard_formats
     );
+}
+
+/// The clipboard opens before the Font Map (issue #9).
+///
+/// A Windows server sends its `CB_CLIP_CAPS` and `CB_MONITOR_READY` as soon
+/// as `rdpclip` is up, and on a resumed logon that is before the connection
+/// sequence has finished. The activation loop used to read those PDUs as if
+/// they were on the I/O channel, so the Monitor Ready never reached the
+/// clipboard and the session ran with no clipboard at all, in either
+/// direction, with nothing in the UI to say so.
+///
+/// The shell sends no `ClipboardRequest` here, which is the other half of the
+/// same report: the shell never sends one, so the text has to be pulled by
+/// the session when the server announces it.
+#[tokio::test]
+async fn a_clipboard_that_opens_before_the_font_map_still_works() {
+    let (server, events, outcome) = run_session_steps(
+        channel_config(SessionBehaviour::ServeChannelsDuringActivation),
+        vec![Step::after(
+            |e| matches!(e, SessionEvent::ClipboardText(_)),
+            vec![ClientCommand::Disconnect],
+        )],
+    )
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    let recorded = server.wait_until(|r| r.clipboard_caps).await;
+    assert!(
+        recorded.clipboard_caps,
+        "the client answered the early CB_MONITOR_READY"
+    );
+    assert!(
+        recorded
+            .clipboard_formats
+            .first()
+            .is_some_and(Vec::is_empty),
+        "the first format list follows the Monitor Ready: {:?}",
+        recorded.clipboard_formats
+    );
+
+    let text = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::ClipboardText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("clipboard text with no request from the shell: {events:?}"));
+    assert_eq!(text, "server side\nsecond line");
 }
 
 // ---------------------------------------------------------------------------

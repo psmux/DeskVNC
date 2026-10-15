@@ -673,7 +673,21 @@ fn limb_attach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
         })?;
         // The person at a Boundary computer agreed to a helper, and an agent
         // is let on only once they have also allowed that helper's tools.
-        if entry.handle.kind == remote_core::ProtocolKind::Boundary && !entry.facts.lock().tools {
+        let facts = entry.facts.lock();
+        if entry.handle.kind == remote_core::ProtocolKind::Boundary
+            && !facts.tools
+            && !matches!(facts.state, vnc_core::SessionState::Connected)
+        {
+            // Not refused: the computer has not answered yet, and its answer
+            // says whether the tools are allowed.
+            return Err(RpcError::tagged(
+                "LIMB_GONE",
+                "that Boundary session is still connecting, so whether its tools are allowed is not known yet. Wait for it to connect, then attach again",
+            ));
+        }
+        let tools = facts.tools;
+        drop(facts);
+        if entry.handle.kind == remote_core::ProtocolKind::Boundary && !tools {
             return Err(RpcError::tagged(
                 "UNSUPPORTED",
                 "the person at that Boundary computer has not allowed the helper's tools, so no agent may attach. Ask them to tick Allow the helper's tools to run commands and copy files in DeskVNC Support, or, for an unattended computer, to allow it for this helper under Settings, Unattended access. Then call limb.attach again",
