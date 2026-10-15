@@ -31,7 +31,13 @@ import type { MultiplexerKind, SshAuthKind, SshSettings } from "../lib/ssh";
 import { blankSshSettings, parseSshSettings } from "../lib/ssh";
 import { sshDefaults } from "../lib/sshDefaults";
 import type { LocalKeys } from "../lib/tauri";
-import { pickPrivateKeyFile, savedUserNames, sshListLocalKeys, sshListWslDistros } from "../lib/tauri";
+import {
+  hasSavedPassword,
+  pickPrivateKeyFile,
+  savedUserNames,
+  sshListLocalKeys,
+  sshListWslDistros,
+} from "../lib/tauri";
 import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
@@ -257,10 +263,17 @@ export function HostDialog({
 
   // A saved host shows the account names it signs in with. They start blank
   // in the draft and arrive a moment later from the keychain; a box the user
-  // has already typed in is left alone.
+  // has already typed in is left alone. Whether a password is saved is asked
+  // of the keychain too: the library's flag was not set by an editor save
+  // before 0.29.1, so it can say "none" for a password that is there.
   useEffect(() => {
     if (!initial.id) return;
     let live = true;
+    if (initial.protocol !== "boundary") {
+      void hasSavedPassword(initial.id, initial.protocol).then((saved) => {
+        if (live && saved) setD((prev) => ({ ...prev, hasPassword: true }));
+      });
+    }
     void savedUserNames(initial.id).then((names) => {
       if (!live || !names) return;
       setD((prev) => ({
@@ -274,7 +287,7 @@ export function HostDialog({
     return () => {
       live = false;
     };
-  }, [initial.id]);
+  }, [initial.id, initial.protocol]);
 
   // `isRdp` still names one protocol on purpose: it only selects between the
   // two GRAPHICAL protocols' own quirks (RdpOptionsSection, SecuritySection,
