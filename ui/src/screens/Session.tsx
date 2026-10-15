@@ -98,6 +98,8 @@ import {
  * "tile shows a thumbnail within 2 s of connect" acceptance test (PRD/03 §7).
  */
 const THUMBNAIL_SETTLE_MS = 1200;
+/** How often a capture that found no picture yet tries again. */
+const THUMBNAIL_RETRY_MS = 1500;
 
 /** Longest a closing session window will wait for its exit capture. */
 const CAPTURE_CLOSE_BUDGET_MS = 700;
@@ -1238,11 +1240,23 @@ function SessionView({
   useEffect(() => {
     if (session.state.state !== "connected") return;
     if (settledCapture.current) return;
-    const t = window.setTimeout(() => {
-      settledCapture.current = true;
-      void captureThumb();
-    }, THUMBNAIL_SETTLE_MS);
-    return () => window.clearTimeout(t);
+    // A connection can be up before its first picture is: a Boundary screen
+    // over a slow uplink takes seconds. Trying once and giving up left those
+    // machines with no tile picture at all, so it tries again until a real
+    // frame is there, for as long as the session stays connected.
+    let t = 0;
+    let stopped = false;
+    const attempt = (): void => {
+      void captureThumb().then((captured) => {
+        if (captured) settledCapture.current = true;
+        else if (!stopped) t = window.setTimeout(attempt, THUMBNAIL_RETRY_MS);
+      });
+    };
+    t = window.setTimeout(attempt, THUMBNAIL_SETTLE_MS);
+    return () => {
+      stopped = true;
+      window.clearTimeout(t);
+    };
   }, [session.state.state, captureThumb]);
 
   // The exit capture. Runs at most once, from whichever of these happens
