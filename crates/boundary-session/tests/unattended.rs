@@ -166,7 +166,9 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
                 assert!(
                     frame
                         .rgba
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .all(|p| p[..3].iter().all(|c| c.abs_diff(200) <= 4) && p[3] == 255),
                     "{:?}",
                     frame.rgba
