@@ -150,12 +150,12 @@ export function BoundaryConnect() {
           <p className="text-xs text-secondary">During the session they can choose to let you connect any time. The computer is then saved to your Library and opens unattended.</p>
           <BoundaryProviderSetup active={open} />
         </> : <>
-          <p className="text-sm text-secondary">For a computer with unattended access switched on in DeskVNC Support. A computer that paired you is already in your Library.</p>
+          <p className="text-sm text-secondary">For a computer with unattended access switched on in DeskVNC Support. A computer that paired you is already in your Library. Otherwise the person there approves you on their screen, and can pair you so you connect without asking next time.</p>
           <label className="text-sm">Computer ID<input required spellCheck={false} autoComplete="off" value={machineId} onChange={(event) => { setMachineId(event.target.value); setPasted(false); }} placeholder="64 letters and digits, from Copy ID" className="mt-1 w-full rounded border border-subtle bg-inset p-2 font-mono text-xs" /></label>
           {pasted && <p className="-mt-2 text-xs text-secondary">Pasted from your clipboard.</p>}
           {machineId.trim() !== "" && !looksLikeMachineId(machineId) && <p className="-mt-2 text-xs text-red-500">That is not a computer ID. Use Copy ID in DeskVNC Support.</p>}
           <label className="text-sm">Name in your Library<input maxLength={80} value={machineName} onChange={(event) => setMachineName(event.target.value)} placeholder="Mum's laptop" className="mt-1 w-full rounded border border-subtle bg-inset p-2" /></label>
-          <label className="text-sm">Unattended password, if you were not paired<input type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 w-full rounded border border-subtle bg-inset p-2" /><span className="mt-1 block text-xs text-secondary">Kept in your system keychain, never in the Library file.</span></label>
+          <label className="text-sm">Unattended password, if nobody is there to approve you<input type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 w-full rounded border border-subtle bg-inset p-2" /><span className="mt-1 block text-xs text-secondary">Kept in your system keychain, never in the Library file.</span></label>
         </>}
         {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
         <div className="flex justify-end gap-2"><button type="button" disabled={busy} onClick={close} className="rounded border border-subtle px-4 py-2">Cancel</button><button disabled={busy || !ready} type="submit" className="rounded bg-accent px-4 py-2 text-accent-fg disabled:opacity-50">{busy ? "Opening…" : mode === "invite" ? "Connect" : "Save and connect"}</button></div>
