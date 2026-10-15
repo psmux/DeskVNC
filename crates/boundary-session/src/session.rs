@@ -139,12 +139,18 @@ impl Session {
     }
     pub fn input(&self, input: Input) -> Result<()> {
         input.validate()?;
-        if self.input.try_send(input).is_err() {
-            // Never silently lose a key release when the queue fills.
-            self.stop();
-            bail!("Input queue is full or disconnected. Session stopped");
+        match self.input.try_send(input) {
+            Ok(()) => Ok(()),
+            // A move is superseded by the next one, so while the link is
+            // slow a full queue drops it. Ending the session for it froze
+            // the picture for the person moving the mouse.
+            Err(mpsc::error::TrySendError::Full(Input::Move { .. })) => Ok(()),
+            Err(_) => {
+                // Never silently lose a key release when the queue fills.
+                self.stop();
+                bail!("Input queue is full or disconnected. Session stopped");
+            }
         }
-        Ok(())
     }
 }
 impl Drop for Session {
@@ -556,9 +562,13 @@ where
                     input.validate()?;
                     let permission = *input_permission.borrow();
                     if permission.allowed || matches!(input, Input::Release) {
-                        input_tx
-                            .try_send((permission.generation, input))
-                            .map_err(|_| anyhow!("Input rate exceeded. Session stopped"))?;
+                        match input_tx.try_send((permission.generation, input)) {
+                            Ok(()) => {}
+                            // The next move supersedes this one; dropping it
+                            // while the screen is busy beats ending the session.
+                            Err(mpsc::error::TrySendError::Full((_, Input::Move { .. }))) => {}
+                            Err(_) => bail!("Input rate exceeded. Session stopped"),
+                        }
                     }
                 }
                 _ => bail!("Unexpected helper message"),
