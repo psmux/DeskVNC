@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod codes;
+mod install;
 mod network;
 mod theme;
 mod unattended;
@@ -76,6 +77,8 @@ struct App {
     wizard: network::Wizard,
     screen_permission: bool,
     input_permission: bool,
+    /// The real app, when macOS runs a translocated copy of it.
+    translocated: Option<std::path::PathBuf>,
     permission_check: Instant,
     remote_focus: bool,
     modifiers: egui::Modifiers,
@@ -148,6 +151,7 @@ impl App {
             wizard: network::Wizard::default(),
             screen_permission: boundary_platform::screen_permission(),
             input_permission: boundary_platform::input_permission(),
+            translocated: install::translocated(),
             permission_check: Instant::now(),
             remote_focus: false,
             modifiers: egui::Modifiers::default(),
@@ -363,6 +367,28 @@ impl App {
         }
     }
     /// The home screen: this computer on the left, a remote one on the right.
+    /// Offer to move the app to Applications when macOS is running a
+    /// translocated copy, which breaks sign in and hides updates.
+    fn move_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(source) = self.translocated.clone() else {
+            return;
+        };
+        theme::card(ui, |ui| {
+            ui.label(RichText::new("Move DeskVNC Support to Applications").strong());
+            theme::muted(
+                ui,
+                "It is running from your Downloads, so macOS runs a temporary copy. Unattended access will not start after a restart, and a newer download is not used until it is moved.",
+            );
+            ui.add_space(6.0);
+            if ui.button("Move to Applications and reopen").clicked() {
+                match install::move_to_applications(&source) {
+                    Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(error) => self.status = format!("{error:#}"),
+                }
+            }
+        });
+        ui.add_space(10.0);
+    }
     fn home(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.columns(2, |columns| {
@@ -970,7 +996,9 @@ impl App {
             });
         });
         ui.add_space(10.0);
+        self.move_banner(ui);
         self.unattended.banner(ui);
+        self.unattended.prompt(ui.ctx(), self.input_permission);
         if self.connected && self.hosting {
             self.sharing(ui);
         } else if self.connected {
