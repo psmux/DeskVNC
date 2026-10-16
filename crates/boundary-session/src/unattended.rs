@@ -262,6 +262,35 @@ pub fn listen<F>(options: HostOptions, key: SecretKey, access_path: PathBuf, des
 where
     F: Fn() -> Result<Box<dyn Desktop>> + Send + Sync + 'static,
 {
+    spawn_listener(options, key, access_path, false, desktop)
+}
+
+/// Listen as [`listen`] does, on a computer where nobody has signed in yet.
+/// Nobody is there to approve a helper who is not paired, so one is turned
+/// away rather than asked about, and nothing is offered to a helper's tools:
+/// at the sign in screen a command would run as the system, not as a person.
+pub fn listen_at_login<F>(
+    options: HostOptions,
+    key: SecretKey,
+    access_path: PathBuf,
+    desktop: F,
+) -> Listener
+where
+    F: Fn() -> Result<Box<dyn Desktop>> + Send + Sync + 'static,
+{
+    spawn_listener(options, key, access_path, true, desktop)
+}
+
+fn spawn_listener<F>(
+    options: HostOptions,
+    key: SecretKey,
+    access_path: PathBuf,
+    login: bool,
+    desktop: F,
+) -> Listener
+where
+    F: Fn() -> Result<Box<dyn Desktop>> + Send + Sync + 'static,
+{
     let (notices_tx, notices) = mpsc::channel(32);
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
@@ -270,7 +299,7 @@ where
         let result = tokio::select! {
             biased;
             _ = stop.cancelled() => Ok(()),
-            result = run_listener(&notices_tx, &stop, options, key, &access_path, desktop) => result,
+            result = run_listener(&notices_tx, &stop, options, key, &access_path, login, desktop) => result,
         };
         let _ = notices_tx.send(Notice::Finished(result)).await;
     });
@@ -283,6 +312,7 @@ async fn run_listener<F>(
     options: HostOptions,
     key: SecretKey,
     access_path: &Path,
+    login: bool,
     desktop: Arc<F>,
 ) -> Result<()>
 where
@@ -346,9 +376,13 @@ where
             Err(error) => Decision::Refuse(format!("{error:#}")),
         };
         let decision = match decision {
+            Decision::Ask if login => Decision::Refuse(
+                "Nobody has signed in on that computer, so nobody can approve you. Ask to be paired, or use its unattended password".into(),
+            ),
             Decision::Ask => ask(notices, access_path, &name, &peer, tools).await,
             other => other,
         };
+        let tools = tools && !login;
         let (control, allowed_tools) = match decision {
             Decision::Grant(control, tools) => (control, tools),
             Decision::Ask => unreachable!("answered above"),
