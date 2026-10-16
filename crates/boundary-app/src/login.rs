@@ -8,8 +8,10 @@
 //!
 //! On macOS launchd starts it in the login window session, as root. On
 //! Windows a service starts it in the console session, as SYSTEM, whenever
-//! nobody is signed in there. Either way it steps aside once somebody signs
-//! in, and the app in the tray takes over the ID.
+//! nobody is signed in there, and while the session is locked, because the
+//! lock screen is out of a person's programs' sight too. Either way it steps
+//! aside once somebody signs in or unlocks, and the app in the tray takes
+//! over the ID.
 //!
 //! Nobody is at the sign in screen to approve a helper, so a helper who is
 //! not paired and has no password is turned away, and no helper's tools may
@@ -30,17 +32,64 @@ pub fn host() -> Result<()> {
     runtime.block_on(serve())
 }
 
+/// A line in `sign-in-screen.log` beside the machine ID, which is the one
+/// place to look when a helper reaches the computer at the sign in screen
+/// and sees nothing: nobody is signed in to show an error to.
+fn note(dir: &std::path::Path, line: &str) {
+    use std::io::Write;
+    let path = dir.join("sign-in-screen.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{seconds} {line}");
+    }
+}
+
+/// Capture one frame and say what came back, so a black screen can be told
+/// apart from a screen that has nothing on it.
+fn probe(display: u32) -> String {
+    let frame = boundary_platform::open(display).and_then(|mut desktop| desktop.capture());
+    #[cfg(windows)]
+    let desktop = boundary_platform::system::attached_desktop().unwrap_or_else(|| "?".into());
+    #[cfg(not(windows))]
+    let desktop = "-";
+    match frame {
+        Ok(frame) => format!(
+            "first frame {}x{} on desktop {desktop}, {}",
+            frame.width,
+            frame.height,
+            if frame.rgba.chunks(4).all(|p| p[..3] == [0, 0, 0]) {
+                "all black"
+            } else {
+                "has a picture"
+            }
+        ),
+        Err(error) => format!("capture failed on desktop {desktop}: {error:#}"),
+    }
+}
+
 async fn serve() -> Result<()> {
     let dir = boundary_provision::platform::data_dir()?;
     let access_path = dir.join("access.json");
-    // The app in the tray holds this while it runs. Fast user switching
-    // shows the sign in screen with somebody still signed in behind it, and
-    // two copies listening as one ID push each other off the relay.
+    note(&dir, "started");
+    // Whoever listens holds this. The app in the tray lets go of it when the
+    // screen locks; with fast user switching it may still hold it behind the
+    // sign in screen. Two copies listening as one ID push each other off the
+    // relay, so this waits its turn.
     let _lock = loop {
         if signed_in() {
             return Ok(());
         }
-        if let Some(lock) = crate::only_instance() {
+        if let Some(lock) = crate::listener_lock() {
             break lock;
         }
         tokio::time::sleep(TICK).await;
@@ -62,12 +111,18 @@ async fn serve() -> Result<()> {
                 .ok()
                 .and_then(|all| all.first().map(|d| d.id));
             if let Some(display) = display {
+                let probed = tokio::task::spawn_blocking(move || probe(display))
+                    .await
+                    .unwrap_or_default();
+                note(&dir, &probed);
                 listener = Some(unattended::listen_at_login(
                     boundary_session::HostOptions::default(),
                     key,
                     access_path.clone(),
                     move || boundary_platform::open(display),
                 ));
+            } else {
+                note(&dir, "no display to share");
             }
         }
         let mut finished = false;
@@ -75,8 +130,20 @@ async fn serve() -> Result<()> {
             while let Ok(notice) = l.notices.try_recv() {
                 match notice {
                     // Held until it ends; dropping it would end it.
-                    Notice::Connected { session: s, .. } => session = Some(s),
-                    Notice::Finished(_) => finished = true,
+                    Notice::Ready { .. } => note(&dir, "listening"),
+                    Notice::Connected {
+                        session: s, name, ..
+                    } => {
+                        note(&dir, &format!("{name} connected"));
+                        session = Some(s);
+                    }
+                    Notice::Refused { name, reason, .. } => {
+                        note(&dir, &format!("turned away {name}: {reason}"));
+                    }
+                    Notice::Finished(result) => {
+                        note(&dir, &format!("stopped listening: {result:?}"));
+                        finished = true;
+                    }
                     _ => {}
                 }
             }
@@ -112,7 +179,7 @@ fn signed_in() -> bool {
 }
 
 /// The Windows service: start the host in the console session while nobody
-/// is signed in there, and stop it when somebody is.
+/// is signed in there or it is locked, and stop it otherwise.
 #[cfg(windows)]
 pub fn service() -> Result<()> {
     boundary_platform::system::run_service(watch)
@@ -133,8 +200,11 @@ fn watch(stop: &'static std::sync::atomic::AtomicBool) {
     };
     let mut child: Option<(u32, system::Child)> = None;
     while !stop.load(Ordering::Relaxed) {
-        let wanted =
-            system::console().and_then(|(session, signed_in)| (!signed_in).then_some(session));
+        // Nobody signed in, or locked: either way the screen is the secure
+        // desktop, which the app in the tray cannot see.
+        let wanted = system::console()
+            .filter(|c| !c.signed_in || c.locked)
+            .map(|c| c.session);
         let current = child.as_ref().filter(|(_, c)| c.running()).map(|(s, _)| *s);
         if wanted != current {
             if let Some((_, old)) = child.take() {

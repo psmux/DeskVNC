@@ -3,8 +3,9 @@
 //! The sign in screen belongs to no user, so nothing a user starts can show
 //! it. A service, running as SYSTEM, watches the console and starts a copy of
 //! the support app in the console session, also as SYSTEM, while nobody is
-//! signed in there. That copy draws and types on whichever desktop has the
-//! input, which at the sign in screen is Winlogon rather than Default.
+//! signed in there or the session is locked. That copy draws and types on
+//! whichever desktop has the input, which at the sign in screen and the lock
+//! screen is Winlogon rather than Default.
 
 use anyhow::{Context, Result, bail};
 use std::ffi::c_void;
@@ -17,8 +18,8 @@ use windows_sys::Win32::Security::{
     TokenSessionId,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
-    WTS_CURRENT_SERVER_HANDLE, WTSFreeMemory, WTSGetActiveConsoleSessionId,
-    WTSQuerySessionInformationW, WTSUserName,
+    ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+    WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx,
 };
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
@@ -31,16 +32,26 @@ use windows_sys::Win32::System::StationsAndDesktops::{
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
-    OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    GetCurrentProcessId, OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-/// The session on the physical screen, and whether somebody is signed in to
-/// it. `None` while there is no console session, as during a switch.
-pub fn console() -> Option<(u32, bool)> {
+/// The session on the physical screen.
+pub struct Console {
+    pub session: u32,
+    /// Somebody is signed in to it.
+    pub signed_in: bool,
+    /// It shows the lock screen, which like the sign in screen is on the
+    /// secure desktop where a person's own programs cannot see.
+    pub locked: bool,
+}
+
+/// The console session, or `None` while there is none, as during a switch.
+pub fn console() -> Option<Console> {
     // SAFETY: no arguments.
     let session = unsafe { WTSGetActiveConsoleSessionId() };
     if session == u32::MAX {
@@ -53,7 +64,7 @@ pub fn console() -> Option<(u32, bool)> {
         WTSQuerySessionInformationW(
             WTS_CURRENT_SERVER_HANDLE,
             session,
-            WTSUserName,
+            WTSSessionInfoEx,
             &mut buffer,
             &mut bytes,
         )
@@ -61,14 +72,28 @@ pub fn console() -> Option<(u32, bool)> {
     if ok == 0 || buffer.is_null() {
         return None;
     }
-    // SAFETY: WTS returned a NUL terminated string of `bytes` bytes.
-    let name = unsafe {
-        let len = (bytes as usize / 2).saturating_sub(1);
-        let name = String::from_utf16_lossy(std::slice::from_raw_parts(buffer, len));
+    // SAFETY: WTSSessionInfoEx fills a WTSINFOEXW, freed once read.
+    let (signed_in, locked) = unsafe {
+        let info = &*(buffer as *const WTSINFOEXW);
+        let level = &info.Data.WTSInfoExLevel1;
+        let signed_in = level.UserName[0] != 0;
+        // WTS_SESSIONSTATE_LOCK is 0; UNLOCK is 1 and UNKNOWN is -1.
+        let locked = info.Level == 1 && level.SessionFlags == 0;
         WTSFreeMemory(buffer.cast());
-        name
+        (signed_in, locked)
     };
-    Some((session, !name.trim_end_matches('\0').is_empty()))
+    Some(Console {
+        session,
+        signed_in,
+        locked,
+    })
+}
+
+/// The session this process runs in.
+pub fn own_session() -> Option<u32> {
+    let mut session = 0u32;
+    // SAFETY: a valid out pointer.
+    (unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) } != 0).then_some(session)
 }
 
 /// A process started by [`spawn_in_session`].
@@ -267,6 +292,11 @@ pub(crate) fn on_input_desktop() {
             }
         }
     });
+}
+
+/// The desktop the calling thread last attached to, for the host's log.
+pub fn attached_desktop() -> Option<String> {
+    ATTACHED.with(|attached| attached.borrow().as_ref().map(|(_, name)| name.clone()))
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);

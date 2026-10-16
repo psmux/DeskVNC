@@ -26,9 +26,8 @@ fn main() -> eframe::Result {
     let background = flag("--background");
     // A copy started at sign in steps aside for one already running. Two
     // copies would listen as the same machine ID and keep pushing each other
-    // off the relay, so neither could be reached. The copy at the sign in
-    // screen holds the lock for a moment after somebody signs in, so this
-    // waits for it before giving up.
+    // off the relay, so neither could be reached. A copy that is quitting
+    // holds the lock a moment longer, so this waits before giving up.
     let _instance = match only_instance() {
         Some(lock) => Some(lock),
         None if background => {
@@ -154,9 +153,17 @@ fn other_mode(args: &[String]) -> Option<i32> {
 /// A lock held for as long as this copy runs, or `None` when another copy
 /// holds it already.
 fn only_instance() -> Option<std::fs::File> {
+    lock_file("running.lock")
+}
+/// A lock held by whichever copy listens as this computer's ID: the app in
+/// the tray, or the copy at the sign in or lock screen.
+fn listener_lock() -> Option<std::fs::File> {
+    lock_file("listening.lock")
+}
+fn lock_file(name: &str) -> Option<std::fs::File> {
     let dir = boundary_provision::platform::data_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("running.lock");
+    let path = dir.join(name);
     // The copy at the sign in screen runs as root on macOS, and a lock file
     // it created cannot be opened for writing by the person afterwards. A
     // lock needs no writing.

@@ -57,6 +57,12 @@ pub struct Unattended {
     login: bool,
     /// Setting that up or taking it away, which waits on an administrator.
     login_change: Option<std::sync::mpsc::Receiver<(bool, Result<()>)>>,
+    /// Held while this copy listens, so only one copy listens as this ID.
+    listening: Option<std::fs::File>,
+    /// Not listening for now, because another copy is: the one at the sign
+    /// in or lock screen. Picked up again when it hands over.
+    handed_over: bool,
+    checked: std::time::Instant,
 }
 
 impl Unattended {
@@ -77,6 +83,9 @@ impl Unattended {
             autostart: autostart::enabled(),
             login: crate::login::enabled(),
             login_change: None,
+            listening: None,
+            handed_over: false,
+            checked: std::time::Instant::now(),
         };
         // Rewrite an existing sign in entry, so one written by an older copy
         // picks up what this one adds (a restart after a crash on macOS) and
@@ -129,6 +138,13 @@ impl Unattended {
         if self.listener.is_some() {
             return;
         }
+        let Some(lock) = crate::listener_lock() else {
+            self.handed_over = true;
+            self.say("The copy at the sign in or lock screen has this computer's ID. It hands over in a moment");
+            return;
+        };
+        self.handed_over = false;
+        self.listening = Some(lock);
         // The primary display: nobody is there to pick another.
         let display = boundary_platform::displays()
             .ok()
@@ -149,6 +165,28 @@ impl Unattended {
         self.listener = None;
         self.active = None;
         self.reachable = false;
+        self.listening = None;
+        self.handed_over = false;
+    }
+    /// Hand this computer's ID to the copy the service starts at the lock
+    /// screen, which can see it, and take it back after.
+    fn hand_over(&mut self) {
+        if self.checked.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.checked = std::time::Instant::now();
+        if !self.access.enabled {
+            return;
+        }
+        if self.login && screen_locked() {
+            if self.listener.is_some() {
+                self.halt();
+                self.handed_over = true;
+                self.say("The screen is locked. The copy at the lock screen answers helpers until it is unlocked");
+            }
+        } else if self.handed_over && self.listener.is_none() {
+            self.start();
+        }
     }
     /// Let the helper of the current attended session in any time, and tell
     /// them this computer's ID so they can save it.
@@ -189,6 +227,7 @@ impl Unattended {
     /// Take in what the listener reported. True when a question arrived that
     /// somebody at this computer has to answer, so the window should show.
     pub fn poll(&mut self) -> bool {
+        self.hand_over();
         let mut arrived = false;
         let mut finished = None;
         if let Some(listener) = self.listener.as_mut() {
@@ -616,6 +655,17 @@ impl Unattended {
             self.say("Waiting for an administrator to allow it");
         }
     }
+}
+
+/// Whether this session is on the physical screen and locked.
+#[cfg(windows)]
+fn screen_locked() -> bool {
+    use boundary_platform::system;
+    system::console().is_some_and(|c| c.locked && Some(c.session) == system::own_session())
+}
+#[cfg(not(windows))]
+fn screen_locked() -> bool {
+    false
 }
 
 /// An ID shortened for display; the Copy button gives the whole one.
