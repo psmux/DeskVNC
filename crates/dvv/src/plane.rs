@@ -2665,6 +2665,26 @@ impl Plane {
         Ok(())
     }
 
+    /// Drop what this attachment knew about a limb whose relay has gone.
+    ///
+    /// What [`Plane::close`] clears, without the `close` capability and
+    /// without detaching: nothing is being closed, the session is still open
+    /// in the application, and the registry replaces the limb itself when it
+    /// is attached again. The lease id goes too, because it was granted on
+    /// the limb being replaced and a release against it would name a lease
+    /// that no longer exists.
+    fn forget_severed(&self, limb: &AttachedLimb) {
+        let id = limb.id().as_str();
+        for intent in self.inflight_ids(id) {
+            limb.cancel_running(limb_core::intent::IntentId(intent));
+        }
+        tracing::warn!(limb = %id, "the relay for this limb had stopped, so it is attached again");
+        forget_answerable(id);
+        lock(&self.leases).remove(id);
+        lock(&self.inflight).remove(id);
+        lock(&self.observed_at).remove(id);
+    }
+
     /// Which limb a call is aimed at.
     ///
     /// # Errors
@@ -2677,8 +2697,16 @@ impl Plane {
         if let Some(id) = &selector.limb_id {
             let limb_id = LimbId::from_caller(id)
                 .map_err(|e| ToolError::new(codes::BAD_REQUEST, e.to_string()))?;
-            if let Some(limb) = self.registry.get(&limb_id) {
-                return Ok(limb);
+            match self.registry.get(&limb_id) {
+                Some(limb) if !limb.is_severed() => return Ok(limb),
+                // The relay that carried this limb's commands has stopped,
+                // which it does when the application refuses one with
+                // LEASE_REVOKED or LIMB_GONE. Kept, the limb went on reading
+                // connected and settled every intent `link-lost`, for as long
+                // as a holder lived. So what this attachment knew about it is
+                // dropped and the session is adopted again, with a new relay.
+                Some(limb) => self.forget_severed(&limb),
+                None => {}
             }
             return self.adopt(&limb_id).ok_or_else(|| {
                 ToolError::new(
