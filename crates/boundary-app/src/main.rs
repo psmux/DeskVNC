@@ -4,6 +4,7 @@
 
 mod codes;
 mod install;
+mod journal;
 mod login;
 mod network;
 mod theme;

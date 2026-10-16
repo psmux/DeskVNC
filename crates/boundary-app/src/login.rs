@@ -36,22 +36,7 @@ pub fn host() -> Result<()> {
 /// place to look when a helper reaches the computer at the sign in screen
 /// and sees nothing: nobody is signed in to show an error to.
 fn note(dir: &std::path::Path, line: &str) {
-    use std::io::Write;
-    let path = dir.join("sign-in-screen.log");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) {
-        let _ = std::fs::remove_file(&path);
-    }
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "{seconds} {line}");
-    }
+    crate::journal::note(dir, "sign-in-screen.log", line);
 }
 
 /// Capture one frame and say what came back, so a black screen can be told

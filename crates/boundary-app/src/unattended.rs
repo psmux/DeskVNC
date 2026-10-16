@@ -234,12 +234,14 @@ impl Unattended {
             while let Ok(notice) = listener.notices.try_recv() {
                 match notice {
                     Notice::Ready { .. } => {
+                        log(&self.access_path, "listening");
                         self.reachable = true;
                         self.message =
                             "Unattended access is on. Paired helpers can connect any time".into();
                         self.error = false;
                     }
                     Notice::Status(status) => {
+                        log(&self.access_path, &status);
                         self.message = status;
                         self.error = false;
                     }
@@ -249,6 +251,7 @@ impl Unattended {
                         session,
                         ..
                     } => {
+                        log(&self.access_path, &format!("{name} connected"));
                         self.active = Some(Active {
                             name,
                             control,
@@ -276,10 +279,14 @@ impl Unattended {
                         arrived = true;
                     }
                     Notice::Refused { name, reason, .. } => {
+                        log(&self.access_path, &format!("turned away {name}: {reason}"));
                         self.message = format!("Turned away {name}: {reason}");
                         self.error = false;
                     }
-                    Notice::Finished(result) => finished = Some(result),
+                    Notice::Finished(result) => {
+                        log(&self.access_path, &format!("stopped listening: {result:?}"));
+                        finished = Some(result);
+                    }
                 }
             }
         }
@@ -292,8 +299,10 @@ impl Unattended {
                         let excess = active.activity.len().saturating_sub(crate::ACTIVITY_LINES);
                         active.activity.drain(..excess);
                     }
-                    boundary_session::Event::Finished(_) => {
+                    boundary_session::Event::Finished(result) => {
+                        let line = format!("session ended: {result:?}");
                         self.active = None;
+                        log(&self.access_path, &line);
                         break;
                     }
                     _ => {}
@@ -666,6 +675,13 @@ fn screen_locked() -> bool {
 #[cfg(not(windows))]
 fn screen_locked() -> bool {
     false
+}
+
+/// Write to `unattended.log` beside the machine ID and `access.json`.
+fn log(access_path: &std::path::Path, line: &str) {
+    if let Some(dir) = access_path.parent() {
+        crate::journal::note(dir, "unattended.log", line);
+    }
 }
 
 /// An ID shortened for display; the Copy button gives the whole one.
