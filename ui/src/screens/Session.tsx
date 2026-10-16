@@ -89,6 +89,7 @@ import {
   writeClipboard,
   type CaptureStatus,
   type SshConnectConfig,
+  hasSavedPassword,
 } from "../lib/tauri";
 
 /**
@@ -861,6 +862,24 @@ function SessionView({
     },
     [session],
   );
+
+  // Whether this host already has a saved password. A prompt then starts
+  // with "Remember" ticked, so the right password replaces a refused one
+  // instead of being forgotten after this connection (issue #9). Asked
+  // again whenever a prompt appears, so a save during this session counts.
+  const [savedBefore, setSavedBefore] = useState(false);
+  const promptOpen = session.credentialRequest !== null;
+  useEffect(() => {
+    const id = params.profileId;
+    if (!id) return;
+    let cancelled = false;
+    void hasSavedPassword(id, params.protocol).then((saved) => {
+      if (!cancelled) setSavedBefore(saved === true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [params.profileId, params.protocol, promptOpen]);
 
   // Seed the resolution from the host profile. The shell already used it to
   // size the connection; this copy is what decides whether a window resize
@@ -2148,6 +2167,7 @@ function SessionView({
             hostName={session.desktopName}
             protocol={params.protocol}
             previous={session.lastCredentialAnswer}
+            savedBefore={savedBefore}
             onSubmit={session.submitCredentials}
             onCancel={session.dismissCredentialPrompt}
           />

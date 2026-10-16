@@ -8,7 +8,9 @@
  * Notes that matter:
  * - The username field exists ONLY for identity-carrying methods
  *   (`kind === "username-and-password"`).
- * - "Remember" is opt-in and defaults to OFF. The checkbox is a *request*: the
+ * - "Remember" is opt-in and defaults to OFF, unless this host already has a
+ *   saved password (`savedBefore`): that person opted in when they saved it.
+ *   The checkbox is a *request*: the
  *   shell holds the value in memory and writes it to the keychain only after
  *   the server accepts it, so a wrong password is never persisted. Once
  *   ticked it stays ticked for the next prompt in this window, along with
@@ -34,6 +36,7 @@ export function CredentialPrompt({
   hostName,
   protocol,
   previous,
+  savedBefore = false,
   onSubmit,
   onCancel,
 }: {
@@ -41,6 +44,8 @@ export function CredentialPrompt({
   hostName: string;
   /** The last answer given in this window, so this prompt starts from it. */
   previous?: PromptAnswer | null;
+  /** This host already has a saved password, so "Remember" starts ticked. */
+  savedBefore?: boolean;
   /** Which protocol is asking. RDP is the one that takes a logon domain. */
   protocol: ProtocolKind;
   onSubmit: (
@@ -55,7 +60,7 @@ export function CredentialPrompt({
   // An RDP logon is always user-first, whatever kind the request names.
   const needsUsername = needsDomain || request.kind === "username-and-password";
   // Computed once, on mount: what the person types after that is theirs.
-  const [start] = useState(() => promptStart(request.usernameHint, previous));
+  const [start] = useState(() => promptStart(request.usernameHint, previous, savedBefore));
   const [username, setUsername] = useState(start.username);
   const [domain, setDomain] = useState(start.domain);
   const [password, setPassword] = useState("");
