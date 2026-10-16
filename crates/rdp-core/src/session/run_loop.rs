@@ -556,6 +556,11 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     // connect time auto detect and the heartbeat. Neither is
                     // acted on, and both are length prefixed, so skipping
                     // cannot desync (MS-RDPBCGR 2.2.1.4.5, PRDRDP/05 §5.1).
+                    tracing::trace!(
+                        channel_id,
+                        len = payload.len(),
+                        "a pdu on a joined channel with no handler"
+                    );
                     return Ok(SessionSignal::Ignored(
                         "a pdu on the message channel, which this build does not act on",
                     ));

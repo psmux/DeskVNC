@@ -217,6 +217,7 @@ impl Cliprdr {
             )));
         }
         let body = body.get(..data_len).unwrap_or(body);
+        tracing::trace!(msg_type, msg_flags, data_len, "a cliprdr message");
 
         match msg_type {
             msg_type::MONITOR_READY => self.monitor_ready(static_id, ctx, out),
