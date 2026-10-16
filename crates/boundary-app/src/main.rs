@@ -45,6 +45,7 @@ fn main() -> eframe::Result {
     };
     let runtime = tokio::runtime::Runtime::new().expect("Cannot start the connection runtime");
     let _guard = runtime.enter();
+    let fallback = std::env::var_os(FALLBACK_RENDERER).is_some();
     let result = eframe::run_native(
         "Boundary",
         eframe::NativeOptions {
@@ -55,13 +56,38 @@ fn main() -> eframe::Result {
                 // icon. Where there is no tray it is minimized instead.
                 .with_visible(!background || !TRAY),
             event_loop_builder: background_policy(background),
+            renderer: if fallback {
+                eframe::Renderer::Wgpu
+            } else {
+                eframe::Renderer::Glow
+            },
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     );
     runtime.shutdown_timeout(Duration::from_secs(3));
+    // A display with no graphics driver behind it, as in a virtual machine,
+    // a Remote Desktop session or a virtual monitor, offers OpenGL 1.1 and
+    // the window never opened. Direct3D has a software device everywhere.
+    // A process gets one event loop, so a fresh copy draws with it.
+    if !fallback
+        && matches!(result, Err(eframe::Error::OpenGL(_)))
+        && let Ok(exe) = std::env::current_exe()
+    {
+        drop(_instance);
+        if std::process::Command::new(exe)
+            .args(&args[1..])
+            .env(FALLBACK_RENDERER, "1")
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
     result
 }
+/// Set for a copy that draws with wgpu because OpenGL was too old.
+const FALLBACK_RENDERER: &str = "DESKVNC_SUPPORT_WGPU";
 /// Whether this platform has a tray icon to hide the window behind.
 const TRAY: bool = cfg!(any(target_os = "macos", windows));
 

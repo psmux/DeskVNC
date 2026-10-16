@@ -11,7 +11,7 @@ boundary-platform.workspace = true
 tokio = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "x11", "wayland"] }
 
 boundary-provision = { path = "../boundary-provision" }
 
