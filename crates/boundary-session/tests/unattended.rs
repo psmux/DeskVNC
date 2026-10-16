@@ -415,3 +415,55 @@ async fn at_the_sign_in_screen_strangers_are_refused_and_tools_stay_off() {
     .await
     .expect("timed out");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_paired_helpers_are_in_at_the_same_time() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("two");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let first = unattended::load_or_create_key(&dir.join("first.key")).unwrap();
+        let second = unattended::load_or_create_key(&dir.join("second.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&first.public().to_string(), "First", true)
+            .unwrap();
+        access
+            .trust(&second.public().to_string(), "Second", false)
+            .unwrap();
+        access.save(&access_path).unwrap();
+
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let mut held = Vec::new();
+        let one = unattended::connect_to(Ok(address.clone()), "First".into(), None, first, local());
+        loop {
+            if let Some(Notice::Connected { session, .. }) = listener.notices.recv().await {
+                held.push(session);
+                break;
+            }
+        }
+        // The first is still in when the second knocks.
+        let two = unattended::connect_to(Ok(address), "Second".into(), None, second, local());
+        loop {
+            if let Some(Notice::Connected { session, .. }) = listener.notices.recv().await {
+                held.push(session);
+                break;
+            }
+        }
+        let (one, two) = tokio::join!(outcome(one), outcome(two));
+        assert_eq!(one, Ok(true), "the first has control");
+        assert_eq!(two, Ok(false), "the second may only watch");
+        assert_eq!(held.len(), 2);
+    })
+    .await
+    .expect("timed out");
+}

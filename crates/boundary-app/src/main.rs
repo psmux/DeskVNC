@@ -1108,10 +1108,11 @@ impl eframe::App for App {
                 }
                 None => {}
             }
-            let line = match &self.unattended.active {
-                Some(active) => format!("{} is connected", active.name),
-                None if self.unattended.enabled() => "Waiting for helpers".to_owned(),
-                None => "Unattended access is off".to_owned(),
+            let line = match self.unattended.active.as_slice() {
+                [one] => format!("{} is connected", one.name),
+                [] if self.unattended.enabled() => "Waiting for helpers".to_owned(),
+                [] => "Unattended access is off".to_owned(),
+                many => format!("{} helpers are connected", many.len()),
             };
             tray.say(&line);
         }

@@ -340,6 +340,7 @@ where
         .await
         .map_err(|_| anyhow!("Nobody is listening for notices"))?;
     let mut throttle = Throttle::default();
+    let seats = Arc::new(tokio::sync::Semaphore::new(MAX_HELPERS));
     loop {
         let incoming = endpoint.accept().await.context("The listener closed")?;
         let knock = async {
@@ -392,6 +393,14 @@ where
                 continue;
             }
         };
+        let Ok(seat) = seats.clone().try_acquire_owned() else {
+            let reason = format!(
+                "That computer already has {MAX_HELPERS} helpers connected. Try again when one leaves"
+            );
+            refuse(connection, send, reason.clone());
+            let _ = notices.send(Notice::Refused { name, peer, reason }).await;
+            continue;
+        };
         let (session, mut worker) = session::channels();
         worker.tools_tx.send_replace(tools && allowed_tools);
         let desktop = desktop.clone();
@@ -407,19 +416,29 @@ where
             })
             .await
             .map_err(|_| anyhow!("Nobody is listening for notices"))?;
-        let result = tokio::select! {
-            _ = stop.cancelled() => Ok(()),
-            _ = ended.cancelled() => Ok(()),
-            result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
-        };
-        connection.close(0u8.into(), b"Session ended");
-        if let Err(error) = result {
-            let _ = notices
-                .send(Notice::Status(format!("The last session ended: {error:#}")))
-                .await;
-        }
+        // Each helper is served on its own, so a second one is answered while
+        // the first is still in, instead of finding the computer silent.
+        let stop = stop.clone();
+        let notices = notices.clone();
+        tokio::spawn(async move {
+            let _seat = seat;
+            let result = tokio::select! {
+                _ = stop.cancelled() => Ok(()),
+                _ = ended.cancelled() => Ok(()),
+                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
+            };
+            connection.close(0u8.into(), b"Session ended");
+            if let Err(error) = result {
+                let _ = notices
+                    .send(Notice::Status(format!("{name}'s session ended: {error:#}")))
+                    .await;
+            }
+        });
     }
 }
+
+/// How many helpers may be connected unattended at once.
+pub const MAX_HELPERS: usize = 8;
 
 /// Tell a helper why it was turned away, and close once it has heard.
 ///

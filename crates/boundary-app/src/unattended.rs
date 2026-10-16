@@ -45,7 +45,8 @@ pub struct Unattended {
     key: Option<boundary_session::unattended::SecretKey>,
     pub access: Access,
     listener: Option<Listener>,
-    pub active: Option<Active>,
+    /// Helpers connected unattended now, in the order they came in.
+    pub active: Vec<Active>,
     ask: Option<Ask>,
     reachable: bool,
     password: String,
@@ -73,7 +74,7 @@ impl Unattended {
             key: None,
             access: Access::default(),
             listener: None,
-            active: None,
+            active: Vec::new(),
             ask: None,
             reachable: false,
             password: String::new(),
@@ -163,7 +164,7 @@ impl Unattended {
     }
     fn halt(&mut self) {
         self.listener = None;
-        self.active = None;
+        self.active.clear();
         self.reachable = false;
         self.listening = None;
         self.handed_over = false;
@@ -252,7 +253,7 @@ impl Unattended {
                         ..
                     } => {
                         log(&self.access_path, &format!("{name} connected"));
-                        self.active = Some(Active {
+                        self.active.push(Active {
                             name,
                             control,
                             tools: session.tools_allowed(),
@@ -290,7 +291,8 @@ impl Unattended {
                 }
             }
         }
-        if let Some(active) = self.active.as_mut() {
+        let mut ended = Vec::new();
+        for (index, active) in self.active.iter_mut().enumerate() {
             while let Ok(event) = active.session.events.try_recv() {
                 match event {
                     boundary_session::Event::Control(control) => active.control = control,
@@ -300,14 +302,19 @@ impl Unattended {
                         active.activity.drain(..excess);
                     }
                     boundary_session::Event::Finished(result) => {
-                        let line = format!("session ended: {result:?}");
-                        self.active = None;
-                        log(&self.access_path, &line);
+                        log(
+                            &self.access_path,
+                            &format!("{}'s session ended: {result:?}", active.name),
+                        );
+                        ended.push(index);
                         break;
                     }
                     _ => {}
                 }
             }
+        }
+        for index in ended.into_iter().rev() {
+            self.active.remove(index);
         }
         if let Some(result) = finished {
             self.halt();
@@ -396,75 +403,72 @@ impl Unattended {
             }
         }
     }
-    /// The banner shown on top of everything while a helper is connected
-    /// unattended. The person at the computer always sees who is in and can
-    /// end it with one click.
+    /// A banner for each helper connected unattended, shown on top of
+    /// everything. The person at the computer always sees who is in and can
+    /// end any of them with one click.
     pub fn banner(&mut self, ui: &mut egui::Ui) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        let name = active.name.clone();
-        let control = active.control;
-        let tools = active.tools;
-        let activity = active.activity.clone();
-        let mut end = false;
-        let mut stop_tools = false;
-        egui::Frame::new()
-            .fill(theme::pal(ui.ctx()).danger)
-            .inner_margin(14.0)
-            .corner_radius(10.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{name} is connected to this computer{}",
-                            if control {
-                                " and can use the mouse and keyboard"
-                            } else {
-                                ", watching"
-                            }
-                        ))
-                        .color(egui::Color32::WHITE)
-                        .strong(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("End their session").clicked() {
-                            end = true;
-                        }
-                        if tools && ui.button("Stop their commands").clicked() {
-                            stop_tools = true;
-                        }
-                    });
-                });
-                if tools {
-                    ui.label(
-                        egui::RichText::new(
-                            "Their tools can run commands and copy files on this computer.",
-                        )
-                        .color(egui::Color32::WHITE),
-                    );
-                }
-                for line in &activity {
-                    ui.label(
-                        egui::RichText::new(line)
+        let mut end = None;
+        let mut stop_tools = None;
+        for (index, active) in self.active.iter().enumerate() {
+            let name = &active.name;
+            let tools = active.tools;
+            egui::Frame::new()
+                .fill(theme::pal(ui.ctx()).danger)
+                .inner_margin(14.0)
+                .corner_radius(10.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{name} is connected to this computer{}",
+                                if active.control {
+                                    " and can use the mouse and keyboard"
+                                } else {
+                                    ", watching"
+                                }
+                            ))
                             .color(egui::Color32::WHITE)
-                            .small(),
-                    );
-                }
-            });
-        ui.add_space(8.0);
-        if stop_tools && let Some(active) = self.active.as_mut() {
+                            .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("End their session").clicked() {
+                                end = Some(index);
+                            }
+                            if tools && ui.button("Stop their commands").clicked() {
+                                stop_tools = Some(index);
+                            }
+                        });
+                    });
+                    if tools {
+                        ui.label(
+                            egui::RichText::new(
+                                "Their tools can run commands and copy files on this computer.",
+                            )
+                            .color(egui::Color32::WHITE),
+                        );
+                    }
+                    for line in &active.activity {
+                        ui.label(
+                            egui::RichText::new(line)
+                                .color(egui::Color32::WHITE)
+                                .small(),
+                        );
+                    }
+                });
+            ui.add_space(8.0);
+        }
+        if let Some(active) = stop_tools.and_then(|i| self.active.get_mut(i)) {
             active.session.set_tools(false);
             active.tools = false;
+            let name = active.name.clone();
             self.say(format!(
                 "{name}'s tools can no longer run commands in this session"
             ));
         }
-        if end {
-            if let Some(active) = self.active.take() {
-                active.session.stop();
-            }
-            self.say(format!("Ended {name}'s session"));
+        if let Some(index) = end.filter(|&i| i < self.active.len()) {
+            let active = self.active.remove(index);
+            active.session.stop();
+            self.say(format!("Ended {}'s session", active.name));
         }
     }
     /// The Unattended access settings, drawn inside a card on the Settings
