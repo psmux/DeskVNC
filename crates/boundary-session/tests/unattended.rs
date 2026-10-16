@@ -406,7 +406,9 @@ async fn at_the_sign_in_screen_strangers_are_refused_and_tools_stay_off() {
         }
         let refused = refused.await.unwrap();
         assert!(
-            refused.as_ref().is_err_and(|e| e.contains("Nobody has signed in")),
+            refused
+                .as_ref()
+                .is_err_and(|e| e.contains("Nobody has signed in")),
             "{refused:?}"
         );
     })

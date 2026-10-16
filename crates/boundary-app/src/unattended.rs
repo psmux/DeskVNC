@@ -53,6 +53,10 @@ pub struct Unattended {
     message: String,
     error: bool,
     autostart: bool,
+    /// Whether the copy at the sign in screen is set up.
+    login: bool,
+    /// Setting that up or taking it away, which waits on an administrator.
+    login_change: Option<std::sync::mpsc::Receiver<(bool, Result<()>)>>,
 }
 
 impl Unattended {
@@ -71,6 +75,8 @@ impl Unattended {
             message: String::new(),
             error: false,
             autostart: autostart::enabled(),
+            login: crate::login::enabled(),
+            login_change: None,
         };
         // Rewrite an existing sign in entry, so one written by an older copy
         // picks up what this one adds (a restart after a crash on macOS) and
@@ -467,6 +473,9 @@ impl Unattended {
                 Err(error) => self.fail(format!("{error:#}")),
             }
         }
+        if crate::login::SUPPORTED && self.access.enabled {
+            self.login_setting(ui);
+        }
         ui.add_space(10.0);
         theme::caption(ui, "Paired helpers");
         if self.access.helpers.is_empty() {
@@ -552,6 +561,59 @@ impl Unattended {
                 },
                 &self.message,
             );
+        }
+    }
+}
+
+impl Unattended {
+    /// Reachable before anyone signs in, after a restart for instance.
+    fn login_setting(&mut self, ui: &mut egui::Ui) {
+        if let Some(change) = self.login_change.as_ref() {
+            match change.try_recv() {
+                Ok((on, Ok(()))) => {
+                    self.login = on;
+                    self.login_change = None;
+                    self.say(if on {
+                        "Paired helpers can now connect at the sign in screen too"
+                    } else {
+                        "Helpers can connect only once somebody signs in"
+                    });
+                }
+                Ok((_, Err(error))) => {
+                    self.login_change = None;
+                    self.fail(format!("{error:#}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(250));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.login_change = None,
+            }
+        }
+        let mut login = self.login;
+        let changed = ui
+            .add_enabled(
+                self.login_change.is_none(),
+                egui::Checkbox::new(
+                    &mut login,
+                    "Also before anyone signs in, such as after a restart",
+                ),
+            )
+            .on_hover_text("Asks for an administrator. At the sign in screen only paired helpers and the unattended password get in, and helpers' tools cannot run commands.")
+            .changed();
+        if changed {
+            // The app in the tray takes over once somebody signs in.
+            if login && !self.autostart && autostart::set(true).is_ok() {
+                self.autostart = true;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let _ = tx.send((login, crate::login::set(login)));
+                ctx.request_repaint();
+            });
+            self.login_change = Some(rx);
+            self.say("Waiting for an administrator to allow it");
         }
     }
 }

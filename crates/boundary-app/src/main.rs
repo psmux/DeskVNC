@@ -4,6 +4,7 @@
 
 mod codes;
 mod install;
+mod login;
 mod network;
 mod theme;
 mod tray;
@@ -17,17 +18,33 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| args.iter().any(|a| a == name);
+    if let Some(code) = other_mode(&args) {
+        std::process::exit(code);
+    }
+    let background = flag("--background");
     // A copy started at sign in steps aside for one already running. Two
     // copies would listen as the same machine ID and keep pushing each other
-    // off the relay, so neither could be reached.
+    // off the relay, so neither could be reached. The copy at the sign in
+    // screen holds the lock for a moment after somebody signs in, so this
+    // waits for it before giving up.
     let _instance = match only_instance() {
         Some(lock) => Some(lock),
-        None if std::env::args().any(|a| a == "--background") => return Ok(()),
+        None if background => {
+            let waited = (0..30).find_map(|_| {
+                std::thread::sleep(Duration::from_secs(1));
+                only_instance()
+            });
+            match waited {
+                Some(lock) => Some(lock),
+                None => return Ok(()),
+            }
+        }
         None => None,
     };
     let runtime = tokio::runtime::Runtime::new().expect("Cannot start the connection runtime");
     let _guard = runtime.enter();
-    let background = std::env::args().any(|a| a == "--background");
     let result = eframe::run_native(
         "Boundary",
         eframe::NativeOptions {
@@ -64,16 +81,65 @@ fn background_policy(_: bool) -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
+/// The modes with no window: the copy at the sign in screen, the Windows
+/// service that starts it, and setting that service up as an administrator.
+/// `Some(exit code)` when this run was one of them.
+fn other_mode(args: &[String]) -> Option<i32> {
+    let after = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+    };
+    let result = if args.iter().any(|a| a == "--login-screen") {
+        login::host()
+    } else if cfg!(windows) && args.iter().any(|a| a == "--service") {
+        #[cfg(windows)]
+        let result = login::service();
+        #[cfg(not(windows))]
+        let result = Ok(());
+        result
+    } else if let Some(owner) = after("--install-service") {
+        #[cfg(windows)]
+        let result = login::install(&owner);
+        #[cfg(not(windows))]
+        let result = {
+            let _ = owner;
+            Ok(())
+        };
+        result
+    } else if args.iter().any(|a| a == "--uninstall-service") {
+        #[cfg(windows)]
+        let result = login::uninstall();
+        #[cfg(not(windows))]
+        let result = Ok(());
+        result
+    } else {
+        return None;
+    };
+    Some(match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error:#}");
+            1
+        }
+    })
+}
+
 /// A lock held for as long as this copy runs, or `None` when another copy
 /// holds it already.
 fn only_instance() -> Option<std::fs::File> {
     let dir = boundary_provision::platform::data_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("running.lock");
+    // The copy at the sign in screen runs as root on macOS, and a lock file
+    // it created cannot be opened for writing by the person afterwards. A
+    // lock needs no writing.
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("running.lock"))
+        .open(&path)
+        .or_else(|_| std::fs::File::open(&path))
         .ok()?;
     file.try_lock().ok()?;
     Some(file)
