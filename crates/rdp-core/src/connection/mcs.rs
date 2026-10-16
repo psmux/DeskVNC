@@ -157,7 +157,7 @@ pub fn client_blocks(opts: &ResolvedOptions, selected: SecurityProtocol) -> Clie
                     // records the 2020-08-17 erratum saying the flag is
                     // unused and must be ignored; we set it because every
                     // client does and a server that reads it expects it.
-                    options: rdp_pdu::gcc::client::channel_option::INITIALIZED,
+                    options: channel_options(name),
                 })
                 .collect(),
         }),
@@ -166,6 +166,21 @@ pub fn client_blocks(opts: &ResolvedOptions, selected: SecurityProtocol) -> Clie
         // server answers with `TS_UD_SC_MCS_MSGCHANNEL` or does not.
         message_channel: Some(ClientMessageChannelData::default()),
         ..ClientGccBlocks::default()
+    }
+}
+
+/// The `CHANNEL_DEF.options` a static channel is asked for with.
+///
+/// `cliprdr` also gets `CHANNEL_OPTION_SHOW_PROTOCOL`, as in Windows' own
+/// client: a Windows server answered none of our clipboard PDUs without it
+/// (issue #9). Compression and RDP encryption stay off; the session runs
+/// inside TLS and the channel layer here does not decompress.
+fn channel_options(name: &str) -> u32 {
+    use rdp_pdu::gcc::client::channel_option;
+    if name == crate::options::CHANNEL_CLIPRDR {
+        channel_option::INITIALIZED | channel_option::SHOW_PROTOCOL
+    } else {
+        channel_option::INITIALIZED
     }
 }
 
@@ -840,5 +855,29 @@ mod tests {
         });
         let err = read_attach_user_confirm(&frame).unwrap_err();
         assert!(err.to_string().contains("channel-connection"), "{err}");
+    }
+
+    /// Windows answered none of our clipboard PDUs until `cliprdr` was asked
+    /// for with `CHANNEL_OPTION_SHOW_PROTOCOL`, the way its own client asks
+    /// (issue #9). The other channels keep the plain option.
+    #[test]
+    fn cliprdr_is_asked_for_with_its_header_shown() {
+        use rdp_pdu::gcc::client::channel_option;
+        let blocks = client_blocks(&opts(), SecurityProtocol::Hybrid);
+        let channels = &blocks.network.expect("network data").channels;
+        let clip = channels
+            .iter()
+            .find(|c| c.name == crate::options::CHANNEL_CLIPRDR)
+            .expect("cliprdr requested by default");
+        assert_eq!(
+            clip.options,
+            channel_option::INITIALIZED | channel_option::SHOW_PROTOCOL
+        );
+        for other in channels
+            .iter()
+            .filter(|c| c.name != crate::options::CHANNEL_CLIPRDR)
+        {
+            assert_eq!(other.options, channel_option::INITIALIZED, "{}", other.name);
+        }
     }
 }
