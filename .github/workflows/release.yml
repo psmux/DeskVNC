@@ -132,7 +132,38 @@ jobs:
           sudo apt-get install -y \
             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev \
-            clang libclang-dev
+            clang libclang-dev zstd
+
+      # The pipewire crates need PipeWire 1.0 headers, and 22.04 has 0.3.48.
+      # Building on 24.04 would cost every distribution older than it, so
+      # compile against Ubuntu 24.04's own 1.0.5 headers, pinned by hash, and
+      # keep linking against this runner's 0.3.48 library. The link fails if
+      # the app needs anything 0.3.48 lacks, so a build that passes starts on
+      # Ubuntu 22.04 and Debian 12 too.
+      - name: Use PipeWire 1.0 headers against the 22.04 library
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          pool=http://archive.ubuntu.com/ubuntu/pool/main/p/pipewire
+          headers=$RUNNER_TEMP/pipewire-headers
+          mkdir -p "$RUNNER_TEMP/pw" "$headers/pkgconfig"
+          cd "$RUNNER_TEMP/pw"
+          while read -r sum deb; do
+            curl -fsSLO "$pool/$deb"
+            echo "$sum  $deb" | sha256sum -c -
+            ar p "$deb" data.tar.zst | zstd -dc | tar -x -C "$headers" ./usr/include
+          done <<'DEBS'
+          1a0267989f02a8729cdb4df36d9acf3a5ac1a525200d428baffe8961ccb0e0ba libpipewire-0.3-dev_1.0.5-1ubuntu3.3_amd64.deb
+          93a60e7656fb35c97a78159fd0556842c62c2d8b9aff096009f9a20c64c1f272 libspa-0.2-dev_1.0.5-1ubuntu3.3_amd64.deb
+          DEBS
+          system=$(pkg-config --variable=libdir libpipewire-0.3)
+          printf '%s\n' "Name: libspa" "Description: SPA 1.0.5 headers" "Version: 1.0.5" \
+            "Cflags: -I$headers/usr/include/spa-0.2 -D_REENTRANT" > "$headers/pkgconfig/libspa-0.2.pc"
+          printf '%s\n' "Name: libpipewire" "Description: PipeWire 1.0.5 headers, system library" "Version: 1.0.5" \
+            "Requires: libspa-0.2" "Libs: -L$system -lpipewire-0.3" \
+            "Cflags: -I$headers/usr/include/pipewire-0.3 -D_REENTRANT" > "$headers/pkgconfig/libpipewire-0.3.pc"
+          echo "PKG_CONFIG_PATH=$headers/pkgconfig" >> "$GITHUB_ENV"
+          echo "linking against $(readlink -f "$system/libpipewire-0.3.so")"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -305,6 +336,19 @@ jobs:
             Full changes in [CHANGELOG.md](https://github.com/psmux/DeskVNC/blob/main/CHANGELOG.md).
           releaseDraft: true
           prerelease: false
+
+      # Resolve every symbol now, the way the dynamic loader does at start,
+      # against this runner's 22.04 libraries. Anything that only a newer
+      # PipeWire or glibc has fails here instead of on someone's desktop.
+      - name: Check the Linux app loads with 22.04 libraries
+        if: runner.os == 'Linux'
+        run: |
+          app=target/${{ matrix.bundle-target }}/release/deskvncviewer
+          if ldd -r "$app" 2>&1 | grep -E "undefined symbol|not found"; then
+            echo "::error::$app needs a library or symbol Ubuntu 22.04 does not have"
+            exit 1
+          fi
+          ldd "$app" | grep -E "pipewire|libc\.so"
 
       # The bundler signs the viewer from a keychain it creates and destroys
       # within its own step, so nothing it set up survives to here. The support
