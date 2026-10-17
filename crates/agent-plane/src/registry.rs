@@ -208,6 +208,16 @@ impl AttachedLimb {
         &self.inner.id
     }
 
+    /// Whatever carried this limb's commands to its session has gone, so
+    /// nothing sent to it can arrive again.
+    ///
+    /// A limb in this state still reads connected and still holds its lease,
+    /// and every intent sent to it settles `LinkLost`. It is a limb to replace,
+    /// never one to hand back to an attach.
+    pub fn is_severed(&self) -> bool {
+        self.inner.handle.commands.is_closed()
+    }
+
     /// Which machine.
     pub fn machine(&self) -> &MachineKey {
         &self.inner.machine
@@ -425,7 +435,16 @@ impl LimbRegistry {
             // agent restarted, are the same code path and the same id. That is
             // the reproducibility `02 §4` needs and it is why an agent's next
             // run is cheap.
-            return Ok(existing.clone());
+            //
+            // A severed limb is the exception, and is replaced below rather
+            // than reused. Handing it back threw away the live handle this
+            // attach arrived with and kept the dead one, so an agent that
+            // reopened a machine after its relay died got `LinkLost` on every
+            // intent until the process holding it was restarted.
+            if !existing.is_severed() {
+                return Ok(existing.clone());
+            }
+            limbs.remove(&id);
         }
 
         if limbs.len() >= self.config.max_driven_limbs {
