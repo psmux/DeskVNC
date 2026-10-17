@@ -83,5 +83,9 @@ async fn first_screen(session: &mut Session, out: &str, started: Instant) -> any
             }
         }
     }
+    // HELPER_HOLD=<seconds> stays connected that long after the first screen.
+    if let Some(seconds) = std::env::var("HELPER_HOLD").ok().and_then(|s| s.parse().ok()) {
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
+    }
     Ok(())
 }
