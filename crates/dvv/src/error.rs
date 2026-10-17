@@ -187,7 +187,7 @@ pub fn hint_for(code: &str) -> &'static str {
             "The screen resized under this action and nothing was delivered. Call dvv_screen again and recompute the coordinate against the new generation."
         }
         "SCREEN_CHANGED" => {
-            "Something large repainted on that machine since you last looked at it, so nothing was typed. Call dvv_screen, read what has focus and what is selected, and only then type. Do not retry the same keystrokes without looking: this fires when a window, a dialog or an application has appeared over what you were working on."
+            "Something large repainted on that machine since you last looked at it. Call dvv_screen once (scale 0.25 is enough), check what has focus and what is selected, then send the same call again. If the message says part of the text went before the refusal, send only the part it says did not. Do not retry without looking: this fires when a window, a dialog or an application has appeared over what you were working on."
         }
         "UNFENCED" => {
             "This action carries a coordinate and no geometry generation. Read the generation from dvv_screen or dvv_status and send it back as generation."

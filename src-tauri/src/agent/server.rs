@@ -3447,13 +3447,20 @@ mod tests {
     /// Not [`paint`], which also consumes the damage: these tests care about
     /// what the update did to the CONTENT counter and want the damage log left
     /// exactly as a real update would leave it.
+    ///
+    /// Each call paints a colour no earlier call painted. The content fence
+    /// counts pixels that CHANGED, so a repaint in the colour already there is
+    /// a resend and moves nothing, which is the point of measuring it that way
+    /// and not what these tests are about.
     fn repaint(ctx: &Ctx, width: u16, height: u16) {
+        static SHADE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(100);
+        let shade = SHADE.fetch_add(7, std::sync::atomic::Ordering::Relaxed);
         ctx.plane.feed(
             "s1",
             &[vnc_core::DecodedRect {
                 rect: Rect::new(0, 0, width, height),
                 payload: vnc_core::RectPayload::Rgba(
-                    [40u8, 80, 160, 255].repeat(width as usize * height as usize),
+                    [shade, 255 - shade, 7, 255].repeat(width as usize * height as usize),
                 ),
             }],
         );

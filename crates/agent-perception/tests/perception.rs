@@ -599,3 +599,164 @@ fn the_content_hint_is_absent_and_every_rgba_rect_is_unknown() {
     assert_eq!(json["availability"], "absent");
     assert!(json.get("value").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// What the content fence is fed: pixels that changed, not rectangles sent.
+// ---------------------------------------------------------------------------
+
+/// The share of a 1280x720 screen an update changed, as the fence reads it.
+fn share(changed: Option<u64>) -> f64 {
+    changed.expect("a mirror is attached") as f64 / (1280.0 * 720.0)
+}
+
+/// Paint one pixel of a 1280 wide RGBA frame.
+fn put(frame: &mut [u8], x: usize, y: usize, colour: [u8; 4]) {
+    frame[(y * 1280 + x) * 4..(y * 1280 + x) * 4 + 4].copy_from_slice(&colour);
+}
+
+/// A frame of the Pi's desktop: a light background with a dark terminal on
+/// it, so the tests below are about a picture with something in it rather
+/// than a flat colour.
+fn desktop() -> Vec<u8> {
+    let mut frame = [230u8, 230, 230, 255].repeat(1280 * 720);
+    for y in 100..500 {
+        for x in 100..800 {
+            put(&mut frame, x, y, [20, 20, 20, 255]);
+        }
+    }
+    frame
+}
+
+fn whole_screen(frame: Vec<u8>) -> DecodedRect {
+    DecodedRect {
+        rect: Rect::new(0, 0, 1280, 720),
+        payload: RectPayload::Rgba(frame),
+    }
+}
+
+/// The Raspberry Pi incident. wayvnc resent the whole screen around a
+/// blinking caret, and counted by rectangle area each blink was a new window.
+/// Counted by what changed, an identical resend is nothing and a caret blink
+/// inside one is a cell or two.
+#[test]
+fn a_whole_screen_resend_that_only_moves_the_caret_is_not_a_new_screen() {
+    let (mut slot, _) = primed(1280, 720);
+    slot.apply(&[whole_screen(desktop())]);
+
+    assert_eq!(slot.apply(&[whole_screen(desktop())]), Some(0));
+
+    let mut blink = desktop();
+    for y in 300..318 {
+        for x in 400..409 {
+            put(&mut blink, x, y, [240, 240, 240, 255]);
+        }
+    }
+    let changed = slot.apply(&[whole_screen(blink)]);
+    assert!(
+        share(changed) < 0.01,
+        "a caret blink changed {changed:?} pixels, which the fence would read as a new window"
+    );
+    assert!(
+        changed.unwrap() > 0,
+        "the blink is still a change, just a small one"
+    );
+}
+
+/// A caret on one side of the screen and a clock on the other, in the same
+/// update, are two small changes and not one window the size of both.
+#[test]
+fn a_caret_and_a_clock_far_apart_are_not_one_big_window() {
+    let (mut slot, _) = primed(1280, 720);
+    slot.apply(&[whole_screen(desktop())]);
+
+    let mut both = desktop();
+    for y in 300..318 {
+        for x in 120..129 {
+            put(&mut both, x, y, [240, 240, 240, 255]);
+        }
+    }
+    for y in 4..22 {
+        for x in 1200..1260 {
+            put(&mut both, x, y, [0, 0, 0, 255]);
+        }
+    }
+    let changed = slot.apply(&[whole_screen(both)]);
+    assert!(
+        share(changed) < 0.02,
+        "a caret and a clock changed {changed:?} pixels between them"
+    );
+}
+
+/// The other edge, which has to hold or the fence is gone. A dialog painted
+/// in the same colour as what is behind it changes only its outline and its
+/// title, and that must still count as a new screen.
+#[test]
+fn a_window_opening_still_counts_even_when_it_is_the_colour_behind_it() {
+    let (mut slot, _) = primed(1280, 720);
+    slot.apply(&[whole_screen(desktop())]);
+
+    // A 600x400 window whose body is the desktop's own grey: a one pixel
+    // border, a title bar, and nothing else.
+    let mut dialog = desktop();
+    for x in 340..940 {
+        put(&mut dialog, x, 160, [90, 90, 90, 255]);
+        put(&mut dialog, x, 559, [90, 90, 90, 255]);
+        for y in 161..190 {
+            put(&mut dialog, x, y, [50, 90, 160, 255]);
+        }
+    }
+    for y in 160..560 {
+        put(&mut dialog, 340, y, [90, 90, 90, 255]);
+        put(&mut dialog, 939, y, [90, 90, 90, 255]);
+    }
+    let changed = slot.apply(&[whole_screen(dialog)]);
+    assert!(
+        share(changed) >= f64::from(limb_core::fence::MATERIAL_REPAINT),
+        "a 600x400 window's outline changed only {changed:?} pixels, which would let typing into it through"
+    );
+}
+
+/// A real full repaint, such as an application going full screen.
+#[test]
+fn a_full_repaint_counts_as_the_whole_screen() {
+    let (mut slot, _) = primed(1280, 720);
+    let changed = slot.apply(&[rgba(0, 0, 1280, 720, [10, 120, 10, 255])]);
+    assert_eq!(changed, Some(1280 * 720));
+}
+
+/// A rectangle whose pixels cannot be compared counts as changed. An H.264
+/// rect has no decoder here, so not knowing what it painted is read as
+/// everything under it, which is the safe direction.
+#[test]
+fn a_rect_that_cannot_be_compared_counts_as_changed() {
+    let (mut slot, _) = primed(1280, 720);
+    let changed = slot.apply(&[h264(0, 0, 640, 720)]);
+    assert_eq!(changed, Some(640 * 720));
+}
+
+/// A scroll arrives as a `CopyRect`, and a page that moved is a page whose
+/// lines are now somewhere else.
+#[test]
+fn a_scroll_by_copy_rect_counts_what_moved() {
+    let (mut slot, _) = primed(1280, 720);
+    // Stripes, so a copy shifted by one stripe lands on a different colour.
+    let mut stripes = Vec::with_capacity(1280 * 720 * 4);
+    for y in 0..720usize {
+        let shade = if (y / 20) % 2 == 0 { 30 } else { 220 };
+        stripes.extend([shade, shade, shade, 255].repeat(1280));
+    }
+    slot.apply(&[whole_screen(stripes)]);
+    let changed = slot.apply(&[DecodedRect {
+        rect: Rect::new(0, 0, 1280, 700),
+        payload: RectPayload::CopyRect { src_x: 0, src_y: 20 },
+    }]);
+    assert!(share(changed) > 0.9, "a scrolled page changed {changed:?}");
+}
+
+/// No mirror, nothing to compare against: the caller is told so rather than
+/// handed a zero that reads as nothing changed.
+#[test]
+fn without_a_mirror_there_is_no_answer_rather_than_a_zero() {
+    let mut slot = MirrorSlot::default();
+    assert_eq!(slot.apply(&[rgba(0, 0, 8, 8, [1, 2, 3, 255])]), None);
+}
