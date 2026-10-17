@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DeskVNCViewer",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "identifier": "com.deskvncviewer.desktop",
   "build": {
     "beforeDevCommand": "npm run dev --prefix ../ui",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build --prefix ../ui",
+    "beforeBundleCommand": "cargo build --release -p dvv",
     "frontendDist": "../ui/dist"
   },
   "app": {
@@ -46,6 +47,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0",
+      "files": {
+        "MacOS/dvv": "../target/release/dvv"
+      },
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true
     }

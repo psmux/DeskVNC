@@ -41,6 +41,52 @@ pub fn data_dir() -> Result<PathBuf> {
             .join("boundary"),
     })
 }
+/// What to call this computer when a helper saves it.
+pub fn computer_name() -> String {
+    let name = if cfg!(target_os = "macos") {
+        std::process::Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()
+    } else {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|s| s.trim().to_string())
+    };
+    name.filter(|n| !n.is_empty() && n.len() <= 80)
+        .unwrap_or_else(|| "This computer".into())
+}
+/// Claim this computer's unattended listener for this process.
+///
+/// DeskVNC and DeskVNC Support share one identity, so only one of them may
+/// listen as it. `Ok(None)` means another app on this computer is listening
+/// now. The claim lasts as long as the returned file is held, and ends with
+/// the process however it ends.
+pub fn claim_unattended() -> Result<Option<std::fs::File>> {
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("unattended.lock");
+    // On macOS the copy at the login window runs as root and may have made
+    // this file, which the person then cannot open for writing. A lock needs
+    // no writing.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .or_else(|_| std::fs::File::open(&path))
+        .context("Cannot open the unattended access lock")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).context("Cannot take the unattended access lock")
+        }
+    }
+}
 pub fn candidates(platform: Platform, provider: Provider) -> Vec<PathBuf> {
     let paths: &[&str] = match (platform, provider) {
         (Platform::MacOS, Provider::Tailscale) => &[

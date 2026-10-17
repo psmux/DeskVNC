@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-set-control"
+description = "Enables the support_set_control command without any pre-configured scope."
+commands.allow = ["support_set_control"]
+
+[[permission]]
+identifier = "deny-support-set-control"
+description = "Denies the support_set_control command without any pre-configured scope."
+commands.deny = ["support_set_control"]

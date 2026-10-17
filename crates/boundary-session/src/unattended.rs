@@ -262,6 +262,35 @@ pub fn listen<F>(options: HostOptions, key: SecretKey, access_path: PathBuf, des
 where
     F: Fn() -> Result<Box<dyn Desktop>> + Send + Sync + 'static,
 {
+    spawn_listener(options, key, access_path, false, desktop)
+}
+
+/// Listen as [`listen`] does, on a computer where nobody has signed in yet.
+/// Nobody is there to approve a helper who is not paired, so one is turned
+/// away rather than asked about, and nothing is offered to a helper's tools:
+/// at the sign in screen a command would run as the system, not as a person.
+pub fn listen_at_login<F>(
+    options: HostOptions,
+    key: SecretKey,
+    access_path: PathBuf,
+    desktop: F,
+) -> Listener
+where
+    F: Fn() -> Result<Box<dyn Desktop>> + Send + Sync + 'static,
+{
+    spawn_listener(options, key, access_path, true, desktop)
+}
+
+fn spawn_listener<F>(
+    options: HostOptions,
+    key: SecretKey,
+    access_path: PathBuf,
+    login: bool,
+    desktop: F,
+) -> Listener
+where
+    F: Fn() -> Result<Box<dyn Desktop>> + Send + Sync + 'static,
+{
     let (notices_tx, notices) = mpsc::channel(32);
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
@@ -270,7 +299,7 @@ where
         let result = tokio::select! {
             biased;
             _ = stop.cancelled() => Ok(()),
-            result = run_listener(&notices_tx, &stop, options, key, &access_path, desktop) => result,
+            result = run_listener(&notices_tx, &stop, options, key, &access_path, login, desktop) => result,
         };
         let _ = notices_tx.send(Notice::Finished(result)).await;
     });
@@ -283,6 +312,7 @@ async fn run_listener<F>(
     options: HostOptions,
     key: SecretKey,
     access_path: &Path,
+    login: bool,
     desktop: Arc<F>,
 ) -> Result<()>
 where
@@ -310,6 +340,7 @@ where
         .await
         .map_err(|_| anyhow!("Nobody is listening for notices"))?;
     let mut throttle = Throttle::default();
+    let seats = Arc::new(tokio::sync::Semaphore::new(MAX_HELPERS));
     loop {
         let incoming = endpoint.accept().await.context("The listener closed")?;
         let knock = async {
@@ -346,9 +377,13 @@ where
             Err(error) => Decision::Refuse(format!("{error:#}")),
         };
         let decision = match decision {
+            Decision::Ask if login => Decision::Refuse(
+                "Nobody has signed in on that computer, so nobody can approve you. Ask to be paired, or use its unattended password".into(),
+            ),
             Decision::Ask => ask(notices, access_path, &name, &peer, tools).await,
             other => other,
         };
+        let tools = tools && !login;
         let (control, allowed_tools) = match decision {
             Decision::Grant(control, tools) => (control, tools),
             Decision::Ask => unreachable!("answered above"),
@@ -357,6 +392,14 @@ where
                 let _ = notices.send(Notice::Refused { name, peer, reason }).await;
                 continue;
             }
+        };
+        let Ok(seat) = seats.clone().try_acquire_owned() else {
+            let reason = format!(
+                "That computer already has {MAX_HELPERS} helpers connected. Try again when one leaves"
+            );
+            refuse(connection, send, reason.clone());
+            let _ = notices.send(Notice::Refused { name, peer, reason }).await;
+            continue;
         };
         let (session, mut worker) = session::channels();
         worker.tools_tx.send_replace(tools && allowed_tools);
@@ -373,19 +416,38 @@ where
             })
             .await
             .map_err(|_| anyhow!("Nobody is listening for notices"))?;
-        let result = tokio::select! {
-            _ = stop.cancelled() => Ok(()),
-            _ = ended.cancelled() => Ok(()),
-            result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
-        };
-        connection.close(0u8.into(), b"Session ended");
-        if let Err(error) = result {
-            let _ = notices
-                .send(Notice::Status(format!("The last session ended: {error:#}")))
+        // Each helper is served on its own, so a second one is answered while
+        // the first is still in, instead of finding the computer silent.
+        let stop = stop.clone();
+        let notices = notices.clone();
+        tokio::spawn(async move {
+            let _seat = seat;
+            let result = tokio::select! {
+                _ = stop.cancelled() => Ok(()),
+                _ = ended.cancelled() => Ok(()),
+                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
+            };
+            connection.close(0u8.into(), b"Session ended");
+            // Whoever holds the session hears that it ended, so a banner
+            // saying the helper is in does not outlive the helper.
+            let reason = result.as_ref().err().map(|error| format!("{error:#}"));
+            let _ = worker
+                .emit(Event::Finished(match &reason {
+                    Some(reason) => Err(anyhow!("{reason}")),
+                    None => Ok(()),
+                }))
                 .await;
-        }
+            if let Some(reason) = reason {
+                let _ = notices
+                    .send(Notice::Status(format!("{name}'s session ended: {reason}")))
+                    .await;
+            }
+        });
     }
 }
+
+/// How many helpers may be connected unattended at once.
+pub const MAX_HELPERS: usize = 8;
 
 /// Tell a helper why it was turned away, and close once it has heard.
 ///

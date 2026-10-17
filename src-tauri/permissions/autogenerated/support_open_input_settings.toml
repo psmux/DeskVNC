@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-open-input-settings"
+description = "Enables the support_open_input_settings command without any pre-configured scope."
+commands.allow = ["support_open_input_settings"]
+
+[[permission]]
+identifier = "deny-support-open-input-settings"
+description = "Denies the support_open_input_settings command without any pre-configured scope."
+commands.deny = ["support_open_input_settings"]

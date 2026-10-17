@@ -143,6 +143,7 @@ fn main() {
             // credentials (write/query only, passwords never flow back to JS)
             "save_password",
             "has_password",
+            "saved_user_names",
             "delete_password",
             "credential_backend",
             "unlock_credentials",
@@ -156,9 +157,35 @@ fn main() {
             // sessions
             "connect_session",
             "connect_boundary",
+            "boundary_permission",
             "boundary_provider_start",
             "boundary_provider_status",
             "boundary_provider_cancel",
+            // Get help: sharing THIS computer. Granted to the main window
+            // only. A session window has no business approving a helper or
+            // switching on unattended access.
+            "support_state",
+            "support_refresh_displays",
+            "support_set_display",
+            "support_set_code_service",
+            "support_share",
+            "support_stop",
+            "support_full_invitation",
+            "support_answer",
+            "support_answer_ask",
+            "support_set_control",
+            "support_set_tools",
+            "support_pair",
+            "support_set_unattended",
+            "support_set_helper",
+            "support_remove_helper",
+            "support_set_password",
+            "support_set_autostart",
+            "support_end_unattended",
+            "support_stop_unattended_tools",
+            "support_request_screen_permission",
+            "support_open_input_settings",
+            "support_save_network",
             "disconnect_session",
             "send_input",
             "trace_enabled",
@@ -243,6 +270,10 @@ fn main() {
             // reading the plane's state and spawning a process are not the
             // same act.
             "agent_register_with_claude",
+            // Writing the dvv entry into the config of each coding agent this
+            // machine has, which is what the AI Agents panel's Set up button
+            // runs.
+            "agent_setup_agents",
         ]),
     ))
     .expect("failed to run tauri-build");

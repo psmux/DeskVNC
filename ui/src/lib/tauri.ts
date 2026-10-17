@@ -703,6 +703,23 @@ export interface LocalKeys {
  * dialog over. An empty list leaves the picker with its Browse button, which
  * is exactly the right answer.
  */
+/** The account names saved beside a host's passwords. Never a password. */
+export interface SavedUserNames {
+  vncUser: string | null;
+  rdpUser: string | null;
+  rdpDomain: string | null;
+  sshUser: string | null;
+}
+
+export function savedUserNames(hostId: string): Promise<SavedUserNames | null> {
+  return safeInvoke<SavedUserNames | null>("saved_user_names", { hostId }, null);
+}
+
+/** Whether the keychain holds a credential this protocol could use. */
+export function hasSavedPassword(hostId: string, protocol: ProtocolKind): Promise<boolean | null> {
+  return safeInvoke<boolean | null>("has_password", { hostId, protocol }, null);
+}
+
 export function sshListLocalKeys(): Promise<LocalKeys> {
   return safeInvoke<LocalKeys>("ssh_list_local_keys", {}, { dir: "", keys: [] });
 }

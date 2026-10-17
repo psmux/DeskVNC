@@ -115,6 +115,42 @@ fn attaching_the_same_machine_at_the_same_slot_twice_is_one_limb() {
 }
 
 #[test]
+fn a_limb_whose_channel_closed_is_replaced_when_attached_again() {
+    // The iMac case. A holder's relay stopped after the application refused
+    // one command, which closed the limb's channel. The limb still read
+    // connected, and reopening the machine handed back the same dead limb
+    // and dropped the live handle the reopen had just built, so every exec
+    // after that settled link-lost until the holder was killed.
+    let grant = operator("att_severed", "imac.example");
+    let registry = LimbRegistry::new(PlaneConfig::default());
+
+    let (handle, rx) = fake_session("imac.example", 16);
+    let severed = registry
+        .attach(
+            &grant,
+            Attach {
+                handle,
+                ..attach_request("imac.example", Slot::ATTACH, 16)
+            },
+        )
+        .expect("attached");
+    assert!(!severed.is_severed());
+    drop(rx);
+    assert!(severed.is_severed(), "a dropped receiver is a severed limb");
+
+    let fresh = registry
+        .attach(&grant, attach_request("imac.example", Slot::ATTACH, 16))
+        .expect("attached again");
+    assert_eq!(fresh.id(), severed.id(), "the same machine is the same id");
+    assert!(!fresh.is_severed(), "the reopen's live handle was kept");
+    assert_eq!(registry.len(), 1, "replaced, not added beside it");
+    assert!(
+        !registry.get(fresh.id()).expect("resolves").is_severed(),
+        "the id now resolves to the live limb"
+    );
+}
+
+#[test]
 fn a_slot_above_zero_opens_its_own_and_never_adopts() {
     let grant = operator("att_slots", "desk.example");
     let registry = LimbRegistry::new(PlaneConfig::default());

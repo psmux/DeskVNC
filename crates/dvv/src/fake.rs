@@ -23,7 +23,8 @@
 
 use crate::error::{codes, ToolError};
 use crate::plane::{
-    FileEntry, FileOp, FileOutcome, HostRecord, OpenRequest, SessionSource, TypingRefused,
+    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, OpenRequest, SessionSource,
+    TypingRefused,
 };
 use agent_plane::{Attach, Damage, Frame, FrameSource, LimbRegistry, PerceptionUnavailable};
 use limb_core::capability::Capability;
@@ -71,6 +72,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Recorder {
     receiver: Mutex<mpsc::Receiver<ClientCommand>>,
     seen: Mutex<Vec<ClientCommand>>,
+    /// Key presses ever received, which [`Recorder::clear`] does not reset,
+    /// so a far side refusal can be counted across a cleared recorder.
+    presses: Mutex<u64>,
 }
 
 impl Recorder {
@@ -78,6 +82,7 @@ impl Recorder {
         Recorder {
             receiver: Mutex::new(receiver),
             seen: Mutex::new(Vec::new()),
+            presses: Mutex::new(0),
         }
     }
 
@@ -85,6 +90,9 @@ impl Recorder {
         let mut receiver = lock(&self.receiver);
         let mut seen = lock(&self.seen);
         while let Ok(command) = receiver.try_recv() {
+            if matches!(command, ClientCommand::Key { down: true, .. }) {
+                *lock(&self.presses) += 1;
+            }
             seen.push(command);
         }
     }
@@ -413,6 +421,17 @@ pub struct FakeSource {
     /// stops a `Type` before lowering it says so with
     /// [`FakeSource::refuse_typing`].
     typing_refusals: Mutex<BTreeMap<String, TypingRefused>>,
+    /// Which limbs' far side accepts only so many more key presses, and the
+    /// refusal it answers the rest with. See [`FakeSource::refuse_presses_after`].
+    press_refusals: Mutex<BTreeMap<String, PressRefusal>>,
+}
+
+/// A far side that takes `allowed` more key presses and refuses the rest.
+struct PressRefusal {
+    allowed: u64,
+    /// The recorder's press count when this was set, or at the last settle.
+    settled: u64,
+    refusal: TypingRefused,
 }
 
 impl FakeSource {
@@ -426,6 +445,7 @@ impl FakeSource {
             states: Mutex::new(BTreeMap::new()),
             disk: Mutex::new(BTreeMap::new()),
             typing_refusals: Mutex::new(BTreeMap::new()),
+            press_refusals: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -451,6 +471,31 @@ impl FakeSource {
             TypingRefused {
                 code: codes::SCREEN_CHANGED.to_string(),
                 why: why.to_string(),
+            },
+        );
+    }
+
+    /// Make the far side of this limb accept `allowed` more key presses and
+    /// refuse every one after them with `code`, the way the application
+    /// refuses a `limb.command` partway through a long `type` when the screen
+    /// changes or the session's queue stays full.
+    pub fn refuse_presses_after(&self, limb: &str, allowed: u64, code: &str, why: &str) {
+        let settled = self
+            .recorder(limb)
+            .map(|recorder| {
+                recorder.pump();
+                *lock(&recorder.presses)
+            })
+            .unwrap_or(0);
+        lock(&self.press_refusals).insert(
+            limb.to_string(),
+            PressRefusal {
+                allowed,
+                settled,
+                refusal: TypingRefused {
+                    code: code.to_string(),
+                    why: why.to_string(),
+                },
             },
         );
     }
@@ -640,6 +685,23 @@ impl SessionSource for FakeSource {
 
     fn typing_fence(&self, limb: &LimbId) -> Option<TypingRefused> {
         lock(&self.typing_refusals).get(limb.as_str()).cloned()
+    }
+
+    fn settle_input(&self, limb: &LimbId) -> Option<InputRefused> {
+        let recorder = self.recorder(limb.as_str())?;
+        recorder.pump();
+        let total = *lock(&recorder.presses);
+        let mut refusals = lock(&self.press_refusals);
+        let rule = refusals.get_mut(limb.as_str())?;
+        let fresh = total.saturating_sub(rule.settled);
+        rule.settled = total;
+        let refused = fresh.saturating_sub(rule.allowed);
+        rule.allowed = rule.allowed.saturating_sub(fresh);
+        (refused > 0).then(|| InputRefused {
+            code: rule.refusal.code.clone(),
+            why: rule.refusal.why.clone(),
+            presses_refused: refused.min(u64::from(u32::MAX)) as u32,
+        })
     }
 
     /// One file operation against the map.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-share"
+description = "Enables the support_share command without any pre-configured scope."
+commands.allow = ["support_share"]
+
+[[permission]]
+identifier = "deny-support-share"
+description = "Denies the support_share command without any pre-configured scope."
+commands.deny = ["support_share"]

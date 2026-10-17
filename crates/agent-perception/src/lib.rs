@@ -120,6 +120,6 @@ pub use ladder::{
     FrameObservation, Read, ReadKind, ReadRequest, Rung, ScreenFacts, ScreenList, Space,
     StalePolicy,
 };
-pub use mirror::{mirror_safety, Mirror, MirrorSafety, MirrorSlot};
+pub use mirror::{mirror_safety, Mirror, MirrorSafety, MirrorSlot, CHANGE_CELL};
 pub use signals::{stale_reason_for, ContentHint, PerceptionSignals, CONTENT_HINT_REASON};
 pub use transform::{ImageSpace, OutOfImage, OutsideRegion};

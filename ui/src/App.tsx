@@ -15,6 +15,7 @@ import { TabStrip, tabPanelId } from "./components/TabStrip";
 import { Pane } from "./components/Pane";
 import { SplitView } from "./components/SplitView";
 import { AgentWall } from "./components/AgentWall";
+import { SupportOverlay } from "./components/SupportOverlay";
 import { ToastShelf } from "./components/primitives";
 import { panes } from "./lib/layout";
 import { inTauri, safeListen } from "./lib/tauri";
@@ -395,6 +396,11 @@ function MainShell(): ReactNode {
 
   return (
     <div className="flex h-full flex-col">
+      {/*
+        Get help: the approval a helper waits on, and a banner for as long as
+        one is connected to this computer. Above everything, tabs included.
+      */}
+      <SupportOverlay />
       {/*
         The strip appears as soon as anything is open in a tab, whatever the
         preference says now: switching back to separate windows must not strand

@@ -31,6 +31,7 @@ pub async fn save_password(
     creds: StoredCredentials,
 ) -> Result<(), String> {
     let credentials = state.credentials.clone();
+    let store = state.store.clone();
     super::blocking(move || {
         let existing = match credentials.load(&host_id) {
             Ok(existing) => existing.unwrap_or_default(),
@@ -41,7 +42,77 @@ pub async fn save_password(
                 StoredCredentials::default()
             }
         };
-        credentials.save(&host_id, &merge_dialog_write(creds, existing))
+        let merged = merge_dialog_write(creds, existing);
+        credentials.save(&host_id, &merged)?;
+        // The library row carries the flag the editor and the key icon read.
+        // Only a successful connect used to set it, so a password saved in
+        // the editor came back looking blank the next time it was opened.
+        if holds_password(&merged) {
+            mark_saved(&store, &host_id, true);
+        }
+        Ok::<(), vnc_store::Error>(())
+    })
+    .await
+}
+
+/// A password of any kind. An SSH key passphrase alone does not count: the
+/// key icon has always meant "you will not be asked for a password".
+fn holds_password(creds: &StoredCredentials) -> bool {
+    creds.vnc_password.is_some()
+        || creds.vencrypt_pass.is_some()
+        || creds.rdp_password.is_some()
+        || creds.ssh_password.is_some()
+}
+
+/// Set the library row's `has_password`. A failure here is logged and not
+/// returned: the secret itself is already where it belongs.
+fn mark_saved(store: &vnc_store::Store, host_id: &str, saved: bool) {
+    match store.get_host(host_id) {
+        Ok(Some(mut profile)) if profile.has_password != saved => {
+            profile.has_password = saved;
+            if let Err(e) = store.save_host(&profile) {
+                tracing::warn!(host = %host_id, "could not update has_password: {e}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(host = %host_id, "could not load host: {e}"),
+    }
+}
+
+/// The account names saved for a host, so the editor can show them. A user
+/// name is not a secret; the passwords beside it still never leave Rust.
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedUserNames {
+    pub vnc_user: Option<String>,
+    pub rdp_user: Option<String>,
+    pub rdp_domain: Option<String>,
+    pub ssh_user: Option<String>,
+}
+
+impl From<&StoredCredentials> for SavedUserNames {
+    fn from(c: &StoredCredentials) -> Self {
+        Self {
+            vnc_user: c.vencrypt_user.clone(),
+            rdp_user: c.rdp_user.clone(),
+            rdp_domain: c.rdp_domain.clone(),
+            ssh_user: c.ssh_user.clone(),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn saved_user_names(
+    state: State<'_, AppState>,
+    host_id: String,
+) -> Result<SavedUserNames, String> {
+    let credentials = state.credentials.clone();
+    super::blocking(move || {
+        credentials
+            .load(&host_id)
+            .map(|blob: Option<StoredCredentials>| {
+                blob.as_ref().map(SavedUserNames::from).unwrap_or_default()
+            })
     })
     .await
 }
@@ -103,7 +174,14 @@ pub async fn has_password(
 #[tauri::command]
 pub async fn delete_password(state: State<'_, AppState>, host_id: String) -> Result<(), String> {
     let credentials = state.credentials.clone();
-    super::blocking(move || credentials.delete(&host_id)).await
+    let store = state.store.clone();
+    super::blocking(move || {
+        credentials.delete(&host_id)?;
+        // Without this the key icon came back on the next start.
+        mark_saved(&store, &host_id, false);
+        Ok::<(), vnc_store::Error>(())
+    })
+    .await
 }
 
 /// Which backend is in use (`"OsKeychain"`, `"EncryptedFile"`, or
@@ -162,6 +240,28 @@ mod tests {
         assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
         assert_eq!(merged.vnc_password.as_deref(), Some("old"));
         assert_eq!(merged.ssh_passphrase.as_deref(), Some("key"));
+    }
+
+    #[test]
+    fn a_passphrase_alone_is_not_a_saved_password() {
+        let key = sent(r#"{"sshPassphrase":"k"}"#);
+        assert!(!holds_password(&key));
+        assert!(holds_password(&sent(
+            r#"{"vencryptUser":"a","vencryptPass":"p"}"#
+        )));
+        assert!(holds_password(&sent(r#"{"rdpPassword":"p"}"#)));
+    }
+
+    #[test]
+    fn saved_user_names_carry_no_password() {
+        let names = SavedUserNames::from(&sent(
+            r#"{"vencryptUser":"alice","vencryptPass":"p","rdpUser":"bob","rdpDomain":"CORP","rdpPassword":"q"}"#,
+        ));
+        let json = serde_json::to_string(&names).unwrap();
+        assert_eq!(
+            json,
+            r#"{"vncUser":"alice","rdpUser":"bob","rdpDomain":"CORP","sshUser":null}"#
+        );
     }
 
     #[test]

@@ -11,6 +11,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Link the C runtime into every Windows exe. Without it the viewer, dvv
+  # and DeskVNC Support all stopped at start on a Windows that has no Visual
+  # C++ redistributable, with "VCRUNTIME140.dll was not found". A fresh
+  # Windows 10 has none. Only Windows targets read this.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
   # One draft release, made before the platforms build. Each platform used to

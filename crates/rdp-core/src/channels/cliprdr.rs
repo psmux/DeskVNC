@@ -47,7 +47,7 @@ use std::collections::VecDeque;
 use rdp_pdu::{PduError, Reader, Writer};
 use remote_core::SessionEvent;
 
-use crate::channels::{encode_channel_pdu, ChannelCtx, Outbox};
+use crate::channels::{encode_channel_pdu_with, ChannelCtx, Outbox};
 use crate::error::{RdpError, Result};
 
 /// `msgType` (MS-RDPECLIP 2.2.1).
@@ -217,6 +217,7 @@ impl Cliprdr {
             )));
         }
         let body = body.get(..data_len).unwrap_or(body);
+        tracing::trace!(msg_type, msg_flags, data_len, "a cliprdr message");
 
         match msg_type {
             msg_type::MONITOR_READY => self.monitor_ready(static_id, ctx, out),
@@ -621,13 +622,19 @@ impl Cliprdr {
             w.u32(len);
             w.bytes(body);
         }
-        encode_channel_pdu(
+        // Windows reads `cliprdr` with the channel header shown, the way its
+        // own client sends it, and ignored this channel entirely without
+        // the flag (see `encode_channel_pdu_with`).
+        encode_channel_pdu_with(
             ctx.user_channel_id,
             static_id,
             &self.scratch,
+            rdp_pdu::vc::static_vc::channel_flags::SHOW_PROTOCOL,
             &mut self.chunk,
             &mut out.frames,
-        )
+        )?;
+        tracing::trace!(msg_type, len, static_id, "sent a cliprdr message");
+        Ok(())
     }
 }
 
@@ -785,6 +792,58 @@ mod tests {
 
     /// Nothing goes out before `CB_MONITOR_READY`, and the two messages that
     /// follow it go out in the order MS-RDPECLIP 1.3.2.1 sets.
+    /// Every chunk we send carries `CHANNEL_FLAG_SHOW_PROTOCOL`. Without it
+    /// a Windows server ignored the whole channel: no format list response,
+    /// no data request, nothing copied in either direction (issue #9).
+    #[test]
+    fn every_chunk_we_send_shows_the_channel_header() {
+        use rdp_pdu::mcs::DomainMcsPdu;
+        use rdp_pdu::vc::static_vc::{channel_flags, ChannelPduHeader};
+        use rdp_pdu::Decode;
+
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+        // Long enough to need several chunks.
+        clip.offer_text(&"x".repeat(5000), 1006, ctx(), &mut out)
+            .expect("offer");
+        clip.message(
+            &from_server(
+                msg_type::FORMAT_DATA_REQUEST,
+                0,
+                &format_id::UNICODE_TEXT.to_le_bytes(),
+            ),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("request");
+        assert!(out.frames.len() > 3, "the paste spans several chunks");
+        for frame in &out.frames {
+            let mut r = Reader::new(frame);
+            let mut body = rdp_pdu::x224::read_data_tpdu(&mut r).expect("x224");
+            let DomainMcsPdu::SendDataRequest { payload, .. } =
+                DomainMcsPdu::decode(&mut body).expect("mcs")
+            else {
+                panic!("not a send data request");
+            };
+            let header = ChannelPduHeader::decode(&mut Reader::new(payload.as_slice()))
+                .expect("channel header");
+            assert_ne!(
+                header.flags & channel_flags::SHOW_PROTOCOL,
+                0,
+                "{:#x}",
+                header.flags
+            );
+        }
+    }
+
     #[test]
     fn the_exchange_starts_at_monitor_ready_and_not_before() {
         let mut clip = Cliprdr::new();

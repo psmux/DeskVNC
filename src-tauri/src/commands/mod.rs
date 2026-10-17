@@ -13,6 +13,7 @@ pub mod menu;
 pub mod rdpfile;
 pub mod session;
 pub mod ssh;
+pub mod support;
 
 /// Run a blocking storage/keychain closure off the async runtime and flatten
 /// both the join error and the inner error into a display `String`.

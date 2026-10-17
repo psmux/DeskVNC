@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-pair"
+description = "Enables the support_pair command without any pre-configured scope."
+commands.allow = ["support_pair"]
+
+[[permission]]
+identifier = "deny-support-pair"
+description = "Denies the support_pair command without any pre-configured scope."
+commands.deny = ["support_pair"]

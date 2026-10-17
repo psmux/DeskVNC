@@ -10,6 +10,80 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.30.0] (2026-10-17)
+
+### Added
+
+* **Get help** in DeskVNC. Someone who already has DeskVNC can now be helped
+  without downloading DeskVNC Support. It has everything that app offers the
+  person being helped: a short code or a full invitation, the approval dialog,
+  control and the helper's tools as separate choices with a list of what the
+  tools did, letting a helper connect any time, and unattended access with
+  paired helpers, a password, and starting DeskVNC at sign in.
+* The approval and a banner naming whoever is connected show over the whole
+  DeskVNC window, and the window comes forward when a helper asks to be let in.
+* The **Get help** dialog lists every helper connected unattended, each with
+  its own banner and its own End and Stop buttons.
+* Unattended access works before anyone signs in. On Windows, switching on
+  "Also before anyone signs in" in DeskVNC Support installs a small service
+  that starts a host on the sign in screen and on a locked screen, and hands
+  over to the signed in app once someone is in. On macOS a login window agent
+  does the same, except on a Mac with FileVault, which has no screen to show
+  until the disk is unlocked. At the sign in screen nobody is there to approve,
+  so only paired helpers and the password get in, and a helper's tools stay off.
+* Up to eight helpers can be connected unattended at the same time. A ninth is
+  told the computer already has eight helpers connected.
+* DeskVNC Support writes unattended connections, refusals and why each session
+  ended to a log beside the machine ID.
+
+### Changed
+
+* The **Boundary support** button is now **Help someone**, so it is clear it
+  is for connecting to another person, and it accepts a short code as well as
+  an invitation.
+* DeskVNC and DeskVNC Support on the same computer share one computer ID, one
+  list of paired helpers and one connection setting. Only one of them answers
+  unattended connections at a time; if both have it switched on, DeskVNC takes
+  over when DeskVNC Support quits.
+* Closing the DeskVNC Support window while unattended access is on keeps it in
+  the tray, so the computer stays reachable. It used to pop back up.
+
+### Fixed
+
+* Agents were refused typing with SCREEN_CHANGED on a screen where nothing had
+  moved. Some VNC servers, wayvnc on a Raspberry Pi among them, resend large
+  unchanged parts of the screen around a blinking cursor, and every resend
+  counted as a new window. The check now counts the pixels that changed, so a
+  cursor or a clock does not trip it and a window opening still does.
+* A long `dvv type` could stop partway and still report delivered. On a
+  Raspberry Pi a 150 character command arrived as its first 24 characters. The
+  result now says how many characters went and quotes the rest, nothing after
+  a refused key is typed, and a busy session is waited out instead of losing
+  keys.
+* An agent driving `dvv` from a shell could be served by an older `dvv` left
+  running from before an upgrade. Each `dvv` binary now keeps its own
+  background holder.
+* `cargo tauri build` on macOS puts `dvv` in the app, as the release build
+  always did. An app built that way and copied to Applications had no `dvv`,
+  so every agent configured for it failed to start the DeskVNC tools.
+* RDP clipboard to and from Windows (#9). Windows ignored every clipboard
+  message from DeskVNC, because the clipboard channel was not opened with its
+  header shown, which Windows requires and xrdp does not. Text now goes both
+  ways with Windows 10 and 11.
+* The credential prompt starts with Remember ticked when the host already has a
+  saved password, so reconnecting does not quietly forget it (#9). The host
+  editor shows the saved login as well.
+* An unattended session that ended kept its "is connected" banner, in DeskVNC
+  and in DeskVNC Support, because the end of the session was never reported.
+  A second unattended helper in DeskVNC also ended the first.
+* A helper paired from the ask dialog did not show in Paired helpers until the
+  window was reopened.
+* The Windows apps start on a Windows that has no Visual C++ redistributable.
+* DeskVNC Support opens on a Windows where OpenGL is only 1.1, such as a
+  virtual machine or a remote session, by using Direct3D or Vulkan instead.
+* An agent's limb whose relay had stopped now reattaches, instead of every
+  action settling as link lost.
+
 ## [0.29.0] (2026-10-15)
 
 ### Added

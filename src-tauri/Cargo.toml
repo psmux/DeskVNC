@@ -19,6 +19,8 @@ boundary-codes = { path = "../crates/boundary-codes" }
 boundary-provision = { path = "../crates/boundary-provision" }
 boundary-driver = { path = "../crates/boundary-driver" }
 boundary-session = { path = "../crates/boundary-session" }
+# Sharing this computer from Get help: screen capture and input.
+boundary-platform = { path = "../crates/boundary-platform" }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"

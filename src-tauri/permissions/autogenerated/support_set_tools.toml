@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-set-tools"
+description = "Enables the support_set_tools command without any pre-configured scope."
+commands.allow = ["support_set_tools"]
+
+[[permission]]
+identifier = "deny-support-set-tools"
+description = "Denies the support_set_tools command without any pre-configured scope."
+commands.deny = ["support_set_tools"]

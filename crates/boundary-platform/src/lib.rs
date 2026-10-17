@@ -3,6 +3,15 @@ use boundary_session::{Button, Desktop, Frame, Input, Key};
 use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use xcap::Monitor;
 
+#[cfg(windows)]
+pub mod system;
+
+/// Attach this thread to the desktop with the input, where that matters.
+fn on_input_desktop() {
+    #[cfg(windows)]
+    system::on_input_desktop();
+}
+
 #[derive(Clone)]
 pub struct Display {
     pub id: u32,
@@ -48,7 +57,7 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
     dpi_aware();
     ensure!(
         screen_permission(),
-        "Allow Boundary in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
+        "Allow this app in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
     );
     let monitor = Monitor::all()?
         .into_iter()
@@ -71,7 +80,7 @@ impl NativeDesktop {
     fn injector(&mut self) -> Result<&mut Enigo> {
         ensure!(
             input_permission(),
-            "Allow Boundary in System Settings > Privacy & Security > Accessibility to use control"
+            "Allow this app in System Settings > Privacy & Security > Accessibility to use control"
         );
         if self.enigo.is_none() {
             self.enigo = Some(Enigo::new(&Settings {
@@ -84,6 +93,7 @@ impl NativeDesktop {
 }
 impl Desktop for NativeDesktop {
     fn capture(&mut self) -> Result<Frame> {
+        on_input_desktop();
         let pixels = self
             .monitor
             .capture_image()
@@ -103,6 +113,7 @@ impl Desktop for NativeDesktop {
     }
     fn input(&mut self, input: Input) -> Result<()> {
         input.validate()?;
+        on_input_desktop();
         match input {
             Input::Move { x, y } => {
                 // xcap reports macOS display bounds in points, matching CGEvent coordinates.

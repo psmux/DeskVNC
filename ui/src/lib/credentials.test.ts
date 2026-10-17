@@ -43,6 +43,14 @@ describe("joinDomainUser", () => {
 });
 
 describe("promptStart", () => {
+  it("starts with Remember ticked when the host already has a saved password", () => {
+    expect(promptStart("tester", null, true).save).toBe(true);
+    expect(promptStart("tester", null, false).save).toBe(false);
+    // An explicit untick in this window still wins.
+    const previous = { username: "tester", domain: "", save: false };
+    expect(promptStart("tester", previous, true).save).toBe(false);
+  });
+
   it("opens the first prompt from the hint, with Remember off", () => {
     expect(promptStart("godwin", null)).toEqual({ username: "godwin", domain: "", save: false });
     expect(promptStart(null, undefined)).toEqual({ username: "", domain: "", save: false });
