@@ -125,6 +125,14 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
             libssl-dev libdbus-1-dev pkg-config
+          # Get help shares this screen from inside DeskVNC, so the app needs
+          # what the DeskVNC Support build does: xcb for X11 capture, PipeWire
+          # for Wayland capture, EGL and GBM, xkbcommon for input, and clang
+          # because pipewire-sys generates its bindings at build time.
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev \
+            clang libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
