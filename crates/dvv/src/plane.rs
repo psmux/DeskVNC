@@ -1791,7 +1791,8 @@ fn send_command(session_id: &str, encoded: &serde_json::Value) -> Result<(), Too
             serde_json::json!({ "sessionId": session_id, "command": encoded }),
         ) {
             Err(error)
-                if error.code == "BACKPRESSURE" && started.elapsed() < RELAY_BACKPRESSURE_PATIENCE =>
+                if error.code == "BACKPRESSURE"
+                    && started.elapsed() < RELAY_BACKPRESSURE_PATIENCE =>
             {
                 std::thread::sleep(pause);
                 pause = (pause * 2).min(std::time::Duration::from_millis(50));
@@ -4005,4 +4006,66 @@ pub fn outcome_word(outcome: &limb_core::observation::Outcome) -> &'static str {
 /// what state a limb is in.
 pub fn state_json(state: &SessionState) -> serde_json::Value {
     serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({ "state": "idle" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ledger's whole contract, without a socket: a refused press trips
+    /// it, later presses are counted as held back, a settle hands back the
+    /// first refusal and the count, and the next action starts clean.
+    #[test]
+    fn a_refused_press_is_counted_with_everything_held_back_after_it() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel::<ClientCommand>(8);
+        let ledger = RelayLedger::watching(&sender);
+        let refusal = ToolError::new(codes::SCREEN_CHANGED, "the screen changed");
+
+        for press in 0..5 {
+            ledger.took();
+            if ledger.tripped() {
+                ledger.press_held_back();
+            } else if press == 2 {
+                ledger.refused(&refusal, true);
+            }
+            ledger.finished();
+        }
+
+        let settled = ledger
+            .settle(std::time::Duration::from_secs(1))
+            .expect("a refusal was recorded");
+        assert_eq!(settled.code, codes::SCREEN_CHANGED);
+        assert_eq!(
+            settled.presses_refused, 3,
+            "the refused press and the two after it"
+        );
+        assert!(!ledger.tripped(), "the next action starts clean");
+        assert_eq!(ledger.settle(std::time::Duration::from_secs(1)), None);
+    }
+
+    /// A settle does not report until what is queued has been carried.
+    #[test]
+    fn a_settle_waits_for_the_queue_to_drain() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<ClientCommand>(8);
+        let ledger = RelayLedger::watching(&sender);
+        sender
+            .try_send(ClientCommand::ReleaseAllKeys)
+            .expect("room in the channel");
+
+        let carrier = Arc::clone(&ledger);
+        let relay = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            receiver.try_recv().expect("the queued command");
+            carrier.took();
+            carrier.refused(&ToolError::new("BACKPRESSURE", "full"), false);
+            carrier.finished();
+        });
+        let settled = ledger.settle(std::time::Duration::from_secs(5));
+        relay.join().expect("the relay thread");
+        assert_eq!(
+            settled.map(|refused| refused.code),
+            Some("BACKPRESSURE".to_string()),
+            "a settle that returned before the queue drained would have missed this"
+        );
+    }
 }

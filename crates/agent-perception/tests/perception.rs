@@ -748,7 +748,10 @@ fn a_scroll_by_copy_rect_counts_what_moved() {
     slot.apply(&[whole_screen(stripes)]);
     let changed = slot.apply(&[DecodedRect {
         rect: Rect::new(0, 0, 1280, 700),
-        payload: RectPayload::CopyRect { src_x: 0, src_y: 20 },
+        payload: RectPayload::CopyRect {
+            src_x: 0,
+            src_y: 20,
+        },
     }]);
     assert!(share(changed) > 0.9, "a scrolled page changed {changed:?}");
 }

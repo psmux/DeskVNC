@@ -844,9 +844,7 @@ mod tests {
             before,
             "twenty whole screen resends that only blinked a caret must not count as new screens"
         );
-        assert!(mirrors
-            .admit_typing("s1", Some(before))
-            .is_ok());
+        assert!(mirrors.admit_typing("s1", Some(before)).is_ok());
 
         // And the other edge: something window sized that really is new.
         mirrors.feed(

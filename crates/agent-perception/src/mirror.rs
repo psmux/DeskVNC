@@ -518,7 +518,12 @@ impl Mirror {
             let d = ((dy + row) * fb_w + dx) * 4;
             // Compared before the copy, while the source row still holds what
             // the row ordering below guarantees it holds.
-            changed.compare_row(dx, dy + row, &data[d..d + row_bytes], &data[s..s + row_bytes]);
+            changed.compare_row(
+                dx,
+                dy + row,
+                &data[d..d + row_bytes],
+                &data[s..s + row_bytes],
+            );
             data.copy_within(s..s + row_bytes, d);
         };
         if dy > sy {
