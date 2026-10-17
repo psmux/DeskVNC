@@ -52,13 +52,6 @@
       },
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true
-    },
-    "linux": {
-      "deb": {
-        "depends": [
-          "libpipewire-0.3-0"
-        ]
-      }
     }
   }
 }
