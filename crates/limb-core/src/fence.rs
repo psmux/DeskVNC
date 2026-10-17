@@ -223,8 +223,20 @@ impl std::fmt::Display for ContentGeneration {
 /// counts as a different screen.
 ///
 /// This number is the whole feature, so here is the argument for it rather
-/// than a shrug and a round figure. It is measured as covered area against
-/// framebuffer area, per SERVER UPDATE, not accumulated over time.
+/// than a shrug and a round figure. It is measured per SERVER UPDATE, not
+/// accumulated over time, as the area the update CHANGED against the area of
+/// the framebuffer.
+///
+/// Changed, and not covered. A server is free to resend pixels it has already
+/// sent, and wayvnc does: on a Raspberry Pi it resent large unchanged regions
+/// around a blinking terminal caret, so measured by the area of its
+/// rectangles every blink was a new window and an agent that had just looked
+/// was refused typing on a screen where nothing had moved. The shell's mirror
+/// compares each rectangle with what it already holds before applying it, in
+/// 64 pixel cells (`agent_perception::CHANGE_CELL`), and reports the area of
+/// the cells that differ, or the box around them when they form the outline
+/// of a window. Rectangle area is the fallback only where there is no mirror
+/// to compare against.
 ///
 /// What has to stay BELOW it, on a 1920x1080 desktop (2,073,600 px):
 ///
@@ -287,7 +299,7 @@ impl ContentFence {
         self.current
     }
 
-    /// Feed one server update in, as the area it covered against the area of
+    /// Feed one server update in, as the area it changed against the area of
     /// the framebuffer.
     ///
     /// Returns the new generation when it moved and `None` when the update was
@@ -295,11 +307,12 @@ impl ContentFence {
     /// deciding, which is the shape [`GeometryFence::changed`] has for the
     /// same reason.
     ///
-    /// `covered` is a plain sum over the update's rectangles and is allowed to
-    /// exceed the framebuffer when they overlap. That over counts, and it over
-    /// counts in the safe direction: an overlapping repaint is a repaint, and
-    /// the error can only make the fence trip earlier than the true coverage
-    /// would, never later.
+    /// `covered` is what the caller measured, and [`MATERIAL_REPAINT`] says
+    /// what that should be: the pixels that changed where there is a picture
+    /// to compare against, and the sum of the rectangles where there is not.
+    /// That sum is allowed to exceed the framebuffer when rectangles overlap.
+    /// It over counts in the safe direction: the error can only make the fence
+    /// trip earlier than the true coverage would, never later.
     pub fn painted(&mut self, covered: u64, area: u64) -> Option<ContentGeneration> {
         if area == 0 {
             // A framebuffer of no size. Nothing can be a material share of
@@ -356,12 +369,12 @@ impl Default for ContentFence {
 /// habit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ContentRejected {
-    #[error("the screen changed materially since this attachment last read it: it read content generation {observed} and the limb is now at {current}. Nothing was typed. Something large repainted, which is what a new window, a dialog or an application launching looks like, and the keystroke you were about to send would have gone into whatever is there now. Read the screen again, check what has focus and what is selected, then type")]
+    #[error("the screen changed materially since this attachment last read it: it read content generation {observed} and the limb is now at {current}. Nothing was typed. Something large repainted, which is what a new window, a dialog or an application launching looks like, and the keystroke you were about to send would have gone into whatever is there now. To recover, take one screenshot (dvv_screen, or dvv screen in a shell; a small scale is enough), check what has focus and what is selected, then send the same call again")]
     Stale {
         observed: ContentGeneration,
         current: ContentGeneration,
     },
-    #[error("this attachment has never read this screen (the limb is at content generation {current}) and text was about to be typed into it. Nothing was typed. Attach with perceive set to frames and read the screen first: typing into a machine you have not looked at is how an agent replaces the contents of a file somebody had open")]
+    #[error("this attachment has never read this screen (the limb is at content generation {current}) and text was about to be typed into it. Nothing was typed. Take one screenshot first (dvv_screen, or dvv screen in a shell, on a limb opened with perceive set), then send the same call again: typing into a machine you have not looked at is how an agent replaces the contents of a file somebody had open")]
     Unobserved { current: ContentGeneration },
 }
 

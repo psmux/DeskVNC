@@ -116,6 +116,140 @@ pub struct Mirror {
     last_read: Timestamp,
     screens: ScreenFacts,
     signals: PerceptionSignals,
+    /// Which cells of the picture the update being applied actually changed.
+    /// Scratch space for [`Mirror::apply`], cleared at the start of each one.
+    changed: ChangedCells,
+}
+
+/// The side of the square cells a repaint is measured in, in pixels.
+///
+/// Why cells and not a plain count of changed pixels: a dialog that opens over
+/// a page of the same colour changes only its border, its title and its text,
+/// which can be a few percent of its own area. Counted pixel by pixel it would
+/// slip under `limb_core::fence::MATERIAL_REPAINT`. Counted by cell, its
+/// outline marks a ring of cells around the whole window, and
+/// `ChangedCells::area` reads a ring as the window it encloses. A blinking
+/// caret or a ticking clock marks one or two cells, 4,096 pixels each at most,
+/// which is under half a percent of a 1280x720 screen.
+pub const CHANGE_CELL: usize = 64;
+
+/// One flag per [`CHANGE_CELL`] square of the framebuffer.
+#[derive(Debug, Default)]
+struct ChangedCells {
+    width: usize,
+    height: usize,
+    columns: usize,
+    cells: Vec<bool>,
+}
+
+impl ChangedCells {
+    /// Sized for this framebuffer and cleared.
+    fn reset(&mut self, width: u16, height: u16) {
+        let (width, height) = (width as usize, height as usize);
+        if self.width != width || self.height != height {
+            let columns = width.div_ceil(CHANGE_CELL);
+            let rows = height.div_ceil(CHANGE_CELL);
+            self.width = width;
+            self.height = height;
+            self.columns = columns;
+            self.cells = vec![false; columns * rows];
+        } else {
+            self.cells.fill(false);
+        }
+    }
+
+    fn index(&self, x: usize, y: usize) -> usize {
+        (y / CHANGE_CELL) * self.columns + x / CHANGE_CELL
+    }
+
+    /// Every cell a rectangle touches, for an update whose pixels cannot be
+    /// compared: an H.264 rect, a short payload, a JPEG that would not decode.
+    /// Counted as changed, because not knowing is not the same as unchanged.
+    fn mark_rect(&mut self, rect: Rect) {
+        let x0 = rect.x as usize;
+        let y0 = rect.y as usize;
+        let x1 = (x0 + rect.width as usize).min(self.width);
+        let y1 = (y0 + rect.height as usize).min(self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        for cy in (y0 / CHANGE_CELL)..=((y1 - 1) / CHANGE_CELL) {
+            for cx in (x0 / CHANGE_CELL)..=((x1 - 1) / CHANGE_CELL) {
+                self.cells[cy * self.columns + cx] = true;
+            }
+        }
+    }
+
+    /// Compare one row about to be overwritten with what is replacing it, and
+    /// mark every cell where the two differ.
+    ///
+    /// `before` and `after` are the same length and start at pixel `x` of
+    /// framebuffer row `y`. Each comparison is a slice equality, which is a
+    /// `memcmp`, and a cell already marked is not compared again, so an
+    /// unchanged resend of the whole screen costs one read of the bytes it was
+    /// about to copy anyway.
+    fn compare_row(&mut self, x: usize, y: usize, before: &[u8], after: &[u8]) {
+        if before == after {
+            return;
+        }
+        let end = x + before.len() / 4;
+        let mut start = x;
+        while start < end {
+            let stop = ((start / CHANGE_CELL + 1) * CHANGE_CELL).min(end);
+            let index = self.index(start, y);
+            if index < self.cells.len() && !self.cells[index] {
+                let (a, b) = ((start - x) * 4, (stop - x) * 4);
+                if before[a..b] != after[a..b] {
+                    self.cells[index] = true;
+                }
+            }
+            start = stop;
+        }
+    }
+
+    /// How much of the screen this update changed, in pixels.
+    ///
+    /// Two readings, and the larger one wins. The first is the pixels inside
+    /// every marked cell. The second is the box around all of them, counted
+    /// only when at least a fifth of the cells in that box are marked, and it
+    /// is there for the window that opens in the colour of what was behind it:
+    /// its outline and title bar mark a ring of cells and leave the inside
+    /// alone, so the first reading sees a thin frame and the second sees the
+    /// window. The density condition is what keeps a caret blinking on one
+    /// side of the screen and a clock ticking on the other from reading as one
+    /// window the size of both: two cells in a box of two hundred.
+    fn area(&self) -> u64 {
+        if self.columns == 0 {
+            return 0;
+        }
+        let pixels_in = |cx: usize, cy: usize| -> u64 {
+            let x = cx * CHANGE_CELL;
+            let y = cy * CHANGE_CELL;
+            (CHANGE_CELL.min(self.width - x) * CHANGE_CELL.min(self.height - y)) as u64
+        };
+        let mut marked = 0usize;
+        let mut cells_area = 0u64;
+        let (mut left, mut top, mut right, mut bottom) = (usize::MAX, usize::MAX, 0, 0);
+        for (index, _) in self.cells.iter().enumerate().filter(|(_, m)| **m) {
+            let (cx, cy) = (index % self.columns, index / self.columns);
+            marked += 1;
+            cells_area += pixels_in(cx, cy);
+            left = left.min(cx);
+            top = top.min(cy);
+            right = right.max(cx);
+            bottom = bottom.max(cy);
+        }
+        if marked == 0 {
+            return 0;
+        }
+        let box_cells = (right - left + 1) * (bottom - top + 1);
+        if marked * 5 < box_cells {
+            return cells_area;
+        }
+        let box_width = ((right + 1) * CHANGE_CELL).min(self.width) - left * CHANGE_CELL;
+        let box_height = ((bottom + 1) * CHANGE_CELL).min(self.height) - top * CHANGE_CELL;
+        cells_area.max((box_width * box_height) as u64)
+    }
 }
 
 fn opaque_black(pixels: usize) -> Vec<u8> {
@@ -138,6 +272,7 @@ impl Mirror {
             last_read: at,
             screens: ScreenFacts::unknown(),
             signals: PerceptionSignals::new(),
+            changed: ChangedCells::default(),
         }
     }
 
@@ -215,16 +350,28 @@ impl Mirror {
         self.coverage.reset(width, height);
     }
 
-    /// Apply one coalesced `SessionEvent::FramebufferUpdate`.
+    /// Apply one coalesced `SessionEvent::FramebufferUpdate`, and say how much
+    /// of the picture it actually changed.
     ///
     /// Rect by rect and in order, which is the only order that composites
     /// correctly: a `CopyRect` reads pixels an earlier rect in the same update
     /// wrote.
-    pub fn apply(&mut self, rects: &[DecodedRect]) {
+    ///
+    /// The answer is in pixels: the area of every [`CHANGE_CELL`] square in
+    /// which at least one pixel now differs from what the mirror held before.
+    /// It is what the content fence measures. It used to be the area of the
+    /// rectangles, and a real server showed why that was wrong: wayvnc on a
+    /// Raspberry Pi resends large unchanged regions around a blinking terminal
+    /// caret, so every blink looked like a new window, the content generation
+    /// climbed by nine in a few seconds of a still screen, and an agent that
+    /// had just looked was refused typing.
+    pub fn apply(&mut self, rects: &[DecodedRect]) -> u64 {
         self.signals.observe(rects);
+        self.changed.reset(self.width, self.height);
         for decoded in rects {
             self.apply_one(decoded);
         }
+        self.changed.area()
     }
 
     fn apply_one(&mut self, decoded: &DecodedRect) {
@@ -250,6 +397,7 @@ impl Mirror {
                     );
                     self.blit_rgba(r, pixels);
                     self.coverage.mark_stale(r);
+                    self.changed.mark_rect(r);
                     return;
                 }
                 self.blit_rgba(r, pixels);
@@ -284,6 +432,7 @@ impl Mirror {
                     // watching, so the region is marked stale as well.
                     tracing::warn!(rect = ?r, error = %e, "undecodable JPEG rect, marking the region stale");
                     self.coverage.mark_stale(r);
+                    self.changed.mark_rect(r);
                 }
             },
             RectPayload::CopyRect { src_x, src_y } => {
@@ -306,6 +455,7 @@ impl Mirror {
                 // nothing.
                 if !data.is_empty() {
                     self.coverage.mark_stale(r);
+                    self.changed.mark_rect(r);
                 }
             }
         }
@@ -332,7 +482,10 @@ impl Mirror {
                 break;
             }
             let dst = ((y + row) * fb_w + x) * 4;
-            self.data[dst..dst + copy_w * 4].copy_from_slice(&pixels[src..src + copy_w * 4]);
+            let incoming = &pixels[src..src + copy_w * 4];
+            let held = &mut self.data[dst..dst + copy_w * 4];
+            self.changed.compare_row(x, y + row, held, incoming);
+            held.copy_from_slice(incoming);
         }
     }
 
@@ -358,10 +511,20 @@ impl Mirror {
             return;
         }
         let row_bytes = w * 4;
+        let data = &mut self.data;
+        let changed = &mut self.changed;
         let mut copy_row = |row: usize| {
             let s = ((sy + row) * fb_w + sx) * 4;
             let d = ((dy + row) * fb_w + dx) * 4;
-            self.data.copy_within(s..s + row_bytes, d);
+            // Compared before the copy, while the source row still holds what
+            // the row ordering below guarantees it holds.
+            changed.compare_row(
+                dx,
+                dy + row,
+                &data[d..d + row_bytes],
+                &data[s..s + row_bytes],
+            );
+            data.copy_within(s..s + row_bytes, d);
         };
         if dy > sy {
             for row in (0..h).rev() {
@@ -645,10 +808,12 @@ impl MirrorSlot {
 
     /// Feed the mirror, if there is one. A session with no mirror pays
     /// nothing, which is `03 §9 A5`.
-    pub fn apply(&mut self, rects: &[DecodedRect]) {
-        if let Some(m) = &mut self.mirror {
-            m.apply(rects);
-        }
+    ///
+    /// Returns the area the update changed, as [`Mirror::apply`] measures it,
+    /// and `None` when there is no mirror to compare against, in which case
+    /// the caller has only the rectangles to go on.
+    pub fn apply(&mut self, rects: &[DecodedRect]) -> Option<u64> {
+        self.mirror.as_mut().map(|m| m.apply(rects))
     }
 
     /// The desktop resized. The mirror is dropped rather than kept when the

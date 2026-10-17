@@ -1029,34 +1029,10 @@ impl AgentPlane {
     /// A session nobody asked to perceive is not in the map and pays a hash
     /// lookup and nothing else, which is the whole of `03 §9 A5`.
     ///
-    /// **Nothing in this build calls it, and that is the one hole left in this
-    /// feature.** The call site is two lines in
-    /// `commands::session::forward_events`, which is owned elsewhere as this
-    /// lands:
-    ///
-    /// ```text
-    /// SessionEvent::FramebufferUpdate { rects, damage } => {
-    ///     if let Some(state) = app.try_state::<AppState>() {
-    ///         state.agent.feed(&session_id, &rects);
-    ///     }
-    ///     …the existing framing::encode_frame call…
-    /// }
-    /// ```
-    ///
-    /// and, in the `match &event` block above it that already keeps
-    /// `SessionFacts::size` current, one more beside the resize:
-    ///
-    /// ```text
-    /// SessionEvent::DesktopResize { width, height } => {
-    ///     …the existing facts update…
-    ///     state.agent.note_resize(&session_id, *width, *height);
-    /// }
-    /// ```
-    ///
-    /// Until those exist every mirror stays priming and every `screen.read`
-    /// refuses with `PRIMING`, which is the correct behaviour for a mirror
-    /// nothing feeds and is not the behaviour anybody wants.
-    #[allow(dead_code)]
+    /// Called from `commands::session::forward_events` for every
+    /// `SessionEvent::FramebufferUpdate`, before the frame goes to the
+    /// webview. This is also where the content fence is fed, so it is the
+    /// place to start when an agent is refused with SCREEN_CHANGED.
     pub fn feed(&self, session_id: &str, rects: &[vnc_core::DecodedRect]) {
         self.mirrors.feed(session_id, rects, now());
     }
@@ -1064,8 +1040,8 @@ impl AgentPlane {
     /// The remote desktop resized. Bumps the geometry generation a read is
     /// fenced against (`00 R10`) and resizes the mirror under it.
     ///
-    /// Unreached for the same reason [`AgentPlane::feed`] is.
-    #[allow(dead_code)]
+    /// Called from the `DesktopResize` arm of
+    /// `commands::session::forward_events`.
     pub fn note_resize(&self, session_id: &str, width: u16, height: u16) {
         self.mirrors.resize(session_id, width, height);
     }

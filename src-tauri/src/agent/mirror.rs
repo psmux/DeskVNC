@@ -263,6 +263,10 @@ impl SessionMirror {
 
 /// How much of the framebuffer one update painted, in pixels.
 ///
+/// The fallback measure for the content fence, used only when there is no
+/// mirror to compare the update against. With a mirror, the fence is fed what
+/// actually changed (`agent_perception::Mirror::apply`).
+///
 /// A plain sum over the rectangles, with no attempt to subtract the overlap
 /// between two of them. Overlap makes this an over count, and it over counts in
 /// the direction that trips the fence sooner rather than later, which is the
@@ -419,18 +423,27 @@ impl Mirrors {
     /// Rect by rect and in order, which is the only order that composites
     /// correctly: a `CopyRect` reads pixels an earlier rect in the same update
     /// wrote. `agent-perception` does that part; this is the plumbing.
-    // Reached only from [`crate::agent::AgentPlane::feed`], which nothing in
-    // this build calls yet. That method's doc comment names the two lines
-    // `commands::session::forward_events` needs and why they are not written
-    // here.
-    #[allow(dead_code)]
+    ///
+    /// Reached from [`crate::agent::AgentPlane::feed`], which
+    /// `commands::session::forward_events` calls for every update.
     pub fn feed(&self, session_id: &str, rects: &[DecodedRect], at: Timestamp) {
         let mut mirrors = self.inner.lock();
         let Some(held) = mirrors.get_mut(session_id) else {
             return;
         };
         let bounds = held.bounds();
-        held.slot.apply(rects);
+        // How much of the picture this update CHANGED, measured by the mirror
+        // as it applies it. Rectangle area is only the fallback for a session
+        // with no mirror to compare against (one that watches damage only, or
+        // whose mirror the idle reaper freed). The area of what a server SENT
+        // is not what changed: wayvnc resends large unchanged regions around a
+        // blinking caret, and measured by rectangle area every blink tripped
+        // the fence, so an agent that had just looked was refused typing on a
+        // screen where nothing had moved.
+        let changed = held
+            .slot
+            .apply(rects)
+            .unwrap_or_else(|| covered_area(rects));
         held.damage.record(rects, bounds, at);
 
         // The content fence, fed from the same update and measured PER UPDATE
@@ -440,17 +453,18 @@ impl Mirrors {
         // means nothing.
         //
         // This is the second consumer of a stream a person's window is waiting
-        // on (`03 §2.1`), so it is a multiply and an add per rectangle and
-        // nothing else. No allocation, no union, no second pass.
+        // on (`03 §2.1`). The comparison costs one read of bytes the mirror was
+        // about to overwrite anyway, and no allocation.
         let area = u64::from(bounds.width) * u64::from(bounds.height);
-        if let Some(generation) = held.content.painted(covered_area(rects), area) {
+        if let Some(generation) = held.content.painted(changed, area) {
             // Logged at info, not debug. When an agent is refused with
             // SCREEN_CHANGED the first question anybody asks is what actually
             // repainted, and a counter that moved with no line in the log is a
             // refusal nobody can reconstruct afterwards.
             tracing::info!(
                 session = %session_id,
-                covered = covered_area(rects),
+                changed,
+                sent = covered_area(rects),
                 area,
                 "the screen repainted materially: content generation is now {generation}"
             );
@@ -462,9 +476,6 @@ impl Mirrors {
     /// The generation is bumped whether or not a mirror is attached, because
     /// `00 R10` is about a coordinate computed against a screen that no longer
     /// exists and a damage only reader hands out coordinates too.
-    // Unreached for the same reason [`Mirrors::feed`] is: it hangs off the
-    // `SessionEvent::DesktopResize` arm of the shell's event pump.
-    #[allow(dead_code)]
     pub fn resize(&self, session_id: &str, width: u16, height: u16) {
         let mut mirrors = self.inner.lock();
         let others: u64 = mirrors
@@ -794,6 +805,54 @@ mod tests {
             before.next(),
             "a window sized repaint is the whole reason this counter exists"
         );
+    }
+
+    /// The Raspberry Pi incident, through the same seam the event pump uses.
+    ///
+    /// wayvnc at 1280x720 resent the whole screen while a terminal caret
+    /// blinked, and with the fence measuring rectangle area the content
+    /// generation went from 28 to 37 in a few seconds of a still screen, so an
+    /// agent that had just looked was refused typing. What it measures now is
+    /// what changed, so a resend moves nothing and a real window still does.
+    #[test]
+    fn a_server_that_resends_the_whole_screen_unchanged_does_not_fence_typing() {
+        let mirrors = Mirrors::default();
+        primed(&mirrors, "s1", (1280, 720));
+        let whole = Rect::new(0, 0, 1280, 720);
+        let before = mirrors.status("s1").content;
+
+        let mut caret_on = [10u8, 20, 30, 255].repeat(1280 * 720);
+        for y in 400..418 {
+            for x in 300..309 {
+                caret_on[(y * 1280 + x) * 4..(y * 1280 + x) * 4 + 4]
+                    .copy_from_slice(&[220, 220, 220, 255]);
+            }
+        }
+        for _ in 0..10 {
+            mirrors.feed("s1", &[rgba(whole, [10, 20, 30, 255])], now());
+            mirrors.feed(
+                "s1",
+                &[DecodedRect {
+                    rect: whole,
+                    payload: RectPayload::Rgba(caret_on.clone()),
+                }],
+                now(),
+            );
+        }
+        assert_eq!(
+            mirrors.status("s1").content,
+            before,
+            "twenty whole screen resends that only blinked a caret must not count as new screens"
+        );
+        assert!(mirrors.admit_typing("s1", Some(before)).is_ok());
+
+        // And the other edge: something window sized that really is new.
+        mirrors.feed(
+            "s1",
+            &[rgba(Rect::new(200, 100, 700, 450), [200, 200, 200, 255])],
+            now(),
+        );
+        assert_eq!(mirrors.status("s1").content, before.next());
     }
 
     /// A repaint that arrives as many rectangles counts as what it covers, not

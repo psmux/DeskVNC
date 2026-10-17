@@ -31,6 +31,25 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   unattended connections at a time; if both have it switched on, DeskVNC takes
   over when DeskVNC Support quits.
 
+### Fixed
+
+* Agents were refused typing with SCREEN_CHANGED on a screen where nothing had
+  moved. Some VNC servers, wayvnc on a Raspberry Pi among them, resend large
+  unchanged parts of the screen around a blinking cursor, and every resend
+  counted as a new window. The check now counts the pixels that changed, so a
+  cursor or a clock does not trip it and a window opening still does.
+* A long `dvv type` could stop partway and still report delivered. On a
+  Raspberry Pi a 150 character command arrived as its first 24 characters. The
+  result now says how many characters went and quotes the rest, nothing after
+  a refused key is typed, and a busy session is waited out instead of losing
+  keys.
+* An agent driving `dvv` from a shell could be served by an older `dvv` left
+  running from before an upgrade. Each `dvv` binary now keeps its own
+  background holder.
+* `cargo tauri build` on macOS puts `dvv` in the app, as the release build
+  always did. An app built that way and copied to Applications had no `dvv`,
+  so every agent configured for it failed to start the DeskVNC tools.
+
 ## [0.29.0] (2026-10-15)
 
 ### Added

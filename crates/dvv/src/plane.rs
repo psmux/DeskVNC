@@ -265,6 +265,29 @@ pub struct TypingRefused {
     pub why: String,
 }
 
+/// What the far side refused AFTER the plane had put commands on a limb's
+/// channel.
+///
+/// `agent-plane` settles an intent when its commands are on the channel, and
+/// for a socket backed limb that is not the end of the road: each command
+/// still has to be accepted by the application, which applies the content
+/// fence once more per key press and can find the session's own queue full.
+/// Before this existed those refusals were a warning in a log and the
+/// settlement said delivered. A 150 character shell command arrived as its
+/// first 24 characters on a Raspberry Pi and the agent was told it had been
+/// typed. This is how the settlement learns otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputRefused {
+    /// The code of the first refusal, such as `SCREEN_CHANGED`.
+    pub code: String,
+    /// The far side's sentence for it, verbatim.
+    pub why: String,
+    /// Key presses that did not reach the session. Once one is refused every
+    /// later press in the same action is held back too, so what did go is
+    /// always a clean prefix of what was asked for, never text with holes.
+    pub presses_refused: u32,
+}
+
 /// Where limbs come from.
 ///
 /// The seam. Everything above it is the same whether a limb is a real RDP
@@ -322,6 +345,19 @@ pub trait SessionSource: Send + Sync {
     /// that has to make a round trip to answer makes it on typing and not on
     /// every click.
     fn typing_fence(&self, limb: &LimbId) -> Option<TypingRefused> {
+        let _ = limb;
+        None
+    }
+
+    /// Wait until every command already on this limb's channel has been
+    /// carried, and say whether the far side refused any of it since the last
+    /// time this was asked.
+    ///
+    /// Called after every dispatch, so an action is reported as delivered only
+    /// once the far side has accepted all of it. `None` means nothing was
+    /// refused, which is also the answer for a source whose channel IS the
+    /// session and so has no far side to refuse anything.
+    fn settle_input(&self, limb: &LimbId) -> Option<InputRefused> {
         let _ = limb;
         None
     }
@@ -732,6 +768,12 @@ fn from_rpc_error(error: &serde_json::Value) -> ToolError {
         Some("LEASE_REVOKED") => codes::LEASE_REVOKED,
         Some("LIMB_GONE") | Some("NOT_ATTACHED") => codes::LIMB_GONE,
         Some("NO_SUCH_MACHINE") => codes::BAD_REQUEST,
+        // Every other tag the shell names is passed through as itself, which
+        // is the rule `crate::error` states for codes. Mapping them all onto
+        // BAD_REQUEST told an agent its own arguments were wrong when the
+        // shell had said SCREEN_CHANGED, and hid BACKPRESSURE from the relay
+        // that waits it out.
+        Some(tag) if !tag.is_empty() => tag,
         // A JSON-RPC protocol error rather than an application one. `-32601`
         // is an unknown method, which under `04 §2.7` rule 2 is how a client
         // discovers that this plane is older than it is.
@@ -966,6 +1008,12 @@ impl SessionSource for ShellSource {
                 )
                 .to_string(),
         })
+    }
+
+    fn settle_input(&self, limb: &LimbId) -> Option<InputRefused> {
+        let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
+        let ledger = lock(ledgers()).get(&session_id).cloned()?;
+        ledger.settle(RELAY_SETTLE_PATIENCE)
     }
 
     fn live(&self) -> Vec<LiveSession> {
@@ -1321,7 +1369,21 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
     // whatever it is handed for the webview's input path, and a smaller number
     // here would make the plane shed for reasons that are this file's fault.
     let (commands, receiver) = tokio::sync::mpsc::channel(256);
-    relay(session_id.clone(), receiver);
+    let ledger = RelayLedger::watching(&commands);
+    {
+        // Only replaced when the one there has finished. Reopening a machine
+        // that is already attached builds an `Attach` the registry then throws
+        // away, and its relay ends at once; letting its ledger win would point
+        // every settle at a relay that carries nothing.
+        let mut ledgers = lock(ledgers());
+        let live = ledgers
+            .get(&session_id)
+            .is_some_and(|held| !held.is_closed());
+        if !live {
+            ledgers.insert(session_id.clone(), Arc::clone(&ledger));
+        }
+    }
+    relay(session_id.clone(), receiver, ledger);
     // The agent holds this limb from the shell's point of view the moment it
     // attaches, and a pane has to say so, visibly, always (`08 §5.5`). Sent
     // once here rather than per command, because a report per pointer event
@@ -1610,14 +1672,29 @@ fn machine_from(value: Option<&serde_json::Value>) -> Result<MachineKey, ToolErr
 /// runtime in scope, so a `tokio::spawn` here would panic in exactly the
 /// configuration a test uses. The thread ends when the plane drops the sender,
 /// which is what `Plane::close` does.
-fn relay(session_id: String, mut receiver: tokio::sync::mpsc::Receiver<ClientCommand>) {
+fn relay(
+    session_id: String,
+    mut receiver: tokio::sync::mpsc::Receiver<ClientCommand>,
+    ledger: Arc<RelayLedger>,
+) {
     std::thread::spawn(move || {
+        // Marks the ledger closed however this thread ends, so a settle
+        // waiting on it returns at once rather than waiting out its patience.
+        struct Closing(Arc<RelayLedger>);
+        impl Drop for Closing {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+        let _closing = Closing(Arc::clone(&ledger));
         // The last intent name reported, so a drag of two hundred pointer
         // events is one line in a pane and not two hundred. `00 R24` is about
         // never dropping something silently, and this drops nothing: what is
         // coalesced is the NOTICE, and the commands themselves all go.
         let mut reported: Option<&'static str> = None;
         while let Some(command) = receiver.blocking_recv() {
+            ledger.took();
+            let _finished = Finished(&ledger);
             // `00 R28`. An intent the driver serves natively is the one thing
             // on this channel with somebody blocked on the far end of it, so it
             // takes a method of its own and its ANSWER is the reply. Handled
@@ -1658,11 +1735,19 @@ fn relay(session_id: String, mut receiver: tokio::sync::mpsc::Receiver<ClientCom
                     }),
                 );
             }
-            if let Err(error) = call(
-                "limb.command",
-                serde_json::json!({ "sessionId": session_id, "command": encoded }),
-            ) {
+            let press = matches!(command, ClientCommand::Key { down: true, .. });
+            if press && ledger.tripped() {
+                // An earlier press in this action was refused. Sending the
+                // ones after it would type the end of a word without its
+                // middle, so they are held back and counted, and what went is
+                // a clean prefix the settlement can name exactly. Releases and
+                // everything else still go: a refused release strands a key.
+                ledger.press_held_back();
+                continue;
+            }
+            if let Err(error) = send_command(&session_id, &encoded) {
                 tracing::warn!(session = %session_id, "{name} was refused: {}", error.message);
+                ledger.refused(&error, press);
                 if error.code == codes::LEASE_REVOKED || error.code == codes::LIMB_GONE {
                     // Nothing further of this attachment's will be accepted,
                     // so the thread stops rather than spinning a refusal per
@@ -1672,6 +1757,193 @@ fn relay(session_id: String, mut receiver: tokio::sync::mpsc::Receiver<ClientCom
             }
         }
     });
+}
+
+/// Counts one command as carried when it goes out of scope, so every path
+/// through the relay loop, `continue` and `return` included, finishes what it
+/// took.
+struct Finished<'a>(&'a RelayLedger);
+
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        self.0.finished();
+    }
+}
+
+/// How long the relay keeps offering one command to a session whose queue is
+/// full before it gives up and reports it.
+///
+/// `limb.command` answers `BACKPRESSURE` when the session's own channel is
+/// full, which on a slow server is a matter of milliseconds, not a fault.
+/// Dropping the command there was how typed text lost characters with nobody
+/// told. Two seconds is far longer than any real burst takes to drain, and a
+/// session still full after that is stuck rather than busy.
+const RELAY_BACKPRESSURE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a settle waits for the relay to carry what is already queued.
+///
+/// One command is one socket round trip, well under a millisecond on the same
+/// machine, so this is only ever reached when the application has stopped
+/// answering. Generous, because what it bounds is a report and not an action.
+const RELAY_SETTLE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Put one encoded command on the session, waiting out a full queue.
+fn send_command(session_id: &str, encoded: &serde_json::Value) -> Result<(), ToolError> {
+    let started = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(2);
+    loop {
+        match call(
+            "limb.command",
+            serde_json::json!({ "sessionId": session_id, "command": encoded }),
+        ) {
+            Err(error)
+                if error.code == "BACKPRESSURE"
+                    && started.elapsed() < RELAY_BACKPRESSURE_PATIENCE =>
+            {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(50));
+            }
+            other => return other.map(|_| ()),
+        }
+    }
+}
+
+/// One relay's account of what it has carried and what was refused.
+///
+/// The relay is fire and forget from the plane's side: `agent-plane` puts a
+/// command on a channel and counts it delivered. The ledger is how the plane
+/// finds out what the application actually did with it, so a settlement that
+/// says delivered means the far side took every keystroke.
+#[derive(Default)]
+pub(crate) struct RelayLedger {
+    state: Mutex<LedgerState>,
+    moved: std::sync::Condvar,
+    /// The sending half of the relay's channel, held weakly so the ledger does
+    /// not keep the relay alive. Read for whether anything is still queued.
+    queue: Mutex<Option<tokio::sync::mpsc::WeakSender<ClientCommand>>>,
+}
+
+#[derive(Default)]
+struct LedgerState {
+    taken: u64,
+    finished: u64,
+    closed: bool,
+    /// The first refusal since the last settle, as a code and a sentence.
+    refused: Option<(String, String)>,
+    presses_refused: u32,
+    /// A key press was refused since the last settle, so later presses are
+    /// held back.
+    tripped: bool,
+}
+
+impl RelayLedger {
+    fn watching(sender: &tokio::sync::mpsc::Sender<ClientCommand>) -> Arc<RelayLedger> {
+        let ledger = RelayLedger::default();
+        *lock(&ledger.queue) = Some(sender.downgrade());
+        Arc::new(ledger)
+    }
+
+    fn took(&self) {
+        lock(&self.state).taken += 1;
+    }
+
+    fn finished(&self) {
+        lock(&self.state).finished += 1;
+        self.moved.notify_all();
+    }
+
+    fn close(&self) {
+        lock(&self.state).closed = true;
+        self.moved.notify_all();
+    }
+
+    fn tripped(&self) -> bool {
+        lock(&self.state).tripped
+    }
+
+    fn press_held_back(&self) {
+        let mut state = lock(&self.state);
+        state.presses_refused = state.presses_refused.saturating_add(1);
+    }
+
+    fn refused(&self, error: &ToolError, press: bool) {
+        let mut state = lock(&self.state);
+        if state.refused.is_none() {
+            state.refused = Some((error.code.clone(), error.message.clone()));
+        }
+        if press {
+            state.tripped = true;
+            state.presses_refused = state.presses_refused.saturating_add(1);
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        lock(&self.state).closed
+    }
+
+    /// Nothing queued and nothing in hand.
+    fn idle(&self, state: &LedgerState) -> bool {
+        let queued = lock(&self.queue)
+            .as_ref()
+            .and_then(tokio::sync::mpsc::WeakSender::upgrade)
+            .is_some_and(|sender| sender.capacity() < sender.max_capacity());
+        !queued && state.taken == state.finished
+    }
+
+    /// Wait for the relay to carry everything queued, then hand back and clear
+    /// what was refused.
+    ///
+    /// Idle has to be seen twice a couple of milliseconds apart. A command the
+    /// relay has just received has left the queue a moment before `took`
+    /// counts it, and one look could fall in that gap. The plane pauses after
+    /// every typed character for longer than that anyway.
+    fn settle(&self, patience: std::time::Duration) -> Option<InputRefused> {
+        let deadline = std::time::Instant::now() + patience;
+        let mut idle_once = false;
+        let mut state = lock(&self.state);
+        loop {
+            if state.closed {
+                break;
+            }
+            if self.idle(&state) {
+                if idle_once {
+                    break;
+                }
+                idle_once = true;
+            } else {
+                idle_once = false;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                tracing::warn!(
+                    "the relay was still carrying commands after {} s; reporting what it has refused so far",
+                    patience.as_secs()
+                );
+                break;
+            }
+            let wait = (deadline - now).min(std::time::Duration::from_millis(2));
+            state = self
+                .moved
+                .wait_timeout(state, wait)
+                .map(|(guard, _)| guard)
+                .unwrap_or_else(|e| e.into_inner().0);
+        }
+        let refused = state.refused.take();
+        let presses_refused = std::mem::take(&mut state.presses_refused);
+        state.tripped = false;
+        refused.map(|(code, why)| InputRefused {
+            code,
+            why,
+            presses_refused,
+        })
+    }
+}
+
+/// Every relay's ledger, by session id.
+fn ledgers() -> &'static Mutex<BTreeMap<String, Arc<RelayLedger>>> {
+    static LEDGERS: std::sync::OnceLock<Mutex<BTreeMap<String, Arc<RelayLedger>>>> =
+        std::sync::OnceLock::new();
+    LEDGERS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 /// Carry one native intent over the socket, and hand the answer back to the
@@ -3102,6 +3374,16 @@ impl Plane {
         }
 
         let fence = self.fence_for(limb, &kind, generation)?;
+        // Kept for the sentence that names what went and what did not, if the
+        // far side refuses part of it.
+        let asked_text = match &kind {
+            IntentKind::Type { text, .. } => Some(text.clone()),
+            _ => None,
+        };
+        // Anything a previous action left on the channel is carried, and any
+        // refusal it earned is cleared, so what is read back after this
+        // dispatch belongs to this action alone.
+        self.settle_input(limb).await;
         let intent = AgentIntent {
             id: limb.mint(),
             grant: self.grant_id.clone(),
@@ -3130,19 +3412,47 @@ impl Plane {
         });
 
         let settlement = limb.dispatch(&self.grant(), intent, now).await;
+        // The dispatch settles once the commands are on the channel. The far
+        // side has the last word on each of them, so wait for it before
+        // saying delivered.
+        let far_side = self.settle_input(limb).await;
 
         self.note_inflight(limb.id().as_str(), id, false);
         let _ = self.watch.send(WatchEvent::Settled {
             limb_id: limb.id().to_string(),
             intent: id,
             kind: name,
-            outcome: outcome_word(&settlement.outcome).to_string(),
-            code: settlement.reason.map(|r| r.as_str().to_string()),
+            outcome: match far_side {
+                Some(_) => "refused".to_string(),
+                None => outcome_word(&settlement.outcome).to_string(),
+            },
+            code: match &far_side {
+                Some(refused) => Some(refused.code.clone()),
+                None => settlement.reason.map(|r| r.as_str().to_string()),
+            },
             progress: format!("{:?}", settlement.progress),
-            lost_state: settlement.gaps.lost_state(),
+            lost_state: settlement.gaps.lost_state() || far_side.is_some(),
             at: clock::unix_millis(),
         });
-        Ok(settlement)
+        match far_side {
+            Some(refused) => Err(partly_refused(
+                &refused,
+                &settlement.progress,
+                asked_text.as_deref(),
+            )),
+            None => Ok(settlement),
+        }
+    }
+
+    /// [`SessionSource::settle_input`], off the async runtime, since it waits
+    /// on the relay thread with a blocking condition variable.
+    async fn settle_input(&self, limb: &AttachedLimb) -> Option<InputRefused> {
+        let source = Arc::clone(&self.source);
+        let id = limb.id().clone();
+        tokio::task::spawn_blocking(move || source.settle_input(&id))
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Open a group and address its members together.
@@ -3574,6 +3884,46 @@ impl Plane {
 /// `FIRST`, which the fence then rejects as stale. That is the honest shape: a
 /// number this build cannot rebuild cannot be admitted, and it must be refused
 /// rather than silently treated as current.
+/// The error an action ends with when the far side refused part of it, with
+/// exactly what went and what did not.
+///
+/// For typed text the count is in characters and the two halves are quoted,
+/// because the repair is to look at the screen and type the rest, and an agent
+/// can only do that if it is told where the rest begins. Held back presses are
+/// always the tail (see [`InputRefused::presses_refused`]), so the characters
+/// that went are the first ones.
+fn partly_refused(
+    refused: &InputRefused,
+    progress: &limb_core::observation::Progress,
+    asked: Option<&str>,
+) -> ToolError {
+    use limb_core::observation::Progress;
+    let why = refused.why.trim_end_matches('.');
+    let message = match (asked, progress) {
+        (Some(text), Progress::CodePoints(queued)) => {
+            let total = text.chars().count();
+            let went = (*queued as usize)
+                .saturating_sub(refused.presses_refused as usize)
+                .min(total);
+            let typed: String = text.chars().take(went).collect();
+            let rest: String = text.chars().skip(went).collect();
+            if went == 0 {
+                format!("nothing was typed: {why}. Not typed: {rest:?}")
+            } else {
+                format!(
+                    "typed {went} of {total} characters, then the rest was refused: {why}. Typed: {typed:?}. Not typed: {rest:?}. Look at the screen, then type only the part that was not typed"
+                )
+            }
+        }
+        _ if refused.presses_refused > 0 => format!(
+            "{} key press(es) in this action did not reach the machine: {why}",
+            refused.presses_refused
+        ),
+        _ => format!("part of this action did not reach the machine: {why}"),
+    };
+    ToolError::new(refused.code.clone(), message)
+}
+
 fn generation_from(quoted: u32, limb: &AttachedLimb) -> GeometryGeneration {
     let current = limb.generation();
     if current.get() == quoted {
@@ -3662,4 +4012,91 @@ pub fn outcome_word(outcome: &limb_core::observation::Outcome) -> &'static str {
 /// what state a limb is in.
 pub fn state_json(state: &SessionState) -> serde_json::Value {
     serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({ "state": "idle" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ledger's whole contract, without a socket: a refused press trips
+    /// it, later presses are counted as held back, a settle hands back the
+    /// first refusal and the count, and the next action starts clean.
+    #[test]
+    fn a_refused_press_is_counted_with_everything_held_back_after_it() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel::<ClientCommand>(8);
+        let ledger = RelayLedger::watching(&sender);
+        let refusal = ToolError::new(codes::SCREEN_CHANGED, "the screen changed");
+
+        for press in 0..5 {
+            ledger.took();
+            if ledger.tripped() {
+                ledger.press_held_back();
+            } else if press == 2 {
+                ledger.refused(&refusal, true);
+            }
+            ledger.finished();
+        }
+
+        let settled = ledger
+            .settle(std::time::Duration::from_secs(1))
+            .expect("a refusal was recorded");
+        assert_eq!(settled.code, codes::SCREEN_CHANGED);
+        assert_eq!(
+            settled.presses_refused, 3,
+            "the refused press and the two after it"
+        );
+        assert!(!ledger.tripped(), "the next action starts clean");
+        assert_eq!(ledger.settle(std::time::Duration::from_secs(1)), None);
+    }
+
+    /// The shell's own tag reaches the agent as itself. SCREEN_CHANGED read
+    /// as BAD_REQUEST told an agent its arguments were wrong, and BACKPRESSURE
+    /// read as BAD_REQUEST was never waited out.
+    #[test]
+    fn a_tag_the_shell_names_is_passed_through() {
+        let error = |tag: &str| serde_json::json!({ "code": -32000, "message": "m", "data": { "code": tag } });
+        assert_eq!(
+            from_rpc_error(&error("SCREEN_CHANGED")).code,
+            codes::SCREEN_CHANGED
+        );
+        assert_eq!(from_rpc_error(&error("BACKPRESSURE")).code, "BACKPRESSURE");
+        assert_eq!(
+            from_rpc_error(&error("NOT_ATTACHED")).code,
+            codes::LIMB_GONE
+        );
+        assert_eq!(
+            from_rpc_error(&error("NO_SUCH_MACHINE")).code,
+            codes::BAD_REQUEST
+        );
+        assert_eq!(
+            from_rpc_error(&serde_json::json!({ "code": -32601, "message": "m" })).code,
+            codes::NOT_IMPLEMENTED
+        );
+    }
+
+    /// A settle does not report until what is queued has been carried.
+    #[test]
+    fn a_settle_waits_for_the_queue_to_drain() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<ClientCommand>(8);
+        let ledger = RelayLedger::watching(&sender);
+        sender
+            .try_send(ClientCommand::ReleaseAllKeys)
+            .expect("room in the channel");
+
+        let carrier = Arc::clone(&ledger);
+        let relay = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            receiver.try_recv().expect("the queued command");
+            carrier.took();
+            carrier.refused(&ToolError::new("BACKPRESSURE", "full"), false);
+            carrier.finished();
+        });
+        let settled = ledger.settle(std::time::Duration::from_secs(5));
+        relay.join().expect("the relay thread");
+        assert_eq!(
+            settled.map(|refused| refused.code),
+            Some("BACKPRESSURE".to_string()),
+            "a settle that returned before the queue drained would have missed this"
+        );
+    }
 }

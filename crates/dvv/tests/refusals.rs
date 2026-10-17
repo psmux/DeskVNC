@@ -335,3 +335,66 @@ async fn text_is_refused_before_it_is_lowered_when_the_shell_says_the_screen_cha
     assert_eq!(error_code(&key), Some("SCREEN_CHANGED"));
     assert!(recorder.commands().is_empty());
 }
+
+/// The far side refusing partway through a long `type` is reported, with the
+/// exact number of characters that went and the text that did not.
+///
+/// The incident: a 150 character shell command typed through `dvv_type` on a
+/// Raspberry Pi arrived as its first 24 characters, and the result said
+/// delivered. `agent-plane` settles once the keystrokes are on the channel, and
+/// the application then refused the rest one `limb.command` at a time, which
+/// the relay only logged. Nothing an agent read said anything was missing.
+#[tokio::test]
+async fn a_long_type_the_far_side_cuts_short_reports_exactly_what_went() {
+    let (source, plane) = fake_plane();
+    let limb = open(&plane, "h_lab01", true);
+    let mut client = Client::connect(plane);
+    client
+        .tool(
+            "dvv_control",
+            json!({ "limbId": limb, "action": "acquire" }),
+        )
+        .await;
+
+    // Shorter than the incident's, because the fake's recorder drains only
+    // when read, so a channel of 256 with half reserved holds 64 characters of
+    // key pairs. The real relay drains as it goes. What is under test is the
+    // report, and 24 of 60 exercises it exactly as 24 of 150 would.
+    let command = "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo dvv-test-1234567";
+    assert_eq!(command.chars().count(), 60);
+
+    // The control: the whole string goes when nothing refuses.
+    let whole = client
+        .tool("dvv_type", json!({ "limbId": limb, "text": command }))
+        .await;
+    assert_eq!(error_code(&whole), None, "{whole}");
+    assert_eq!(structured(&whole)["outcome"], "delivered");
+
+    source.refuse_presses_after(
+        &limb,
+        24,
+        "SCREEN_CHANGED",
+        "the screen changed materially since this attachment last read it: it read content generation 28 and the limb is now at 37. Nothing was typed",
+    );
+    let cut = client
+        .tool("dvv_type", json!({ "limbId": limb, "text": command }))
+        .await;
+    assert_eq!(
+        error_code(&cut),
+        Some("SCREEN_CHANGED"),
+        "a type the far side cut short must not say delivered: {cut}"
+    );
+    let message = structured(&cut)["message"].as_str().expect("a message");
+    let total = command.chars().count();
+    assert!(
+        message.contains(&format!("typed 24 of {total} characters")),
+        "{message}"
+    );
+    let (typed, rest) = command.split_at(24);
+    assert!(message.contains(&format!("{typed:?}")), "{message}");
+    assert!(message.contains(&format!("{rest:?}")), "{message}");
+    assert!(
+        message.contains("generation 28"),
+        "the far side's own words: {message}"
+    );
+}

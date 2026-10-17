@@ -34,17 +34,40 @@ use std::time::Duration;
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 
 /// Where the holder listens: beside `agent.sock`, under the same directory.
+///
+/// One holder per `dvv` binary, named by [`binary_tag`]. A single shared name
+/// meant that after an upgrade, or with a development build beside the
+/// installed one, every CLI verb was quietly served by whichever older binary
+/// had started the holder, for up to half an hour, with none of the fixes the
+/// binary the agent actually ran had in it.
 #[cfg(not(windows))]
 pub fn holder_path() -> PathBuf {
     let app = PathBuf::from(crate::cli::socket_path());
-    app.with_file_name("dvv-cli.sock")
+    app.with_file_name(format!("dvv-cli-{}.sock", binary_tag()))
 }
 
 /// Where the holder listens: a pipe named for this user beside the plane's.
 #[cfg(windows)]
 pub fn holder_path() -> PathBuf {
     let user = std::env::var("USERNAME").unwrap_or_default();
-    PathBuf::from(format!("\\\\.\\pipe\\deskvncviewer-dvv-cli-{user}"))
+    PathBuf::from(format!(
+        "\\\\.\\pipe\\deskvncviewer-dvv-cli-{user}-{}",
+        binary_tag()
+    ))
+}
+
+/// Eight hex digits that differ between two `dvv` binaries: a hash of this
+/// executable's path and version. Only the same binary has to agree with
+/// itself, so the hasher's output not being stable across Rust releases does
+/// not matter here.
+fn binary_tag() -> String {
+    use std::hash::{Hash, Hasher};
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (exe, crate::error::DVV_VERSION).hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
 }
 
 /// One blocking connection to a running holder.

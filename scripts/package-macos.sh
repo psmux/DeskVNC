@@ -35,6 +35,12 @@ env -u APPLE_SIGNING_IDENTITY cargo tauri build --bundles app
 # `cargo test --workspace` and `cargo tauri dev` on a fresh checkout. The
 # resulting bundle is identical either way: `Contents/MacOS/dvv`, beside the
 # main executable, signed with it and removed with it.
+#
+# `tauri.conf.json` now also does this for a plain `cargo tauri build`: its
+# `beforeBundleCommand` builds dvv and `bundle.macOS.files` copies it in,
+# because an app built by hand and copied to /Applications without dvv broke
+# every agent configured for it. The copy below stays so this script does not
+# depend on that, and it writes the same file.
 echo "==> Building the dvv agent binary"
 cargo build --release -p dvv
 cp target/release/dvv "$APP/Contents/MacOS/dvv"
