@@ -9,8 +9,8 @@
 
 use anyhow::{Context, Result};
 use boundary_session::{
-    Session,
-    unattended::{self, Access, Listener, MIN_PASSWORD, Notice},
+    Approval, Session,
+    unattended::{self, Access, Asked, Listener, MIN_PASSWORD, Notice},
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -29,6 +29,16 @@ pub struct Active {
     pub session: Session,
 }
 
+/// A helper that is not paired asking to come in by this computer's ID.
+pub struct Ask {
+    name: String,
+    peer: String,
+    tools: bool,
+    allow_tools: bool,
+    pair: bool,
+    answer: tokio::sync::oneshot::Sender<Asked>,
+}
+
 pub struct Unattended {
     access_path: PathBuf,
     machine: String,
@@ -39,6 +49,7 @@ pub struct Unattended {
     /// as the same ID at the same time.
     claim: Option<std::fs::File>,
     pub active: Option<Active>,
+    ask: Option<Ask>,
     reachable: bool,
     password: String,
     confirm: String,
@@ -57,6 +68,7 @@ impl Unattended {
             listener: None,
             claim: None,
             active: None,
+            ask: None,
             reachable: false,
             password: String::new(),
             confirm: String::new(),
@@ -209,6 +221,22 @@ impl Unattended {
                         });
                         arrived = true;
                     }
+                    Notice::Ask {
+                        name,
+                        peer,
+                        tools,
+                        answer,
+                    } => {
+                        self.ask = Some(Ask {
+                            name,
+                            peer,
+                            tools,
+                            allow_tools: false,
+                            pair: false,
+                            answer,
+                        });
+                        arrived = true;
+                    }
                     Notice::Refused { name, reason, .. } => {
                         self.message = format!("Turned away {name}: {reason}");
                         self.error = false;
@@ -241,6 +269,85 @@ impl Unattended {
             }
         }
         arrived
+    }
+    /// Ask the person about a helper who connected by this computer's ID
+    /// without being paired. `control_ok` is whether this app may control
+    /// the computer at all.
+    pub fn prompt(&mut self, ctx: &egui::Context, control_ok: bool) {
+        if self.ask.as_ref().is_some_and(|ask| ask.answer.is_closed()) {
+            // The helper gave up, or nobody answered in time.
+            self.ask = None;
+        }
+        let Some(ask) = self.ask.as_mut() else {
+            return;
+        };
+        let mut decision = None;
+        egui::Window::new("Approve this helper?")
+            .id(egui::Id::new("unattended ask"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} is connecting with this computer's ID and wants to see your screen.",
+                        ask.name
+                    ))
+                    .size(15.0),
+                );
+                theme::small(ui, "They are not paired with this computer. The name is supplied by the helper, so only allow someone you expect.");
+                ui.add_space(6.0);
+                theme::caption(ui, "Helper connection identity");
+                ui.monospace(&ask.peer);
+                if ask.tools {
+                    ui.add_space(10.0);
+                    ui.checkbox(
+                        &mut ask.allow_tools,
+                        "Also let their tools run commands and copy files on this computer",
+                    );
+                    theme::small(ui, "Their tools act as you, outside what the screen shows. Leave this off unless you asked for it.");
+                }
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut ask.pair,
+                    "Let them connect any time without asking me again",
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(control_ok, theme::primary(ui, "Allow viewing and control"))
+                        .clicked()
+                    {
+                        decision = Some(Approval::Control);
+                    }
+                    if ui.button("Allow viewing").clicked() {
+                        decision = Some(Approval::View);
+                    }
+                    if ui.button("Decline").clicked() {
+                        decision = Some(Approval::Deny);
+                    }
+                });
+                if !control_ok {
+                    theme::small(ui, "Accessibility permission is needed for control. You can allow viewing now.");
+                }
+            });
+        if let Some(approval) = decision
+            && let Some(ask) = self.ask.take()
+        {
+            let allowed = !matches!(approval, Approval::Deny);
+            let _ = ask.answer.send(Asked {
+                approval,
+                tools: allowed && ask.allow_tools,
+                pair: allowed && ask.pair,
+            });
+            if allowed && ask.pair {
+                // The listener saved them; show the list as it now is.
+                if let Ok(access) = Access::load(&self.access_path) {
+                    self.access = access;
+                }
+            }
+        }
     }
     /// The banner shown on top of everything while a helper is connected
     /// unattended. The person at the computer always sees who is in and can
@@ -484,6 +591,12 @@ pub mod autostart {
         autostart::enabled(ENTRY)
     }
     pub fn set(on: bool) -> Result<()> {
+        // A translocated copy's path is gone after a restart. Always None
+        // off macOS.
+        anyhow::ensure!(
+            !on || crate::install::translocated().is_none(),
+            "Move DeskVNC Support to Applications first, so it can start when you sign in"
+        );
         autostart::set(ENTRY, on)
     }
 }

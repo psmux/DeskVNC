@@ -67,6 +67,15 @@ struct Active {
     session: Session,
 }
 
+/// A helper that is not paired, and has no password, asking to come in by
+/// this computer's ID. Nobody answering within a minute turns them away.
+struct Ask {
+    name: String,
+    peer: String,
+    tools: bool,
+    answer: oneshot::Sender<unattended::Asked>,
+}
+
 struct Codes {
     lease: Option<boundary_codes::Lease>,
     pending: Option<(
@@ -115,6 +124,7 @@ struct Model {
     listener: Option<Listener>,
     claim: Option<std::fs::File>,
     active: Option<Active>,
+    ask: Option<Ask>,
     reachable: bool,
     message: String,
     message_error: bool,
@@ -184,6 +194,7 @@ struct UnattendedView {
     message: String,
     error: bool,
     active: Option<ActiveView>,
+    ask: Option<PendingView>,
 }
 #[derive(Serialize)]
 struct ActiveView {
@@ -242,6 +253,7 @@ impl Model {
             listener: None,
             claim: None,
             active: None,
+            ask: None,
             reachable: false,
             message: String::new(),
             message_error: false,
@@ -421,6 +433,8 @@ impl Model {
         self.listener = None;
         self.claim = None;
         self.active = None;
+        // Dropping the answer turns the helper away.
+        self.ask = None;
         self.reachable = false;
     }
     fn set_unattended(&mut self, enabled: bool) -> Result<(), String> {
@@ -562,6 +576,20 @@ impl Model {
                         });
                         arrived = true;
                     }
+                    Notice::Ask {
+                        name,
+                        peer,
+                        tools,
+                        answer,
+                    } => {
+                        self.ask = Some(Ask {
+                            name,
+                            peer,
+                            tools,
+                            answer,
+                        });
+                        arrived = true;
+                    }
                     Notice::Refused { name, reason, .. } => {
                         self.message = format!("Turned away {name}: {reason}");
                         self.message_error = false;
@@ -569,6 +597,10 @@ impl Model {
                     Notice::Finished(result) => finished = Some(result),
                 }
             }
+        }
+        if self.ask.as_ref().is_some_and(|ask| ask.answer.is_closed()) {
+            // The helper gave up, or nobody answered in time.
+            self.ask = None;
         }
         let mut ended = false;
         if let Some(active) = self.active.as_mut() {
@@ -675,6 +707,11 @@ impl Model {
                     control: a.control,
                     tools: a.tools,
                     activity: a.activity.clone(),
+                }),
+                ask: self.ask.as_ref().map(|a| PendingView {
+                    name: a.name.clone(),
+                    peer: a.peer.clone(),
+                    tools: a.tools,
                 }),
             },
         }
@@ -970,6 +1007,48 @@ pub async fn support_end_unattended(app: AppHandle, support: Shared<'_>) -> Resu
         if let Some(active) = m.active.take() {
             active.session.stop();
             m.say(format!("Ended {}'s session", active.name));
+        }
+        Ok(())
+    })
+}
+/// Answer a helper who is not paired and asked to come in by this
+/// computer's ID. `pair` lets them connect later without asking.
+#[tauri::command]
+pub async fn support_answer_ask(
+    app: AppHandle,
+    support: Shared<'_>,
+    decision: String,
+    allow_tools: bool,
+    pair: bool,
+) -> Result<(), String> {
+    let approval = match decision.as_str() {
+        "control" => Approval::Control,
+        "view" => Approval::View,
+        "deny" => Approval::Deny,
+        _ => return Err("Unknown answer".into()),
+    };
+    support.act(&app, |m| {
+        if matches!(approval, Approval::Control) && !m.input_permission {
+            return Err(
+                "Accessibility permission is needed for control. You can allow viewing now".into(),
+            );
+        }
+        let ask = m.ask.take().ok_or("Nobody is asking to connect")?;
+        let allowed = !matches!(approval, Approval::Deny);
+        let tools = allowed && allow_tools && ask.tools;
+        let pair = allowed && pair;
+        ask.answer
+            .send(unattended::Asked {
+                approval,
+                tools,
+                pair,
+            })
+            .map_err(|_| format!("{} stopped waiting", ask.name))?;
+        if pair {
+            // The listener saved them; show the list as it now is.
+            if let Ok(access) = Access::load(&m.access_path) {
+                m.access = access;
+            }
         }
         Ok(())
     })

@@ -10,7 +10,9 @@
  *   (`kind === "username-and-password"`).
  * - "Remember" is opt-in and defaults to OFF. The checkbox is a *request*: the
  *   shell holds the value in memory and writes it to the keychain only after
- *   the server accepts it, so a wrong password is never persisted.
+ *   the server accepts it, so a wrong password is never persisted. Once
+ *   ticked it stays ticked for the next prompt in this window, along with
+ *   the user name and domain (`previous`, see `promptStart`).
  * - The 8-character notice is a hard requirement for DES-based methods, which
  *   truncate silently, a 20-character password that "works" here would fail
  *   confusingly elsewhere.
@@ -22,7 +24,7 @@ import { Dialog } from "./primitives";
 import { IconAlert, IconLock } from "./icons";
 import type { CredentialRequest, ProtocolKind } from "../lib/types";
 import { promptNeedsDomain } from "../lib/types";
-import { splitDomainUser } from "../lib/credentials";
+import { promptStart, splitDomainUser, type PromptAnswer } from "../lib/credentials";
 
 /** DES truncation point for VncAuth / TLSVnc / X509Vnc. */
 const VNC_PASSWORD_LIMIT = 8;
@@ -31,11 +33,14 @@ export function CredentialPrompt({
   request,
   hostName,
   protocol,
+  previous,
   onSubmit,
   onCancel,
 }: {
   request: CredentialRequest;
   hostName: string;
+  /** The last answer given in this window, so this prompt starts from it. */
+  previous?: PromptAnswer | null;
   /** Which protocol is asking. RDP is the one that takes a logon domain. */
   protocol: ProtocolKind;
   onSubmit: (
@@ -49,10 +54,12 @@ export function CredentialPrompt({
   const needsDomain = promptNeedsDomain(protocol);
   // An RDP logon is always user-first, whatever kind the request names.
   const needsUsername = needsDomain || request.kind === "username-and-password";
-  const [username, setUsername] = useState(request.usernameHint ?? "");
-  const [domain, setDomain] = useState("");
+  // Computed once, on mount: what the person types after that is theirs.
+  const [start] = useState(() => promptStart(request.usernameHint, previous));
+  const [username, setUsername] = useState(start.username);
+  const [domain, setDomain] = useState(start.domain);
   const [password, setPassword] = useState("");
-  const [save, setSave] = useState(false); // opt-in, per PRD/10 §3.4
+  const [save, setSave] = useState(start.save); // opt-in, per PRD/10 §3.4
   const submitted = useRef(false);
 
   // A rejected attempt re-raises the prompt with a higher `attempt`. Clear the

@@ -6,9 +6,11 @@
 //! decided: the shell puts text on the OS clipboard
 //! (`src-tauri/src/commands/session.rs:932`), a session announces the peer's
 //! formats with `remote_core::SessionEvent::ClipboardNotify` and delivers text
-//! with `SessionEvent::ClipboardText`, and the shell asks for it with
-//! `ClientCommand::ClipboardRequest` and offers ours with
-//! `ClientCommand::ClipboardText`. This file speaks MS-RDPECLIP on one side of
+//! with `SessionEvent::ClipboardText`, and the shell offers ours with
+//! `ClientCommand::ClipboardText`. The session pulls the peer's text itself
+//! when it is announced, as the RFB session does; an explicit
+//! `ClientCommand::ClipboardRequest` is honoured too, and is what an agent's
+//! clipboard read sends. This file speaks MS-RDPECLIP on one side of
 //! that contract and nothing more. Text only, which is what the RFB side
 //! supports today (`crates/vnc-core/src/clipboard/mod.rs:220` encodes text and
 //! nothing else on the outbound path).
@@ -39,6 +41,8 @@
 //! for the same reason (`crates/vnc-core/src/clipboard/mod.rs:92`), which is
 //! what stops a paste from an RDP session and a paste from a VNC session
 //! behaving differently in the same window.
+
+use std::collections::VecDeque;
 
 use rdp_pdu::{PduError, Reader, Writer};
 use remote_core::SessionEvent;
@@ -75,7 +79,10 @@ pub mod msg_flags {
     /// `CB_RESPONSE_FAIL`.
     pub const RESPONSE_FAIL: u16 = 0x0002;
     /// `CB_ASCII_NAMES`: the short format names in the list are ASCII rather
-    /// than Unicode. We never read a format name, so it changes nothing here.
+    /// than Unicode. Both are 32 bytes wide and we never read a format name,
+    /// so it changes nothing here. In particular it does not choose between
+    /// the short and the long list form: only the capability exchange does
+    /// that (MS-RDPECLIP 2.2.3.1).
     pub const ASCII_NAMES: u16 = 0x0004;
 }
 
@@ -134,6 +141,13 @@ pub struct Cliprdr {
     /// it (MS-RDPECLIP 1.3.2.1).
     ready: bool,
     /// True when both ends agreed long format names.
+    ///
+    /// We always ask for them, so this is the server's answer and nothing
+    /// else: false until its `CB_CLIP_CAPS` says otherwise, because a server
+    /// that sends no capabilities is a version 1 server with no flags set
+    /// (MS-RDPECLIP 3.1.5.2.1). The server sends its capabilities before the
+    /// Monitor Ready, so the answer is already here when our first list goes
+    /// out.
     long_names: bool,
     /// The text the shell last put on the local clipboard, held until the
     /// server asks for it.
@@ -142,8 +156,18 @@ pub struct Cliprdr {
     /// not send it, and the server asks only when something on its side
     /// pastes. Holding the string is what lets the answer be immediate.
     local: Option<String>,
-    /// True when the server's last format list offered text we can ask for.
-    server_has_text: bool,
+    /// The text format the server's last format list offered, if any:
+    /// `CF_UNICODETEXT` when it was in the list, otherwise `CF_TEXT` or
+    /// `CF_OEMTEXT`. A client may only ask for a format the server offered
+    /// (MS-RDPECLIP 3.1.5.2.5).
+    server_text: Option<u32>,
+    /// The formats we asked for and have not had an answer to, oldest first.
+    ///
+    /// A `CB_FORMAT_DATA_RESPONSE` does not say which format it carries
+    /// (MS-RDPECLIP 2.2.5.2), and the responses come back in the order the
+    /// requests went out, so this is how a `CF_TEXT` answer is told from a
+    /// `CF_UNICODETEXT` one.
+    requested: VecDeque<u32>,
     /// The message under construction, reused.
     scratch: Vec<u8>,
     /// The static channel chunk, reused.
@@ -155,16 +179,6 @@ impl Cliprdr {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Forget the negotiation. The share is being torn down and the server
-    /// restarts the clipboard sequence on the new one.
-    pub fn reset(&mut self) {
-        self.ready = false;
-        self.long_names = false;
-        self.server_has_text = false;
-        // `local` survives: it is what the *user* has on their clipboard, and
-        // a reactivation is not a reason to forget it.
     }
 
     /// True once the server has said its clipboard is ready.
@@ -244,6 +258,10 @@ impl Cliprdr {
     /// the shell has already handed us, which is usually nothing; announcing
     /// an empty list is how a client says "my clipboard is empty" and is what
     /// stops the server offering its own contents into a void.
+    ///
+    /// A second Monitor Ready on the same channel is answered the same way.
+    /// Nothing in MS-RDPECLIP forbids a server restarting its clipboard, and
+    /// answering twice costs two short PDUs.
     fn monitor_ready(&mut self, static_id: u16, ctx: ChannelCtx, out: &mut Outbox) -> Result<()> {
         self.ready = true;
         tracing::debug!("the server's clipboard is ready");
@@ -258,6 +276,11 @@ impl Cliprdr {
     /// this build does not do. A malformed capability set is not an error:
     /// the defaults are the conservative ones, so the worst case is short
     /// format names, which are also parsed here.
+    ///
+    /// Sending our own capabilities never changes this. It used to: the
+    /// Monitor Ready handler set long names on as it sent ours, which threw
+    /// away a server's "no" that had arrived just before it, and every list
+    /// we sent such a server after that was in a form it does not parse.
     fn capabilities(&mut self, body: &[u8]) {
         let mut r = Reader::new(body);
         let Ok(count) = r.u16("CLIPRDR_CAPS cCapabilitiesSets") else {
@@ -311,15 +334,16 @@ impl Cliprdr {
         ctx: ChannelCtx,
         out: &mut Outbox,
     ) -> Result<()> {
-        // The sender's own `CB_ASCII_NAMES` decides the record width for this
-        // message, whatever the capability exchange settled, because
-        // MS-RDPECLIP 2.2.3.1.1 makes it a per message flag.
-        let long = self.long_names && flags & msg_flags::ASCII_NAMES == 0;
-        let ids = format_ids(body, long);
-        self.server_has_text = ids.iter().any(|id| is_text(*id));
+        // The capability exchange alone decides the list form.
+        // `CB_ASCII_NAMES` only says how a short name is encoded, and both
+        // encodings are 32 bytes wide (MS-RDPECLIP 2.2.3.1), so it is logged
+        // and not acted on.
+        let ids = format_ids(body, self.long_names);
+        self.server_text = best_text_format(&ids);
         tracing::debug!(
             formats = ids.len(),
-            text = self.server_has_text,
+            text = ?self.server_text,
+            ascii_names = flags & msg_flags::ASCII_NAMES != 0,
             "the server offered clipboard formats"
         );
 
@@ -332,14 +356,20 @@ impl Cliprdr {
             out,
         )?;
 
-        if self.server_has_text {
-            // The shell decides whether to pull it: a notify is cheap and a
-            // transfer is not, and pulling every remote copy into the local
-            // clipboard unasked is what makes a remote session steal a user's
-            // clipboard (PRDRDP/05 §4.3).
+        if let Some(format) = self.server_text {
             out.events.push(SessionEvent::ClipboardNotify {
                 formats: FORMAT_TEXT,
             });
+            // Pulled now rather than left for the shell to ask for. The shell
+            // never asks: it treats a notify as information and waits for the
+            // `ClipboardText` that follows, because that is what the RFB
+            // session does (`crates/vnc-core/src/session/run_loop.rs`, the
+            // `ACTION_NOTIFY` arm, pulls on every notify). Leaving the pull to
+            // the shell meant nothing copied on a Windows desktop ever
+            // reached this side (issue #9). Whether the clipboard is shared
+            // at all is decided before the channel is requested, by the
+            // host's clipboard setting.
+            self.send_request(format, static_id, ctx, out)?;
         }
         Ok(())
     }
@@ -354,7 +384,7 @@ impl Cliprdr {
         out: &mut Outbox,
     ) -> Result<()> {
         let requested = Reader::new(body).u32("CLIPRDR_FORMAT_DATA_REQUEST requestedFormatId")?;
-        let text = match (&self.local, is_text(requested)) {
+        let text = match (&self.local, requested == format_id::UNICODE_TEXT) {
             (Some(text), true) => text,
             _ => {
                 // MS-RDPECLIP 3.1.5.2.6: a client with nothing to give
@@ -374,7 +404,10 @@ impl Cliprdr {
         // `CF_UNICODETEXT` is UTF-16LE with a NUL terminator
         // (MS-RDPECLIP 2.2.5.2). `CF_TEXT` is the server's ANSI code page,
         // which we have no way to know, so we only ever answer the Unicode
-        // one and refuse the rest above.
+        // one and refuse the rest above. That costs nothing: we announce only
+        // `CF_UNICODETEXT`, and Windows synthesises the other two from it on
+        // its own side. Answering a `CF_TEXT` request with UTF-16, as this
+        // once did, pasted a NUL after the first character.
         let mut data = Vec::with_capacity(text.len() * 2 + 2);
         for unit in lf_to_crlf(text).encode_utf16() {
             data.extend_from_slice(&unit.to_le_bytes());
@@ -393,6 +426,12 @@ impl Cliprdr {
     /// `CB_FORMAT_DATA_RESPONSE` from the server (MS-RDPECLIP 2.2.5.2): the
     /// text we asked for.
     fn format_data_response(&mut self, body: &[u8], flags: u16, out: &mut Outbox) {
+        // An answer nobody is waiting for is read as the Unicode form, which
+        // is the only one a well behaved server would volunteer.
+        let format = self
+            .requested
+            .pop_front()
+            .unwrap_or(format_id::UNICODE_TEXT);
         if flags & msg_flags::RESPONSE_OK == 0 {
             tracing::debug!("the server could not produce the clipboard format we asked for");
             return;
@@ -406,17 +445,31 @@ impl Cliprdr {
             );
             return;
         }
-        let units: Vec<u16> = body
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .take_while(|u| *u != 0)
-            .collect();
-        // Lossy rather than refused: a server sending an unpaired surrogate is
-        // sending something no clipboard should hold, and losing one character
-        // beats losing the paste.
-        let text = crlf_to_lf(&String::from_utf16_lossy(&units));
+        let text = if format == format_id::UNICODE_TEXT {
+            let units: Vec<u16> = body
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|u| *u != 0)
+                .collect();
+            // Lossy rather than refused: a server sending an unpaired
+            // surrogate is sending something no clipboard should hold, and
+            // losing one character beats losing the paste.
+            String::from_utf16_lossy(&units)
+        } else {
+            // `CF_TEXT` or `CF_OEMTEXT`, asked for only because the server
+            // offered no Unicode form. The code page is the server's and is
+            // not on the wire, so each byte is taken as Latin-1: exact for
+            // ASCII, which is what a server offering only these formats
+            // usually holds, and one wrong character rather than a lost paste
+            // for anything else.
+            body.iter()
+                .take_while(|b| **b != 0)
+                .map(|b| char::from(*b))
+                .collect()
+        };
+        let text = crlf_to_lf(&text);
         tracing::debug!(
             chars = text.chars().count(),
             "clipboard text from the server"
@@ -461,18 +514,31 @@ impl Cliprdr {
         ctx: ChannelCtx,
         out: &mut Outbox,
     ) -> Result<()> {
-        if !self.ready || !self.server_has_text {
+        let Some(format) = self.server_text.filter(|_| self.ready) else {
             tracing::debug!(
                 ready = self.ready,
-                text = self.server_has_text,
+                text = ?self.server_text,
                 "a clipboard request with nothing to ask for"
             );
             return Ok(());
-        }
+        };
+        self.send_request(format, static_id, ctx, out)
+    }
+
+    /// `CB_FORMAT_DATA_REQUEST` (MS-RDPECLIP 2.2.5.1) for one format, noted
+    /// so its answer is decoded as that format.
+    fn send_request(
+        &mut self,
+        format: u32,
+        static_id: u16,
+        ctx: ChannelCtx,
+        out: &mut Outbox,
+    ) -> Result<()> {
+        self.requested.push_back(format);
         self.send_header(
             msg_type::FORMAT_DATA_REQUEST,
             0,
-            &format_id::UNICODE_TEXT.to_le_bytes(),
+            &format.to_le_bytes(),
             static_id,
             ctx,
             out,
@@ -496,19 +562,17 @@ impl Cliprdr {
             w.u32(CB_CAPS_VERSION_2);
             w.u32(CB_USE_LONG_FORMAT_NAMES);
         }
-        // We asked for long names; the server agrees or it does not, and its
-        // own capability set says which. Assuming ours until then is what
-        // MS-RDPECLIP 3.1.5.2.1 describes.
-        self.long_names = true;
+        // `long_names` is left alone: it is the server's answer, and the
+        // server has usually given it already (see the field).
         self.send_header(msg_type::CLIP_CAPS, 0, &body, static_id, ctx, out)
     }
 
     /// `CB_FORMAT_LIST` (MS-RDPECLIP 2.2.3.1), in the long name form.
     ///
-    /// One format when we hold text and none when we do not. The short name
-    /// form is never produced: we always ask for long names, and a server
-    /// that refuses them still parses a list we send in the form its own
-    /// capability set advertised, which is the form we agreed to.
+    /// One format when we hold text and none when we do not, in whichever
+    /// form the capability exchange settled: long names when the server
+    /// agreed them, the 36 byte short form when it did not or sent no
+    /// capabilities at all.
     fn send_format_list(
         &mut self,
         static_id: u16,
@@ -602,18 +666,22 @@ fn format_ids(body: &[u8], long_names: bool) -> Vec<u32> {
     ids
 }
 
-/// True for a format id whose payload is text we can present.
+/// The text format to ask for out of a server's format list, if it offered
+/// one.
 ///
-/// Only `CF_UNICODETEXT` is asked for. `CF_TEXT` and `CF_OEMTEXT` are in the
-/// list because a server that offers only those is still offering text, and
-/// the notify the shell sees should say so; the request that follows names
-/// the Unicode form, which every Windows server synthesises from the others
-/// (MS-RDPECLIP 1.3.1.2).
-const fn is_text(id: u32) -> bool {
-    matches!(
-        id,
-        format_id::TEXT | format_id::OEM_TEXT | format_id::UNICODE_TEXT
-    )
+/// `CF_UNICODETEXT` whenever it is there, which on Windows is always, because
+/// the OS synthesises it from either of the other two (MS-RDPECLIP 1.3.1.2).
+/// A server that is not Windows may offer only `CF_TEXT` or `CF_OEMTEXT`, and
+/// asking it for a format it never offered gets a refusal at best
+/// (MS-RDPECLIP 3.1.5.2.5), so the one it did offer is asked for instead.
+fn best_text_format(ids: &[u32]) -> Option<u32> {
+    [
+        format_id::UNICODE_TEXT,
+        format_id::TEXT,
+        format_id::OEM_TEXT,
+    ]
+    .into_iter()
+    .find(|wanted| ids.contains(wanted))
 }
 
 /// Normalise to CRLF for the wire.
@@ -750,9 +818,10 @@ mod tests {
         );
     }
 
-    /// The round trip the shell sees: the server offers text, we notify, the
-    /// shell asks, the server answers, we emit the text with its line endings
-    /// converted.
+    /// The round trip the shell sees: the server offers text, we notify and
+    /// pull it, the server answers, we emit the text with its line endings
+    /// converted. A request from the shell on top of that is still honoured,
+    /// which is what an agent's clipboard read sends.
     #[test]
     fn text_from_the_server_reaches_the_shell() {
         let mut clip = Cliprdr::new();
@@ -770,9 +839,10 @@ mod tests {
         let mut out = Outbox::new();
         clip.message(&text_format_list(), 1006, ctx(), &mut out)
             .expect("list");
-        // The mandatory response, and a notify for the shell.
+        // The mandatory response, the pull, and a notify for the shell.
         assert_eq!(sent(&out)[0].0, msg_type::FORMAT_LIST_RESPONSE);
         assert_eq!(sent(&out)[0].1, msg_flags::RESPONSE_OK);
+        assert_eq!(sent(&out)[1].0, msg_type::FORMAT_DATA_REQUEST);
         assert!(matches!(
             out.events.first(),
             Some(SessionEvent::ClipboardNotify {
@@ -955,6 +1025,256 @@ mod tests {
         )
         .expect("survives");
         assert!(out.events.is_empty(), "nothing was emitted");
+    }
+
+    /// The Monitor Ready handler used to set long format names on as it sent
+    /// our capabilities, which threw away the server's answer: Windows sends
+    /// its `CB_CLIP_CAPS` before the Monitor Ready (MS-RDPECLIP 1.3.2.1), so
+    /// a server that said no was then sent long form lists it reads as
+    /// garbage. The list now goes out in the form the server agreed.
+    #[test]
+    fn a_server_that_refuses_long_names_gets_short_format_lists() {
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.offer_text("held", 1006, ctx(), &mut out)
+            .expect("held");
+        clip.message(&caps_from_server(false), 1006, ctx(), &mut out)
+            .expect("caps");
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+
+        let sent = sent(&out);
+        assert_eq!(sent[0].0, msg_type::CLIP_CAPS);
+        assert_eq!(sent[1].0, msg_type::FORMAT_LIST);
+        // One 36 byte short record: the id and a 32 byte name.
+        assert_eq!(sent[1].2.len(), 36, "{:?}", sent[1].2);
+        assert_eq!(format_ids(&sent[1].2, false), vec![format_id::UNICODE_TEXT]);
+    }
+
+    /// A server that sends no capabilities at all is a version 1 server with
+    /// no flags (MS-RDPECLIP 3.1.5.2.1), so it gets the short form too. One
+    /// that agrees long names gets the long form, whichever order its
+    /// capabilities and the shell's offer arrive in.
+    #[test]
+    fn the_list_form_follows_the_server_capabilities() {
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+        let mut out = Outbox::new();
+        clip.offer_text("x", 1006, ctx(), &mut out).expect("offer");
+        assert_eq!(sent(&out)[0].2.len(), 36, "no capabilities, short form");
+
+        clip.message(&caps_from_server(true), 1006, ctx(), &mut out)
+            .expect("caps");
+        let mut out = Outbox::new();
+        clip.offer_text("y", 1006, ctx(), &mut out).expect("offer");
+        // The id and an empty NUL terminated UTF-16LE name.
+        assert_eq!(sent(&out)[0].2, [13, 0, 0, 0, 0, 0]);
+    }
+
+    /// Text copied on the server reaches the shell with no request from the
+    /// shell, which never sends one (issue #9). The pull names the format the
+    /// server offered.
+    #[test]
+    fn the_server_text_is_pulled_without_the_shell_asking() {
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.message(&caps_from_server(true), 1006, ctx(), &mut out)
+            .expect("caps");
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+
+        // A Windows Server list: registered formats with names, and the three
+        // text formats with none.
+        let mut body = Vec::new();
+        let mut w = Writer::new(&mut body);
+        w.u32(0xC004);
+        for unit in "Rich Text Format".encode_utf16() {
+            w.u16(unit);
+        }
+        w.u16(0);
+        for id in [
+            format_id::UNICODE_TEXT,
+            16,
+            format_id::TEXT,
+            format_id::OEM_TEXT,
+        ] {
+            w.u32(id);
+            w.u16(0);
+        }
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(msg_type::FORMAT_LIST, 0, &body),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("list");
+        let sent = sent(&out);
+        assert_eq!(sent[0].0, msg_type::FORMAT_LIST_RESPONSE);
+        assert_eq!(sent[1].0, msg_type::FORMAT_DATA_REQUEST);
+        assert_eq!(sent[1].2, format_id::UNICODE_TEXT.to_le_bytes());
+
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(
+                msg_type::FORMAT_DATA_RESPONSE,
+                msg_flags::RESPONSE_OK,
+                &utf16("copied on the server"),
+            ),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("data");
+        assert!(matches!(
+            out.events.as_slice(),
+            [SessionEvent::ClipboardText(t)] if t == "copied on the server"
+        ));
+    }
+
+    /// A short name list (long names not agreed) that offers only `CF_TEXT`,
+    /// with `CB_ASCII_NAMES` set: the request names `CF_TEXT`, because asking
+    /// for a format the server never offered is refused, and the answer is
+    /// read as bytes rather than as UTF-16.
+    #[test]
+    fn a_server_offering_only_cf_text_is_asked_for_cf_text() {
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.message(&caps_from_server(false), 1006, ctx(), &mut out)
+            .expect("caps");
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&format_id::TEXT.to_le_bytes());
+        body.extend_from_slice(&[0u8; 32]);
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(msg_type::FORMAT_LIST, msg_flags::ASCII_NAMES, &body),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("list");
+        let requests: Vec<_> = sent(&out)
+            .into_iter()
+            .filter(|m| m.0 == msg_type::FORMAT_DATA_REQUEST)
+            .collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].2, format_id::TEXT.to_le_bytes());
+
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(
+                msg_type::FORMAT_DATA_RESPONSE,
+                msg_flags::RESPONSE_OK,
+                b"one\r\ntwo\0",
+            ),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("data");
+        assert!(matches!(
+            out.events.as_slice(),
+            [SessionEvent::ClipboardText(t)] if t == "one\ntwo"
+        ));
+    }
+
+    /// `CB_ASCII_NAMES` does not switch a long name list to the short form.
+    /// Only the capability exchange decides that (MS-RDPECLIP 2.2.3.1), and
+    /// reading a long list as short records skips straight past the text
+    /// format.
+    #[test]
+    fn the_ascii_names_flag_does_not_change_the_list_form() {
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.message(&caps_from_server(true), 1006, ctx(), &mut out)
+            .expect("caps");
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+        // A named format first, so a short form reading lands its 32 byte
+        // skip in the middle of the name and never sees the text format.
+        let mut body = Vec::new();
+        let mut w = Writer::new(&mut body);
+        w.u32(0xC0DE);
+        for unit in "HTML Format".encode_utf16() {
+            w.u16(unit);
+        }
+        w.u16(0);
+        w.u32(format_id::UNICODE_TEXT);
+        w.u16(0);
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(msg_type::FORMAT_LIST, msg_flags::ASCII_NAMES, &body),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("list");
+        assert!(matches!(
+            out.events.as_slice(),
+            [SessionEvent::ClipboardNotify { .. }]
+        ));
+    }
+
+    /// We announce only `CF_UNICODETEXT`, so a `CF_TEXT` request is refused
+    /// rather than answered with UTF-16, which the server would paste as one
+    /// character followed by a NUL.
+    #[test]
+    fn a_cf_text_request_is_refused_rather_than_answered_in_utf16() {
+        let mut clip = Cliprdr::new();
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(msg_type::MONITOR_READY, 0, &[]),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("ready");
+        clip.offer_text("abc", 1006, ctx(), &mut out)
+            .expect("offer");
+        let mut out = Outbox::new();
+        clip.message(
+            &from_server(
+                msg_type::FORMAT_DATA_REQUEST,
+                0,
+                &format_id::TEXT.to_le_bytes(),
+            ),
+            1006,
+            ctx(),
+            &mut out,
+        )
+        .expect("request");
+        assert_eq!(sent(&out)[0].0, msg_type::FORMAT_DATA_RESPONSE);
+        assert_eq!(sent(&out)[0].1, msg_flags::RESPONSE_FAIL);
     }
 
     /// The line ending conversions, including the pair that must not double.

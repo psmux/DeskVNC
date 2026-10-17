@@ -65,6 +65,11 @@ pub struct CredentialSource<'a> {
     used: AtomicBool,
     /// The user name the user last supplied, so a retry can prefill it.
     last_username: Mutex<Option<String>>,
+    /// What the user last supplied in full, held until the handshake says
+    /// whether the server took it. See [`accepted`](Self::accepted).
+    supplied: Mutex<Option<Credentials>>,
+    /// Set by the handshake once the security result came back OK.
+    authenticated: AtomicBool,
 }
 
 impl std::fmt::Debug for CredentialSource<'_> {
@@ -95,6 +100,8 @@ impl<'a> CredentialSource<'a> {
             username_hint: None,
             used: AtomicBool::new(false),
             last_username: Mutex::new(None),
+            supplied: Mutex::new(None),
+            authenticated: AtomicBool::new(false),
         }
     }
 
@@ -115,6 +122,8 @@ impl<'a> CredentialSource<'a> {
             username_hint,
             used: AtomicBool::new(false),
             last_username: Mutex::new(None),
+            supplied: Mutex::new(None),
+            authenticated: AtomicBool::new(false),
         }
     }
 
@@ -136,6 +145,28 @@ impl<'a> CredentialSource<'a> {
     /// The user name the user supplied, for prefilling the retry prompt.
     pub fn last_username(&self) -> Option<String> {
         self.last_username.lock().expect("not poisoned").clone()
+    }
+
+    /// Record that the security handshake succeeded with what this attempt
+    /// used. Called by the session once the server's security result is OK,
+    /// which is the one point at which a typed password is known to be right.
+    pub(crate) fn mark_authenticated(&self) {
+        self.authenticated.store(true, Ordering::Relaxed);
+    }
+
+    /// The credentials the user typed in this attempt, once the server has
+    /// accepted them; `None` when nothing was typed or nothing was accepted.
+    ///
+    /// The session keeps these for its later connection attempts, so an
+    /// automatic reconnect after a dropped link (an SSH tunnel going away is
+    /// the common one) does not ask for a password the server took a minute
+    /// ago. A rejected answer is never returned, so nothing here can replay a
+    /// wrong password.
+    pub(crate) fn accepted(&self) -> Option<Credentials> {
+        if !self.authenticated.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.supplied.lock().expect("not poisoned").clone()
     }
 
     /// Resolve credentials for one security method.
@@ -222,11 +253,13 @@ impl<'a> CredentialSource<'a> {
         }
 
         *self.last_username.lock().expect("not poisoned") = username.clone();
-        Ok(Credentials {
+        let answer = Credentials {
             username,
             password,
             domain: None,
-        })
+        };
+        *self.supplied.lock().expect("not poisoned") = Some(answer.clone());
+        Ok(answer)
     }
 }
 
@@ -386,6 +419,67 @@ mod tests {
         assert_eq!(got.username.as_deref(), Some("alice"));
         assert_eq!(got.password.as_deref(), Some("pw2"));
         assert_eq!(src.last_username().as_deref(), Some("alice"));
+    }
+
+    /// A Mac saved with its account name and password (issue #9) signs in
+    /// with Apple auth without raising the prompt at all.
+    #[tokio::test]
+    async fn a_saved_user_name_and_password_skip_the_apple_prompt() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut o = opts();
+        o.credentials = Credentials::user_pass("godwin", "secret");
+        let src = CredentialSource::interactive(&tx, 1, None, None);
+        let got = src
+            .obtain(
+                "Apple Remote Desktop",
+                CredentialKind::UsernameAndPassword,
+                false,
+                &o,
+            )
+            .await
+            .unwrap();
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password.as_deref(), Some("secret"));
+        assert!(!src.prompted(), "no prompt should have been raised");
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A Mac saved with only its account name still asks for the password,
+    /// but the prompt arrives with the saved name in it, not the local one.
+    #[tokio::test]
+    async fn a_saved_user_name_prefills_the_prompt() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut o = opts();
+        o.credentials = Credentials {
+            username: Some("godwin".into()),
+            password: None,
+            domain: None,
+        };
+        let src = CredentialSource::interactive(&tx, 1, None, None);
+        tokio::spawn(async move {
+            let ask = rx.recv().await.unwrap();
+            assert_eq!(ask.request.username_hint.as_deref(), Some("godwin"));
+            // The person only types the password; the name box is left as
+            // the prompt filled it, which the shell sends back empty.
+            ask.reply
+                .send(Some(Credentials {
+                    username: None,
+                    password: Some("typed".into()),
+                    domain: None,
+                }))
+                .unwrap();
+        });
+        let got = src
+            .obtain(
+                "Apple Remote Desktop",
+                CredentialKind::UsernameAndPassword,
+                false,
+                &o,
+            )
+            .await
+            .unwrap();
+        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.password.as_deref(), Some("typed"));
     }
 
     #[tokio::test]

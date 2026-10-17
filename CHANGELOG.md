@@ -31,6 +31,63 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   unattended connections at a time; if both have it switched on, DeskVNC takes
   over when DeskVNC Support quits.
 
+## [0.29.0] (2026-10-15)
+
+### Added
+
+* Connecting to a Boundary computer by its machine ID works on a fresh install.
+  A helper that is not paired and has no password is no longer turned away:
+  the person at that computer is asked, as they are for an invitation, and can
+  pair the helper so it comes straight in next time.
+* New Host offers Boundary next to VNC, RDP and SSH, with a machine ID field in
+  place of address and port, so a Boundary computer is saved and reopened like
+  any other.
+* A VNC host shows a User name field when it needs one: Apple Screen Sharing,
+  the VeNCrypt types that take one, and Auto against a Mac. The name is saved
+  with the host and used at connect without a prompt (#9).
+* On macOS, DeskVNC Support notices when it runs from Downloads as a
+  translocated copy and moves itself to Applications with one click.
+
+### Fixed
+
+* Boundary showed a still picture on slow links. Each screen had 750 ms to
+  arrive at one end and 2 s at the other, so on a cellular uplink nearly all
+  of them were thrown away. Screens now go as JPEG, a tenth the size, to a
+  helper that takes it, an unchanged screen is not sent again, and a slow
+  screen is allowed to finish.
+* A Boundary session opened view only and ignored the mouse and keyboard. The
+  window saved its own "view only until allowed" state as the person's choice
+  and read it back next time. Agents were blocked by the same thing.
+* A burst of pointer moves on a slow Boundary link ended the session. Surplus
+  moves are now dropped instead.
+* Boundary computers never got a thumbnail in the Library, because the picture
+  was taken once, before the first Boundary screen had arrived.
+* RDP clipboard sharing (#9): text copied on the server never reached this
+  computer, the clipboard stopped working after a server reactivated the
+  session, and some servers that open the clipboard early failed to connect.
+  The per host "Share my clipboard" switch is now honoured for RDP, and the
+  local clipboard is offered again after a reconnect.
+* Credentials typed at a prompt were lost when a connection, including one
+  through an SSH tunnel, failed or dropped (#9). A VNC password that the
+  server accepted is saved even if the session drops before its first frame,
+  an automatic reconnect no longer asks again, a reconnect after a wrong
+  password keeps the user name, and "Remember" stays ticked between attempts.
+* A host switched to "VNC password only" now uses the password typed after the
+  switch, not one saved earlier under Apple auth.
+* `dvv_run` returns the command's output and exit status; it reported only that
+  the command was delivered.
+* DeskVNC Support for Intel Macs, built with a newer Xcode, failed to launch
+  for want of a Swift runtime path.
+
+### Security
+
+* rustls is updated to 0.23.46 for RUSTSEC-2026-0346, 0347, 0348 and 0349.
+
+### Changed
+
+* Both ends of a Boundary session should be on 0.29.0 for JPEG screens and the
+  approve on screen flow. Older copies still connect, with PNG screens.
+
 ## [0.28.0] (2026-10-13)
 
 ### Added

@@ -24,27 +24,63 @@ export function SupportOverlay(): ReactNode {
   if (!view) return null;
   return (
     <>
-      {view.pending ? <Approval key={view.pending.peer} view={view} /> : null}
+      {view.pending ? (
+        <Approval
+          key={view.pending.peer}
+          asking={view.pending}
+          inputPermission={view.inputPermission}
+          note="The name is supplied by the helper. Confirm it with the person you invited."
+          onDecide={(decision, allowTools) => support.answer(decision, allowTools)}
+        />
+      ) : view.unattended.ask ? (
+        <Approval
+          key={view.unattended.ask.peer}
+          asking={view.unattended.ask}
+          inputPermission={view.inputPermission}
+          note="They are connecting with this computer's ID and are not paired with it. The name is supplied by the helper, so only allow someone you expect."
+          pairable
+          onDecide={(decision, allowTools, pair) => support.answerAsk(decision, allowTools, pair)}
+        />
+      ) : null}
       {view.sharing && view.connected ? <SharingBanner view={view} /> : null}
       {view.unattended.active ? <UnattendedBanner view={view} /> : null}
     </>
   );
 }
 
-function Approval({ view }: { view: SupportView }): ReactNode {
+type Decision = "control" | "view" | "deny";
+
+/**
+ * Asks the person whether to let a helper in. The same question for an
+ * invited helper and for one connecting by this computer's ID; only the
+ * second can be paired from here.
+ */
+function Approval({
+  asking,
+  inputPermission,
+  note,
+  pairable = false,
+  onDecide,
+}: {
+  asking: { name: string; peer: string; tools: boolean };
+  inputPermission: boolean;
+  note: string;
+  pairable?: boolean;
+  onDecide: (decision: Decision, allowTools: boolean, pair: boolean) => Promise<unknown>;
+}): ReactNode {
   const dialog = useRef<HTMLDialogElement>(null);
   const [allowTools, setAllowTools] = useState(false);
+  const [pair, setPair] = useState(false);
   const [error, setError] = useState("");
-  const pending = view.pending;
   useEffect(() => {
     const el = dialog.current;
     if (el && !el.open) el.showModal();
     return () => el?.close();
   }, []);
-  if (!pending) return null;
-  const decide = (decision: "control" | "view" | "deny") => {
+  const pending = asking;
+  const decide = (decision: Decision) => {
     setError("");
-    support.answer(decision, allowTools).catch((err) => setError(String(err)));
+    onDecide(decision, allowTools, pair).catch((err) => setError(String(err)));
   };
   return (
     <dialog
@@ -55,9 +91,7 @@ function Approval({ view }: { view: SupportView }): ReactNode {
     >
       <h2 className="text-lg font-semibold">Approve this helper?</h2>
       <p className="mt-3 text-base">{pending.name} wants to see your screen.</p>
-      <p className="mt-1 text-xs text-secondary">
-        The name is supplied by the helper. Confirm it with the person you invited.
-      </p>
+      <p className="mt-1 text-xs text-secondary">{note}</p>
       <p className="mt-3 text-xs text-secondary">Helper connection identity</p>
       <p className="mono break-all text-xs">{pending.peer}</p>
       {pending.tools ? (
@@ -77,11 +111,22 @@ function Approval({ view }: { view: SupportView }): ReactNode {
           </p>
         </div>
       ) : null}
+      {pairable ? (
+        <label className="mt-4 flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={pair}
+            onChange={(event) => setPair(event.target.checked)}
+          />
+          <span>Let them connect any time without asking me again</span>
+        </label>
+      ) : null}
       <div className="mt-5 flex flex-wrap gap-2">
         <button
           type="button"
           className="btn-primary"
-          disabled={!view.inputPermission}
+          disabled={!inputPermission}
           onClick={() => decide("control")}
         >
           Allow viewing and control
@@ -93,7 +138,7 @@ function Approval({ view }: { view: SupportView }): ReactNode {
           Decline
         </button>
       </div>
-      {!view.inputPermission ? (
+      {!inputPermission ? (
         <p className="mt-2 text-xs text-secondary">
           Accessibility permission is needed for control. You can allow viewing now.
         </p>

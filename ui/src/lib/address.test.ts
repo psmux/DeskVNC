@@ -210,3 +210,19 @@ describe("round trips", () => {
     expect(formatTarget("vnc", "box", 5900)).toBe("box");
   });
 });
+
+describe("parseConnectTarget for a Boundary computer", () => {
+  const id = "DE5AC5DF984D2A0B2A5BCF8425537AB7C3B82FA3FE5161E9A541652177626CBC";
+  it("takes a machine ID and keeps no port", () => {
+    const result = parseConnectTarget(`  ${id} `, "boundary");
+    expect(result.ok && result.target).toMatchObject({
+      address: id.toLowerCase(),
+      port: 0,
+      protocol: "boundary",
+    });
+  });
+  it("refuses anything that is not a machine ID", () => {
+    expect(parseConnectTarget("192.168.1.4", "boundary").ok).toBe(false);
+    expect(parseConnectTarget(id.slice(1), "boundary").ok).toBe(false);
+  });
+});

@@ -73,6 +73,7 @@
     "allow-support-stop",
     "allow-support-full-invitation",
     "allow-support-answer",
+    "allow-support-answer-ask",
     "allow-support-set-control",
     "allow-support-set-tools",
     "allow-support-pair",

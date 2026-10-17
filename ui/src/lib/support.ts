@@ -60,6 +60,8 @@ export interface SupportView {
     message: string;
     error: boolean;
     active: { name: string; control: boolean; tools: boolean; activity: string[] } | null;
+    /** A helper that is not paired asking to come in by this computer's ID. */
+    ask: { name: string; peer: string; tools: boolean } | null;
   };
 }
 
@@ -119,6 +121,8 @@ export const support = {
   setDisplay: (id: number) => mustInvoke("support_set_display", { id }),
   answer: (decision: "control" | "view" | "deny", allowTools: boolean) =>
     mustInvoke("support_answer", { decision, allowTools }),
+  answerAsk: (decision: "control" | "view" | "deny", allowTools: boolean, pair: boolean) =>
+    mustInvoke("support_answer_ask", { decision, allowTools, pair }),
   setControl: (allowed: boolean) => mustInvoke("support_set_control", { allowed }),
   setTools: (allowed: boolean) => mustInvoke("support_set_tools", { allowed }),
   pair: () => mustInvoke("support_pair"),

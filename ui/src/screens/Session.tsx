@@ -57,6 +57,7 @@ import {
   type ViewPrefs,
 } from "../lib/viewPrefs";
 import { syncSessionMenu, type SessionMenuState } from "../lib/menuSync";
+import { ClipboardEcho } from "../lib/clipboardEcho";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
@@ -97,6 +98,8 @@ import {
  * "tile shows a thumbnail within 2 s of connect" acceptance test (PRD/03 §7).
  */
 const THUMBNAIL_SETTLE_MS = 1200;
+/** How often a capture that found no picture yet tries again. */
+const THUMBNAIL_RETRY_MS = 1500;
 
 /** Longest a closing session window will wait for its exit capture. */
 const CAPTURE_CLOSE_BUDGET_MS = 700;
@@ -338,7 +341,13 @@ function SessionView({
   const [passthrough, setPassthroughState] = useState(stored.passthrough);
   const [capture, setCapture] = useState<CaptureStatus>(CAPTURE_INACTIVE);
   const [showCaptureHelp, setShowCaptureHelp] = useState(false);
-  const [requestedViewOnly, setViewOnlyState] = useState(stored.viewOnly);
+  // A Boundary computer decides control itself, and builds before this one
+  // saved view only for every Boundary window whether or not the person chose
+  // it. So a Boundary session starts with the choice open; View only still
+  // turns it on for the session.
+  const [requestedViewOnly, setViewOnlyState] = useState(
+    params.protocol === "boundary" ? false : stored.viewOnly,
+  );
   /** Manual staleness override; off by default because it costs bandwidth. */
   const [alwaysRefresh, setAlwaysRefresh] = useState(stored.alwaysRefresh);
   const [recallSignal, setRecallSignal] = useState(0);
@@ -626,9 +635,15 @@ function SessionView({
 
   useEffect(() => {
     inputRef.current?.setViewOnly(viewOnly);
-    session.setViewOnly(viewOnly);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewOnly]);
+  // The core is told only what the person chose. Whether a Boundary computer
+  // allows control is that computer's to enforce, and pushing this window's
+  // guess about it down left the session view only when the guess was stale.
+  useEffect(() => {
+    session.setViewOnly(requestedViewOnly);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedViewOnly]);
 
   useEffect(() => {
     inputRef.current?.setPassthrough(passthrough);
@@ -986,7 +1001,10 @@ function SessionView({
       quality,
       bwLevels,
       alwaysRefresh,
-      viewOnly,
+      // What the person chose, never what this window derived: a Boundary
+      // session is view only until its computer says otherwise, and saving
+      // that made every later session view only for good.
+      viewOnly: requestedViewOnly,
       passthrough,
       display: desiredDisplay,
     };
@@ -1005,7 +1023,7 @@ function SessionView({
     quality,
     bwLevels,
     alwaysRefresh,
-    viewOnly,
+    requestedViewOnly,
     passthrough,
     desiredDisplay,
   ]);
@@ -1024,8 +1042,8 @@ function SessionView({
    * time any one of them changed, and `useSession` hands back a new object on
    * every stats tick.
    */
-  const restoreRef = useRef({ quality, viewOnly, alwaysRefresh, passthrough });
-  restoreRef.current = { quality, viewOnly, alwaysRefresh, passthrough };
+  const restoreRef = useRef({ quality, viewOnly: requestedViewOnly, alwaysRefresh, passthrough });
+  restoreRef.current = { quality, viewOnly: requestedViewOnly, alwaysRefresh, passthrough };
   useEffect(() => {
     if (session.state.state !== "connected") return;
     const want = restoreRef.current;
@@ -1083,20 +1101,19 @@ function SessionView({
 
   /**
    * The text most recently moved in either direction, so neither automatic
-   * half of the sync repeats itself: without it, text copied on the remote is
-   * written to the local clipboard and then pushed straight back the next time
-   * this window is focused.
+   * half of the sync repeats itself. Forgotten on every (re)connect: see
+   * `ClipboardEcho`.
    */
-  const lastClipboardRef = useRef<string | null>(null);
+  const [clipboardEcho] = useState(() => new ClipboardEcho());
 
   // Remote clipboard -> local (text only). The write is native: the webview's
   // own clipboard API is gesture-gated and this text arrives from the socket.
   useEffect(() => {
     const text = session.remoteClipboard;
     if (text === null) return;
-    lastClipboardRef.current = text;
+    clipboardEcho.moved(text);
     void writeClipboard(text);
-  }, [session.remoteClipboard]);
+  }, [session.remoteClipboard, clipboardEcho]);
 
   /**
    * Local clipboard -> remote.
@@ -1109,15 +1126,15 @@ function SessionView({
     async (force: boolean): Promise<"sent" | "unchanged" | "unreadable"> => {
       const text = await readClipboard();
       if (text === null) return "unreadable";
-      if (!text || (!force && text === lastClipboardRef.current)) return "unchanged";
-      lastClipboardRef.current = text;
+      if (!clipboardEcho.shouldPush(text, force)) return "unchanged";
+      clipboardEcho.moved(text);
       // Await the enqueue: the paste-chord sync (SessionInput.deferForPaste)
       // relies on this resolving only once the text is ordered ahead of any
       // keystroke sent after it.
       await session.sendClipboard(text);
       return "sent";
     },
-    [session],
+    [session, clipboardEcho],
   );
 
   /**
@@ -1146,6 +1163,12 @@ function SessionView({
   pushClipboardRef.current = pushClipboard;
 
   const clipboardReady = session.state.state === "connected";
+  // Declared ahead of the sync below so it runs first: a reconnect brings up
+  // a fresh clipboard channel, and the text pushed before the drop has to be
+  // offered on it again rather than skipped as a repeat.
+  useEffect(() => {
+    if (clipboardReady) clipboardEcho.connected();
+  }, [clipboardReady, clipboardEcho]);
   useEffect(() => {
     if (!clipboardReady || !owns) return;
     const sync = (): void => {
@@ -1217,11 +1240,23 @@ function SessionView({
   useEffect(() => {
     if (session.state.state !== "connected") return;
     if (settledCapture.current) return;
-    const t = window.setTimeout(() => {
-      settledCapture.current = true;
-      void captureThumb();
-    }, THUMBNAIL_SETTLE_MS);
-    return () => window.clearTimeout(t);
+    // A connection can be up before its first picture is: a Boundary screen
+    // over a slow uplink takes seconds. Trying once and giving up left those
+    // machines with no tile picture at all, so it tries again until a real
+    // frame is there, for as long as the session stays connected.
+    let t = 0;
+    let stopped = false;
+    const attempt = (): void => {
+      void captureThumb().then((captured) => {
+        if (captured) settledCapture.current = true;
+        else if (!stopped) t = window.setTimeout(attempt, THUMBNAIL_RETRY_MS);
+      });
+    };
+    t = window.setTimeout(attempt, THUMBNAIL_SETTLE_MS);
+    return () => {
+      stopped = true;
+      window.clearTimeout(t);
+    };
   }, [session.state.state, captureThumb]);
 
   // The exit capture. Runs at most once, from whichever of these happens
@@ -2112,6 +2147,7 @@ function SessionView({
             request={session.credentialRequest}
             hostName={session.desktopName}
             protocol={params.protocol}
+            previous={session.lastCredentialAnswer}
             onSubmit={session.submitCredentials}
             onCancel={session.dismissCredentialPrompt}
           />

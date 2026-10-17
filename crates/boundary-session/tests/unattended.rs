@@ -161,7 +161,18 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
             if paired.frames.has_changed().unwrap_or(false)
                 && let Some(frame) = paired.frames.borrow_and_update().as_ref()
             {
-                assert_eq!(frame.rgba, vec![200; 16]);
+                // JPEG is lossy and has no alpha, so the colour comes back
+                // near 200 and the alpha opaque.
+                assert!(
+                    frame
+                        .rgba
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p[..3].iter().all(|c| c.abs_diff(200) <= 4) && p[3] == 255),
+                    "{:?}",
+                    frame.rgba
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -169,20 +180,97 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
         drop(held);
         paired.stop();
 
-        // 4. A stranger with no password is refused, with a reason.
+        // 4. A stranger with no password is asked about, and turned away
+        //    with a reason when the person declines.
         let stranger = unattended::load_or_create_key(&dir.join("stranger.key")).unwrap();
-        let refused = outcome(unattended::connect_to(
+        let declined = tokio::spawn(outcome(unattended::connect_to(
             Ok(address.clone()),
             "Stranger".into(),
             None,
             stranger.clone(),
             local(),
-        ))
-        .await;
+        )));
+        loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ask { name, answer, .. }) => {
+                    assert_eq!(name, "Stranger");
+                    let _ = answer.send(unattended::Asked {
+                        approval: Approval::Deny,
+                        tools: false,
+                        pair: false,
+                    });
+                    break;
+                }
+                Some(Notice::Connected { .. }) => panic!("a stranger got in unasked"),
+                _ => {}
+            }
+        }
+        let declined = declined.await.unwrap();
         assert!(
-            refused.as_ref().is_err_and(|e| e.contains("not allowed")),
-            "{refused:?}"
+            declined.as_ref().is_err_and(|e| e.contains("declined")),
+            "{declined:?}"
         );
+
+        // 4b. Approved and paired, a newcomer gets in, and next time comes
+        //     straight in without being asked.
+        let newcomer = unattended::load_or_create_key(&dir.join("newcomer.key")).unwrap();
+        let approved = tokio::spawn(outcome(unattended::connect_to_with_tools(
+            Ok(address.clone()),
+            "Newcomer".into(),
+            None,
+            newcomer.clone(),
+            local(),
+        )));
+        let held = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ask { tools, answer, .. }) => {
+                    assert!(tools, "the newcomer declared tools");
+                    let _ = answer.send(unattended::Asked {
+                        approval: Approval::Control,
+                        tools: true,
+                        pair: true,
+                    });
+                }
+                Some(Notice::Connected {
+                    name,
+                    control,
+                    session,
+                    ..
+                }) => {
+                    assert_eq!(name, "Newcomer");
+                    assert!(control);
+                    assert!(session.tools_allowed());
+                    break session;
+                }
+                // The stranger's refusal from step 4 may still be queued.
+                Some(Notice::Refused { name, reason, .. }) if name == "Newcomer" => {
+                    panic!("approved newcomer refused: {reason}")
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(approved.await.unwrap(), Ok(true));
+        drop(held);
+        let saved = Access::load(&access_path).unwrap();
+        let id = newcomer.public().to_string();
+        let entry = saved.helpers.iter().find(|h| h.id == id).expect("paired");
+        assert!(entry.control && entry.tools);
+        let back = tokio::spawn(outcome(unattended::connect_to_with_tools(
+            Ok(address.clone()),
+            "Newcomer".into(),
+            None,
+            newcomer.clone(),
+            local(),
+        )));
+        let held = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ask { .. }) => panic!("a paired helper was asked again"),
+                Some(Notice::Connected { session, .. }) => break session,
+                _ => {}
+            }
+        };
+        assert_eq!(back.await.unwrap(), Ok(true));
+        drop(held);
 
         // 5. With a password set, the right one gets in and wrong ones lock it.
         let mut access = Access::load(&access_path).unwrap();

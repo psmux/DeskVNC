@@ -170,6 +170,7 @@ fn main() {
             "support_stop",
             "support_full_invitation",
             "support_answer",
+            "support_answer_ask",
             "support_set_control",
             "support_set_tools",
             "support_pair",

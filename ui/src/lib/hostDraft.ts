@@ -7,7 +7,14 @@
  * rules that are easy to get subtly wrong.
  */
 
-import { DEFAULT_PORT, hostProtocol, type HostProfile, type ProtocolKind } from "./types";
+import {
+  DEFAULT_PORT,
+  hostProtocol,
+  type HostProfile,
+  type OsHint,
+  type ProtocolKind,
+  type StoredCredentials,
+} from "./types";
 
 /**
  * What the port becomes when the user switches protocol.
@@ -41,4 +48,59 @@ export function portOnProtocolChange(
 export function portWasTouched(host: HostProfile | null | undefined): boolean {
   if (!host) return false;
   return host.port !== DEFAULT_PORT[hostProtocol(host)];
+}
+
+/**
+ * Whether a VNC host's security type signs in with an account name.
+ *
+ * RFB is mostly password only, but not always. Apple's Screen Sharing auth
+ * (type 30) wants a macOS account and its password, and so do VeNCrypt's
+ * `*Plain` subtypes and RA2's subtype 1. A pinned VeNCrypt or RA2 may still
+ * end up asking for a password alone, which is why a blank user name keeps
+ * meaning "ask me if the server wants one" rather than being required.
+ *
+ * Auto counts when the host is a Mac, because Auto against macOS negotiates
+ * Apple auth: it is the strongest type a Mac offers that this app speaks.
+ * Without this there was no way to save the account name for a Mac at all,
+ * only to type it into the prompt on every connect (issue #9).
+ */
+export function vncTakesUsername(securityPref: string | null, osHint: OsHint): boolean {
+  switch (securityPref ?? "auto") {
+    case "apple-dh":
+    case "vencrypt-x509":
+    case "ra2":
+      return true;
+    case "auto":
+      return osHint === "macos";
+    default:
+      return false;
+  }
+}
+
+/**
+ * The `save_password` payload for a VNC host's editor, or `null` when there
+ * is nothing to write.
+ *
+ * Only non-empty fields are sent, the same rule as the RDP and SSH saves: an
+ * empty box means "keep what is stored", and the Rust side merges.
+ *
+ * When the security type signs in with a user name, the password goes in the
+ * `vencrypt*` pair beside it. That is the slot the connect path reads first,
+ * and the one a post-connect save writes for these methods, so a password
+ * typed here replaces the one a prompt saved earlier instead of sitting
+ * behind it unused.
+ */
+export function vncCredentialPayload(
+  user: string,
+  password: string,
+  takesUsername: boolean,
+): StoredCredentials | null {
+  const payload: StoredCredentials = {};
+  if (takesUsername) {
+    if (user.trim()) payload.vencryptUser = user.trim();
+    if (password) payload.vencryptPass = password;
+  } else if (password) {
+    payload.vncPassword = password;
+  }
+  return Object.keys(payload).length > 0 ? payload : null;
 }
