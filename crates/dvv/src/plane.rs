@@ -768,6 +768,12 @@ fn from_rpc_error(error: &serde_json::Value) -> ToolError {
         Some("LEASE_REVOKED") => codes::LEASE_REVOKED,
         Some("LIMB_GONE") | Some("NOT_ATTACHED") => codes::LIMB_GONE,
         Some("NO_SUCH_MACHINE") => codes::BAD_REQUEST,
+        // Every other tag the shell names is passed through as itself, which
+        // is the rule `crate::error` states for codes. Mapping them all onto
+        // BAD_REQUEST told an agent its own arguments were wrong when the
+        // shell had said SCREEN_CHANGED, and hid BACKPRESSURE from the relay
+        // that waits it out.
+        Some(tag) if !tag.is_empty() => tag,
         // A JSON-RPC protocol error rather than an application one. `-32601`
         // is an unknown method, which under `04 §2.7` rule 2 is how a client
         // discovers that this plane is older than it is.
@@ -4041,6 +4047,31 @@ mod tests {
         );
         assert!(!ledger.tripped(), "the next action starts clean");
         assert_eq!(ledger.settle(std::time::Duration::from_secs(1)), None);
+    }
+
+    /// The shell's own tag reaches the agent as itself. SCREEN_CHANGED read
+    /// as BAD_REQUEST told an agent its arguments were wrong, and BACKPRESSURE
+    /// read as BAD_REQUEST was never waited out.
+    #[test]
+    fn a_tag_the_shell_names_is_passed_through() {
+        let error = |tag: &str| serde_json::json!({ "code": -32000, "message": "m", "data": { "code": tag } });
+        assert_eq!(
+            from_rpc_error(&error("SCREEN_CHANGED")).code,
+            codes::SCREEN_CHANGED
+        );
+        assert_eq!(from_rpc_error(&error("BACKPRESSURE")).code, "BACKPRESSURE");
+        assert_eq!(
+            from_rpc_error(&error("NOT_ATTACHED")).code,
+            codes::LIMB_GONE
+        );
+        assert_eq!(
+            from_rpc_error(&error("NO_SUCH_MACHINE")).code,
+            codes::BAD_REQUEST
+        );
+        assert_eq!(
+            from_rpc_error(&serde_json::json!({ "code": -32601, "message": "m" })).code,
+            codes::NOT_IMPLEMENTED
+        );
     }
 
     /// A settle does not report until what is queued has been carried.

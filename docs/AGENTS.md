@@ -76,7 +76,9 @@ off is remembered. It is reachable only by the user who started the app.
 
 The same wiring from a terminal is `dvv setup`, or `dvv setup opencode` (or
 `pi`, `codex`, `claude`) for one agent. `dvv` sits beside the app: in
-`/Applications/DeskVNCViewer.app/Contents/MacOS/` on macOS, in
+`/Applications/DeskVNCViewer.app/Contents/MacOS/` on macOS (a plain
+`cargo tauri build` puts it there too; if it is missing, the app was built
+some other way and every agent configured for it fails to start the tools), in
 `%LOCALAPPDATA%\DeskVNCViewer` or `C:\Program Files\DeskVNCViewer` on
 Windows, and at `/usr/bin/dvv` on Linux. It adds an MCP entry to OpenCode's and
 Codex's config, keeping a backup and any comments, and repoints one that names
@@ -91,7 +93,12 @@ PATH because that is how `pi` itself runs. The
 agent then runs `dvv open`, `dvv screen`, `dvv click` and the rest as shell
 commands. `dvv open` starts a small background holder so a machine stays open
 between commands, and `dvv screen` saves the picture to a file and prints its
-path, which Pi's `read` tool opens as an image.
+path (or writes it where `--out` says), which Pi's `read` tool opens as an
+image. A verb that names a limb already open in DeskVNCViewer starts the
+holder too, so `dvv limbs`, `dvv screen <limb>`, `dvv type <limb>` and
+`dvv key <limb>` work as separate commands with no `dvv open` at all. Each
+`dvv` binary has its own holder, so a `dvv` left running from before an
+upgrade never answers for the new one.
 
 ### Free models
 
@@ -286,6 +293,18 @@ the viewer can be minimised while a person works on their own machine.
    clears it, `dvv_status` does not (it reads no pixels), and there is no
    override. Terminal limbs are not fenced, because a PTY echoes what it is sent
    into a stream you read back.
+
+   "Window-sized" is measured in pixels that actually changed, in 64 pixel
+   cells, not in the area a server chose to send. Some servers (wayvnc on a
+   Raspberry Pi is one) resend large unchanged regions around a blinking
+   cursor, and a blinking cursor or a ticking clock does not trip the fence.
+   The check is also applied to every key press, so a window that opens
+   halfway through a long `dvv_type` stops it. The result then says
+   `typed N of M characters`, quotes what went and what did not, and nothing
+   after the refused key is sent, so the fix is one `dvv_screen` and a
+   `dvv_type` of the quoted remainder. There is deliberately no call that
+   looks and types in one go: the look is for you, and a look nobody reads
+   would be the override the fence refuses to have.
 4. **Expect to lose the wheel.** A person can take control mid-task. Held keys
    and buttons are released when that happens, so a half-finished drag cannot
    strand the desktop. On `LEASE_REVOKED`, observe again before doing anything

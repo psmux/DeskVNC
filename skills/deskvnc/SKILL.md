@@ -73,7 +73,9 @@ convert before clicking.
 * `SCREEN_CHANGED`: read the screen, then retry the key or the text. A
   refused key pressed nothing, so a shortcut that should have opened a new
   window or tab did not: read the screen and retry it before you type, or the
-  text goes into whatever already had focus.
+  text goes into whatever already had focus. If it came partway through a
+  long `type`, the message says how many characters went and quotes the part
+  that did not: read the screen and type only that part.
 * `LEASE_REVOKED`: check `control yield_status`. If a person took over, stop
   and tell the user. That is the only case where you stop.
 
