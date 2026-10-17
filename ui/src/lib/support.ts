@@ -59,7 +59,8 @@ export interface SupportView {
     minPassword: number;
     message: string;
     error: boolean;
-    active: { name: string; control: boolean; tools: boolean; activity: string[] } | null;
+    /** Every helper connected unattended right now. */
+    active: { id: number; name: string; control: boolean; tools: boolean; activity: string[] }[];
     /** A helper that is not paired asking to come in by this computer's ID. */
     ask: { name: string; peer: string; tools: boolean } | null;
   };
@@ -132,8 +133,8 @@ export const support = {
   removeHelper: (id: string) => mustInvoke("support_remove_helper", { id }),
   setPassword: (password: string | null) => mustInvoke("support_set_password", { password }),
   setAutostart: (enabled: boolean) => mustInvoke("support_set_autostart", { enabled }),
-  endUnattended: () => mustInvoke("support_end_unattended"),
-  stopUnattendedTools: () => mustInvoke("support_stop_unattended_tools"),
+  endUnattended: (id: number) => mustInvoke("support_end_unattended", { id }),
+  stopUnattendedTools: (id: number) => mustInvoke("support_stop_unattended_tools", { id }),
   requestScreenPermission: () => mustInvoke("support_request_screen_permission"),
   openInputSettings: () => mustInvoke("support_open_input_settings"),
   saveNetwork: (profile: NetworkProfile) => mustInvoke("support_save_network", { profile }),

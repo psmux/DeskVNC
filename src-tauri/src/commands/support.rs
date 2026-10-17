@@ -28,7 +28,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
 /// The event the main window listens on for a new [`View`].
 pub const SUPPORT_EVENT: &str = "support://state";
@@ -60,6 +63,9 @@ struct Pending {
 /// A helper connected with nobody's approval, held so the person at the
 /// computer can see it and end it.
 struct Active {
+    /// Stays the same for the whole session, so a click lands on the helper
+    /// it was meant for even if another one left in the meantime.
+    id: u64,
     name: String,
     control: bool,
     tools: bool,
@@ -123,7 +129,9 @@ struct Model {
     access: Access,
     listener: Option<Listener>,
     claim: Option<std::fs::File>,
-    active: Option<Active>,
+    /// Every helper in unattended right now; up to the listener's limit.
+    active: Vec<Active>,
+    next_active: u64,
     ask: Option<Ask>,
     reachable: bool,
     message: String,
@@ -193,11 +201,12 @@ struct UnattendedView {
     min_password: usize,
     message: String,
     error: bool,
-    active: Option<ActiveView>,
+    active: Vec<ActiveView>,
     ask: Option<PendingView>,
 }
 #[derive(Serialize)]
 struct ActiveView {
+    id: u64,
     name: String,
     control: bool,
     tools: bool,
@@ -252,7 +261,8 @@ impl Model {
             access: Access::default(),
             listener: None,
             claim: None,
-            active: None,
+            active: Vec::new(),
+            next_active: 0,
             ask: None,
             reachable: false,
             message: String::new(),
@@ -432,7 +442,7 @@ impl Model {
     fn halt(&mut self) {
         self.listener = None;
         self.claim = None;
-        self.active = None;
+        self.active.clear();
         // Dropping the answer turns the helper away.
         self.ask = None;
         self.reachable = false;
@@ -567,7 +577,14 @@ impl Model {
                         session,
                         ..
                     } => {
-                        self.active = Some(Active {
+                        // A helper the person just chose to pair was saved
+                        // before it was let in; show the list as it now is.
+                        if let Ok(access) = Access::load(&self.access_path) {
+                            self.access = access;
+                        }
+                        self.next_active += 1;
+                        self.active.push(Active {
+                            id: self.next_active,
                             name,
                             control,
                             tools: session.tools_allowed(),
@@ -602,23 +619,17 @@ impl Model {
             // The helper gave up, or nobody answered in time.
             self.ask = None;
         }
-        let mut ended = false;
-        if let Some(active) = self.active.as_mut() {
-            while let Ok(event) = active.session.events.try_recv() {
-                match event {
-                    Event::Control(control) => active.control = control,
-                    Event::Activity(line) => keep(&mut active.activity, line),
-                    Event::Finished(_) => {
-                        ended = true;
-                        break;
-                    }
-                    _ => {}
+        self.active.retain_mut(|active| loop {
+            match active.session.events.try_recv() {
+                Ok(Event::Control(control)) => active.control = control,
+                Ok(Event::Activity(line)) => keep(&mut active.activity, line),
+                Ok(Event::Finished(_)) | Err(mpsc::error::TryRecvError::Disconnected) => {
+                    break false;
                 }
+                Ok(_) => {}
+                Err(mpsc::error::TryRecvError::Empty) => break true,
             }
-        }
-        if ended {
-            self.active = None;
-        }
+        });
         if let Some(result) = finished {
             self.halt();
             if let Err(error) = result {
@@ -702,12 +713,17 @@ impl Model {
                 min_password: MIN_PASSWORD,
                 message: self.message.clone(),
                 error: self.message_error,
-                active: self.active.as_ref().map(|a| ActiveView {
-                    name: a.name.clone(),
-                    control: a.control,
-                    tools: a.tools,
-                    activity: a.activity.clone(),
-                }),
+                active: self
+                    .active
+                    .iter()
+                    .map(|a| ActiveView {
+                        id: a.id,
+                        name: a.name.clone(),
+                        control: a.control,
+                        tools: a.tools,
+                        activity: a.activity.clone(),
+                    })
+                    .collect(),
                 ask: self.ask.as_ref().map(|a| PendingView {
                     name: a.name.clone(),
                     peer: a.peer.clone(),
@@ -1000,11 +1016,16 @@ pub async fn support_set_autostart(
         Ok(())
     })
 }
-/// End the unattended helper's session.
+/// End one unattended helper's session.
 #[tauri::command]
-pub async fn support_end_unattended(app: AppHandle, support: Shared<'_>) -> Result<(), String> {
+pub async fn support_end_unattended(
+    app: AppHandle,
+    support: Shared<'_>,
+    id: u64,
+) -> Result<(), String> {
     support.act(&app, |m| {
-        if let Some(active) = m.active.take() {
+        if let Some(index) = m.active.iter().position(|a| a.id == id) {
+            let active = m.active.remove(index);
             active.session.stop();
             m.say(format!("Ended {}'s session", active.name));
         }
@@ -1044,23 +1065,20 @@ pub async fn support_answer_ask(
                 pair,
             })
             .map_err(|_| format!("{} stopped waiting", ask.name))?;
-        if pair {
-            // The listener saved them; show the list as it now is.
-            if let Ok(access) = Access::load(&m.access_path) {
-                m.access = access;
-            }
-        }
+        // The listener saves a pairing before it lets the helper in, and the
+        // list is reloaded when they arrive; reading it here would race it.
         Ok(())
     })
 }
-/// Stop the unattended helper's commands for the rest of their session.
+/// Stop one unattended helper's commands for the rest of their session.
 #[tauri::command]
 pub async fn support_stop_unattended_tools(
     app: AppHandle,
     support: Shared<'_>,
+    id: u64,
 ) -> Result<(), String> {
     support.act(&app, |m| {
-        let Some(active) = m.active.as_mut() else {
+        let Some(active) = m.active.iter_mut().find(|a| a.id == id) else {
             return Ok(());
         };
         active.session.set_tools(false);

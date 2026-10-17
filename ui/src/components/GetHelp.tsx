@@ -32,7 +32,8 @@ export function GetHelp(): ReactNode {
     setOpen(false);
     dialog.current?.close();
   };
-  const busy = view?.sharing || view?.unattended.active;
+  const helping = (view?.unattended.active.length ?? 0) > 0;
+  const busy = view?.sharing || helping;
   return (
     <>
       <button
@@ -41,7 +42,7 @@ export function GetHelp(): ReactNode {
         onClick={show}
         title="Let someone you trust see or control this computer"
       >
-        {view?.connected || view?.unattended.active ? "Sharing" : "Get help"}
+        {view?.connected || helping ? "Sharing" : "Get help"}
       </button>
       <dialog
         ref={dialog}

@@ -43,7 +43,9 @@ export function SupportOverlay(): ReactNode {
         />
       ) : null}
       {view.sharing && view.connected ? <SharingBanner view={view} /> : null}
-      {view.unattended.active ? <UnattendedBanner view={view} /> : null}
+      {view.unattended.active.map((active) => (
+        <UnattendedBanner key={active.id} active={active} />
+      ))}
     </>
   );
 }
@@ -201,10 +203,8 @@ function SharingBanner({ view }: { view: SupportView }): ReactNode {
   );
 }
 
-/** A paired helper who came in with nobody's approval. */
-function UnattendedBanner({ view }: { view: SupportView }): ReactNode {
-  const active = view.unattended.active;
-  if (!active) return null;
+/** A paired helper who came in with nobody's approval. One per helper. */
+function UnattendedBanner({ active }: { active: SupportView["unattended"]["active"][number] }): ReactNode {
   return (
     <Banner>
       <div className="flex flex-wrap items-center gap-2">
@@ -214,11 +214,11 @@ function UnattendedBanner({ view }: { view: SupportView }): ReactNode {
         </span>
         <div className="ml-auto flex gap-2">
           {active.tools ? (
-            <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.stopUnattendedTools()}>
+            <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.stopUnattendedTools(active.id)}>
               Stop their commands
             </button>
           ) : null}
-          <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.endUnattended()}>
+          <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.endUnattended(active.id)}>
             End their session
           </button>
         </div>

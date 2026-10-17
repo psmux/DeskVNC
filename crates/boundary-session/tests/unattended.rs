@@ -467,3 +467,46 @@ async fn two_paired_helpers_are_in_at_the_same_time() {
     .await
     .expect("timed out");
 }
+
+/// The holder hears when a helper leaves, so nothing keeps saying it is in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whoever_holds_the_session_hears_the_helper_left() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("left");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let helper = unattended::load_or_create_key(&dir.join("helper.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&helper.public().to_string(), "Helper", false)
+            .unwrap();
+        access.save(&access_path).unwrap();
+
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let visit = unattended::connect_to(Ok(address), "Helper".into(), None, helper, local());
+        let mut held = loop {
+            if let Some(Notice::Connected { session, .. }) = listener.notices.recv().await {
+                break session;
+            }
+        };
+        assert_eq!(outcome(visit).await, Ok(false));
+        loop {
+            match held.events.recv().await {
+                Some(Event::Finished(_)) => break,
+                Some(_) => {}
+                None => panic!("the session went quiet without saying it ended"),
+            }
+        }
+    })
+    .await
+    .expect("timed out");
+}

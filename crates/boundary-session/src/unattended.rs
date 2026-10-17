@@ -428,9 +428,18 @@ where
                 result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
             };
             connection.close(0u8.into(), b"Session ended");
-            if let Err(error) = result {
+            // Whoever holds the session hears that it ended, so a banner
+            // saying the helper is in does not outlive the helper.
+            let reason = result.as_ref().err().map(|error| format!("{error:#}"));
+            let _ = worker
+                .emit(Event::Finished(match &reason {
+                    Some(reason) => Err(anyhow!("{reason}")),
+                    None => Ok(()),
+                }))
+                .await;
+            if let Some(reason) = reason {
                 let _ = notices
-                    .send(Notice::Status(format!("{name}'s session ended: {error:#}")))
+                    .send(Notice::Status(format!("{name}'s session ended: {reason}")))
                     .await;
             }
         });
