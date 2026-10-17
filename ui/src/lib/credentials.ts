@@ -76,17 +76,22 @@ export interface PromptStart {
  *
  * The user name the person typed last wins over the hint, which is only the
  * stored or local account name. "Remember" stays an opt in: it starts ticked
- * only when this person ticked it in this window. The password is never
- * carried, and there is nowhere here to carry it.
+ * when this person ticked it in this window, or when they already saved a
+ * password for this host. The saved one was refused or is missing, and the
+ * right one typed here should replace it rather than be forgotten after this
+ * connection, which is what "I have to fill in passwords again" was
+ * (issue #9). The password is never carried, and there is nowhere here to
+ * carry it.
  */
 export function promptStart(
   usernameHint: string | null | undefined,
   previous: PromptAnswer | null | undefined,
+  savedBefore = false,
 ): PromptStart {
   const typed = previous?.username?.trim() ? previous.username : null;
   return {
     username: typed ?? usernameHint ?? "",
     domain: previous?.domain ?? "",
-    save: previous?.save ?? false,
+    save: previous?.save ?? savedBefore,
   };
 }

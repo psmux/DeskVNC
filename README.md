@@ -158,6 +158,15 @@ control, shows each command as it runs, and lets them take it back. For an
 unattended computer they allow it per paired helper under Settings,
 Unattended access. Until they do, an agent cannot attach to the session.
 
+On macOS and Windows an unattended computer can also be reached at the sign
+in screen, after a restart for instance, once somebody ticks "Also before
+anyone signs in" and an administrator allows it. Windows runs it as a
+service; macOS runs it in the login window. There only paired helpers and
+the unattended password get in, and no helper's tools can run commands,
+because nobody is signed in for them to run as. A Mac with FileVault on still
+needs its disk unlocked at the screen before macOS starts after a restart,
+and nothing runs at that screen.
+
 It is quick enough to sit inside a loop. Measured against a real 1920x1080
 Windows desktop on a LAN:
 

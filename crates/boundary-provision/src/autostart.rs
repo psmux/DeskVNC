@@ -84,6 +84,7 @@ pub fn set(entry: Entry, on: bool) -> Result<()> {
 <key>Label</key><string>{}</string>
 <key>ProgramArguments</key><array><string>{}</string><string>{BACKGROUND}</string></array>
 <key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
 </dict></plist>
 "#,

@@ -48,7 +48,8 @@ pub struct Unattended {
     /// Held while listening, so DeskVNC on this computer does not listen
     /// as the same ID at the same time.
     claim: Option<std::fs::File>,
-    pub active: Option<Active>,
+    /// Helpers connected unattended now, in the order they came in.
+    pub active: Vec<Active>,
     ask: Option<Ask>,
     reachable: bool,
     password: String,
@@ -56,6 +57,14 @@ pub struct Unattended {
     message: String,
     error: bool,
     autostart: bool,
+    /// Whether the copy at the sign in screen is set up.
+    login: bool,
+    /// Setting that up or taking it away, which waits on an administrator.
+    login_change: Option<std::sync::mpsc::Receiver<(bool, Result<()>)>>,
+    /// Not listening for now, because another copy is: the one at the sign
+    /// in or lock screen. Picked up again when it hands over.
+    handed_over: bool,
+    checked: std::time::Instant,
 }
 
 impl Unattended {
@@ -67,7 +76,7 @@ impl Unattended {
             access: Access::default(),
             listener: None,
             claim: None,
-            active: None,
+            active: Vec::new(),
             ask: None,
             reachable: false,
             password: String::new(),
@@ -75,7 +84,17 @@ impl Unattended {
             message: String::new(),
             error: false,
             autostart: autostart::enabled(),
+            login: crate::login::enabled(),
+            login_change: None,
+            handed_over: false,
+            checked: std::time::Instant::now(),
         };
+        // Rewrite an existing sign in entry, so one written by an older copy
+        // picks up what this one adds (a restart after a crash on macOS) and
+        // points at where this copy is now.
+        if this.autostart {
+            let _ = autostart::set(true);
+        }
         match Self::load() {
             Ok((path, key, access)) => {
                 this.machine = unattended::machine_id(&key);
@@ -129,10 +148,19 @@ impl Unattended {
             self.fail("No display found to share unattended".into());
             return;
         };
+        // One answerer per computer: DeskVNC, this app, or the copy at the
+        // sign in or lock screen. Whoever holds the claim has the ID; this
+        // copy keeps asking and takes over when the holder lets go.
         match boundary_provision::platform::claim_unattended() {
-            Ok(Some(claim)) => self.claim = Some(claim),
+            Ok(Some(claim)) => {
+                self.claim = Some(claim);
+                self.handed_over = false;
+            }
             Ok(None) => {
-                self.fail("DeskVNC on this computer is already answering unattended connections. Quit it, or leave unattended access to it".into());
+                if !self.handed_over {
+                    self.say("DeskVNC, or the copy at the sign in or lock screen, is answering unattended connections for this computer. This app takes over when it stops");
+                }
+                self.handed_over = true;
                 return;
             }
             Err(error) => {
@@ -151,8 +179,29 @@ impl Unattended {
     fn halt(&mut self) {
         self.listener = None;
         self.claim = None;
-        self.active = None;
+        self.active.clear();
         self.reachable = false;
+        self.handed_over = false;
+    }
+    /// Hand this computer's ID to the copy the service starts at the lock
+    /// screen, which can see it, and take it back after.
+    fn hand_over(&mut self) {
+        if self.checked.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.checked = std::time::Instant::now();
+        if !self.access.enabled {
+            return;
+        }
+        if self.login && screen_locked() {
+            if self.listener.is_some() {
+                self.halt();
+                self.handed_over = true;
+                self.say("The screen is locked. The copy at the lock screen answers helpers until it is unlocked");
+            }
+        } else if self.handed_over && self.listener.is_none() {
+            self.start();
+        }
     }
     /// Let the helper of the current attended session in any time, and tell
     /// them this computer's ID so they can save it.
@@ -190,19 +239,24 @@ impl Unattended {
     }
     /// Drain the listener. `true` when a helper has just come in, so the
     /// caller brings the window forward.
+    /// Take in what the listener reported. True when a question arrived that
+    /// somebody at this computer has to answer, so the window should show.
     pub fn poll(&mut self) -> bool {
+        self.hand_over();
         let mut arrived = false;
         let mut finished = None;
         if let Some(listener) = self.listener.as_mut() {
             while let Ok(notice) = listener.notices.try_recv() {
                 match notice {
                     Notice::Ready { .. } => {
+                        log(&self.access_path, "listening");
                         self.reachable = true;
                         self.message =
                             "Unattended access is on. Paired helpers can connect any time".into();
                         self.error = false;
                     }
                     Notice::Status(status) => {
+                        log(&self.access_path, &status);
                         self.message = status;
                         self.error = false;
                     }
@@ -212,14 +266,16 @@ impl Unattended {
                         session,
                         ..
                     } => {
-                        self.active = Some(Active {
+                        log(&self.access_path, &format!("{name} connected"));
+                        self.active.push(Active {
                             name,
                             control,
                             tools: session.tools_allowed(),
                             activity: Vec::new(),
                             session,
                         });
-                        arrived = true;
+                        // A paired helper needs no answer, so the window stays
+                        // where it is; the tray icon says who is connected.
                     }
                     Notice::Ask {
                         name,
@@ -238,14 +294,19 @@ impl Unattended {
                         arrived = true;
                     }
                     Notice::Refused { name, reason, .. } => {
+                        log(&self.access_path, &format!("turned away {name}: {reason}"));
                         self.message = format!("Turned away {name}: {reason}");
                         self.error = false;
                     }
-                    Notice::Finished(result) => finished = Some(result),
+                    Notice::Finished(result) => {
+                        log(&self.access_path, &format!("stopped listening: {result:?}"));
+                        finished = Some(result);
+                    }
                 }
             }
         }
-        if let Some(active) = self.active.as_mut() {
+        let mut ended = Vec::new();
+        for (index, active) in self.active.iter_mut().enumerate() {
             while let Ok(event) = active.session.events.try_recv() {
                 match event {
                     boundary_session::Event::Control(control) => active.control = control,
@@ -254,13 +315,20 @@ impl Unattended {
                         let excess = active.activity.len().saturating_sub(crate::ACTIVITY_LINES);
                         active.activity.drain(..excess);
                     }
-                    boundary_session::Event::Finished(_) => {
-                        self.active = None;
+                    boundary_session::Event::Finished(result) => {
+                        log(
+                            &self.access_path,
+                            &format!("{}'s session ended: {result:?}", active.name),
+                        );
+                        ended.push(index);
                         break;
                     }
                     _ => {}
                 }
             }
+        }
+        for index in ended.into_iter().rev() {
+            self.active.remove(index);
         }
         if let Some(result) = finished {
             self.halt();
@@ -349,75 +417,72 @@ impl Unattended {
             }
         }
     }
-    /// The banner shown on top of everything while a helper is connected
-    /// unattended. The person at the computer always sees who is in and can
-    /// end it with one click.
+    /// A banner for each helper connected unattended, shown on top of
+    /// everything. The person at the computer always sees who is in and can
+    /// end any of them with one click.
     pub fn banner(&mut self, ui: &mut egui::Ui) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        let name = active.name.clone();
-        let control = active.control;
-        let tools = active.tools;
-        let activity = active.activity.clone();
-        let mut end = false;
-        let mut stop_tools = false;
-        egui::Frame::new()
-            .fill(theme::pal(ui.ctx()).danger)
-            .inner_margin(14.0)
-            .corner_radius(10.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{name} is connected to this computer{}",
-                            if control {
-                                " and can use the mouse and keyboard"
-                            } else {
-                                ", watching"
-                            }
-                        ))
-                        .color(egui::Color32::WHITE)
-                        .strong(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("End their session").clicked() {
-                            end = true;
-                        }
-                        if tools && ui.button("Stop their commands").clicked() {
-                            stop_tools = true;
-                        }
-                    });
-                });
-                if tools {
-                    ui.label(
-                        egui::RichText::new(
-                            "Their tools can run commands and copy files on this computer.",
-                        )
-                        .color(egui::Color32::WHITE),
-                    );
-                }
-                for line in &activity {
-                    ui.label(
-                        egui::RichText::new(line)
+        let mut end = None;
+        let mut stop_tools = None;
+        for (index, active) in self.active.iter().enumerate() {
+            let name = &active.name;
+            let tools = active.tools;
+            egui::Frame::new()
+                .fill(theme::pal(ui.ctx()).danger)
+                .inner_margin(14.0)
+                .corner_radius(10.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{name} is connected to this computer{}",
+                                if active.control {
+                                    " and can use the mouse and keyboard"
+                                } else {
+                                    ", watching"
+                                }
+                            ))
                             .color(egui::Color32::WHITE)
-                            .small(),
-                    );
-                }
-            });
-        ui.add_space(8.0);
-        if stop_tools && let Some(active) = self.active.as_mut() {
+                            .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("End their session").clicked() {
+                                end = Some(index);
+                            }
+                            if tools && ui.button("Stop their commands").clicked() {
+                                stop_tools = Some(index);
+                            }
+                        });
+                    });
+                    if tools {
+                        ui.label(
+                            egui::RichText::new(
+                                "Their tools can run commands and copy files on this computer.",
+                            )
+                            .color(egui::Color32::WHITE),
+                        );
+                    }
+                    for line in &active.activity {
+                        ui.label(
+                            egui::RichText::new(line)
+                                .color(egui::Color32::WHITE)
+                                .small(),
+                        );
+                    }
+                });
+            ui.add_space(8.0);
+        }
+        if let Some(active) = stop_tools.and_then(|i| self.active.get_mut(i)) {
             active.session.set_tools(false);
             active.tools = false;
+            let name = active.name.clone();
             self.say(format!(
                 "{name}'s tools can no longer run commands in this session"
             ));
         }
-        if end {
-            if let Some(active) = self.active.take() {
-                active.session.stop();
-            }
-            self.say(format!("Ended {name}'s session"));
+        if let Some(index) = end.filter(|&i| i < self.active.len()) {
+            let active = self.active.remove(index);
+            active.session.stop();
+            self.say(format!("Ended {}'s session", active.name));
         }
     }
     /// The Unattended access settings, drawn inside a card on the Settings
@@ -473,6 +538,9 @@ impl Unattended {
                 Ok(()) => self.autostart = autostart,
                 Err(error) => self.fail(format!("{error:#}")),
             }
+        }
+        if crate::login::SUPPORTED && self.access.enabled {
+            self.login_setting(ui);
         }
         ui.add_space(10.0);
         theme::caption(ui, "Paired helpers");
@@ -560,6 +628,77 @@ impl Unattended {
                 &self.message,
             );
         }
+    }
+}
+
+impl Unattended {
+    /// Reachable before anyone signs in, after a restart for instance.
+    fn login_setting(&mut self, ui: &mut egui::Ui) {
+        if let Some(change) = self.login_change.as_ref() {
+            match change.try_recv() {
+                Ok((on, Ok(()))) => {
+                    self.login = on;
+                    self.login_change = None;
+                    self.say(if on {
+                        "Paired helpers can now connect at the sign in screen too"
+                    } else {
+                        "Helpers can connect only once somebody signs in"
+                    });
+                }
+                Ok((_, Err(error))) => {
+                    self.login_change = None;
+                    self.fail(format!("{error:#}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(250));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.login_change = None,
+            }
+        }
+        let mut login = self.login;
+        let changed = ui
+            .add_enabled(
+                self.login_change.is_none(),
+                egui::Checkbox::new(
+                    &mut login,
+                    "Also before anyone signs in, such as after a restart",
+                ),
+            )
+            .on_hover_text("Asks for an administrator. At the sign in screen only paired helpers and the unattended password get in, and helpers' tools cannot run commands.")
+            .changed();
+        if changed {
+            // The app in the tray takes over once somebody signs in.
+            if login && !self.autostart && autostart::set(true).is_ok() {
+                self.autostart = true;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let _ = tx.send((login, crate::login::set(login)));
+                ctx.request_repaint();
+            });
+            self.login_change = Some(rx);
+            self.say("Waiting for an administrator to allow it");
+        }
+    }
+}
+
+/// Whether this session is on the physical screen and locked.
+#[cfg(windows)]
+fn screen_locked() -> bool {
+    use boundary_platform::system;
+    system::console().is_some_and(|c| c.locked && Some(c.session) == system::own_session())
+}
+#[cfg(not(windows))]
+fn screen_locked() -> bool {
+    false
+}
+
+/// Write to `unattended.log` beside the machine ID and `access.json`.
+fn log(access_path: &std::path::Path, line: &str) {
+    if let Some(dir) = access_path.parent() {
+        crate::journal::note(dir, "unattended.log", line);
     }
 }
 

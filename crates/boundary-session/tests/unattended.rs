@@ -341,3 +341,129 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
     .await
     .expect("unattended flow timed out");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn at_the_sign_in_screen_strangers_are_refused_and_tools_stay_off() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("login");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let friend = unattended::load_or_create_key(&dir.join("friend.key")).unwrap();
+        let stranger = unattended::load_or_create_key(&dir.join("stranger.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&friend.public().to_string(), "Friend", true)
+            .unwrap();
+        access.allow_tools(&friend.public().to_string(), true);
+        access.save(&access_path).unwrap();
+
+        let mut listener =
+            unattended::listen_at_login(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+
+        // Paired, with tools allowed in access.json: in, but without tools.
+        let paired = tokio::spawn(outcome(unattended::connect_to_with_tools(
+            Ok(address.clone()),
+            "Friend".into(),
+            None,
+            friend,
+            local(),
+        )));
+        let held = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Connected { session, .. }) => {
+                    assert!(!session.tools_allowed(), "tools run as nobody's account");
+                    break session;
+                }
+                Some(Notice::Ask { .. }) => panic!("a paired helper was asked"),
+                _ => {}
+            }
+        };
+        assert_eq!(paired.await.unwrap(), Ok(true));
+        drop(held);
+
+        // Not paired, no password: nobody is there to ask, so it is refused.
+        let refused = tokio::spawn(outcome(unattended::connect_to(
+            Ok(address),
+            "Stranger".into(),
+            None,
+            stranger,
+            local(),
+        )));
+        loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ask { .. }) => panic!("asked with nobody signed in"),
+                Some(Notice::Refused { name, .. }) if name == "Stranger" => break,
+                _ => {}
+            }
+        }
+        let refused = refused.await.unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.contains("Nobody has signed in")),
+            "{refused:?}"
+        );
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_paired_helpers_are_in_at_the_same_time() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("two");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let first = unattended::load_or_create_key(&dir.join("first.key")).unwrap();
+        let second = unattended::load_or_create_key(&dir.join("second.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&first.public().to_string(), "First", true)
+            .unwrap();
+        access
+            .trust(&second.public().to_string(), "Second", false)
+            .unwrap();
+        access.save(&access_path).unwrap();
+
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let mut held = Vec::new();
+        let one = unattended::connect_to(Ok(address.clone()), "First".into(), None, first, local());
+        loop {
+            if let Some(Notice::Connected { session, .. }) = listener.notices.recv().await {
+                held.push(session);
+                break;
+            }
+        }
+        // The first is still in when the second knocks.
+        let two = unattended::connect_to(Ok(address), "Second".into(), None, second, local());
+        loop {
+            if let Some(Notice::Connected { session, .. }) = listener.notices.recv().await {
+                held.push(session);
+                break;
+            }
+        }
+        let (one, two) = tokio::join!(outcome(one), outcome(two));
+        assert_eq!(one, Ok(true), "the first has control");
+        assert_eq!(two, Ok(false), "the second may only watch");
+        assert_eq!(held.len(), 2);
+    })
+    .await
+    .expect("timed out");
+}

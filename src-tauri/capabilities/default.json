@@ -49,6 +49,7 @@
 
     "allow-save-password",
     "allow-has-password",
+    "allow-saved-user-names",
     "allow-delete-password",
     "allow-credential-backend",
     "allow-unlock-credentials",
@@ -62,6 +63,7 @@
 
     "allow-connect-session",
     "allow-connect-boundary",
+    "allow-boundary-permission",
     "allow-boundary-provider-start",
     "allow-boundary-provider-status",
     "allow-boundary-provider-cancel",

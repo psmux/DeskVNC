@@ -384,13 +384,36 @@ pub fn encode_channel_pdu(
     scratch: &mut Vec<u8>,
     out: &mut Vec<Bytes>,
 ) -> Result<()> {
+    encode_channel_pdu_with(user_channel_id, channel_id, payload, 0, scratch, out)
+}
+
+/// [`encode_channel_pdu`], with `extra_flags` set in every chunk's header
+/// beside `FIRST` and `LAST`.
+///
+/// `cliprdr` needs `CHANNEL_FLAG_SHOW_PROTOCOL` here: a Windows server
+/// ignored every clipboard PDU sent without it, so nothing copied on either
+/// side ever crossed (issue #9). xrdp did not mind, which is why a test
+/// against it passed.
+///
+/// # Errors
+///
+/// As [`encode_channel_pdu`].
+pub fn encode_channel_pdu_with(
+    user_channel_id: u16,
+    channel_id: u16,
+    payload: &[u8],
+    extra_flags: u32,
+    scratch: &mut Vec<u8>,
+    out: &mut Vec<Bytes>,
+) -> Result<()> {
     // `scratch` is the caller's, and it is the same buffer for every chunk of
     // every PDU on the channel: `send_data_request` copies it into the frame
     // it returns, so it is free to be reused as soon as that call returns.
     // The one allocation left per frame is the frame itself, which is the
     // value handed to the writer task.
     scratch.reserve(ChannelPduHeader::LEN + CHANNEL_CHUNK_LENGTH);
-    for chunk in chunk_channel_pdu(payload, CHANNEL_CHUNK_LENGTH) {
+    for mut chunk in chunk_channel_pdu(payload, CHANNEL_CHUNK_LENGTH) {
+        chunk.header.flags |= extra_flags;
         scratch.clear();
         chunk.encode_checked(&mut Writer::new(scratch))?;
         out.push(send_data_request(user_channel_id, channel_id, scratch)?);

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-boundary-permission"
+description = "Enables the boundary_permission command without any pre-configured scope."
+commands.allow = ["boundary_permission"]
+
+[[permission]]
+identifier = "deny-boundary-permission"
+description = "Denies the boundary_permission command without any pre-configured scope."
+commands.deny = ["boundary_permission"]

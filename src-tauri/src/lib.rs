@@ -215,6 +215,7 @@ pub fn run() {
             // credentials
             commands::credentials::save_password,
             commands::credentials::has_password,
+            commands::credentials::saved_user_names,
             commands::credentials::delete_password,
             commands::credentials::credential_backend,
             commands::credentials::unlock_credentials,

@@ -4,8 +4,11 @@
 
 mod codes;
 mod install;
+mod journal;
+mod login;
 mod network;
 mod theme;
+mod tray;
 mod unattended;
 
 use boundary_session::{
@@ -16,20 +19,159 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| args.iter().any(|a| a == name);
+    if let Some(code) = other_mode(&args) {
+        std::process::exit(code);
+    }
+    let background = flag("--background");
+    // A copy started at sign in steps aside for one already running. Two
+    // copies would listen as the same machine ID and keep pushing each other
+    // off the relay, so neither could be reached. A copy that is quitting
+    // holds the lock a moment longer, so this waits before giving up.
+    let _instance = match only_instance() {
+        Some(lock) => Some(lock),
+        None if background => {
+            let waited = (0..30).find_map(|_| {
+                std::thread::sleep(Duration::from_secs(1));
+                only_instance()
+            });
+            match waited {
+                Some(lock) => Some(lock),
+                None => return Ok(()),
+            }
+        }
+        None => None,
+    };
     let runtime = tokio::runtime::Runtime::new().expect("Cannot start the connection runtime");
     let _guard = runtime.enter();
+    let fallback = std::env::var_os(FALLBACK_RENDERER).is_some();
     let result = eframe::run_native(
         "Boundary",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([980.0, 660.0])
-                .with_min_inner_size([820.0, 600.0]),
+                .with_min_inner_size([820.0, 600.0])
+                // Started at sign in, the window waits hidden behind the tray
+                // icon. Where there is no tray it is minimized instead.
+                .with_visible(!background || !TRAY),
+            event_loop_builder: background_policy(background),
+            renderer: if fallback {
+                eframe::Renderer::Wgpu
+            } else {
+                eframe::Renderer::Glow
+            },
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     );
     runtime.shutdown_timeout(Duration::from_secs(3));
+    // A display with no graphics driver behind it, as in a virtual machine,
+    // a Remote Desktop session or a virtual monitor, offers OpenGL 1.1 and
+    // the window never opened. Direct3D has a software device everywhere.
+    // A process gets one event loop, so a fresh copy draws with it.
+    if !fallback
+        && matches!(result, Err(eframe::Error::OpenGL(_)))
+        && let Ok(exe) = std::env::current_exe()
+    {
+        drop(_instance);
+        if std::process::Command::new(exe)
+            .args(&args[1..])
+            .env(FALLBACK_RENDERER, "1")
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
     result
+}
+/// Set for a copy that draws with wgpu because OpenGL was too old.
+const FALLBACK_RENDERER: &str = "DESKVNC_SUPPORT_WGPU";
+/// Whether this platform has a tray icon to hide the window behind.
+const TRAY: bool = cfg!(any(target_os = "macos", windows));
+
+/// Started at sign in on macOS, the app keeps out of the Dock and the app
+/// switcher: the menu bar icon is how it is reached.
+#[cfg(target_os = "macos")]
+fn background_policy(background: bool) -> Option<eframe::EventLoopBuilderHook> {
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+    background.then(|| -> eframe::EventLoopBuilderHook {
+        Box::new(|builder| {
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        })
+    })
+}
+#[cfg(not(target_os = "macos"))]
+fn background_policy(_: bool) -> Option<eframe::EventLoopBuilderHook> {
+    None
+}
+
+/// The modes with no window: the copy at the sign in screen, the Windows
+/// service that starts it, and setting that service up as an administrator.
+/// `Some(exit code)` when this run was one of them.
+fn other_mode(args: &[String]) -> Option<i32> {
+    let after = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+    };
+    let result = if args.iter().any(|a| a == "--login-screen") {
+        login::host()
+    } else if cfg!(windows) && args.iter().any(|a| a == "--service") {
+        #[cfg(windows)]
+        let result = login::service();
+        #[cfg(not(windows))]
+        let result = Ok(());
+        result
+    } else if let Some(owner) = after("--install-service") {
+        #[cfg(windows)]
+        let result = login::install(&owner);
+        #[cfg(not(windows))]
+        let result = {
+            let _ = owner;
+            Ok(())
+        };
+        result
+    } else if args.iter().any(|a| a == "--uninstall-service") {
+        #[cfg(windows)]
+        let result = login::uninstall();
+        #[cfg(not(windows))]
+        let result = Ok(());
+        result
+    } else {
+        return None;
+    };
+    Some(match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error:#}");
+            1
+        }
+    })
+}
+
+/// A lock held for as long as this copy runs, or `None` when another copy
+/// holds it already.
+fn only_instance() -> Option<std::fs::File> {
+    lock_file("running.lock")
+}
+fn lock_file(name: &str) -> Option<std::fs::File> {
+    let dir = boundary_provision::platform::data_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(name);
+    // The copy at the sign in screen runs as root on macOS, and a lock file
+    // it created cannot be opened for writing by the person afterwards. A
+    // lock needs no writing.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .or_else(|_| std::fs::File::open(&path))
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 struct Pending {
     name: String,
@@ -92,13 +234,21 @@ struct App {
     approved_name: String,
     /// A computer that let this helper in any time, as (ID, name).
     paired: Option<(String, String)>,
+    /// Set when this copy closes on purpose, for a moved copy to take over.
+    quitting: bool,
+    tray: Option<tray::Tray>,
+    /// Frames left in which to hide the window at a background start. eframe
+    /// shows the window once its first frame is drawn, whatever it was built
+    /// with, so it has to be hidden again after that.
+    hide_frames: u8,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
-        // Started at sign in for unattended access: out of the way until a
-        // helper connects, when the window comes forward to say so.
-        if std::env::args().any(|a| a == "--background") {
+        // Started at sign in for unattended access: out of the way, in the
+        // tray. The window comes forward only for a question somebody has to
+        // answer, never just because a paired helper connected.
+        if std::env::args().any(|a| a == "--background") && !TRAY {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
@@ -160,6 +310,13 @@ impl App {
             helper: None,
             approved_name: String::new(),
             paired: None,
+            quitting: false,
+            tray: tray::Tray::new(),
+            hide_frames: if std::env::args().any(|a| a == "--background") && TRAY {
+                3
+            } else {
+                0
+            },
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -249,8 +406,7 @@ impl App {
     }
     fn poll(&mut self, ctx: &egui::Context) {
         if self.unattended.poll() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            show(ctx);
         }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
@@ -304,7 +460,7 @@ impl App {
                             allow_tools: false,
                             answer,
                         });
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        show(ctx);
                     }
                     Event::Connected { peer, control } => {
                         self.codes.clear();
@@ -382,7 +538,10 @@ impl App {
             ui.add_space(6.0);
             if ui.button("Move to Applications and reopen").clicked() {
                 match install::move_to_applications(&source) {
-                    Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                    Ok(_) => {
+                        self.quitting = true;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                     Err(error) => self.status = format!("{error:#}"),
                 }
             }
@@ -904,8 +1063,54 @@ impl App {
         }
     }
 }
+/// Bring the window back from the tray, the Dock or the taskbar.
+fn show(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // With unattended access on, the window closing must not take the
+        // listener with it: that left a computer unreachable until somebody
+        // opened the app again by hand. It goes to the Dock instead.
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.unattended.enabled()
+            && !self.quitting
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            self.status = "Still running, so helpers can reach this computer. Turn off unattended access to quit.".into();
+        }
+        if self.hide_frames > 0 {
+            self.hide_frames -= 1;
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+        if let Some(tray) = self.tray.as_mut() {
+            match tray.poll() {
+                Some(tray::Action::Show) => show(ctx),
+                Some(tray::Action::Quit) => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                None => {}
+            }
+            let line = match self.unattended.active.as_slice() {
+                [one] => format!("{} is connected", one.name),
+                [] if self.unattended.enabled() => "Waiting for helpers".to_owned(),
+                [] => "Unattended access is off".to_owned(),
+                many => format!("{} helpers are connected", many.len()),
+            };
+            tray.say(&line);
+        }
         self.poll(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {

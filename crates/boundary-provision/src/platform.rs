@@ -68,11 +68,16 @@ pub fn computer_name() -> String {
 pub fn claim_unattended() -> Result<Option<std::fs::File>> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
+    let path = dir.join("unattended.lock");
+    // On macOS the copy at the login window runs as root and may have made
+    // this file, which the person then cannot open for writing. A lock needs
+    // no writing.
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("unattended.lock"))
+        .open(&path)
+        .or_else(|_| std::fs::File::open(&path))
         .context("Cannot open the unattended access lock")?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),

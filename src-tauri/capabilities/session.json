@@ -53,6 +53,7 @@
     "allow-forget-certificate",
     "allow-provide-credentials",
     "allow-pending-credential-request",
+    "allow-boundary-permission",
     "allow-cancel-credentials",
     "allow-fullscreen-session",
 
