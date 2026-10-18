@@ -10,6 +10,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.31.0] (2026-10-18)
+
+### Added
+
+* Right-click any tab for Close tab, Close other tabs, Close tabs to the left,
+  Close tabs to the right, and Close all tabs, as in a web browser. Right-click
+  the Library tab for Close all tabs. The menu key, or Shift+F10, opens the
+  same menu on the tab with focus.
+* When there are more tabs than fit, arrows appear at each end of the strip
+  and scroll it, and an ordinary mouse wheel over the tabs scrolls them
+  sideways. The arrow at an end with nothing past it is dimmed.
+
 ## [0.30.0] (2026-10-17)
 
 ### Added
