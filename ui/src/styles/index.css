@@ -296,6 +296,15 @@ select.field option {
   scrollbar-color: var(--border-strong) transparent;
 }
 
+/* The tab strip scrolls under its own arrow buttons, the way a browser's
+   does, so a scrollbar across the tabs would only be in the way. */
+.tab-scroller {
+  scrollbar-width: none;
+}
+.tab-scroller::-webkit-scrollbar {
+  display: none;
+}
+
 /* Skeleton shimmer */
 @keyframes skeleton-pulse {
   0%,

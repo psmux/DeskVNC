@@ -72,6 +72,9 @@ export const IconArrowRight = (p: IconProps): ReactNode => (
 export const IconChevronDown = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="m6 9 6 6 6-6" /></Icon>
 );
+export const IconChevronLeft = (p: IconProps): ReactNode => (
+  <Icon {...p}><path d="m15 6-6 6 6 6" /></Icon>
+);
 export const IconChevronRight = (p: IconProps): ReactNode => (
   <Icon {...p}><path d="m9 6 6 6-6 6" /></Icon>
 );

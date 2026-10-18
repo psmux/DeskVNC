@@ -38,6 +38,7 @@ import type { SessionParams } from "../hooks/useSession";
 import type { SessionState } from "../lib/types";
 import { safeInvoke } from "../lib/tauri";
 import { serializeLayout } from "../lib/groupLayout";
+import { frontAfterClose } from "../lib/tabClose";
 import {
   closePane as closePaneIn,
   cyclePane,
@@ -123,6 +124,13 @@ interface TabsContextValue {
   open: (id: string, params: SessionParams, target?: PaneTarget, background?: boolean) => void;
   /** Close a tab and everything in it. Every viewer unmounts, disconnecting. */
   close: (id: string) => void;
+  /**
+   * Close several tabs in one go, for the strip's "Close other tabs" and the
+   * like. One update rather than a `close` per tab, so the tab left in front is
+   * worked out once from the whole set instead of landing on a neighbour that
+   * is about to go too.
+   */
+  closeMany: (ids: readonly string[]) => void;
   /** Bring a tab (or, for null, the library) to the front. */
   select: (id: string | null) => void;
   /** Bring the tab holding this session forward and focus its pane. */
@@ -349,6 +357,21 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
       if (activeRef.current === id) {
         setActiveId((next[index] ?? next[index - 1])?.id ?? null);
       }
+    },
+    [releaseClaim],
+  );
+
+  const closeMany = useCallback(
+    (ids: readonly string[]): void => {
+      const closing = new Set(ids);
+      const list = tabsRef.current;
+      const gone = list.filter((t) => closing.has(t.id));
+      if (gone.length === 0) return;
+      for (const tab of gone) {
+        for (const sessionId of placedSessions(tab.root)) releaseClaim(sessionId);
+      }
+      setTabs((prev) => prev.filter((t) => !closing.has(t.id)));
+      setActiveId(frontAfterClose(list.map((t) => t.id), activeRef.current, closing));
     },
     [releaseClaim],
   );
@@ -715,6 +738,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
       activeTab,
       open,
       close,
+      closeMany,
       select,
       selectSession,
       has,
@@ -741,7 +765,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
       tabs, sessions, summaries, activeId, activeTab, open, close, select, selectSession,
       has, selectRelative, selectIndex, closeActive, setTitle, setState, split, closePane,
       focusPane, reportArea, moveFocus, cycleFocus, adopt, resize, evenOut, toggleZoom, arrange,
-      openArranged, serializeActive,
+      openArranged, serializeActive, closeMany,
     ],
   );
 
