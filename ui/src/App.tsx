@@ -123,6 +123,7 @@ function MainShell(): ReactNode {
     activeId,
     activeTab,
     close,
+    closeMany,
     closePane,
     select,
     selectRelative,
@@ -413,6 +414,7 @@ function MainShell(): ReactNode {
             activeId={activeId}
             onSelect={select}
             onClose={close}
+            onCloseMany={closeMany}
             onSelectRelative={selectRelative}
             drivenTabIds={drivenTabIds}
           />
