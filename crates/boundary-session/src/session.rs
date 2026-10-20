@@ -815,10 +815,75 @@ pub(crate) async fn watch_session(
     }
     // The computer's own reason beats whatever read or write noticed first,
     // which is only ever "connection lost" or a stream ending early.
-    match ended_by_host(connection) {
-        Some(reason) => Err(anyhow!("{reason}")),
-        None => result,
+    if let Some(reason) = ended_by_host(connection) {
+        return Err(anyhow!("{reason}"));
     }
+    match result {
+        Err(error) if !closed_by_peer(connection) && error.downcast_ref::<Refusal>().is_none() => {
+            Err(link_lost(error))
+        }
+        other => other,
+    }
+}
+
+/// The computer, or the person at it, said no. Read before the computer has
+/// closed the connection, so the close cannot be what tells this apart from a
+/// link that failed.
+#[derive(Debug)]
+struct Refusal(String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// An error that means the link failed, not that anyone ended the session:
+/// a timeout, a reset, a computer that stopped answering. Only this is worth
+/// connecting again for. A computer that turned the helper away, or whose
+/// person ended the session, closed it on purpose, and connecting again would
+/// overrule them.
+///
+/// It wraps the error rather than adding a line to it, so what the person
+/// reads is unchanged.
+#[derive(Debug)]
+pub struct LinkLost(anyhow::Error);
+
+impl std::fmt::Display for LinkLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for LinkLost {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl LinkLost {
+    /// Is this error a link failure, worth connecting again for?
+    pub fn is(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<LinkLost>().is_some()
+    }
+}
+
+pub(crate) fn link_lost(error: anyhow::Error) -> anyhow::Error {
+    if LinkLost::is(&error) {
+        error
+    } else {
+        anyhow::Error::new(LinkLost(error))
+    }
+}
+
+/// Did the other side close this connection on purpose?
+fn closed_by_peer(connection: &Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(_))
+    )
 }
 
 async fn watch(
@@ -837,8 +902,8 @@ async fn watch(
         .context("Approval timed out")??;
     let (control, tools) = match grant {
         Message::Granted { control, tools } => (control, tools),
-        Message::Refused(reason) => bail!("{reason}"),
-        _ => bail!("The person declined this connection"),
+        Message::Refused(reason) => return Err(Refusal(reason).into()),
+        _ => return Err(Refusal("The person declined this connection".into()).into()),
     };
     // Only a host that answered about tools serves them. One that did not is
     // older than they are, and a request sent to it would wait on a stream

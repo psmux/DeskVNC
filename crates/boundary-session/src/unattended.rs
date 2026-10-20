@@ -697,8 +697,10 @@ async fn run_connect(
     let _close = Closing(endpoint.clone());
     let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(target, wire::ALPN))
         .await
-        .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")?
-        .context("Cannot reach the computer")?;
+        .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
+        .map_err(session::link_lost)?
+        .context("Cannot reach the computer")
+        .map_err(session::link_lost)?;
     let (mut send, recv) = connection.open_bi().await?;
     wire::write(
         &mut send,

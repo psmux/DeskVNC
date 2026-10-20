@@ -3,7 +3,7 @@
 //! unknown one, the password, the lockout and the off switch.
 
 use boundary_session::{
-    Approval, Desktop, Event, Frame, HostOptions, Input, Session,
+    Approval, Desktop, Event, Frame, HostOptions, Input, LinkLost, Session,
     unattended::{self, Access, Notice},
 };
 use std::{path::PathBuf, time::Duration};
@@ -550,11 +550,58 @@ async fn the_helper_hears_why_the_computer_ended_the_session() {
                 None => panic!("the helper's session went quiet"),
             }
         };
-        let error = format!("{:#}", ended.expect_err("the session should have failed"));
+        let ended = ended.expect_err("the session should have failed");
+        // Ended on purpose, so the helper must not connect again by itself.
+        assert!(!LinkLost::is(&ended));
+        let error = format!("{ended:#}");
         assert!(
             error.starts_with("That computer ended the session: Allow this app"),
             "{error}"
         );
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A helper the computer turns away is told so, and that is never mistaken
+/// for a lost link that would be worth knocking again for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_helper_turned_away_is_not_a_lost_link() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("away");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let stranger = unattended::load_or_create_key(&dir.join("stranger.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        access.set_password(Some("correct horse battery")).unwrap();
+        access.save(&access_path).unwrap();
+
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let mut visit = unattended::connect_to(
+            Ok(address),
+            "Stranger".into(),
+            Some("wrong".into()),
+            stranger,
+            local(),
+        );
+        let ended = loop {
+            match visit.events.recv().await {
+                Some(Event::Finished(result)) => break result,
+                Some(_) => {}
+                None => panic!("the helper's session went quiet"),
+            }
+        };
+        let ended = ended.expect_err("a stranger with a wrong password is turned away");
+        assert!(!LinkLost::is(&ended), "{ended:#}");
     })
     .await
     .expect("timed out");
