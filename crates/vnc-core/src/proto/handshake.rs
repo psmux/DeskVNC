@@ -50,12 +50,32 @@ where
             "server reported empty framebuffer {width}x{height}"
         )));
     }
+    check_framebuffer_size(width, height)?;
     Ok(ServerInit {
         width,
         height,
         pixel_format,
         name,
     })
+}
+
+/// The most pixels a framebuffer may have: 64 million, a quarter of a
+/// gigabyte of RGBA. Three 8K screens side by side would not fit and nothing
+/// real comes near that. Every decoder sizes its buffers from the framebuffer
+/// and the rects inside it, so without a ceiling a server that reports a
+/// garbage size, which a reboot or a mode change in flight can produce, made
+/// this app allocate gigabytes, and a failed allocation aborts the process.
+pub const MAX_FRAMEBUFFER_PIXELS: u64 = 64 * 1024 * 1024;
+
+/// Refuse a framebuffer too big to allocate safely (see
+/// [`MAX_FRAMEBUFFER_PIXELS`]).
+pub fn check_framebuffer_size(width: u16, height: u16) -> Result<()> {
+    if u64::from(width) * u64::from(height) > MAX_FRAMEBUFFER_PIXELS {
+        return Err(VncError::Protocol(format!(
+            "server reported a framebuffer of {width}x{height}, too large to display"
+        )));
+    }
+    Ok(())
 }
 
 /// One entry of a Tight capability list: `S32 code`, 4-byte vendor,
@@ -327,5 +347,19 @@ mod tests {
             read_tight_server_capabilities(&mut r).await,
             Err(VncError::Protocol(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod framebuffer_size_tests {
+    use super::check_framebuffer_size;
+
+    #[test]
+    fn real_screens_fit_and_garbage_sizes_are_refused() {
+        assert!(check_framebuffer_size(3840, 2160).is_ok());
+        assert!(check_framebuffer_size(7680, 4320).is_ok());
+        assert!(check_framebuffer_size(11520, 2160).is_ok());
+        assert!(check_framebuffer_size(65535, 65535).is_err());
+        assert!(check_framebuffer_size(65535, 2000).is_err());
     }
 }

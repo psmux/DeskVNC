@@ -1460,6 +1460,7 @@ impl RunLoop {
                 "server resized framebuffer to zero".into(),
             ));
         }
+        crate::proto::handshake::check_framebuffer_size(width, height)?;
         if (width, height) != (self.fb_width, self.fb_height) {
             self.fb_width = width;
             self.fb_height = height;

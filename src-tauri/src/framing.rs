@@ -142,7 +142,11 @@ pub fn decode_jpeg_rects(rects: Vec<DecodedRect>) -> Vec<DecodedRect> {
         .into_iter()
         .map(|r| match &r.payload {
             RectPayload::Jpeg(data) => {
-                match vnc_core::encodings::tight::decode_jpeg_to_rgba(data) {
+                match vnc_core::encodings::tight::decode_jpeg_to_rgba_within(
+                    data,
+                    r.rect.width,
+                    r.rect.height,
+                ) {
                     Ok((w, h, rgba))
                         if w == u32::from(r.rect.width) && h == u32::from(r.rect.height) =>
                     {
