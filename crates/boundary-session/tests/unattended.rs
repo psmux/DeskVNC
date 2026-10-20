@@ -510,3 +510,52 @@ async fn whoever_holds_the_session_hears_the_helper_left() {
     .await
     .expect("timed out");
 }
+
+/// A computer that cannot share its screen tells the helper why, instead of
+/// the helper seeing only that the connection was lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_helper_hears_why_the_computer_ended_the_session() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("why");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let helper = unattended::load_or_create_key(&dir.join("helper.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&helper.public().to_string(), "Helper", false)
+            .unwrap();
+        access.save(&access_path).unwrap();
+
+        let mut listener = unattended::listen(local(), machine_key, access_path, || {
+            anyhow::bail!("Allow this app in System Settings > Privacy & Security > Screen & System Audio Recording")
+        });
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let mut visit = unattended::connect_to(Ok(address), "Helper".into(), None, helper, local());
+        let _held = loop {
+            if let Some(Notice::Connected { session, .. }) = listener.notices.recv().await {
+                break session;
+            }
+        };
+        let ended = loop {
+            match visit.events.recv().await {
+                Some(Event::Finished(result)) => break result,
+                Some(_) => {}
+                None => panic!("the helper's session went quiet"),
+            }
+        };
+        let error = format!("{:#}", ended.expect_err("the session should have failed"));
+        assert!(
+            error.starts_with("That computer ended the session: Allow this app"),
+            "{error}"
+        );
+    })
+    .await
+    .expect("timed out");
+}

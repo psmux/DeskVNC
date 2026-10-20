@@ -427,7 +427,7 @@ where
                 _ = ended.cancelled() => Ok(()),
                 result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
             };
-            connection.close(0u8.into(), b"Session ended");
+            session::close_served(&connection, &result);
             // Whoever holds the session hears that it ended, so a banner
             // saying the helper is in does not outlive the helper.
             let reason = result.as_ref().err().map(|error| format!("{error:#}"));

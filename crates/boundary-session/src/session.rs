@@ -488,6 +488,7 @@ where
             worker, connection, send, recv, peer, allowed, tools, jpeg, desktop,
         )
         .await;
+        close_served(connection, &result);
         drop(guard);
         endpoint.close().await;
         return result;
@@ -701,7 +702,13 @@ async fn send_screens(
 ) -> Result<()> {
     let mut last: Option<Arc<Vec<u8>>> = None;
     loop {
-        screens.changed().await?;
+        if screens.changed().await.is_err() {
+            // The capture worker has stopped, and its own result says why.
+            // Ending here first reported "channel closed" to the helper
+            // instead, and the real reason, such as a missing permission,
+            // was lost.
+            return std::future::pending().await;
+        }
         let bytes = screens
             .borrow_and_update()
             .clone()
@@ -795,6 +802,26 @@ async fn run_viewer(
 /// be let in, then show screens, send input and keep the session alive.
 /// Shared by invitations and unattended connections.
 pub(crate) async fn watch_session(
+    worker: &mut Worker,
+    connection: &Connection,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
+    let result = watch(worker, connection, send, recv).await;
+    if result.is_err() && connection.close_reason().is_none() {
+        // A stream can end a moment before the close that explains it, so
+        // give the reason a moment to land rather than report the symptom.
+        let _ = tokio::time::timeout(Duration::from_secs(1), connection.closed()).await;
+    }
+    // The computer's own reason beats whatever read or write noticed first,
+    // which is only ever "connection lost" or a stream ending early.
+    match ended_by_host(connection) {
+        Some(reason) => Err(anyhow!("{reason}")),
+        None => result,
+    }
+}
+
+async fn watch(
     worker: &mut Worker,
     connection: &Connection,
     mut send: iroh::endpoint::SendStream,
@@ -894,6 +921,55 @@ pub(crate) async fn watch_session(
         result = write_input => result,
         result = read_frames => result,
         _ = connection.closed() => Ok(()),
+    }
+}
+
+/// Close code for a session the shared computer ended because something went
+/// wrong there. The close reason carries what, for the helper to read.
+const ENDED_WITH_REASON: u8 = 2;
+
+/// Close a session that was served, telling the helper why when it failed.
+///
+/// Before this, every session closed with the same "Session ended", so a
+/// helper whose session was cut short by, say, a Mac without Screen Recording
+/// permission saw only "connection lost" while the reason sat on a screen
+/// nobody was looking at.
+pub(crate) fn close_served(connection: &Connection, result: &Result<()>) {
+    match result {
+        Ok(()) => connection.close(0u8.into(), b"Session ended"),
+        Err(error) => connection.close(
+            ENDED_WITH_REASON.into(),
+            close_reason(&format!("{error:#}")).as_bytes(),
+        ),
+    }
+}
+
+/// A reason short enough to fit in the close frame, which has to travel in
+/// one packet, cut at a character boundary.
+fn close_reason(reason: &str) -> &str {
+    const MAX: usize = 400;
+    if reason.len() <= MAX {
+        return reason;
+    }
+    let mut end = MAX;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason[..end]
+}
+
+/// Why the shared computer ended this session, when it said.
+fn ended_by_host(connection: &Connection) -> Option<String> {
+    match connection.close_reason()? {
+        iroh::endpoint::ConnectionError::ApplicationClosed(close)
+            if close.error_code == ENDED_WITH_REASON.into() =>
+        {
+            Some(format!(
+                "That computer ended the session: {}",
+                String::from_utf8_lossy(&close.reason)
+            ))
+        }
+        _ => None,
     }
 }
 
