@@ -8,8 +8,8 @@ mod wire;
 use anyhow::{Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
 pub use session::{
-    Approval, Connectivity, Event, HostOptions, Route, Session, host, validate_relay_url, viewer,
-    viewer_as, viewer_with_tools,
+    Approval, Connectivity, Event, HostOptions, LinkLost, Route, Session, host, validate_relay_url,
+    viewer, viewer_as, viewer_with_tools,
 };
 use std::io::Cursor;
 

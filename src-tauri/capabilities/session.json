@@ -40,6 +40,7 @@
     "allow-set-quality",
     "allow-request-resize",
     "allow-refresh-session",
+    "allow-frames-delivered",
     "allow-set-view-only",
     "allow-set-always-refresh",
     "allow-set-prefer-scancodes",

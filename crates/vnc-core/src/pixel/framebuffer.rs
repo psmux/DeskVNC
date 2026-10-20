@@ -64,26 +64,28 @@ impl Framebuffer {
             RectPayload::Rgba(pixels) => {
                 self.blit_rgba(r.x, r.y, r.width, r.height, pixels);
             }
-            RectPayload::Jpeg(bytes) => match crate::encodings::decode_jpeg_to_rgba(bytes) {
-                Ok((jw, jh, pixels)) => {
-                    // The JPEG should match the rect; crop bottom/right if not.
-                    let w = (r.width as u32).min(jw);
-                    let h = (r.height as u32).min(jh);
-                    if jw == w && w == r.width as u32 {
-                        self.blit_rgba(r.x, r.y, w as u16, h as u16, &pixels);
-                    } else {
-                        // Row stride differs, copy row by row.
-                        for y in 0..h {
-                            let src = (y as usize * jw as usize) * 4;
-                            let row = &pixels[src..src + w as usize * 4];
-                            self.blit_rgba(r.x, r.y.saturating_add(y as u16), w as u16, 1, row);
+            RectPayload::Jpeg(bytes) => {
+                match crate::encodings::decode_jpeg_to_rgba_within(bytes, r.width, r.height) {
+                    Ok((jw, jh, pixels)) => {
+                        // The JPEG should match the rect; crop bottom/right if not.
+                        let w = (r.width as u32).min(jw);
+                        let h = (r.height as u32).min(jh);
+                        if jw == w && w == r.width as u32 {
+                            self.blit_rgba(r.x, r.y, w as u16, h as u16, &pixels);
+                        } else {
+                            // Row stride differs, copy row by row.
+                            for y in 0..h {
+                                let src = (y as usize * jw as usize) * 4;
+                                let row = &pixels[src..src + w as usize * 4];
+                                self.blit_rgba(r.x, r.y.saturating_add(y as u16), w as u16, 1, row);
+                            }
                         }
                     }
+                    Err(e) => {
+                        tracing::warn!("failed to decode JPEG rect for framebuffer: {e}");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("failed to decode JPEG rect for framebuffer: {e}");
-                }
-            },
+            }
             RectPayload::CopyRect { src_x, src_y } => {
                 self.copy_rect(*src_x, *src_y, r.x, r.y, r.width, r.height);
             }

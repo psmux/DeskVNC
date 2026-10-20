@@ -2518,6 +2518,7 @@ mod tests {
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(AtomicI32::new(-1)),
             facts: Default::default(),
+            delivered: Default::default(),
         };
         entry.facts.lock().state = SessionState::Connected;
         entry.facts.lock().size = Some((1280, 720));

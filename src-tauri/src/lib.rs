@@ -8,6 +8,7 @@
 mod agent;
 mod commands;
 mod framing;
+mod logging;
 mod menu;
 mod state;
 mod thumbnail;
@@ -22,9 +23,7 @@ use tauri::{Manager, RunEvent};
 use state::AppState;
 
 pub fn run() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,deskvncviewer_lib=debug"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    logging::init();
 
     let mut builder = tauri::Builder::default();
 
@@ -262,6 +261,7 @@ pub fn run() {
             commands::session::set_quality,
             commands::session::request_resize,
             commands::session::refresh_session,
+            commands::session::frames_delivered,
             commands::session::set_view_only,
             commands::session::set_prefer_scancodes,
             commands::session::set_always_refresh,

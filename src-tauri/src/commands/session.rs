@@ -626,8 +626,13 @@ fn forward_events(
     endpoint: SessionEndpoint,
     mut rx: mpsc::Receiver<SessionEvent>,
     channel: Channel<InvokeResponseBody>,
+    delivered: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tauri::async_runtime::spawn(async move {
+        // Framebuffer bytes sent to the webview, against `delivered`, and
+        // whether frames are being held back because it stopped taking them.
+        let mut sent: u64 = 0;
+        let mut holding = false;
         // Two facts this task remembers across events, because the pure
         // `event_json` cannot: how the session authenticated (which decides
         // whether reaching `Connected` proved the password) and the audio
@@ -829,8 +834,37 @@ fn forward_events(
                     // back into the protocol and so cannot storm. Flow control
                     // here, at a hop that can ask the server for more data, was
                     // the mistake.
+                    //
+                    // With one exception: a webview that has stopped taking
+                    // frames altogether. Tauri keeps every frame it has not
+                    // fetched yet, in memory, with no limit, so a page that is
+                    // hung, suspended or gone made the app grow for as long as
+                    // the session ran. Two days of that ended in an abort on a
+                    // 1.5 GB allocation. Being slower than the server never
+                    // comes near this limit, because the page fetches every
+                    // frame as it arrives whatever its renderer then does with
+                    // it, so the storm described above cannot come back.
+                    let waiting =
+                        sent.saturating_sub(delivered.load(std::sync::atomic::Ordering::Relaxed));
+                    if waiting > MAX_UNDELIVERED {
+                        if !holding {
+                            holding = true;
+                            tracing::warn!(session = %session_id, waiting, "the window stopped taking frames, so they are held back");
+                        }
+                        continue;
+                    }
+                    if holding && waiting <= MAX_UNDELIVERED / 2 {
+                        holding = false;
+                        tracing::info!(session = %session_id, "the window is taking frames again");
+                        // The frames that were held back are gone, so ask for
+                        // the whole screen once rather than leave it stale.
+                        if let Some(state) = app.try_state::<AppState>() {
+                            let _ = send_command(&state, &session_id, ClientCommand::Refresh).await;
+                        }
+                    }
                     let bytes = framing::encode_frame(&rects, &damage);
                     let len = bytes.len();
+                    sent += len as u64;
                     if let Err(e) = channel.send(InvokeResponseBody::Raw(bytes)) {
                         tracing::warn!(session = %session_id, "frame channel send failed: {e}");
                     } else if protocol_trace_enabled() {
@@ -1374,6 +1408,7 @@ pub async fn connect_session(
         .map_err(|e| e.to_string())?;
 
     let window_label = window.label().to_string();
+    let delivered = Arc::new(std::sync::atomic::AtomicU64::new(0));
     state.sessions.lock().insert(
         id.clone(),
         SessionEntry {
@@ -1386,6 +1421,7 @@ pub async fn connect_session(
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             facts: Default::default(),
+            delivered: delivered.clone(),
         },
     );
     // The window has stopped "opening", from here the registry entry above is
@@ -1423,6 +1459,7 @@ pub async fn connect_session(
         },
         event_rx,
         on_event,
+        delivered,
     );
     Ok(SessionConnectOutcome::Started { session_id: id })
 }
@@ -1797,6 +1834,21 @@ pub async fn request_resize(
         ClientCommand::RequestResize { width, height },
     )
     .await
+}
+
+/// How many framebuffer bytes may be sent to a window that has not said it
+/// received them, before frames are held back. Far above anything a working
+/// window has outstanding, which is a few frames at most.
+const MAX_UNDELIVERED: u64 = 128 * 1024 * 1024;
+
+/// The window saying it received `bytes` more of this session's frames.
+#[tauri::command]
+pub fn frames_delivered(state: State<'_, AppState>, session_id: String, bytes: u64) {
+    if let Some(entry) = state.sessions.lock().get(&session_id) {
+        entry
+            .delivered
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Force a full (non-incremental) framebuffer update.

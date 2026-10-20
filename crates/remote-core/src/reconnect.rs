@@ -31,7 +31,15 @@ use crate::options::ReconnectPolicy;
 use crate::state::SessionState;
 
 /// A connection that stayed up at least this long resets the attempt counter.
-pub const STABLE_UPTIME: Duration = Duration::from_secs(60);
+///
+/// This was a minute, which a flapping link never satisfies: up for twenty
+/// seconds, down, up for thirty, down. Every drop then waited out the longest
+/// backoff, fifteen seconds and more, although the link had just proved it
+/// works. Five seconds is past anything a server that accepts and then
+/// immediately drops a client does, so that case still climbs the ladder and
+/// cannot become a reconnect storm, while a link that keeps coming back is
+/// retried at once each time it goes.
+pub const STABLE_UPTIME: Duration = Duration::from_secs(5);
 
 /// How many attempts in a row may end in [`RunOutcome::Reattempt`] before the
 /// supervisor stops treating the peer as honest.
@@ -476,6 +484,9 @@ mod tests {
         policy: ReconnectPolicy,
         script: Vec<Result<RunOutcome, TestError>>,
         absorbed: usize,
+        /// How long each attempt stayed connected before it failed, if it
+        /// connected at all.
+        held: Option<Duration>,
     }
 
     impl ConnectOnce for Scripted {
@@ -490,9 +501,10 @@ mod tests {
             _events: &'a mpsc::Sender<SessionEvent>,
             _commands: &'a mut mpsc::Receiver<ClientCommand>,
             _cancel: &'a CancellationToken,
-            _connected_at: &'a mut Option<Instant>,
+            connected_at: &'a mut Option<Instant>,
         ) -> Pin<Box<dyn Future<Output = Result<RunOutcome, TestError>> + Send + 'a>> {
             Box::pin(async move {
+                *connected_at = self.held.and_then(|held| Instant::now().checked_sub(held));
                 if self.script.is_empty() {
                     return Err(TestError::Fatal);
                 }
@@ -540,6 +552,7 @@ mod tests {
                 Err(TestError::Transient),
             ],
             absorbed: 0,
+            held: None,
         };
         supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
 
@@ -561,6 +574,60 @@ mod tests {
         ));
     }
 
+    /// A link that keeps coming back is retried at the first, shortest delay
+    /// after every drop, because each connection held long enough to prove it.
+    #[tokio::test]
+    async fn a_link_that_keeps_coming_back_is_retried_at_once_every_time() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: ReconnectPolicy {
+                max_attempts: Some(5),
+                ..fast_policy()
+            },
+            script: vec![Err(TestError::Transient); 4],
+            absorbed: 0,
+            held: Some(STABLE_UPTIME),
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+        let attempts: Vec<u32> = states(&mut rx)
+            .await
+            .iter()
+            .filter_map(|s| match s {
+                SessionState::Reconnecting { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attempts, vec![1, 1, 1, 1]);
+    }
+
+    /// A server that lets a client in and drops it straight away still climbs
+    /// the ladder, so it cannot turn the retries into a storm.
+    #[tokio::test]
+    async fn a_connection_dropped_at_once_still_backs_off() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: ReconnectPolicy {
+                max_attempts: Some(5),
+                ..fast_policy()
+            },
+            script: vec![Err(TestError::Transient); 4],
+            absorbed: 0,
+            held: Some(Duration::from_millis(500)),
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+        let attempts: Vec<u32> = states(&mut rx)
+            .await
+            .iter()
+            .filter_map(|s| match s {
+                SessionState::Reconnecting { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attempts, vec![1, 2, 3, 4]);
+    }
+
     /// A `Reattempt` skips the backoff and the attempt counter: the next
     /// attempt starts at once and no `Reconnecting` state is emitted, because
     /// the session is not in trouble, it is moving.
@@ -577,6 +644,7 @@ mod tests {
                 Ok(RunOutcome::UserDisconnect),
             ],
             absorbed: 0,
+            held: None,
         };
         supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
 
@@ -609,6 +677,7 @@ mod tests {
                 })
                 .collect(),
             absorbed: 0,
+            held: None,
         };
         supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
 
@@ -634,6 +703,7 @@ mod tests {
             policy: fast_policy(),
             script: vec![Err(TestError::NeedsUser)],
             absorbed: 0,
+            held: None,
         };
         supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
 
@@ -665,6 +735,7 @@ mod tests {
             },
             script: vec![Err(TestError::Fatal)],
             absorbed: 0,
+            held: None,
         };
         supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
 

@@ -422,12 +422,31 @@ pub const JPEG_8X8_RED_BLUE: &[u8] = &[
 /// The hot path hands [`RectPayload::Jpeg`] to the webview for GPU decode;
 /// this software path exists for the native framebuffer (thumbnails).
 pub fn decode_jpeg_to_rgba(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    decode_jpeg_to_rgba_within(data, u16::MAX, u16::MAX)
+}
+
+/// [`decode_jpeg_to_rgba`] for a JPEG that has to fit a `max_width` by
+/// `max_height` rect, refused before any pixel buffer is allocated if its own
+/// header says it is bigger.
+///
+/// The JPEG's header is the server's word, and the decoder sizes its output
+/// from it. Checking the size against the rect only after decoding meant a
+/// tile claiming to be enormous was allocated first, and a failed allocation
+/// aborts the process.
+pub fn decode_jpeg_to_rgba_within(
+    data: &[u8],
+    max_width: u16,
+    max_height: u16,
+) -> Result<(u32, u32, Vec<u8>)> {
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
     use zune_jpeg::JpegDecoder;
 
-    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGBA)
+        .set_max_width(usize::from(max_width))
+        .set_max_height(usize::from(max_height));
     // zune-jpeg 0.5 reads through `ZByteReaderTrait` rather than a bare slice,
     // so the input is wrapped in a cursor. Still zero-copy over `data`.
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
@@ -520,6 +539,10 @@ mod tests {
         assert!(decode_jpeg_to_rgba(b"not a jpeg at all").is_err());
         // Valid header, truncated body: the common hostile shape.
         assert!(decode_jpeg_to_rgba(&JPEG_8X8_RED_BLUE[..20]).is_err());
+        // A JPEG bigger than the rect it is meant to fill is refused.
+        assert!(decode_jpeg_to_rgba_within(JPEG_8X8_RED_BLUE, 8, 8).is_ok());
+        assert!(decode_jpeg_to_rgba_within(JPEG_8X8_RED_BLUE, 4, 8).is_err());
+        assert!(decode_jpeg_to_rgba_within(JPEG_8X8_RED_BLUE, 8, 4).is_err());
     }
     use super::*;
 

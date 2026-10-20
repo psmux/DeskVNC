@@ -193,6 +193,7 @@ fn main() {
             "set_quality",
             "request_resize",
             "refresh_session",
+            "frames_delivered",
             "set_view_only",
             "set_always_refresh",
             "set_prefer_scancodes",

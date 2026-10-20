@@ -262,6 +262,10 @@ pub struct SessionEntry {
     /// What the shell has heard about this session that it used to forward and
     /// forget (see [`SessionFacts`]).
     pub facts: Arc<Mutex<SessionFacts>>,
+    /// Bytes of framebuffer messages the webview has said it received. The
+    /// forwarding task compares it with what it sent, so a webview that has
+    /// stopped taking frames stops being sent them (see `forward_events`).
+    pub delivered: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The two facts about a live session the shell now keeps rather than only
@@ -994,6 +998,7 @@ mod tests {
                     thumbnails: Default::default(),
                     last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
                     facts: Default::default(),
+                    delivered: Default::default(),
                 },
             );
             self

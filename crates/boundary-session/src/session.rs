@@ -298,6 +298,26 @@ pub(crate) enum Lookup {
 async fn endpoint(options: &HostOptions) -> Result<Endpoint> {
     endpoint_with(options, None, Lookup::Off).await
 }
+/// How long a connection may hear nothing before it counts as lost.
+///
+/// QUIC's own default is thirty seconds, so a helper whose link died looked
+/// at a frozen screen for half a minute before anything noticed and connected
+/// again. Keep-alives go every five seconds whatever the screen does, so
+/// fifteen is three missed in a row: long enough for a cellular blip, short
+/// enough that a dead link is found and replaced quickly. Each side uses the
+/// lower of the two values, so this holds against older copies too.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn transport_config() -> Result<iroh::endpoint::QuicTransportConfig> {
+    Ok(iroh::endpoint::QuicTransportConfig::builder()
+        .max_idle_timeout(Some(
+            IDLE_TIMEOUT
+                .try_into()
+                .map_err(|e| anyhow!("Invalid idle timeout: {e}"))?,
+        ))
+        .build())
+}
+
 pub(crate) async fn endpoint_with(
     options: &HostOptions,
     key: Option<iroh::SecretKey>,
@@ -325,7 +345,8 @@ pub(crate) async fn endpoint_with(
     builder = builder
         .relay_mode(relay)
         .alpns(vec![wire::ALPN.to_vec()])
-        .dns_resolver(crate::dns::resolver());
+        .dns_resolver(crate::dns::resolver())
+        .transport_config(transport_config()?);
     if let Some(key) = key {
         builder = builder.secret_key(key);
     }
@@ -488,6 +509,7 @@ where
             worker, connection, send, recv, peer, allowed, tools, jpeg, desktop,
         )
         .await;
+        close_served(connection, &result);
         drop(guard);
         endpoint.close().await;
         return result;
@@ -611,12 +633,15 @@ where
         })
         .await
     };
+    // Reading from or writing to the helper failing is the link failing,
+    // seen from this end. The helper connects again for that, unlike for a
+    // capture that failed here, which another attempt would only repeat.
     let result = tokio::select! {
         _ = monitor_route(connection, &worker.connectivity) => Ok(()),
-        result = read_input => result,
-        result = write_control => result,
+        result = read_input => result.map_err(link_lost),
+        result = write_control => result.map_err(link_lost),
         result = serve_tools => result,
-        result = send_screens(connection, screen_rx) => result,
+        result = send_screens(connection, screen_rx) => result.map_err(link_lost),
         result = capture => result.context("Capture worker failed")?,
         _ = connection.closed() => Ok(()),
     };
@@ -701,7 +726,13 @@ async fn send_screens(
 ) -> Result<()> {
     let mut last: Option<Arc<Vec<u8>>> = None;
     loop {
-        screens.changed().await?;
+        if screens.changed().await.is_err() {
+            // The capture worker has stopped, and its own result says why.
+            // Ending here first reported "channel closed" to the helper
+            // instead, and the real reason, such as a missing permission,
+            // was lost.
+            return std::future::pending().await;
+        }
         let bytes = screens
             .borrow_and_update()
             .clone()
@@ -797,6 +828,91 @@ async fn run_viewer(
 pub(crate) async fn watch_session(
     worker: &mut Worker,
     connection: &Connection,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+) -> Result<()> {
+    let result = watch(worker, connection, send, recv).await;
+    if result.is_err() && connection.close_reason().is_none() {
+        // A stream can end a moment before the close that explains it, so
+        // give the reason a moment to land rather than report the symptom.
+        let _ = tokio::time::timeout(Duration::from_secs(1), connection.closed()).await;
+    }
+    // The computer's own reason beats whatever read or write noticed first,
+    // which is only ever "connection lost" or a stream ending early.
+    if let Some(error) = ended_by_host(connection) {
+        return Err(error);
+    }
+    match result {
+        Err(error) if !closed_by_peer(connection) && error.downcast_ref::<Refusal>().is_none() => {
+            Err(link_lost(error))
+        }
+        other => other,
+    }
+}
+
+/// The computer, or the person at it, said no. Read before the computer has
+/// closed the connection, so the close cannot be what tells this apart from a
+/// link that failed.
+#[derive(Debug)]
+struct Refusal(String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// An error that means the link failed, not that anyone ended the session:
+/// a timeout, a reset, a computer that stopped answering. Only this is worth
+/// connecting again for. A computer that turned the helper away, or whose
+/// person ended the session, closed it on purpose, and connecting again would
+/// overrule them.
+///
+/// It wraps the error rather than adding a line to it, so what the person
+/// reads is unchanged.
+#[derive(Debug)]
+pub struct LinkLost(anyhow::Error);
+
+impl std::fmt::Display for LinkLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for LinkLost {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl LinkLost {
+    /// Is this error a link failure, worth connecting again for?
+    pub fn is(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<LinkLost>().is_some()
+    }
+}
+
+pub(crate) fn link_lost(error: anyhow::Error) -> anyhow::Error {
+    if LinkLost::is(&error) {
+        error
+    } else {
+        anyhow::Error::new(LinkLost(error))
+    }
+}
+
+/// Did the other side close this connection on purpose?
+fn closed_by_peer(connection: &Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(_))
+    )
+}
+
+async fn watch(
+    worker: &mut Worker,
+    connection: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
 ) -> Result<()> {
@@ -810,8 +926,8 @@ pub(crate) async fn watch_session(
         .context("Approval timed out")??;
     let (control, tools) = match grant {
         Message::Granted { control, tools } => (control, tools),
-        Message::Refused(reason) => bail!("{reason}"),
-        _ => bail!("The person declined this connection"),
+        Message::Refused(reason) => return Err(Refusal(reason).into()),
+        _ => return Err(Refusal("The person declined this connection".into()).into()),
     };
     // Only a host that answered about tools serves them. One that did not is
     // older than they are, and a request sent to it would wait on a stream
@@ -894,6 +1010,74 @@ pub(crate) async fn watch_session(
         result = write_input => result,
         result = read_frames => result,
         _ = connection.closed() => Ok(()),
+    }
+}
+
+/// Close code for a session the shared computer ended because something went
+/// wrong there. The close reason carries what, for the helper to read.
+const ENDED_WITH_REASON: u8 = 2;
+
+/// Close code for a session the shared computer ended because the link to
+/// the helper failed, such as the helper going silent. The helper treats it
+/// as a lost link and connects again.
+const LINK_FAILED: u8 = 3;
+
+/// Close a session that was served, telling the helper why when it failed.
+///
+/// Before this, every session closed with the same "Session ended", so a
+/// helper whose session was cut short by, say, a Mac without Screen Recording
+/// permission saw only "connection lost" while the reason sat on a screen
+/// nobody was looking at.
+pub(crate) fn close_served(connection: &Connection, result: &Result<()>) {
+    match result {
+        Ok(()) => connection.close(0u8.into(), b"Session ended"),
+        Err(error) => connection.close(
+            if LinkLost::is(error) {
+                LINK_FAILED
+            } else {
+                ENDED_WITH_REASON
+            }
+            .into(),
+            close_reason(&format!("{error:#}")).as_bytes(),
+        ),
+    }
+}
+
+/// A reason short enough to fit in the close frame, which has to travel in
+/// one packet, cut at a character boundary.
+fn close_reason(reason: &str) -> &str {
+    const MAX: usize = 400;
+    if reason.len() <= MAX {
+        return reason;
+    }
+    let mut end = MAX;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    &reason[..end]
+}
+
+/// Why the shared computer ended this session, when it said, as the error
+/// the helper should report.
+fn ended_by_host(connection: &Connection) -> Option<anyhow::Error> {
+    match connection.close_reason()? {
+        iroh::endpoint::ConnectionError::ApplicationClosed(close)
+            if close.error_code == ENDED_WITH_REASON.into() =>
+        {
+            Some(anyhow!(
+                "That computer ended the session: {}",
+                String::from_utf8_lossy(&close.reason)
+            ))
+        }
+        iroh::endpoint::ConnectionError::ApplicationClosed(close)
+            if close.error_code == LINK_FAILED.into() =>
+        {
+            Some(link_lost(anyhow!(
+                "The connection to that computer was lost: {}",
+                String::from_utf8_lossy(&close.reason)
+            )))
+        }
+        _ => None,
     }
 }
 

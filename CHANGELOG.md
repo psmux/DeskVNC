@@ -10,6 +10,38 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.31.1] (2026-10-21)
+
+### Fixed
+
+* DeskVNC could grow for days and then crash when a window stopped taking
+  the screen updates sent to it, which happened most on links that kept
+  dropping. Frames for such a window are now held back, and the whole screen
+  is fetched once when it starts taking them again.
+* A computer that reports an impossible screen size, or sends a picture far
+  bigger than the space it is meant to fill, is refused instead of making
+  DeskVNC try to allocate gigabytes and crash.
+* On a link that keeps dropping and coming back, DeskVNC now connects again
+  at once after each drop. It used to wait out its longest delay, fifteen
+  seconds or more, because no connection had lasted a full minute.
+* A computer opened by its ID (Boundary) connects again by itself when the
+  link drops, the way VNC, RDP and SSH sessions already did. It never does
+  when the person at that computer ended the session or turned you away.
+* A dead link to a Boundary computer is noticed in 15 seconds instead of 30.
+* When the computer you are helping ends the session because of a problem at
+  its end, such as a Mac without Screen Recording permission for DeskVNC,
+  you now see that reason instead of "connection lost".
+* An RDP connection stuck writing to a dead network link is stopped when its
+  session ends, instead of lingering.
+
+### Added
+
+* DeskVNC writes a log, and a record of any crash, to
+  `~/Library/Logs/com.deskvncviewer.desktop` on macOS,
+  `%LOCALAPPDATA%\com.deskvncviewer.desktop\logs` on Windows and
+  `~/.local/share/com.deskvncviewer.desktop/logs` on Linux, so a problem can
+  be looked into after it happens.
+
 ## [0.31.0] (2026-10-18)
 
 ### Added

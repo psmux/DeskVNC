@@ -14,7 +14,7 @@ pub mod tight;
 pub mod zlib;
 pub mod zrle;
 
-pub use tight::decode_jpeg_to_rgba;
+pub use tight::{decode_jpeg_to_rgba, decode_jpeg_to_rgba_within};
 
 use flate2::{Decompress, FlushDecompress, Status};
 use tokio::io::{AsyncRead, AsyncReadExt};

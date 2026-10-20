@@ -4,12 +4,13 @@ use anyhow::{anyhow, bail, ensure, Result};
 use boundary_session::{
     tools::{Client, Reply, Request},
     unattended::{self, SecretKey},
-    Button, Event, HostOptions, Input, Invitation, Key, Session,
+    Button, Event, HostOptions, Input, Invitation, Key, LinkLost, Session,
 };
 use parking_lot::Mutex;
 use remote_core::{
-    ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch, ProtocolDriver, ProtocolKind,
-    Rect, RectPayload, SessionEvent, SessionHandle, SessionState,
+    reconnect::STABLE_UPTIME, ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch,
+    ProtocolDriver, ProtocolKind, ReconnectPolicy, Rect, RectPayload, SessionEvent, SessionHandle,
+    SessionState,
 };
 use std::{
     collections::HashMap,
@@ -117,58 +118,101 @@ impl ProtocolDriver for BoundaryDriver {
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         tokio::spawn(async move {
-            let work = async {
-                let mut session = match pending {
-                    Some(pending) => {
-                        ensure!(
-                            pending.created.elapsed() < Duration::from_secs(60),
-                            "Support connection expired before the window opened"
-                        );
-                        // With tools declared, so the person is asked about
-                        // commands and files and an agent can use them once
-                        // they say yes.
-                        boundary_session::viewer_with_tools(
-                            pending.ticket,
-                            pending.helper,
-                            HostOptions::default(),
-                            identity,
-                        )
-                    }
-                    None if unattended => {
-                        let key = identity.ok_or_else(|| anyhow!("This copy of DeskVNC has no helper identity, so it cannot be recognised by a computer it was paired with"))?;
-                        let name = options
-                            .credentials
-                            .username
-                            .clone()
-                            .filter(|n| !n.trim().is_empty())
-                            .unwrap_or_else(helper_name);
-                        unattended::connect_with_tools(
-                            options.host.clone(),
-                            name,
-                            options.credentials.password.clone().filter(|p| !p.is_empty()),
-                            key,
-                            HostOptions::default(),
-                        )
-                    }
-                    None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
+            let mut pending = pending;
+            let policy = ReconnectPolicy::default();
+            let mut attempts: u32 = 0;
+            // Only a computer this session has already reached is connected
+            // to again by itself. One that never answered gets the error and
+            // the Retry button, as before.
+            let mut reached = false;
+            let result = loop {
+                let mut connected_at: Option<Instant> = None;
+                let work = async {
+                    let mut session = match pending.take() {
+                        Some(pending) => {
+                            ensure!(
+                                pending.created.elapsed() < Duration::from_secs(60),
+                                "Support connection expired before the window opened"
+                            );
+                            // With tools declared, so the person is asked about
+                            // commands and files and an agent can use them once
+                            // they say yes.
+                            boundary_session::viewer_with_tools(
+                                pending.ticket,
+                                pending.helper,
+                                HostOptions::default(),
+                                identity.clone(),
+                            )
+                        }
+                        None if unattended => {
+                            let key = identity.clone().ok_or_else(|| anyhow!("This copy of DeskVNC has no helper identity, so it cannot be recognised by a computer it was paired with"))?;
+                            let name = options
+                                .credentials
+                                .username
+                                .clone()
+                                .filter(|n| !n.trim().is_empty())
+                                .unwrap_or_else(helper_name);
+                            unattended::connect_with_tools(
+                                options.host.clone(),
+                                name,
+                                options.credentials.password.clone().filter(|p| !p.is_empty()),
+                                key,
+                                HostOptions::default(),
+                            )
+                        }
+                        None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
+                    };
+                    drive(
+                        &mut session,
+                        &mut receiver,
+                        &events,
+                        options.view_only,
+                        paired.clone(),
+                        Tools {
+                            registry: registry.clone(),
+                            session_id: session_id.clone(),
+                        },
+                        &mut connected_at,
+                    )
+                    .await
                 };
-                drive(
-                    &mut session,
-                    &mut receiver,
-                    &events,
-                    options.view_only,
-                    paired,
-                    Tools {
-                        registry,
-                        session_id,
-                    },
-                )
-                .await
-            };
-            let result = tokio::select! {
-                biased;
-                _ = token.cancelled() => Ok(()),
-                result = work => result,
+                let result = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break Ok(()),
+                    result = work => result,
+                };
+                registry.lock().remove(&session_id);
+                if let Some(at) = connected_at {
+                    reached = true;
+                    // A connection that held proves the link works, so the
+                    // next drop is retried at once rather than after the
+                    // longest wait (see `STABLE_UPTIME`).
+                    if at.elapsed() >= STABLE_UPTIME {
+                        attempts = 0;
+                    }
+                }
+                let error = match result {
+                    Err(error) if unattended && reached && LinkLost::is(&error) => error,
+                    other => break other,
+                };
+                attempts += 1;
+                if policy.max_attempts.is_some_and(|max| attempts > max) {
+                    break Err(error);
+                }
+                let delay = policy.delay_for(attempts, jitter());
+                let reconnecting = SessionEvent::StateChanged(SessionState::Reconnecting {
+                    attempt: attempts,
+                    next_retry_ms: delay.as_millis() as u64,
+                    reason: error.to_string(),
+                });
+                if events.send(reconnecting).await.is_err() {
+                    return;
+                }
+                match wait(delay, &mut receiver, &token).await {
+                    Wait::Elapsed => {}
+                    Wait::Now => attempts = 0,
+                    Wait::Stop => break Ok(()),
+                }
             };
             let reason = match result {
                 Ok(()) => "Support session ended".into(),
@@ -188,6 +232,45 @@ impl ProtocolDriver for BoundaryDriver {
             commands,
             cancel,
         })
+    }
+}
+/// A small random fraction for the backoff's jitter. Spreading retries out
+/// only needs them to differ, so the clock's low bits do.
+fn jitter() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    f64::from(nanos % 1000) / 1000.0
+}
+
+enum Wait {
+    Elapsed,
+    Now,
+    Stop,
+}
+
+/// Wait before connecting again, still answering the window: Disconnect stops
+/// for good and Reconnect now goes at once. Anything else meant for a live
+/// session has nothing to act on yet and is dropped.
+async fn wait(
+    delay: Duration,
+    commands: &mut mpsc::Receiver<ClientCommand>,
+    cancel: &CancellationToken,
+) -> Wait {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Wait::Stop,
+            _ = &mut sleep => return Wait::Elapsed,
+            command = commands.recv() => match command {
+                None | Some(ClientCommand::Disconnect) | Some(ClientCommand::CancelCredentials) => return Wait::Stop,
+                Some(ClientCommand::ReconnectNow) => return Wait::Now,
+                Some(_) => {}
+            },
+        }
     }
 }
 async fn emit(events: &mpsc::Sender<SessionEvent>, event: SessionEvent) -> Result<()> {
@@ -345,6 +428,7 @@ async fn drive(
     mut view_only: bool,
     paired: Option<OnPaired>,
     published: Tools,
+    connected_at: &mut Option<Instant>,
 ) -> Result<()> {
     let mut size = (0u16, 0u16);
     let mut input = InputState::default();
@@ -364,6 +448,7 @@ async fn drive(
                     emit(events, SessionEvent::DesktopName("Boundary support".into())).await?;
                     permission(events, allowed, tools_allowed).await?;
                     emit(events, SessionEvent::StateChanged(SessionState::Connected)).await?;
+                    connected_at.get_or_insert_with(Instant::now);
                 }
                 Some(Event::Control(control)) => {
                     allowed = control;
@@ -383,7 +468,19 @@ async fn drive(
                 _ => {},
             },
             frame = session.frames.changed() => {
-                frame?;
+                if frame.is_err() {
+                    // The session has ended and dropped its screens. Why it
+                    // ended is in its last event, and that decides whether
+                    // to connect again: returning this error instead said
+                    // only "channel closed", and a link that had died was
+                    // given up on.
+                    while let Some(event) = session.events.recv().await {
+                        if let Event::Finished(result) = event {
+                            return result;
+                        }
+                    }
+                    return Ok(());
+                }
                 let frame = session.frames.borrow_and_update().clone();
                 if let Some(frame) = frame {
                     let current = (frame.width as u16, frame.height as u16);

@@ -427,7 +427,7 @@ where
                 _ = ended.cancelled() => Ok(()),
                 result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
             };
-            connection.close(0u8.into(), b"Session ended");
+            session::close_served(&connection, &result);
             // Whoever holds the session hears that it ended, so a banner
             // saying the helper is in does not outlive the helper.
             let reason = result.as_ref().err().map(|error| format!("{error:#}"));
@@ -697,8 +697,10 @@ async fn run_connect(
     let _close = Closing(endpoint.clone());
     let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(target, wire::ALPN))
         .await
-        .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")?
-        .context("Cannot reach the computer")?;
+        .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
+        .map_err(session::link_lost)?
+        .context("Cannot reach the computer")
+        .map_err(session::link_lost)?;
     let (mut send, recv) = connection.open_bi().await?;
     wire::write(
         &mut send,
