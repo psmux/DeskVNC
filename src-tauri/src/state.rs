@@ -998,6 +998,7 @@ mod tests {
                     thumbnails: Default::default(),
                     last_pointer_mask: Arc::new(std::sync::atomic::AtomicI32::new(-1)),
                     facts: Default::default(),
+                    delivered: Default::default(),
                 },
             );
             self

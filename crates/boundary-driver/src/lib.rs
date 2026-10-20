@@ -468,7 +468,19 @@ async fn drive(
                 _ => {},
             },
             frame = session.frames.changed() => {
-                frame?;
+                if frame.is_err() {
+                    // The session has ended and dropped its screens. Why it
+                    // ended is in its last event, and that decides whether
+                    // to connect again: returning this error instead said
+                    // only "channel closed", and a link that had died was
+                    // given up on.
+                    while let Some(event) = session.events.recv().await {
+                        if let Event::Finished(result) = event {
+                            return result;
+                        }
+                    }
+                    return Ok(());
+                }
                 let frame = session.frames.borrow_and_update().clone();
                 if let Some(frame) = frame {
                     let current = (frame.width as u16, frame.height as u16);

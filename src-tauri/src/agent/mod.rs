@@ -1482,6 +1482,7 @@ mod tests {
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(AtomicI32::new(-1)),
             facts: Default::default(),
+            delivered: Default::default(),
         };
         entry.facts.lock().state = SessionState::Connected;
         (entry, receiver)
@@ -1902,6 +1903,7 @@ mod tests {
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(AtomicI32::new(-1)),
             facts: Default::default(),
+            delivered: Default::default(),
         };
         entry.facts.lock().state = SessionState::Connected;
         let mut sessions = HashMap::new();
@@ -2031,6 +2033,7 @@ mod tests {
             thumbnails: Default::default(),
             last_pointer_mask: Arc::new(AtomicI32::new(-1)),
             facts: Default::default(),
+            delivered: Default::default(),
         };
         entry.facts.lock().state = SessionState::Connected;
         entry.facts.lock().size = Some((1920, 1080));
