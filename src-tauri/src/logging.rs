@@ -51,7 +51,7 @@ pub fn init() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,deskvncviewer_lib=debug"));
     let dir = log_dir();
-    let file = dir.as_deref().and_then(open_log);
+    let file = dir.as_deref().and_then(LogFile::open);
     match file {
         Some(file) => tracing_subscriber::fmt()
             .with_env_filter(filter)
@@ -64,22 +64,67 @@ pub fn init() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "DeskVNCViewer started");
 }
 
-/// The log file, appended to by every run.
+/// The log file, appended to by every run and moved aside by size.
 ///
 /// Rotated by size, never per run: a second launch that is about to hand over
 /// to the copy already running must not move that copy's log out from under
-/// it, which macOS and Linux would allow.
-fn open_log(dir: &Path) -> Option<File> {
-    fs::create_dir_all(dir).ok()?;
-    let current = dir.join("deskvnc.log");
-    if fs::metadata(&current).is_ok_and(|m| m.len() > LOG_LIMIT) {
-        let _ = fs::rename(&current, dir.join("deskvnc.previous.log"));
+/// it, which macOS and Linux would allow. And by size while running too,
+/// since one session left open for days on a link that keeps dropping logs
+/// every drop.
+struct LogFile {
+    dir: PathBuf,
+    file: File,
+    size: u64,
+}
+
+impl LogFile {
+    fn open(dir: &Path) -> Option<Self> {
+        fs::create_dir_all(dir).ok()?;
+        let current = dir.join("deskvnc.log");
+        if fs::metadata(&current).is_ok_and(|m| m.len() > LOG_LIMIT) {
+            let _ = fs::rename(&current, dir.join("deskvnc.previous.log"));
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&current)
+            .ok()?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Some(Self {
+            dir: dir.to_path_buf(),
+            file,
+            size,
+        })
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(current)
-        .ok()
+
+    fn rotate(&mut self) {
+        let current = self.dir.join("deskvnc.log");
+        // Renamed before the new one is opened, so a rename that fails (a
+        // virus scanner holding the file, say) leaves logging where it was.
+        if fs::rename(&current, self.dir.join("deskvnc.previous.log")).is_ok() {
+            if let Ok(file) = OpenOptions::new().create(true).append(true).open(&current) {
+                self.file = file;
+            }
+        }
+        // Counted from zero either way, so a rotation that failed is tried
+        // again a whole log later rather than on every line.
+        self.size = 0;
+    }
+}
+
+impl Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.size > LOG_LIMIT {
+            self.rotate();
+        }
+        let written = self.file.write(buf)?;
+        self.size += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 /// Write every panic to `crash.log` before the usual handling runs.

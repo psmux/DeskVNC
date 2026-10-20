@@ -292,10 +292,21 @@ async fn run_connected(
     // finished or about to be. Joining it inside the budget is what makes the
     // close ordered rather than racing the drop.
     drop(run_loop);
-    match tokio::time::timeout(TEARDOWN_BUDGET, writer).await {
+    let mut writer = writer;
+    match tokio::time::timeout(TEARDOWN_BUDGET, &mut writer).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::debug!(error = %e, "the writer task did not finish cleanly"),
-        Err(_) => tracing::debug!("the writer task did not finish inside the teardown budget"),
+        Err(_) => {
+            // Stuck writing to a socket that will never drain, usually a link
+            // that died without a reset. Dropping the handle would have left
+            // it running, holding the stream, its TLS state and whatever was
+            // queued, for as long as the operating system kept that socket.
+            // On a link that keeps dropping, that was one more per attempt.
+            writer.abort();
+            tracing::debug!(
+                "the writer task did not finish inside the teardown budget, so it was stopped"
+            );
+        }
     }
     outcome
 }
