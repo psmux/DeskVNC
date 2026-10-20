@@ -2163,6 +2163,7 @@ dependencies = [
  "boundary-session",
  "bytes",
  "crossbeam-channel",
+ "directories",
  "limb-core",
  "local-pipe",
  "os_info",
