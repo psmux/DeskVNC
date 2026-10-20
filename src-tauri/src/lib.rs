@@ -261,6 +261,7 @@ pub fn run() {
             commands::session::set_quality,
             commands::session::request_resize,
             commands::session::refresh_session,
+            commands::session::frames_delivered,
             commands::session::set_view_only,
             commands::session::set_prefer_scancodes,
             commands::session::set_always_refresh,

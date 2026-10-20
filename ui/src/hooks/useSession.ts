@@ -396,11 +396,26 @@ export function useSession(
     // Binary channel: framebuffer updates (msg_type 1) AND cursor shapes
     // (msg_type 2). Anything else is ignored for forward compatibility.
     void initTrace();
+    // Tell the shell how many frame bytes arrived, so it can stop sending to
+    // a window that has stopped taking them (see `forward_events`). Batched,
+    // because a call per frame would cost more than the frames.
+    let undelivered = 0;
+    let deliveryTimer: ReturnType<typeof setTimeout> | null = null;
+    const reportDelivered = () => {
+      deliveryTimer = null;
+      const bytes = undelivered;
+      undelivered = 0;
+      if (bytes > 0 && sessionIdRef.current) {
+        void safeInvoke("frames_delivered", { sessionId: sessionIdRef.current, bytes }, null);
+      }
+    };
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (data: ArrayBuffer) => {
       if (cancelled) return;
       switch (messageType(data)) {
         case MSG_FRAMEBUFFER: {
+          undelivered += data.byteLength;
+          deliveryTimer ??= setTimeout(reportDelivered, 100);
           traceMark("frame_rx", data.byteLength);
           const msg = parseFrameMessage(data);
           // A parse failure silently discards a WHOLE update: every region it
@@ -674,6 +689,7 @@ export function useSession(
 
     return () => {
       cancelled = true;
+      if (deliveryTimer) clearTimeout(deliveryTimer);
       unlisten?.();
       void safeInvoke("disconnect_session", { sessionId: sessionIdRef.current }, null);
     };
