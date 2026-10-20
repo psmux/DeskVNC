@@ -26,6 +26,8 @@ interface AboutInfo {
   osVersion: string;
   arch: string;
   webviewVersion: string;
+  /** The log file this build writes, when it opened one. */
+  logPath: string | null;
 }
 
 /**

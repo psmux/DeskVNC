@@ -29,6 +29,9 @@ import {
 } from "../render/frameProtocol";
 import { encodeTerminalInput, encodeTerminalResize } from "../render/input";
 import type { PromptAnswer } from "../lib/credentials";
+import type { MacDisplayAction, MacDisplayInfo } from "../components/MacDisplayControls";
+import type { AppleMediaState } from "../lib/appleMedia";
+import { appleGeometryArguments, readAppleGeometry, writeAppleGeometry } from "../lib/appleGeometry";
 import { initTrace, traceMark } from "../render/trace";
 import type {
   CredentialRequest,
@@ -70,7 +73,14 @@ type SshOnlyEvent =
   | { type: "ssh-notice"; message: string };
 
 /** `SessionEventPayload`, widened by `SshOnlyEvent` for the listener below. */
-type SessionOrSshEventPayload = SessionEventPayload | (SshOnlyEvent & { sessionId: string });
+type SessionOrSshEventPayload = SessionEventPayload | (SshOnlyEvent & { sessionId: string })
+  | { type: "apple-display"; sessionId: string; info: MacDisplayInfo | null; error: string | null }
+  | { type: "apple-notice"; sessionId: string; message: string }
+  | {
+      type: "apple-media";
+      sessionId: string;
+      state: AppleMediaState;
+    };
 
 export interface CertPromptState {
   fingerprint: string;
@@ -118,6 +128,12 @@ export interface SshHostKeyPromptState {
 }
 
 export interface SessionApi {
+  macDisplayInfo: MacDisplayInfo | null;
+  macDisplayNotice: string | null;
+  macDisplayBusy: boolean;
+  /** What the Mac's media path is doing, as its answer says. */
+  appleMedia: AppleMediaState | null;
+  requestMacDisplay: (action: MacDisplayAction) => void;
   boundaryControl: boolean | null;
   state: SessionState;
   desktopName: string;
@@ -333,6 +349,10 @@ export function useSession(
   const [boundaryControl, setBoundaryControl] = useState<boolean | null>(params.protocol === "boundary" ? false : null);
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
+  const [macDisplayInfo, setMacDisplayInfo] = useState<MacDisplayInfo | null>(null);
+  const [macDisplayNotice, setMacDisplayNotice] = useState<string | null>(null);
+  const [macDisplayBusy, setMacDisplayBusy] = useState(false);
+  const [appleMedia, setAppleMedia] = useState<SessionApi["appleMedia"]>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
   const [sshHostKeyPrompt, setSshHostKeyPrompt] = useState<SshHostKeyPromptState | null>(null);
   const [credentialRequest, setCredentialRequest] = useState<CredentialRequest | null>(null);
@@ -500,6 +520,30 @@ export function useSession(
           // show the rejection reason without flickering.
           setCredentialRequest(ev.request);
           break;
+        case "apple-display":
+          setMacDisplayBusy(false);
+          if (ev.info) setMacDisplayInfo(ev.info);
+          setMacDisplayNotice(ev.error ?? "Physical display mode confirmed by macOS.");
+          break;
+        case "apple-media": {
+          setAppleMedia(ev.state);
+          // The layout the Mac confirmed is the geometry of its desktop.
+          // Remembering it is what lets the next connection say which
+          // display the session is about.
+          const { layoutWidth, layoutHeight, desktopWidth, desktopHeight } = ev.state;
+          if (layoutWidth > 0 && layoutHeight > 0 && desktopWidth > 0 && desktopHeight > 0) {
+            writeAppleGeometry(params.profileId, {
+              pixelWidth: layoutWidth,
+              pixelHeight: layoutHeight,
+              pointWidth: desktopWidth,
+              pointHeight: desktopHeight,
+            });
+          }
+          break;
+        }
+        case "apple-notice":
+          setMacDisplayNotice(ev.message);
+          break;
         case "stats":
           setStats(ev.stats);
           break;
@@ -593,6 +637,10 @@ export function useSession(
           viewportHeight: Math.round(
             (availableRef.current?.height || window.innerHeight) * window.devicePixelRatio,
           ),
+          // The Mac's own geometry, as the last session confirmed it, so
+          // the Mac attaches to the running console session instead of
+          // starting a new one that shows a login screen.
+          appleGeometry: appleGeometryArguments(readAppleGeometry(params.profileId)),
           onEvent: channel,
         });
         repromptRef.current = false;
@@ -683,6 +731,14 @@ export function useSession(
   // ---------------------------------------------------------------- actions
 
   const sid = (): string => sessionIdRef.current;
+  const requestMacDisplay = useCallback((action: MacDisplayAction): void => {
+    setMacDisplayBusy(true);
+    setMacDisplayNotice("Waiting for macOS; the SSH host key must already be trusted.");
+    void invoke("apple_display", { sessionId: sessionIdRef.current, action }).catch(error => {
+      setMacDisplayBusy(false);
+      setMacDisplayNotice(String(error));
+    });
+  }, []);
 
   /**
    * Input goes out in ORDER, but not one packet per IPC call.
@@ -1005,6 +1061,7 @@ export function useSession(
   }, []);
 
   return {
+    macDisplayInfo, macDisplayNotice, macDisplayBusy, requestMacDisplay, appleMedia,
     state, desktopName, boundaryControl, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,

@@ -205,6 +205,14 @@ pub struct AudioPacket {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProtocolEvent {
+    AppleDisplay(Result<crate::mac_display::MacDisplayInfo, String>),
+    AppleNotice(String),
+    /// What the Mac's media path settled on.
+    ///
+    /// The offer asks for a picture of a given size; the answer says what
+    /// the encoder will really do. Reporting it is the difference between
+    /// "you asked for 2216 pixels" and "the Mac is sending 2216 pixels".
+    AppleMedia(crate::apple_media::MediaState),
     /// Host permission for a support session: whether the helper may use
     /// the mouse and keyboard, and whether the person at that computer lets
     /// the helper's tools (DeskVNC's agents) run commands and copy files.

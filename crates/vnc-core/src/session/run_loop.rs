@@ -2017,6 +2017,9 @@ impl RunLoop {
             // treated as a protocol error: it is a routing bug, not a wire
             // problem, and killing the user's session over it would be the
             // worse outcome.
+            ClientCommand::MacDisplay(_) => {
+                tracing::warn!("Mac display command routed to a VNC session; ignoring");
+            }
             ClientCommand::TerminalInput(_) | ClientCommand::ResizeTerminal { .. } => {
                 tracing::debug!("terminal command received by a framebuffer session; ignoring");
             }

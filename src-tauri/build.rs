@@ -191,6 +191,7 @@ fn main() {
             "trace_enabled",
             "trace_marks",
             "set_quality",
+            "apple_display",
             "request_resize",
             "refresh_session",
             "set_view_only",

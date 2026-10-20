@@ -186,6 +186,9 @@ pub fn command_name(command: &limb_core::ClientCommand) -> String {
         C::ClipboardRequest { .. } => "clipboard request".to_string(),
         C::SetQuality(_) => "set quality".to_string(),
         C::RequestResize { width, height } => format!("request resize({width}x{height})"),
+        // Never carries dimensions or any credential; it is a display-mode
+        // request routed over the session's own transport.
+        C::MacDisplay(_) => "mac display request".to_string(),
         C::Refresh => "refresh".to_string(),
         C::SetAlwaysRefresh(_) => "set always refresh".to_string(),
         C::SetViewOnly(_) => "set view only".to_string(),

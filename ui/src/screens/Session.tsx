@@ -21,6 +21,8 @@ import {
 import { useLivePreview } from "../hooks/useLivePreview";
 import { SessionStatusDetails, SessionToolbar } from "../components/SessionToolbar";
 import { CertPrompt } from "../components/CertPrompt";
+import { MacDisplayControls } from "../components/MacDisplayControls";
+import { ConnectionDiagnostics } from "../components/ConnectionDiagnostics";
 import { CredentialPrompt } from "../components/CredentialPrompt";
 import { SshHostKeyPrompt } from "../components/SshHostKeyPrompt";
 import { DropOverlay, FilePanel } from "../components/FilePanel";
@@ -353,6 +355,10 @@ function SessionView({
   const [alwaysRefresh, setAlwaysRefresh] = useState(stored.alwaysRefresh);
   const [recallSignal, setRecallSignal] = useState(0);
   const [connectionInfoOpen, setConnectionInfoOpen] = useState(false);
+  // When this connection started, so the diagnostics can describe it rather
+  // than describe how long its dialog has been open. Cleared on a disconnect
+  // so a reconnect starts its own clock.
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
   /**
    * Bumped by every native-menu action, so the menu's state is re-asserted
    * after the render even when the action changed nothing. See the note where
@@ -378,6 +384,9 @@ function SessionView({
   const sendComboRef = useRef<((c: "ctrl-alt-del") => void) | null>(null);
   const disconnectRef = useRef<(() => void) | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ w: number; h: number } | null>(null);
+  /** The geometry the session started with: the "Native" restore target. */
+  const nativeSizeRef = useRef<{ w: number; h: number } | null>(null);
+  if (remoteSize && !nativeSizeRef.current) nativeSizeRef.current = remoteSize;
   /**
    * The monitor the user asked for, remembered against this computer, or null
    * for the whole desktop.
@@ -454,6 +463,11 @@ function SessionView({
       return;
     }
     rendererRef.current = renderer;
+    renderer.setContinuousH264(params.protocol === "apple");
+    // The decoder drops its queue when it cannot keep up, and a picture that
+    // references what was dropped cannot be decoded. The session asks the
+    // Mac for an independent one; the shell rate limits the request.
+    renderer.onDecoderBehind = () => sessionRef.current.refreshScreen();
     // The pointer preference was read before this renderer existed; see the
     // effect that owns `showRemoteCursorRef`.
     renderer.setCursorVisible(showRemoteCursorRef.current);
@@ -710,6 +724,41 @@ function SessionView({
       unlisten?.();
     };
   }, [params.sessionId]);
+
+  // The video path's own numbers, so a picture that is going wrong can be
+  // read rather than guessed at: how much is queued at the decoder, and how
+  // long a picture takes to come back.
+  const [mediaStats, setMediaStats] = useState<{
+    queued: number;
+    submitted: number;
+    decoded: number;
+    latencyMs: number;
+    pictureWidth: number;
+    pictureHeight: number;
+    frameWidth: number;
+    frameHeight: number;
+    acceleration: "hardware" | "software";
+    behind: boolean;
+  } | null>(null);
+  // The renderer's own queue, sampled on the same clock as the decoder, so
+  // the diagnostics panel can say whether a slow picture is the decoder or
+  // the shell that is behind.
+  const [queueStats, setQueueStats] = useState<{
+    depth: number;
+    bytes: number;
+    dropped: number;
+  } | null>(null);
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    const sample = (): void => {
+      setMediaStats(renderer.getMediaStats());
+      const q = renderer.getQueueStats();
+      setQueueStats({ depth: q.depth, bytes: q.bytes, dropped: q.droppedUpdates });
+    };
+    const timer = window.setInterval(sample, 1000);
+    return () => window.clearInterval(timer);
+  }, [rendererRef.current]);
 
   // A capture helper can exit without a window event. Refresh the indicator
   // while it claims to be active so a dead helper cannot leave it stuck there.
@@ -1061,6 +1110,21 @@ function SessionView({
    * time any one of them changed, and `useSession` hands back a new object on
    * every stats tick.
    */
+  useEffect(() => {
+    if (session.state.state === "connected") {
+      // A connection can come back with exactly the geometry of the one
+      // before it, so a size change is not an attempt boundary. This call
+      // is: transient decoder state must not outlive the attempt that made
+      // it.
+      rendererRef.current?.beginConnectionAttempt();
+      setConnectedAt((previous) => previous ?? Date.now());
+    } else if (session.state.state === "disconnected") {
+      // A reconnect builds a new connection underneath, so the clock starts
+      // again when it reaches `connected`.
+      setConnectedAt(null);
+    }
+  }, [session.state.state]);
+
   const restoreRef = useRef({ quality, viewOnly: requestedViewOnly, alwaysRefresh, passthrough });
   restoreRef.current = { quality, viewOnly: requestedViewOnly, alwaysRefresh, passthrough };
   useEffect(() => {
@@ -1953,6 +2017,14 @@ function SessionView({
         aria-label={`Remote desktop: ${session.desktopName}`}
       />
 
+      {params.protocol === "apple" && owns && <MacDisplayControls
+        info={session.macDisplayInfo} notice={session.macDisplayNotice}
+        busy={session.macDisplayBusy} size={remoteSize} native={nativeSizeRef.current}
+        media={session.appleMedia} stats={mediaStats}
+        onStreamResize={(w, h) => session.requestResize(w, h)}
+        onPanelMode={session.requestMacDisplay}
+      />}
+
       {/* Preferences ▸ Session can take the bar away; the View and Session
           menus carry the same options either way.
 
@@ -2012,6 +2084,7 @@ function SessionView({
           alwaysRefresh={alwaysRefresh}
           onAlwaysRefresh={toggleAlwaysRefresh}
           onDisconnect={disconnectWithThumbnail}
+          onDiagnostics={() => setConnectionInfoOpen(true)}
         />
       )}
 
@@ -2020,9 +2093,40 @@ function SessionView({
           live, and it is the first thing anyone asks for when a session feels
           slow. */}
       {connectionInfoOpen ? (
-        <Dialog title="Connection info" onClose={() => setConnectionInfoOpen(false)} width={360}>
-          <div className="p-4">
+        <Dialog title="Connection info" onClose={() => setConnectionInfoOpen(false)} width={420}>
+          <div className="space-y-3 p-4">
             <SessionStatusDetails stats={session.stats} desktopName={session.desktopName} />
+            <ConnectionDiagnostics
+              protocol={params.protocol}
+              desktopName={session.desktopName}
+              host={`${params.address}:${params.port}`}
+              media={session.appleMedia}
+              stats={session.stats}
+              decoder={mediaStats}
+              queue={queueStats}
+              requested={
+                session.appleMedia && session.appleMedia.requestedWidth > 0
+                  ? { w: session.appleMedia.requestedWidth, h: session.appleMedia.requestedHeight }
+                  : null
+              }
+              layout={
+                session.appleMedia && session.appleMedia.layoutWidth > 0
+                  ? { w: session.appleMedia.layoutWidth, h: session.appleMedia.layoutHeight }
+                  : remoteSize
+              }
+              desktopPoints={
+                session.appleMedia && session.appleMedia.desktopWidth > 0
+                  ? { w: session.appleMedia.desktopWidth, h: session.appleMedia.desktopHeight }
+                  : null
+              }
+              decoded={
+                mediaStats && mediaStats.pictureWidth > 0
+                  ? { w: mediaStats.pictureWidth, h: mediaStats.pictureHeight }
+                  : null
+              }
+              live={st.state === "connected"}
+              connectedAt={connectedAt}
+            />
             <div className="mt-4 flex justify-end">
               <button
                 type="button"

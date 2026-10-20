@@ -175,6 +175,8 @@ export interface SessionToolbarProps {
   onViewOnly: (v: boolean) => void;
   onScreenshot: () => void;
   onRefresh: () => void;
+  /** Open the live connection diagnostics, from the status popup. */
+  onDiagnostics: () => void;
   onDisconnect: () => void;
   /**
    * Divide this pane, putting the new one to the right or underneath.
@@ -746,7 +748,10 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           <IconCamera size={15} />
         </ToolButton>
 
-        <ToolButton label="Request full screen refresh" onClick={props.onRefresh}>
+        <ToolButton
+          label={props.protocol === "apple" ? "Request a clean picture" : "Request full screen refresh"}
+          onClick={props.onRefresh}
+        >
           <IconRefresh size={15} />
         </ToolButton>
 
@@ -791,6 +796,18 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
           {openMenu === "status" ? (
             <div className="w-60 px-2.5 py-1.5">
               <SessionStatusDetails stats={props.stats} desktopName={props.desktopName} />
+              {/* The numbers above are a snapshot. The dialog behind this is
+                  the live view, and it is where a report can be copied from. */}
+              <button
+                type="button"
+                className="mt-2 w-full rounded border border-subtle px-2 py-1 text-xs text-primary hover:bg-canvas"
+                onClick={() => {
+                  setOpenMenu(null);
+                  props.onDiagnostics();
+                }}
+              >
+                Live diagnostics…
+              </button>
             </div>
           ) : null}
           {openMenu === "scale" ? (
@@ -832,8 +849,9 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
               </MenuRow>
               {props.protocol === "rdp" ? (
                 <p className="px-2.5 pb-1 text-2xs text-tertiary">
-                  View, then Resolution, also sets the remote desktop to a fixed
-                  size.
+                  {props.protocol === "rdp"
+                    ? "View, then Resolution, also sets the remote desktop to a fixed size."
+                    : "For a Mac, quality presets ask the Mac to render and stream at a smaller size; the layout it confirms is what you get."}
                 </p>
               ) : null}
               <MenuRow
@@ -943,21 +961,56 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                 346 ms because Auto dropped the quality on its own.
               */}
               <p className="px-2.5 py-1 text-2xs text-tertiary">Picture vs response</p>
-              <MenuRow selected={props.quality === "auto"} onClick={() => props.onQuality("auto")}>
-                Auto — sharp when idle, faster under load
-              </MenuRow>
-              <MenuRow selected={props.quality === "high"} onClick={() => props.onQuality("high")}>
-                Sharp — best picture, never adapts
-              </MenuRow>
-              <MenuRow selected={props.quality === "medium"} onClick={() => props.onQuality("medium")}>
-                Balanced
-              </MenuRow>
-              <MenuRow selected={props.quality === "low"} onClick={() => props.onQuality("low")}>
-                Responsive — softer picture, lowest lag
-              </MenuRow>
-              <MenuRow selected={props.quality === "bw"} onClick={() => props.onQuality("bw")}>
-                Black &amp; White
-              </MenuRow>
+              {/*
+                The Apple path has no adaptation of its own: the preset
+                asks the Mac for a picture of a given size and the Mac
+                renders it. So the labels say what the preset does rather
+                than promising a cleverness that is not there. "Auto" is the
+                Mac's own resolution. B&W requests the same size as Low;
+                its grayscale conversion is local to the renderer.
+              */}
+              {props.protocol === "apple" ? (
+                <>
+                  <MenuRow selected={props.quality === "auto"} onClick={() => props.onQuality("auto")}>
+                    Full resolution: same stream as Sharp
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "high"} onClick={() => props.onQuality("high")}>
+                    Sharp: the Mac&apos;s own resolution
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "medium"} onClick={() => props.onQuality("medium")}>
+                    Balanced: request fewer pixels
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "low"} onClick={() => props.onQuality("low")}>
+                    Responsive: request the smallest stream
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "bw"} onClick={() => props.onQuality("bw")}>
+                    Smallest + grayscale: same stream as Responsive
+                  </MenuRow>
+                  <p className="px-2.5 pb-1 text-2xs text-tertiary">
+                    These are requested sizes, not confirmed modes. The Mac panel
+                    shows requested versus decoded pixels. Presets request the original
+                    desktop-point size; the physical panel is a separate control.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <MenuRow selected={props.quality === "auto"} onClick={() => props.onQuality("auto")}>
+                    Auto: sharp when idle, faster under load
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "high"} onClick={() => props.onQuality("high")}>
+                    Sharp: best picture, never adapts
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "medium"} onClick={() => props.onQuality("medium")}>
+                    Balanced
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "low"} onClick={() => props.onQuality("low")}>
+                    Responsive: softer picture, lowest lag
+                  </MenuRow>
+                  <MenuRow selected={props.quality === "bw"} onClick={() => props.onQuality("bw")}>
+                    Black &amp; White
+                  </MenuRow>
+                </>
+              )}
               {/*
                 Hidden for RDP rather than disabled, and that asymmetry with
                 "Remote resize" above is deliberate. This switch exists for a
@@ -977,12 +1030,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
                     selected={props.alwaysRefresh}
                     onClick={() => props.onAlwaysRefresh(!props.alwaysRefresh)}
                   >
-                    Always request fresh frames
+                    {props.protocol === "apple" ? "Keep requesting clean pictures" : "Always request fresh frames"}
                   </MenuRow>
                   <p className="px-2.5 pb-1 text-2xs text-tertiary">
-                    Re-fetches the whole screen every second instead of trusting the
-                    server to report what changed. Fixes a picture that stays stale
-                    or smeared; uses more bandwidth.
+                    {props.protocol === "apple"
+                      ? "Asks the Mac for an independent H.264 picture every few seconds. Can clear persistent artifacts, but uses more bandwidth."
+                      : "Re-fetches the whole screen every second instead of trusting the server to report what changed. Fixes a picture that stays stale or smeared; uses more bandwidth."}
                   </p>
                 </div>
               )}

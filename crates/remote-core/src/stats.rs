@@ -24,6 +24,10 @@ use serde::{Deserialize, Serialize};
 ///   reading the intervening update, so it reads HIGH compared with a fence.
 ///   Read it as "how long until the next picture", which is what the user
 ///   actually feels, rather than as a pure network round trip.
+/// * `Rtcp` is the time from this client's RTCP feedback to the Mac's next
+///   RTCP packet. The Mac reports on a schedule of its own, so every sample
+///   is the round trip plus the gap until its next report; the smallest
+///   sample in a window is the closest to the truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RttSource {
@@ -33,6 +37,7 @@ pub enum RttSource {
     Fence,
     IdleProbe,
     UpdatePipeline,
+    Rtcp,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

@@ -39,6 +39,7 @@
     "allow-trace-marks",
     "allow-set-quality",
     "allow-request-resize",
+    "allow-apple-display",
     "allow-refresh-session",
     "allow-set-view-only",
     "allow-set-always-refresh",

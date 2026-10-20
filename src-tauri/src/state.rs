@@ -220,6 +220,7 @@ impl ProtocolRegistry {
                 boundary,
                 Arc::new(VncDriver::new()),
                 Arc::new(rdp_core::RdpDriver::new()),
+                Arc::new(apple_core::AppleDriver::with_host_keys(host_keys.clone())),
                 // SSH is the only driver that needs anything from the shell
                 // to construct: its trust decision reads the shared pin
                 // store, so it cannot make its own.
@@ -937,7 +938,8 @@ mod protocol_registry_tests {
                 ProtocolKind::Vnc,
                 ProtocolKind::Rdp,
                 ProtocolKind::Ssh,
-                ProtocolKind::Boundary
+                ProtocolKind::Boundary,
+                ProtocolKind::Apple,
             ]
         );
     }

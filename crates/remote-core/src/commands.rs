@@ -28,6 +28,8 @@ pub enum ClientCommand {
         formats: u32,
     },
     SetQuality(QualityPreset),
+    /// Physical macOS panel mode, never a curtained virtual display.
+    MacDisplay(crate::mac_display::MacDisplayAction),
     RequestResize {
         width: u16,
         height: u16,

@@ -31,6 +31,9 @@ pub struct AboutInfo {
     pub os_version: String,
     pub arch: String,
     pub webview_version: String,
+    /// The log file this build writes, when it could open one. A report
+    /// that names it can be followed up without asking where it went.
+    pub log_path: Option<String>,
 }
 
 #[tauri::command]
@@ -51,6 +54,7 @@ pub fn about_info() -> AboutInfo {
         os_version: info.version().to_string(),
         arch: std::env::consts::ARCH.into(),
         webview_version: tauri::webview_version().unwrap_or_else(|_| "unknown".into()),
+        log_path: crate::logging::log_path().map(|path| path.display().to_string()),
     }
 }
 

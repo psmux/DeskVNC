@@ -32,6 +32,7 @@
 // exception.
 #![forbid(unsafe_code)]
 
+pub mod apple_media;
 pub mod commands;
 pub mod credentials;
 pub mod driver;
@@ -39,6 +40,7 @@ pub mod events;
 pub mod geometry;
 pub mod intent;
 pub mod keys;
+pub mod mac_display;
 pub mod options;
 pub mod pins;
 pub mod reconnect;
@@ -52,6 +54,7 @@ pub use events::*;
 pub use geometry::*;
 pub use intent::*;
 pub use keys::*;
+pub use mac_display::*;
 pub use options::*;
 pub use pins::*;
 pub use state::*;

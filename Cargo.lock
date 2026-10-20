@@ -355,6 +355,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apple-core"
+version = "0.31.0"
+dependencies = [
+ "aes 0.8.4",
+ "bytes",
+ "cbc 0.1.2",
+ "cipher 0.4.4",
+ "ecb",
+ "flate2",
+ "hmac 0.12.1",
+ "num-bigint-dig",
+ "pbkdf2 0.12.2",
+ "rand 0.10.2",
+ "remote-core",
+ "rsa",
+ "russh",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "socket2 0.5.10",
+ "ssh-transport",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "vnc-transport",
+ "zeroize",
+]
+
+[[package]]
 name = "apple-native-keyring-store"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2155,6 +2185,7 @@ version = "0.31.0"
 dependencies = [
  "agent-perception",
  "anyhow",
+ "apple-core",
  "base64 0.22.1",
  "boundary-codes",
  "boundary-driver",

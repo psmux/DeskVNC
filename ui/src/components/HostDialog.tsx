@@ -204,6 +204,9 @@ interface ProtocolCaps {
 }
 
 const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
+  // A picture, and a Mac account name. Security is always RSA-SRP, so there
+  // is no RFB security-type picker.
+  apple: { graphical: true, rfbSecurity: false, username: true, domain: false },
   boundary: { graphical: true, rfbSecurity: false, username: false, domain: false },
   vnc: { graphical: true, rfbSecurity: true, username: false, domain: false },
   rdp: { graphical: true, rfbSecurity: false, username: true, domain: true },
@@ -543,6 +546,26 @@ export function HostDialog({
                 />
               </Field>
             </div>
+          ) : d.protocol === "apple" ? (
+            <Field
+              label="User name"
+              hint={
+                d.hasPassword && !d.vncUser
+                  ? "Leave blank to keep the saved one."
+                  : "The account on that Mac"
+              }
+            >
+              <input
+                className="field"
+                value={d.vncUser}
+                placeholder={d.hasPassword ? "(unchanged)" : "Your account on that Mac"}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => set({ vncUser: e.target.value })}
+              />
+            </Field>
           ) : (
             <Field
               label="User name"

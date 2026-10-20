@@ -2226,6 +2226,8 @@ fn encode_command(command: &ClientCommand) -> Option<serde_json::Value> {
         // because the day somebody encodes a command from somewhere else this
         // is the arm that stops an intent going out with nothing listening.
         ClientCommand::Agent(_) => return None,
+        // A Mac display intent is served by the driver, not the agent plane.
+        ClientCommand::MacDisplay(_) => return None,
     })
 }
 

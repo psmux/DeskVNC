@@ -356,6 +356,9 @@ impl StoredCredentials {
             // a password: reporting otherwise would make the UI prompt for
             // something the vault already holds.
             ProtocolKind::Ssh => self.ssh_password.is_some() || self.ssh_passphrase.is_some(),
+            // Apple Screen Sharing signs in with the same account password
+            // the VNC column already stores.
+            ProtocolKind::Apple => self.vnc_password.is_some(),
             // `ProtocolKind` is `#[non_exhaustive]`. A protocol this build
             // does not know has no field here, so it has no credential here.
             _ => false,

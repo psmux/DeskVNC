@@ -132,6 +132,9 @@ function readScheme(raw: string): { protocol: ProtocolKind | null; rest: string;
   if (/^(?:vncs?|rfb):\/\//i.test(raw)) {
     return { protocol: "vnc", rest: raw.replace(/^(?:vncs?|rfb):\/\//i, ""), url: true };
   }
+  if (/^apple:\/\//i.test(raw)) {
+    return { protocol: "apple", rest: raw.replace(/^apple:\/\//i, ""), url: true };
+  }
   return { protocol: null, rest: raw, url: false };
 }
 

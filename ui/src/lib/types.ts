@@ -14,17 +14,23 @@
  * `remote_core::ProtocolKind`, serde `rename_all = "kebab-case"`, which for
  * these three spells them exactly as they are written here.
  */
-export type ProtocolKind = "vnc" | "rdp" | "ssh" | "boundary";
+export type ProtocolKind = "vnc" | "rdp" | "ssh" | "boundary" | "apple";
 
 /**
  * The port a bare hostname gets, per protocol. The one place these numbers
  * live on this side; `address.ts` re-exports them under its own names for
  * the callers that already import those.
  */
-export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, ssh: 22, boundary: 0 };
+export const DEFAULT_PORT: Record<ProtocolKind, number> = {
+  vnc: 5900,
+  rdp: 3389,
+  ssh: 22,
+  boundary: 0,
+  apple: 5900,
+};
 
 /** The three protocols, in the order the UI offers them. */
-export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh"];
+export const PROTOCOLS: readonly ProtocolKind[] = ["vnc", "rdp", "ssh", "apple"];
 /**
  * What a saved host can be. Boundary is here and not in `PROTOCOLS`: a
  * Boundary computer is reached by its machine ID, which is nothing anyone
@@ -39,7 +45,7 @@ export const HOST_PROTOCOLS: readonly ProtocolKind[] = [...PROTOCOLS, "boundary"
  * than being quietly relabelled.
  */
 export function isProtocolKind(value: unknown): value is ProtocolKind {
-  return value === "vnc" || value === "rdp" || value === "ssh" || value === "boundary";
+  return value === "vnc" || value === "rdp" || value === "ssh" || value === "boundary" || value === "apple";
 }
 
 /**
@@ -48,7 +54,7 @@ export function isProtocolKind(value: unknown): value is ProtocolKind {
  * mislabelled as one of ours.
  */
 export function protocolLabel(p: string): string {
-  return p === "vnc" ? "VNC" : p === "rdp" ? "RDP" : p === "ssh" ? "SSH" : p.toUpperCase();
+  return p === "vnc" ? "VNC" : p === "rdp" ? "RDP" : p === "ssh" ? "SSH" : p === "apple" ? "Apple" : p.toUpperCase();
 }
 
 /**
@@ -63,6 +69,7 @@ export function protocolLabel(p: string): string {
  * happened to fall through to.
  */
 const PROTOCOL_NAMES: Record<ProtocolKind, string> = {
+  apple: "Apple Screen Sharing",
   boundary: "Boundary support",
   rdp: "RDP (Windows Remote Desktop)",
   ssh: "SSH terminal",
@@ -513,10 +520,12 @@ export type SessionState =
  * request timed into a quiet screen, and `update-pipeline` is the passive
  * readout taken on the normal update path (always available, including on
  * the Fence-less TightVNC family, but it includes this client's own decode
- * of the previous update, so it reads high). `none` means nothing has been
+ * of the previous update, so it reads high). `rtcp` is the Apple path: the
+ * time from this client's RTCP feedback to the Mac's next RTCP packet, where
+ * the Mac reports on a schedule of its own. `none` means nothing has been
  * measured yet and `rtt_ms` is 0.
  */
-export type RttSource = "none" | "fence" | "idle-probe" | "update-pipeline";
+export type RttSource = "none" | "fence" | "idle-probe" | "update-pipeline" | "rtcp";
 
 /** `vnc_core::SessionStats`, no rename_all, so these stay snake_case. */
 export interface SessionStats {

@@ -8,6 +8,7 @@
 mod agent;
 mod commands;
 mod framing;
+mod logging;
 mod menu;
 mod state;
 mod thumbnail;
@@ -22,10 +23,6 @@ use tauri::{Manager, RunEvent};
 use state::AppState;
 
 pub fn run() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,deskvncviewer_lib=debug"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-
     let mut builder = tauri::Builder::default();
 
     #[cfg(desktop)]
@@ -64,6 +61,10 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
+            // Logging goes next to the rest of this app's data. It is set up
+            // here rather than before the builder because the directory is
+            // the shell's, not a guess at one.
+            logging::init(app.handle());
             // Storage lives under the per-user Tauri app data dir.
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -260,6 +261,7 @@ pub fn run() {
             commands::session::trace_enabled,
             commands::session::trace_marks,
             commands::session::set_quality,
+            commands::session::apple_display,
             commands::session::request_resize,
             commands::session::refresh_session,
             commands::session::set_view_only,

@@ -87,6 +87,12 @@ impl ConnectOptions {
         Self::with_protocol(id, 0, ProtocolOptions::Boundary)
     }
 
+    /// Apple Screen Sharing. `width`/`height` are the fixed canvas asked for
+    /// in the encrypted display configuration.
+    pub fn apple(host: impl Into<String>, port: u16) -> Self {
+        Self::with_protocol(host, port, ProtocolOptions::Apple(AppleOptions::default()))
+    }
+
     fn with_protocol(host: impl Into<String>, port: u16, protocol: ProtocolOptions) -> Self {
         Self {
             host: host.into(),
@@ -167,6 +173,18 @@ impl ConnectOptions {
             other => panic!("expected RDP options, got {:?}", other.kind()),
         }
     }
+
+    /// The Apple half, mutably, on the same terms as [`Self::vnc_mut`].
+    ///
+    /// # Panics
+    ///
+    /// When the options are not Apple.
+    pub fn apple_mut(&mut self) -> &mut AppleOptions {
+        match &mut self.protocol {
+            ProtocolOptions::Apple(a) => a,
+            other => panic!("expected Apple options, got {:?}", other.kind()),
+        }
+    }
 }
 
 /// The protocol specific half of [`ConnectOptions`].
@@ -181,6 +199,8 @@ pub enum ProtocolOptions {
     Rdp(RdpOptions),
     Ssh(SshOptions),
     Boundary,
+    /// Apple Screen Sharing high-performance H.264.
+    Apple(AppleOptions),
 }
 
 impl ProtocolOptions {
@@ -190,6 +210,66 @@ impl ProtocolOptions {
             ProtocolOptions::Rdp(_) => ProtocolKind::Rdp,
             ProtocolOptions::Ssh(_) => ProtocolKind::Ssh,
             ProtocolOptions::Boundary => ProtocolKind::Boundary,
+            ProtocolOptions::Apple(_) => ProtocolKind::Apple,
+        }
+    }
+}
+
+/// Fixed canvas for an Apple Screen Sharing session.
+///
+/// One display, no dynamic resize. The Mac is asked for this geometry; the
+/// stream that comes back is H.264 for the webview's hardware decoder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppleOptions {
+    pub width: u16,
+    pub height: u16,
+    /// The local port the video arrives on. The Mac sends its video to this
+    /// port, so it cannot be an arbitrary one: 5901 is what the protocol
+    /// uses, and a session needs it to itself.
+    pub video_port: u16,
+    /// The local port the control and feedback traffic arrives on.
+    pub control_port: u16,
+    /// The Mac's own geometry, as the last session confirmed it.
+    ///
+    /// The native client sends the console display's geometry in its first
+    /// record, so the Mac attaches to the running console session instead
+    /// of starting a new one, which shows a login screen. A client that
+    /// does not know the geometry cannot send that record, so it is
+    /// remembered from the last session and sent again.
+    pub desktop: Option<AppleGeometry>,
+}
+
+/// The geometry of the Mac's desktop, in both coordinate spaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleGeometry {
+    /// The picture size, in pixels.
+    pub pixel_width: u16,
+    pub pixel_height: u16,
+    /// The desktop size, in points.
+    pub point_width: u16,
+    pub point_height: u16,
+}
+
+impl Default for AppleOptions {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            video_port: 5901,
+            control_port: 5900,
+            desktop: None,
+        }
+    }
+}
+
+impl AppleOptions {
+    pub fn new(width: u16, height: u16) -> Self {
+        Self {
+            width,
+            height,
+            ..Self::default()
         }
     }
 }

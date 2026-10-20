@@ -1,0 +1,41 @@
+[package]
+name = "apple-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Apple Screen Sharing high-performance client for DeskVNC"
+
+# UI-agnostic. Speaks the Apple extension of RFB and emits H.264 access
+# units through remote-core. Must not depend on Tauri.
+
+[dependencies]
+remote-core = { path = "../remote-core" }
+vnc-transport = { path = "../vnc-transport" }
+ssh-transport = { path = "../ssh-transport" }
+russh = { workspace = true }
+serde_json = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+
+aes = { workspace = true }
+cbc = { workspace = true }
+ecb = { workspace = true }
+cipher = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+pbkdf2 = { workspace = true }
+num-bigint-dig = { workspace = true }
+rsa = { workspace = true }
+rand = { workspace = true }
+socket2 = { workspace = true }
+zeroize = { workspace = true }
+flate2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

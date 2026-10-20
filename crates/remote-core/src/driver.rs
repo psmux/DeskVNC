@@ -36,6 +36,9 @@ pub enum ProtocolKind {
     Ssh,
     /// Attended support through a Boundary invitation.
     Boundary,
+    /// Apple Screen Sharing high-performance mode: H.264 over the
+    /// encrypted control channel and UDP, decoded in the webview.
+    Apple,
 }
 
 impl ProtocolKind {
@@ -47,6 +50,7 @@ impl ProtocolKind {
         ProtocolKind::Rdp,
         ProtocolKind::Ssh,
         ProtocolKind::Boundary,
+        ProtocolKind::Apple,
     ];
 
     /// The stored spelling. Matches the serde representation and the
@@ -57,6 +61,7 @@ impl ProtocolKind {
             ProtocolKind::Rdp => "rdp",
             ProtocolKind::Ssh => "ssh",
             ProtocolKind::Boundary => "boundary",
+            ProtocolKind::Apple => "apple",
         }
     }
 
@@ -69,6 +74,7 @@ impl ProtocolKind {
             "rdp" => Some(ProtocolKind::Rdp),
             "ssh" => Some(ProtocolKind::Ssh),
             "boundary" => Some(ProtocolKind::Boundary),
+            "apple" => Some(ProtocolKind::Apple),
             _ => None,
         }
     }
@@ -83,6 +89,8 @@ impl ProtocolKind {
             // RFC 4253 §4: the SSH transport runs on TCP 22.
             ProtocolKind::Ssh => 22,
             ProtocolKind::Boundary => 0,
+            // Same well-known port as RFB. Apple Screen Sharing listens here.
+            ProtocolKind::Apple => 5900,
         }
     }
 
@@ -280,6 +288,7 @@ mod protocol_kind_tests {
         assert_eq!(ProtocolKind::Vnc.default_port(), 5900);
         assert_eq!(ProtocolKind::Rdp.default_port(), 3389);
         assert_eq!(ProtocolKind::Ssh.default_port(), 22);
+        assert_eq!(ProtocolKind::Apple.default_port(), 5900);
         assert_eq!(ProtocolKind::default(), ProtocolKind::Vnc);
     }
 }

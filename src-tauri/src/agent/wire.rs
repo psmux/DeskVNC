@@ -487,6 +487,7 @@ pub fn command_name(command: &ClientCommand) -> &'static str {
         ClientCommand::ClipboardText(_) => "clipboard-text",
         ClientCommand::ClipboardRequest { .. } => "clipboard-request",
         ClientCommand::SetQuality(_) => "set-quality",
+        ClientCommand::MacDisplay(_) => "mac-display",
         ClientCommand::RequestResize { .. } => "request-resize",
         ClientCommand::Refresh => "refresh",
         ClientCommand::SetAlwaysRefresh(_) => "set-always-refresh",

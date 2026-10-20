@@ -1,0 +1,13 @@
+[package]
+name = "apple-protocol-review-probes"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone review harness; deliberately not part of the production workspace.
+[workspace]
+
+[dependencies]
+aes = "0.8"
+cipher = "0.4"
+hmac = "0.12"
+sha1 = "0.10"

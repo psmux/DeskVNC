@@ -848,17 +848,16 @@ export function Library({
             // state by re-reading it from the backend instead.
             if (payload.sshPassword) await refresh();
           }
-        } else if (draft.protocol === "vnc") {
+        } else if (draft.protocol === "apple" || draft.protocol === "vnc") {
+          const takesUser =
+            draft.protocol === "apple" ||
+            vncTakesUsername(draft.securityPref, draft.osHint);
           // A Mac's Screen Sharing, and the other RFB methods that sign in
           // with an account, keep the user name beside the password in the
           // `vencrypt*` pair, which is where `connect_session` looks first
           // and where a post-connect save puts them too. The password only
           // case is still `savePassword`, unchanged.
-          const payload = vncCredentialPayload(
-            draft.vncUser,
-            draft.password,
-            vncTakesUsername(draft.securityPref, draft.osHint),
-          );
+          const payload = vncCredentialPayload(draft.vncUser, draft.password, takesUser);
           if (payload?.vncPassword && !payload.vencryptUser && !payload.vencryptPass) {
             await savePassword(id, payload.vncPassword);
           } else if (payload) {
