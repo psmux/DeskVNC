@@ -299,6 +299,15 @@ fn apple_offer_selection_is_pinned() {
         SecurityType::AppleDh
     );
 
+    // A Mac with "VNC viewers may control screen with password" off sends no
+    // type 2 at all (seen from a macOS 15 iMac: `[30, 33, 36, 35]`). Apple DH
+    // must still be chosen, with no fallback needed.
+    let apple_only = [30u8, 33, 36, 35];
+    assert_eq!(
+        select_security_type(&apple_only, &opts).unwrap(),
+        SecurityType::AppleDh
+    );
+
     // Without type 30 the same offer falls back to VncAuth, which now connects
     // without any opt-in (only `None` is gated), the client has to work
     // against servers that offer nothing better.
