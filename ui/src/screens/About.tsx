@@ -3,6 +3,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Dialog } from "../components/primitives";
 import { openExternal, safeInvoke, writeClipboard } from "../lib/tauri";
 import { classNames, fullscreenHint, modKeyLabel } from "../lib/util";
+import { useT } from "../lib/i18n";
+import { Trans } from "../components/Trans";
 
 export const AUTHOR_NAME = "psmux";
 export const CONTACT_URL = "https://github.com/psmux";
@@ -113,6 +115,7 @@ const TROUBLESHOOTING: Array<[string, string]> = [
 ];
 
 export function About({ onClose }: { onClose: () => void }): ReactNode {
+  const tr = useT();
   const [tab, setTab] = useState<Tab>("About");
   const info = useAboutInfo();
   const [copied, setCopied] = useState(false);
@@ -126,8 +129,8 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
   };
 
   return (
-    <Dialog title="About DeskVNCViewer" onClose={onClose} width={560}>
-      <nav className="mb-4 flex gap-1 border-b border-subtle" aria-label="About sections">
+    <Dialog title={tr("About DeskVNCViewer")} onClose={onClose} width={560}>
+      <nav className="mb-4 flex gap-1 border-b border-subtle" aria-label={tr("About sections")}>
         {(["About", "Help"] as const).map((t) => (
           <button
             key={t}
@@ -141,7 +144,7 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
             )}
             onClick={() => setTab(t)}
           >
-            {t}
+            {tr(t === "About" ? "About" : "Help")}
           </button>
         ))}
       </nav>
@@ -151,48 +154,53 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
           <div>
             <h3 className="text-lg font-semibold text-primary">DeskVNCViewer</h3>
             <p className="text-sm text-secondary">
-              A fast, native remote desktop viewer for macOS, Windows and Linux.
+              {tr("A fast, native remote desktop viewer for macOS, Windows and Linux.")}
             </p>
             <p className="mt-1 text-sm text-tertiary">
-              Version {info ? `${info.appVersion} (${info.gitDescribe})` : "-"}
+              {tr("Version {version}", {
+                version: info ? `${info.appVersion} (${info.gitDescribe})` : "-",
+              })}
             </p>
           </div>
 
           {info ? (
-            <section aria-label="Build details">
+            <section aria-label={tr("Build details")}>
               <div className="mb-1.5 flex items-baseline justify-between">
-                <h4 className="text-sm font-semibold text-primary">Build</h4>
+                <h4 className="text-sm font-semibold text-primary">{tr("Build")}</h4>
                 <button
                   type="button"
                   className="text-xs text-accent hover:underline"
                   onClick={copyReport}
                 >
-                  {copied ? "Copied" : "Copy report for a bug ticket"}
+                  {copied ? tr("Copied") : tr("Copy report for a bug ticket")}
                 </button>
               </div>
               <dl className="space-y-1 rounded-md bg-inset/50 p-3 font-mono text-xs">
                 <div className="flex gap-2">
-                  <dt className="w-20 shrink-0 text-tertiary">Commit</dt>
+                  <dt className="w-20 shrink-0 text-tertiary">{tr("Commit")}</dt>
                   <dd className="text-primary break-all" title={info.gitHash}>
                     {info.gitHashShort}
-                    {info.gitDirty === "dirty" ? " (locally modified)" : ""}
+                    {info.gitDirty === "dirty" ? ` ${tr("(locally modified)")}` : ""}
                   </dd>
                 </div>
                 <div className="flex gap-2">
-                  <dt className="w-20 shrink-0 text-tertiary">Branch</dt>
+                  <dt className="w-20 shrink-0 text-tertiary">{tr("Branch")}</dt>
                   <dd className="text-primary">
-                    {info.gitBranch}, committed {info.gitCommitDate}
+                    {tr("{branch}, committed {date}", {
+                      branch: info.gitBranch,
+                      date: info.gitCommitDate,
+                    })}
                   </dd>
                 </div>
                 <div className="flex gap-2">
-                  <dt className="w-20 shrink-0 text-tertiary">Toolchain</dt>
+                  <dt className="w-20 shrink-0 text-tertiary">{tr("Toolchain")}</dt>
                   <dd className="text-primary">
                     {info.buildProfile} profile, tauri {info.tauriVersion},{" "}
                     {info.rustcVersion}
                   </dd>
                 </div>
                 <div className="flex gap-2">
-                  <dt className="w-20 shrink-0 text-tertiary">System</dt>
+                  <dt className="w-20 shrink-0 text-tertiary">{tr("System")}</dt>
                   <dd className="text-primary">
                     {info.os} {info.osVersion} ({info.arch}), webview{" "}
                     {info.webviewVersion}
@@ -200,19 +208,20 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
                 </div>
               </dl>
               <p className="mt-1 text-xs text-tertiary">
-                Please include the copied block when reporting an issue; it
-                identifies this exact build.
+                {tr(
+                  "Please include the copied block when reporting an issue; it identifies this exact build.",
+                )}
               </p>
             </section>
           ) : null}
 
           <dl className="space-y-2 rounded-md bg-inset/50 p-3 text-sm">
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-tertiary">Developed by</dt>
+              <dt className="w-24 shrink-0 text-tertiary">{tr("Developed by")}</dt>
               <dd className="text-primary">{AUTHOR_NAME}</dd>
             </div>
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-tertiary">Contact</dt>
+              <dt className="w-24 shrink-0 text-tertiary">{tr("Contact")}</dt>
               <dd>
                 <button
                   type="button"
@@ -224,15 +233,16 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
               </dd>
             </div>
             <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-tertiary">License</dt>
+              <dt className="w-24 shrink-0 text-tertiary">{tr("License")}</dt>
               <dd className="text-primary">MIT OR Apache-2.0</dd>
             </div>
           </dl>
 
           <p className="text-xs text-tertiary">
-            © {new Date().getFullYear()} {AUTHOR_NAME}. Supports RFB 3.3-3.8 with
-            VNC, VeNCrypt, RA2, Apple Diffie-Hellman and MS-Logon authentication,
-            and RDP with network level authentication.
+            {tr(
+              "© {year} {author}. Supports RFB 3.3-3.8 with VNC, VeNCrypt, RA2, Apple Diffie-Hellman and MS-Logon authentication, and RDP with network level authentication.",
+              { year: new Date().getFullYear(), author: AUTHOR_NAME },
+            )}
           </p>
 
           <div className="flex gap-2 pt-1">
@@ -241,52 +251,60 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
               className="btn-secondary"
               onClick={() => void openExternal(PROJECT_URL)}
             >
-              Project page
+              {tr("Project page")}
             </button>
             <button
               type="button"
               className="btn-secondary"
               onClick={() => void openExternal(CONTACT_URL)}
             >
-              Contact developer
+              {tr("Contact developer")}
             </button>
             <button type="button" className="btn-primary ml-auto" data-autofocus onClick={onClose}>
-              Close
+              {tr("Close")}
             </button>
           </div>
         </div>
       ) : (
         <div className="space-y-4">
           <section>
-            <h3 className="mb-1.5 text-sm font-semibold text-primary">Getting started</h3>
+            <h3 className="mb-1.5 text-sm font-semibold text-primary">{tr("Getting started")}</h3>
             <ol className="list-inside list-decimal space-y-1 text-sm text-secondary">
-              <li>Use <strong className="text-primary">Scan network</strong> to find computers nearby, or <strong className="text-primary">New Host</strong> to add one by address.</li>
-              <li>Double-click a tile to connect. Passwords are saved to the OS keychain on first use.</li>
-              <li>Group and tag hosts from the sidebar to keep a large library navigable.</li>
+              <li>
+                <Trans
+                  text="Use {scan} to find computers nearby, or {newHost} to add one by address."
+                  nodes={{
+                    scan: <strong className="text-primary">{tr("Scan network")}</strong>,
+                    newHost: <strong className="text-primary">{tr("New Host")}</strong>,
+                  }}
+                />
+              </li>
+              <li>{tr("Double-click a tile to connect. Passwords are saved to the OS keychain on first use.")}</li>
+              <li>{tr("Group and tag hosts from the sidebar to keep a large library navigable.")}</li>
             </ol>
           </section>
 
           <section>
-            <h3 className="mb-1.5 text-sm font-semibold text-primary">Keyboard shortcuts</h3>
+            <h3 className="mb-1.5 text-sm font-semibold text-primary">{tr("Keyboard shortcuts")}</h3>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
               {SHORTCUTS.map(([keys, what]) => (
                 <div key={keys} className="flex items-baseline gap-2">
                   <dt className="shrink-0 rounded-sm bg-inset px-1.5 py-0.5 font-mono text-xs text-primary">
                     {keys}
                   </dt>
-                  <dd className="text-secondary">{what}</dd>
+                  <dd className="text-secondary">{tr(what)}</dd>
                 </div>
               ))}
             </dl>
           </section>
 
           <section>
-            <h3 className="mb-1.5 text-sm font-semibold text-primary">Troubleshooting</h3>
+            <h3 className="mb-1.5 text-sm font-semibold text-primary">{tr("Troubleshooting")}</h3>
             <dl className="space-y-2 text-sm">
               {TROUBLESHOOTING.map(([symptom, fix]) => (
                 <div key={symptom}>
-                  <dt className="text-primary">{symptom}</dt>
-                  <dd className="text-secondary">{fix}</dd>
+                  <dt className="text-primary">{tr(symptom)}</dt>
+                  <dd className="text-secondary">{tr(fix)}</dd>
                 </div>
               ))}
             </dl>
@@ -298,10 +316,10 @@ export function About({ onClose }: { onClose: () => void }): ReactNode {
               className="btn-secondary"
               onClick={() => void openExternal(PROJECT_URL)}
             >
-              Full documentation
+              {tr("Full documentation")}
             </button>
             <button type="button" className="btn-primary ml-auto" onClick={onClose}>
-              Close
+              {tr("Close")}
             </button>
           </div>
         </div>

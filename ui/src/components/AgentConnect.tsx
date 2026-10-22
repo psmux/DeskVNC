@@ -58,6 +58,8 @@ import {
 } from "../lib/agentSetup";
 import { useAgentActivity } from "../state/AgentActivityContext";
 import { Dialog } from "./primitives";
+import { Trans } from "./Trans";
+import { t, useT } from "../lib/i18n";
 import {
   IconAlert,
   IconCheck,
@@ -114,6 +116,7 @@ function CopyLine({
   copied: Copied | null;
   onCopy: (key: string, text: string) => void;
 }): ReactNode {
+  const tr = useT();
   const mine = copied?.key === copiedKey ? copied : null;
   return (
     <div className="flex items-stretch gap-1.5 rounded-md border border-subtle bg-inset/60">
@@ -130,8 +133,8 @@ function CopyLine({
       <button
         type="button"
         onClick={() => onCopy(copiedKey, text)}
-        aria-label={mine?.ok ? "Copied" : "Copy this line"}
-        title="Copy"
+        aria-label={mine?.ok ? tr("Copied") : tr("Copy this line")}
+        title={tr("Copy")}
         className={classNames(
           "flex shrink-0 items-center gap-1 rounded-r-md border-l border-subtle px-2.5 text-2xs font-medium",
           mine === null
@@ -169,6 +172,7 @@ function CopyLine({
  * is not treated as one: the line underneath says where to get it by hand.
  */
 function CopyToken(): ReactNode {
+  const tr = useT();
   const [said, setSaid] = useState<"copied" | "unavailable" | null>(null);
   const timer = useRef<number | null>(null);
   useEffect(() => () => {
@@ -194,9 +198,9 @@ function CopyToken(): ReactNode {
         type="button"
         onClick={grab}
         className="btn-secondary text-2xs"
-        title="The token goes straight to the clipboard. It is never shown here."
+        title={tr("The token goes straight to the clipboard. It is never shown here.")}
       >
-        Copy the token
+        {tr("Copy the token")}
       </button>
       <span
         className={classNames(
@@ -206,10 +210,10 @@ function CopyToken(): ReactNode {
         aria-live="polite"
       >
         {said === "copied"
-          ? "On the clipboard. Paste it into the prompt above."
+          ? tr("On the clipboard. Paste it into the prompt above.")
           : said === "unavailable"
-            ? "This build will not hand it over. Read it from dvv doctor instead."
-            : "It is never shown here, only copied."}
+            ? tr("This build will not hand it over. Read it from dvv doctor instead.")
+            : tr("It is never shown here, only copied.")}
       </span>
     </div>
   );
@@ -224,6 +228,7 @@ function Step({
   title: string;
   children: ReactNode;
 }): ReactNode {
+  // Titles are handed in translated already; this draws the number.
   return (
     <section className="flex gap-2.5">
       <span
@@ -250,6 +255,7 @@ function Step({
  * than mentioning it and leaving the reader to go looking.
  */
 function Register({ onFallback }: { onFallback: () => void }): ReactNode {
+  const tr = useT();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<RegisterResult | null>(null);
   const alive = useRef(true);
@@ -277,9 +283,9 @@ function Register({ onFallback }: { onFallback: () => void }): ReactNode {
     <section className="rounded-lg border border-accent/40 bg-accent/10 p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-primary">Connect Claude Code</h3>
+          <h3 className="text-sm font-semibold text-primary">{tr("Connect Claude Code")}</h3>
           <p className="mt-0.5 text-xs text-secondary">
-            This registers the server for you. No terminal, nothing to copy.
+            {tr("This registers the server for you. No terminal, nothing to copy.")}
           </p>
         </div>
         <button
@@ -294,7 +300,11 @@ function Register({ onFallback }: { onFallback: () => void }): ReactNode {
             after a success invites somebody to press a button that has already
             worked, and then to wonder whether the second press undid it.
           */}
-          {busy ? "Connecting…" : result && needsManualSetup(result.outcome) ? "Try again" : "Connect"}
+          {busy
+            ? tr("Connecting…")
+            : result && needsManualSetup(result.outcome)
+              ? tr("Try again")
+              : tr("Connect")}
         </button>
       </div>
       {/*
@@ -340,12 +350,13 @@ function SetupAgents(): ReactNode {
     alive.current = false;
   }, []);
 
+  const tr = useT();
   const run = useCallback((): void => {
     setBusy(true);
     void safeInvoke<string | null>("agent_setup_agents", undefined, null).then((text) => {
       if (!alive.current) return;
       setBusy(false);
-      setReport(text ?? "This build cannot run setup. Run dvv setup in a terminal instead.");
+      setReport(text ?? t("This build cannot run setup. Run dvv setup in a terminal instead."));
     });
   }, []);
 
@@ -353,10 +364,13 @@ function SetupAgents(): ReactNode {
     <section className="rounded-lg border border-accent/40 bg-accent/10 p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-primary">OpenCode, Pi, Claude Code and Codex</h3>
+          <h3 className="text-sm font-semibold text-primary">
+            {tr("OpenCode, Pi, Claude Code and Codex")}
+          </h3>
           <p className="mt-0.5 text-xs text-secondary">
-            Connected automatically each time DeskVNC starts. Installed a new agent just now? Connect it
-            without restarting.
+            {tr(
+              "Connected automatically each time DeskVNC starts. Installed a new agent just now? Connect it without restarting.",
+            )}
           </p>
         </div>
         <button
@@ -365,7 +379,7 @@ function SetupAgents(): ReactNode {
           className={classNames("btn-primary shrink-0", busy && "opacity-70")}
           onClick={run}
         >
-          {busy ? "Connecting…" : "Connect now"}
+          {busy ? tr("Connecting…") : tr("Connect now")}
         </button>
       </div>
       <div role="status" aria-live="polite" className="empty:hidden">
@@ -388,11 +402,12 @@ function SetupAgents(): ReactNode {
  * so it reads as a property of the product rather than as a to-do.
  */
 function Limits(): ReactNode {
+  const tr = useT();
   return (
     <div className="space-y-3 border-t border-subtle pt-4">
       <div>
         <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-tertiary">
-          What an agent can do
+          {tr("What an agent can do")}
         </p>
         <ul className="space-y-1">
           {AGENT_CAN.map((line) => (
@@ -401,7 +416,7 @@ function Limits(): ReactNode {
                 aria-hidden="true"
                 className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-success"
               />
-              <span>{line}</span>
+              <span>{tr(line)}</span>
             </li>
           ))}
         </ul>
@@ -413,10 +428,10 @@ function Limits(): ReactNode {
         <div className="min-w-0 space-y-0.5">
           {AGENT_CANNOT.map((line) => (
             <p key={line} className="text-xs font-medium text-primary">
-              {line}
+              {tr(line)}
             </p>
           ))}
-          <p className="text-2xs text-tertiary">{AGENT_BOUNDARY_WHY}</p>
+          <p className="text-2xs text-tertiary">{tr(AGENT_BOUNDARY_WHY)}</p>
         </div>
       </div>
     </div>
@@ -445,6 +460,7 @@ function ManualSetup({
   copied: Copied | null;
   onCopy: (key: string, text: string) => void;
 }): ReactNode {
+  const tr = useT();
   const note = binaryNote(binary);
   // No rule above it deliberately. The footer below draws one and the limits
   // above draw one, and a third between two short rows would make the fold
@@ -461,11 +477,11 @@ function ManualSetup({
         <span aria-hidden="true">
           {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
         </span>
-        Do it by hand, or connect a different agent
+        {tr("Do it by hand, or connect a different agent")}
       </button>
       {open ? (
         <div id="agent-manual" className="mt-3.5 space-y-4">
-          <Step n={1} title="Register it yourself">
+          <Step n={1} title={tr("Register it yourself")}>
             <CopyLine
               text={mcpAddLine(binary)}
               copiedKey="stdio"
@@ -480,7 +496,7 @@ function ManualSetup({
               has not built the binary, and it says so rather than leaving
               somebody staring at a placeholder wondering whose fault it is.
             */}
-            {note ? <p className="text-xs text-tertiary">{note}</p> : null}
+            {note ? <p className="text-xs text-tertiary">{tr(note)}</p> : null}
           </Step>
 
           {/*
@@ -492,7 +508,7 @@ function ManualSetup({
             container, anything that cannot spawn a subprocess) would never
             learn it exists.
           */}
-          <Step n={2} title="Or reach it over HTTP">
+          <Step n={2} title={tr("Or reach it over HTTP")}>
             <CopyLine
               text={httpServeLine(binary)}
               copiedKey="http-serve"
@@ -500,10 +516,10 @@ function ManualSetup({
               onCopy={onCopy}
             />
             <p className="text-xs text-tertiary">
-              Starts a listener on <code className="mono">{HTTP_DEFAULT_URL}</code> and prints
-              the line below with your token already in it. Loopback only, and it needs the
-              token even there, because any page your browser has open can reach a port on
-              this machine.
+              <Trans
+                text="Starts a listener on {url} and prints the line below with your token already in it. Loopback only, and it needs the token even there, because any page your browser has open can reach a port on this machine."
+                nodes={{ url: <code className="mono">{HTTP_DEFAULT_URL}</code> }}
+              />
             </p>
             <CopyLine
               text={httpAddLine(httpUrl ?? HTTP_DEFAULT_URL)}
@@ -514,7 +530,7 @@ function ManualSetup({
             <CopyToken />
           </Step>
 
-          <Step n={3} title="Check it">
+          <Step n={3} title={tr("Check it")}>
             <CopyLine
               text={doctorLine(binary)}
               copiedKey="doctor"
@@ -522,8 +538,9 @@ function ManualSetup({
               onCopy={onCopy}
             />
             <p className="text-xs text-tertiary">
-              It prints the socket path and whether it is present. Present means this
-              application is running with the plane on, which is what an agent needs.
+              {tr(
+                "It prints the socket path and whether it is present. Present means this application is running with the plane on, which is what an agent needs.",
+              )}
             </p>
           </Step>
         </div>
@@ -533,13 +550,14 @@ function ManualSetup({
 }
 
 export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
+  const tr = useT();
   const { plane, setPlaneEnabled } = useAgentActivity();
   const [copied, copy] = useCopied();
   const [manual, setManual] = useState(false);
   const openManual = useCallback(() => setManual(true), []);
 
   return (
-    <Dialog title="AI agents" onClose={onClose} width={620}>
+    <Dialog title={tr("AI agents")} onClose={onClose} width={620}>
       <div className="space-y-5">
         {plane.on ? (
           <>
@@ -548,8 +566,9 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
             <Register onFallback={openManual} />
 
             <p className="text-xs text-secondary">
-              Then ask your agent to open one of your machines by name. It reads the same
-              library you see here.
+              {tr(
+                "Then ask your agent to open one of your machines by name. It reads the same library you see here.",
+              )}
             </p>
 
             <Limits />
@@ -565,7 +584,7 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
 
             <div className="flex items-center justify-between gap-4 border-t border-subtle pt-4">
               <div className="min-w-0">
-                <p className="text-xs text-secondary">The plane is on.</p>
+                <p className="text-xs text-secondary">{tr("The plane is on.")}</p>
                 {plane.socket ? (
                   <p className="mono truncate text-2xs text-tertiary" title={plane.socket}>
                     {plane.socket}
@@ -576,25 +595,27 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
                 type="button"
                 className="btn-secondary shrink-0"
                 onClick={() => setPlaneEnabled(false)}
-                title="Close the socket and unlink it. Every agent loses its connection at once."
+                title={tr("Close the socket and unlink it. Every agent loses its connection at once.")}
               >
-                Turn it off
+                {tr("Turn it off")}
               </button>
             </div>
           </>
         ) : (
           <>
             <p className="text-sm text-secondary">
-              An agent can open your machines, drive them and read the screen, while you
-              watch and take over whenever you want.
+              {tr(
+                "An agent can open your machines, drive them and read the screen, while you watch and take over whenever you want.",
+              )}
             </p>
             <p className="text-sm text-secondary">
-              It is off because it was switched off on this computer. While it is off there is no
-              socket, nothing is listening, and your agents cannot reach your machines.
+              {tr(
+                "It is off because it was switched off on this computer. While it is off there is no socket, nothing is listening, and your agents cannot reach your machines.",
+              )}
             </p>
             {plane.error ? (
               <p className="rounded-md border border-warning bg-warning-subtle px-3 py-2 text-xs text-warning">
-                The last attempt to start it failed: {plane.error}
+                {tr("The last attempt to start it failed: {error}", { error: plane.error })}
               </p>
             ) : null}
             <div className="flex items-center gap-3">
@@ -604,10 +625,10 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
                 className="btn-primary"
                 onClick={() => setPlaneEnabled(true)}
               >
-                Turn it back on
+                {tr("Turn it back on")}
               </button>
               <span className="text-xs text-tertiary">
-                One socket, on this computer only. Nothing opens on the network.
+                {tr("One socket, on this computer only. Nothing opens on the network.")}
               </span>
             </div>
             {/*

@@ -35,6 +35,7 @@ import { usePaneVisible } from "./Pane";
 import { useToasts } from "../state/ToastContext";
 import { classNames } from "../lib/util";
 import { IconAlert, IconX } from "./icons";
+import { t, useT } from "../lib/i18n";
 
 export interface SshTerminalProps {
   /** Identifies this shell in the `ssh-core` registry; independent of any
@@ -264,6 +265,7 @@ export function SshTerminal({
   hostName,
   onClose,
 }: SshTerminalProps): ReactNode {
+  const tr = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   /** Re-run `ssh_connect`, for the TOFU accept and for "Reconnect" after a
@@ -455,12 +457,12 @@ export function SshTerminal({
     if (phase.state.state === "connected" && phase.state.resumed) {
       if (!resumeToasted.current) {
         resumeToasted.current = true;
-        push("success", "Reattached to your tmux session");
+        push("success", tr("Reattached to your tmux session"));
       }
     } else {
       resumeToasted.current = false;
     }
-  }, [phase, push]);
+  }, [phase, push, tr]);
 
   // Notices are rare and informational (PRD wording: "tmux is not installed
   // ... this session will not survive a disconnect"); they say their piece
@@ -495,14 +497,16 @@ export function SshTerminal({
       className="fade-in absolute inset-0 z-30 flex flex-col bg-scrim"
       role="dialog"
       aria-modal="true"
-      aria-label={`Terminal, ${hostName}`}
+      aria-label={tr("Terminal, {host}", { host: hostName })}
       onPointerDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div className="m-auto flex h-[min(88vh,760px)] w-[min(96vw,1100px)] flex-col overflow-hidden rounded-lg border border-subtle bg-surface shadow-(--shadow-pop)">
         <div className="flex items-center justify-between border-b border-subtle px-4 py-2.5">
-          <h2 className="truncate text-sm font-semibold text-primary">Terminal, {hostName}</h2>
+          <h2 className="truncate text-sm font-semibold text-primary">
+            {tr("Terminal, {host}", { host: hostName })}
+          </h2>
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1.5 text-2xs text-tertiary">
               <span className={classNames("h-1.5 w-1.5 rounded-full", status.dot)} />
@@ -510,7 +514,7 @@ export function SshTerminal({
             </span>
             <button
               type="button"
-              aria-label="Close terminal"
+              aria-label={tr("Close terminal")}
               className="rounded-sm p-1 text-tertiary hover:text-primary"
               onClick={onClose}
             >
@@ -601,20 +605,25 @@ export function SshTerminal({
 // --------------------------------------------------------------- status pill
 
 function statusPill(phase: Phase): { label: string; dot: string } {
-  if (phase.kind === "error") return { label: "Connection failed", dot: "bg-danger" };
-  if (phase.kind === "host-key-prompt") return { label: "Verifying host key", dot: "bg-warning" };
-  if (phase.kind === "host-key-changed") return { label: "Host key changed", dot: "bg-danger" };
+  if (phase.kind === "error") return { label: t("Connection failed"), dot: "bg-danger" };
+  if (phase.kind === "host-key-prompt") return { label: t("Verifying host key"), dot: "bg-warning" };
+  if (phase.kind === "host-key-changed") return { label: t("Host key changed"), dot: "bg-danger" };
   const s = phase.kind === "shell" ? phase.state : null;
-  if (!s || s.state === "connecting") return { label: "Connecting…", dot: "bg-tertiary animate-pulse" };
+  if (!s || s.state === "connecting") {
+    return { label: t("Connecting…"), dot: "bg-tertiary animate-pulse" };
+  }
   switch (s.state) {
     case "connected":
-      return { label: "Connected", dot: "bg-success" };
+      return { label: t("Connected"), dot: "bg-success" };
     case "reconnecting":
-      return { label: `Reconnecting (attempt ${s.attempt})`, dot: "bg-warning animate-pulse" };
+      return {
+        label: t("Reconnecting (attempt {n})", { n: s.attempt }),
+        dot: "bg-warning animate-pulse",
+      };
     case "disconnected":
-      return { label: "Disconnected", dot: "bg-danger" };
+      return { label: t("Disconnected"), dot: "bg-danger" };
     default:
-      return { label: "Connected", dot: "bg-success" };
+      return { label: t("Connected"), dot: "bg-success" };
   }
 }
 
@@ -631,6 +640,7 @@ function ReconnectingBanner({
   reason: string;
   onRetryNow: () => void;
 }): ReactNode {
+  const tr = useT();
   // Mirrors `Session.tsx`'s `ReconnectOverlay`: a bare spinner with no number
   // is what makes people force-quit, so the countdown is the point.
   const [remaining, setRemaining] = useState(delayMs);
@@ -657,13 +667,14 @@ function ReconnectingBanner({
           <div className="indeterminate-bar h-0.5 w-1/3 bg-accent" />
         </div>
         <p className="mt-3 text-sm font-medium text-primary">
-          Reconnecting… attempt {attempt}
-          {secs > 0 ? ` · retrying in ${secs}s` : " · retrying now"}
+          {secs > 0
+            ? tr("Reconnecting… attempt {attempt} · retrying in {secs}s", { attempt, secs })
+            : tr("Reconnecting… attempt {attempt} · retrying now", { attempt })}
         </p>
         {reason ? <p className="mt-1 text-xs text-secondary">{reason}</p> : null}
         <div className="mt-3 flex justify-end">
           <button type="button" className="btn-primary px-3 py-1 text-xs" onClick={onRetryNow}>
-            Reconnect now
+            {tr("Reconnect now")}
           </button>
         </div>
       </div>
@@ -682,18 +693,21 @@ function DisconnectedBanner({
   onReconnect: () => void;
   onClose: () => void;
 }): ReactNode {
+  const tr = useT();
   return (
     <div className="fade-in absolute inset-0 z-10 flex items-center justify-center bg-scrim" role="alert">
       <div className="w-80 max-w-[calc(100%-32px)] rounded-lg border border-subtle bg-raised p-4 shadow-(--shadow-pop)">
-        <p className="text-sm font-semibold text-primary">Disconnected</p>
-        <p className="mt-1.5 text-xs text-secondary">{reason || "The connection was closed."}</p>
+        <p className="text-sm font-semibold text-primary">{tr("Disconnected")}</p>
+        <p className="mt-1.5 text-xs text-secondary">
+          {reason || tr("The connection was closed.")}
+        </p>
         <div className="mt-3 flex justify-end gap-2">
           <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={onClose}>
-            Close
+            {tr("Close")}
           </button>
           {canRetry ? (
             <button type="button" className="btn-primary px-3 py-1 text-xs" onClick={onReconnect}>
-              Reconnect
+              {tr("Reconnect")}
             </button>
           ) : null}
         </div>
@@ -711,20 +725,21 @@ function ConnectErrorBanner({
   onRetry: () => void;
   onClose: () => void;
 }): ReactNode {
+  const tr = useT();
   return (
     <div className="fade-in absolute inset-0 z-10 flex items-center justify-center bg-scrim" role="alert">
       <div className="w-80 max-w-[calc(100%-32px)] rounded-lg border border-danger bg-raised p-4 shadow-(--shadow-pop)">
         <p className="flex items-center gap-2 text-sm font-semibold text-danger">
           <IconAlert size={15} />
-          Couldn&apos;t open a terminal
+          {tr("Couldn't open a terminal")}
         </p>
         <p className="mono mt-1.5 max-h-24 overflow-auto text-xs text-secondary">{message}</p>
         <div className="mt-3 flex justify-end gap-2">
           <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={onClose}>
-            Close
+            {tr("Close")}
           </button>
           <button type="button" className="btn-primary px-3 py-1 text-xs" onClick={onRetry}>
-            Try again
+            {tr("Try again")}
           </button>
         </div>
       </div>

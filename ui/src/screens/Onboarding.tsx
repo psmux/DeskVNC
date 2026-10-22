@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import { useSettings, type ThemeChoice } from "../state/SettingsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
 import { classNames } from "../lib/util";
+import { useT } from "../lib/i18n";
 import { IconMonitor, IconZap, IconLock } from "../components/icons";
 
 export function Onboarding({
@@ -16,6 +17,8 @@ export function Onboarding({
   const { settings, update } = useSettings();
   const { discovered, scan, startScan } = useDiscovery();
   const [ranDiscovery, setRanDiscovery] = useState(false);
+  // `tr`, not `t`: the theme buttons below map over a variable called `t`.
+  const tr = useT();
 
   const finish = (): void => {
     update({ onboarded: true });
@@ -26,7 +29,10 @@ export function Onboarding({
     <div className="flex h-full items-center justify-center bg-canvas p-6">
       <div className="w-[520px] max-w-full rounded-lg border border-subtle bg-surface p-8 shadow-(--shadow-pop)">
         {/* progress */}
-        <div className="mb-6 flex items-center gap-2" aria-label={`Step ${step + 1} of 3`}>
+        <div
+          className="mb-6 flex items-center gap-2"
+          aria-label={tr("Step {step} of 3", { step: step + 1 })}
+        >
           {[0, 1, 2].map((i) => (
             <span
               key={i}
@@ -43,13 +49,17 @@ export function Onboarding({
             <div className="flex justify-center text-accent">
               <IconMonitor size={56} />
             </div>
-            <h1 className="text-center text-xl font-semibold text-primary">Welcome to DeskVNCViewer</h1>
+            <h1 className="text-center text-xl font-semibold text-primary">
+              {tr("Welcome to DeskVNCViewer")}
+            </h1>
             <p className="text-center text-sm text-secondary">
-              See and control your other computers, fast, secure, and entirely yours. No account, ever.
+              {tr(
+                "See and control your other computers, fast, secure, and entirely yours. No account, ever.",
+              )}
             </p>
             <div>
-              <p className="mb-2 text-xs font-medium text-secondary">Appearance</p>
-              <div className="flex gap-2" role="radiogroup" aria-label="Theme">
+              <p className="mb-2 text-xs font-medium text-secondary">{tr("Appearance")}</p>
+              <div className="flex gap-2" role="radiogroup" aria-label={tr("Theme")}>
                 {(["system", "light", "dark"] as ThemeChoice[]).map((t) => (
                   <button
                     key={t}
@@ -64,7 +74,7 @@ export function Onboarding({
                     )}
                     onClick={() => update({ theme: t })}
                   >
-                    {t === "system" ? "Follow System" : t}
+                    {t === "system" ? tr("Follow System") : tr(THEME_LABELS[t])}
                   </button>
                 ))}
               </div>
@@ -77,10 +87,13 @@ export function Onboarding({
             <div className="flex justify-center text-accent">
               <IconZap size={56} />
             </div>
-            <h1 className="text-center text-xl font-semibold text-primary">Find your computers</h1>
+            <h1 className="text-center text-xl font-semibold text-primary">
+              {tr("Find your computers")}
+            </h1>
             <p className="text-center text-sm text-secondary">
-              DeskVNCViewer listens for computers advertising screen sharing on your local network.
-              Your OS may ask permission to access the local network, that's this feature.
+              {tr(
+                "DeskVNCViewer listens for computers advertising screen sharing on your local network. Your OS may ask permission to access the local network, that's this feature.",
+              )}
             </p>
             {!ranDiscovery ? (
               <div className="flex justify-center">
@@ -92,7 +105,7 @@ export function Onboarding({
                     void startScan();
                   }}
                 >
-                  <IconZap size={14} /> Find computers on my network
+                  <IconZap size={14} /> {tr("Find computers on my network")}
                 </button>
               </div>
             ) : (
@@ -104,7 +117,11 @@ export function Onboarding({
                 ) : null}
                 {discovered.length === 0 ? (
                   <p className="text-center text-xs text-tertiary">
-                    {scan.running ? "Scanning your network…" : "Nothing found yet, some computers don't advertise themselves. You can add one manually later."}
+                    {scan.running
+                      ? tr("Scanning your network…")
+                      : tr(
+                          "Nothing found yet, some computers don't advertise themselves. You can add one manually later.",
+                        )}
                   </p>
                 ) : (
                   <ul className="max-h-40 space-y-1 overflow-y-auto">
@@ -127,10 +144,13 @@ export function Onboarding({
             <div className="flex justify-center text-accent">
               <IconLock size={56} />
             </div>
-            <h1 className="text-center text-xl font-semibold text-primary">Save your first computer</h1>
+            <h1 className="text-center text-xl font-semibold text-primary">
+              {tr("Save your first computer")}
+            </h1>
             <p className="text-center text-sm text-secondary">
-              Give it a friendly name and, if you save a password, it's stored in your system
-              keychain, never in a file.
+              {tr(
+                "Give it a friendly name and, if you save a password, it's stored in your system keychain, never in a file.",
+              )}
             </p>
             {discovered.length > 0 ? (
               <ul className="space-y-1.5">
@@ -147,14 +167,14 @@ export function Onboarding({
                       <IconMonitor size={16} className="text-tertiary" />
                       <span className="flex-1 truncate">{d.name}</span>
                       <span className="mono text-xs text-tertiary">{d.address}</span>
-                      <span className="text-xs font-medium text-accent">Save…</span>
+                      <span className="text-xs font-medium text-accent">{tr("Save…")}</span>
                     </button>
                   </li>
                 ))}
               </ul>
             ) : (
               <p className="text-center text-xs text-tertiary">
-                No discovered computers to pre-fill, use “+ New Host” in the library instead.
+                {tr("No discovered computers to pre-fill, use “+ New Host” in the library instead.")}
               </p>
             )}
           </div>
@@ -162,21 +182,21 @@ export function Onboarding({
 
         <div className="mt-8 flex items-center justify-between">
           <button type="button" className="text-sm text-tertiary hover:text-primary" onClick={finish}>
-            Skip
+            {tr("Skip")}
           </button>
           <div className="flex gap-2.5">
             {step > 0 ? (
               <button type="button" className="btn-secondary" onClick={() => setStep((s) => s - 1)}>
-                Back
+                {tr("Back")}
               </button>
             ) : null}
             {step < 2 ? (
               <button type="button" data-autofocus className="btn-primary" onClick={() => setStep((s) => s + 1)}>
-                Continue
+                {tr("Continue")}
               </button>
             ) : (
               <button type="button" className="btn-primary" onClick={finish}>
-                Open my library
+                {tr("Open my library")}
               </button>
             )}
           </div>
@@ -185,3 +205,14 @@ export function Onboarding({
     </div>
   );
 }
+
+/**
+ * The theme buttons used to render the raw setting name, which only worked
+ * because the three names happen to be English words. The catalog needs a
+ * stable key per choice, so the name is looked up from the choice instead.
+ */
+const THEME_LABELS: Record<ThemeChoice, string> = {
+  system: "Follow System",
+  light: "Light",
+  dark: "Dark",
+};

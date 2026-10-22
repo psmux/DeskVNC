@@ -19,6 +19,7 @@ import {
   protocolName,
 } from "../lib/types";
 import type { RdpResolution, RdpSettings } from "../lib/rdp";
+import { useT } from "../lib/i18n";
 import { rdpDefaults } from "../lib/rdpDefaults";
 import {
   blankRdpSettings,
@@ -241,6 +242,7 @@ export function HostDialog({
   onSave: (draft: HostDraft) => void;
   onClose: () => void;
 }): ReactNode {
+  const tr = useT();
   const [d, setD] = useState<HostDraft>(initial);
   // Open Advanced when the dialog arrives with a MAC the user never typed, // discovery filled it in, and a value silently folded away is one the user
   // can neither check nor correct. An enabled SSH tunnel opens it too: it
@@ -350,7 +352,7 @@ export function HostDialog({
   };
 
   return (
-    <Dialog title={d.id ? "Edit Host" : "New Host"} onClose={onClose} width={540}>
+    <Dialog title={d.id ? tr("Edit Host") : tr("New Host")} onClose={onClose} width={540}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -376,7 +378,7 @@ export function HostDialog({
           <div
             className="flex gap-1 rounded-md border border-subtle p-0.5"
             role="radiogroup"
-            aria-label="Connection protocol"
+            aria-label={tr("Connection protocol")}
           >
             {HOST_PROTOCOLS.map((p) => (
               <button
@@ -411,7 +413,7 @@ export function HostDialog({
             <input
               className="field mono"
               value={d.address}
-              placeholder={isBoundary ? "64 character machine ID" : "192.168.1.42 or hostname"}
+              placeholder={isBoundary ? tr("64 character machine ID") : "192.168.1.42 or hostname"}
               spellCheck={false}
               onBlur={() => {
                 setTouched(true);
@@ -649,7 +651,7 @@ export function HostDialog({
               value={d.groupId ?? ""}
               onChange={(e) => set({ groupId: e.target.value || null })}
             >
-              <option value="">No group</option>
+              <option value="">{tr("No group")}</option>
               {groups.map((g) => (
                 <option key={g.id} value={g.id}>
                   {g.name}
@@ -662,11 +664,11 @@ export function HostDialog({
               value={d.osHint}
               onChange={(e) => set({ osHint: e.target.value as OsHint })}
             >
-              <option value="unknown">Unknown</option>
+              <option value="unknown">{tr("Unknown")}</option>
               <option value="macos">macOS</option>
-              <option value="windows">Windows</option>
-              <option value="linux">Linux</option>
-              <option value="qemu">QEMU / VM</option>
+              <option value="windows">{tr("Windows")}</option>
+              <option value="linux">{tr("Linux")}</option>
+              <option value="qemu">{tr("QEMU / VM")}</option>
             </Select>
           </Field>
         </div>
@@ -733,12 +735,12 @@ export function HostDialog({
                             set({ securityPref: e.target.value === "auto" ? null : e.target.value })
                           }
                         >
-                          <option value="auto">Auto</option>
-                          <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
-                          <option value="ra2">RSA-AES (RA2)</option>
-                          <option value="apple-dh">Apple Screen Sharing</option>
-                          <option value="vncauth">VNC password only</option>
-                          <option value="none">None</option>
+                          <option value="auto">{tr("Auto")}</option>
+                          <option value="vencrypt-x509">{tr("VeNCrypt (TLS + X.509)")}</option>
+                          <option value="ra2">{tr("RSA-AES (RA2)")}</option>
+                          <option value="apple-dh">{tr("Apple Screen Sharing")}</option>
+                          <option value="vncauth">{tr("VNC password only")}</option>
+                          <option value="none">{tr("None")}</option>
                         </Select>
                       </Field>
                     ) : null}
@@ -754,10 +756,10 @@ export function HostDialog({
                         value={d.qualityPref}
                         onChange={(e) => set({ qualityPref: e.target.value as QualityPreset })}
                       >
-                        <option value="auto">Auto</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
+                        <option value="auto">{tr("Auto")}</option>
+                        <option value="high">{tr("High")}</option>
+                        <option value="medium">{tr("Medium")}</option>
+                        <option value="low">{tr("Low")}</option>
                         {/*
                           Black and White is a shader in this app, not a wire
                           setting, so the toolbar keeps offering it live for
@@ -766,7 +768,7 @@ export function HostDialog({
                           grey screen on every connect", which is not what
                           choosing a saved default is for.
                         */}
-                        {isRdp ? null : <option value="bw">Black &amp; White</option>}
+                        {isRdp ? null : <option value="bw">{tr("Black & White")}</option>}
                       </Select>
                     </Field>
                   </div>
@@ -776,10 +778,10 @@ export function HostDialog({
                         value={d.scalingMode}
                         onChange={(e) => set({ scalingMode: e.target.value as ScalingMode })}
                       >
-                        <option value="aspect-fit">Aspect fit</option>
-                        <option value="fit">Fit to window</option>
-                        <option value="actual">Actual size (1:1)</option>
-                        <option value="remote-resize">Remote resize</option>
+                        <option value="aspect-fit">{tr("Aspect fit")}</option>
+                        <option value="fit">{tr("Fit to window")}</option>
+                        <option value="actual">{tr("Actual size (1:1)")}</option>
+                        <option value="remote-resize">{tr("Remote resize")}</option>
                       </Select>
                     </Field>
                     <Field label="Keyboard mode" hint="How keystrokes are translated">
@@ -787,11 +789,11 @@ export function HostDialog({
                         value={d.keyboardMode}
                         onChange={(e) => set({ keyboardMode: e.target.value })}
                       >
-                        <option value="auto">Auto</option>
+                        <option value="auto">{tr("Auto")}</option>
                         {/* RDP has no concept of a keysym. */}
-                        {isRdp ? null : <option value="keysym">Keysym</option>}
-                        <option value="unicode">Unicode</option>
-                        <option value="scancode">Scancode</option>
+                        {isRdp ? null : <option value="keysym">{tr("Keysym")}</option>}
+                        <option value="unicode">{tr("Unicode")}</option>
+                        <option value="scancode">{tr("Scancode")}</option>
                       </Select>
                     </Field>
                   </div>
@@ -882,7 +884,7 @@ export function HostDialog({
             Cancel
           </button>
           <button type="submit" className="btn-primary" disabled={!canSave}>
-            {d.id ? "Save Changes" : "Add Host"}
+            {d.id ? tr("Save Changes") : tr("Add Host")}
           </button>
         </div>
       </form>
@@ -904,6 +906,7 @@ function RdpOptionsSection({
   rdp: RdpSettings;
   onChange: (patch: Partial<RdpSettings>) => void;
 }): ReactNode {
+  const tr = useT();
   const [codecs, setCodecs] = useState(false);
   return (
     <div className="space-y-4">
@@ -913,7 +916,7 @@ function RdpOptionsSection({
             value={rdp.colorDepth}
             onChange={(e) => onChange({ colorDepth: e.target.value as RdpSettings["colorDepth"] })}
           >
-            <option value="auto">Auto</option>
+            <option value="auto">{tr("Auto")}</option>
             <option value="bpp32">32-bit</option>
             <option value="bpp24">24-bit</option>
             <option value="bpp16">16-bit</option>
@@ -925,9 +928,9 @@ function RdpOptionsSection({
             value={rdp.audio}
             onChange={(e) => onChange({ audio: e.target.value as RdpSettings["audio"] })}
           >
-            <option value="play-locally">Play here</option>
-            <option value="leave-at-server">Play there</option>
-            <option value="off">Do not play</option>
+            <option value="play-locally">{tr("Play here")}</option>
+            <option value="leave-at-server">{tr("Play there")}</option>
+            <option value="off">{tr("Do not play")}</option>
           </Select>
         </Field>
       </div>
@@ -1065,6 +1068,7 @@ function SshOptionsSection({
   username: string;
   profileId: string | null;
 }): ReactNode {
+  const tr = useT();
   // Touched on blur rather than checked from the first keystroke, the same
   // rule the address field uses: typing a fresh name a character at a time
   // must not flash red before the user has finished it.
@@ -1130,7 +1134,7 @@ function SshOptionsSection({
                 value={ssh.wslDistro ?? ""}
                 onChange={(e) => onChange({ wslDistro: e.target.value || null })}
               >
-                <option value="">Default distribution</option>
+                <option value="">{tr("Default distribution")}</option>
                 {distros.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -1179,13 +1183,13 @@ function SshOptionsSection({
           value={ssh.multiplexer}
           onChange={(e) => onChange({ multiplexer: e.target.value as MultiplexerKind })}
         >
-          <option value="auto">Auto (recommended)</option>
+          <option value="auto">{tr("Auto (recommended)")}</option>
           <option value="psmux">psmux</option>
           <option value="tmux">tmux</option>
           <option value="screen">screen</option>
           <option value="zellij">zellij</option>
-          <option value="none">None, always a plain shell</option>
-          <option value="custom">Custom command</option>
+          <option value="none">{tr("None, always a plain shell")}</option>
+          <option value="custom">{tr("Custom command")}</option>
         </Select>
       </Field>
 
@@ -1382,6 +1386,7 @@ function KeyFileField({
   value: string | null;
   onChange: (path: string | null) => void;
 }): ReactNode {
+  const tr = useT();
   const [found, setFound] = useState<LocalKeys>({ dir: "", keys: [] });
   // Sticky once the user has gone off-list: cancelling the file dialog, or
   // typing a path by hand, must not bounce the field back to the list and
@@ -1443,16 +1448,16 @@ function KeyFileField({
                 onChange(picked || null);
               }}
             >
-              <option value="">Choose a key...</option>
+              <option value="">{tr("Choose a key...")}</option>
               {found.keys.map((k) => (
                 <option key={k.path} value={k.path}>
                   {keyLabel(k.name, k.kind, k.comment)}
                 </option>
               ))}
-              <option value={BROWSE}>Another file...</option>
+              <option value={BROWSE}>{tr("Another file...")}</option>
             </Select>
             <button type="button" className="btn-secondary shrink-0" onClick={() => void browse()}>
-              Browse...
+              {tr("Browse...")}
             </button>
           </div>
         ) : null}
@@ -1465,7 +1470,7 @@ function KeyFileField({
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
-              aria-label="Private key path"
+              aria-label={tr("Private key path")}
               onChange={(e) => {
                 setManual(true);
                 onChange(e.target.value || null);
@@ -1477,7 +1482,7 @@ function KeyFileField({
                 className="btn-secondary shrink-0"
                 onClick={() => void browse()}
               >
-                Browse...
+                {tr("Browse...")}
               </button>
             )}
           </div>
@@ -1505,6 +1510,7 @@ function Check({
   label: string;
   hint?: string;
 }): ReactNode {
+  const tr = useT();
   return (
     <label className="flex items-start gap-2.5 text-sm text-primary">
       <input
@@ -1514,8 +1520,8 @@ function Check({
         onChange={(e) => onChange(e.target.checked)}
       />
       <span>
-        {label}
-        {hint ? <span className="block text-xs text-tertiary">{hint}</span> : null}
+        {tr(label)}
+        {hint ? <span className="block text-xs text-tertiary">{tr(hint)}</span> : null}
       </span>
     </label>
   );
@@ -1538,6 +1544,7 @@ function SshTunnelSection({
   onChange: (tunnel: SshTunnelSettings) => void;
   onPassphrase: (passphrase: string) => void;
 }): ReactNode {
+  const tr = useT();
   const t = tunnel ?? blankSshTunnel();
   const patch = (p: Partial<SshTunnelSettings>): void => onChange({ ...t, ...p });
 
@@ -1599,9 +1606,9 @@ function SshTunnelSection({
                   patch({ auth: e.target.value as SshTunnelSettings["auth"] })
                 }
               >
-                <option value="stored">Saved passphrase (or agent)</option>
-                <option value="agent">SSH agent</option>
-                <option value="key-file">Private key file</option>
+                <option value="stored">{tr("Saved passphrase (or agent)")}</option>
+                <option value="agent">{tr("SSH agent")}</option>
+                <option value="key-file">{tr("Private key file")}</option>
               </Select>
             </Field>
           </div>
@@ -1644,6 +1651,7 @@ function ResolutionField({
   value: RdpResolution;
   onChange: (v: RdpResolution) => void;
 }): ReactNode {
+  const tr = useT();
   const listed =
     value.mode === "fixed" &&
     RDP_FIXED_SIZES.some(([w, h]) => w === value.width && h === value.height);
@@ -1689,14 +1697,14 @@ function ResolutionField({
       }
     >
       <Select value={selected} onChange={(e) => pick(e.target.value)}>
-        <option value="window-at-connect">Match this window when connecting</option>
-        <option value="follow-window">Match this window, and keep matching</option>
+        <option value="window-at-connect">{tr("Match this window when connecting")}</option>
+        <option value="follow-window">{tr("Match this window, and keep matching")}</option>
         {RDP_FIXED_SIZES.map(([w, h]) => (
           <option key={`${w}x${h}`} value={`${w}x${h}`}>
             {w} x {h}
           </option>
         ))}
-        <option value="custom">Custom...</option>
+        <option value="custom">{tr("Custom...")}</option>
       </Select>
       {custom && value.mode === "fixed" ? (
         <div className="mt-2 grid grid-cols-2 gap-3">
@@ -1719,16 +1727,19 @@ function Field({
   error?: string | null;
   children: ReactNode;
 }): ReactNode {
+  // Translated here rather than at every call site: a Field is the one place
+  // its label and hint are drawn, and there are sixty of them.
+  const tr = useT();
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-medium text-secondary">{label}</span>
+      <span className="mb-1 block text-xs font-medium text-secondary">{tr(label)}</span>
       {children}
       {error ? (
         <span className="mt-1 block text-xs text-danger" role="alert">
-          {error}
+          {tr(error)}
         </span>
       ) : hint ? (
-        <span className="mt-1 block text-xs text-tertiary">{hint}</span>
+        <span className="mt-1 block text-xs text-tertiary">{tr(hint)}</span>
       ) : null}
     </label>
   );

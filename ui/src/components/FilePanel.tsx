@@ -24,6 +24,11 @@ import {
 import { usePaneVisible } from "./Pane";
 import { pickLocalDirectory, pickLocalFiles } from "../lib/tauri";
 import { classNames, fingerprintMnemonic } from "../lib/util";
+import { t as translate, useT } from "../lib/i18n";
+
+/** `stateLabel` takes a Transfer named `t`, which would shadow the
+ *  translation function; this is the same function under another name. */
+const t2 = translate;
 import {
   IconAlert,
   IconChevronRight,
@@ -88,6 +93,7 @@ function formatWhen(ts: number | null): string {
 // ------------------------------------------------------------------- panel
 
 export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNode {
+  const tr = useT();
   const [focused, setFocused] = useState<Pane>("local");
   const [renaming, setRenaming] = useState<{ pane: Pane; path: string; name: string } | null>(null);
   const [creating, setCreating] = useState<{ pane: Pane; name: string } | null>(null);
@@ -139,7 +145,7 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
       className="fade-in absolute inset-0 z-30 flex flex-col bg-scrim"
       role="dialog"
       aria-modal="true"
-      aria-label={`Files, ${hostName}`}
+      aria-label={tr("Files, {host}", { host: hostName })}
       onPointerDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -156,7 +162,7 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
             ) : null}
             <button
               type="button"
-              aria-label="Close files"
+              aria-label={tr("Close files")}
               className="rounded-sm p-1 text-tertiary hover:text-primary"
               onClick={onClose}
             >
@@ -197,7 +203,7 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
         <div className="flex min-h-0 flex-1">
           <FilePane
             pane="local"
-            title="Local"
+            title={tr("Local")}
             state={files.local}
             files={files}
             focused={focused === "local"}
@@ -217,27 +223,27 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
               disabled={!canTransfer || busy}
               title={
                 canTransfer
-                  ? "Upload the selected local files (or choose files) to the remote folder"
-                  : "Connect the file-transfer channel first"
+                  ? tr("Upload the selected local files (or choose files) to the remote folder")
+                  : tr("Connect the file-transfer channel first")
               }
               onClick={() => void doUpload()}
             >
-              Upload →
+              {tr("Upload")} →
             </button>
             <button
               type="button"
               className="btn-secondary w-full px-2 py-1.5 text-xs"
               disabled={!canTransfer || files.remote.selected.length === 0}
-              title="Download the selected remote files into the local folder"
+              title={tr("Download the selected remote files into the local folder")}
               onClick={() => void doDownload()}
             >
-              ← Download
+              ← {tr("Download")}
             </button>
           </div>
 
           <FilePane
             pane="remote"
-            title={`Remote, ${hostName}`}
+            title={tr("Remote, {host}", { host: hostName })}
             state={files.remote}
             files={files}
             focused={focused === "remote"}
@@ -255,10 +261,10 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
             type="button"
             className="btn-secondary px-2.5 py-1 text-xs"
             disabled={focused === "remote" && conn.state !== "connected"}
-            onClick={() => setCreating({ pane: focused, name: "New folder" })}
+            onClick={() => setCreating({ pane: focused, name: tr("New folder") })}
           >
             <IconPlus size={13} className="mr-1 inline" />
-            New folder
+            {tr("New folder")}
           </button>
           <button
             type="button"
@@ -270,7 +276,7 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
               if (entry) setRenaming({ pane: focused, path, name: entry.name });
             }}
           >
-            Rename (F2)
+            {tr("Rename (F2)")}
           </button>
           <button
             type="button"
@@ -279,11 +285,13 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
             onClick={() => setConfirmDelete({ pane: focused, paths: activePane.selected })}
           >
             <IconTrash size={13} className="mr-1 inline" />
-            Delete
+            {tr("Delete")}
           </button>
           <span className="flex-1" />
           <span className="text-2xs text-tertiary">
-            Enter opens · Backspace goes up · Ctrl/⌘+A selects all · F2 renames · Del removes
+            {tr(
+              "Enter opens · Backspace goes up · Ctrl/⌘+A selects all · F2 renames · Del removes",
+            )}
           </span>
         </div>
 
@@ -293,9 +301,13 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
 
       {creating ? (
         <NamePrompt
-          title={`New folder in ${creating.pane === "local" ? "the local" : "the remote"} folder`}
+          title={
+            creating.pane === "local"
+              ? tr("New folder in the local folder")
+              : tr("New folder in the remote folder")
+          }
           initial={creating.name}
-          confirmLabel="Create"
+          confirmLabel={tr("Create")}
           onCancel={() => setCreating(null)}
           onConfirm={(name) => {
             void files.mkdir(creating.pane, name);
@@ -306,9 +318,9 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
 
       {renaming ? (
         <NamePrompt
-          title="Rename"
+          title={tr("Rename")}
           initial={renaming.name}
-          confirmLabel="Rename"
+          confirmLabel={tr("Rename")}
           onCancel={() => setRenaming(null)}
           onConfirm={(name) => {
             void files.rename(renaming.pane, renaming.path, name);
@@ -320,7 +332,7 @@ export function FilePanel({ files, hostName, onClose }: FilePanelProps): ReactNo
       {confirmDelete ? (
         <ConfirmDelete
           count={confirmDelete.paths.length}
-          where={confirmDelete.pane === "local" ? "this computer" : hostName}
+          where={confirmDelete.pane === "local" ? tr("this computer") : hostName}
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => {
             void files.remove(confirmDelete.pane, confirmDelete.paths);
@@ -358,6 +370,7 @@ function FilePane({
   setRenaming,
   onRequestDelete,
 }: FilePaneProps): ReactNode {
+  const tr = useT();
   const listRef = useRef<HTMLDivElement>(null);
   const [cursor, setCursor] = useState(0);
 
@@ -482,7 +495,7 @@ function FilePane({
             state.showHidden ? "text-accent" : "text-tertiary hover:text-primary",
           )}
           aria-pressed={state.showHidden}
-          title={state.showHidden ? "Hide dot-files" : "Show hidden files"}
+          title={state.showHidden ? tr("Hide dot-files") : tr("Show hidden files")}
           onClick={() => files.setShowHidden(pane, !state.showHidden)}
         >
           <IconEye size={14} />
@@ -490,7 +503,7 @@ function FilePane({
         <button
           type="button"
           className="rounded-sm p-1 text-tertiary hover:text-primary"
-          title="Refresh"
+          title={tr("Refresh")}
           onClick={() => files.refresh(pane)}
         >
           <IconRefresh size={14} />
@@ -546,7 +559,7 @@ function FilePane({
             <span className="min-w-0 break-words">{state.error}</span>
           </p>
         ) : visible.length === 0 ? (
-          <p className="p-4 text-xs text-tertiary">This folder is empty.</p>
+          <p className="p-4 text-xs text-tertiary">{tr("This folder is empty.")}</p>
         ) : (
           visible.map((entry, i) => {
             const selected = state.selected.includes(entry.path);
@@ -584,8 +597,10 @@ function FilePane({
       </div>
 
       <footer className="border-t border-subtle px-3 py-1 text-2xs text-tertiary">
-        {visible.length} item{visible.length === 1 ? "" : "s"}
-        {state.selected.length > 0 ? ` · ${state.selected.length} selected` : ""}
+        {tr("{count} items", { count: visible.length })}
+        {state.selected.length > 0
+          ? ` · ${tr("{count} selected", { count: state.selected.length })}`
+          : ""}
       </footer>
     </section>
   );
@@ -604,6 +619,7 @@ function SortButton({
   onClick: () => void;
   align?: "left" | "right";
 }): ReactNode {
+  const tr = useT();
   return (
     <button
       type="button"
@@ -614,7 +630,7 @@ function SortButton({
       )}
       onClick={onClick}
     >
-      {label}
+      {tr(label)}
       {active ? (asc ? " ▲" : " ▼") : ""}
     </button>
   );
@@ -702,8 +718,8 @@ function TransferRow({
       {running ? (
         <button
           type="button"
-          aria-label={`Cancel transfer of ${transfer.name}`}
-          title="Cancel"
+          aria-label={t2("Cancel transfer of {name}", { name: transfer.name })}
+          title={t2("Cancel")}
           className="justify-self-end rounded-sm p-0.5 text-tertiary hover:text-danger"
           onClick={onCancel}
         >
@@ -719,11 +735,11 @@ function TransferRow({
 function stateLabel(t: Transfer): string {
   switch (t.state) {
     case "completed":
-      return `Done · ${formatBytes(t.total)}`;
+      return `${t2("Done")} · ${formatBytes(t.total)}`;
     case "cancelled":
-      return "Cancelled";
+      return t2("Cancelled");
     case "failed":
-      return t.error ?? "Failed";
+      return t.error ?? t2("Failed");
     default:
       return "";
   }
@@ -746,15 +762,17 @@ function HostKeyPrompt({
   onAccept: () => void;
   onCancel: () => void;
 }): ReactNode {
+  const tr = useT();
   return (
     <div className="border-b border-subtle bg-raised px-4 py-3">
       <p className="flex items-center gap-2 text-sm font-medium text-primary">
         <IconLock size={15} className="text-warning" />
-        First connection to {host}:{port}
+        {tr("First connection to {host}:{port}", { host, port })}
       </p>
       <p className="mt-1 text-xs text-secondary">
-        This computer&apos;s SSH identity has not been seen before. Check the fingerprint against the
-        server before trusting it.
+        {tr(
+          "This computer's SSH identity has not been seen before. Check the fingerprint against the server before trusting it.",
+        )}
       </p>
       <p className="mono mt-2 break-all text-xs text-primary">
         {keyType} {fingerprint}
@@ -762,10 +780,10 @@ function HostKeyPrompt({
       <p className="mt-0.5 text-2xs text-tertiary">{fingerprintMnemonic(fingerprint)}</p>
       <div className="mt-3 flex justify-end gap-2">
         <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={onCancel}>
-          Cancel
+          {tr("Cancel")}
         </button>
         <button type="button" className="btn-primary px-3 py-1 text-xs" onClick={onAccept}>
-          Trust and connect
+          {tr("Trust and connect")}
         </button>
       </div>
     </div>
@@ -785,30 +803,31 @@ function HostKeyChanged({
   actual: string;
   onClose: () => void;
 }): ReactNode {
+  const tr = useT();
   return (
     <div className="border-b border-danger bg-danger-subtle px-4 py-3">
       <p className="flex items-center gap-2 text-sm font-semibold text-danger">
         <IconAlert size={15} />
-        The SSH identity of {host}:{port} has changed
+        {tr("The SSH identity of {host}:{port} has changed", { host, port })}
       </p>
       <p className="mt-1 text-xs text-secondary">
-        File transfer is blocked. This is either a reinstalled server or someone intercepting the
-        connection, there is no &ldquo;continue anyway&rdquo;. Verify the new key out of band and
-        remove the stored pin before reconnecting.
+        {tr(
+          "File transfer is blocked. This is either a reinstalled server or someone intercepting the connection, there is no “continue anyway”. Verify the new key out of band and remove the stored pin before reconnecting.",
+        )}
       </p>
       <dl className="mono mt-2 space-y-0.5 break-all text-2xs">
         <div>
-          <dt className="inline text-tertiary">expected </dt>
+          <dt className="inline text-tertiary">{tr("expected")} </dt>
           <dd className="inline text-primary">{expected}</dd>
         </div>
         <div>
-          <dt className="inline text-tertiary">received </dt>
+          <dt className="inline text-tertiary">{tr("received")} </dt>
           <dd className="inline text-danger">{actual}</dd>
         </div>
       </dl>
       <div className="mt-3 flex justify-end">
         <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={onClose}>
-          Close
+          {tr("Close")}
         </button>
       </div>
     </div>
@@ -830,6 +849,7 @@ function NamePrompt({
   onConfirm: (name: string) => void;
   onCancel: () => void;
 }): ReactNode {
+  const tr = useT();
   const [value, setValue] = useState(initial);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -857,15 +877,15 @@ function NamePrompt({
         />
         {!valid ? (
           <p className="mt-1 text-2xs text-danger">
-            A name cannot be empty, contain a slash, or be “.” or “..”.
+            {tr("A name cannot be empty, contain a slash, or be “.” or “..”.")}
           </p>
         ) : null}
         <div className="mt-3 flex justify-end gap-2">
           <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={onCancel}>
-            Cancel
+            {tr("Cancel")}
           </button>
           <button type="submit" className="btn-primary px-3 py-1 text-xs" disabled={!valid}>
-            {confirmLabel}
+            {tr(confirmLabel)}
           </button>
         </div>
       </form>
@@ -884,18 +904,19 @@ function ConfirmDelete({
   onConfirm: () => void;
   onCancel: () => void;
 }): ReactNode {
+  const tr = useT();
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-scrim">
       <div className="w-96 max-w-[calc(100vw-32px)] rounded-lg border border-danger bg-surface p-4 shadow-(--shadow-pop)">
         <p className="text-sm font-semibold text-primary">
-          Delete {count} item{count === 1 ? "" : "s"} on {where}?
+          {tr("Delete {count} items on {where}?", { count, where })}
         </p>
         <p className="mt-1 text-xs text-secondary">
-          Folders are removed with everything inside them. This cannot be undone.
+          {tr("Folders are removed with everything inside them. This cannot be undone.")}
         </p>
         <div className="mt-3 flex justify-end gap-2">
           <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={onCancel}>
-            Cancel
+            {tr("Cancel")}
           </button>
           <button
             type="button"
@@ -903,7 +924,7 @@ function ConfirmDelete({
             className="btn-primary bg-danger px-3 py-1 text-xs"
             onClick={onConfirm}
           >
-            Delete
+            {tr("Delete")}
           </button>
         </div>
       </div>
@@ -926,6 +947,7 @@ export function DropOverlay({
   hostName: string;
   remoteDir: string;
 }): ReactNode {
+  const tr = useT();
   return (
     <div
       className="fade-in pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-scrim"
@@ -934,7 +956,7 @@ export function DropOverlay({
     >
       <div className="rounded-lg border-2 border-dashed border-(--accent) bg-raised/95 px-8 py-6 text-center shadow-(--shadow-pop)">
         <p className="text-base font-semibold text-primary">
-          Drop to send {count > 0 ? count : ""} file{count === 1 ? "" : "s"} to {hostName}
+          {tr("Drop to send {count} files to {host}", { count, host: hostName })}
         </p>
         <p className="mono mt-1 text-xs text-secondary">→ {remoteDir}</p>
       </div>

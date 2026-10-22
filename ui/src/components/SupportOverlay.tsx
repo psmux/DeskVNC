@@ -6,6 +6,7 @@ import {
   useSupport,
   type SupportView,
 } from "../lib/support";
+import { useT } from "../lib/i18n";
 
 /**
  * What Get help puts in front of the person, wherever they are in the app:
@@ -16,6 +17,7 @@ import {
  * helper knocks or comes in unattended, so neither waits unseen.
  */
 export function SupportOverlay(): ReactNode {
+  const tr = useT();
   const view = useSupport();
   useEffect(() => {
     const url = rememberedCodeService();
@@ -29,7 +31,7 @@ export function SupportOverlay(): ReactNode {
           key={view.pending.peer}
           asking={view.pending}
           inputPermission={view.inputPermission}
-          note="The name is supplied by the helper. Confirm it with the person you invited."
+          note={tr("The name is supplied by the helper. Confirm it with the person you invited.")}
           onDecide={(decision, allowTools) => support.answer(decision, allowTools)}
         />
       ) : view.unattended.ask ? (
@@ -37,7 +39,9 @@ export function SupportOverlay(): ReactNode {
           key={view.unattended.ask.peer}
           asking={view.unattended.ask}
           inputPermission={view.inputPermission}
-          note="They are connecting with this computer's ID and are not paired with it. The name is supplied by the helper, so only allow someone you expect."
+          note={tr(
+            "They are connecting with this computer's ID and are not paired with it. The name is supplied by the helper, so only allow someone you expect.",
+          )}
           pairable
           onDecide={(decision, allowTools, pair) => support.answerAsk(decision, allowTools, pair)}
         />
@@ -70,6 +74,7 @@ function Approval({
   pairable?: boolean;
   onDecide: (decision: Decision, allowTools: boolean, pair: boolean) => Promise<unknown>;
 }): ReactNode {
+  const tr = useT();
   const dialog = useRef<HTMLDialogElement>(null);
   const [allowTools, setAllowTools] = useState(false);
   const [pair, setPair] = useState(false);
@@ -91,10 +96,12 @@ function Approval({
       onCancel={(event) => event.preventDefault()}
       className="m-auto w-full max-w-md rounded-lg border border-subtle bg-raised p-6 text-primary shadow-lg backdrop:bg-black/50"
     >
-      <h2 className="text-lg font-semibold">Approve this helper?</h2>
-      <p className="mt-3 text-base">{pending.name} wants to see your screen.</p>
+      <h2 className="text-lg font-semibold">{tr("Approve this helper?")}</h2>
+      <p className="mt-3 text-base">
+        {tr("{name} wants to see your screen.", { name: pending.name })}
+      </p>
       <p className="mt-1 text-xs text-secondary">{note}</p>
-      <p className="mt-3 text-xs text-secondary">Helper connection identity</p>
+      <p className="mt-3 text-xs text-secondary">{tr("Helper connection identity")}</p>
       <p className="mono break-all text-xs">{pending.peer}</p>
       {pending.tools ? (
         <div className="mt-4">
@@ -105,11 +112,14 @@ function Approval({
               checked={allowTools}
               onChange={(event) => setAllowTools(event.target.checked)}
             />
-            <span>Also let their tools run commands and copy files on this computer</span>
+            <span>
+              {tr("Also let their tools run commands and copy files on this computer")}
+            </span>
           </label>
           <p className="mt-1 text-xs text-secondary">
-            Their tools act as you, outside what the screen shows. Leave this off unless you asked
-            for it. You can turn it off at any time, and each command shows here as it runs.
+            {tr(
+              "Their tools act as you, outside what the screen shows. Leave this off unless you asked for it. You can turn it off at any time, and each command shows here as it runs.",
+            )}
           </p>
         </div>
       ) : null}
@@ -121,7 +131,7 @@ function Approval({
             checked={pair}
             onChange={(event) => setPair(event.target.checked)}
           />
-          <span>Let them connect any time without asking me again</span>
+          <span>{tr("Let them connect any time without asking me again")}</span>
         </label>
       ) : null}
       <div className="mt-5 flex flex-wrap gap-2">
@@ -131,18 +141,18 @@ function Approval({
           disabled={!inputPermission}
           onClick={() => decide("control")}
         >
-          Allow viewing and control
+          {tr("Allow viewing and control")}
         </button>
         <button type="button" className="btn-secondary" onClick={() => decide("view")}>
-          Allow viewing
+          {tr("Allow viewing")}
         </button>
         <button type="button" className="btn-secondary" onClick={() => decide("deny")}>
-          Decline
+          {tr("Decline")}
         </button>
       </div>
       {!inputPermission ? (
         <p className="mt-2 text-xs text-secondary">
-          Accessibility permission is needed for control. You can allow viewing now.
+          {tr("Accessibility permission is needed for control. You can allow viewing now.")}
         </p>
       ) : null}
       {error ? <p role="alert" className="mt-2 text-sm text-danger">{error}</p> : null}
@@ -173,31 +183,35 @@ function Banner({ children }: { children: ReactNode }): ReactNode {
 
 /** A helper this person let in, in this session. */
 function SharingBanner({ view }: { view: SupportView }): ReactNode {
-  const name = view.helper?.name || "Your helper";
+  const tr = useT();
+  const name = view.helper?.name || tr("Your helper");
   return (
     <Banner>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-semibold">
-          {name} can see your screen
-          {view.control ? " and use your mouse and keyboard" : ""}.
+          {view.control
+            ? tr("{name} can see your screen and use your mouse and keyboard.", { name })
+            : tr("{name} can see your screen.", { name })}
         </span>
         <div className="ml-auto flex gap-2">
           {view.control ? (
             <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.setControl(false)}>
-              Stop control
+              {tr("Stop control")}
             </button>
           ) : null}
           {view.tools ? (
             <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.setTools(false)}>
-              Stop their commands
+              {tr("Stop their commands")}
             </button>
           ) : null}
           <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.stop()}>
-            End session
+            {tr("End session")}
           </button>
         </div>
       </div>
-      {view.tools ? <p className="text-xs">Their tools can run commands and copy files on this computer.</p> : null}
+      {view.tools ? (
+        <p className="text-xs">{tr("Their tools can run commands and copy files on this computer.")}</p>
+      ) : null}
       <Activity lines={view.activity.slice(-3)} />
     </Banner>
   );
@@ -205,25 +219,31 @@ function SharingBanner({ view }: { view: SupportView }): ReactNode {
 
 /** A paired helper who came in with nobody's approval. One per helper. */
 function UnattendedBanner({ active }: { active: SupportView["unattended"]["active"][number] }): ReactNode {
+  const tr = useT();
   return (
     <Banner>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-semibold">
-          {active.name} is connected to this computer
-          {active.control ? " and can use the mouse and keyboard" : ", watching"}
+          {active.control
+            ? tr("{name} is connected to this computer and can use the mouse and keyboard", {
+                name: active.name,
+              })
+            : tr("{name} is connected to this computer, watching", { name: active.name })}
         </span>
         <div className="ml-auto flex gap-2">
           {active.tools ? (
             <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.stopUnattendedTools(active.id)}>
-              Stop their commands
+              {tr("Stop their commands")}
             </button>
           ) : null}
           <button type="button" className="btn-secondary px-3 py-1 text-xs" onClick={() => void support.endUnattended(active.id)}>
-            End their session
+            {tr("End their session")}
           </button>
         </div>
       </div>
-      {active.tools ? <p className="text-xs">Their tools can run commands and copy files on this computer.</p> : null}
+      {active.tools ? (
+        <p className="text-xs">{tr("Their tools can run commands and copy files on this computer.")}</p>
+      ) : null}
       <Activity lines={active.activity} />
     </Banner>
   );
