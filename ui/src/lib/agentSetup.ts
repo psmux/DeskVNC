@@ -175,10 +175,10 @@ export const AGENT_CANNOT: readonly string[] = [
 ];
 
 /** Why the line above is a boundary and not a feature somebody forgot. */
+// One literal, not concatenated: the catalog is keyed by the source text, and a
+// sentence built from fragments cannot be looked up.
 export const AGENT_BOUNDARY_WHY =
-  "That one is deliberate and it is not going to change. An agent that could type " +
-  "a secret it read off a screen would leave a record saying you approved it, and a " +
-  "record that says the wrong thing is worse than none.";
+  "That one is deliberate and it is not going to change. An agent that could type a secret it read off a screen would leave a record saying you approved it, and a record that says the wrong thing is worse than none.";
 
 // ---------------------------------------------------------------------------
 // Registering, without a terminal

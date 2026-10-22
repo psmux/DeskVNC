@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { BoundaryProviderSetup } from "./BoundaryProviderSetup";
 import { mustInvoke, openSessionWindow, readClipboard } from "../lib/tauri";
 import { useHosts } from "../state/HostsContext";
+import { useT } from "../lib/i18n";
+import { Trans } from "./Trans";
 
 const NAME_KEY = "deskvnc.boundary.helperName";
 
@@ -37,6 +39,7 @@ function looksLikeMachineId(text: string): boolean {
  * Rust validates and owns the invitation; it never enters a URL.
  */
 export function BoundaryConnect() {
+  const tr = useT();
   const dialog = useRef<HTMLDialogElement>(null);
   const { saveHost, savePassword } = useHosts();
   const [open, setOpen] = useState(false);
@@ -92,12 +95,12 @@ export function BoundaryConnect() {
   const connectMachine = async () => {
     remember(NAME_KEY, name.trim());
     const saved = await saveHost({
-      friendlyName: machineName.trim() || "Boundary computer",
+      friendlyName: machineName.trim() || tr("Boundary computer"),
       address: machineId.trim().toLowerCase(),
       port: 0,
       protocol: "boundary",
     });
-    if (!saved) throw new Error("The computer could not be saved to the Library");
+    if (!saved) throw new Error(tr("The computer could not be saved to the Library"));
     if (password) await savePassword(saved.id, password);
     await openSessionWindow({ profileId: saved.id });
   };
@@ -130,36 +133,72 @@ export function BoundaryConnect() {
   );
 
   return <>
-    <button type="button" className="rounded-md border border-subtle px-3 py-1.5 text-sm text-primary hover:bg-inset" onClick={() => void show()} title="Connect to someone who asked you for help">Help someone</button>
+    <button type="button" className="rounded-md border border-subtle px-3 py-1.5 text-sm text-primary hover:bg-inset" onClick={() => void show()} title={tr("Connect to someone who asked you for help")}>{tr("Help someone")}</button>
     <dialog ref={dialog} onCancel={reset} className="m-auto max-h-[90vh] overflow-y-auto w-full max-w-lg rounded-lg border border-subtle bg-raised p-6 text-primary shadow-lg backdrop:bg-black/40">
       <form onSubmit={(event) => { event.preventDefault(); void submit(); }} className="flex flex-col gap-4">
         <div>
-          <h2 className="text-lg font-semibold">Help someone</h2>
-          <p className="mt-2 text-sm text-secondary">Help someone over the internet, with nothing to set up on either network.</p>
+          <h2 className="text-lg font-semibold">{tr("Help someone")}</h2>
+          <p className="mt-2 text-sm text-secondary">
+            {tr("Help someone over the internet, with nothing to set up on either network.")}
+          </p>
         </div>
-        <div className="flex gap-2">{tab("invite", "Help someone now")}{tab("machine", "Connect to a computer")}</div>
-        <label className="text-sm">Your name, shown to the person<input autoFocus required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded border border-subtle bg-inset p-2" /></label>
+        <div className="flex gap-2">{tab("invite", tr("Help someone now"))}{tab("machine", tr("Connect to a computer"))}</div>
+        <label className="text-sm">{tr("Your name, shown to the person")}<input autoFocus required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded border border-subtle bg-inset p-2" /></label>
         {mode === "invite" ? <>
           <ol className="list-decimal space-y-1 pl-5 text-sm text-secondary">
-            <li>In DeskVNC they press <strong>Get help</strong>. Without DeskVNC, they download <strong>DeskVNC Support</strong> from the DeskVNC releases page and open it. Nothing is installed.</li>
-            <li>They press <strong>Get a code</strong> or <strong>Create invitation</strong> and send you what it shows.</li>
-            <li>You copy it and open this window. It is pasted for you. They approve you on their screen.</li>
+            <li>
+              <Trans
+                text="In DeskVNC they press {getHelp}. Without DeskVNC, they download {support} from the DeskVNC releases page and open it. Nothing is installed."
+                nodes={{
+                  getHelp: <strong>{tr("Get help")}</strong>,
+                  support: <strong>DeskVNC Support</strong>,
+                }}
+              />
+            </li>
+            <li>
+              <Trans
+                text="They press {code} or {invite} and send you what it shows."
+                nodes={{
+                  code: <strong>{tr("Get a code")}</strong>,
+                  invite: <strong>{tr("Create invitation")}</strong>,
+                }}
+              />
+            </li>
+            <li>{tr("You copy it and open this window. It is pasted for you. They approve you on their screen.")}</li>
           </ol>
-          <label className="text-sm">Their code or invitation<textarea required spellCheck={false} autoComplete="off" maxLength={16384} rows={4} value={invitation} onChange={(event) => { setInvitation(event.target.value); setPasted(false); }} placeholder="1234 5678 9012, or boundary1:…" className="mt-1 w-full rounded border border-subtle bg-inset p-2 font-mono text-xs" /></label>
-          {pasted && <p className="-mt-2 text-xs text-secondary">Pasted from your clipboard.</p>}
-          {numeric && <label className="text-sm">Code service URL<input type="url" value={codeService} onChange={(event) => setCodeService(event.target.value)} placeholder="https://codes.example.com" className="mt-1 w-full rounded border border-subtle bg-inset p-2" /><span className="mt-1 block text-xs text-secondary">A number needs the same code service the person used. Otherwise ask them for the invitation text.</span></label>}
-          <p className="text-xs text-secondary">During the session they can choose to let you connect any time. The computer is then saved to your Library and opens unattended.</p>
+          <label className="text-sm">{tr("Their code or invitation")}<textarea required spellCheck={false} autoComplete="off" maxLength={16384} rows={4} value={invitation} onChange={(event) => { setInvitation(event.target.value); setPasted(false); }} placeholder="1234 5678 9012, or boundary1:…" className="mt-1 w-full rounded border border-subtle bg-inset p-2 font-mono text-xs" /></label>
+          {pasted && <p className="-mt-2 text-xs text-secondary">{tr("Pasted from your clipboard.")}</p>}
+          {numeric && <label className="text-sm">{tr("Code service URL")}<input type="url" value={codeService} onChange={(event) => setCodeService(event.target.value)} placeholder="https://codes.example.com" className="mt-1 w-full rounded border border-subtle bg-inset p-2" /><span className="mt-1 block text-xs text-secondary">
+              {tr(
+                "A number needs the same code service the person used. Otherwise ask them for the invitation text.",
+              )}
+            </span></label>}
+          <p className="text-xs text-secondary">
+            {tr(
+              "During the session they can choose to let you connect any time. The computer is then saved to your Library and opens unattended.",
+            )}
+          </p>
           <BoundaryProviderSetup active={open} />
         </> : <>
-          <p className="text-sm text-secondary">For a computer with unattended access switched on in DeskVNC or DeskVNC Support. A computer that paired you is already in your Library. Otherwise the person there approves you on their screen, and can pair you so you connect without asking next time.</p>
-          <label className="text-sm">Computer ID<input required spellCheck={false} autoComplete="off" value={machineId} onChange={(event) => { setMachineId(event.target.value); setPasted(false); }} placeholder="64 letters and digits, from Copy ID" className="mt-1 w-full rounded border border-subtle bg-inset p-2 font-mono text-xs" /></label>
-          {pasted && <p className="-mt-2 text-xs text-secondary">Pasted from your clipboard.</p>}
-          {machineId.trim() !== "" && !looksLikeMachineId(machineId) && <p className="-mt-2 text-xs text-red-500">That is not a computer ID. Use Copy ID on that computer.</p>}
-          <label className="text-sm">Name in your Library<input maxLength={80} value={machineName} onChange={(event) => setMachineName(event.target.value)} placeholder="Mum's laptop" className="mt-1 w-full rounded border border-subtle bg-inset p-2" /></label>
-          <label className="text-sm">Unattended password, if nobody is there to approve you<input type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 w-full rounded border border-subtle bg-inset p-2" /><span className="mt-1 block text-xs text-secondary">Kept in your system keychain, never in the Library file.</span></label>
+          <p className="text-sm text-secondary">
+            {tr(
+              "For a computer with unattended access switched on in DeskVNC or DeskVNC Support. A computer that paired you is already in your Library. Otherwise the person there approves you on their screen, and can pair you so you connect without asking next time.",
+            )}
+          </p>
+          <label className="text-sm">{tr("Computer ID")}<input required spellCheck={false} autoComplete="off" value={machineId} onChange={(event) => { setMachineId(event.target.value); setPasted(false); }} placeholder="64 letters and digits, from Copy ID" className="mt-1 w-full rounded border border-subtle bg-inset p-2 font-mono text-xs" /></label>
+          {pasted && <p className="-mt-2 text-xs text-secondary">{tr("Pasted from your clipboard.")}</p>}
+          {machineId.trim() !== "" && !looksLikeMachineId(machineId) && (
+            <p className="-mt-2 text-xs text-red-500">
+              {tr("That is not a computer ID. Use Copy ID on that computer.")}
+            </p>
+          )}
+          <label className="text-sm">{tr("Name in your Library")}<input maxLength={80} value={machineName} onChange={(event) => setMachineName(event.target.value)} placeholder="Mum's laptop" className="mt-1 w-full rounded border border-subtle bg-inset p-2" /></label>
+          <label className="text-sm">{tr("Unattended password, if nobody is there to approve you")}<input type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 w-full rounded border border-subtle bg-inset p-2" /><span className="mt-1 block text-xs text-secondary">
+              {tr("Kept in your system keychain, never in the Library file.")}
+            </span></label>
         </>}
         {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
-        <div className="flex justify-end gap-2"><button type="button" disabled={busy} onClick={close} className="rounded border border-subtle px-4 py-2">Cancel</button><button disabled={busy || !ready} type="submit" className="rounded bg-accent px-4 py-2 text-accent-fg disabled:opacity-50">{busy ? "Opening…" : mode === "invite" ? "Connect" : "Save and connect"}</button></div>
+        <div className="flex justify-end gap-2"><button type="button" disabled={busy} onClick={close} className="rounded border border-subtle px-4 py-2">{tr("Cancel")}</button><button disabled={busy || !ready} type="submit" className="rounded bg-accent px-4 py-2 text-accent-fg disabled:opacity-50">{busy ? tr("Opening…") : mode === "invite" ? tr("Connect") : tr("Save and connect")}</button></div>
       </form>
     </dialog>
   </>;

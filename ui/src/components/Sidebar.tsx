@@ -2,6 +2,7 @@
 import { useState, type ReactNode } from "react";
 import type { HostGroup, HostProfile, HostTag } from "../lib/types";
 import { classNames } from "../lib/util";
+import { useT } from "../lib/i18n";
 import {
   IconAgent,
   IconChevronDown,
@@ -88,15 +89,16 @@ export function Sidebar({
    */
   const [agentsOpen, setAgentsOpen] = useState(false);
 
+  const tr = useT();
   return (
     <>
     <nav
       className="flex w-56 shrink-0 flex-col gap-1 overflow-y-auto border-r border-subtle bg-surface/60 px-2.5 py-3"
-      aria-label="Library sections"
+      aria-label={tr("Library sections")}
     >
       <SidebarRow
         icon={<IconZap size={16} />}
-        label="Nearby"
+        label={tr("Nearby")}
         count={nearbyCount}
         active={selection.kind === "nearby"}
         onClick={() => onSelect({ kind: "nearby" })}
@@ -105,32 +107,32 @@ export function Sidebar({
           selection on the unfiltered list is the natural way to say it. */}
       <SidebarRow
         icon={<IconMonitor size={16} />}
-        label="All Hosts"
+        label={tr("All Hosts")}
         count={hosts.length}
         active={selection.kind === "all"}
         onClick={() => onSelect({ kind: "all" })}
         dropKey="ungroup"
         dropActive={dropOverKey === "ungroup"}
-        dropHint={dragging ? "Drop here to remove these hosts from their group" : undefined}
+        dropHint={dragging ? tr("Drop here to remove these hosts from their group") : undefined}
       />
       <SidebarRow
         icon={<IconStar size={16} />}
-        label="Favorites"
+        label={tr("Favorites")}
         count={hosts.filter((h) => h.favorite).length}
         active={selection.kind === "favorites"}
         onClick={() => onSelect({ kind: "favorites" })}
       />
       <SidebarRow
         icon={<IconClock size={16} />}
-        label="Recents"
+        label={tr("Recents")}
         active={selection.kind === "recents"}
         onClick={() => onSelect({ kind: "recents" })}
       />
 
-      <Section title="Groups" onAdd={onNewGroup} addLabel="New group">
+      <Section title={tr("Groups")} onAdd={onNewGroup} addLabel={tr("New group")}>
         {rootGroups.length === 0 ? (
           <p className="px-2 py-1 text-xs text-tertiary">
-            {dragging ? "Make a group first, then drop hosts on it" : "No groups yet"}
+            {dragging ? tr("Make a group first, then drop hosts on it") : tr("No groups yet")}
           </p>
         ) : (
           rootGroups.map((g) => (
@@ -151,16 +153,18 @@ export function Sidebar({
       </Section>
 
       <Section
-        title="Tags"
+        title={tr("Tags")}
         onAdd={onNewTag}
-        addLabel="New tag"
+        addLabel={tr("New tag")}
         extra={
           tags.length > 1 ? (
             <button
               type="button"
               className="rounded-sm px-1.5 py-0.5 text-2xs font-semibold tracking-wide text-tertiary hover:bg-inset hover:text-primary"
-              title="Toggle whether hosts must match ALL selected tags (AND) or ANY (OR)"
-              aria-label={`Tag filter mode: ${tagMode.toUpperCase()}. Click to toggle.`}
+              title={tr("Toggle whether hosts must match ALL selected tags (AND) or ANY (OR)")}
+              aria-label={tr("Tag filter mode: {mode}. Click to toggle.", {
+                mode: tagMode.toUpperCase(),
+              })}
               onClick={onToggleTagMode}
             >
               {tagMode.toUpperCase()}
@@ -170,7 +174,7 @@ export function Sidebar({
       >
         {tags.length === 0 ? (
           <p className="px-2 py-1 text-xs text-tertiary">
-            {dragging ? "Make a tag first, then drop hosts on it" : "No tags yet"}
+            {dragging ? tr("Make a tag first, then drop hosts on it") : tr("No tags yet")}
           </p>
         ) : (
           <div className="flex flex-wrap gap-1.5 px-2 py-1">
@@ -183,7 +187,7 @@ export function Sidebar({
                   type="button"
                   aria-pressed={active}
                   data-drop={`tag:${t.id}`}
-                  title={dragging ? `Drop here to tag with ${t.name}` : undefined}
+                  title={dragging ? tr("Drop here to tag with {tag}", { tag: t.name }) : undefined}
                   className={classNames(
                     "flex items-center gap-1.5 rounded-pill border px-2 py-0.5 text-xs",
                     active
@@ -215,13 +219,13 @@ export function Sidebar({
       <div className="mt-auto pt-2">
         <SidebarRow
           icon={<IconAgent size={16} />}
-          label="AI Agents"
+          label={tr("AI Agents")}
           active={agentsOpen}
           onClick={() => setAgentsOpen(true)}
         />
         <SidebarRow
           icon={<IconGear size={16} />}
-          label="Preferences"
+          label={tr("Preferences")}
           active={false}
           onClick={onOpenPreferences}
         />
@@ -338,6 +342,7 @@ function GroupRow({
   dragging?: boolean;
   dropOverKey?: string | null;
 }): ReactNode {
+  const tr = useT();
   const children = groups.filter((g) => g.parentId === group.id).sort((a, b) => a.sort - b.sort);
   const active = selection.kind === "group" && selection.id === group.id;
   const over = dropOverKey === `group:${group.id}`;
@@ -347,7 +352,7 @@ function GroupRow({
         type="button"
         aria-current={active ? "true" : undefined}
         data-drop={`group:${group.id}`}
-        title={dragging ? `Drop here to move these hosts into ${group.name}` : undefined}
+        title={dragging ? tr("Drop here to move these hosts into {group}", { group: group.name }) : undefined}
         className={classNames(
           "flex w-full items-center gap-2 rounded-sm py-1.5 pr-2 text-sm",
           active ? "bg-accent/15 font-medium text-primary" : "text-secondary hover:bg-inset hover:text-primary",

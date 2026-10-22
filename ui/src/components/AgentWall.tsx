@@ -56,6 +56,7 @@ import {
 } from "../lib/prefs";
 import { useAgentActivity } from "../state/AgentActivityContext";
 import { IconMonitor, IconStop, IconTerminal } from "./icons";
+import { t, useT } from "../lib/i18n";
 
 /**
  * A clock local to this component.
@@ -168,8 +169,13 @@ function RemoteQuote({ remote }: { remote: RemoteText }): ReactNode {
 
 /** The intent line, and what became of it. */
 function IntentRow({ intent }: { intent: AgentIntent | null }): ReactNode {
+  const tr = useT();
   if (!intent) {
-    return <p className="truncate text-2xs text-tertiary">Holding the lease, nothing in flight</p>;
+    return (
+      <p className="truncate text-2xs text-tertiary">
+        {tr("Holding the lease, nothing in flight")}
+      </p>
+    );
   }
   const outcome = outcomeStyle(intent.outcome);
   return (
@@ -208,6 +214,7 @@ function Card({
   onGo: () => void;
   onStop: () => void;
 }): ReactNode {
+  const tr = useT();
   const holder = entry.holder;
   const driven = holder?.kind === "agent";
   const label = entry.machine?.label ?? entry.sessionId;
@@ -253,7 +260,7 @@ function Card({
           title={
             entry.machine
               ? `${entry.machine.address}:${entry.machine.port}`
-              : "Show this machine"
+              : tr("Show this machine")
           }
         >
           {label}
@@ -269,8 +276,8 @@ function Card({
             type="button"
             onClick={onStop}
             className="shrink-0 rounded-sm p-0.5 text-warning hover:bg-danger-subtle hover:text-danger"
-            aria-label={`Stop the agent driving ${label}, and take control`}
-            title={`Stop ${holderLabel(holder)} and take control`}
+            aria-label={tr("Stop the agent driving {machine}, and take control", { machine: label })}
+            title={tr("Stop {holder} and take control", { holder: holderLabel(holder) })}
           >
             <IconStop size={11} />
           </button>
@@ -282,12 +289,16 @@ function Card({
           "truncate text-2xs",
           driven ? "text-secondary" : "font-medium text-accent",
         )}
-        title={holder?.capability ? `Capability: ${holder.capability}` : undefined}
+        title={
+          holder?.capability
+            ? tr("Capability: {capability}", { capability: holder.capability })
+            : undefined
+        }
       >
         {driven
           ? holderLabel(holder)
           : entry.preempted
-            ? `You took the wheel from ${entry.preempted.agent}`
+            ? tr("You took the wheel from {agent}", { agent: entry.preempted.agent })
             : holderLabel(holder)}
       </p>
 
@@ -299,7 +310,9 @@ function Card({
           {entry.intent?.remote ? <RemoteQuote remote={entry.intent.remote} /> : null}
         </div>
       ) : (
-        <p className="truncate text-2xs text-tertiary">Input is yours, the agent was stopped</p>
+        <p className="truncate text-2xs text-tertiary">
+          {tr("Input is yours, the agent was stopped")}
+        </p>
       )}
     </div>
   );
@@ -311,6 +324,7 @@ export function AgentWall({
   /** Bring the pane holding this session forward. */
   onShowSession: (sessionId: string) => void;
 }): ReactNode {
+  const tr = useT();
   const { wall, count, plane, stopAgent, stopAll } = useAgentActivity();
   const now = useSecondsTick(wall.length > 0);
   const scroller = useRef<HTMLDivElement>(null);
@@ -332,7 +346,7 @@ export function AgentWall({
    */
   const showStatus = plane.on && !hidden;
   const headline = useMemo(
-    () => (showStatus ? planeStatusLine(plane) : "Agent activity"),
+    () => (showStatus ? planeStatusLine(plane) : t("Agent activity")),
     [showStatus, plane],
   );
 
@@ -348,7 +362,7 @@ export function AgentWall({
       // Announced, but not interrupting: a person watching this is looking at
       // it, and a person who is not should not have their work read over.
       role="region"
-      aria-label="Agent activity"
+      aria-label={tr("Agent activity")}
     >
       <div className="flex items-center gap-2 px-0.5">
         <span
@@ -380,9 +394,9 @@ export function AgentWall({
             className="shrink-0 rounded-sm px-1.5 py-0.5 text-2xs font-medium text-warning hover:bg-danger-subtle hover:text-danger"
             // Says what it does to all of them, because a person reaching for
             // this on a wall of twelve is not reading carefully.
-            title="Take every lease back from every agent, at once"
+            title={tr("Take every lease back from every agent, at once")}
           >
-            Stop all
+            {tr("Stop all")}
           </button>
         ) : null}
       </div>

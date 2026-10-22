@@ -18,6 +18,8 @@ import type { ReactNode } from "react";
 import { Dialog } from "./primitives";
 import type { SshHostKeyPromptState } from "../hooks/useSession";
 import { IconAlert, IconLock } from "./icons";
+import { Trans } from "./Trans";
+import { useT } from "../lib/i18n";
 
 export function SshHostKeyPrompt({
   data,
@@ -28,13 +30,18 @@ export function SshHostKeyPrompt({
   onAccept: () => void;
   onCancel: () => void;
 }): ReactNode {
+  const tr = useT();
   const endpoint = `${data.host}:${data.port}`;
   const gateway = data.gateway;
 
   if (data.changed) {
     return (
       <Dialog
-        title={gateway ? "SSH gateway identity has CHANGED" : "This machine's identity has CHANGED"}
+        title={
+          gateway
+            ? tr("SSH gateway identity has CHANGED")
+            : tr("This machine's identity has CHANGED")
+        }
         onClose={onCancel}
         danger
         width={560}
@@ -46,18 +53,17 @@ export function SshHostKeyPrompt({
               <IconAlert size={20} />
             </span>
             <p className="text-sm break-words text-primary">
-              The SSH server at <strong className="mono">{endpoint}</strong> is presenting a
-              different host key than the one you trusted before. This can mean the machine was
-              reinstalled, or that someone is intercepting your connection. The connection was
-              refused. If you know the key legitimately changed, remove the saved key for this
-              machine and connect again.
+              <Trans
+                text="The SSH server at {endpoint} is presenting a different host key than the one you trusted before. This can mean the machine was reinstalled, or that someone is intercepting your connection. The connection was refused. If you know the key legitimately changed, remove the saved key for this machine and connect again."
+                nodes={{ endpoint: <strong className="mono">{endpoint}</strong> }}
+              />
             </p>
           </div>
-          <KeyBlock label="Previously trusted" value={data.expected ?? ""} />
-          <KeyBlock label="Presented now" value={data.fingerprint} />
+          <KeyBlock label={tr("Previously trusted")} value={data.expected ?? ""} />
+          <KeyBlock label={tr("Presented now")} value={data.fingerprint} />
           <div className="flex justify-end">
             <button type="button" data-cancel className="btn-primary" onClick={onCancel}>
-              Close
+              {tr("Close")}
             </button>
           </div>
         </div>
@@ -67,7 +73,11 @@ export function SshHostKeyPrompt({
 
   return (
     <Dialog
-      title={gateway ? `Verify SSH gateway ${data.host}` : `Verify ${data.host}`}
+      title={
+        gateway
+          ? tr("Verify SSH gateway {host}", { host: data.host })
+          : tr("Verify {host}", { host: data.host })
+      }
       onClose={onCancel}
       width={560}
       initialFocusSelector="[data-cancel]"
@@ -79,29 +89,33 @@ export function SshHostKeyPrompt({
           </span>
           <p className="text-sm break-words text-secondary">
             {gateway ? (
-              <>
-                Your connection will be tunnelled through the SSH server at{" "}
-                <span className="mono">{endpoint}</span>, and this is the first time it has
-                identified itself.
-              </>
+              <Trans
+                text="Your connection will be tunnelled through the SSH server at {endpoint}, and this is the first time it has identified itself."
+                nodes={{ endpoint: <span className="mono">{endpoint}</span> }}
+              />
             ) : (
-              <>
-                This is the first time <span className="mono">{endpoint}</span> has identified
-                itself, so there is nothing saved to compare it against yet.
-              </>
+              <Trans
+                text="This is the first time {endpoint} has identified itself, so there is nothing saved to compare it against yet."
+                nodes={{ endpoint: <span className="mono">{endpoint}</span> }}
+              />
             )}{" "}
-            Verify the fingerprint below matches the server&apos;s
-            (<span className="mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</span>)
-            before trusting it.
+            <Trans
+              text="Verify the fingerprint below matches the server's ({command}) before trusting it."
+              nodes={{
+                command: (
+                  <span className="mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</span>
+                ),
+              }}
+            />
           </p>
         </div>
-        <KeyBlock label={data.keyType ?? "host key"} value={data.fingerprint} />
+        <KeyBlock label={data.keyType ?? tr("host key")} value={data.fingerprint} />
         <div className="flex flex-wrap justify-end gap-2.5">
           <button type="button" data-cancel className="btn-secondary" onClick={onCancel}>
-            Cancel
+            {tr("Cancel")}
           </button>
           <button type="button" className="btn-primary" onClick={onAccept}>
-            Trust and connect
+            {tr("Trust and connect")}
           </button>
         </div>
       </div>
@@ -110,12 +124,13 @@ export function SshHostKeyPrompt({
 }
 
 function KeyBlock({ label, value }: { label: string; value: string }): ReactNode {
+  const tr = useT();
   return (
     <div className="space-y-1 rounded-md bg-inset p-3.5">
       <div className="text-xs text-secondary">{label}</div>
       <div
         className="mono break-all text-xs leading-relaxed text-primary"
-        aria-label={`${label} SSH fingerprint`}
+        aria-label={tr("{label} SSH fingerprint", { label })}
       >
         {value}
       </div>

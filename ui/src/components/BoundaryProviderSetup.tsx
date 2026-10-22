@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { mustInvoke } from "../lib/tauri";
+import { useT } from "../lib/i18n";
 
 type Progress = { message: string; address: string | null; finished: boolean; failed: boolean };
 /**
@@ -8,6 +9,7 @@ type Progress = { message: string; address: string | null; finished: boolean; fa
  * finishes, for a caller that saves it as the connection to use.
  */
 export function BoundaryProviderSetup({ active, intro, onAddress }: { active: boolean; intro?: string; onAddress?: (address: string) => void }) {
+  const tr = useT();
   const reported = useRef(onAddress);
   reported.current = onAddress;
   const [provider, setProvider] = useState("Tailscale");
@@ -33,7 +35,7 @@ export function BoundaryProviderSetup({ active, intro, onAddress }: { active: bo
           setBusy(!state.finished);
           if (state.finished && state.address) reported.current?.(state.address);
         }
-      } catch { if (alive) setMessage("Could not read setup status. Reopen this dialog to reconnect."); }
+      } catch { if (alive) setMessage(tr("Could not read setup status. Reopen this dialog to reconnect.")); }
       if (alive) timer = setTimeout(() => { void poll(); }, 700);
     };
     void poll();
@@ -53,32 +55,51 @@ export function BoundaryProviderSetup({ active, intro, onAddress }: { active: bo
   };
   const inputClass = "mt-1 w-full rounded border border-subtle bg-inset p-2";
   return <details className="rounded border border-subtle p-3 text-sm">
-    <summary className="cursor-pointer">Set up my private infrastructure</summary>
+    <summary className="cursor-pointer">{tr("Set up my private infrastructure")}</summary>
     <div className="mt-3 flex flex-col gap-3">
-      <p>{intro ?? "Install and connect this helper device to your own provider account. Run setup in Boundary on the recipient device as well, then create a new invitation."}</p>
+      <p>
+        {intro ??
+          tr(
+            "Install and connect this helper device to your own provider account. Run setup in Boundary on the recipient device as well, then create a new invitation.",
+          )}
+      </p>
       <fieldset disabled={busy} className="flex flex-col gap-3">
-        <label>Provider<select className={inputClass} value={provider} onChange={event => { setProvider(event.target.value); setToken(""); setConsent(false); }}><option>Tailscale</option><option>Cloudflare</option></select></label>
+        <label>{tr("Provider")}<select className={inputClass} value={provider} onChange={event => { setProvider(event.target.value); setToken(""); setConsent(false); }}><option>Tailscale</option><option>Cloudflare</option></select></label>
         {provider === "Cloudflare" && <>
-          <label>Cloudflare team name<input className={inputClass} value={team} onChange={event => setTeam(event.target.value)} /></label>
-          <label><input type="checkbox" checked={configure} onChange={event => setConfigure(event.target.checked)} /> Configure my account through the Cloudflare API</label>
+          <label>{tr("Cloudflare team name")}<input className={inputClass} value={team} onChange={event => setTeam(event.target.value)} /></label>
+          <label><input type="checkbox" checked={configure} onChange={event => setConfigure(event.target.checked)} /> {tr("Configure my account through the Cloudflare API")}</label>
           {configure && <>
-            <label>Account ID<input className={inputClass} value={account} onChange={event => setAccount(event.target.value)} /></label>
-            <label>Enrollment emails, separated by commas<input className={inputClass} value={emails} onChange={event => setEmails(event.target.value)} /></label>
-            <p>Creates an email enrollment policy and private Mesh device profile, and enables device connectivity for the account. Existing access policies still apply.</p>
+            <label>{tr("Account ID")}<input className={inputClass} value={account} onChange={event => setAccount(event.target.value)} /></label>
+            <label>{tr("Enrollment emails, separated by commas")}<input className={inputClass} value={emails} onChange={event => setEmails(event.target.value)} /></label>
+            <p>
+              {tr(
+                "Creates an email enrollment policy and private Mesh device profile, and enables device connectivity for the account. Existing access policies still apply.",
+              )}
+            </p>
           </>}
         </>}
-        {(provider === "Tailscale" || configure) && <label>{provider === "Tailscale" ? "Device auth key (optional, leave empty for browser login)" : "Scoped Cloudflare API token"}<input type="password" autoComplete="off" spellCheck={false} className={inputClass} value={token} onChange={event => setToken(event.target.value)} /></label>}
-        <p>The official client is installed if missing. Complete provider login and operating system permission prompts when they appear. Windows setup adds a UDP firewall rule limited to this app and the private provider network.</p>
-        <label><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} /> Install the client and apply the setup described above</label>
-        <button type="button" disabled={!consent || busy} onClick={() => void start()} className="rounded border border-subtle px-3 py-2 disabled:opacity-50">Install and connect</button>
+        {(provider === "Tailscale" || configure) && <label>{provider === "Tailscale"
+                ? tr("Device auth key (optional, leave empty for browser login)")
+                : tr("Scoped Cloudflare API token")}<input type="password" autoComplete="off" spellCheck={false} className={inputClass} value={token} onChange={event => setToken(event.target.value)} /></label>}
+        <p>
+          {tr(
+            "The official client is installed if missing. Complete provider login and operating system permission prompts when they appear. Windows setup adds a UDP firewall rule limited to this app and the private provider network.",
+          )}
+        </p>
+        <label><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} /> {tr("Install the client and apply the setup described above")}</label>
+        <button type="button" disabled={!consent || busy} onClick={() => void start()} className="rounded border border-subtle px-3 py-2 disabled:opacity-50">{tr("Install and connect")}</button>
       </fieldset>
       {provider === "Cloudflare" && configure && !busy && <>
-        <label><input type="checkbox" checked={remove} onChange={event => setRemove(event.target.checked)} /> Remove this deployment's Cloudflare enrollment policy and device profile. This can interrupt access.</label>
-        <button type="button" disabled={!remove} onClick={() => { setRemove(false); void start(true); }}>Remove Boundary account resources</button>
+        <label><input type="checkbox" checked={remove} onChange={event => setRemove(event.target.checked)} /> {tr("Remove this deployment's Cloudflare enrollment policy and device profile. This can interrupt access.")}</label>
+        <button type="button" disabled={!remove} onClick={() => { setRemove(false); void start(true); }}>{tr("Remove Boundary account resources")}</button>
       </>}
-      {busy && <button type="button" onClick={() => { void mustInvoke("boundary_provider_cancel").catch(error => setMessage(String(error))); }}>Cancel setup</button>}
+      {busy && <button type="button" onClick={() => { void mustInvoke("boundary_provider_cancel").catch(error => setMessage(String(error))); }}>{tr("Cancel setup")}</button>}
       {message && <p role="status">{message}</p>}
-      <p className="text-xs text-secondary">A local connection check is followed by an actual Boundary session to verify the complete route. Private invitations disable public relay fallback.</p>
+      <p className="text-xs text-secondary">
+        {tr(
+          "A local connection check is followed by an actual Boundary session to verify the complete route. Private invitations disable public relay fallback.",
+        )}
+      </p>
     </div>
   </details>;
 }

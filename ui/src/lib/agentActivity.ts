@@ -27,6 +27,8 @@
  * component cannot mistake it for a string we wrote.
  */
 
+import { t } from "./i18n";
+
 // ---------------------------------------------------------------- contracts
 
 /**
@@ -598,18 +600,20 @@ export function drivenCount(state: AgentState): number {
 
 /** What to call a holder on screen, making no claim we cannot support. */
 export function holderLabel(holder: LeaseHolder | null): string {
-  if (!holder) return "Nobody";
+  // Plain functions in this file translate through `t()`: their callers are
+  // components that already re-render on a language change.
+  if (!holder) return t("Nobody");
   switch (holder.kind) {
     case "agent":
-      return `Agent ${holder.name}`;
+      return t("Agent {name}", { name: holder.name });
     case "service":
-      return `Service ${holder.name}`;
+      return t("Service {name}", { name: holder.name });
     case "human":
       return holder.name;
     default:
       // Said as plainly as it is known: something is driving, and we are not
       // going to guess what.
-      return `Driver ${holder.name}`;
+      return t("Driver {name}", { name: holder.name });
   }
 }
 
@@ -621,7 +625,7 @@ export function intentLine(intent: AgentIntent | null): string {
 
 /** How a remote excerpt is introduced, so its origin is never in doubt. */
 export function remoteLabel(remote: RemoteText): string {
-  return remote.source === "terminal" ? "remote terminal" : "remote screen";
+  return remote.source === "terminal" ? t("remote terminal") : t("remote screen");
 }
 
 // ------------------------------------------------------------------- plane
@@ -870,7 +874,9 @@ export function planeView(reported: PlaneStatus | null, state: AgentState): Plan
   };
 }
 
-const agentWord = (n: number): string => (n === 1 ? "1 agent" : `${n} agents`);
+// English still needs "1 agent"; Chinese does not inflect, so both keys map to
+// the same translation there and the singular only differs in the catalog.
+const agentWord = (n: number): string => (n === 1 ? t("1 agent") : t("{n} agents", { n }));
 
 /**
  * The status line: agents, what they are driving, and out of how much.
@@ -882,10 +888,19 @@ const agentWord = (n: number): string => (n === 1 ? "1 agent" : `${n} agents`);
  */
 export function planeStatusLine(plane: PlaneView): string {
   if (!plane.on) return "";
-  if (plane.agents === 0) return "No agent connected";
-  if (plane.driving === 0) return `${agentWord(plane.agents)} connected, none driving`;
-  const of = plane.sessions > 0 ? ` of ${plane.sessions}` : "";
-  return `${agentWord(plane.agents)} driving ${plane.driving}${of}`;
+  if (plane.agents === 0) return t("No agent connected");
+  if (plane.driving === 0) {
+    return t("{agents} connected, none driving", { agents: agentWord(plane.agents) });
+  }
+  // The "of N" clause is part of the sentence in each language, so it is two
+  // keys rather than an interpolated fragment.
+  return plane.sessions > 0
+    ? t("{agents} driving {driving} of {sessions}", {
+        agents: agentWord(plane.agents),
+        driving: plane.driving,
+        sessions: plane.sessions,
+      })
+    : t("{agents} driving {driving}", { agents: agentWord(plane.agents), driving: plane.driving });
 }
 
 /** The same thing at length, for the tooltip and the screen reader. */
@@ -893,14 +908,20 @@ export function planeStatusDetail(plane: PlaneView): string {
   if (!plane.on) return "";
   const total =
     plane.sessions > 0
-      ? ` ${plane.sessions === 1 ? "1 session is" : `${plane.sessions} sessions are`} live in all.`
+      ? ` ${plane.sessions === 1
+          ? t("1 session is live in all.")
+          : t("{n} sessions are live in all.", { n: plane.sessions })}`
       : "";
   if (plane.agents === 0) {
-    return `No agent is attached to this computer.${total}`;
+    return `${t("No agent is attached to this computer.")}${total}`;
   }
   const held =
     plane.driving === 0
-      ? "None of them holds a lease, so nothing is being driven"
-      : `${plane.driving === 1 ? "1 machine is" : `${plane.driving} machines are`} being driven`;
-  return `${agentWord(plane.agents)} attached. ${held}.${total} Driving means an agent holds the lease; an attached agent that holds none is driving nothing.`;
+      ? t("None of them holds a lease, so nothing is being driven")
+      : plane.driving === 1
+        ? t("1 machine is being driven")
+        : t("{n} machines are being driven", { n: plane.driving });
+  return `${t("{agents} attached.", { agents: agentWord(plane.agents) })} ${held}.${total} ${t(
+    "Driving means an agent holds the lease; an attached agent that holds none is driving nothing.",
+  )}`;
 }

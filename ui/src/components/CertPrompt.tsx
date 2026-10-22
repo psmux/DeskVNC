@@ -7,7 +7,9 @@ import { useState, type ReactNode } from "react";
 import { Dialog } from "./primitives";
 import { fingerprintMnemonic, formatFingerprint } from "../lib/util";
 import { IconAlert, IconLock } from "./icons";
+import { Trans } from "./Trans";
 import type { PinScheme } from "../lib/types";
+import { useT } from "../lib/i18n";
 
 export interface CertPromptData {
   fingerprint: string;
@@ -33,14 +35,19 @@ export function CertPrompt({
   onConnectOnce: () => void;
   onCancel: () => void;
 }): ReactNode {
+  const tr = useT();
   const mnemonic = fingerprintMnemonic(data.fingerprint);
   const [confirmText, setConfirmText] = useState("");
 
   if (data.isChange) {
-    const confirmed = confirmText === "trust new identity";
+    // The phrase is compared against, so it has to be the same string the
+    // instruction shows. Typing an English phrase in a Chinese UI would be a
+    // worse test of attention than the one this is trying to be.
+    const phrase = tr("trust new identity");
+    const confirmed = confirmText === phrase;
     return (
       <Dialog
-        title="Server identity has CHANGED"
+        title={tr("Server identity has CHANGED")}
         onClose={onCancel}
         danger
         width={560}
@@ -52,15 +59,18 @@ export function CertPrompt({
               <IconAlert size={20} />
             </span>
             <p className="text-sm text-primary">
-              <strong>{data.hostName}</strong> is presenting a different certificate than the one
-              you trusted before. This can mean the server was reinstalled, or that someone is
-              intercepting your connection. <strong>Do not continue unless you know why this
-              changed.</strong>
+              <Trans
+                text="{host} is presenting a different certificate than the one you trusted before. This can mean the server was reinstalled, or that someone is intercepting your connection. <em>Do not continue unless you know why this changed.</em>"
+                nodes={{
+                  host: <strong>{data.hostName}</strong>,
+                  em: <strong />,
+                }}
+              />
               {data.scheme === "rdp-tls" ? (
                 <span className="mt-2 block">
-                  A Windows reinstall, or a new machine certificate after a domain
-                  change, both look exactly like this. So does an attacker. Do not
-                  continue unless you know which it is.
+                  {tr(
+                    "A Windows reinstall, or a new machine certificate after a domain change, both look exactly like this. So does an attacker. Do not continue unless you know which it is.",
+                  )}
                 </span>
               ) : null}
             </p>
@@ -68,7 +78,10 @@ export function CertPrompt({
           <FingerprintBlock fingerprint={data.fingerprint} mnemonic={mnemonic} subject={data.subject} />
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-secondary">
-              To proceed anyway, type <span className="mono">trust new identity</span>
+              <Trans
+                text="To proceed anyway, type {phrase}"
+                nodes={{ phrase: <span className="mono">{phrase}</span> }}
+              />
             </span>
             <input
               className="field mono"
@@ -80,7 +93,7 @@ export function CertPrompt({
           </label>
           <div className="flex justify-end gap-2.5">
             <button type="button" data-cancel className="btn-primary" onClick={onCancel}>
-              Cancel (recommended)
+              {tr("Cancel (recommended)")}
             </button>
             <button
               type="button"
@@ -88,7 +101,7 @@ export function CertPrompt({
               disabled={!confirmed}
               onClick={onTrust}
             >
-              Trust new identity
+              {tr("Trust new identity")}
             </button>
           </div>
         </div>
@@ -98,7 +111,7 @@ export function CertPrompt({
 
   return (
     <Dialog
-      title={`Verify ${data.hostName}`}
+      title={tr("Verify {host}", { host: data.hostName })}
       onClose={onCancel}
       width={560}
       initialFocusSelector="[data-cancel]"
@@ -111,16 +124,15 @@ export function CertPrompt({
           <p className="text-sm text-secondary">
             {data.scheme === "rdp-tls" ? (
               <>
-                Windows Remote Desktop normally identifies itself with a certificate
-                it generated for itself, so on a fresh machine there is nothing to
-                compare this against. Remembering it now means you will be told if
-                it ever changes.
+                {tr(
+                  "Windows Remote Desktop normally identifies itself with a certificate it generated for itself, so on a fresh machine there is nothing to compare this against. Remembering it now means you will be told if it ever changes.",
+                )}
               </>
             ) : (
               <>
-                This is the first time this computer has identified itself with the
-                key below. Verify the fingerprint matches the one shown on the
-                server, then choose how much to trust it.
+                {tr(
+                  "This is the first time this computer has identified itself with the key below. Verify the fingerprint matches the one shown on the server, then choose how much to trust it.",
+                )}
               </>
             )}
           </p>
@@ -128,13 +140,13 @@ export function CertPrompt({
         <FingerprintBlock fingerprint={data.fingerprint} mnemonic={mnemonic} subject={data.subject} />
         <div className="flex flex-wrap justify-end gap-2.5">
           <button type="button" data-cancel className="btn-secondary" onClick={onCancel}>
-            Cancel
+            {tr("Cancel")}
           </button>
           <button type="button" className="btn-secondary" onClick={onConnectOnce}>
-            Connect once
+            {tr("Connect once")}
           </button>
           <button type="button" className="btn-primary" onClick={onTrust}>
-            Trust this computer
+            {tr("Trust this computer")}
           </button>
         </div>
       </div>
@@ -151,15 +163,16 @@ function FingerprintBlock({
   mnemonic: string;
   subject: string;
 }): ReactNode {
+  const tr = useT();
   return (
     <div className="space-y-2 rounded-md bg-inset p-3.5">
       {subject ? <div className="text-xs text-secondary">{subject}</div> : null}
-      <div className="mono break-all text-xs leading-relaxed text-primary" aria-label="SHA-256 certificate fingerprint">
+      <div className="mono break-all text-xs leading-relaxed text-primary" aria-label={tr("SHA-256 certificate fingerprint")}>
         {formatFingerprint(fingerprint)}
       </div>
       {mnemonic ? (
         <div className="text-sm">
-          <span className="text-tertiary">Fingerprint words: </span>
+          <span className="text-tertiary">{tr("Fingerprint words:")} </span>
           <span className="mono font-medium text-accent">{mnemonic}</span>
         </div>
       ) : null}

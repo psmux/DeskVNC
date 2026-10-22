@@ -91,6 +91,8 @@ import {
   type SshConnectConfig,
   hasSavedPassword,
 } from "../lib/tauri";
+import { t, useT } from "../lib/i18n";
+import { Trans } from "../components/Trans";
 
 /**
  * How long to let the desktop settle after `connected` before grabbing the
@@ -297,6 +299,7 @@ function SessionView({
   const inputRef = useRef<SessionInput | null>(null);
   /** Last-chance thumbnail capture, run before the renderer is disposed. */
   const teardownCaptureRef = useRef<() => void>(() => undefined);
+  const tr = useT();
   const { push } = useToasts();
   const { settings, update } = useSettings();
 
@@ -1112,7 +1115,7 @@ function SessionView({
       // fade the scrim out over 150ms, then a brief confirmation toast
       setScrimFading(true);
       window.setTimeout(() => setScrimFading(false), 180);
-      push("success", "Reconnected");
+      push("success", t("Reconnected"));
       session.refreshScreen();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1482,7 +1485,10 @@ function SessionView({
               if (paths.length === 0) return;
               const target = dropDir();
               void filesRef.current.upload(paths, target).then(() => {
-                push("info", `Sending ${paths.length} file${paths.length === 1 ? "" : "s"} to ${target}`);
+                push(
+                  "info",
+                  t("{count} files to {target}", { count: paths.length, target }),
+                );
               });
               break;
             }
@@ -1628,7 +1634,7 @@ function SessionView({
     a.download = `${session.desktopName.replace(/[^\w.-]+/g, "_")}-${Date.now()}.png`;
     a.click();
     URL.revokeObjectURL(url);
-    push("success", "Screenshot saved");
+    push("success", t("Screenshot saved"));
   }, [session.desktopName, push]);
   sendComboRef.current = sendCombo;
 
@@ -1674,10 +1680,10 @@ function SessionView({
   const clipboardSend = useCallback(async (): Promise<void> => {
     const outcome = await pushClipboard(true);
     if (outcome === "unreadable") {
-      push("warning", "Could not read the local clipboard");
+      push("warning", t("Could not read the local clipboard"));
       return;
     }
-    if (outcome === "sent") push("success", "Clipboard sent to remote");
+    if (outcome === "sent") push("success", t("Clipboard sent to remote"));
   }, [pushClipboard, push]);
 
   const changeQuality = useCallback((q: QualityPreset): void => {
@@ -1950,7 +1956,7 @@ function SessionView({
           settings.localCursor === "off" && "local-cursor-hidden",
         )}
         tabIndex={0}
-        aria-label={`Remote desktop: ${session.desktopName}`}
+        aria-label={tr("Remote desktop: {name}", { name: session.desktopName })}
       />
 
       {/* Preferences ▸ Session can take the bar away; the View and Session
@@ -2020,7 +2026,11 @@ function SessionView({
           live, and it is the first thing anyone asks for when a session feels
           slow. */}
       {connectionInfoOpen ? (
-        <Dialog title="Connection info" onClose={() => setConnectionInfoOpen(false)} width={360}>
+        <Dialog
+          title={tr("Connection info")}
+          onClose={() => setConnectionInfoOpen(false)}
+          width={360}
+        >
           <div className="p-4">
             <SessionStatusDetails stats={session.stats} desktopName={session.desktopName} />
             <div className="mt-4 flex justify-end">
@@ -2030,7 +2040,7 @@ function SessionView({
                 className="btn-primary"
                 onClick={() => setConnectionInfoOpen(false)}
               >
-                Done
+                {tr("Done")}
               </button>
             </div>
           </div>
@@ -2202,21 +2212,27 @@ function CapturePermissionDialog({
   onRetry: () => void;
   onClose: () => void;
 }): ReactNode {
+  const tr = useT();
   const isMac = navigator.platform.toLowerCase().includes("mac");
 
   if (status.state === "unsupported") {
     return (
-      <Dialog title="Shortcut pass-through isn't available here" onClose={onClose} width={480}>
+      <Dialog
+        title={tr("Shortcut pass-through isn't available here")}
+        onClose={onClose}
+        width={480}
+      >
         <div className="space-y-3 p-5 text-sm text-secondary">
           <p>{status.reason}</p>
           <p>
-            Everything the browser engine can see still reaches the remote. For the shortcuts it
-            can't, use <strong>Send to remote</strong> in the keyboard menu, Ctrl+Alt+Del,
-            Cmd/Alt+Tab and the Windows key are all deliverable that way.
+            <Trans
+              text="Everything the browser engine can see still reaches the remote. For the shortcuts it can't, use {send} in the keyboard menu, Ctrl+Alt+Del, Cmd/Alt+Tab and the Windows key are all deliverable that way."
+              nodes={{ send: <strong>{tr("Send to remote")}</strong> }}
+            />
           </p>
           <div className="flex justify-end pt-1">
             <button type="button" data-autofocus className="btn-primary" onClick={onClose}>
-              Got it
+              {tr("Got it")}
             </button>
           </div>
         </div>
@@ -2227,31 +2243,37 @@ function CapturePermissionDialog({
   const granted = status.state === "active";
 
   return (
-    <Dialog title="Let this app capture system shortcuts" onClose={onClose} width={520}>
+    <Dialog title={tr("Let this app capture system shortcuts")} onClose={onClose} width={520}>
       <div className="space-y-3.5 p-5 text-sm text-secondary">
         <p>
-          To send {isMac ? "⌘Tab, ⌘Space and ⌘Q" : "Alt+Tab and the Windows key"} to the remote
-          computer instead of this one, {isMac ? "macOS" : "the system"} has to let this app see
-          keys before the {isMac ? "window server" : "shell"} does.
+          {isMac
+            ? tr(
+                "To send ⌘Tab, ⌘Space and ⌘Q to the remote computer instead of this one, macOS has to let this app see keys before the window server does.",
+              )
+            : tr(
+                "To send Alt+Tab and the Windows key to the remote computer instead of this one, the system has to let this app see keys before the shell does.",
+              )}
         </p>
         {isMac ? (
           <div className="rounded-md bg-inset p-3.5">
             <p className="text-xs text-primary">
-              macOS calls this <strong>Accessibility</strong>. It is only used while a session
-              window is focused and pass-through is switched on. Keys are forwarded to the remote
-              computer you are connected to and are never stored or sent anywhere else.
+              <Trans
+                text="macOS calls this <strong>Accessibility</strong>. It is only used while a session window is focused and pass-through is switched on. Keys are forwarded to the remote computer you are connected to and are never stored or sent anywhere else."
+                nodes={{ strong: <strong /> }}
+              />
             </p>
           </div>
         ) : null}
         <p className="text-xs text-tertiary">
-          You can release the keyboard at any time with{" "}
-          <span className="mono">Ctrl+Alt+Shift+Esc</span>, and it releases automatically when this
-          window loses focus or closes.
+          <Trans
+            text="You can release the keyboard at any time with {chord}, and it releases automatically when this window loses focus or closes."
+            nodes={{ chord: <span className="mono">Ctrl+Alt+Shift+Esc</span> }}
+          />
         </p>
 
         <div className="flex flex-wrap justify-end gap-2.5 pt-1">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Not now
+            {tr("Not now")}
           </button>
           {isMac ? (
             <button
@@ -2259,23 +2281,24 @@ function CapturePermissionDialog({
               className="btn-secondary"
               onClick={() => void openExternal(MACOS_ACCESSIBILITY_SETTINGS_URL)}
             >
-              Open System Settings
+              {tr("Open System Settings")}
             </button>
           ) : null}
           {granted ? (
             <button type="button" data-autofocus className="btn-primary" onClick={onRetry}>
-              Turn pass-through on
+              {tr("Turn pass-through on")}
             </button>
           ) : (
             <button type="button" data-autofocus className="btn-primary" onClick={onGrant}>
-              Allow…
+              {tr("Allow…")}
             </button>
           )}
         </div>
         {isMac ? (
           <p className="text-2xs text-tertiary">
-            Already allowed but still not working? A macOS update or a new build can silently
-            invalidate the grant, remove the app from the Accessibility list and add it again.
+            {tr(
+              "Already allowed but still not working? A macOS update or a new build can silently invalidate the grant, remove the app from the Accessibility list and add it again.",
+            )}
           </p>
         ) : null}
       </div>
@@ -2318,14 +2341,14 @@ class SessionErrorBoundary extends Component<
         <div
           role="alertdialog"
           aria-modal="true"
-          aria-label="This session ran into a problem"
+          aria-label={t("This session ran into a problem")}
           className="w-[28rem] max-w-full rounded-lg border border-danger bg-raised p-5 shadow-(--shadow-pop)"
         >
           <p className="text-base font-semibold text-primary">
-            This session ran into a problem
+            {t("This session ran into a problem")}
           </p>
           <p className="mt-2 text-sm text-secondary">
-            The connection has been closed. Nothing was saved from this session.
+            {t("The connection has been closed. Nothing was saved from this session.")}
           </p>
           <p className="mono mt-3 max-h-24 overflow-auto rounded-md bg-inset p-2.5 text-xs text-tertiary">
             {error.message || String(error)}
@@ -2336,7 +2359,7 @@ class SessionErrorBoundary extends Component<
               className="btn-secondary"
               onClick={() => this.setState({ error: null })}
             >
-              Try again
+              {t("Try again")}
             </button>
             <button
               type="button"
@@ -2347,7 +2370,7 @@ class SessionErrorBoundary extends Component<
                 else void closeSessionWindow(sessionId);
               }}
             >
-              {embedded ? "Close tab" : "Close window"}
+              {embedded ? t("Close tab") : t("Close window")}
             </button>
           </div>
         </div>

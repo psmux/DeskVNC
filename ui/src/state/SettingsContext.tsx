@@ -1,3 +1,4 @@
+import { applyLocale, useLocaleCode } from "../lib/i18n";
 import {
   createContext,
   useCallback,
@@ -11,6 +12,8 @@ import {
 export type LocalCursor = "standard" | "dot" | "off";
 
 export type ThemeChoice = "system" | "light" | "dark";
+/** The language the UI is drawn in. `system` follows the OS. */
+export type LocaleChoice = "system" | "en" | "zh-CN";
 export type LibraryView = "grid" | "list";
 export type SortKey = "name" | "last-connected" | "frequency" | "group";
 /**
@@ -31,6 +34,14 @@ export type WindowMode = "windows" | "tabs";
 
 export interface Settings {
   theme: ThemeChoice;
+  /**
+   * Language for the whole UI, `system` unless chosen otherwise.
+   *
+   * Here rather than in `lib/prefs` because Preferences is its own window: the
+   * choice has to reach every other window, and this is the one store that
+   * already broadcasts. See `lib/i18n`.
+   */
+  locale: LocaleChoice;
   libraryView: LibraryView;
   sortKey: SortKey;
   compact: boolean;
@@ -78,6 +89,7 @@ export const MAX_QUICK_CONNECT_HISTORY = 8;
 
 export const DEFAULTS: Settings = {
   theme: "system",
+  locale: "system",
   libraryView: "grid",
   sortKey: "name",
   compact: false,
@@ -111,6 +123,10 @@ export function loadSettings(): Settings {
     if (merged.windowMode !== "windows" && merged.windowMode !== "tabs") {
       merged.windowMode = DEFAULTS.windowMode;
     }
+    // An unknown language would leave `t()` with no catalog at all.
+    if (merged.locale !== "system" && merged.locale !== "en" && merged.locale !== "zh-CN") {
+      merged.locale = DEFAULTS.locale;
+    }
     return merged;
   } catch {
     return DEFAULTS;
@@ -138,6 +154,17 @@ export function SettingsProvider({ children }: { children: ReactNode }): ReactNo
     if (settings.theme === "system") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", settings.theme);
   }, [settings.theme]);
+
+  // Hand the language to the module that holds it, so non-component code
+  // (`t()`) agrees with what the components just re-rendered with.
+  const localeCode = useLocaleCode();
+  useEffect(() => {
+    applyLocale(settings.locale);
+  }, [settings.locale]);
+
+  useEffect(() => {
+    document.documentElement.lang = localeCode;
+  }, [localeCode]);
 
   const value = useMemo(() => ({ settings, update }), [settings, update]);
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

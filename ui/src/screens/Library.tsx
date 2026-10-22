@@ -44,6 +44,7 @@ import {
   saveGroupLayout,
 } from "../lib/groupLayout";
 import { classNames, formatBps, fuzzyMatch, modKeyLabel, timeAgo } from "../lib/util";
+import { useT } from "../lib/i18n";
 import { Sidebar, type SidebarSelection } from "../components/Sidebar";
 import { useHostDragSelect, type DropTarget } from "../hooks/useHostDragSelect";
 import { HostTile, DiscoveredTile, addressLabel, osLabel } from "../components/HostTile";
@@ -119,6 +120,7 @@ export function Library({
   autoAddDiscoveredId?: string | null;
   onAutoAddHandled?: () => void;
 }): ReactNode {
+  const tr = useT();
   const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, wakeHost, refresh, refreshThumbnail } = useHosts();
   const { discovered, scan, startScan } = useDiscovery();
   const { settings, update } = useSettings();
@@ -377,40 +379,40 @@ export function Library({
     (group: HostGroup): void => {
       const serialized = serializeActive();
       if (!serialized) {
-        push("info", "Open a group as a grid first, then save how you arranged it");
+        push("info", tr("Open a group as a grid first, then save how you arranged it"));
         return;
       }
       saveGroupLayout(group.id, serialized);
-      push("success", `Saved this arrangement to ${group.name}`);
+      push("success", tr("Saved this arrangement to {group}", { group: group.name }));
     },
-    [serializeActive, push],
+    [serializeActive, push, tr],
   );
 
   const groupMenuItems = useCallback(
     (group: HostGroup): MenuItem[] => {
       const items: MenuItem[] = [
         {
-          label: hasSavedLayout(group.id) ? "Open as grid (saved layout)" : "Open as grid",
+          label: hasSavedLayout(group.id) ? tr("Open as grid (saved layout)") : tr("Open as grid"),
           onSelect: () => openGroupAsGrid(group),
         },
       ];
       // Only worth offering with a session in front: with the library showing
       // there is no arrangement to save.
       if (activeTabId !== null) {
-        items.push({ label: "Save this layout to group", onSelect: () => saveLayoutToGroup(group) });
+        items.push({ label: tr("Save this layout to group"), onSelect: () => saveLayoutToGroup(group) });
       }
       if (hasSavedLayout(group.id)) {
         items.push({
-          label: "Forget saved layout",
+          label: tr("Forget saved layout"),
           onSelect: () => {
             forgetGroupLayout(group.id);
-            push("info", `${group.name} will open as a plain grid from now on`);
+            push("info", tr("{group} will open as a plain grid from now on", { group: group.name }));
           },
         });
       }
       return items;
     },
-    [openGroupAsGrid, saveLayoutToGroup, activeTabId, push],
+    [openGroupAsGrid, saveLayoutToGroup, activeTabId, push, tr],
   );
 
   /** Most recent first, no duplicates, oldest dropped past the cap. */
@@ -552,8 +554,9 @@ export function Library({
 
   /** "3 hosts" / "Studio", for toasts about a dropped selection. */
   const describe = useCallback(
-    (ids: string[]): string => (ids.length === 1 ? hostName(ids[0]) : `${ids.length} hosts`),
-    [hostName],
+    (ids: string[]): string =>
+      ids.length === 1 ? hostName(ids[0]) : tr("{count} hosts", { count: ids.length }),
+    [hostName, tr],
   );
 
   /**
@@ -585,23 +588,31 @@ export function Library({
       // nothing is the very bug this change exists to fix, and it is no more
       // acceptable on the way back than on the way there.
       const reportUndo = (run: () => Promise<void>) => (): void => {
-        void run().catch((err: unknown) => push("danger", `Could not undo: ${String(err)}`));
+        void run().catch((err: unknown) =>
+          push("danger", tr("Could not undo: {error}", { error: String(err) })),
+        );
       };
 
       if (target.kind === "ungroup") {
         // Nothing to do for hosts that are not in a group anyway.
         const grouped = ids.filter((id) => previousGroup.get(id) !== null);
         if (grouped.length === 0) {
-          push("info", `${describe(ids)} ${ids.length === 1 ? "is" : "are"} not in a group`);
+          push(
+            "info",
+            ids.length === 1
+              ? tr("{name} is not in a group", { name: describe(ids) })
+              : tr("{name} are not in a group", { name: describe(ids) }),
+          );
           return;
         }
         void setHostsGroup(grouped, null).then(
           () =>
-            push("success", `Removed ${describe(grouped)} from their group`, {
-              label: "Undo",
+            push("success", tr("Removed {name} from their group", { name: describe(grouped) }), {
+              label: tr("Undo"),
               run: reportUndo(undoGroups),
             }),
-          (err: unknown) => push("danger", `Could not move those hosts: ${String(err)}`),
+          (err: unknown) =>
+            push("danger", tr("Could not move those hosts: {error}", { error: String(err) })),
         );
         return;
       }
@@ -612,13 +623,13 @@ export function Library({
         const moving = ids.filter((id) => previousGroup.get(id) !== target.id);
         // Silence here would be indistinguishable from a drop that missed.
         if (moving.length === 0) {
-          push("info", `${describe(ids)} already in ${group.name}`);
+          push("info", tr("{name} already in {group}", { name: describe(ids), group: group.name }));
           return;
         }
         void setHostsGroup(moving, target.id).then(
           () =>
-            push("success", `Moved ${describe(moving)} to ${group.name}`, {
-              label: "Undo",
+            push("success", tr("Moved {name} to {group}", { name: describe(moving), group: group.name }), {
+              label: tr("Undo"),
               run: reportUndo(undoGroups),
             }),
           (err: unknown) => push("danger", `Could not move those hosts: ${String(err)}`),
@@ -632,19 +643,20 @@ export function Library({
       // would strip a tag the user had put there earlier by hand.
       const tagging = ids.filter((id) => !(hostById.get(id)?.tags ?? []).includes(target.id));
       if (tagging.length === 0) {
-        push("info", `${describe(ids)} already tagged ${tag.name}`);
+        push("info", tr("{name} already tagged {tag}", { name: describe(ids), tag: tag.name }));
         return;
       }
       void addTagToHosts(tagging, target.id).then(
         () =>
-          push("success", `Tagged ${describe(tagging)} with ${tag.name}`, {
-            label: "Undo",
+          push("success", tr("Tagged {name} with {tag}", { name: describe(tagging), tag: tag.name }), {
+            label: tr("Undo"),
             run: reportUndo(() => removeTagFromHosts(tagging, target.id)),
           }),
-        (err: unknown) => push("danger", `Could not tag those hosts: ${String(err)}`),
+        (err: unknown) =>
+          push("danger", tr("Could not tag those hosts: {error}", { error: String(err) })),
       );
     },
-    [hostById, groups, tags, setHostsGroup, addTagToHosts, removeTagFromHosts, describe, push],
+    [hostById, groups, tags, setHostsGroup, addTagToHosts, removeTagFromHosts, describe, push, tr],
   );
 
   const {
@@ -874,9 +886,12 @@ export function Library({
         await setHostTags(id, draft.tagIds);
       }
       setHostDialog(null);
-      push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
+      push(
+        "success",
+        draft.id ? tr("Host updated") : tr("Added {name}", { name: draft.friendlyName }),
+      );
     },
-    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push],
+    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push, tr],
   );
 
   const paletteActions = useMemo((): PaletteAction[] => {
@@ -884,26 +899,26 @@ export function Library({
       // Sessions open in tabs are reachable from here as well as from the
       // strip, so a library with a long list of machines still has one keyboard
       // route back to the one you were working in.
-      ...summaries.map((t, i) => ({
-        id: `go-to-tab-${t.id}`,
-        label: `Go to ${t.title}`,
+      ...summaries.map((s, i) => ({
+        id: `go-to-tab-${s.id}`,
+        label: tr("Go to {title}", { title: s.title }),
         hint: i < 8 ? `${modKeyLabel}${i + 2}` : "",
-        run: () => selectTab(t.id),
+        run: () => selectTab(s.id),
       })),
-      { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
-      { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
-      { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
+      { id: "new-host", label: tr("New host…"), hint: "", run: () => setHostDialog(draftFromHost(null)) },
+      { id: "quick-connect", label: tr("Connect to an address…"), hint: `${modKeyLabel}T`, run: focusQuickConnect },
+      { id: "scan", label: tr("Scan network"), hint: "", run: () => void startScan() },
       {
         id: "toggle-view",
-        label: settings.libraryView === "grid" ? "Switch to list view" : "Switch to grid view",
+        label: settings.libraryView === "grid" ? tr("Switch to list view") : tr("Switch to grid view"),
         run: () => update({ libraryView: settings.libraryView === "grid" ? "list" : "grid" }),
       },
-      { id: "preferences", label: "Open Preferences", run: onOpenPreferences },
-      { id: "refresh", label: "Refresh library", run: () => void refresh() },
-      { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
-      { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
+      { id: "preferences", label: tr("Open Preferences"), run: onOpenPreferences },
+      { id: "refresh", label: tr("Refresh library"), run: () => void refresh() },
+      { id: "help", label: tr("Help & keyboard shortcuts"), run: onOpenAbout },
+      { id: "about", label: tr("About DeskVNCViewer"), run: onOpenAbout },
     ];
-  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
+  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, tr]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -999,21 +1014,21 @@ export function Library({
       const grouped = ids.filter((id) => hosts.find((h) => h.id === id)?.groupId);
       return [
         {
-          label: `Remove ${ids.length} hosts from their group`,
+          label: tr("Remove {count} hosts from their group", { count: ids.length }),
           disabled: grouped.length === 0,
           onSelect: () => dropOnTarget(ids, { kind: "ungroup" }),
         },
         ...groups.map((g) => ({
-          label: `Move to ${g.name}`,
+          label: tr("Move to {group}", { group: g.name }),
           onSelect: () => dropOnTarget(ids, { kind: "group", id: g.id }),
         })),
         ...tags.map((t) => ({
-          label: `Tag with ${t.name}`,
+          label: tr("Tag with {tag}", { tag: t.name }),
           separatorAbove: t.id === tags[0]?.id,
           onSelect: () => dropOnTarget(ids, { kind: "tag", id: t.id }),
         })),
         {
-          label: `Delete ${ids.length} hosts…`,
+          label: tr("Delete {count} hosts…", { count: ids.length }),
           danger: true,
           separatorAbove: true,
           onSelect: () => {
@@ -1031,13 +1046,16 @@ export function Library({
               // entry, the history rows and the thumbnail, and none of those
               // are recoverable from here. Say so rather than promise more
               // than the button delivers.
-              push("info", `Deleted ${doomed.length} hosts. Saved passwords are gone.`, {
-                label: "Undo",
+              push(
+                "info",
+                tr("Deleted {count} hosts. Saved passwords are gone.", { count: doomed.length }),
+                {
+                  label: tr("Undo"),
                 run: () => {
                   void (async () => {
                     for (const h of doomed) await saveHost({ ...h });
                   })().catch((err: unknown) =>
-                    push("danger", `Could not restore those hosts: ${String(err)}`),
+                    push("danger", tr("Could not restore those hosts: {error}", { error: String(err) })),
                   );
                 },
               });
@@ -1046,51 +1064,51 @@ export function Library({
         },
       ];
     },
-    [hostById, groups, tags, dropOnTarget, deleteHost, saveHost, clearSelection, push],
+    [hostById, groups, tags, dropOnTarget, deleteHost, saveHost, clearSelection, push, tr],
   );
 
   const menuItemsFor = useCallback(
     (host: HostProfile): MenuItem[] => [
-      { label: "Connect", onSelect: () => connectHost(host) },
+      { label: tr("Connect"), onSelect: () => connectHost(host) },
       ...(allowMultiple
         ? [
             {
-              label: tabbed ? "Connect in new tab" : "Connect in new window",
+              label: tabbed ? tr("Connect in new tab") : tr("Connect in new window"),
               onSelect: () => connectHost(host, true),
             },
           ]
         : []),
       {
-        label: "Edit…",
+        label: tr("Edit…"),
         onSelect: () => editHost(host),
       },
       {
-        label: host.favorite ? "Remove from Favorites" : "Add to Favorites",
+        label: host.favorite ? tr("Remove from Favorites") : tr("Add to Favorites"),
         onSelect: () => void saveHost({ ...host, favorite: !host.favorite }),
       },
       {
-        label: "Duplicate",
+        label: tr("Duplicate"),
         onSelect: () =>
           void saveHost({
             ...host,
             id: undefined,
-            friendlyName: `${host.friendlyName} copy`,
+            friendlyName: tr("{name} copy", { name: host.friendlyName }),
             hasPassword: false,
           }),
       },
       {
-        label: "Wake (Wake-on-LAN)",
+        label: tr("Wake (Wake-on-LAN)"),
         disabled: !host.wolMac,
         onSelect: () => {
           void wakeHost(host.id);
-          push("info", `Magic packet sent to ${host.friendlyName}`);
+          push("info", tr("Magic packet sent to {host}", { host: host.friendlyName }));
         },
       },
       {
         // Thumbnails are captured by the SESSION window (capture_thumbnail
         // takes a raw RGBA body, not a host id), so from here we can only
         // re-read what the store already has.
-        label: "Reload thumbnail",
+        label: tr("Reload thumbnail"),
         onSelect: () => refreshThumbnail(host.id),
       },
       {
@@ -1098,30 +1116,44 @@ export function Library({
         // clicked through, so without this a legitimately rebuilt machine, // new TLS certificate or new RA2 key, would be permanently
         // unreachable. Forgetting returns it to first-contact state, where the
         // usual "Trust this computer" prompt applies.
-        label: "Forget saved key…",
+        label: tr("Forget saved key…"),
         onSelect: () => {
           void forgetCertificate(host.address, host.port).then(() =>
             push(
               "info",
-              `Forgot the saved key for ${host.friendlyName}. You will be asked to verify it on the next connection.`,
+              tr(
+                "Forgot the saved key for {host}. You will be asked to verify it on the next connection.",
+                { host: host.friendlyName },
+              ),
             ),
           );
         },
       },
       {
-        label: "Delete…",
+        label: tr("Delete…"),
         danger: true,
         separatorAbove: true,
         onSelect: () => {
           void deleteHost(host.id);
-          push("info", `Deleted ${host.friendlyName}`, {
-            label: "Undo",
+          push("info", tr("Deleted {host}", { host: host.friendlyName }), {
+            label: tr("Undo"),
             run: () => void saveHost({ ...host }),
           });
         },
       },
     ],
-    [allowMultiple, tabbed, connectHost, editHost, saveHost, deleteHost, wakeHost, refreshThumbnail, push],
+    [
+      allowMultiple,
+      tabbed,
+      connectHost,
+      editHost,
+      saveHost,
+      deleteHost,
+      wakeHost,
+      refreshThumbnail,
+      push,
+      tr,
+    ],
   );
 
   // ------------------------------------------------------------ render
@@ -1139,8 +1171,8 @@ export function Library({
           <input
             ref={searchRef}
             className="field !pl-8"
-            placeholder={`Search or press ${modKeyLabel}K`}
-            aria-label="Search hosts"
+            placeholder={tr("Search or press {modifier}K", { modifier: modKeyLabel })}
+            aria-label={tr("Search hosts")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => {
@@ -1149,24 +1181,24 @@ export function Library({
           />
         </div>
         <label className="flex shrink-0 items-center gap-1.5 text-xs text-secondary">
-          Sort
+          {tr("Sort")}
           <Select
             wrapperClassName="!inline-block"
             className="!w-auto !py-1 text-xs"
-            aria-label="Sort hosts"
+            aria-label={tr("Sort hosts")}
             value={settings.sortKey}
             onChange={(e) => update({ sortKey: e.target.value as SortKey })}
           >
-            <option value="name">Name</option>
-            <option value="last-connected">Last connected</option>
-            <option value="frequency">Most used</option>
-            <option value="group">Group</option>
+            <option value="name">{tr("Name")}</option>
+            <option value="last-connected">{tr("Last connected")}</option>
+            <option value="frequency">{tr("Most used")}</option>
+            <option value="group">{tr("Group")}</option>
           </Select>
         </label>
-        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label="View mode">
+        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label={tr("View mode")}>
           <button
             type="button"
-            aria-label="Grid view"
+            aria-label={tr("Grid view")}
             aria-pressed={settings.libraryView === "grid"}
             className={classNames("p-1.5", settings.libraryView === "grid" ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ libraryView: "grid" })}
@@ -1175,7 +1207,7 @@ export function Library({
           </button>
           <button
             type="button"
-            aria-label="List view"
+            aria-label={tr("List view")}
             aria-pressed={settings.libraryView === "list"}
             className={classNames("p-1.5", settings.libraryView === "list" ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ libraryView: "list" })}
@@ -1186,11 +1218,11 @@ export function Library({
         {/* The same preference as Connections > "Show sessions as tabs", within
             reach of the moment it matters: about to connect. It decides where
             the NEXT session goes, so sessions already running stay put. */}
-        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label="Where sessions open">
+        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label={tr("Where sessions open")}>
           <button
             type="button"
-            aria-label="Open sessions in their own windows"
-            title="Open each session in its own window"
+            aria-label={tr("Open sessions in their own windows")}
+            title={tr("Open each session in its own window")}
             aria-pressed={!tabbed}
             className={classNames("p-1.5", !tabbed ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ windowMode: "windows" })}
@@ -1199,8 +1231,8 @@ export function Library({
           </button>
           <button
             type="button"
-            aria-label="Open sessions as tabs in this window"
-            title="Open sessions as tabs in this window"
+            aria-label={tr("Open sessions as tabs in this window")}
+            title={tr("Open sessions as tabs in this window")}
             aria-pressed={tabbed}
             className={classNames("p-1.5", tabbed ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ windowMode: "tabs" })}
@@ -1211,8 +1243,10 @@ export function Library({
         <button
           type="button"
           aria-pressed={livePreviews}
-          aria-label="Live previews"
-          title="Live previews, tiles with an active session show a live picture instead of the saved thumbnail"
+          aria-label={tr("Live previews")}
+          title={tr(
+            "Live previews, tiles with an active session show a live picture instead of the saved thumbnail",
+          )}
           className={classNames(
             "overflow-hidden rounded-sm border border-subtle p-1.5",
             livePreviews ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset",
@@ -1231,17 +1265,17 @@ export function Library({
             </span>
           ) : null}
           <IconZap size={14} />
-          {scan.running ? "Scanning…" : "Scan network"}
+          {scan.running ? tr("Scanning…") : tr("Scan network")}
         </button>
         <button type="button" className="btn-primary" onClick={() => setHostDialog(draftFromHost(null))}>
-          <IconPlus size={14} /> New Host
+          <IconPlus size={14} /> {tr("New Host")}
         </button>
         {/* Routed through the same event the native menu's About item emits,
             so one listener (App.tsx) owns opening the dialog everywhere. */}
         <button
           type="button"
-          aria-label="About and help"
-          title="About and help"
+          aria-label={tr("About and help")}
+          title={tr("About and help")}
           className="overflow-hidden rounded-sm border border-subtle p-1.5 text-secondary hover:bg-inset"
           onClick={() => void emit("menu://action", { id: "menu:about" })}
         >
@@ -1297,7 +1331,7 @@ export function Library({
           // starts on a heading or on the empty-state copy would otherwise
           // drag a text highlight along with the rectangle.
           className="min-w-0 flex-1 select-none overflow-y-auto p-4"
-          aria-label="Hosts"
+          aria-label={tr("Hosts")}
         >
           {loading ? (
             <div className={gridClass} style={gridCap(8, settings.compact)}>
@@ -1308,19 +1342,24 @@ export function Library({
           ) : nothingSaved && unsavedDiscovered.length === 0 ? (
             <EmptyState
               icon={<IconMonitor size={56} />}
-              title="Let's find your computers"
-              body="DeskVNCViewer can discover computers on your local network automatically, or you can add one by address."
-              primary={{ label: "Find computers on my network", onClick: () => void startScan() }}
-              secondary={{ label: "Add a computer manually", onClick: () => setHostDialog(draftFromHost(null)) }}
+              title={tr("Let's find your computers")}
+              body={tr(
+                "DeskVNCViewer can discover computers on your local network automatically, or you can add one by address.",
+              )}
+              primary={{ label: tr("Find computers on my network"), onClick: () => void startScan() }}
+              secondary={{
+                label: tr("Add a computer manually"),
+                onClick: () => setHostDialog(draftFromHost(null)),
+              }}
             />
           ) : (
             <>
               {selection.kind !== "nearby" ? (
                 visibleHosts.length === 0 && search.trim() ? (
                   <EmptyState
-                    title={`No computers match “${search.trim()}”`}
+                    title={tr("No computers match “{query}”", { query: search.trim() })}
                     primary={{
-                      label: `Add “${search.trim()}” as a new host`,
+                      label: tr("Add “{query}” as a new host", { query: search.trim() }),
                       onClick: () =>
                         setHostDialog(draftFromHost(null, { address: search.trim(), friendlyName: search.trim() })),
                     }}
@@ -1378,10 +1417,15 @@ export function Library({
               ) : selection.kind === "nearby" && unsavedDiscovered.length === 0 ? (
                 <EmptyState
                   icon={<IconZap size={48} />}
-                  title="Nothing discovered yet"
-                  body="Some computers don't advertise themselves on the network. You can actively scan this subnet, or add a computer by address."
-                  primary={{ label: "Scan this network", onClick: () => void startScan() }}
-                  secondary={{ label: "Add manually", onClick: () => setHostDialog(draftFromHost(null)) }}
+                  title={tr("Nothing discovered yet")}
+                  body={tr(
+                    "Some computers don't advertise themselves on the network. You can actively scan this subnet, or add a computer by address.",
+                  )}
+                  primary={{ label: tr("Scan this network"), onClick: () => void startScan() }}
+                  secondary={{
+                    label: tr("Add manually"),
+                    onClick: () => setHostDialog(draftFromHost(null)),
+                  }}
                 />
               ) : null}
             </>
@@ -1476,8 +1520,20 @@ export function Library({
             // appeared in the sidebar, and the only trace was a console
             // warning nobody sees in a packaged app.
             void created.then(
-              () => push("success", `Created the ${kind} ${name}`),
-              (err: unknown) => push("danger", `Could not create the ${kind}: ${String(err)}`),
+              () =>
+                push(
+                  "success",
+                  kind === "group"
+                    ? tr("Created the group {name}", { name })
+                    : tr("Created the tag {name}", { name }),
+                ),
+              (err: unknown) =>
+                push(
+                  "danger",
+                  kind === "group"
+                    ? tr("Could not create the group: {error}", { error: String(err) })
+                    : tr("Could not create the tag: {error}", { error: String(err) }),
+                ),
             );
             setNamePrompt(null);
           }}
@@ -1517,6 +1573,7 @@ function SelectionBar({
   onAddTag: (tagId: string) => void;
   onClear: () => void;
 }): ReactNode {
+  const tr = useT();
   return (
     <div
       className="fade-in absolute bottom-4 right-4 z-30 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-md border border-strong bg-raised/95 px-3 py-2 text-sm shadow-(--shadow-pop) backdrop-blur-sm"
@@ -1525,17 +1582,17 @@ function SelectionBar({
           have a screen reader re-read every control each time the count
           changed, which during a marquee is constantly. */}
       <span className="font-medium text-primary" role="status">
-        {count} hosts selected
+        {tr("{count} hosts selected", { count })}
       </span>
       <span className="hidden text-xs text-tertiary lg:inline">
-        Drag onto a group or tag in the sidebar, or:
+        {tr("Drag onto a group or tag in the sidebar, or:")}
       </span>
       <label className="flex items-center gap-1.5 text-xs text-secondary">
-        Group
+        {tr("Group")}
         <Select
           wrapperClassName="!inline-block"
           className="!w-auto !py-1 text-xs"
-          aria-label="Move selected hosts to a group"
+          aria-label={tr("Move selected hosts to a group")}
           value=""
           onChange={(e) => {
             const v = e.target.value;
@@ -1543,21 +1600,21 @@ function SelectionBar({
             e.target.value = "";
           }}
         >
-          <option value="">Move to…</option>
+          <option value="">{tr("Move to…")}</option>
           {groups.map((g) => (
             <option key={g.id} value={g.id}>
               {g.name}
             </option>
           ))}
-          <option value="__none__">No group</option>
+          <option value="__none__">{tr("No group")}</option>
         </Select>
       </label>
       <label className="flex items-center gap-1.5 text-xs text-secondary">
-        Tag
+        {tr("Tag")}
         <Select
           wrapperClassName="!inline-block"
           className="!w-auto !py-1 text-xs"
-          aria-label="Add a tag to the selected hosts"
+          aria-label={tr("Add a tag to the selected hosts")}
           value=""
           onChange={(e) => {
             const v = e.target.value;
@@ -1565,7 +1622,7 @@ function SelectionBar({
             e.target.value = "";
           }}
         >
-          <option value="">Add tag…</option>
+          <option value="">{tr("Add tag…")}</option>
           {tags.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
@@ -1600,19 +1657,20 @@ function HostListView({
   /** The library holds more than one protocol, so the column earns its width. */
   showProtocol?: boolean;
 }): ReactNode {
+  const tr = useT();
   const { forKey } = useSessions();
   return (
     <div className="select-none overflow-x-auto rounded-md border border-subtle bg-surface">
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-subtle text-left text-xs text-tertiary">
-            <th className="px-3 py-2 font-medium">Name</th>
-            <th className="px-3 py-2 font-medium">Address</th>
-            <th className="px-3 py-2 font-medium">Group</th>
-            <th className="px-3 py-2 font-medium">Tags</th>
-            {showProtocol ? <th className="px-3 py-2 font-medium">Protocol</th> : null}
-            <th className="px-3 py-2 font-medium">OS</th>
-            <th className="px-3 py-2 font-medium">Last connected</th>
+            <th className="px-3 py-2 font-medium">{tr("Name")}</th>
+            <th className="px-3 py-2 font-medium">{tr("Address")}</th>
+            <th className="px-3 py-2 font-medium">{tr("Group")}</th>
+            <th className="px-3 py-2 font-medium">{tr("Tags")}</th>
+            {showProtocol ? <th className="px-3 py-2 font-medium">{tr("Protocol")}</th> : null}
+            <th className="px-3 py-2 font-medium">{tr("OS")}</th>
+            <th className="px-3 py-2 font-medium">{tr("Last connected")}</th>
           </tr>
         </thead>
         <tbody>
@@ -1637,7 +1695,7 @@ function HostListView({
                   <span
                     className={classNames("h-2 w-2 rounded-full", h.online ? "bg-success" : "bg-tertiary/60")}
                     role="img"
-                    aria-label={h.online ? "Online" : "Offline or unknown"}
+                    aria-label={h.online ? tr("Online") : tr("Offline or unknown")}
                   />
                   <span className="font-medium text-primary">{h.friendlyName}</span>
                 </span>
@@ -1705,10 +1763,11 @@ function NamePromptDialog({
   onSubmit: (name: string, color: string) => void;
   onClose: () => void;
 }): ReactNode {
+  const tr = useT();
   const [name, setName] = useState("");
   const [color, setColor] = useState(TAG_COLORS[3]);
   return (
-    <Dialog title={kind === "group" ? "New Group" : "New Tag"} onClose={onClose} width={400}>
+    <Dialog title={kind === "group" ? tr("New Group") : tr("New Tag")} onClose={onClose} width={400}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -1720,7 +1779,7 @@ function NamePromptDialog({
           data-autofocus
           className="field"
           placeholder={kind === "group" ? "Office" : "prod"}
-          aria-label={`${kind} name`}
+          aria-label={kind === "group" ? tr("Group name") : tr("Tag name")}
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
