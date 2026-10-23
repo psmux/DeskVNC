@@ -1,0 +1,285 @@
+//! Measure how a Boundary session feels across a real network.
+//!
+//! The host draws a still desktop picture with a square at the last pointer
+//! position. The helper moves the pointer and times how long until a screen
+//! with the square in its new place arrives, which is what a person feels as
+//! lag. With `busy` the host also repaints a large band every capture, the
+//! way a scrolling page or a video does, to measure screens per second.
+//!
+//! ```sh
+//! bench host [--image screen.png] [--bind 10.42.0.9]    # prints INVITATION
+//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy]
+//! bench encode [--image screen.png]                      # time capture side work
+//! ```
+use boundary_session::{Approval, Desktop, Event, Frame, HostOptions, Input, Key, Route};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const MARK: i64 = 28;
+const W: u32 = 1920;
+const H: u32 = 1200;
+
+fn arg(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn options(args: &[String]) -> HostOptions {
+    match arg(args, "--bind") {
+        Some(ip) => HostOptions {
+            relay: false,
+            relay_url: None,
+            bind_ip: Some(ip.parse().expect("bind address")),
+        },
+        None => HostOptions::default(),
+    }
+}
+
+/// A desktop sized picture: the given image, or bands of text-like noise.
+fn base(args: &[String]) -> Vec<u8> {
+    if let Some(path) = arg(args, "--image") {
+        let image = image::open(path).expect("image").resize_exact(
+            W,
+            H,
+            image::imageops::FilterType::Triangle,
+        );
+        return image.into_rgba8().into_raw();
+    }
+    (0..W * H)
+        .flat_map(|i| {
+            let (x, y) = (i % W, i / W);
+            let text = (y % 18) < 11 && ((x * 31 + y * 7) % 13) < 6 && (x % 400) < 320;
+            let v = if text {
+                40
+            } else {
+                235 - ((y / 200) as u8) * 6
+            };
+            [v, v, v.saturating_add(10), 255]
+        })
+        .collect()
+}
+
+struct State {
+    x: f32,
+    y: f32,
+    busy: bool,
+    tick: u32,
+}
+
+struct Synthetic {
+    base: Vec<u8>,
+    state: Arc<Mutex<State>>,
+}
+impl Desktop for Synthetic {
+    fn capture(&mut self) -> anyhow::Result<Frame> {
+        let mut rgba = self.base.clone();
+        let mut s = self.state.lock().unwrap();
+        s.tick = s.tick.wrapping_add(1);
+        if s.busy {
+            // A third of the screen changes every capture.
+            let shift = s.tick * 37;
+            for y in 300..700u32 {
+                for x in 0..W {
+                    let i = ((y * W + x) * 4) as usize;
+                    let v = (((x + shift) ^ y) % 251) as u8;
+                    rgba[i..i + 3].copy_from_slice(&[v, v / 2, 255 - v]);
+                }
+            }
+        }
+        let cx = (s.x * (W - 1) as f32) as i64;
+        let cy = (s.y * (H - 1) as f32) as i64;
+        for y in (cy - MARK / 2).max(0)..(cy + MARK / 2).min(H as i64) {
+            for x in (cx - MARK / 2).max(0)..(cx + MARK / 2).min(W as i64) {
+                let i = ((y as u32 * W + x as u32) * 4) as usize;
+                rgba[i..i + 3].copy_from_slice(&[255, 0, 255]);
+            }
+        }
+        Ok(Frame {
+            width: W,
+            height: H,
+            rgba,
+        })
+    }
+    fn input(&mut self, input: Input) -> anyhow::Result<()> {
+        let mut s = self.state.lock().unwrap();
+        match input {
+            Input::Move { x, y } => (s.x, s.y) = (x, y),
+            Input::Key {
+                key: Key::Letter('b'),
+                down: true,
+            } => s.busy = true,
+            Input::Key {
+                key: Key::Letter('q'),
+                down: true,
+            } => s.busy = false,
+            _ => {}
+        }
+        Ok(())
+    }
+    fn release(&mut self) {}
+}
+
+/// Is the square drawn at this normalised point?
+fn marked(frame: &Frame, x: f32, y: f32) -> bool {
+    let px = (x * (frame.width - 1) as f32) as usize;
+    let py = (y * (frame.height - 1) as f32) as usize;
+    let i = (py * frame.width as usize + px) * 4;
+    let p = &frame.rgba[i..i + 3];
+    p[0] > 200 && p[1] < 70 && p[2] > 200
+}
+
+fn percentile(sorted: &[Duration], p: f64) -> Duration {
+    if sorted.is_empty() {
+        return Duration::ZERO;
+    }
+    sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let started = Instant::now();
+    match args.first().map(String::as_str) {
+        Some("host") => {
+            let base = base(&args);
+            let mut session = boundary_session::host(options(&args), move || {
+                Ok(Box::new(Synthetic {
+                    base,
+                    state: Arc::new(Mutex::new(State {
+                        x: 0.5,
+                        y: 0.5,
+                        busy: false,
+                        tick: 0,
+                    })),
+                }))
+            });
+            while let Some(event) = session.events.recv().await {
+                match event {
+                    Event::Invitation(t) => println!("INVITATION {t}"),
+                    Event::Approval { answer, .. } => {
+                        let _ = answer.send(Approval::Control);
+                    }
+                    Event::Connected { .. } => println!("{:?} connected", started.elapsed()),
+                    Event::Finished(result) => {
+                        println!("finished: {result:?}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some("view") => {
+            let secs: u64 = arg(&args, "--secs")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20);
+            let busy = args.iter().any(|a| a == "--busy");
+            let mut session =
+                boundary_session::viewer(args[1].clone(), "Bench".into(), options(&args));
+            loop {
+                match session.events.recv().await {
+                    Some(Event::Connected { .. }) => break,
+                    Some(Event::Finished(r)) => anyhow::bail!("finished before connecting: {r:?}"),
+                    None => anyhow::bail!("session ended"),
+                    _ => {}
+                }
+            }
+            let connected = started.elapsed();
+            session.frames.changed().await?;
+            let first = started.elapsed();
+            if busy {
+                session.input(Input::Key {
+                    key: Key::Letter('b'),
+                    down: true,
+                })?;
+            }
+            let mut lags = Vec::new();
+            let mut frames = 0u32;
+            let mut misses = 0u32;
+            let points = [(0.2, 0.2), (0.8, 0.3), (0.3, 0.8), (0.7, 0.7), (0.5, 0.15)];
+            let end = Instant::now() + Duration::from_secs(secs);
+            let mut n = 0;
+            let measured = Instant::now();
+            while Instant::now() < end {
+                let (x, y) = points[n % points.len()];
+                n += 1;
+                let sent = Instant::now();
+                session.input(Input::Move { x, y })?;
+                let seen = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        session.frames.changed().await?;
+                        frames += 1;
+                        let frame = session.frames.borrow_and_update().clone();
+                        if frame.is_some_and(|f| marked(&f, x, y)) {
+                            return anyhow::Ok(());
+                        }
+                    }
+                })
+                .await;
+                match seen {
+                    Ok(r) => {
+                        r?;
+                        lags.push(sent.elapsed());
+                    }
+                    Err(_) => misses += 1,
+                }
+                // Keep counting screens for a moment, as a person pausing would.
+                let pause = Instant::now() + Duration::from_millis(300);
+                while let Ok(Ok(())) =
+                    tokio::time::timeout_at(pause.into(), session.frames.changed()).await
+                {
+                    session.frames.borrow_and_update();
+                    frames += 1;
+                }
+            }
+            let elapsed = measured.elapsed().as_secs_f64();
+            let c = session.connectivity.borrow().clone();
+            lags.sort();
+            println!(
+                "route {} rtt {:?} | connect {:.2}s first screen {:.2}s | lag p50 {:?} p90 {:?} max {:?} ({} moves, {} missed) | {:.1} screens/s",
+                match c.route {
+                    Some(Route::Direct) => "direct",
+                    Some(Route::Relay) => "relay",
+                    _ => "unknown",
+                },
+                c.rtt,
+                connected.as_secs_f64(),
+                first.as_secs_f64(),
+                percentile(&lags, 0.5),
+                percentile(&lags, 0.9),
+                lags.last().copied().unwrap_or_default(),
+                lags.len(),
+                misses,
+                frames as f64 / elapsed,
+            );
+            session.stop();
+        }
+        Some("encode") => {
+            let base = base(&args);
+            let frame = Frame {
+                width: W,
+                height: H,
+                rgba: base,
+            };
+            let big = image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(W, H, frame.rgba.clone()).unwrap(),
+            )
+            .resize_exact(5120, 2880, image::imageops::FilterType::Nearest);
+            let t = Instant::now();
+            let _ = big.resize(1920, 1200, image::imageops::FilterType::Triangle);
+            let resize = t.elapsed();
+            let t = Instant::now();
+            let jpeg = frame.encode_jpeg()?;
+            let encode = t.elapsed();
+            let t = Instant::now();
+            let _ = Frame::decode(&jpeg)?;
+            let decode = t.elapsed();
+            println!(
+                "5K to 1920 resize {resize:?} | jpeg encode {encode:?} {} KB | decode {decode:?}",
+                jpeg.len() / 1024
+            );
+        }
+        _ => eprintln!("usage: bench host | bench view <invitation> | bench encode"),
+    }
+    Ok(())
+}
