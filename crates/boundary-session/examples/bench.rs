@@ -268,6 +268,24 @@ async fn main() -> anyhow::Result<()> {
             let t = Instant::now();
             let _ = big.resize(1920, 1200, image::imageops::FilterType::Triangle);
             let resize = t.elapsed();
+            let fast = {
+                use fast_image_resize::{
+                    FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer, images::Image,
+                };
+                let raw = big.to_rgba8().into_raw();
+                let mut resizer = Resizer::new();
+                let t = Instant::now();
+                let src = Image::from_vec_u8(5120, 2880, raw, PixelType::U8x4)?;
+                let mut dst = Image::new(1920, 1080, PixelType::U8x4);
+                resizer.resize(
+                    &src,
+                    &mut dst,
+                    &ResizeOptions::new()
+                        .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+                        .use_alpha(false),
+                )?;
+                t.elapsed()
+            };
             let t = Instant::now();
             let jpeg = frame.encode_jpeg()?;
             let encode = t.elapsed();
@@ -275,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = Frame::decode(&jpeg)?;
             let decode = t.elapsed();
             println!(
-                "5K to 1920 resize {resize:?} | jpeg encode {encode:?} {} KB | decode {decode:?}",
+                "5K to 1920 resize {resize:?} simd {fast:?} | jpeg encode {encode:?} {} KB | decode {decode:?}",
                 jpeg.len() / 1024
             );
         }

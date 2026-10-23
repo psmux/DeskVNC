@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 boundary-session.workspace = true
 image.workspace = true
+fast_image_resize.workspace = true
 xcap = "0.9.8"
 enigo = "0.6.1"
 
@@ -24,3 +25,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = "0.3.2"
+objc2-core-foundation = "0.3.2"

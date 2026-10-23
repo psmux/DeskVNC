@@ -1020,7 +1020,10 @@ dependencies = [
  "anyhow",
  "boundary-session",
  "enigo",
+ "fast_image_resize",
  "image",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "windows-sys 0.59.0",
  "xcap",
 ]
@@ -1052,9 +1055,11 @@ dependencies = [
  "anyhow",
  "argon2 0.5.3",
  "base64 0.22.1",
+ "fast_image_resize",
  "getrandom 0.3.4",
  "image",
  "iroh",
+ "noq-proto",
  "serde",
  "serde_json",
  "subtle",
@@ -2932,6 +2937,18 @@ dependencies = [
  "document-features",
  "num-traits",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "fastbloom"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef975e30683b2d965054bb0a836f8973857c4ebf6acf274fe46617cd285060d8"
+dependencies = [
+ "foldhash 0.2.0",
+ "libm",
+ "portable-atomic",
+ "siphasher",
 ]
 
 [[package]]
@@ -5673,6 +5690,7 @@ dependencies = [
  "bytes",
  "derive_more",
  "enum-assoc",
+ "fastbloom",
  "getrandom 0.4.3",
  "identity-hash",
  "lru-slab",

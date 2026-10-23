@@ -65,13 +65,80 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         .context("The selected display is no longer connected")?;
     Ok(Box::new(NativeDesktop {
         monitor,
+        resizer: fast_image_resize::Resizer::new(),
         enigo: None,
         buttons: Vec::new(),
         keys: Vec::new(),
     }))
 }
+/// The screen at its size in points, not Retina pixels.
+///
+/// A 5K iMac has four times as many pixels as points. Asking for all of them
+/// took 110 ms on a 2020 i5 and 58 ms on an i9, then the copy and the shrink
+/// to 1920 wide came on top; at point size the window server scales on the
+/// GPU and the same capture takes 35 ms and 17 ms. The screen goes out at no
+/// more than 1920 wide either way, so nothing a helper can see is lost.
+#[cfg(target_os = "macos")]
+fn capture_pixels(monitor: &Monitor) -> Result<(u32, u32, Vec<u8>)> {
+    #[allow(deprecated)]
+    use objc2_core_graphics::CGWindowListCreateImage;
+    use objc2_core_graphics::{
+        CGDataProvider, CGDisplayBounds, CGImage, CGWindowImageOption, CGWindowListOption,
+    };
+    const FAILED: &str = "Screen capture failed. Check Screen Recording permission";
+    // Deprecated for ScreenCaptureKit, but still what works on every macOS
+    // this app supports, and the call xcap itself makes.
+    #[allow(deprecated)]
+    let image = CGWindowListCreateImage(
+        CGDisplayBounds(monitor.id()?),
+        CGWindowListOption::OptionAll,
+        0,
+        CGWindowImageOption::NominalResolution,
+    )
+    .context(FAILED)?;
+    let (width, height) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
+    let stride = CGImage::bytes_per_row(Some(&image));
+    ensure!(
+        width > 0
+            && height > 0
+            && CGImage::bits_per_pixel(Some(&image)) == 32
+            && stride >= width * 4,
+        FAILED
+    );
+    let data = CGDataProvider::data(CGImage::data_provider(Some(&image)).as_deref())
+        .context(FAILED)?
+        .to_vec();
+    ensure!(data.len() >= stride * height, FAILED);
+    // Drop the padding at the end of each row and turn BGRA into RGBA in
+    // one pass.
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in data.chunks_exact(stride).take(height) {
+        rgba.extend(
+            row[..width * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[2], p[1], p[0], 255]),
+        );
+    }
+    Ok((width as u32, height as u32, rgba))
+}
+#[cfg(not(target_os = "macos"))]
+fn capture_pixels(monitor: &Monitor) -> Result<(u32, u32, Vec<u8>)> {
+    let pixels = monitor
+        .capture_image()
+        .context("Screen capture failed. Check Screen Recording permission")?;
+    let (width, height) = pixels.dimensions();
+    Ok((width, height, pixels.into_raw()))
+}
+
+/// Screens larger than this are shrunk to fit before they are sent.
+const MAX_WIDTH: u32 = 1920;
+const MAX_HEIGHT: u32 = 1200;
+
 struct NativeDesktop {
     monitor: Monitor,
+    resizer: fast_image_resize::Resizer,
     enigo: Option<Enigo>,
     buttons: Vec<Button>,
     keys: Vec<Key>,
@@ -94,21 +161,36 @@ impl NativeDesktop {
 impl Desktop for NativeDesktop {
     fn capture(&mut self) -> Result<Frame> {
         on_input_desktop();
-        let pixels = self
-            .monitor
-            .capture_image()
-            .context("Screen capture failed. Check Screen Recording permission")?;
-        let image = image::DynamicImage::ImageRgba8(pixels);
-        let image = if image.width() > 1920 || image.height() > 1200 {
-            image.resize(1920, 1200, image::imageops::FilterType::Triangle)
-        } else {
-            image
-        };
-        let image = image.into_rgba8();
+        let (width, height, rgba) = capture_pixels(&self.monitor)?;
+        if width <= MAX_WIDTH && height <= MAX_HEIGHT {
+            return Ok(Frame {
+                width,
+                height,
+                rgba,
+            });
+        }
+        // A 5K iMac screen shrunk with the image crate took 140 ms of a
+        // 2020 i5, which by itself held Boundary to about six screens a
+        // second. The same filter with SIMD takes a few milliseconds.
+        let scale = (MAX_WIDTH as f64 / width as f64).min(MAX_HEIGHT as f64 / height as f64);
+        let (w, h) = (
+            ((width as f64 * scale).round() as u32).max(1),
+            ((height as f64 * scale).round() as u32).max(1),
+        );
+        use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, images::Image};
+        let src = Image::from_vec_u8(width, height, rgba, PixelType::U8x4)?;
+        let mut dst = Image::new(w, h, PixelType::U8x4);
+        self.resizer.resize(
+            &src,
+            &mut dst,
+            &ResizeOptions::new()
+                .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+                .use_alpha(false),
+        )?;
         Ok(Frame {
-            width: image.width(),
-            height: image.height(),
-            rgba: image.into_raw(),
+            width: w,
+            height: h,
+            rgba: dst.into_vec(),
         })
     }
     fn input(&mut self, input: Input) -> Result<()> {

@@ -481,15 +481,25 @@ async fn drive(
                     }
                     return Ok(());
                 }
-                let frame = session.frames.borrow_and_update().clone();
-                if let Some(frame) = frame {
+                if let Some((frame, changed)) = session.screen() {
                     let current = (frame.width as u16, frame.height as u16);
-                    if size != current {
+                    let resized = size != current;
+                    if resized {
                         size = current;
                         emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
                     }
-                    let rect = Rect { x: 0, y: 0, width: size.0, height: size.1 };
-                    emit(events, SessionEvent::FramebufferUpdate { rects: vec![DecodedRect { rect, payload: RectPayload::Rgba(frame.rgba.clone()) }], damage: rect }).await?;
+                    let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                    // Only what changed goes on to the window: a pointer
+                    // moving is a few tiles, not the 9 MB of a whole screen.
+                    let (rects, damage) = match changed.filter(|_| !resized) {
+                        Some(changed) => {
+                            let rects: Vec<DecodedRect> = changed.iter().map(|r| crop(&frame, r)).collect();
+                            let damage = rects.iter().skip(1).fold(rects[0].rect, |u, r| u.union(&r.rect));
+                            (rects, damage)
+                        }
+                        None => (vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], whole),
+                    };
+                    emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
                 }
             },
             command = commands.recv() => match command {
@@ -609,6 +619,25 @@ impl InputState {
         out
     }
 }
+/// One changed rectangle of a Boundary screen, as its own pixels.
+fn crop(frame: &boundary_session::Frame, r: &boundary_session::Rect) -> DecodedRect {
+    let stride = frame.width as usize * 4;
+    let mut rgba = Vec::with_capacity(r.width as usize * r.height as usize * 4);
+    for y in r.y..r.y + r.height {
+        let i = y as usize * stride + r.x as usize * 4;
+        rgba.extend_from_slice(&frame.rgba[i..i + r.width as usize * 4]);
+    }
+    DecodedRect {
+        rect: Rect {
+            x: r.x as u16,
+            y: r.y as u16,
+            width: r.width as u16,
+            height: r.height as u16,
+        },
+        payload: RectPayload::Rgba(rgba),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -351,13 +351,26 @@ async fn endpoint(options: &HostOptions) -> Result<Endpoint> {
 /// lower of the two values, so this holds against older copies too.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How much a new connection may send before its first acknowledgement.
+///
+/// QUIC starts at about 14 KB and doubles once a round trip. The first screen
+/// is a few hundred kilobytes, so across an ocean, at a quarter of a second a
+/// round trip, it took five round trips and arrived nearly two seconds after
+/// connecting. Starting at 128 KB, paced rather than sent in a burst, halves
+/// that. BBR measured no better than Cubic on the same links, so the default
+/// controller stays.
+const INITIAL_WINDOW: u64 = 128 * 1024;
+
 fn transport_config() -> Result<iroh::endpoint::QuicTransportConfig> {
+    let mut congestion = noq_proto::congestion::CubicConfig::default();
+    congestion.initial_window(INITIAL_WINDOW);
     Ok(iroh::endpoint::QuicTransportConfig::builder()
         .max_idle_timeout(Some(
             IDLE_TIMEOUT
                 .try_into()
                 .map_err(|e| anyhow!("Invalid idle timeout: {e}"))?,
         ))
+        .congestion_controller_factory(Arc::new(congestion))
         .build())
 }
 
