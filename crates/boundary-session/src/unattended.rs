@@ -361,6 +361,7 @@ where
             password,
             tools,
             jpeg,
+            tiles,
         } = message
         else {
             refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -425,7 +426,7 @@ where
             let result = tokio::select! {
                 _ = stop.cancelled() => Ok(()),
                 _ = ended.cancelled() => Ok(()),
-                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
+                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles), move || desktop()) => result,
             };
             session::close_served(&connection, &result);
             // Whoever holds the session hears that it ended, so a banner
@@ -710,6 +711,7 @@ async fn run_connect(
             password,
             tools,
             jpeg: true,
+            tiles: true,
         },
     )
     .await?;

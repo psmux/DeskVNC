@@ -1,6 +1,8 @@
 use crate::{
-    Desktop, Frame, Input, Invitation, tools,
-    wire::{self, Message},
+    Desktop, Frame, Input, Invitation,
+    screen::{self, Rect},
+    tools,
+    wire::{self, Message, Screens},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use iroh::{
@@ -8,7 +10,8 @@ use iroh::{
     endpoint::{Connection, presets},
 };
 use std::{
-    sync::Arc,
+    collections::VecDeque,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -89,6 +92,7 @@ pub struct Session {
     pub events: mpsc::Receiver<Event>,
     pub frames: watch::Receiver<Option<Arc<Frame>>>,
     pub connectivity: watch::Receiver<Connectivity>,
+    damage: Arc<Mutex<Damage>>,
     input: mpsc::Sender<Input>,
     control: watch::Sender<Permission>,
     /// On the host's side, whether the person allows commands and files. On
@@ -98,7 +102,42 @@ pub struct Session {
     pairing: mpsc::Sender<(String, String)>,
     cancel: CancellationToken,
 }
+/// Show a screen in the helper's window, with what changed: `None` when it is
+/// a whole new picture.
+fn show(
+    frames: &watch::Sender<Option<Arc<Frame>>>,
+    damage: &Mutex<Damage>,
+    frame: Frame,
+    rects: Option<Vec<Rect>>,
+) {
+    let mut damage = damage.lock().unwrap_or_else(|e| e.into_inner());
+    match rects {
+        Some(rects) if !damage.whole => damage.rects.extend(rects),
+        _ => {
+            *damage = Damage {
+                whole: true,
+                rects: Vec::new(),
+            }
+        }
+    }
+    frames.send_replace(Some(Arc::new(frame)));
+}
+/// What changed on the helper's screen since it was last read.
+#[derive(Default)]
+struct Damage {
+    whole: bool,
+    rects: Vec<Rect>,
+}
 impl Session {
+    /// The newest screen and the rectangles that changed since the last
+    /// call, or `None` for the rectangles when all of it may have.
+    pub fn screen(&mut self) -> Option<(Arc<Frame>, Option<Vec<Rect>>)> {
+        let mut damage = self.damage.lock().unwrap_or_else(|e| e.into_inner());
+        let frame = self.frames.borrow_and_update().clone()?;
+        let taken = std::mem::take(&mut *damage);
+        let rects = (!taken.whole && !taken.rects.is_empty()).then_some(taken.rects);
+        Some((frame, rects))
+    }
     pub(crate) fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -162,6 +201,7 @@ pub(crate) struct Worker {
     connectivity: watch::Sender<Connectivity>,
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<Frame>>>,
+    damage: Arc<Mutex<Damage>>,
     input: mpsc::Receiver<Input>,
     control: watch::Receiver<Permission>,
     control_tx: watch::Sender<Permission>,
@@ -184,11 +224,13 @@ pub(crate) fn channels() -> (Session, Worker) {
     let (tools_tx, _) = watch::channel(false);
     let (client_tx, client) = watch::channel(None);
     let cancel = CancellationToken::new();
+    let damage = Arc::new(Mutex::new(Damage::default()));
     (
         Session {
             connectivity,
             events,
             frames,
+            damage: damage.clone(),
             input,
             control: control.clone(),
             tools: tools_tx.clone(),
@@ -200,6 +242,7 @@ pub(crate) fn channels() -> (Session, Worker) {
             connectivity: connectivity_tx,
             events: events_tx,
             frames: frames_tx,
+            damage,
             input: input_rx,
             control: control_rx,
             control_tx: control.clone(),
@@ -471,10 +514,11 @@ where
             let connection = incoming.await?;
             let guard = Close(connection.clone());
             let (send, mut recv) = connection.accept_bi().await?;
-            let (name, tools, jpeg) = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
-            Ok::<_, anyhow::Error>((guard, send, recv, name, tools, jpeg))
+            let (name, tools, screens) =
+                wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
+            Ok::<_, anyhow::Error>((guard, send, recv, name, tools, screens))
         };
-        let Ok(Ok((guard, mut send, recv, name, tools, jpeg))) =
+        let Ok(Ok((guard, mut send, recv, name, tools, screens))) =
             tokio::time::timeout(Duration::from_secs(5), handshake).await
         else {
             continue;
@@ -506,7 +550,7 @@ where
         };
         // The invitation is consumed by this session, even if the peer later disconnects.
         let result = serve(
-            worker, connection, send, recv, peer, allowed, tools, jpeg, desktop,
+            worker, connection, send, recv, peer, allowed, tools, screens, desktop,
         )
         .await;
         close_served(connection, &result);
@@ -532,7 +576,7 @@ pub(crate) async fn serve<F>(
     peer: String,
     allowed: bool,
     tools: bool,
-    jpeg: bool,
+    screens: Screens,
     desktop: F,
 ) -> Result<()>
 where
@@ -551,10 +595,11 @@ where
     let permission_rx = worker.control.clone();
     let input_permission = worker.control.clone();
     let (input_tx, input_rx) = mpsc::channel(128);
-    let (screen_tx, screen_rx) = watch::channel(None::<Arc<Vec<u8>>>);
+    let (screen_tx, screen_rx) = watch::channel(None::<Arc<Frame>>);
+    let (shown_tx, shown_rx) = watch::channel(0u64);
     let cancel = worker.cancel.clone();
     let capture = tokio::task::spawn_blocking(move || {
-        desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel, jpeg)
+        desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel)
     });
     wire::write(
         &mut send,
@@ -580,6 +625,13 @@ where
                     .context("Helper stopped responding")??;
             match message {
                 Message::Ping => {}
+                Message::Shown(seq) if screens == Screens::Tiles => {
+                    shown_tx.send_if_modified(|shown| {
+                        let newer = seq > *shown;
+                        *shown = (*shown).max(seq);
+                        newer
+                    });
+                }
                 Message::Input(input) => {
                     input.validate()?;
                     let permission = *input_permission.borrow();
@@ -641,20 +693,34 @@ where
         result = read_input => result.map_err(link_lost),
         result = write_control => result.map_err(link_lost),
         result = serve_tools => result,
-        result = send_screens(connection, screen_rx) => result.map_err(link_lost),
+        result = async {
+            match screens {
+                Screens::Tiles => send_updates(connection, screen_rx, shown_rx).await,
+                _ => send_screens(connection, screen_rx, screens == Screens::Jpeg).await,
+            }
+        } => result.map_err(link_lost),
         result = capture => result.context("Capture worker failed")?,
         _ = connection.closed() => Ok(()),
     };
     result
 }
 
+/// How soon to capture again while the screen is changing or someone is
+/// using it: about thirty screens a second.
+const BUSY_CAPTURE: Duration = Duration::from_millis(33);
+/// How soon to capture again on a screen that has stayed still for a while.
+const IDLE_CAPTURE: Duration = Duration::from_millis(100);
+/// How long a still screen stays on the busy pace after it last changed.
+const BUSY_FOR: Duration = Duration::from_secs(1);
+/// After input, how long to give an app to draw what it did before capturing.
+const AFTER_INPUT: Duration = Duration::from_millis(12);
+
 fn desktop_loop<F>(
     factory: F,
     mut input: mpsc::Receiver<(u64, Input)>,
     permission: watch::Receiver<Permission>,
-    screens: watch::Sender<Option<Arc<Vec<u8>>>>,
+    screens: watch::Sender<Option<Arc<Frame>>>,
     cancel: CancellationToken,
-    jpeg: bool,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<Box<dyn Desktop>>,
@@ -668,6 +734,8 @@ where
     let mut desktop = Release(factory()?);
     let mut capture_at = Instant::now();
     let mut last_input = Instant::now();
+    let mut last_change = Instant::now();
+    let mut last: Option<Arc<Frame>> = None;
     let mut generation = permission.borrow().generation;
     while !cancel.is_cancelled() {
         let current = *permission.borrow();
@@ -689,6 +757,10 @@ where
                 let current = *permission.borrow();
                 if current.allowed && current.generation == epoch {
                     desktop.0.input(event)?;
+                    // Show what the input did as soon as it is drawn,
+                    // rather than at the next turn of the clock.
+                    capture_at = capture_at.min(Instant::now() + AFTER_INPUT);
+                    last_change = Instant::now();
                 }
             }
             last_input = Instant::now();
@@ -697,18 +769,29 @@ where
             break;
         }
         if Instant::now() >= capture_at {
+            let started = Instant::now();
             let frame = desktop.0.capture()?;
-            let encoded = Arc::new(if jpeg {
-                frame.encode_jpeg()?
-            } else {
-                frame.encode()?
-            });
-            if !cancel.is_cancelled() {
-                screens.send_replace(Some(encoded));
+            // A still screen is not handed on: sending the same picture
+            // again only costs the link.
+            if last.as_ref().is_none_or(|last| **last != frame) {
+                let frame = Arc::new(frame);
+                last = Some(frame.clone());
+                last_change = Instant::now();
+                if !cancel.is_cancelled() {
+                    screens.send_replace(Some(frame));
+                }
             }
-            capture_at = Instant::now() + Duration::from_millis(125);
+            let pace = if last_change.elapsed() < BUSY_FOR {
+                BUSY_CAPTURE
+            } else {
+                IDLE_CAPTURE
+            };
+            capture_at = started + pace;
         }
-        std::thread::sleep(Duration::from_millis(8));
+        let wait = capture_at
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(4));
+        std::thread::sleep(wait.max(Duration::from_millis(1)));
     }
     Ok(())
 }
@@ -720,11 +803,12 @@ where
 /// screens rather than late ones.
 const SCREEN_DEADLINE: Duration = Duration::from_secs(15);
 
+/// Whole screens, one stream each, to a helper that does not take updates.
 async fn send_screens(
     connection: &Connection,
-    mut screens: watch::Receiver<Option<Arc<Vec<u8>>>>,
+    mut screens: watch::Receiver<Option<Arc<Frame>>>,
+    jpeg: bool,
 ) -> Result<()> {
-    let mut last: Option<Arc<Vec<u8>>> = None;
     loop {
         if screens.changed().await.is_err() {
             // The capture worker has stopped, and its own result says why.
@@ -733,15 +817,18 @@ async fn send_screens(
             // was lost.
             return std::future::pending().await;
         }
-        let bytes = screens
+        let frame = screens
             .borrow_and_update()
             .clone()
             .context("Missing screen")?;
-        // A still screen is captured eight times a second; sending the same
-        // picture again only costs the link.
-        if last.as_ref().is_some_and(|last| **last == *bytes) {
-            continue;
-        }
+        let bytes = tokio::task::spawn_blocking(move || {
+            if jpeg {
+                frame.encode_jpeg()
+            } else {
+                frame.encode()
+            }
+        })
+        .await??;
         let mut stream = connection.open_uni().await?;
         let result = tokio::time::timeout(SCREEN_DEADLINE, async {
             stream.write_all(&bytes).await?;
@@ -751,14 +838,92 @@ async fn send_screens(
         })
         .await;
         match result {
-            Ok(result) => {
-                result?;
-                last = Some(bytes);
-            }
+            Ok(result) => result?,
             Err(_) => {
                 let _ = stream.reset(1u8.into());
             }
         }
+    }
+}
+
+/// At most this many updates wait to be shown, however small they are.
+const MAX_UPDATES_IN_FLIGHT: usize = 12;
+/// Data allowed on its way before the link has measured itself.
+const MIN_BYTES_IN_FLIGHT: u64 = 128 * 1024;
+
+/// Bytes the link carries in one round trip, as its congestion window has
+/// measured it.
+fn window(connection: &Connection) -> u64 {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map_or(0, |path| path.stats().cwnd)
+        .max(MIN_BYTES_IN_FLIGHT)
+}
+
+/// Changed rectangles, one update after another on a single stream, to a
+/// helper that takes them.
+///
+/// Updates are not waited on one at a time: that cost a round trip per
+/// screen, which across an ocean was most of a second. Instead about one
+/// round trip of them may be on their way, as the helper's acknowledgements
+/// tell. Past that the sender waits, and only the newest capture is encoded
+/// when it goes on, so a slow link gets fewer updates rather than late ones.
+async fn send_updates(
+    connection: &Connection,
+    mut screens: watch::Receiver<Option<Arc<Frame>>>,
+    mut shown: watch::Receiver<u64>,
+) -> Result<()> {
+    let mut stream = connection.open_uni().await?;
+    stream.write_all(screen::MAGIC).await?;
+    let mut encoder = Some(screen::Encoder::default());
+    let mut seq = 0u64;
+    let mut in_flight: VecDeque<(u64, u64)> = VecDeque::new();
+    loop {
+        loop {
+            let acked = *shown.borrow_and_update();
+            while in_flight.front().is_some_and(|(s, _)| *s <= acked) {
+                in_flight.pop_front();
+            }
+            let bytes: u64 = in_flight.iter().map(|(_, b)| b).sum();
+            if in_flight.is_empty()
+                || (in_flight.len() < MAX_UPDATES_IN_FLIGHT && bytes < window(connection))
+            {
+                break;
+            }
+            if shown.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
+        if screens.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+        let frame = screens
+            .borrow_and_update()
+            .clone()
+            .context("Missing screen")?;
+        let mut working = encoder.take().context("Screen encoder lost")?;
+        let next = seq + 1;
+        let (working, update) = tokio::task::spawn_blocking(move || {
+            let update = working.update(frame, next);
+            (working, update)
+        })
+        .await?;
+        encoder = Some(working);
+        let Some(update) = update? else {
+            continue;
+        };
+        seq = next;
+        tokio::time::timeout(SCREEN_DEADLINE, async {
+            stream
+                .write_all(&(update.len() as u32).to_be_bytes())
+                .await?;
+            stream.write_all(&update).await
+        })
+        .await
+        .context("The helper stopped taking screens")??;
+        in_flight.push_back((seq, update.len() as u64));
     }
 }
 fn viewer_network_options(invitation: &Invitation, mut options: HostOptions) -> HostOptions {
@@ -814,6 +979,7 @@ async fn run_viewer(
             name,
             tools,
             jpeg: true,
+            tiles: true,
         },
     )
     .await?;
@@ -948,6 +1114,7 @@ async fn watch(
         .await?;
     let events = worker.events.clone();
     let tools_tx = worker.tools_tx.clone();
+    let (shown_tx, mut shown_rx) = watch::channel(0u64);
     let read_control = async {
         loop {
             match wire::read::<Message>(&mut recv).await? {
@@ -972,6 +1139,7 @@ async fn watch(
         loop {
             let message = tokio::select! {
                 event = worker.input.recv() => Message::Input(event.context("Window closed")?),
+                Ok(()) = shown_rx.changed() => Message::Shown(*shown_rx.borrow_and_update()),
                 _ = tick.tick() => Message::Ping,
             };
             tokio::time::timeout(Duration::from_secs(3), wire::write(&mut send, &message))
@@ -981,25 +1149,40 @@ async fn watch(
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
+    let (frames, damage) = (&worker.frames, &*worker.damage);
     let read_frames = async {
         loop {
             let mut stream = connection.accept_uni().await?;
-            let bytes =
-                match tokio::time::timeout(SCREEN_DEADLINE, stream.read_to_end(wire::MAX_FRAME))
-                    .await
-                {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(iroh::endpoint::ReadToEndError::Read(
-                        iroh::endpoint::ReadError::Reset(_),
-                    ))) => continue,
-                    Ok(Err(error)) => return Err(error.into()),
-                    Err(_) => {
-                        let _ = stream.stop(1u8.into());
-                        continue;
-                    }
-                };
+            let mut head = [0u8; 4];
+            match stream.read_exact(&mut head).await {
+                Ok(()) => {}
+                Err(iroh::endpoint::ReadExactError::ReadError(
+                    iroh::endpoint::ReadError::Reset(_),
+                )) => continue,
+                Err(error) => return Err(error.into()),
+            }
+            if &head == screen::MAGIC {
+                return read_updates(frames, damage, stream, &shown_tx).await;
+            }
+            let rest = match tokio::time::timeout(
+                SCREEN_DEADLINE,
+                stream.read_to_end(wire::MAX_FRAME - head.len()),
+            )
+            .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(iroh::endpoint::ReadToEndError::Read(
+                    iroh::endpoint::ReadError::Reset(_),
+                ))) => continue,
+                Ok(Err(error)) => return Err(error.into()),
+                Err(_) => {
+                    let _ = stream.stop(1u8.into());
+                    continue;
+                }
+            };
+            let bytes = [&head[..], &rest].concat();
             let frame = tokio::task::spawn_blocking(move || Frame::decode(&bytes)).await??;
-            worker.frames.send_replace(Some(Arc::new(frame)));
+            show(frames, damage, frame, None);
         }
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
@@ -1010,6 +1193,37 @@ async fn watch(
         result = write_input => result,
         result = read_frames => result,
         _ = connection.closed() => Ok(()),
+    }
+}
+
+/// Draw each update from a host that sends them, and say when it is shown.
+async fn read_updates(
+    frames: &watch::Sender<Option<Arc<Frame>>>,
+    damage: &Mutex<Damage>,
+    mut stream: iroh::endpoint::RecvStream,
+    shown: &watch::Sender<u64>,
+) -> Result<()> {
+    let mut canvas = Some(screen::Canvas::default());
+    loop {
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).await?;
+        let length = u32::from_be_bytes(length) as usize;
+        ensure!(
+            length > 0 && length <= wire::MAX_FRAME,
+            "Invalid screen update length"
+        );
+        let mut bytes = vec![0; length];
+        stream.read_exact(&mut bytes).await?;
+        let mut drawing = canvas.take().context("Screen lost")?;
+        let (drawing, result) = tokio::task::spawn_blocking(move || {
+            let result = drawing.apply(&bytes);
+            (drawing, result)
+        })
+        .await?;
+        canvas = Some(drawing);
+        let (seq, frame, rects) = result?;
+        show(frames, damage, frame, Some(rects));
+        shown.send_replace(seq);
     }
 }
 

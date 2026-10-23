@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod dns;
+mod screen;
 mod session;
 pub mod tools;
 pub mod unattended;
@@ -16,6 +17,7 @@ use std::io::Cursor;
 /// JPEG quality for screens: small enough for a cellular uplink, sharp
 /// enough to read text.
 const JPEG_QUALITY: u8 = 70;
+pub use screen::Rect;
 pub use wire::{Button, Input, Invitation, Key};
 
 /// Implemented by a local platform backend, created only after consent.
@@ -24,7 +26,7 @@ pub trait Desktop {
     fn input(&mut self, input: Input) -> Result<()>;
     fn release(&mut self);
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,

@@ -127,6 +127,11 @@ pub enum Message {
         /// PNG. An older helper leaves it out and is sent PNG.
         #[serde(default)]
         jpeg: bool,
+        /// The helper draws screens sent as changed rectangles on one
+        /// stream (`crate::screen`) and says when it has shown each one. An
+        /// older helper leaves it out and is sent whole screens.
+        #[serde(default)]
+        tiles: bool,
     },
     Granted {
         control: bool,
@@ -143,6 +148,9 @@ pub enum Message {
     Tools(bool),
     Input(Input),
     Ping,
+    /// The helper has drawn the screen update with this number. Sent only
+    /// to a host that sends updates, which is the only kind that reads it.
+    Shown(u64),
     /// A helper asking an unattended machine to let it in. The helper's
     /// identity is the key it connected with, which the encrypted handshake
     /// has already proved, so a paired helper sends no password at all.
@@ -156,6 +164,11 @@ pub enum Message {
         /// PNG. An older helper leaves it out and is sent PNG.
         #[serde(default)]
         jpeg: bool,
+        /// The helper draws screens sent as changed rectangles on one
+        /// stream (`crate::screen`) and says when it has shown each one. An
+        /// older helper leaves it out and is sent whole screens.
+        #[serde(default)]
+        tiles: bool,
     },
     /// Sent during an attended session when the person being helped chooses
     /// to let this helper connect any time. `machine` is the ID the helper
@@ -188,9 +201,25 @@ pub async fn read<T: DeserializeOwned>(stream: &mut RecvStream) -> Result<T> {
     stream.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+/// How screens go to a helper, from what its first message said it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screens {
+    Png,
+    Jpeg,
+    Tiles,
+}
+impl Screens {
+    pub fn from_hello(jpeg: bool, tiles: bool) -> Self {
+        match (jpeg, tiles) {
+            (_, true) => Self::Tiles,
+            (true, false) => Self::Jpeg,
+            (false, false) => Self::Png,
+        }
+    }
+}
 /// The helper's name, whether it can send commands and file requests, and
-/// whether it takes JPEG screens.
-pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool, bool)> {
+/// how it takes screens.
+pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool, Screens)> {
     use subtle::ConstantTimeEq;
     if let Message::Hello {
         version,
@@ -198,6 +227,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
         name,
         tools,
         jpeg,
+        tiles,
     } = message
     {
         ensure!(
@@ -209,7 +239,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
             !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
             "Invalid helper name"
         );
-        Ok((name, tools, jpeg))
+        Ok((name, tools, Screens::from_hello(jpeg, tiles)))
     } else {
         bail!("Expected session handshake")
     }
