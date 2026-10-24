@@ -412,6 +412,7 @@ struct Report {
     connect_secs: f64,
     first_stage_secs: f64,
     screen: (u32, u32),
+    stage_size: (u32, u32),
     stage_in_screen: Option<(f32, f32, f32, f32)>,
     clock_offset_ms: i64,
     clock_rtt_ms: f64,
@@ -737,7 +738,7 @@ fn connect(config: &Config, events: mpsc::Sender<SessionEvent>) -> Result<(Sessi
     })
 }
 
-pub async fn run(config: Config, stage: Stage) -> Result<()> {
+pub async fn run(config: Config, stage: impl std::future::Future<Output = Result<Stage>>) -> Result<()> {
     let started = Instant::now();
     let (events_tx, events) = mpsc::channel(256);
     let (handle, _driver) = connect(&config, events_tx)?;
@@ -765,6 +766,7 @@ pub async fn run(config: Config, stage: Stage) -> Result<()> {
         config.password.clone(),
     ));
     let cpu = cpu_sampler(config.watch.clone());
+    let stage = stage.await?;
     let mut bench = Bench {
         shared: shared.clone(),
         notify,
@@ -819,6 +821,7 @@ pub async fn run(config: Config, stage: Stage) -> Result<()> {
         first_stage_secs,
         clock_offset_ms: offset,
         clock_rtt_ms: rtt,
+        stage_size: bench.stage.size(),
         ..Report::default()
     };
     for scene in config.scenes.clone() {

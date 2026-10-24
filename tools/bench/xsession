@@ -1,0 +1,9 @@
+#!/bin/sh
+# The whole desktop is the stage. No window manager: nothing else should
+# draw, and the stage covers the screen at 0,0. It dials the bench on
+# BENCH_CONTROL, and dials again for each run.
+CONTROL=$(cat /tmp/bench-control 2>/dev/null || echo 127.0.0.1:47800)
+SIZE=$(xdpyinfo | awk '/dimensions:/ {print $2}')
+exec /opt/bench/bench-stage --borderless --focused --pos 0,0 \
+    --size "${SIZE:-1920x1080}" --control "$CONTROL" --secs 36000 \
+    > /tmp/bench-stage.log 2>&1

@@ -65,6 +65,10 @@ impl Desktop for OffscreenDesktop {
                 key: Key::Letter(_),
                 down: true,
             } => s.state.keys = s.state.keys.wrapping_add(1),
+            // A helper's plain letters arrive as text, as typing does.
+            Input::Text(text) => {
+                s.state.keys = s.state.keys.wrapping_add(text.chars().count() as u16)
+            }
             _ => {}
         }
         Ok(())
@@ -77,16 +81,20 @@ pub struct Link {
     writer: tokio::sync::Mutex<OwnedWriteHalf>,
     pongs: tokio::sync::Mutex<mpsc::Receiver<(u64, u32)>>,
     pub samples: Arc<Mutex<Vec<HostSample>>>,
+    /// The stage's size in its own pixels, as it said when it dialled in.
     pub size: (u32, u32),
 }
 
 impl Link {
-    /// Wait for the stage to dial `port`.
-    pub async fn accept(port: u16, wait: Duration) -> Result<Link> {
-        let listener = TcpListener::bind(("0.0.0.0", port))
+    pub async fn listen(port: u16) -> Result<TcpListener> {
+        TcpListener::bind(("0.0.0.0", port))
             .await
-            .with_context(|| format!("listen for the stage on port {port}"))?;
-        eprintln!("waiting for the stage to dial port {port}");
+            .with_context(|| format!("listen for the stage on port {port}"))
+    }
+
+    /// Wait for the stage to dial in.
+    pub async fn accept(listener: TcpListener, wait: Duration) -> Result<Link> {
+        eprintln!("waiting for the stage to dial {}", listener.local_addr()?);
         let (stream, from) = tokio::time::timeout(wait, listener.accept())
             .await
             .context("the stage never dialled in")??;
@@ -216,6 +224,16 @@ impl Stage {
                 .filter(|s| s.at >= from && s.at <= to)
                 .copied()
                 .collect(),
+        }
+    }
+    /// The stage's size in its own pixels.
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Stage::Local(o) => {
+                let l = o.lock().unwrap().layout;
+                (l.width, l.height)
+            }
+            Stage::Linked(link) => link.size,
         }
     }
     /// Whether key presses will reach the stage. A window that does not have

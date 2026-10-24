@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
             })
             .await?;
             let config = measure::Config::from_args(&args, "boundary", ticket)?;
-            measure::run(config, stage::Stage::Local(offscreen)).await
+            measure::run(config, async { Ok(stage::Stage::Local(offscreen)) }).await
         }
         Some("host") => {
             let synthetic = arg(&args, "--synthetic").is_some();
@@ -124,8 +124,15 @@ async fn main() -> Result<()> {
             let port: u16 = arg(&args, "--control")
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(47800);
-            let link = stage::Link::accept(port, Duration::from_secs(120)).await?;
-            measure::run(config, stage::Stage::Linked(link)).await
+            // Listen before connecting: over RDP to xrdp, the stage only
+            // starts once the login the bench makes creates the desktop.
+            let listener = stage::Link::listen(port).await?;
+            let link = async move {
+                Ok(stage::Stage::Linked(
+                    stage::Link::accept(listener, Duration::from_secs(120)).await?,
+                ))
+            };
+            measure::run(config, link).await
         }
         _ => bail!("usage: remote-bench loopback | host | run (see the top of main.rs)"),
     }

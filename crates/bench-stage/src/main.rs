@@ -3,13 +3,18 @@
 //!
 //! ```sh
 //! bench-stage [--size 960x600] [--pos 40,80] [--borderless] [--secs 600]
-//!             [--control 10.0.0.5:47800] [--scene idle]
+//!             [--control 10.0.0.5:47800] [--scene idle] [--focused]
 //! ```
 //!
 //! With `--control` the stage dials the measuring client, which then switches
 //! scenes, syncs clocks and reads the computer's CPU over that link. Without
 //! it, F1 to F5 switch scenes by hand. The window closes by itself after
 //! `--secs`, so a forgotten stage never stays on someone's screen.
+//!
+//! `--focused` reports the window as having the keyboard focus whatever the
+//! window system says. Use it only on a display with no window manager and
+//! nothing else on it, such as the bench container, where X sends keys to the
+//! window under the pointer and never tells the window it has the focus.
 use bench_stage::{Layout, Scene, StageState, clock_ms, render};
 use minifb::{Key, KeyRepeat, MouseMode, Window, WindowOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -109,6 +114,7 @@ fn main() {
         .unwrap_or((960, 600));
     let secs: u64 = arg(&args, "--secs").and_then(|s| s.parse().ok()).unwrap_or(600);
     let layout = Layout::fit(ww, wh);
+    let focused = args.iter().any(|a| a == "--focused");
     let mut window = Window::new(
         "DeskVNC bench stage",
         ww as usize,
@@ -152,7 +158,7 @@ fn main() {
                 break;
             }
             s.frame = frame;
-            s.active = window.is_active();
+            s.active = focused || window.is_active();
             s.state.pointer = pointer;
             for key in keys {
                 let scene = match key {
