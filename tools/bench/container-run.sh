@@ -130,6 +130,7 @@ for proto in $PROTOS; do
             --label "$PREFIX-xvnc-boundary" --watch-procs remote-bench,Xvnc \
             --note "${NOTE_LINK}Boundary host on the Xvnc display" $COMMON
         pkill -f "remote-bench host" || true
+        [ -n "${BOUNDARY_STATS:-}" ] && cp /tmp/boundary-host-xvnc.log "$OUT/$PREFIX-xvnc-boundary-host.log"
       fi
       ;;
   esac

@@ -169,3 +169,10 @@ fn report() {
         isms
     );
 }
+
+/// How long into a settle each step finished, printed as it happens.
+pub(crate) fn phase(name: &str, at: Duration) {
+    if on() {
+        eprintln!("SETTLE {name} at {:.1} ms", at.as_secs_f64() * 1000.0);
+    }
+}

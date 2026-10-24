@@ -157,12 +157,12 @@ pub(crate) const QUIET_SHARE: f32 = 0.02;
 /// only the tiles video drew wrong go then.
 pub(crate) const SETTLE: Duration = Duration::from_millis(60);
 /// Once they are known, the screen has settled when it has been quiet for
-/// one and a half of the usual gaps between its changes: 25 ms for a screen
-/// changing 60 times a second, 50 for a 30 frame video, which does not count
+/// one and a quarter of the usual gaps between its changes: 21 ms for a
+/// screen changing 60 times a second, 42 for a 30 frame video, which does not count
 /// as stopped between its frames. A pause that was not a stop picks video
 /// up again at once and waits [`SETTLE_AGAIN`] from then on.
-const SETTLE_GAPS: u32 = 3;
-const SETTLE_GAPS_PER: u32 = 2;
+const SETTLE_GAPS: u32 = 5;
+const SETTLE_GAPS_PER: u32 = 4;
 pub(crate) const SETTLE_MIN: Duration = Duration::from_millis(20);
 pub(crate) const SETTLE_MAX: Duration = Duration::from_millis(100);
 /// Motion again this soon after the screen settled was a pause, not a stop,
@@ -324,37 +324,53 @@ pub(crate) fn stale_tiles(frame: &Frame, shown: &Shown) -> Vec<bool> {
         stale.fill(true);
         return stale;
     }
-    for ty in 0..rows {
-        for tx in 0..cols {
-            let (x0, y0) = (tx * TILE, ty * TILE);
-            let (x1, y1) = ((x0 + TILE).min(w), (y0 + TILE).min(h));
-            let (mut peak, mut sum) = (0u32, 0u32);
-            for y in y0..y1 {
-                let rgba = &frame.rgba[(y * w + x0) * 4..(y * w + x1) * 4];
-                let luma = &shown.luma[y * shown.stride..];
-                let (u, v) = (
-                    &shown.u[y / 2 * shown.chroma_stride..],
-                    &shown.v[y / 2 * shown.chroma_stride..],
-                );
-                for (x, p) in (x0..x1).zip(rgba.as_chunks::<4>().0) {
-                    let c = 298 * (luma[x] as i32 - 16);
-                    let (d, e) = (u[x / 2] as i32 - 128, v[x / 2] as i32 - 128);
-                    let shown = [
-                        (c + rv * e + 128) >> 8,
-                        (c - gu * d - gv * e + 128) >> 8,
-                        (c + bu * d + 128) >> 8,
-                    ];
-                    for (s, t) in shown.into_iter().zip(&p[..3]) {
-                        let diff = s.clamp(0, 255).abs_diff(*t as i32);
-                        peak = peak.max(diff);
-                        sum += diff;
-                    }
+    let tile = |tx: usize, ty: usize| {
+        let (x0, y0) = (tx * TILE, ty * TILE);
+        let (x1, y1) = ((x0 + TILE).min(w), (y0 + TILE).min(h));
+        let (mut peak, mut sum) = (0u32, 0u32);
+        for y in y0..y1 {
+            let rgba = &frame.rgba[(y * w + x0) * 4..(y * w + x1) * 4];
+            let luma = &shown.luma[y * shown.stride..];
+            let (u, v) = (
+                &shown.u[y / 2 * shown.chroma_stride..],
+                &shown.v[y / 2 * shown.chroma_stride..],
+            );
+            for (x, p) in (x0..x1).zip(rgba.as_chunks::<4>().0) {
+                let c = 298 * (luma[x] as i32 - 16);
+                let (d, e) = (u[x / 2] as i32 - 128, v[x / 2] as i32 - 128);
+                let shown = [
+                    (c + rv * e + 128) >> 8,
+                    (c - gu * d - gv * e + 128) >> 8,
+                    (c + bu * d + 128) >> 8,
+                ];
+                for (s, t) in shown.into_iter().zip(&p[..3]) {
+                    let diff = s.clamp(0, 255).abs_diff(*t as i32);
+                    peak = peak.max(diff);
+                    sum += diff;
                 }
             }
-            let area = ((x1 - x0) * (y1 - y0) * 3) as u32;
-            stale[ty * cols + tx] = peak > STALE_PEAK || sum > STALE_MEAN * area;
         }
-    }
+        let area = ((x1 - x0) * (y1 - y0) * 3) as u32;
+        peak > STALE_PEAK || sum > STALE_MEAN * area
+    };
+    // Rows of tiles shared among the cores: on one of the bench container's
+    // four this took 5 ms of the time to sharp.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8);
+    let per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (part, chunk) in stale.chunks_mut(per * cols).enumerate() {
+            let tile = &tile;
+            scope.spawn(move || {
+                for (n, row) in chunk.chunks_mut(cols).enumerate() {
+                    for (tx, cell) in row.iter_mut().enumerate() {
+                        *cell = tile(tx, part * per + n);
+                    }
+                }
+            });
+        }
+    });
     stale
 }
 
@@ -387,12 +403,12 @@ pub(crate) fn damage_share(rects: &[screen::Rect], width: u32, height: u32) -> f
 /// second right now. Video takes about half of that, so the tiles of the
 /// settle refresh and the input still find room, and the queue at the
 /// bottleneck stays short: a frame that waits there is lag the helper feels.
-/// On a fast link 8 Mbit/s is the ceiling, near what video used when it ran
+/// On a fast link 6 Mbit/s is the ceiling, near what video used when it ran
 /// at 33 screens a second. More buys a sharper moving picture, and the
 /// screen is sent sharp anyway once it settles.
 pub(crate) fn bitrate(cwnd: u64, rtt: Duration) -> u32 {
     const MIN: u64 = 300_000;
-    const MAX: u64 = 8_000_000;
+    const MAX: u64 = 6_000_000;
     let rtt = rtt.max(Duration::from_millis(5)).as_secs_f64();
     ((cwnd as f64 * 8.0 / rtt * 0.5) as u64).clamp(MIN, MAX) as u32
 }
@@ -432,17 +448,17 @@ mod tests {
         assert_eq!(policy.capture(0.6, ms(64)), Choice::Video { start: true });
         // Before the gaps are known, the screen settles after SETTLE.
         assert_eq!(policy.settles_at(), Some(ms(64) + SETTLE));
-        // Changing every 16 ms, it has settled after one and a half gaps.
+        // Changing every 16 ms, it has settled after one and a quarter gaps.
         assert_eq!(policy.capture(0.6, ms(80)), Choice::Video { start: false });
         assert_eq!(
             policy.settles_at(),
-            Some(ms(80) + Duration::from_millis(24))
+            Some(ms(80) + Duration::from_millis(20))
         );
         // The pointer moving after the scroll stops does not hold video.
         assert_eq!(policy.capture(0.01, ms(96)), Choice::Video { start: false });
         assert_eq!(
             policy.settles_at(),
-            Some(ms(80) + Duration::from_millis(24))
+            Some(ms(80) + Duration::from_millis(20))
         );
         policy.settle(ms(180));
         assert_eq!(policy.settles_at(), None);
@@ -489,7 +505,7 @@ mod tests {
         let cell = bitrate(30_000, Duration::from_millis(200));
         assert!(cell < 1_000_000 && frame_rate(cell) < 30);
         // A LAN is capped.
-        assert_eq!(bitrate(10_000_000, Duration::from_millis(1)), 8_000_000);
+        assert_eq!(bitrate(10_000_000, Duration::from_millis(1)), 6_000_000);
     }
 
     #[test]

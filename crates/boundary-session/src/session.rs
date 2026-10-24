@@ -1153,10 +1153,13 @@ impl Coder {
                     .as_mut()
                     .filter(|v| v.width == frame.width && v.height == frame.height)
                     .and_then(|v| v.encoder.shown());
+                crate::stats::phase("shadow", now.elapsed());
                 match shown {
                     Some(shown) => {
                         let stale = video::stale_tiles(&frame, &shown);
+                        crate::stats::phase("compare", now.elapsed());
                         let update = self.tiles.refine(frame, &stale, seq, SETTLED_QUALITY)?;
+                        crate::stats::phase("tiles", now.elapsed());
                         Ok(update.map(|u| self.kind(u)))
                     }
                     None => {
