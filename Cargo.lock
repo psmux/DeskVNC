@@ -1032,6 +1032,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
  "xcap",
 ]
