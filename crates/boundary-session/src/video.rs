@@ -158,18 +158,18 @@ pub(crate) const QUIET_SHARE: f32 = 0.02;
 pub(crate) const SETTLE: Duration = Duration::from_millis(60);
 /// Once they are known, the screen has settled when it has been quiet for
 /// one and a quarter of the usual gaps between its changes: 21 ms for a
-/// screen changing 60 times a second, 42 for a 30 frame video, which does not count
-/// as stopped between its frames. A pause that was not a stop picks video
-/// up again at once and waits [`SETTLE_AGAIN`] from then on.
+/// screen changing 60 times a second, 42 for a 30 frame video, which does
+/// not count as stopped between its frames. After a pause that was not a
+/// stop, twice that.
 const SETTLE_GAPS: u32 = 5;
 const SETTLE_GAPS_PER: u32 = 4;
 pub(crate) const SETTLE_MIN: Duration = Duration::from_millis(20);
 pub(crate) const SETTLE_MAX: Duration = Duration::from_millis(100);
 /// Motion again this soon after the screen settled was a pause, not a stop,
 /// as between the turns of a scroll wheel: video picks up at once, and waits
-/// longer before it settles again.
+/// longer before it settles again. A fixed 200 ms there made one late
+/// picture on a busy desktop cost a fifth of a second of blur at the end.
 pub(crate) const RESUME: Duration = Duration::from_millis(500);
-pub(crate) const SETTLE_AGAIN: Duration = Duration::from_millis(200);
 
 /// When to send video and when tiles.
 #[derive(Default)]
@@ -180,8 +180,8 @@ pub(crate) struct Policy {
     busy: Option<Instant>,
     /// When the screen last settled.
     settled: Option<Instant>,
-    /// How long to wait for this run of video to settle.
-    wait: Duration,
+    /// This run of video picked up again after a pause.
+    resumed: bool,
     /// The last capture that changed, while on video, and the usual gap
     /// between those captures.
     previous: Option<Instant>,
@@ -226,7 +226,7 @@ impl Policy {
         if self.run >= MOTION_RUN || (resumed && share >= MOTION_SHARE) {
             self.video = true;
             self.busy = Some(now);
-            self.wait = if resumed { SETTLE_AGAIN } else { SETTLE };
+            self.resumed = resumed;
             self.previous = Some(now);
             self.gap = Duration::ZERO;
             return Choice::Video { start: true };
@@ -235,12 +235,11 @@ impl Policy {
     }
     /// When the screen will have settled, while on video.
     pub fn settles_at(&self) -> Option<Instant> {
-        let wait = if self.wait == SETTLE_AGAIN {
-            SETTLE_AGAIN
-        } else if self.gap.is_zero() {
+        let wait = if self.gap.is_zero() {
             SETTLE
         } else {
-            (self.gap * SETTLE_GAPS / SETTLE_GAPS_PER).clamp(SETTLE_MIN, SETTLE_MAX)
+            let times = if self.resumed { 2 } else { 1 };
+            (self.gap * SETTLE_GAPS * times / SETTLE_GAPS_PER).clamp(SETTLE_MIN, SETTLE_MAX)
         };
         self.video.then(|| self.busy.map(|b| b + wait)).flatten()
     }
@@ -466,7 +465,12 @@ mod tests {
         // Motion again soon after: a pause in a scroll. Video at once, and a
         // longer wait before settling again.
         assert_eq!(policy.capture(0.6, ms(400)), Choice::Video { start: true });
-        assert_eq!(policy.settles_at(), Some(ms(400) + SETTLE_AGAIN));
+        assert_eq!(policy.settles_at(), Some(ms(400) + SETTLE));
+        assert_eq!(policy.capture(0.6, ms(416)), Choice::Video { start: false });
+        assert_eq!(
+            policy.settles_at(),
+            Some(ms(416) + Duration::from_millis(40))
+        );
         policy.settle(ms(700));
         // Long after, motion starts as new: two captures in a row.
         assert_eq!(policy.capture(0.6, ms(2000)), Choice::Tiles);

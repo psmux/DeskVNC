@@ -1193,10 +1193,7 @@ impl Coder {
                         .tiles
                         .update_with(frame, seq, crate::JPEG_QUALITY, damage.as_deref())?
                         .map(|u| self.kind(u))),
-                    video::Choice::Video { start } => match {
-                        self.tiles.passed();
-                        self.video(&frame, seq, rate)
-                    } {
+                    video::Choice::Video { start } => match self.passed_video(&frame, seq, rate) {
                         Ok(bytes) => Ok(bytes),
                         Err(_) => {
                             // An encoder that failed is not tried again in
@@ -1227,6 +1224,16 @@ impl Coder {
             update.insert(0, video::KIND_TILES);
         }
         update
+    }
+    /// A capture as video, which the tile encoder then did not see.
+    fn passed_video(
+        &mut self,
+        frame: &Frame,
+        seq: u64,
+        rate: (u32, u32),
+    ) -> Result<Option<Vec<u8>>> {
+        self.tiles.passed();
+        self.video(frame, seq, rate)
     }
     fn video(&mut self, frame: &Frame, seq: u64, rate: (u32, u32)) -> Result<Option<Vec<u8>>> {
         let video = match self.video.take() {
