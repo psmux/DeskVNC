@@ -1012,6 +1012,10 @@ async fn send_screens(
 
 /// At most this many updates wait to be shown, however small they are.
 const MAX_UPDATES_IN_FLIGHT: usize = 12;
+/// The same for pictures of video, which are small and come many a second:
+/// twelve held a link with a 300 ms round trip to forty a second. The bytes
+/// in flight are still held to the congestion window.
+const MAX_VIDEO_IN_FLIGHT: usize = 32;
 /// Data allowed on its way before the link has measured itself.
 const MIN_BYTES_IN_FLIGHT: u64 = 128 * 1024;
 
@@ -1239,9 +1243,12 @@ async fn send_updates(
                 in_flight.pop_front();
             }
             let bytes: u64 = in_flight.iter().map(|(_, b)| b).sum();
-            if in_flight.is_empty()
-                || (in_flight.len() < MAX_UPDATES_IN_FLIGHT && bytes < window(connection))
-            {
+            let most = if coder.as_ref().is_some_and(|c| c.policy.on_video()) {
+                MAX_VIDEO_IN_FLIGHT
+            } else {
+                MAX_UPDATES_IN_FLIGHT
+            };
+            if in_flight.is_empty() || (in_flight.len() < most && bytes < window(connection)) {
                 break;
             }
             if shown.changed().await.is_err() {

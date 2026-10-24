@@ -321,10 +321,13 @@ impl VideoToolbox {
     pub fn new(width: u32, height: u32) -> Result<Self> {
         let api = api().context("VideoToolbox is not available")?;
         // Low latency rate control is the mode made for video calls: no
-        // frames held back, a rate that follows what it is told at once. A
-        // Mac that has no such mode, as some Intel ones, gets the ordinary
-        // real time mode.
-        match Self::create(api, width, height, true) {
+        // frames held back, a rate that follows what it is told at once. It
+        // is used on Apple silicon only. On the Intel i9 iMac it cut each
+        // picture into slices that OpenH264 would not decode after a dozen
+        // pictures and dropped pictures to keep its rate, where the ordinary
+        // real time mode measured 30 screens a second across the ocean. A
+        // Mac without the mode gets the ordinary one too.
+        match Self::create(api, width, height, cfg!(target_arch = "aarch64")) {
             Ok(encoder) => Ok(encoder),
             Err(_) => Self::create(api, width, height, false),
         }

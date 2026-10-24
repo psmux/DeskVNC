@@ -237,13 +237,22 @@ impl Screen {
                             .write_all(&unit.data)?;
                     }
                     let t = Instant::now();
-                    let Some(picture) = decoder.decode(&unit.data)? else {
+                    // A NAL unit at a time: OpenH264 refuses a picture of
+                    // several slices handed over at once, which is what the
+                    // hardware encoders on Intel Macs make.
+                    let mut decoded = None;
+                    for nal in openh264::nal_units(&unit.data) {
+                        if let Some(picture) = decoder.decode(nal)? {
+                            use openh264::formats::YUVSource;
+                            let (dw, dh) = picture.dimensions();
+                            let mut rgba = vec![0u8; dw * dh * 4];
+                            picture.write_rgba8(&mut rgba);
+                            decoded = Some((dw, dh, rgba));
+                        }
+                    }
+                    let Some((dw, dh, rgba)) = decoded else {
                         anyhow::bail!("the decoder held a picture back");
                     };
-                    use openh264::formats::YUVSource;
-                    let (dw, dh) = picture.dimensions();
-                    let mut rgba = vec![0u8; dw * dh * 4];
-                    picture.write_rgba8(&mut rgba);
                     let canvas = match self.canvas.as_mut() {
                         Some(c) if c.width == unit.width && c.height == unit.height => c,
                         _ => self.canvas.insert(Frame {
