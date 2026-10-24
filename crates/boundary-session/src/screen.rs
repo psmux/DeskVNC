@@ -75,6 +75,39 @@ impl Encoder {
                 height: frame.height,
             }],
         };
+        self.send(frame, rects, seq, quality)
+    }
+    /// After video drew over the screen: the tiles marked in `stale`, in rows
+    /// of 64 pixel tiles, from `frame`, which the helper then counts as
+    /// holding all of. The rest video already drew closely enough.
+    pub fn refine(
+        &mut self,
+        frame: std::sync::Arc<Frame>,
+        stale: &[bool],
+        seq: u64,
+        quality: u8,
+    ) -> Result<Option<Vec<u8>>> {
+        frame.validate()?;
+        let cols = frame.width.div_ceil(TILE);
+        let rects = joined(frame.width, frame.height, |tx, ty| {
+            stale
+                .get((ty * cols + tx) as usize)
+                .copied()
+                .unwrap_or(true)
+        });
+        if rects.is_empty() {
+            self.reference = Some(frame);
+            return Ok(None);
+        }
+        self.send(frame, rects, seq, quality)
+    }
+    fn send(
+        &mut self,
+        frame: std::sync::Arc<Frame>,
+        rects: Vec<Rect>,
+        seq: u64,
+        quality: u8,
+    ) -> Result<Option<Vec<u8>>> {
         if rects.is_empty() {
             return Ok(None);
         }
@@ -103,6 +136,19 @@ impl Encoder {
 fn changed(old: &Frame, new: &Frame) -> Vec<Rect> {
     let (w, h) = (new.width, new.height);
     let stride = w as usize * 4;
+    joined(w, h, |tx, ty| {
+        let (y0, x0) = (ty * TILE, (tx * TILE) as usize * 4);
+        let th = TILE.min(h - y0);
+        let tw = TILE.min(w - tx * TILE) as usize * 4;
+        (y0..y0 + th).any(|y| {
+            let i = y as usize * stride + x0;
+            old.rgba[i..i + tw] != new.rgba[i..i + tw]
+        })
+    })
+}
+
+/// The tiles `dirty` picks, joined into rectangles as [`changed`] does.
+fn joined(w: u32, h: u32, dirty: impl Fn(u32, u32) -> bool) -> Vec<Rect> {
     let cols = w.div_ceil(TILE);
     let mut rects: Vec<Rect> = Vec::new();
     // Rectangles that end on the row of tiles above, which this row may extend.
@@ -110,16 +156,7 @@ fn changed(old: &Frame, new: &Frame) -> Vec<Rect> {
     for ty in 0..h.div_ceil(TILE) {
         let y0 = ty * TILE;
         let th = TILE.min(h - y0);
-        let dirty: Vec<bool> = (0..cols)
-            .map(|tx| {
-                let x0 = (tx * TILE) as usize * 4;
-                let tw = TILE.min(w - tx * TILE) as usize * 4;
-                (y0..y0 + th).any(|y| {
-                    let i = y as usize * stride + x0;
-                    old.rgba[i..i + tw] != new.rgba[i..i + tw]
-                })
-            })
-            .collect();
+        let dirty: Vec<bool> = (0..cols).map(|tx| dirty(tx, ty)).collect();
         let mut next_open = Vec::new();
         let mut tx = 0;
         while tx < cols {

@@ -1102,7 +1102,10 @@ enum Work {
     /// A new capture, and what the desktop said changed since the last one
     /// taken, when it said.
     Capture(Arc<Frame>, Option<Vec<Rect>>),
-    /// The whole screen, sharp, as when motion stopped or the helper asked.
+    /// The screen has stopped moving: sharp tiles for what video drew
+    /// visibly wrong.
+    Settle(Arc<Frame>),
+    /// The whole screen, sharp, as when the helper asked.
     Whole(Arc<Frame>),
 }
 impl Coder {
@@ -1126,6 +1129,26 @@ impl Coder {
         now: Instant,
     ) -> Result<Option<Vec<u8>>> {
         match work {
+            Work::Settle(frame) => {
+                self.policy.settle(now);
+                self.last = Some(frame.clone());
+                let shown = self
+                    .video
+                    .as_mut()
+                    .filter(|v| v.width == frame.width && v.height == frame.height)
+                    .and_then(|v| v.encoder.shown());
+                match shown {
+                    Some(shown) => {
+                        let stale = video::stale_tiles(&frame, &shown);
+                        let update = self.tiles.refine(frame, &stale, seq, SETTLED_QUALITY)?;
+                        Ok(update.map(|u| self.kind(u)))
+                    }
+                    None => {
+                        self.tiles.reset();
+                        self.tiles(frame, seq, SETTLED_QUALITY)
+                    }
+                }
+            }
             Work::Whole(frame) => {
                 self.policy.stop();
                 self.tiles.reset();
@@ -1150,7 +1173,7 @@ impl Coder {
                 };
                 match choice {
                     video::Choice::Tiles => self.tiles(frame, seq, crate::JPEG_QUALITY),
-                    video::Choice::Video { start } => match self.video(&frame, seq, start, rate) {
+                    video::Choice::Video { start } => match self.video(&frame, seq, rate) {
                         Ok(bytes) => Ok(bytes),
                         Err(_) => {
                             // An encoder that failed is not tried again in
@@ -1170,21 +1193,19 @@ impl Coder {
         }
     }
     fn tiles(&mut self, frame: Arc<Frame>, seq: u64, quality: u8) -> Result<Option<Vec<u8>>> {
-        let Some(mut update) = self.tiles.update_at(frame, seq, quality)? else {
-            return Ok(None);
-        };
+        Ok(self
+            .tiles
+            .update_at(frame, seq, quality)?
+            .map(|u| self.kind(u)))
+    }
+    /// A tile update as it goes on this stream.
+    fn kind(&self, mut update: Vec<u8>) -> Vec<u8> {
         if self.framed {
             update.insert(0, video::KIND_TILES);
         }
-        Ok(Some(update))
+        update
     }
-    fn video(
-        &mut self,
-        frame: &Frame,
-        seq: u64,
-        start: bool,
-        rate: (u32, u32),
-    ) -> Result<Option<Vec<u8>>> {
+    fn video(&mut self, frame: &Frame, seq: u64, rate: (u32, u32)) -> Result<Option<Vec<u8>>> {
         let video = match self.video.take() {
             Some(v) if v.width == frame.width && v.height == frame.height => v,
             _ => {
@@ -1206,13 +1227,15 @@ impl Coder {
             video.encoder.set_rate(rate.0, rate.1);
             video.rate = rate;
         }
-        let encoded = video.encoder.encode(frame, start || video.fresh)?;
+        // Only a new encoder starts with a keyframe. When video starts again
+        // after the screen settled, the helper's decoder still holds the
+        // picture this encoder last made, so the next one follows on from it:
+        // a keyframe there cost a third of a second on a slow link before
+        // the first moving picture.
+        let encoded = video.encoder.encode(frame, video.fresh)?;
         if encoded.data.is_empty() {
             // The encoder skipped this screen to keep to its rate.
-            ensure!(
-                !video.fresh && !start,
-                "The video encoder skipped a keyframe"
-            );
+            ensure!(!video.fresh, "The video encoder skipped a keyframe");
             return Ok(None);
         }
         ensure!(
@@ -1317,6 +1340,20 @@ async fn send_updates(
         // in the middle of every scroll on a slow link.
         let work = tokio::select! {
             biased;
+            // The helper asking for the screen comes first: while the screen
+            // keeps moving there is always a capture waiting, and an agent
+            // that asked would never be answered.
+            Ok(()) = async {
+                match refresh.as_mut() {
+                    Some(refresh) => refresh.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match screens.borrow_and_update().clone() {
+                    Some(frame) => Work::Whole(frame),
+                    None => continue,
+                }
+            }
             changed = screens.changed() => {
                 if changed.is_err() {
                     return std::future::pending().await;
@@ -1335,18 +1372,7 @@ async fn send_updates(
             }
             _ = tokio::time::sleep_until(settles.unwrap_or_else(tokio::time::Instant::now)), if settles.is_some() => {
                 match screens.borrow_and_update().clone() {
-                    Some(frame) => Work::Whole(frame),
-                    None => continue,
-                }
-            }
-            Ok(()) = async {
-                match refresh.as_mut() {
-                    Some(refresh) => refresh.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match screens.borrow_and_update().clone() {
-                    Some(frame) => Work::Whole(frame),
+                    Some(frame) => Work::Settle(frame),
                     None => continue,
                 }
             }

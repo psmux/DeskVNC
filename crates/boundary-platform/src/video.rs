@@ -7,14 +7,15 @@
 use anyhow::{Result, ensure};
 use boundary_session::{
     Frame,
-    video::{Encoded, VideoEncoder, VideoEncoders},
+    video::{Encoded, Shown, VideoEncoder, VideoEncoders},
 };
 use openh264::encoder::{
     BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod,
     RateControlMode, UsageType, VuiConfig,
 };
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 /// The best encoder this machine has, made for each size of screen.
 pub fn encoders() -> VideoEncoders {
@@ -23,19 +24,160 @@ pub fn encoders() -> VideoEncoders {
 
 /// Only the software encoder, to compare against the hardware one.
 pub fn software() -> VideoEncoders {
-    Arc::new(|width, height| Ok(Box::new(OpenH264::new(width, height)?) as Box<dyn VideoEncoder>))
+    Arc::new(|width, height| Shadowed::wrap(Box::new(OpenH264::new(width, height)?), false))
 }
 
 fn best(width: u32, height: u32) -> Result<Box<dyn VideoEncoder>> {
+    // VideoToolbox is told its pictures are BT.709; the others convert to
+    // BT.601 themselves.
     #[cfg(target_os = "macos")]
     if let Ok(encoder) = crate::vt::VideoToolbox::new(width, height) {
-        return Ok(Box::new(encoder));
+        return Shadowed::wrap(Box::new(encoder), true);
     }
     #[cfg(windows)]
     if let Ok(encoder) = crate::mf::MediaFoundation::new(width, height) {
-        return Ok(Box::new(encoder));
+        return Shadowed::wrap(Box::new(encoder), false);
     }
-    Ok(Box::new(OpenH264::new(width, height)?))
+    Shadowed::wrap(Box::new(OpenH264::new(width, height)?), false)
+}
+
+/// How long to wait for the shadow decoder to catch up when the screen
+/// settles, before sending the whole screen instead.
+const SHADOW_WAIT: Duration = Duration::from_millis(150);
+
+/// An encoder with a decoder of its own output beside it, on its own
+/// thread, so that when the screen settles the host knows what the helper's
+/// picture looks like and sends sharp tiles only where it is visibly wrong.
+/// Decoding a 1920 by 1200 picture takes a few milliseconds of one core,
+/// off the path a picture takes to the helper.
+struct Shadowed {
+    inner: Box<dyn VideoEncoder>,
+    bt709: bool,
+    pictures: Option<mpsc::Sender<Vec<u8>>>,
+    state: Arc<(Mutex<Mirror>, Condvar)>,
+    sent: u64,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+#[derive(Default)]
+struct Mirror {
+    decoded: u64,
+    luma: Vec<u8>,
+    stride: usize,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    chroma_stride: usize,
+    /// The decoder lost its place, until the next keyframe.
+    lost: bool,
+}
+impl Shadowed {
+    fn wrap(inner: Box<dyn VideoEncoder>, bt709: bool) -> Result<Box<dyn VideoEncoder>> {
+        let (pictures, queue) = mpsc::channel::<Vec<u8>>();
+        let state = Arc::new((Mutex::new(Mirror::default()), Condvar::new()));
+        let shared = state.clone();
+        let thread = std::thread::Builder::new()
+            .name("boundary-shadow-decoder".into())
+            .spawn(move || shadow(queue, &shared))?;
+        Ok(Box::new(Self {
+            inner,
+            bt709,
+            pictures: Some(pictures),
+            state,
+            sent: 0,
+            thread: Some(thread),
+        }))
+    }
+}
+fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
+    let mut decoder = openh264::decoder::Decoder::new().ok();
+    for picture in queue {
+        // A NAL unit at a time: OpenH264 refuses a picture of several
+        // slices handed over at once.
+        let mut luma = None;
+        let mut failed = decoder.is_none();
+        if let Some(decoder) = decoder.as_mut() {
+            for nal in openh264::nal_units(&picture) {
+                match decoder.decode(nal) {
+                    Ok(Some(yuv)) => {
+                        use openh264::formats::YUVSource;
+                        let (_, height) = yuv.dimensions();
+                        let (stride, chroma, _) = yuv.strides();
+                        let half = height.div_ceil(2);
+                        luma = Some((
+                            yuv.y()[..stride * height].to_vec(),
+                            stride,
+                            yuv.u()[..chroma * half].to_vec(),
+                            yuv.v()[..chroma * half].to_vec(),
+                            chroma,
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(_) => failed = true,
+                }
+            }
+        }
+        let keyframe = openh264::nal_units(&picture).any(|nal| {
+            nal.get(if nal[2] == 1 { 3 } else { 4 })
+                .is_some_and(|b| b & 31 == 5)
+        });
+        let (lock, ready) = state;
+        let mut mirror = lock.lock().unwrap_or_else(|e| e.into_inner());
+        match luma {
+            Some((luma, stride, u, v, chroma)) if !failed => {
+                mirror.luma = luma;
+                mirror.stride = stride;
+                mirror.u = u;
+                mirror.v = v;
+                mirror.chroma_stride = chroma;
+                if keyframe {
+                    mirror.lost = false;
+                }
+            }
+            _ => mirror.lost = true,
+        }
+        mirror.decoded += 1;
+        ready.notify_all();
+    }
+}
+impl Drop for Shadowed {
+    fn drop(&mut self) {
+        self.pictures.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+impl VideoEncoder for Shadowed {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn set_rate(&mut self, bits_per_second: u32, frames_per_second: u32) {
+        self.inner.set_rate(bits_per_second, frames_per_second);
+    }
+    fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Encoded> {
+        let encoded = self.inner.encode(frame, keyframe)?;
+        if !encoded.data.is_empty()
+            && let Some(pictures) = &self.pictures
+            && pictures.send(encoded.data.clone()).is_ok()
+        {
+            self.sent += 1;
+        }
+        Ok(encoded)
+    }
+    fn shown(&mut self) -> Option<Shown> {
+        let (lock, ready) = &*self.state;
+        let mirror = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (mirror, _) = ready
+            .wait_timeout_while(mirror, SHADOW_WAIT, |m| m.decoded < self.sent)
+            .unwrap_or_else(|e| e.into_inner());
+        (mirror.decoded == self.sent && !mirror.lost && !mirror.luma.is_empty()).then(|| Shown {
+            luma: mirror.luma.clone(),
+            stride: mirror.stride,
+            u: mirror.u.clone(),
+            v: mirror.v.clone(),
+            chroma_stride: mirror.chroma_stride,
+            bt709: self.bt709,
+        })
+    }
 }
 
 /// Cisco's OpenH264, in software. It makes Constrained Baseline, which

@@ -147,15 +147,69 @@ fn difference(a: &Frame, b: &Frame) -> u64 {
     diff / a.rgba.len() as u64
 }
 
+/// What the helper's window shows: video decoded, and tiles drawn over it,
+/// in the order they came.
+struct Window {
+    canvas: Frame,
+    decoder: Option<openh264::decoder::Decoder>,
+}
+impl Window {
+    fn new() -> Self {
+        Self {
+            canvas: Frame {
+                width: W,
+                height: H,
+                rgba: vec![0; (W * H * 4) as usize],
+            },
+            decoder: None,
+        }
+    }
+    fn draw(&mut self, updates: &[(Instant, Update)]) {
+        use openh264::formats::YUVSource;
+        let stride = W as usize * 4;
+        for (_, update) in updates {
+            match update {
+                Update::Screen { frame, rects } => match rects {
+                    None => self.canvas.rgba.copy_from_slice(&frame.rgba),
+                    Some(rects) => {
+                        for r in rects {
+                            for y in r.y..r.y + r.height {
+                                let i = y as usize * stride + r.x as usize * 4;
+                                let n = r.width as usize * 4;
+                                self.canvas.rgba[i..i + n].copy_from_slice(&frame.rgba[i..i + n]);
+                            }
+                        }
+                    }
+                },
+                Update::Video(unit) => {
+                    if unit.fresh || self.decoder.is_none() {
+                        self.decoder = Some(openh264::decoder::Decoder::new().unwrap());
+                    }
+                    let decoder = self.decoder.as_mut().unwrap();
+                    let picture = decoder
+                        .decode(&unit.data)
+                        .unwrap()
+                        .expect("no frame held back");
+                    // Every picture decodes, in order, to the screen's size.
+                    assert_eq!(picture.dimensions(), (W as usize, H as usize));
+                    picture.write_rgba8(&mut self.canvas.rgba);
+                }
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn moving_screens_come_as_h264_and_settle_back_to_sharp_tiles() {
     timeout(Duration::from_secs(60), async {
         let mut pair = connect(Some(boundary_platform::video::software()), true).await;
+        let mut window = Window::new();
         let first = gather(&mut pair.helper, Duration::from_millis(500)).await;
         assert!(
             first.iter().any(|(_, u)| whole(u)),
             "the first screen is tiles"
         );
+        window.draw(&first);
 
         pair.moving.store(true, Ordering::SeqCst);
         let moving = gather(&mut pair.helper, Duration::from_millis(1500)).await;
@@ -172,16 +226,7 @@ async fn moving_screens_come_as_h264_and_settle_back_to_sharp_tiles() {
             "video starts with a keyframe"
         );
         assert!(units[1..].iter().all(|u| !u.fresh && !u.keyframe));
-        // Every picture decodes, in order, to the screen's size.
-        let mut decoder = openh264::decoder::Decoder::new().unwrap();
-        for unit in &units {
-            let picture = decoder
-                .decode(&unit.data)
-                .unwrap()
-                .expect("no frame held back");
-            use openh264::formats::YUVSource;
-            assert_eq!(picture.dimensions(), (W as usize, H as usize));
-        }
+        window.draw(&moving);
 
         // The agent asks for the whole screen while it still moves.
         pair.helper.refresh();
@@ -190,42 +235,51 @@ async fn moving_screens_come_as_h264_and_settle_back_to_sharp_tiles() {
             asked.iter().any(|(_, u)| whole(u)),
             "a refresh sends the whole screen"
         );
+        window.draw(&asked);
 
-        // The screen stops: the whole of it comes again as tiles, after the
-        // last picture of video and soon after it.
+        // The screen stops.
         pair.moving.store(false, Ordering::SeqCst);
         let stopped = Instant::now();
         let after = gather(&mut pair.helper, Duration::from_millis(1500)).await;
-        let last_video = after
-            .iter()
-            .rposition(|(_, u)| matches!(u, Update::Video(_)));
-        let settle = after
-            .iter()
-            .enumerate()
-            .find(|(i, (_, u))| last_video.is_none_or(|v| *i > v) && whole(u))
-            .map(|(_, (at, u))| (*at, u.clone()))
-            .expect("the screen is sent sharp once it stops");
-        assert!(
-            settle.0 - stopped < Duration::from_millis(800),
-            "{:?}",
-            settle.0 - stopped
-        );
-        assert!(matches!(settle.1, Update::Screen { .. }));
-        // What the helper holds in the end is the still screen. A last change
-        // may come as tiles after the sharp one, so it is the last screen.
-        let last = after
-            .iter()
-            .rev()
-            .find_map(|(_, u)| match u {
-                Update::Screen { frame, .. } => Some(frame.clone()),
-                _ => None,
-            })
-            .expect("a screen");
-        // Near the still screen, as JPEG is, and far from one a step earlier.
+        // Video stops soon. Tiles follow only where video drew visibly
+        // wrong, which on a fast link may be nowhere.
+        if let Some((at, _)) = after.iter().rfind(|(_, u)| matches!(u, Update::Video(_))) {
+            assert!(
+                *at - stopped < Duration::from_millis(800),
+                "{:?}",
+                *at - stopped
+            );
+        }
+        window.draw(&after);
+        // What the window shows in the end is the still screen, near it as
+        // JPEG is, and far from the one a step earlier.
         let step = pair.step.load(Ordering::SeqCst);
         let (now, before) = (
-            difference(&last, &picture(step)),
-            difference(&last, &picture(step - 1)),
+            difference(&window.canvas, &picture(step)),
+            difference(&window.canvas, &picture(step - 1)),
+        );
+        assert!(now < 9 && before > now * 2, "{now} {before}");
+
+        // Moving again, video follows on from the picture the helper's
+        // decoder already holds, with no keyframe, and still draws right.
+        pair.moving.store(true, Ordering::SeqCst);
+        let again = gather(&mut pair.helper, Duration::from_millis(800)).await;
+        let first_again = again
+            .iter()
+            .find_map(|(_, u)| match u {
+                Update::Video(unit) => Some(unit.clone()),
+                _ => None,
+            })
+            .expect("video again");
+        assert!(!first_again.keyframe && !first_again.fresh);
+        window.draw(&again);
+        pair.moving.store(false, Ordering::SeqCst);
+        let after = gather(&mut pair.helper, Duration::from_millis(1000)).await;
+        window.draw(&after);
+        let step = pair.step.load(Ordering::SeqCst);
+        let (now, before) = (
+            difference(&window.canvas, &picture(step)),
+            difference(&window.canvas, &picture(step - 1)),
         );
         assert!(now < 9 && before > now * 2, "{now} {before}");
         pair.helper.stop();
