@@ -698,14 +698,27 @@ fn open_stream(path: &str) -> std::io::Result<Stream> {
 /// the application has closed.
 fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
     let mut guard = lock(link());
-    if guard.is_none() {
+    let reused = guard.is_some();
+    if !reused {
         *guard = Some(connect()?);
     }
-    let outcome = {
+    let mut outcome = {
         let held = guard.as_mut().expect("just connected");
-        request(held, method, params)
+        send(held, method, params.clone())
     };
-    match outcome {
+    // A link held from before DeskVNCViewer restarted fails on the first
+    // write. That request never reached anyone, so it is sent again on a
+    // fresh connection, once. Without this every agent's first call after a
+    // restart came back LIMB_GONE, which reads to an agent like a failure.
+    // A failure after the request went out is not retried: the old
+    // application may have acted on it.
+    if reused && matches!(outcome, Err(Failure::Unsent(_))) {
+        *guard = None;
+        *guard = Some(connect()?);
+        let held = guard.as_mut().expect("just connected");
+        outcome = send(held, method, params);
+    }
+    match outcome.map_err(Failure::into_error) {
         Ok(value) => Ok(value),
         Err(error) => {
             // A transport failure invalidates the connection, and a
@@ -753,12 +766,35 @@ fn connect() -> Result<Link, ToolError> {
     Ok(link)
 }
 
+/// Why a request failed: before it was written, or after.
+enum Failure {
+    /// Writing it failed, so the plane never saw it.
+    Unsent(ToolError),
+    /// It went out, or was refused.
+    Sent(ToolError),
+}
+impl Failure {
+    fn into_error(self) -> ToolError {
+        match self {
+            Failure::Unsent(e) | Failure::Sent(e) => e,
+        }
+    }
+}
+
 /// Write one framed request and read the reply that matches its id.
 fn request(
     link: &mut Link,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, ToolError> {
+    send(link, method, params).map_err(Failure::into_error)
+}
+
+fn send(
+    link: &mut Link,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Failure> {
     use std::io::{Read, Write};
 
     link.next_id += 1;
@@ -766,7 +802,11 @@ fn request(
     let body = serde_json::to_vec(&serde_json::json!({
         "jsonrpc": "2.0", "id": id, "method": method, "params": params,
     }))
-    .map_err(|e| ToolError::bad_request(format!("that request could not be encoded: {e}")))?;
+    .map_err(|e| {
+        Failure::Unsent(ToolError::bad_request(format!(
+            "that request could not be encoded: {e}"
+        )))
+    })?;
 
     let mut framed = Vec::with_capacity(8 + body.len());
     framed.push(MSG_JSONRPC);
@@ -775,37 +815,45 @@ fn request(
     framed.extend_from_slice(&0u16.to_le_bytes());
     framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
     framed.extend_from_slice(&body);
-    link.stream.write_all(&framed).map_err(transport)?;
-    link.stream.flush().map_err(transport)?;
+    link.stream
+        .write_all(&framed)
+        .map_err(|e| Failure::Unsent(transport(e)))?;
+    link.stream
+        .flush()
+        .map_err(|e| Failure::Unsent(transport(e)))?;
 
     loop {
         let mut header = [0u8; 8];
-        link.stream.read_exact(&mut header).map_err(transport)?;
+        link.stream
+            .read_exact(&mut header)
+            .map_err(|e| Failure::Sent(transport(e)))?;
         let msg_type = header[0];
         let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
         if len > MAX_PAYLOAD {
-            return Err(transport(std::io::Error::other(format!(
+            return Err(Failure::Sent(transport(std::io::Error::other(format!(
                 "the plane sent {len} bytes, which is above this client's cap"
-            ))));
+            )))));
         }
         let mut payload = vec![0u8; len as usize];
-        link.stream.read_exact(&mut payload).map_err(transport)?;
+        link.stream
+            .read_exact(&mut payload)
+            .map_err(|e| Failure::Sent(transport(e)))?;
         // An unknown `msg_type` is ignored rather than refused, which is what
         // lets the plane grow the pixel lane without this client changing.
         if msg_type != MSG_JSONRPC {
             continue;
         }
         let message: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
-            transport(std::io::Error::other(format!(
+            Failure::Sent(transport(std::io::Error::other(format!(
                 "the plane sent something that is not JSON: {e}"
-            )))
+            ))))
         })?;
         // A notification carries no id and is not this call's answer.
         if message.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
             continue;
         }
         if let Some(error) = message.get("error") {
-            return Err(from_rpc_error(error));
+            return Err(Failure::Sent(from_rpc_error(error)));
         }
         return Ok(message
             .get("result")
