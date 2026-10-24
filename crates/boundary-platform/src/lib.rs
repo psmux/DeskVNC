@@ -89,11 +89,13 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         screen_permission(),
         "Allow this app in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
     );
+    let awake = Awake::hold();
     Ok(Box::new(NativeDesktop {
         screen: Capturer::new(id)?,
         enigo: None,
         buttons: Vec::new(),
         keys: Vec::new(),
+        _awake: awake,
     }))
 }
 /// The screen at its size in points, not Retina pixels.
@@ -263,6 +265,42 @@ struct NativeDesktop {
     enigo: Option<Enigo>,
     buttons: Vec<Button>,
     keys: Vec<Key>,
+    _awake: Awake,
+}
+
+/// Keeps the screen on while a helper is connected. A Mac nobody is at shows
+/// its lock screen, which switches the display off thirty seconds after
+/// anything wakes it, and a sleeping display captures as black: the helper
+/// watched a black screen until their own input woke it. `caffeinate` holds
+/// the assertion, is tied to this process so a crash cannot leave it behind,
+/// and is stopped when the session lets go of the desktop.
+struct Awake(Option<std::process::Child>);
+impl Awake {
+    fn hold() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            let pid = std::process::id().to_string();
+            Self(
+                std::process::Command::new("/usr/bin/caffeinate")
+                    .args(["-d", "-u", "-w", &pid])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .ok(),
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        Self(None)
+    }
+}
+impl Drop for Awake {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 impl NativeDesktop {
     fn injector(&mut self) -> Result<&mut Enigo> {
