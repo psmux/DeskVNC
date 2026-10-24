@@ -9,10 +9,15 @@ mod damage;
 mod dxgi;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(windows)]
+mod mf;
 #[cfg(target_os = "macos")]
 mod sck;
 #[cfg(windows)]
 pub mod system;
+pub mod video;
+#[cfg(target_os = "macos")]
+mod vt;
 
 /// Attach this thread to the desktop with the input, where that matters.
 fn on_input_desktop() {
@@ -696,6 +701,9 @@ impl Desktop for NativeDesktop {
             Input::Release => self.release(),
         }
         Ok(())
+    }
+    fn video(&self) -> Option<boundary_session::video::VideoEncoders> {
+        Some(video::encoders())
     }
     fn release(&mut self) {
         #[cfg(target_os = "linux")]

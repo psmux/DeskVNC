@@ -2,6 +2,7 @@ use crate::{
     Desktop, Frame, Input, Invitation,
     screen::{self, Rect},
     tools,
+    video::{self, Update, VideoEncoder, VideoEncoders, VideoUnit},
     wire::{self, Message, Screens},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -93,6 +94,8 @@ pub struct Session {
     pub frames: watch::Receiver<Option<Arc<Frame>>>,
     pub connectivity: watch::Receiver<Connectivity>,
     damage: Arc<Mutex<Damage>>,
+    /// Bytes of screens received, for measuring.
+    received: Arc<std::sync::atomic::AtomicU64>,
     input: mpsc::Sender<Input>,
     control: watch::Sender<Permission>,
     /// On the host's side, whether the person allows commands and files. On
@@ -100,7 +103,29 @@ pub struct Session {
     tools: watch::Sender<bool>,
     client: watch::Receiver<Option<tools::Client>>,
     pairing: mpsc::Sender<(String, String)>,
+    /// Bumped to ask the host for the whole screen again.
+    refresh: watch::Sender<u64>,
     cancel: CancellationToken,
+}
+/// What a helper can do beyond drawing screens, said in its first message.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Abilities {
+    /// Send commands and file requests (`crate::tools`).
+    pub tools: bool,
+    /// Take moving screens as H.264 through [`Session::updates`]. Only a
+    /// caller that reads updates that way may say so: [`Session::screen`]
+    /// has nowhere to put a picture of video.
+    pub video: bool,
+}
+impl Abilities {
+    /// The video codecs to name in the first message.
+    pub(crate) fn codecs(&self) -> Vec<String> {
+        if self.video {
+            vec![wire::H264.into()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 /// Show a screen in the helper's window, with what changed: `None` when it is
 /// a whole new picture.
@@ -114,10 +139,8 @@ fn show(
     match rects {
         Some(rects) if !damage.whole => damage.rects.extend(rects),
         _ => {
-            *damage = Damage {
-                whole: true,
-                rects: Vec::new(),
-            }
+            damage.whole = true;
+            damage.rects.clear();
         }
     }
     frames.send_replace(Some(Arc::new(frame)));
@@ -127,6 +150,35 @@ fn show(
 struct Damage {
     whole: bool,
     rects: Vec<Rect>,
+    /// Rectangles and video that came before the rectangles above, in order,
+    /// when video came between them.
+    earlier: Vec<Pending>,
+}
+enum Pending {
+    Rects { whole: bool, rects: Vec<Rect> },
+    Video(VideoUnit),
+}
+impl Damage {
+    /// Close the rectangles gathered so far, so what comes next is drawn
+    /// after them.
+    fn seal(&mut self) {
+        if self.whole || !self.rects.is_empty() {
+            self.earlier.push(Pending::Rects {
+                whole: std::mem::take(&mut self.whole),
+                rects: std::mem::take(&mut self.rects),
+            });
+        }
+    }
+}
+/// Hand a picture of video to the helper's window, after whatever came
+/// before it.
+fn show_video(frames: &watch::Sender<Option<Arc<Frame>>>, damage: &Mutex<Damage>, unit: VideoUnit) {
+    let mut damage = damage.lock().unwrap_or_else(|e| e.into_inner());
+    damage.seal();
+    damage.earlier.push(Pending::Video(unit));
+    // The screen itself has not changed, but whoever reads updates has to
+    // wake for this.
+    frames.send_modify(|_| {});
 }
 impl Session {
     /// The newest screen and the rectangles that changed since the last
@@ -134,9 +186,45 @@ impl Session {
     pub fn screen(&mut self) -> Option<(Arc<Frame>, Option<Vec<Rect>>)> {
         let mut damage = self.damage.lock().unwrap_or_else(|e| e.into_inner());
         let frame = self.frames.borrow_and_update().clone()?;
-        let taken = std::mem::take(&mut *damage);
+        let mut taken = std::mem::take(&mut *damage);
+        // Only a session that said it takes video gets any, so this is only
+        // ever rectangles, and they are all drawn from the newest screen.
+        for pending in taken.earlier.drain(..) {
+            if let Pending::Rects { whole, rects } = pending {
+                taken.whole |= whole;
+                taken.rects.extend(rects);
+            }
+        }
         let rects = (!taken.whole && !taken.rects.is_empty()).then_some(taken.rects);
         Some((frame, rects))
+    }
+    /// Everything to draw since the last call, in order: changed parts of
+    /// the screen and pictures of video. For a session opened with
+    /// [`Abilities::video`]; without it this is [`Session::screen`] as a list.
+    pub fn updates(&mut self) -> Vec<Update> {
+        let mut damage = self.damage.lock().unwrap_or_else(|e| e.into_inner());
+        let frame = self.frames.borrow_and_update().clone();
+        damage.seal();
+        std::mem::take(&mut damage.earlier)
+            .into_iter()
+            .filter_map(|pending| match pending {
+                Pending::Video(unit) => Some(Update::Video(unit)),
+                Pending::Rects { whole, rects } => frame.clone().map(|frame| Update::Screen {
+                    frame,
+                    rects: (!whole && !rects.is_empty()).then_some(rects),
+                }),
+            })
+            .collect()
+    }
+    /// Ask the host for the whole screen again as rectangles, as when what
+    /// this side holds went stale under video. Only a host that sends video
+    /// is asked, since no other one lets it go stale.
+    pub fn refresh(&self) {
+        self.refresh.send_modify(|n| *n += 1);
+    }
+    /// Bytes of screens and video received so far, on the helper's side.
+    pub fn received(&self) -> u64 {
+        self.received.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub(crate) fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
@@ -202,12 +290,14 @@ pub(crate) struct Worker {
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<Frame>>>,
     damage: Arc<Mutex<Damage>>,
+    received: Arc<std::sync::atomic::AtomicU64>,
     input: mpsc::Receiver<Input>,
     control: watch::Receiver<Permission>,
     control_tx: watch::Sender<Permission>,
     pub(crate) tools_tx: watch::Sender<bool>,
     client: watch::Sender<Option<tools::Client>>,
     pairing: mpsc::Receiver<(String, String)>,
+    refresh: watch::Receiver<u64>,
     cancel: CancellationToken,
 }
 pub(crate) fn channels() -> (Session, Worker) {
@@ -216,6 +306,7 @@ pub(crate) fn channels() -> (Session, Worker) {
     let (frames_tx, frames) = watch::channel(None);
     let (input, input_rx) = mpsc::channel(128);
     let (pairing, pairing_rx) = mpsc::channel(4);
+    let (refresh, refresh_rx) = watch::channel(0u64);
     let (control, control_rx) = watch::channel(Permission {
         allowed: false,
         generation: 0,
@@ -225,17 +316,20 @@ pub(crate) fn channels() -> (Session, Worker) {
     let (client_tx, client) = watch::channel(None);
     let cancel = CancellationToken::new();
     let damage = Arc::new(Mutex::new(Damage::default()));
+    let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
     (
         Session {
             connectivity,
             events,
             frames,
             damage: damage.clone(),
+            received: received.clone(),
             input,
             control: control.clone(),
             tools: tools_tx.clone(),
             client,
             pairing,
+            refresh,
             cancel: cancel.clone(),
         },
         Worker {
@@ -243,12 +337,14 @@ pub(crate) fn channels() -> (Session, Worker) {
             events: events_tx,
             frames: frames_tx,
             damage,
+            received,
             input: input_rx,
             control: control_rx,
             control_tx: control.clone(),
             tools_tx,
             client: client_tx,
             pairing: pairing_rx,
+            refresh: refresh_rx,
             cancel,
         },
     )
@@ -293,7 +389,7 @@ pub fn viewer_as(
     options: HostOptions,
     key: Option<iroh::SecretKey>,
 ) -> Session {
-    viewer_inner(ticket, name, options, key, false)
+    viewer_with(ticket, name, options, key, Abilities::default())
 }
 /// [`viewer_as`] for a helper whose tools send commands and file requests,
 /// such as DeskVNC's agent plane. The person is asked about those
@@ -304,14 +400,24 @@ pub fn viewer_with_tools(
     options: HostOptions,
     key: Option<iroh::SecretKey>,
 ) -> Session {
-    viewer_inner(ticket, name, options, key, true)
+    viewer_with(
+        ticket,
+        name,
+        options,
+        key,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
 }
-fn viewer_inner(
+/// [`viewer_as`] for a helper that says what more it can do.
+pub fn viewer_with(
     ticket: String,
     name: String,
     options: HostOptions,
     key: Option<iroh::SecretKey>,
-    tools: bool,
+    abilities: Abilities,
 ) -> Session {
     let (session, mut worker) = channels();
     tokio::spawn(async move {
@@ -319,7 +425,7 @@ fn viewer_inner(
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ok(()),
-            result = run_viewer(&mut worker, ticket, name, options, key, tools) => result,
+            result = run_viewer(&mut worker, ticket, name, options, key, abilities) => result,
         };
         worker.cancel.cancel();
         let _ = worker.emit(Event::Finished(result)).await;
@@ -639,9 +745,23 @@ where
     let (input_tx, input_rx) = mpsc::channel(128);
     let (screen_tx, screen_rx) = watch::channel(None::<Arc<Frame>>);
     let (shown_tx, shown_rx) = watch::channel(0u64);
+    let (refresh_tx, refresh_rx) = watch::channel(0u64);
+    let (encoders_tx, encoders_rx) = oneshot::channel();
+    let changes: Changes = Arc::new(Mutex::new(Some(Vec::new())));
     let cancel = worker.cancel.clone();
-    let capture = tokio::task::spawn_blocking(move || {
-        desktop_loop(desktop, input_rx, permission_rx, screen_tx, cancel)
+    let capture = tokio::task::spawn_blocking({
+        let changes = changes.clone();
+        move || {
+            desktop_loop(
+                desktop,
+                input_rx,
+                permission_rx,
+                screen_tx,
+                encoders_tx,
+                changes,
+                cancel,
+            )
+        }
     });
     wire::write(
         &mut send,
@@ -667,7 +787,10 @@ where
                     .context("Helper stopped responding")??;
             match message {
                 Message::Ping => {}
-                Message::Shown(seq) if screens == Screens::Tiles => {
+                Message::Refresh if screens == Screens::Video => {
+                    refresh_tx.send_modify(|n| *n += 1);
+                }
+                Message::Shown(seq) if screens.acknowledged() => {
                     shown_tx.send_if_modified(|shown| {
                         let newer = seq > *shown;
                         *shown = (*shown).max(seq);
@@ -737,7 +860,17 @@ where
         result = serve_tools => result,
         result = async {
             match screens {
-                Screens::Tiles => send_updates(connection, screen_rx, shown_rx).await,
+                Screens::Tiles => send_updates(connection, screen_rx, shown_rx, &changes, None).await,
+                Screens::Video => {
+                    send_updates(
+                        connection,
+                        screen_rx,
+                        shown_rx,
+                        &changes,
+                        Some((encoders_rx, refresh_rx)),
+                    )
+                    .await
+                }
                 _ => send_screens(connection, screen_rx, screens == Screens::Jpeg).await,
             }
         } => result.map_err(link_lost),
@@ -760,6 +893,8 @@ fn desktop_loop<F>(
     mut input: mpsc::Receiver<(u64, Input)>,
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Frame>>>,
+    encoders: oneshot::Sender<Option<VideoEncoders>>,
+    changes: Changes,
     cancel: CancellationToken,
 ) -> Result<()>
 where
@@ -772,6 +907,7 @@ where
         }
     }
     let mut desktop = Release(factory()?);
+    let _ = encoders.send(desktop.0.video());
     let mut capture_at = Instant::now();
     let mut last_input = Instant::now();
     let mut last_change = Instant::now();
@@ -812,9 +948,15 @@ where
             let started = Instant::now();
             // A still screen is not handed on: sending the same picture
             // again only costs the link.
+            // A backend that says what changed saves comparing whole screens.
             if let Some(frame) = desktop.0.capture_changed()?
-                && last.as_ref().is_none_or(|last| **last != frame)
+                && let damage = desktop.0.capture_damage()
+                && damage.as_ref().map_or_else(
+                    || last.as_ref().is_none_or(|last| **last != frame),
+                    |rects| !rects.is_empty() || last.is_none(),
+                )
             {
+                note_changes(&changes, damage);
                 let frame = Arc::new(frame);
                 last = Some(frame.clone());
                 last_change = Instant::now();
@@ -889,6 +1031,10 @@ async fn send_screens(
 
 /// At most this many updates wait to be shown, however small they are.
 const MAX_UPDATES_IN_FLIGHT: usize = 12;
+/// The same for pictures of video, which are small and come many a second:
+/// twelve held a link with a 300 ms round trip to forty a second. The bytes
+/// in flight are still held to the congestion window.
+const MAX_VIDEO_IN_FLIGHT: usize = 32;
 /// Data allowed on its way before the link has measured itself.
 const MIN_BYTES_IN_FLIGHT: u64 = 128 * 1024;
 
@@ -903,24 +1049,234 @@ fn window(connection: &Connection) -> u64 {
         .max(MIN_BYTES_IN_FLIGHT)
 }
 
+/// JPEG quality of the whole screen sent when motion stops, after video
+/// drew over it. Higher than for ordinary tiles: it goes once per stop, and
+/// it is the picture that sits there while the person reads.
+const SETTLED_QUALITY: u8 = 80;
+
+/// For a helper that decodes video: where the desktop's encoders come from,
+/// once it has started, and the helper's requests for the whole screen.
+/// What changed on the screen since the sender last took a capture, as the
+/// desktop said, or `None` when it did not say and screens must be compared.
+type Changes = Arc<Mutex<Option<Vec<Rect>>>>;
+
+/// Add what the desktop said changed in the screen just captured.
+fn note_changes(changes: &Mutex<Option<Vec<Rect>>>, damage: Option<Vec<Rect>>) {
+    let mut changes = changes.lock().unwrap_or_else(|e| e.into_inner());
+    match (changes.as_mut(), damage) {
+        // Bounded, for a sender that never takes them, as for whole screens.
+        (Some(known), Some(rects)) if known.len() + rects.len() <= 4096 => known.extend(rects),
+        _ => *changes = None,
+    }
+}
+
+type VideoSetup = (
+    oneshot::Receiver<Option<VideoEncoders>>,
+    watch::Receiver<u64>,
+);
+
+/// One video encoder and the screens it was made for.
+struct Video {
+    encoder: Box<dyn VideoEncoder>,
+    width: u32,
+    height: u32,
+    /// Nothing has been sent from this encoder yet.
+    fresh: bool,
+    rate: (u32, u32),
+}
+
+/// The host's side of a stream of updates: what the helper holds, and
+/// whether moving screens go as video. Moved to a blocking thread for each
+/// update, since encoding takes milliseconds.
+struct Coder {
+    tiles: screen::Encoder,
+    /// Each message carries a kind, on a stream to a helper that takes video.
+    framed: bool,
+    encoders: Option<VideoEncoders>,
+    video: Option<Video>,
+    policy: video::Policy,
+    /// The capture before this one, to tell how much of the screen moved.
+    last: Option<Arc<Frame>>,
+}
+enum Work {
+    /// A new capture, and what the desktop said changed since the last one
+    /// taken, when it said.
+    Capture(Arc<Frame>, Option<Vec<Rect>>),
+    /// The whole screen, sharp, as when motion stopped or the helper asked.
+    Whole(Arc<Frame>),
+}
+impl Coder {
+    fn new(framed: bool) -> Self {
+        Self {
+            tiles: screen::Encoder::default(),
+            framed,
+            encoders: None,
+            video: None,
+            policy: video::Policy::default(),
+            last: None,
+        }
+    }
+    /// The message that carries `work` to the helper, or nothing when there
+    /// is nothing new to send.
+    fn work(
+        &mut self,
+        work: Work,
+        seq: u64,
+        rate: (u32, u32),
+        now: Instant,
+    ) -> Result<Option<Vec<u8>>> {
+        match work {
+            Work::Whole(frame) => {
+                self.policy.stop();
+                self.tiles.reset();
+                self.last = Some(frame.clone());
+                self.tiles(frame, seq, SETTLED_QUALITY)
+            }
+            Work::Capture(frame, damage) => {
+                let share = match (&self.last, damage) {
+                    (Some(last), _) if last.width != frame.width || last.height != frame.height => {
+                        1.0
+                    }
+                    (Some(_), Some(rects)) => {
+                        video::damage_share(&rects, frame.width, frame.height)
+                    }
+                    (Some(last), None) => video::changed_share(last, &frame),
+                    (None, _) => 1.0,
+                };
+                self.last = Some(frame.clone());
+                let choice = match self.encoders {
+                    Some(_) => self.policy.capture(share, now),
+                    None => video::Choice::Tiles,
+                };
+                match choice {
+                    video::Choice::Tiles => self.tiles(frame, seq, crate::JPEG_QUALITY),
+                    video::Choice::Video { start } => match self.video(&frame, seq, start, rate) {
+                        Ok(bytes) => Ok(bytes),
+                        Err(_) => {
+                            // An encoder that failed is not tried again in
+                            // this session. What video already drew is
+                            // replaced by the whole screen as tiles.
+                            self.encoders = None;
+                            self.video = None;
+                            self.policy.stop();
+                            if !start {
+                                self.tiles.reset();
+                            }
+                            self.tiles(frame, seq, crate::JPEG_QUALITY)
+                        }
+                    },
+                }
+            }
+        }
+    }
+    fn tiles(&mut self, frame: Arc<Frame>, seq: u64, quality: u8) -> Result<Option<Vec<u8>>> {
+        let Some(mut update) = self.tiles.update_at(frame, seq, quality)? else {
+            return Ok(None);
+        };
+        if self.framed {
+            update.insert(0, video::KIND_TILES);
+        }
+        Ok(Some(update))
+    }
+    fn video(
+        &mut self,
+        frame: &Frame,
+        seq: u64,
+        start: bool,
+        rate: (u32, u32),
+    ) -> Result<Option<Vec<u8>>> {
+        let video = match self.video.take() {
+            Some(v) if v.width == frame.width && v.height == frame.height => v,
+            _ => {
+                let make = self.encoders.as_ref().context("No video encoder")?;
+                Video {
+                    encoder: make(frame.width, frame.height)?,
+                    width: frame.width,
+                    height: frame.height,
+                    fresh: true,
+                    rate: (0, 0),
+                }
+            }
+        };
+        let video = self.video.insert(video);
+        // Small swings in the measured link are left alone: an encoder told
+        // a new rate every screen spends its bits unevenly.
+        let swing = (rate.0 as f64 / video.rate.0.max(1) as f64 - 1.0).abs();
+        if video.fresh || swing > 0.15 || rate.1 != video.rate.1 {
+            video.encoder.set_rate(rate.0, rate.1);
+            video.rate = rate;
+        }
+        let encoded = video.encoder.encode(frame, start || video.fresh)?;
+        if encoded.data.is_empty() {
+            // The encoder skipped this screen to keep to its rate.
+            ensure!(
+                !video.fresh && !start,
+                "The video encoder skipped a keyframe"
+            );
+            return Ok(None);
+        }
+        ensure!(
+            !video.fresh || encoded.keyframe,
+            "The video encoder did not start with a keyframe"
+        );
+        let bytes = video::encode_unit(seq, frame.width, frame.height, &encoded, video.fresh);
+        video.fresh = false;
+        ensure!(
+            bytes.len() <= wire::MAX_FRAME,
+            "Encoded screen is too large"
+        );
+        Ok(Some(bytes))
+    }
+}
+
+/// The bit rate and screens a second video should aim at on this link now.
+fn link_rate(connection: &Connection) -> (u32, u32) {
+    let (cwnd, rtt) = connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map_or((MIN_BYTES_IN_FLIGHT, Duration::from_millis(100)), |path| {
+            (path.stats().cwnd, path.rtt())
+        });
+    let bits = video::bitrate(cwnd.max(MIN_BYTES_IN_FLIGHT), rtt);
+    (bits, video::frame_rate(bits))
+}
+
 /// Changed rectangles, one update after another on a single stream, to a
-/// helper that takes them.
+/// helper that takes them, and video while much of the screen moves to one
+/// that decodes it.
 ///
 /// Updates are not waited on one at a time: that cost a round trip per
 /// screen, which across an ocean was most of a second. Instead about one
 /// round trip of them may be on their way, as the helper's acknowledgements
 /// tell. Past that the sender waits, and only the newest capture is encoded
 /// when it goes on, so a slow link gets fewer updates rather than late ones.
+/// Video follows the same rule, and its bit rate follows the link, so a slow
+/// link gets fewer and smaller pictures rather than a queue.
 async fn send_updates(
     connection: &Connection,
     mut screens: watch::Receiver<Option<Arc<Frame>>>,
     mut shown: watch::Receiver<u64>,
+    changes: &Mutex<Option<Vec<Rect>>>,
+    video: Option<VideoSetup>,
 ) -> Result<()> {
+    let framed = video.is_some();
+    let (mut encoders, mut refresh) = match video {
+        Some((encoders, refresh)) => (Some(encoders), Some(refresh)),
+        None => (None, None),
+    };
     let mut stream = connection.open_uni().await?;
-    stream.write_all(screen::MAGIC).await?;
-    let mut encoder = Some(screen::Encoder::default());
+    stream
+        .write_all(if framed {
+            screen::MAGIC_VIDEO
+        } else {
+            screen::MAGIC
+        })
+        .await?;
+    let mut coder = Some(Coder::new(framed));
     let mut seq = 0u64;
     let mut in_flight: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut next_video = tokio::time::Instant::now();
     loop {
         loop {
             let acked = *shown.borrow_and_update();
@@ -928,30 +1284,85 @@ async fn send_updates(
                 in_flight.pop_front();
             }
             let bytes: u64 = in_flight.iter().map(|(_, b)| b).sum();
-            if in_flight.is_empty()
-                || (in_flight.len() < MAX_UPDATES_IN_FLIGHT && bytes < window(connection))
-            {
+            let most = if coder.as_ref().is_some_and(|c| c.policy.on_video()) {
+                MAX_VIDEO_IN_FLIGHT
+            } else {
+                MAX_UPDATES_IN_FLIGHT
+            };
+            if in_flight.is_empty() || (in_flight.len() < most && bytes < window(connection)) {
                 break;
             }
             if shown.changed().await.is_err() {
                 return std::future::pending().await;
             }
         }
-        if screens.changed().await.is_err() {
-            return std::future::pending().await;
+        let mut working = coder.take().context("Screen encoder lost")?;
+        // The desktop says what it encodes with as soon as it starts, which
+        // is before its first screen.
+        if let Some(receiver) = encoders.as_mut()
+            && let Ok(found) = receiver.try_recv()
+        {
+            working.encoders = found;
+            encoders = None;
         }
-        let frame = screens
-            .borrow_and_update()
-            .clone()
-            .context("Missing screen")?;
-        let mut working = encoder.take().context("Screen encoder lost")?;
+        let settles = working
+            .policy
+            .settles_at()
+            .map(tokio::time::Instant::from_std);
+        let on_video = working.policy.on_video();
+        coder = Some(working);
+        // A capture waiting is looked at before the settle timer: while the
+        // link was full nothing was looked at, and the timer ran out on a
+        // screen that never stopped moving. That sent a whole sharp screen
+        // in the middle of every scroll on a slow link.
+        let work = tokio::select! {
+            biased;
+            changed = screens.changed() => {
+                if changed.is_err() {
+                    return std::future::pending().await;
+                }
+                if on_video {
+                    // No more screens a second than the link was given:
+                    // wait, then take the newest.
+                    tokio::time::sleep_until(next_video).await;
+                }
+                let frame = screens.borrow_and_update().clone().context("Missing screen")?;
+                let damage = changes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(Vec::new());
+                Work::Capture(frame, damage)
+            }
+            _ = tokio::time::sleep_until(settles.unwrap_or_else(tokio::time::Instant::now)), if settles.is_some() => {
+                match screens.borrow_and_update().clone() {
+                    Some(frame) => Work::Whole(frame),
+                    None => continue,
+                }
+            }
+            Ok(()) = async {
+                match refresh.as_mut() {
+                    Some(refresh) => refresh.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match screens.borrow_and_update().clone() {
+                    Some(frame) => Work::Whole(frame),
+                    None => continue,
+                }
+            }
+        };
+        let rate = link_rate(connection);
+        let mut working = coder.take().context("Screen encoder lost")?;
         let next = seq + 1;
         let (working, update) = tokio::task::spawn_blocking(move || {
-            let update = working.update(frame, next);
+            let update = working.work(work, next, rate, Instant::now());
             (working, update)
         })
         .await?;
-        encoder = Some(working);
+        if working.policy.on_video() {
+            next_video = tokio::time::Instant::now() + Duration::from_secs(1) / rate.1.max(1);
+        }
+        coder = Some(working);
         let Some(update) = update? else {
             continue;
         };
@@ -987,7 +1398,7 @@ async fn run_viewer(
     name: String,
     options: HostOptions,
     key: Option<iroh::SecretKey>,
-    tools: bool,
+    abilities: Abilities,
 ) -> Result<()> {
     let invitation = Invitation::decode(&ticket)?;
     // A host without a relay address must not cause the helper to use public relays.
@@ -1028,9 +1439,10 @@ async fn run_viewer(
             version: 1,
             secret: invitation.secret,
             name,
-            tools,
+            tools: abilities.tools,
             jpeg: true,
             tiles: true,
+            video: abilities.codecs(),
         },
     )
     .await?;
@@ -1168,6 +1580,11 @@ async fn watch(
     let events = worker.events.clone();
     let tools_tx = worker.tools_tx.clone();
     let (shown_tx, mut shown_rx) = watch::channel(0u64);
+    // Whether the host's updates said it sends video, the only kind of host
+    // that is asked for the screen again.
+    let (video_tx, video_rx) = watch::channel(false);
+    let refresh = &mut worker.refresh;
+    refresh.borrow_and_update();
     let read_control = async {
         loop {
             match wire::read::<Message>(&mut recv).await? {
@@ -1193,6 +1610,13 @@ async fn watch(
             let message = tokio::select! {
                 event = worker.input.recv() => Message::Input(event.context("Window closed")?),
                 Ok(()) = shown_rx.changed() => Message::Shown(*shown_rx.borrow_and_update()),
+                Ok(()) = refresh.changed() => {
+                    refresh.borrow_and_update();
+                    if !*video_rx.borrow() {
+                        continue;
+                    }
+                    Message::Refresh
+                }
                 _ = tick.tick() => Message::Ping,
             };
             tokio::time::timeout(Duration::from_secs(3), wire::write(&mut send, &message))
@@ -1203,6 +1627,7 @@ async fn watch(
         Ok::<(), anyhow::Error>(())
     };
     let (frames, damage) = (&worker.frames, &*worker.damage);
+    let received = &*worker.received;
     let read_frames = async {
         loop {
             let mut stream = connection.accept_uni().await?;
@@ -1215,7 +1640,11 @@ async fn watch(
                 Err(error) => return Err(error.into()),
             }
             if &head == screen::MAGIC {
-                return read_updates(frames, damage, stream, &shown_tx).await;
+                return read_updates(frames, damage, received, stream, &shown_tx, false).await;
+            }
+            if &head == screen::MAGIC_VIDEO {
+                video_tx.send_replace(true);
+                return read_updates(frames, damage, received, stream, &shown_tx, true).await;
             }
             let rest = match tokio::time::timeout(
                 SCREEN_DEADLINE,
@@ -1234,6 +1663,7 @@ async fn watch(
                 }
             };
             let bytes = [&head[..], &rest].concat();
+            received.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             let frame = tokio::task::spawn_blocking(move || Frame::decode(&bytes)).await??;
             show(frames, damage, frame, None);
         }
@@ -1253,23 +1683,37 @@ async fn watch(
 async fn read_updates(
     frames: &watch::Sender<Option<Arc<Frame>>>,
     damage: &Mutex<Damage>,
+    received: &std::sync::atomic::AtomicU64,
     mut stream: iroh::endpoint::RecvStream,
     shown: &watch::Sender<u64>,
+    video: bool,
 ) -> Result<()> {
     let mut canvas = Some(screen::Canvas::default());
     loop {
         let mut length = [0u8; 4];
         stream.read_exact(&mut length).await?;
-        let length = u32::from_be_bytes(length) as usize;
-        ensure!(
-            length > 0 && length <= wire::MAX_FRAME,
-            "Invalid screen update length"
-        );
+        let length = video::bounded(u32::from_be_bytes(length) as usize)?;
         let mut bytes = vec![0; length];
         stream.read_exact(&mut bytes).await?;
+        let mut skip = 0;
+        received.fetch_add(length as u64 + 4, std::sync::atomic::Ordering::Relaxed);
+        if video {
+            match bytes[0] {
+                video::KIND_TILES => skip = 1,
+                video::KIND_VIDEO => {
+                    let (seq, unit) = video::decode_unit(&bytes[1..])?;
+                    show_video(frames, damage, unit);
+                    shown.send_replace(seq);
+                    continue;
+                }
+                // A kind a newer host sends that this helper does not know
+                // carries nothing it has to draw.
+                _ => continue,
+            }
+        }
         let mut drawing = canvas.take().context("Screen lost")?;
         let (drawing, result) = tokio::task::spawn_blocking(move || {
-            let result = drawing.apply(&bytes);
+            let result = drawing.apply(&bytes[skip..]);
             (drawing, result)
         })
         .await?;

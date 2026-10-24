@@ -8,12 +8,13 @@ mod session;
 mod shared;
 pub mod tools;
 pub mod unattended;
+pub mod video;
 mod wire;
 use anyhow::{Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
 pub use session::{
-    Approval, Connectivity, Event, HostOptions, LinkLost, Route, Session, host, validate_relay_url,
-    viewer, viewer_as, viewer_with_tools,
+    Abilities, Approval, Connectivity, Event, HostOptions, LinkLost, Route, Session, host,
+    validate_relay_url, viewer, viewer_as, viewer_with, viewer_with_tools,
 };
 use std::io::Cursor;
 
@@ -21,6 +22,7 @@ use std::io::Cursor;
 /// enough to read text.
 const JPEG_QUALITY: u8 = 70;
 pub use screen::Rect;
+pub use video::{Update, VideoUnit};
 pub use wire::{Button, Input, Invitation, Key};
 
 /// Implemented by a local platform backend, created only after consent.
@@ -41,6 +43,11 @@ pub trait Desktop {
     }
     fn input(&mut self, input: Input) -> Result<()>;
     fn release(&mut self);
+    /// How to make an H.264 encoder for this desktop's screens, for a helper
+    /// that decodes video. `None`, the default, sends rectangles only.
+    fn video(&self) -> Option<video::VideoEncoders> {
+        None
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {

@@ -10,6 +10,10 @@ boundary-session.workspace = true
 image.workspace = true
 fast_image_resize.workspace = true
 enigo = "0.6.1"
+# Software H.264, compiled from source, for machines without a hardware
+# encoder and for Linux.
+openh264 = "0.9.9"
+openh264-sys2 = { version = "0.9.9", default-features = false }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 xcap = "0.9.8"
@@ -44,13 +48,18 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 # Desktop Duplication and the video processor that shrinks its pictures, in
-# the version xcap already builds.
+# the version xcap already builds, and hardware H.264 through Media
+# Foundation.
 windows = { version = "0.62", features = [
+    "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
 ] }
 
 # CPU time in the capture_time example.

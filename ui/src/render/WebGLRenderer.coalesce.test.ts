@@ -45,3 +45,19 @@ describe("coalesceByDamage", () => {
     expect(r.dropped).toBe(0);
   });
 });
+
+describe("coalesceByDamage with Boundary video", () => {
+  const h264 = (x: number, y: number, w: number, h: number) => ({ x, y, w, h, format: RectFormat.H264 });
+  const rgba = (x: number, y: number, w: number, h: number) => ({ x, y, w, h, format: RectFormat.Rgba });
+  it("keeps whole-screen pictures of video and the sharp screen that follows", () => {
+    const whole = box(0, 0, 1920, 1200);
+    const u = [
+      { rects: [h264(0, 0, 1920, 1200)], damage: whole },
+      { rects: [h264(0, 0, 1920, 1200)], damage: whole },
+      { rects: [rgba(0, 0, 1920, 1200)], damage: whole },
+    ];
+    const r = coalesceByDamage(u);
+    expect(r.kept.map((k) => k.length)).toEqual([1, 1, 1]);
+    expect(r.dropped).toBe(0);
+  });
+});

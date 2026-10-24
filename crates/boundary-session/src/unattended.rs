@@ -20,7 +20,7 @@
 //! the ID. Only one session runs at a time.
 
 use crate::{
-    Approval, Desktop, Event, HostOptions, Session,
+    Abilities, Approval, Desktop, Event, HostOptions, Session,
     session::{self, Lookup},
     wire::{self, Message},
 };
@@ -385,6 +385,7 @@ where
             tools,
             jpeg,
             tiles,
+            video,
         } = message
         else {
             refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -449,7 +450,7 @@ where
             let result = tokio::select! {
                 _ = stop.cancelled() => Ok(()),
                 _ = ended.cancelled() => Ok(()),
-                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles), move || desktop()) => result,
+                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
             };
             session::close_served(&connection, &result);
             // Whoever holds the session hears that it ended, so a banner
@@ -634,7 +635,14 @@ pub fn connect(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Text(machine), name, password, key, options, false)
+    open(
+        Dial::Text(machine),
+        name,
+        password,
+        key,
+        options,
+        Abilities::default(),
+    )
 }
 /// [`connect`] for a helper whose tools send commands and file requests,
 /// such as DeskVNC's agent plane. They run only if the computer allows them
@@ -646,7 +654,29 @@ pub fn connect_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Text(machine), name, password, key, options, true)
+    open(
+        Dial::Text(machine),
+        name,
+        password,
+        key,
+        options,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
+}
+/// [`connect`] for a helper that says what more it can do, such as take
+/// moving screens as video.
+pub fn connect_with(
+    machine: String,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+    abilities: Abilities,
+) -> Session {
+    open(Dial::Text(machine), name, password, key, options, abilities)
 }
 /// What [`open`] dials: an address already worked out, or what the helper
 /// typed, which may be an ID or an address and is resolved once the session
@@ -684,7 +714,14 @@ pub fn connect_to(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Addr(target), name, password, key, options, false)
+    open(
+        Dial::Addr(target),
+        name,
+        password,
+        key,
+        options,
+        Abilities::default(),
+    )
 }
 /// [`connect_to`] for a helper whose tools send commands and file requests.
 pub fn connect_to_with_tools(
@@ -694,7 +731,28 @@ pub fn connect_to_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Addr(target), name, password, key, options, true)
+    open(
+        Dial::Addr(target),
+        name,
+        password,
+        key,
+        options,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
+}
+/// [`connect_to`] for a helper that says what more it can do.
+pub fn connect_to_with(
+    target: Result<EndpointAddr>,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+    abilities: Abilities,
+) -> Session {
+    open(Dial::Addr(target), name, password, key, options, abilities)
 }
 fn open(
     target: Dial,
@@ -702,7 +760,7 @@ fn open(
     password: Option<String>,
     key: SecretKey,
     options: HostOptions,
-    tools: bool,
+    abilities: Abilities,
 ) -> Session {
     let (session, mut worker) = session::channels();
     tokio::spawn(async move {
@@ -710,7 +768,7 @@ fn open(
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ok(()),
-            result = run_connect(&mut worker, target, name, password, key, options, tools) => result,
+            result = run_connect(&mut worker, target, name, password, key, options, abilities) => result,
         };
         cancel.cancel();
         let _ = worker.emit(Event::Finished(result)).await;
@@ -724,7 +782,7 @@ async fn run_connect(
     password: Option<String>,
     key: SecretKey,
     options: HostOptions,
-    tools: bool,
+    abilities: Abilities,
 ) -> Result<()> {
     ensure!(
         !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
@@ -748,9 +806,10 @@ async fn run_connect(
             version: 2,
             name,
             password,
-            tools,
+            tools: abilities.tools,
             jpeg: true,
             tiles: true,
+            video: abilities.codecs(),
         },
     )
     .await?;

@@ -12,6 +12,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Added
 
+* Boundary sends a screen that is moving as H.264 video while most of it
+  changes, as when a page scrolls, a window is dragged or a video plays, and
+  the whole screen again as sharp tiles 100 ms after it stops. The computer
+  encodes with VideoToolbox on a Mac (Apple silicon and Intel), a Media
+  Foundation hardware encoder on Windows, and OpenH264 otherwise, at a bit
+  rate that follows the link. The viewer decodes it in hardware. From India
+  to an Intel iMac in the US, with a 300 ms round trip, a moving screen went
+  from 15 to 27 screens a second to 34, at half the bits, with the pointer
+  lag p90 from 0.5 to 0.9 s down to 0.45 s. Older viewers and older
+  computers keep getting tiles.
+
 * A Boundary computer can be reached by its address, the way a VNC or RDP
   machine is. Type `192.168.1.20`, `box:6000` or `boundary://box` in quick
   connect or in a saved computer's address field. A computer with unattended

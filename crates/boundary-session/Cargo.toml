@@ -24,4 +24,6 @@ mdns-sd.workspace = true
 # Checks the record this crate publishes against the scan that reads it.
 vnc-discovery = { path = "../vnc-discovery" }
 boundary-platform = { path = "../boundary-platform" }
+# The bench decodes the video it is sent, to find the pointer in it.
+openh264 = "0.9.9"
 fast_image_resize.workspace = true

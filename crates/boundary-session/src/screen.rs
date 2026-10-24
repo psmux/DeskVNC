@@ -11,7 +11,7 @@
 //! ```text
 //! seq u64 | width u16 | height u16 | count u16 | count × (x y w h u16, len u32, JPEG)
 //! ```
-use crate::{Frame, JPEG_QUALITY, dimensions, wire};
+use crate::{Frame, dimensions, wire};
 use anyhow::{Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
 use std::io::Cursor;
@@ -19,6 +19,11 @@ use std::io::Cursor;
 /// The first bytes of a stream of updates. A JPEG or PNG screen starts
 /// differently, which is how a helper tells the two kinds of stream apart.
 pub(crate) const MAGIC: &[u8; 4] = b"BDT1";
+/// The first bytes of a stream of updates that may carry video
+/// (`crate::video`). After it each message is a length, then a kind byte,
+/// then an update as above or a picture of video. Sent only to a helper that
+/// said it decodes video.
+pub(crate) const MAGIC_VIDEO: &[u8; 4] = b"BDV1";
 const TILE: u32 = 64;
 const MAX_RECTS: usize = 4096;
 /// Below this many changed pixels one thread encodes everything.
@@ -38,9 +43,24 @@ pub(crate) struct Encoder {
     reference: Option<std::sync::Arc<Frame>>,
 }
 impl Encoder {
+    /// Forget what the helper has, so the next update is the whole screen,
+    /// as after video drew over it.
+    pub fn reset(&mut self) {
+        self.reference = None;
+    }
     /// The update that turns what the helper has into `frame`, or nothing
     /// when the two are the same.
+    #[cfg(test)]
     pub fn update(&mut self, frame: std::sync::Arc<Frame>, seq: u64) -> Result<Option<Vec<u8>>> {
+        self.update_at(frame, seq, crate::JPEG_QUALITY)
+    }
+    /// [`Encoder::update`] at a chosen JPEG quality.
+    pub fn update_at(
+        &mut self,
+        frame: std::sync::Arc<Frame>,
+        seq: u64,
+        quality: u8,
+    ) -> Result<Option<Vec<u8>>> {
         frame.validate()?;
         let rects = match self
             .reference
@@ -59,7 +79,7 @@ impl Encoder {
             return Ok(None);
         }
         let rects = split(&frame, rects);
-        let encoded = encode_rects(&frame, &rects)?;
+        let encoded = encode_rects(&frame, &rects, quality)?;
         let mut out = Vec::with_capacity(16 + encoded.iter().map(|e| e.len() + 12).sum::<usize>());
         out.extend_from_slice(&seq.to_be_bytes());
         out.extend_from_slice(&(frame.width as u16).to_be_bytes());
@@ -145,7 +165,7 @@ fn changed(old: &Frame, new: &Frame) -> Vec<Rect> {
     rects
 }
 
-fn encode_rect(frame: &Frame, rect: &Rect) -> Result<Vec<u8>> {
+fn encode_rect(frame: &Frame, rect: &Rect, quality: u8) -> Result<Vec<u8>> {
     let stride = frame.width as usize * 4;
     let mut rgb = Vec::with_capacity((rect.width * rect.height * 3) as usize);
     for y in rect.y..rect.y + rect.height {
@@ -159,7 +179,7 @@ fn encode_rect(frame: &Frame, rect: &Rect) -> Result<Vec<u8>> {
         );
     }
     let mut bytes = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY).write_image(
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality).write_image(
         &rgb,
         rect.width,
         rect.height,
@@ -199,9 +219,12 @@ fn split(frame: &Frame, rects: Vec<Rect>) -> Vec<Rect> {
 }
 
 /// Encode each rectangle, in order, on as many cores as there are bands.
-fn encode_rects(frame: &Frame, rects: &[Rect]) -> Result<Vec<Vec<u8>>> {
+fn encode_rects(frame: &Frame, rects: &[Rect], quality: u8) -> Result<Vec<Vec<u8>>> {
     if rects.len() < 2 || threads() < 2 {
-        return rects.iter().map(|r| encode_rect(frame, r)).collect();
+        return rects
+            .iter()
+            .map(|r| encode_rect(frame, r, quality))
+            .collect();
     }
     let chunk = rects.len().div_ceil(threads());
     std::thread::scope(|s| {
@@ -210,7 +233,7 @@ fn encode_rects(frame: &Frame, rects: &[Rect]) -> Result<Vec<Vec<u8>>> {
             .map(|part| {
                 s.spawn(move || {
                     part.iter()
-                        .map(|r| encode_rect(frame, r))
+                        .map(|r| encode_rect(frame, r, quality))
                         .collect::<Result<Vec<_>>>()
                 })
             })
