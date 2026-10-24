@@ -169,7 +169,7 @@ pub fn tools() -> Vec<Value> {
                 selector(),
                 json!({
                     "action": { "type": "string", "enum": ["acquire", "release", "status", "yield", "yield_status"], "description": "yield and release are the same act from this attachment's side; yield records a reason. yield_status reads who holds it without changing anything." },
-                    "reason": { "type": "string", "description": "acquire: shown to the person watching this machine. yield: recorded as why the agent stood down." },
+                    "reason": { "type": "string", "description": "acquire: what you want the machine for, shown to the person if they are using it and are asked to let you in. yield: recorded as why the agent stood down." },
                     "waitMs": { "type": "number", "description": "acquire only. How long to wait in the queue for the wheel, 25000 by default and at most 120000. 0 asks once and does not wait, which is what you want when you have something else to do." },
                 }),
             ),
@@ -182,6 +182,7 @@ pub fn tools() -> Vec<Value> {
                 merge(selector(), generation()),
                 json!({
                     "action": { "type": "string", "enum": ["move", "click", "double", "right", "middle", "drag", "scroll"], "description": "Which gesture." },
+                    "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
                     "x": { "type": "number", "description": "Framebuffer pixels from the left. Rejected rather than clamped when outside, because a clamped click lands on whatever is at the edge and that is a different action performed silently." },
                     "y": { "type": "number", "description": "Framebuffer pixels from the top." },
                     "toX": { "type": "number", "description": "drag only: where the button is released." },
@@ -201,6 +202,7 @@ pub fn tools() -> Vec<Value> {
                 selector(),
                 json!({
                     "text": { "type": "string", "description": "What to type." },
+                    "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
                     "wpm": { "type": "number", "description": "Throttle, in words per minute. Not politeness: a machine that drops characters under a fast synthetic type does it silently, because neither wire carries an acknowledgement." },
                 }),
             ),
@@ -213,6 +215,7 @@ pub fn tools() -> Vec<Value> {
                 selector(),
                 json!({
                     "keys": { "type": "string", "description": "One name, or a chord joined with '+'." },
+                    "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
                 }),
             ),
             &["keys"],

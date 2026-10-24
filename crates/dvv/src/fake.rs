@@ -837,15 +837,38 @@ impl SessionSource for FakeSource {
         let id = PartyId::from(me.as_str());
         let mut board = lock(board);
         let answer = match ask {
-            LeaseAsk::Acquire { label } => board.ask(
+            LeaseAsk::Acquire { label, reason } => board.ask(
                 limb.as_str(),
                 Party::new(me.as_str(), HolderKind::Agent, label),
+                reason.map(str::to_string),
                 now,
             ),
             LeaseAsk::Release => board.release(limb.as_str(), &id, now),
             LeaseAsk::Status => board.status(limb.as_str(), now),
         };
-        Some(Ok(shared_json(&answer.status, &id)))
+        let mut json = shared_json(&answer.status, &id);
+        // The person's answer, in the words the application uses for it.
+        let (word, why) = match &answer.refusal {
+            Some(agent_lease::LeaseError::Muted { retry_after_ms }) => (
+                "muted",
+                format!("the person using this machine has muted requests from agents for another {retry_after_ms} ms"),
+            ),
+            Some(agent_lease::LeaseError::NotNow { .. }) => (
+                "not-now",
+                "the person using this machine said not now".to_string(),
+            ),
+            _ if answer.status.dispatching(&id) => ("granted", String::new()),
+            _ if answer.status.position_of(&id).is_some() && answer.status.person_holds() => (
+                "waiting-for-person",
+                "waiting for the person using this machine".to_string(),
+            ),
+            _ => ("queued", String::new()),
+        };
+        json["answer"] = serde_json::json!(word);
+        if !why.is_empty() {
+            json["why"] = serde_json::json!(why);
+        }
+        Some(Ok(json))
     }
 
     fn describe(&self) -> &'static str {

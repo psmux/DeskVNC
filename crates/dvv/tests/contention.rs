@@ -202,7 +202,7 @@ async fn a_person_takes_over_and_the_agent_gets_it_back_once_they_go_quiet() {
     let told = status.control_yield.expect("a yield");
     assert!(told.human_took_over);
     assert!(
-        told.advice.contains("get it back") && !told.advice.contains("STOP"),
+        told.advice.contains("after their last input") && !told.advice.contains("STOP"),
         "{}",
         told.advice
     );
@@ -250,4 +250,127 @@ async fn a_person_who_keeps_using_it_keeps_it_and_the_agent_is_told_why() {
         .peek(&card.limb_id, dvv::clock::lease_now())
         .expect("a lease");
     assert!(status.queue.is_empty());
+}
+
+fn person_types(shared: &Arc<Mutex<Board>>, key: &str) {
+    let person = Party::new("person", HolderKind::Human, "a person in DeskVNCViewer");
+    let _ = shared
+        .lock()
+        .unwrap()
+        .person_input(key, person, dvv::clock::lease_now());
+}
+
+/// The person is asked, with the agent's reason, and lets it in: the waiting
+/// acquire comes back holding the machine well before the 20 s rule.
+#[tokio::test]
+async fn the_person_lets_the_agent_in_and_the_waiting_acquire_gets_it() {
+    let shared = board(LeasePolicy::default());
+    let plane = agent(&shared, "att_a");
+    let card = open(&plane);
+    let a = limb(&plane, &card);
+    person_types(&shared, &card.limb_id);
+
+    let asking = {
+        let plane = plane.clone();
+        let a = a.clone();
+        tokio::spawn(async move {
+            plane
+                .acquire(
+                    &a,
+                    Some("run the nightly build".into()),
+                    Some(Duration::from_secs(5)),
+                )
+                .await
+        })
+    };
+    // The person sees the request, with the reason, and answers it.
+    let mut seen = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let requests = shared.lock().unwrap().requests(dvv::clock::lease_now());
+        if let Some(r) = requests.first() {
+            seen = Some(r.clone());
+            break;
+        }
+    }
+    let request = seen.expect("the request reached the person");
+    assert_eq!(request.reason.as_deref(), Some("run the nightly build"));
+    let started = Instant::now();
+    let _ = shared.lock().unwrap().yield_to(
+        &card.limb_id,
+        &request.party,
+        &agent_lease::PartyId::from("person"),
+        dvv::clock::lease_now(),
+    );
+    let report = asking.await.expect("joined").expect("let in");
+    assert!(report.held);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+/// "Not now" ends the wait at once with that answer, and asking again soon
+/// gets the same answer without the person being asked again.
+#[tokio::test]
+async fn not_now_ends_the_wait_with_the_persons_answer() {
+    let shared = board(LeasePolicy::default());
+    let plane = agent(&shared, "att_a");
+    let card = open(&plane);
+    let a = limb(&plane, &card);
+    person_types(&shared, &card.limb_id);
+
+    let asking = {
+        let plane = plane.clone();
+        let a = a.clone();
+        tokio::spawn(async move { plane.acquire(&a, None, Some(Duration::from_secs(5))).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = Instant::now();
+    let _ = shared.lock().unwrap().not_now(
+        &card.limb_id,
+        &agent_lease::PartyId::from("att_a"),
+        dvv::clock::lease_now(),
+    );
+    let refused = asking.await.expect("joined").expect_err("not now");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(refused.code, "LEASE_NOT_HELD");
+    assert!(
+        refused.message.contains("said not now"),
+        "{}",
+        refused.message
+    );
+
+    let again = plane
+        .acquire(&a, None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("still not now");
+    assert!(again.message.contains("said not now"));
+    assert!(shared
+        .lock()
+        .unwrap()
+        .requests(dvv::clock::lease_now())
+        .is_empty());
+}
+
+/// While requests are muted an action is answered at once, without waiting,
+/// and nothing is shown to the person.
+#[tokio::test]
+async fn a_mute_answers_at_once_and_shows_nothing() {
+    let shared = board(LeasePolicy::default());
+    let plane = agent(&shared, "att_a");
+    let card = open(&plane);
+    let a = limb(&plane, &card);
+    person_types(&shared, &card.limb_id);
+    let now = dvv::clock::lease_now();
+    let _ = shared
+        .lock()
+        .unwrap()
+        .mute(agent_lease::MuteUntil::At(now.plus(15 * 60_000)), now);
+
+    let started = Instant::now();
+    let refused = plane
+        .acquire(&a, None, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("muted");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(refused.message.contains("muted"), "{}", refused.message);
+    assert!(shared.lock().unwrap().requests(now).is_empty());
 }

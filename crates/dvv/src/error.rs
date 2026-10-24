@@ -151,7 +151,7 @@ pub fn code_for_refusal(reason: RefusalReason) -> &'static str {
 pub fn hint_for(code: &str) -> &'static str {
     match code {
         "LEASE_NOT_HELD" => {
-            "Somebody else is using this machine right now; the message says who and when it frees up. Call dvv_control with action acquire, which waits in the queue for it (waitMs, 25 s by default), then carry on. A person gets 20 s after their last input and an agent 8 s after you start waiting. Tell the user only if a person is still using it after a couple of tries."
+            "Somebody else is using this machine right now; the message says who and when it frees up. If it says the person said not now, or that requests are muted until a time, do other work and ask again after that time: asking sooner gets the same answer. Otherwise call dvv_control with action acquire and a reason, which asks the person if one is using it and waits (waitMs, 25 s by default), then carry on. A person gets 20 s after their last input and an agent 8 s after you start waiting. Tell the user only if a person is still using it after a couple of tries."
         }
         "LEASE_REVOKED" => {
             "The person at the remote computer has taken back the helper's tools in DeskVNC Support. Nothing is sent until they allow them again: tell the user, and try again after they have."

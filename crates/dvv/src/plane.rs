@@ -443,6 +443,9 @@ pub enum LeaseAsk<'a> {
     Acquire {
         /// What everyone else is shown while this agent holds or waits.
         label: &'a str,
+        /// What the agent wants the machine for, shown to a person who is
+        /// using it and is asked to let the agent in.
+        reason: Option<&'a str>,
     },
     /// Let go, and leave the queue.
     Release,
@@ -1038,9 +1041,9 @@ impl SessionSource for ShellSource {
     ) -> Option<Result<serde_json::Value, ToolError>> {
         let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
         let (method, params) = match ask {
-            LeaseAsk::Acquire { label } => (
+            LeaseAsk::Acquire { label, reason } => (
                 "control.acquire",
-                serde_json::json!({ "sessionId": session_id, "label": label }),
+                serde_json::json!({ "sessionId": session_id, "label": label, "reason": reason }),
             ),
             LeaseAsk::Release => (
                 "control.release",
@@ -3334,7 +3337,9 @@ impl Plane {
         wait: Option<std::time::Duration>,
     ) -> Result<ControlReport, ToolError> {
         self.require(Capability::Control, "holding the control lease")?;
-        let shared = self.acquire_shared(limb, wait.unwrap_or_default()).await?;
+        let shared = self
+            .acquire_shared(limb, wait.unwrap_or_default(), reason.as_deref())
+            .await?;
         let (transition, released) = self.acquire_local(limb, reason).await?;
         let lease_id = match &transition.outcome {
             LeaseOutcome::Granted { lease_id, .. } | LeaseOutcome::Renewed { lease_id } => {
@@ -3358,19 +3363,33 @@ impl Plane {
         &self,
         limb: &AttachedLimb,
         wait: std::time::Duration,
+        reason: Option<&str>,
     ) -> Result<Option<serde_json::Value>, ToolError> {
         let label = agent_label();
         let started = std::time::Instant::now();
         loop {
-            let Some(answer) = self
-                .source
-                .shared_lease(limb.id(), LeaseAsk::Acquire { label: &label })
-            else {
+            let Some(answer) = self.source.shared_lease(
+                limb.id(),
+                LeaseAsk::Acquire {
+                    label: &label,
+                    reason,
+                },
+            ) else {
                 return Ok(None);
             };
             let answer = answer?;
             if answer["granted"].as_bool() == Some(true) {
                 return Ok(Some(answer));
+            }
+            // The person using the machine has answered: "not now", or
+            // requests are muted. Waiting on would only ask them again, so
+            // the answer comes back now, with when it is worth asking again.
+            if matches!(answer["answer"].as_str(), Some("not-now" | "muted")) {
+                let why = answer["why"]
+                    .as_str()
+                    .unwrap_or("the person using this machine said not now")
+                    .trim_end_matches('.');
+                return Err(ToolError::new(codes::LEASE_NOT_HELD, format!("{why}.")));
             }
             let waited = started.elapsed();
             if waited >= wait {
@@ -3434,7 +3453,12 @@ impl Plane {
     /// and keyboard actions ask the shared lease too; a command run or bytes
     /// to a terminal touch nothing a person at the screen is in the middle
     /// of, so they need only this process's own.
-    async fn ensure_wheel(&self, limb: &AttachedLimb, kind: &IntentKind) -> Result<(), ToolError> {
+    async fn ensure_wheel(
+        &self,
+        limb: &AttachedLimb,
+        kind: &IntentKind,
+        reason: Option<String>,
+    ) -> Result<(), ToolError> {
         if !kind.needs_control_lease()
             || !self
                 .grant()
@@ -3446,7 +3470,7 @@ impl Plane {
             return Ok(());
         }
         if uses_the_screen(kind) {
-            self.acquire(limb, None, Some(DEFAULT_LEASE_WAIT)).await?;
+            self.acquire(limb, reason, Some(DEFAULT_LEASE_WAIT)).await?;
         } else if !limb.fencing(self.party_id()).is_allowed() {
             let _honoured = self.acquire_local(limb, None).await?;
         }
@@ -3564,6 +3588,23 @@ impl Plane {
         kind: IntentKind,
         generation: Option<u32>,
     ) -> Result<Settlement, ToolError> {
+        self.submit_for(limb, kind, generation, None).await
+    }
+
+    /// [`Plane::submit`], with what the action is for. When the wheel has to
+    /// be asked for and a person is using the machine, the reason is what
+    /// they are shown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Plane::submit`].
+    pub async fn submit_for(
+        &self,
+        limb: &AttachedLimb,
+        kind: IntentKind,
+        generation: Option<u32>,
+        reason: Option<String>,
+    ) -> Result<Settlement, ToolError> {
         self.refresh(limb);
         let now = clock::lease_now();
         let expiries = limb.tick(now);
@@ -3591,7 +3632,7 @@ impl Plane {
         // The wheel, asked for and waited for here rather than demanded of the
         // agent beforehand. The clock is read again after it, because the
         // wait can be long and the dispatch below counts idle time from it.
-        self.ensure_wheel(limb, &kind).await?;
+        self.ensure_wheel(limb, &kind, reason).await?;
         let now = clock::lease_now();
 
         let fence = self.fence_for(limb, &kind, generation)?;
@@ -3996,6 +4037,12 @@ impl Plane {
                 .unwrap_or_default(),
             changes_in_ms: shared.as_ref().and_then(|s| s["changesInMs"].as_u64()),
             advice: (!who.held).then(|| who.advice()),
+            answer: shared
+                .as_ref()
+                .and_then(|s| s["answer"].as_str().map(str::to_string)),
+            why: shared
+                .as_ref()
+                .and_then(|s| s["why"].as_str().map(str::to_string)),
         }
     }
 
@@ -4256,7 +4303,7 @@ impl Who {
         if self.held {
             "This attachment holds the wheel."
         } else if self.person {
-            "A person is using this machine in DeskVNCViewer. Do not act on it while they are. Agents get it back 20 seconds after the person's last input: call dvv_control with action acquire, which waits for it. Tell the user only if the person keeps using it."
+            "A person is using this machine in DeskVNCViewer. Do not act on it while they are. dvv_control with action acquire (give a reason) asks them and waits: they can let you in at once, say not now, or mute requests, and if they say nothing you get it 20 seconds after their last input. If they said not now or muted requests, do other work and ask again after the time you were told. Tell the user only if the person keeps using it."
         } else if self.label.is_some() {
             "Another agent holds this machine. Call dvv_control with action acquire: it waits in the queue, and the wheel passes to you if that agent sends no input for 8 seconds after you ask."
         } else {
