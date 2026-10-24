@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, ensure};
-use boundary_session::{Button, Desktop, Frame, Input, Key};
+use boundary_session::{Button, Desktop, Frame, Input, Key, Rect};
 use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+#[cfg(not(target_os = "linux"))]
 use xcap::Monitor;
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod sck;
 #[cfg(windows)]
@@ -44,7 +47,14 @@ fn dpi_aware() {
 }
 
 pub fn displays() -> Result<Vec<Display>> {
+    #[cfg(target_os = "linux")]
+    return Ok(linux::displays()?
+        .into_iter()
+        .map(|(id, name)| Display { id, name })
+        .collect());
+    #[cfg(not(target_os = "linux"))]
     dpi_aware();
+    #[cfg(not(target_os = "linux"))]
     Monitor::all()?
         .into_iter()
         .map(|m| {
@@ -90,8 +100,11 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         "Allow this app in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
     );
     let awake = Awake::hold();
+    let screen = Capturer::new(id)?;
     Ok(Box::new(NativeDesktop {
-        screen: Capturer::new(id)?,
+        #[cfg(target_os = "linux")]
+        remote: screen.linux.remote(),
+        screen,
         enigo: None,
         buttons: Vec::new(),
         keys: Vec::new(),
@@ -150,7 +163,7 @@ fn capture_pixels(monitor: &Monitor) -> Result<(u32, u32, Vec<u8>)> {
     }
     Ok((width as u32, height as u32, rgba))
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn capture_pixels(monitor: &Monitor) -> Result<(u32, u32, Vec<u8>)> {
     let pixels = monitor
         .capture_image()
@@ -169,17 +182,24 @@ const MAX_HEIGHT: u32 = 1200;
 /// Mac without it the picture is the wallpaper alone, at the same cost, which
 /// is what makes this usable for timing a machine over SSH.
 pub struct Capturer {
+    #[cfg(not(target_os = "linux"))]
     monitor: Monitor,
+    /// X11 through shared memory, or a Wayland portal stream.
+    #[cfg(target_os = "linux")]
+    linux: linux::Screen,
     resizer: fast_image_resize::Resizer,
     /// A ScreenCaptureKit stream, where one could be started.
     #[cfg(target_os = "macos")]
     stream: Option<sck::Stream>,
     /// The last screen, for a caller that wants one whether or not it changed.
     last: Option<Frame>,
+    /// What changed in `last`, where the system said.
+    damage: Option<Vec<Rect>>,
 }
 impl Capturer {
     pub fn new(id: u32) -> Result<Self> {
         dpi_aware();
+        #[cfg(not(target_os = "linux"))]
         let monitor = Monitor::all()?
             .into_iter()
             .find(|m| m.id().ok() == Some(id))
@@ -187,17 +207,34 @@ impl Capturer {
         Ok(Self {
             #[cfg(target_os = "macos")]
             stream: sck::Stream::open(monitor.id()?, (MAX_WIDTH, MAX_HEIGHT)).ok(),
+            #[cfg(not(target_os = "linux"))]
             monitor,
+            #[cfg(target_os = "linux")]
+            linux: linux::Screen::open(id)?,
             resizer: fast_image_resize::Resizer::new(),
             last: None,
+            damage: None,
         })
     }
-    /// Whether screens come from a ScreenCaptureKit stream.
+    /// Whether screens come from a stream that says when they change.
     pub fn streaming(&self) -> bool {
         #[cfg(target_os = "macos")]
         return self.stream.is_some();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        return true;
+        #[cfg(windows)]
         false
+    }
+    /// How screens are captured, for logs and measurements.
+    pub fn backend(&self) -> &'static str {
+        #[cfg(target_os = "linux")]
+        return self.linux.backend();
+        #[cfg(not(target_os = "linux"))]
+        if self.streaming() {
+            "stream"
+        } else {
+            "pictures"
+        }
     }
     /// The screen, changed or not.
     pub fn capture(&mut self) -> Result<Frame> {
@@ -206,8 +243,15 @@ impl Capturer {
             None => self.last.clone().context("No screen yet"),
         }
     }
+    /// What changed in the screen `capture_changed` last returned, in its
+    /// pixels, where the system said. `None` when it did not, or when the
+    /// whole screen may have changed.
+    pub fn damage(&self) -> Option<&[Rect]> {
+        self.damage.as_deref()
+    }
     /// The screen if it changed since the last call.
     pub fn capture_changed(&mut self) -> Result<Option<Frame>> {
+        self.damage = None;
         #[cfg(target_os = "macos")]
         if let Some(stream) = &self.stream {
             match stream.next() {
@@ -221,18 +265,41 @@ impl Capturer {
                 Ok(None) | Err(_) => self.stream = None,
             }
         }
-        let frame = self.grab()?;
-        self.last = Some(frame.clone());
-        Ok(Some(frame))
-    }
-    fn grab(&mut self) -> Result<Frame> {
-        let (width, height, rgba) = capture_pixels(&self.monitor)?;
-        if width <= MAX_WIDTH && height <= MAX_HEIGHT {
-            return Ok(Frame {
-                width,
-                height,
-                rgba,
+        #[cfg(target_os = "linux")]
+        {
+            let Some(raw) = self.linux.next()? else {
+                return Ok(None);
+            };
+            let (frame, scale) = self.fit(raw.width, raw.height, raw.rgba)?;
+            self.damage = raw.damage.map(|rects| {
+                rects
+                    .iter()
+                    .map(|r| scaled(*r, scale, frame.width, frame.height))
+                    .collect()
             });
+            self.last = Some(frame.clone());
+            Ok(Some(frame))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (width, height, rgba) = capture_pixels(&self.monitor)?;
+            let frame = self.fit(width, height, rgba)?.0;
+            self.last = Some(frame.clone());
+            Ok(Some(frame))
+        }
+    }
+    /// The screen at no more than the size it is sent at, and how much it
+    /// was shrunk.
+    fn fit(&mut self, width: u32, height: u32, rgba: Vec<u8>) -> Result<(Frame, f64)> {
+        if width <= MAX_WIDTH && height <= MAX_HEIGHT {
+            return Ok((
+                Frame {
+                    width,
+                    height,
+                    rgba,
+                },
+                1.0,
+            ));
         }
         // A 5K iMac screen shrunk with the image crate took 140 ms of a
         // 2020 i5, which by itself held Boundary to about six screens a
@@ -252,11 +319,34 @@ impl Capturer {
                 .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
                 .use_alpha(false),
         )?;
-        Ok(Frame {
-            width: w,
-            height: h,
-            rgba: dst.into_vec(),
-        })
+        Ok((
+            Frame {
+                width: w,
+                height: h,
+                rgba: dst.into_vec(),
+            },
+            scale,
+        ))
+    }
+}
+
+/// A changed area of a screen, in the pixels of the same screen shrunk by
+/// `scale`: rounded outward, and a pixel wider each way, since the filter
+/// blends each pixel with its neighbours.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scaled(r: Rect, scale: f64, width: u32, height: u32) -> Rect {
+    if scale >= 1.0 {
+        return r;
+    }
+    let x0 = ((r.x as f64 * scale).floor() as u32).saturating_sub(1);
+    let y0 = ((r.y as f64 * scale).floor() as u32).saturating_sub(1);
+    let x1 = (((r.x + r.width) as f64 * scale).ceil() as u32 + 1).min(width);
+    let y1 = (((r.y + r.height) as f64 * scale).ceil() as u32 + 1).min(height);
+    Rect {
+        x: x0,
+        y: y0,
+        width: x1.saturating_sub(x0),
+        height: y1.saturating_sub(y0),
     }
 }
 
@@ -265,6 +355,10 @@ struct NativeDesktop {
     enigo: Option<Enigo>,
     buttons: Vec<Button>,
     keys: Vec<Key>,
+    /// Input through the Wayland RemoteDesktop portal, granted with the
+    /// screen.
+    #[cfg(target_os = "linux")]
+    remote: Option<std::sync::Arc<linux::portal::Remote>>,
     _awake: Awake,
 }
 
@@ -309,12 +403,93 @@ impl NativeDesktop {
             "Allow this app in System Settings > Privacy & Security > Accessibility to use control"
         );
         if self.enigo.is_none() {
-            self.enigo = Some(Enigo::new(&Settings {
-                open_prompt_to_get_permissions: false,
-                ..Settings::default()
-            })?);
+            self.enigo = Some(Enigo::new(&input_settings())?);
         }
         self.enigo.as_mut().context("Input is unavailable")
+    }
+    /// Where a pointer at `x`, `y` across the shared screen goes, in the
+    /// coordinates the injector takes.
+    fn pointer_at(&mut self, x: f32, y: f32) -> Result<(i32, i32)> {
+        let at = |origin: i32, size: u32, f: f32| {
+            origin + (f * size.saturating_sub(1) as f32).round() as i32
+        };
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(area) = self.screen.linux.area() {
+                return Ok((at(area.x, area.width, x), at(area.y, area.height, y)));
+            }
+            // A wlroots desktop: the virtual pointer spans its main output.
+            let (w, h) = self.injector()?.main_display()?;
+            Ok((at(0, w.max(0) as u32, x), at(0, h.max(0) as u32, y)))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // xcap reports macOS display bounds in points, matching CGEvent coordinates.
+            let m = &self.screen.monitor;
+            Ok((at(m.x()?, m.width()?, x), at(m.y()?, m.height()?, y)))
+        }
+    }
+    /// Input through the Wayland RemoteDesktop portal, where this session
+    /// has one.
+    #[cfg(target_os = "linux")]
+    fn portal(&mut self, input: &Input) -> Option<Result<()>> {
+        let remote = self.remote.clone()?;
+        Some(match input {
+            Input::Move { x, y } => remote.move_to(*x, *y),
+            Input::Button { button, down } => remote.button(*button, *down),
+            Input::Key { key, down } => remote.keysym(linux_keysym(*key), *down),
+            Input::Text(text) => remote.text(text),
+            Input::Scroll { lines } => remote.scroll(*lines),
+            Input::Release => Ok(()),
+        })
+    }
+}
+/// How the injector is set up. On Linux each session gets one kind of
+/// input: enigo sends every event down every connection it made, so on a
+/// Wayland desktop it would also type into Xwayland's own idea of focus.
+fn input_settings() -> Settings {
+    #[allow(unused_mut)]
+    let mut settings = Settings {
+        open_prompt_to_get_permissions: false,
+        ..Settings::default()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        // A name that cannot connect turns that kind off.
+        const NOWHERE: &str = "deskvnc-input-off";
+        match linux::kind() {
+            linux::Kind::X11 => settings.wayland_display = Some(NOWHERE.into()),
+            linux::Kind::Wayland => settings.x11_display = Some(NOWHERE.into()),
+        }
+        // enigo delays each X11 click by this many milliseconds on the
+        // server, by default 12. Keys it maps for a character still get the
+        // pause they need.
+        settings.linux_delay = 0;
+    }
+    settings
+}
+#[cfg(target_os = "linux")]
+fn linux_keysym(key: Key) -> u32 {
+    match key {
+        Key::Enter => 0xff0d,
+        Key::Tab => 0xff09,
+        Key::Escape => 0xff1b,
+        Key::Backspace => 0xff08,
+        Key::Delete => 0xffff,
+        Key::Left => 0xff51,
+        Key::Up => 0xff52,
+        Key::Right => 0xff53,
+        Key::Down => 0xff54,
+        Key::Home => 0xff50,
+        Key::End => 0xff57,
+        Key::PageUp => 0xff55,
+        Key::PageDown => 0xff56,
+        Key::Shift => 0xffe1,
+        Key::Control => 0xffe3,
+        Key::Alt => 0xffe9,
+        Key::Meta => 0xffeb,
+        Key::Space => 0x20,
+        Key::Letter(c) => linux::keysym(c),
     }
 }
 impl Desktop for NativeDesktop {
@@ -326,32 +501,42 @@ impl Desktop for NativeDesktop {
         on_input_desktop();
         self.screen.capture_changed()
     }
+    fn damage(&self) -> Option<Vec<Rect>> {
+        self.screen.damage().map(<[Rect]>::to_vec)
+    }
     fn input(&mut self, input: Input) -> Result<()> {
         input.validate()?;
         on_input_desktop();
+        match &input {
+            Input::Button { button, down } => {
+                self.buttons.retain(|b| b != button);
+                if *down {
+                    self.buttons.push(*button);
+                }
+            }
+            Input::Key { key, down } => {
+                self.keys.retain(|k| k != key);
+                if *down {
+                    self.keys.push(*key);
+                }
+            }
+            _ => {}
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(done) = self.portal(&input) {
+            return done;
+        }
         match input {
             Input::Move { x, y } => {
-                // xcap reports macOS display bounds in points, matching CGEvent coordinates.
-                let px = self.screen.monitor.x()?
-                    + (x * self.screen.monitor.width()?.saturating_sub(1) as f32).round() as i32;
-                let py = self.screen.monitor.y()?
-                    + (y * self.screen.monitor.height()?.saturating_sub(1) as f32).round() as i32;
+                let (px, py) = self.pointer_at(x, y)?;
                 self.injector()?.move_mouse(px, py, Coordinate::Abs)?;
             }
             Input::Button { button, down } => {
                 self.injector()?
                     .button(native_button(button), direction(down))?;
-                self.buttons.retain(|b| *b != button);
-                if down {
-                    self.buttons.push(button);
-                }
             }
             Input::Key { key, down } => {
                 self.injector()?.key(native_key(key), direction(down))?;
-                self.keys.retain(|k| *k != key);
-                if down {
-                    self.keys.push(key);
-                }
             }
             Input::Text(text) => self.injector()?.text(&text)?,
             Input::Scroll { lines } => self.injector()?.scroll(lines, Axis::Vertical)?,
@@ -360,6 +545,16 @@ impl Desktop for NativeDesktop {
         Ok(())
     }
     fn release(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = self.remote.clone() {
+            for button in self.buttons.drain(..) {
+                let _ = remote.button(button, false);
+            }
+            for key in self.keys.drain(..).rev() {
+                let _ = remote.keysym(linux_keysym(key), false);
+            }
+            return;
+        }
         if let Some(enigo) = self.enigo.as_mut() {
             for button in self.buttons.drain(..) {
                 let _ = enigo.button(native_button(button), Direction::Release);

@@ -447,6 +447,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ashpd"
+version = "0.13.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb8421aaa9644a5faf26735f258b669b15f063313ef8f8e2bdb28912a1a6f111"
+dependencies = [
+ "enumflags2",
+ "futures-util",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_repr",
+ "zbus",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1018,11 +1032,14 @@ name = "boundary-platform"
 version = "0.31.1"
 dependencies = [
  "anyhow",
+ "ashpd",
+ "async-io",
  "block2 0.6.2",
  "boundary-session",
  "dispatch2",
  "enigo",
  "fast_image_resize",
+ "futures-lite",
  "image",
  "libc",
  "objc2 0.6.4",
@@ -1032,7 +1049,9 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "pipewire",
  "windows-sys 0.59.0",
+ "x11rb",
  "xcap",
 ]
 
@@ -2781,6 +2800,10 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
  "windows 0.61.3",
  "x11rb",
  "xkbcommon",

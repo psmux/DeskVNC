@@ -31,6 +31,12 @@ pub trait Desktop {
     fn capture_changed(&mut self) -> Result<Option<Frame>> {
         self.capture().map(Some)
     }
+    /// What changed in the screen the last `capture_changed` returned, in that
+    /// screen's pixels, for a backend the system tells about changes (X11
+    /// damage). `None` means it is not known and any of it may have changed.
+    fn damage(&self) -> Option<Vec<Rect>> {
+        None
+    }
     fn input(&mut self, input: Input) -> Result<()>;
     fn release(&mut self);
 }
