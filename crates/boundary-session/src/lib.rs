@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+pub mod direct;
 mod dns;
 mod screen;
 mod session;
+mod shared;
 pub mod tools;
 pub mod unattended;
 mod wire;

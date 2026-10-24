@@ -321,6 +321,20 @@ where
     let machine = machine_id(&key);
     let endpoint = session::endpoint_with(&options, Some(key), Lookup::Publish).await?;
     let _close = Closing(endpoint.clone());
+    // Say which computer this is to a helper that dialled the address. On
+    // the random port of a machine that could not have the usual one this
+    // costs nothing and still serves a helper told the port.
+    let sockets = endpoint.bound_sockets();
+    if crate::direct::answer(sockets.clone(), endpoint.id(), stop.child_token()) == 0
+        || !sockets.iter().any(|s| s.port() == crate::direct::PORT)
+    {
+        let _ = notices
+            .send(Notice::Status(format!(
+                "Port {} is taken, so helpers must connect by machine ID",
+                crate::direct::PORT
+            )))
+            .await;
+    }
     if options.relay
         && tokio::time::timeout(Duration::from_secs(12), endpoint.online())
             .await
@@ -611,7 +625,7 @@ pub fn connect(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(machine_addr(&machine), name, password, key, options, false)
+    open(Dial::Text(machine), name, password, key, options, false)
 }
 /// [`connect`] for a helper whose tools send commands and file requests,
 /// such as DeskVNC's agent plane. They run only if the computer allows them
@@ -623,16 +637,33 @@ pub fn connect_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(machine_addr(&machine), name, password, key, options, true)
+    open(Dial::Text(machine), name, password, key, options, true)
 }
-fn machine_addr(machine: &str) -> Result<EndpointAddr> {
-    EndpointId::from_str(machine.trim())
-        .map(EndpointAddr::from)
-        .map_err(|_| {
-            anyhow!(
-                "That is not a machine ID. Copy it from the computer's unattended access settings"
-            )
-        })
+/// What [`open`] dials: an address already worked out, or what the helper
+/// typed, which may be an ID or an address and is resolved once the session
+/// has started so a slow lookup shows as "Finding the computer".
+enum Dial {
+    Addr(Result<EndpointAddr>),
+    Text(String),
+}
+impl Dial {
+    /// A mistyped target is the helper's to fix; a lookup that fails is a
+    /// network that may come back, so only that is worth trying again.
+    async fn resolve(self) -> Result<EndpointAddr> {
+        match self {
+            Self::Addr(addr) => addr,
+            Self::Text(text) => crate::direct::resolve(target(&text)?)
+                .await
+                .map_err(session::link_lost),
+        }
+    }
+}
+fn target(text: &str) -> Result<crate::direct::Target> {
+    crate::direct::Target::parse(text).map_err(|error| {
+        anyhow!(
+            "{error}. Enter the machine ID from the computer's unattended access settings, or its address"
+        )
+    })
 }
 
 /// [`connect`] with a full address, for a helper that already knows where
@@ -644,7 +675,7 @@ pub fn connect_to(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(target, name, password, key, options, false)
+    open(Dial::Addr(target), name, password, key, options, false)
 }
 /// [`connect_to`] for a helper whose tools send commands and file requests.
 pub fn connect_to_with_tools(
@@ -654,10 +685,10 @@ pub fn connect_to_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(target, name, password, key, options, true)
+    open(Dial::Addr(target), name, password, key, options, true)
 }
 fn open(
-    target: Result<EndpointAddr>,
+    target: Dial,
     name: String,
     password: Option<String>,
     key: SecretKey,
@@ -679,14 +710,13 @@ fn open(
 }
 async fn run_connect(
     worker: &mut session::Worker,
-    target: Result<EndpointAddr>,
+    target: Dial,
     name: String,
     password: Option<String>,
     key: SecretKey,
     options: HostOptions,
     tools: bool,
 ) -> Result<()> {
-    let target = target?;
     ensure!(
         !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
         "Enter a helper name of at most 80 bytes"
@@ -694,8 +724,8 @@ async fn run_connect(
     worker
         .emit(Event::Status("Finding the computer".into()))
         .await?;
-    let endpoint = session::endpoint_with(&options, Some(key), Lookup::Resolve).await?;
-    let _close = Closing(endpoint.clone());
+    let target = target.resolve().await?;
+    let endpoint = crate::shared::helper(&options, key).await?;
     let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(target, wire::ALPN))
         .await
         .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
@@ -766,6 +796,10 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
 
 /// Reject anything but the expected machine, so a helper is never let into
 /// the wrong computer by a confused address.
+pub fn validate_target(text: &str) -> Result<()> {
+    target(text).map(|_| ())
+}
+/// Accept only a machine ID, for places that must not take an address.
 pub fn validate_machine_id(text: &str) -> Result<()> {
     if EndpointId::from_str(text.trim()).is_err() {
         bail!("That is not a machine ID");

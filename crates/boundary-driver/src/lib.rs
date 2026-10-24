@@ -106,10 +106,14 @@ impl ProtocolDriver for BoundaryDriver {
             });
         }
         let pending = self.pending.lock().remove(&options.host);
-        // A saved machine is opened by its ID; an invitation by the one use
-        // token `prepare` handed out. Only a saved machine can be retried.
-        let unattended =
-            pending.is_none() && unattended::validate_machine_id(&options.host).is_ok();
+        // A saved machine is opened by its ID or its address; an invitation
+        // by the one use token `prepare` handed out. Only a saved machine can
+        // be retried.
+        let unattended = pending.is_none()
+            && !is_invitation_token(&options.host)
+            && unattended::validate_target(&options.host).is_ok();
+        // The Library keeps a port beside the address, as it does for VNC.
+        let machine = with_port(&options.host, options.port);
         let identity = self.identity.lock().clone();
         let paired = self.paired.lock().clone();
         let registry = self.tools.clone();
@@ -153,7 +157,7 @@ impl ProtocolDriver for BoundaryDriver {
                                 .filter(|n| !n.trim().is_empty())
                                 .unwrap_or_else(helper_name);
                             unattended::connect_with_tools(
-                                options.host.clone(),
+                                machine.clone(),
                                 name,
                                 options.credentials.password.clone().filter(|p| !p.is_empty()),
                                 key,
@@ -414,6 +418,29 @@ fn exec(
     });
 }
 /// The name a helper is shown by when none was given: the account name.
+/// One of the tokens `prepare` hands out. Once used or expired it must not
+/// be taken for a host name and dialled.
+fn is_invitation_token(host: &str) -> bool {
+    host.strip_prefix("boundary-")
+        .is_some_and(|rest| uuid::Uuid::parse_str(rest).is_ok())
+}
+/// A saved Boundary address with the Library's port added, unless it is an
+/// ID, the port is 0, or the address already names one.
+fn with_port(host: &str, port: u16) -> String {
+    if port == 0 || unattended::validate_machine_id(host).is_ok() {
+        return host.to_string();
+    }
+    let (id, rest) = match host.rsplit_once('@') {
+        Some((id, rest)) => (format!("{id}@"), rest),
+        None => (String::new(), host),
+    };
+    match rest.matches(':').count() {
+        _ if rest.starts_with('[') => host.to_string(),
+        0 => format!("{id}{rest}:{port}"),
+        1 => host.to_string(),
+        _ => format!("{id}[{rest}]:{port}"),
+    }
+}
 fn helper_name() -> String {
     std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
@@ -651,6 +678,20 @@ fn crop(frame: &boundary_session::Frame, r: &boundary_session::Rect) -> DecodedR
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_saved_port_is_added_only_where_one_is_missing() {
+        let id = "3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723";
+        assert_eq!(with_port(id, 5940), id);
+        assert_eq!(with_port("10.42.0.2", 0), "10.42.0.2");
+        assert_eq!(with_port("10.42.0.2", 6000), "10.42.0.2:6000");
+        assert_eq!(with_port("10.42.0.2:7000", 6000), "10.42.0.2:7000");
+        assert_eq!(with_port("fd00::2", 6000), "[fd00::2]:6000");
+        assert_eq!(with_port("[fd00::2]:7000", 6000), "[fd00::2]:7000");
+        assert_eq!(
+            with_port(&format!("{id}@box"), 6000),
+            format!("{id}@box:6000")
+        );
+    }
     #[test]
     fn coordinates_buttons_and_unicode_are_translated() {
         let mut state = InputState::default();

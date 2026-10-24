@@ -379,6 +379,23 @@ pub(crate) async fn endpoint_with(
     key: Option<iroh::SecretKey>,
     lookup: Lookup,
 ) -> Result<Endpoint> {
+    // A machine waiting for unattended helpers sits on a port people can
+    // type, so it can be dialled by address like a VNC server. Somebody else
+    // on that port only costs it the address: it still answers by ID.
+    if lookup == Lookup::Publish {
+        if let Ok(endpoint) = bind_endpoint(options, key.clone(), lookup, crate::direct::PORT).await
+        {
+            return Ok(endpoint);
+        }
+    }
+    bind_endpoint(options, key, lookup, 0).await
+}
+async fn bind_endpoint(
+    options: &HostOptions,
+    key: Option<iroh::SecretKey>,
+    lookup: Lookup,
+    port: u16,
+) -> Result<Endpoint> {
     ensure!(
         options.bind_ip.is_none() || !options.relay,
         "Private interface mode cannot enable a relay"
@@ -414,7 +431,15 @@ pub(crate) async fn endpoint_with(
         builder = builder
             .clear_ip_transports()
             .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
-            .bind_addr(std::net::SocketAddr::new(ip, 0))?;
+            .bind_addr(std::net::SocketAddr::new(ip, port))?;
+    } else if port != 0 {
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr(std::net::SocketAddr::from(([0, 0, 0, 0], port)))?
+            .bind_addr_with_opts(
+                std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
+                iroh::endpoint::BindOpts::default().set_is_required(false),
+            )?;
     }
     Ok(builder.bind().await?)
 }
@@ -468,6 +493,11 @@ async fn monitor_route(connection: &Connection, updates: &watch::Sender<Connecti
     }
 }
 struct EndpointGuard(Endpoint);
+/// An endpoint a session bound for itself, or one it shares with others.
+enum Held {
+    Own(#[allow(dead_code)] EndpointGuard),
+    Shared(#[allow(dead_code)] crate::shared::Shared),
+}
 impl Drop for EndpointGuard {
     fn drop(&mut self) {
         let endpoint = self.0.clone();
@@ -973,8 +1003,18 @@ async fn run_viewer(
             "Connecting to the person needing help".into(),
         ))
         .await?;
-    let endpoint = endpoint_with(&options, key, Lookup::Off).await?;
-    let _endpoint_guard = EndpointGuard(endpoint.clone());
+    // With a lasting key, share the endpoint other sessions as that helper
+    // already use, so the relay does not drop one for the other.
+    let (endpoint, _endpoint_guard) = match key {
+        Some(key) => {
+            let shared = crate::shared::helper(&options, key).await?;
+            ((*shared).clone(), Held::Shared(shared))
+        }
+        None => {
+            let endpoint = endpoint_with(&options, None, Lookup::Off).await?;
+            (endpoint.clone(), Held::Own(EndpointGuard(endpoint)))
+        }
+    };
     let connection = tokio::time::timeout(
         Duration::from_secs(25),
         endpoint.connect(invitation.address, wire::ALPN),
@@ -997,7 +1037,9 @@ async fn run_viewer(
     .await?;
     let result = watch_session(worker, &connection, send, recv).await;
     drop(guard);
-    endpoint.close().await;
+    if matches!(_endpoint_guard, Held::Own(_)) {
+        endpoint.close().await;
+    }
     result
 }
 /// The helper's side of a session once its request is on the wire: wait to

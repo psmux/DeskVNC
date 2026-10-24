@@ -606,3 +606,62 @@ async fn a_helper_turned_away_is_not_a_lost_link() {
     .await
     .expect("timed out");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("address");
+        let access_path = dir.join("access.json");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let helper_key = unattended::load_or_create_key(&dir.join("helper.key")).unwrap();
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&helper_key.public().to_string(), "Godwin", true)
+            .unwrap();
+        access.save(&access_path).unwrap();
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        // The usual port when this test has it, another when a test beside
+        // it got there first. Either way only the address is typed.
+        let port = address.ip_addrs().next().expect("a direct address").port();
+        let typed = if port == boundary_session::direct::PORT {
+            "127.0.0.1".to_string()
+        } else {
+            format!("127.0.0.1:{port}")
+        };
+        let helper = unattended::connect(typed, "Godwin".into(), None, helper_key, local());
+        assert_eq!(outcome(helper).await, Ok(true));
+        listener.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_address_with_nothing_listening_says_so() {
+    let helper_key = unattended::SecretKey::generate();
+    // A port nobody listens on, on this machine.
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    let helper = unattended::connect(
+        format!("127.0.0.1:{port}"),
+        "Godwin".into(),
+        None,
+        helper_key,
+        local(),
+    );
+    let error = timeout(Duration::from_secs(30), outcome(helper))
+        .await
+        .expect("timed out")
+        .unwrap_err();
+    assert!(error.contains("did not say which computer"), "{error}");
+}
