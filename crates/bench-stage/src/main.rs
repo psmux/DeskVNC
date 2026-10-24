@@ -112,7 +112,9 @@ fn main() {
     let (ww, wh) = arg(&args, "--size")
         .and_then(|s| pair(&s, 'x'))
         .unwrap_or((960, 600));
-    let secs: u64 = arg(&args, "--secs").and_then(|s| s.parse().ok()).unwrap_or(600);
+    let secs: u64 = arg(&args, "--secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
     let layout = Layout::fit(ww, wh);
     let focused = args.iter().any(|a| a == "--focused");
     let mut window = Window::new(

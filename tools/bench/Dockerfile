@@ -26,5 +26,9 @@ COPY xsession /home/bench/.xsession
 RUN chmod +x /home/bench/.xsession && chown bench:bench /home/bench/.xsession \
     && sed -i 's/^KillDisconnected=.*/KillDisconnected=false/' /etc/xrdp/sesman.ini
 
+# tc, to shape the loopback link like a WAN for the NETEM runs.
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY container-run.sh /usr/local/bin/container-run.sh
 RUN chmod +x /usr/local/bin/container-run.sh

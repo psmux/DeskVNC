@@ -142,7 +142,17 @@ impl Framebuffer {
 
     #[cfg(not(feature = "h264"))]
     #[allow(clippy::too_many_arguments)]
-    fn h264(&mut self, _: u32, _: u32, _: u32, _: u32, _: &[u8], _: u32, _: u32, _: bool) -> Result<()> {
+    fn h264(
+        &mut self,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: bool,
+    ) -> Result<()> {
         anyhow::bail!("H.264 rectangle arrived but this bench was built without the h264 feature")
     }
 }

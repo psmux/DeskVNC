@@ -30,6 +30,8 @@ pub struct Config {
     quality: QualityPreset,
     watch: Vec<String>,
     rdp_size: (u16, u16),
+    /// Close the stage window when the run ends.
+    quit_stage: bool,
 }
 
 impl Config {
@@ -77,12 +79,7 @@ impl Config {
                 .map(|s| s.split(',').map(str::to_owned).collect())
                 .unwrap_or_default(),
             rdp_size,
-        })
-        .map(|c| {
-            if flag(args, "--verbose") {
-                eprintln!("config: {:?} {:?}", c.kind, c.scenes);
-            }
-            c
+            quit_stage: flag(args, "--quit-stage"),
         })
     }
 }
@@ -178,10 +175,10 @@ async fn pump(
             SessionEvent::FramebufferUpdate { rects, .. } => {
                 let mut s = shared.lock().unwrap();
                 for rect in &rects {
-                    if let Err(e) = s.fb.apply(rect) {
-                        if s.errors.len() < 20 {
-                            s.errors.push(format!("{e:#}"));
-                        }
+                    if let Err(e) = s.fb.apply(rect)
+                        && s.errors.len() < 20
+                    {
+                        s.errors.push(format!("{e:#}"));
                     }
                 }
                 let at = Instant::now();
@@ -189,7 +186,10 @@ async fn pump(
                 if s.map.is_none() {
                     s.map = s.fb.view().locate();
                     if let Some(map) = s.map {
-                        eprintln!("stage found at {map:?} in a {}x{} screen", s.fb.width, s.fb.height);
+                        eprintln!(
+                            "stage found at {map:?} in a {}x{} screen",
+                            s.fb.width, s.fb.height
+                        );
                     }
                 }
                 if let Some(map) = s.map {
@@ -202,8 +202,9 @@ async fn pump(
                         }
                         None => false,
                     };
-                    let patch = (s.patches.is_some() && code.is_some_and(|c| c.scene == Scene::Still))
-                        .then(|| view.patch(&map));
+                    let patch = (s.patches.is_some()
+                        && code.is_some_and(|c| c.scene == Scene::Still))
+                    .then(|| view.patch(&map));
                     if hit && s.hit.is_none() {
                         s.hit = Some(at);
                     }
@@ -447,7 +448,13 @@ impl Bench {
     async fn showing(&mut self, scene: Scene, wait: Duration) -> Result<()> {
         let until = Instant::now() + wait;
         loop {
-            if self.shared.lock().unwrap().last_code().is_some_and(|c| c.scene == scene) {
+            if self
+                .shared
+                .lock()
+                .unwrap()
+                .last_code()
+                .is_some_and(|c| c.scene == scene)
+            {
                 return Ok(());
             }
             if !self.changed(until).await {
@@ -457,7 +464,11 @@ impl Bench {
     }
 
     /// Send input and time it until the probe sees its effect.
-    async fn input_lag(&mut self, probe: Probe, commands: Vec<ClientCommand>) -> Result<Option<f64>> {
+    async fn input_lag(
+        &mut self,
+        probe: Probe,
+        commands: Vec<ClientCommand>,
+    ) -> Result<Option<f64>> {
         {
             let mut s = self.shared.lock().unwrap();
             s.probe = Some(probe);
@@ -485,7 +496,12 @@ impl Bench {
             (Some(a), Some(b)) if b >= a => Some((b - a) as f64 * 8.0 / 1000.0 / secs),
             _ => None,
         };
-        let host: Vec<f64> = self.stage.samples(from, to).iter().map(|s| s.cpu as f64).collect();
+        let host: Vec<f64> = self
+            .stage
+            .samples(from, to)
+            .iter()
+            .map(|s| s.cpu as f64)
+            .collect();
         let cpu: Vec<CpuSample> = self
             .cpu
             .lock()
@@ -502,7 +518,12 @@ impl Bench {
             host_cpu: mean(host),
             server_cpu: mean(cpu.iter().map(|c| c.watched as f64).collect()),
             client_cpu: mean(cpu.iter().map(|c| c.own as f64).collect()),
-            updates_per_sec: s.updates.iter().filter(|t| **t >= from && **t <= to).count() as f64 / secs,
+            updates_per_sec: s
+                .updates
+                .iter()
+                .filter(|t| **t >= from && **t <= to)
+                .count() as f64
+                / secs,
         }
     }
 
@@ -515,7 +536,8 @@ impl Bench {
 
     /// Our wall clock at `ms` turned into the stage's, minus a frame's stamp.
     fn age(&self, ms: u32, stamp: u32) -> f64 {
-        ms.wrapping_add(self.offset as i32 as u32).wrapping_sub(stamp) as i32 as f64
+        ms.wrapping_add(self.offset as i32 as u32)
+            .wrapping_sub(stamp) as i32 as f64
     }
 
     async fn pointer(&mut self, count: usize) -> Result<InputResult> {
@@ -565,11 +587,18 @@ impl Bench {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         if !self.stage.takes_keys() {
             return Ok(InputResult {
-                skipped: Some("the stage window did not have the keyboard focus, so no keys were sent".into()),
+                skipped: Some(
+                    "the stage window did not have the keyboard focus, so no keys were sent".into(),
+                ),
                 ..InputResult::default()
             });
         }
-        let start = self.shared.lock().unwrap().last_code().map_or(0, |c| c.keys);
+        let start = self
+            .shared
+            .lock()
+            .unwrap()
+            .last_code()
+            .map_or(0, |c| c.keys);
         let from = Instant::now();
         let bytes = self.bytes();
         let mut samples = Vec::new();
@@ -581,7 +610,10 @@ impl Bench {
                 keycode: None,
                 down,
             };
-            match self.input_lag(Probe::Typed(k), vec![key(true), key(false)]).await? {
+            match self
+                .input_lag(Probe::Typed(k), vec![key(true), key(false)])
+                .await?
+            {
                 Some(ms) => samples.push(ms),
                 None => missed += 1,
             }
@@ -634,7 +666,12 @@ impl Bench {
             _ => 0,
         };
         let secs = window.secs;
-        let stage_fps: Vec<f64> = self.stage.samples(from, to).iter().map(|s| s.fps as f64).collect();
+        let stage_fps: Vec<f64> = self
+            .stage
+            .samples(from, to)
+            .iter()
+            .map(|s| s.fps as f64)
+            .collect();
         Ok(StreamResult {
             fps: seen.len() as f64 / secs,
             stage_fps: if stage_fps.is_empty() {
@@ -671,12 +708,20 @@ impl Bench {
         let Some((first, first_patch)) = patches.first() else {
             return Ok(StillResult::default());
         };
-        let drawn = patches.iter().map(|(o, _)| o.code.clock_ms).min_by_key(|c| c.wrapping_sub(first.code.clock_ms) as i32).unwrap();
+        let drawn = patches
+            .iter()
+            .map(|(o, _)| o.code.clock_ms)
+            .min_by_key(|c| c.wrapping_sub(first.code.clock_ms) as i32)
+            .unwrap();
         let mut last_change = first;
         for pair in patches.windows(2) {
             let (a, b) = (&pair[0].1, &pair[1].1);
             if a.len() == b.len() && !a.is_empty() {
-                let diff: u64 = a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
+                let diff: u64 = a
+                    .iter()
+                    .zip(b)
+                    .map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64)
+                    .sum();
                 if diff as f64 / a.len() as f64 > 0.5 {
                     last_change = &pair[1].0;
                 }
@@ -692,7 +737,10 @@ impl Bench {
     }
 }
 
-fn connect(config: &Config, events: mpsc::Sender<SessionEvent>) -> Result<(SessionHandle, Option<boundary_driver::BoundaryDriver>)> {
+fn connect(
+    config: &Config,
+    events: mpsc::Sender<SessionEvent>,
+) -> Result<(SessionHandle, Option<boundary_driver::BoundaryDriver>)> {
     let id = format!("bench-{}", clock_ms());
     let mut options = match config.kind {
         ProtocolKind::Vnc => {
@@ -738,7 +786,10 @@ fn connect(config: &Config, events: mpsc::Sender<SessionEvent>) -> Result<(Sessi
     })
 }
 
-pub async fn run(config: Config, stage: impl std::future::Future<Output = Result<Stage>>) -> Result<()> {
+pub async fn run(
+    config: Config,
+    stage: impl std::future::Future<Output = Result<Stage>>,
+) -> Result<()> {
     let started = Instant::now();
     let (events_tx, events) = mpsc::channel(256);
     let (handle, _driver) = connect(&config, events_tx)?;
@@ -840,16 +891,20 @@ pub async fn run(config: Config, stage: impl std::future::Future<Output = Result
         let s = shared.lock().unwrap();
         report.screen = (s.fb.width, s.fb.height);
         report.stage_in_screen = s.map.map(|m| (m.x0, m.y0, m.width, m.height));
-        report.rect_kinds = s.fb.kinds.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        report.rect_kinds =
+            s.fb.kinds
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect();
         report.driver_encodings = s.encodings.clone();
         report.errors = s.errors.clone();
     }
     let _ = handle.send(ClientCommand::Disconnect).await;
     handle.shutdown();
-    if let Stage::Linked(link) = &bench.stage {
-        if flag(&std::env::args().collect::<Vec<_>>(), "--quit-stage") {
-            link.quit().await;
-        }
+    if let Stage::Linked(link) = &bench.stage
+        && config.quit_stage
+    {
+        link.quit().await;
     }
     write(&config, &report)?;
     summary(&report);
@@ -859,7 +914,10 @@ pub async fn run(config: Config, stage: impl std::future::Future<Output = Result
 fn write(config: &Config, report: &Report) -> Result<()> {
     std::fs::create_dir_all(&config.out)?;
     let base = config.out.join(&config.label);
-    std::fs::write(base.with_extension("json"), serde_json::to_string_pretty(report)?)?;
+    std::fs::write(
+        base.with_extension("json"),
+        serde_json::to_string_pretty(report)?,
+    )?;
     let mut csv = String::from("label,build,protocol,scene,metric,value\n");
     let mut row = |scene: &str, metric: &str, value: f64| {
         csv.push_str(&format!(
@@ -900,14 +958,21 @@ fn summary(r: &Report) {
             .or(w.driver_kbps)
             .map_or("n/a".into(), |k| format!("{:.0} kbit/s", k))
     };
-    println!("== {} ({}, build {}) screen {:?}", r.label, r.protocol, r.build, r.screen);
+    println!(
+        "== {} ({}, build {}) screen {:?}",
+        r.label, r.protocol, r.build, r.screen
+    );
     for (name, i) in [("pointer", &r.pointer), ("typing", &r.typing)] {
         if let Some(i) = i {
             match &i.skipped {
                 Some(why) => println!("{name:8} skipped: {why}"),
                 None => println!(
                     "{name:8} lag p50 {:.1} p90 {:.1} p99 {:.1} ms, {} missed, {}",
-                    i.lag_ms.p50, i.lag_ms.p90, i.lag_ms.p99, i.missed, kb(&i.window)
+                    i.lag_ms.p50,
+                    i.lag_ms.p90,
+                    i.lag_ms.p99,
+                    i.missed,
+                    kb(&i.window)
                 ),
             }
         }
@@ -916,7 +981,16 @@ fn summary(r: &Report) {
         if let Some(s) = s {
             println!(
                 "{name:8} {:.1} of {:.1} fps, {} dropped of {}, latency p50 {:.1} p90 {:.1} p99 {:.1} ms, {}, host cpu {:?} server cpu {:?}",
-                s.fps, s.stage_fps, s.dropped, s.span, s.latency_ms.p50, s.latency_ms.p90, s.latency_ms.p99, kb(&s.window), s.window.host_cpu.map(|c| c.round()), s.window.server_cpu.map(|c| c.round())
+                s.fps,
+                s.stage_fps,
+                s.dropped,
+                s.span,
+                s.latency_ms.p50,
+                s.latency_ms.p90,
+                s.latency_ms.p99,
+                kb(&s.window),
+                s.window.host_cpu.map(|c| c.round()),
+                s.window.server_cpu.map(|c| c.round())
             );
         }
     }

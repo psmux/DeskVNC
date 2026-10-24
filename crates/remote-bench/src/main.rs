@@ -113,7 +113,9 @@ async fn main() -> Result<()> {
             } else {
                 serve(host_options(&args)?, boundary_platform::open_primary)
             };
-            let secs: u64 = arg(&args, "--secs").and_then(|s| s.parse().ok()).unwrap_or(900);
+            let secs: u64 = arg(&args, "--secs")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(900);
             tokio::time::sleep(Duration::from_secs(secs)).await;
             Ok(())
         }

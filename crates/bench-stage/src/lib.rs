@@ -107,7 +107,17 @@ impl Code {
         let f = self.frame.to_be_bytes();
         let c = self.clock_ms.to_be_bytes();
         let k = self.keys.to_be_bytes();
-        [f[0], f[1], c[0], c[1], c[2], c[3], k[0], k[1], self.scene as u8]
+        [
+            f[0],
+            f[1],
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+            k[0],
+            k[1],
+            self.scene as u8,
+        ]
     }
     /// The squares, left to right then the second row.
     pub fn bits(&self) -> [bool; BITS] {
@@ -294,7 +304,14 @@ fn plasma() -> &'static Plasma {
 }
 
 /// Draw one frame into `buf`, a window `stride` pixels wide, as 0RGB words.
-pub fn render(buf: &mut [u32], stride: u32, layout: Layout, state: &StageState, frame: u32, clock_ms: u32) {
+pub fn render(
+    buf: &mut [u32],
+    stride: u32,
+    layout: Layout,
+    state: &StageState,
+    frame: u32,
+    clock_ms: u32,
+) {
     let (w, h, u) = (layout.width, layout.height, layout.unit);
     let teal = rgb(TEAL);
     let paper = rgb([0xf4, 0xf4, 0xf0]);
@@ -359,7 +376,7 @@ pub fn render(buf: &mut [u32], stride: u32, layout: Layout, state: &StageState, 
         for k in 0..GRID_COLS * GRID_ROWS {
             let (gx, gy) = glyph_at(k as u16);
             let typed = (k as u16) < state.keys % (GRID_COLS * GRID_ROWS) as u16
-                || (state.keys > 0 && state.keys % (GRID_COLS * GRID_ROWS) as u16 == 0);
+                || (state.keys > 0 && state.keys.is_multiple_of((GRID_COLS * GRID_ROWS) as u16));
             fill(
                 buf,
                 gx,
@@ -500,11 +517,13 @@ impl View<'_> {
 
     /// Is the pointer marker drawn at this point, given in units?
     pub fn marked(&self, map: &Mapping, ux: f32, uy: f32) -> bool {
-        [(0.0, 0.0), (-0.3, -0.3), (0.3, 0.3)].iter().all(|(dx, dy)| {
-            let (x, y) = map.pixel(ux + dx, uy + dy);
-            let [r, g, b] = self.rgb(x, y);
-            r > 190 && g < 90 && b > 190
-        })
+        [(0.0, 0.0), (-0.3, -0.3), (0.3, 0.3)]
+            .iter()
+            .all(|(dx, dy)| {
+                let (x, y) = map.pixel(ux + dx, uy + dy);
+                let [r, g, b] = self.rgb(x, y);
+                r > 190 && g < 90 && b > 190
+            })
     }
 
     /// Is the cell for key press `k` filled?
@@ -603,7 +622,8 @@ mod tests {
             let stage = frame(layout, &state, 42, 99_000);
             let mut desk = vec![40u8; (dw * dh * 4) as usize];
             for y in 0..layout.height {
-                let src = &stage[(y * layout.width * 4) as usize..((y + 1) * layout.width * 4) as usize];
+                let src =
+                    &stage[(y * layout.width * 4) as usize..((y + 1) * layout.width * 4) as usize];
                 let at = (((y + 100) * dw + 200) * 4) as usize;
                 desk[at..at + src.len()].copy_from_slice(src);
             }
@@ -613,9 +633,15 @@ mod tests {
                 height: dh,
             };
             let map = view.locate().expect("stage found");
-            assert!((map.x0 - 200.0).abs() <= 2.0 && (map.y0 - 100.0).abs() <= 2.0, "{map:?}");
+            assert!(
+                (map.x0 - 200.0).abs() <= 2.0 && (map.y0 - 100.0).abs() <= 2.0,
+                "{map:?}"
+            );
             let code = view.code(&map).expect("code reads");
-            assert_eq!((code.frame, code.clock_ms, code.scene, code.keys), (42, 99_000, scene, 5));
+            assert_eq!(
+                (code.frame, code.clock_ms, code.scene, code.keys),
+                (42, 99_000, scene, 5)
+            );
             assert!(view.marked(&map, 300.0 / 16.0, 400.0 / 16.0), "{scene:?}");
             assert!(!view.marked(&map, 10.0, 20.0));
             if scene == Scene::Typing {
@@ -655,7 +681,10 @@ mod tests {
     fn pointer_targets_stay_inside_the_content() {
         for n in 0..8 {
             let (x, y) = pointer_target(n, 37.5);
-            assert!((2.0..58.0).contains(&x) && (BAND + 1.0..36.0).contains(&y), "{x} {y}");
+            assert!(
+                (2.0..58.0).contains(&x) && (BAND + 1.0..36.0).contains(&y),
+                "{x} {y}"
+            );
         }
     }
 }

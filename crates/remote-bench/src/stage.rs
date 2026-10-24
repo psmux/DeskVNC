@@ -161,7 +161,8 @@ impl Link {
             let sent = Instant::now();
             let ours = clock_ms();
             self.send(format!("ping {n}")).await?;
-            let Ok(Some((echo, stage))) = tokio::time::timeout(Duration::from_secs(2), pongs.recv()).await
+            let Ok(Some((echo, stage))) =
+                tokio::time::timeout(Duration::from_secs(2), pongs.recv()).await
             else {
                 continue;
             };
