@@ -1383,9 +1383,11 @@ impl Coder {
 }
 
 /// A picture of video this many times the usual size, and at least this
-/// big, is held back as a cut.
+/// big, is held back as a cut. On the bench a cut to a page of text was
+/// 364 KB, and the biggest picture of a scroll 70 KB: at 64 KB scrolls were
+/// taken for cuts, and each started the video over from a keyframe.
 const CUT_TIMES: usize = 6;
-const CUT_BYTES: usize = 64 * 1024;
+const CUT_BYTES: usize = 160 * 1024;
 
 /// A picture of video, encoded, not yet numbered.
 struct Unit {
