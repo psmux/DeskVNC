@@ -1,0 +1,23 @@
+[package]
+name = "bench-stage"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+# The picture a remote desktop benchmark looks at. The library draws the
+# scenes and reads the frame code back; the binary puts the scenes in a real
+# window on the computer being measured. The library has no dependencies, so
+# the measuring client can draw the same scenes offscreen.
+
+[features]
+default = ["window"]
+window = ["dep:minifb", "dep:sysinfo"]
+
+[dependencies]
+minifb = { version = "0.29", optional = true }
+sysinfo = { version = "0.39", optional = true, default-features = false, features = ["system"] }
+
+[[bin]]
+name = "bench-stage"
+required-features = ["window"]
