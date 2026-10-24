@@ -79,15 +79,19 @@ const FLAG_FRESH: u8 = 2;
 /// ```text
 /// seq u64 | width u16 | height u16 | flags u8 (1 keyframe, 2 fresh) | Annex B
 /// ```
-pub(crate) fn encode_unit(seq: u64, width: u32, height: u32, unit: &Encoded, fresh: bool) -> Vec<u8> {
+pub(crate) fn encode_unit(
+    seq: u64,
+    width: u32,
+    height: u32,
+    unit: &Encoded,
+    fresh: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(14 + unit.data.len());
     out.push(KIND_VIDEO);
     out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(&(width as u16).to_be_bytes());
     out.extend_from_slice(&(height as u16).to_be_bytes());
-    out.push(
-        if unit.keyframe { FLAG_KEYFRAME } else { 0 } | if fresh { FLAG_FRESH } else { 0 },
-    );
+    out.push(if unit.keyframe { FLAG_KEYFRAME } else { 0 } | if fresh { FLAG_FRESH } else { 0 });
     out.extend_from_slice(&unit.data);
     out
 }
@@ -199,7 +203,10 @@ pub(crate) fn changed_share(old: &Frame, new: &Frame) -> f32 {
         for tx in 0..cols {
             let x0 = tx * TILE * 4;
             let x1 = ((tx + 1) * TILE).min(w) * 4;
-            if (y0..y1).any(|y| old.rgba[y * stride + x0..y * stride + x1] != new.rgba[y * stride + x0..y * stride + x1]) {
+            if (y0..y1).any(|y| {
+                old.rgba[y * stride + x0..y * stride + x1]
+                    != new.rgba[y * stride + x0..y * stride + x1]
+            }) {
                 dirty += 1;
             }
         }

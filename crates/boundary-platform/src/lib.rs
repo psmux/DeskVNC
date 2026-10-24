@@ -7,6 +7,9 @@ use xcap::Monitor;
 mod sck;
 #[cfg(windows)]
 pub mod system;
+pub mod video;
+#[cfg(target_os = "macos")]
+mod vt;
 
 /// Attach this thread to the desktop with the input, where that matters.
 fn on_input_desktop() {
@@ -358,6 +361,9 @@ impl Desktop for NativeDesktop {
             Input::Release => self.release(),
         }
         Ok(())
+    }
+    fn video(&self) -> Option<boundary_session::video::VideoEncoders> {
+        Some(video::encoders())
     }
     fn release(&mut self) {
         if let Some(enigo) = self.enigo.as_mut() {

@@ -626,7 +626,14 @@ pub fn connect(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Text(machine), name, password, key, options, Abilities::default())
+    open(
+        Dial::Text(machine),
+        name,
+        password,
+        key,
+        options,
+        Abilities::default(),
+    )
 }
 /// [`connect`] for a helper whose tools send commands and file requests,
 /// such as DeskVNC's agent plane. They run only if the computer allows them
@@ -638,7 +645,17 @@ pub fn connect_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Text(machine), name, password, key, options, Abilities { tools: true, video: false })
+    open(
+        Dial::Text(machine),
+        name,
+        password,
+        key,
+        options,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
 }
 /// [`connect`] for a helper that says what more it can do, such as take
 /// moving screens as video.
@@ -688,7 +705,14 @@ pub fn connect_to(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Addr(target), name, password, key, options, Abilities::default())
+    open(
+        Dial::Addr(target),
+        name,
+        password,
+        key,
+        options,
+        Abilities::default(),
+    )
 }
 /// [`connect_to`] for a helper whose tools send commands and file requests.
 pub fn connect_to_with_tools(
@@ -698,7 +722,17 @@ pub fn connect_to_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(Dial::Addr(target), name, password, key, options, Abilities { tools: true, video: false })
+    open(
+        Dial::Addr(target),
+        name,
+        password,
+        key,
+        options,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
 }
 /// [`connect_to`] for a helper that says what more it can do.
 pub fn connect_to_with(

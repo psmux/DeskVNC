@@ -170,11 +170,7 @@ impl Damage {
 }
 /// Hand a picture of video to the helper's window, after whatever came
 /// before it.
-fn show_video(
-    frames: &watch::Sender<Option<Arc<Frame>>>,
-    damage: &Mutex<Damage>,
-    unit: VideoUnit,
-) {
+fn show_video(frames: &watch::Sender<Option<Arc<Frame>>>, damage: &Mutex<Damage>, unit: VideoUnit) {
     let mut damage = damage.lock().unwrap_or_else(|e| e.into_inner());
     damage.seal();
     damage.earlier.push(Pending::Video(unit));
@@ -1102,7 +1098,7 @@ impl Coder {
                 match choice {
                     video::Choice::Tiles => self.tiles(frame, seq, crate::JPEG_QUALITY),
                     video::Choice::Video { start } => match self.video(&frame, seq, start, rate) {
-                        Ok(bytes) => Ok(Some(bytes)),
+                        Ok(bytes) => Ok(bytes),
                         Err(_) => {
                             // An encoder that failed is not tried again in
                             // this session. What video already drew is
@@ -1129,7 +1125,13 @@ impl Coder {
         }
         Ok(Some(update))
     }
-    fn video(&mut self, frame: &Frame, seq: u64, start: bool, rate: (u32, u32)) -> Result<Vec<u8>> {
+    fn video(
+        &mut self,
+        frame: &Frame,
+        seq: u64,
+        start: bool,
+        rate: (u32, u32),
+    ) -> Result<Option<Vec<u8>>> {
         let video = match self.video.take() {
             Some(v) if v.width == frame.width && v.height == frame.height => v,
             _ => {
@@ -1152,14 +1154,25 @@ impl Coder {
             video.rate = rate;
         }
         let encoded = video.encoder.encode(frame, start || video.fresh)?;
+        if encoded.data.is_empty() {
+            // The encoder skipped this screen to keep to its rate.
+            ensure!(
+                !video.fresh && !start,
+                "The video encoder skipped a keyframe"
+            );
+            return Ok(None);
+        }
         ensure!(
             !video.fresh || encoded.keyframe,
             "The video encoder did not start with a keyframe"
         );
         let bytes = video::encode_unit(seq, frame.width, frame.height, &encoded, video.fresh);
         video.fresh = false;
-        ensure!(bytes.len() <= wire::MAX_FRAME, "Encoded screen is too large");
-        Ok(bytes)
+        ensure!(
+            bytes.len() <= wire::MAX_FRAME,
+            "Encoded screen is too large"
+        );
+        Ok(Some(bytes))
     }
 }
 
@@ -1235,7 +1248,10 @@ async fn send_updates(
             working.encoders = found;
             encoders = None;
         }
-        let settles = working.policy.settles_at().map(tokio::time::Instant::from_std);
+        let settles = working
+            .policy
+            .settles_at()
+            .map(tokio::time::Instant::from_std);
         let on_video = working.policy.on_video();
         coder = Some(working);
         let work = tokio::select! {

@@ -11,7 +11,7 @@
 //! ```text
 //! seq u64 | width u16 | height u16 | count u16 | count × (x y w h u16, len u32, JPEG)
 //! ```
-use crate::{Frame, JPEG_QUALITY, dimensions, wire};
+use crate::{Frame, dimensions, wire};
 use anyhow::{Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
 use std::io::Cursor;
@@ -52,7 +52,7 @@ impl Encoder {
     /// when the two are the same.
     #[cfg(test)]
     pub fn update(&mut self, frame: std::sync::Arc<Frame>, seq: u64) -> Result<Option<Vec<u8>>> {
-        self.update_at(frame, seq, JPEG_QUALITY)
+        self.update_at(frame, seq, crate::JPEG_QUALITY)
     }
     /// [`Encoder::update`] at a chosen JPEG quality.
     pub fn update_at(
@@ -221,7 +221,10 @@ fn split(frame: &Frame, rects: Vec<Rect>) -> Vec<Rect> {
 /// Encode each rectangle, in order, on as many cores as there are bands.
 fn encode_rects(frame: &Frame, rects: &[Rect], quality: u8) -> Result<Vec<Vec<u8>>> {
     if rects.len() < 2 || threads() < 2 {
-        return rects.iter().map(|r| encode_rect(frame, r, quality)).collect();
+        return rects
+            .iter()
+            .map(|r| encode_rect(frame, r, quality))
+            .collect();
     }
     let chunk = rects.len().div_ceil(threads());
     std::thread::scope(|s| {

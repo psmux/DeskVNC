@@ -11,6 +11,10 @@ image.workspace = true
 fast_image_resize.workspace = true
 xcap = "0.9.8"
 enigo = "0.6.1"
+# Software H.264, compiled from source, for machines without a hardware
+# encoder and for Linux.
+openh264 = "0.9.9"
+openh264-sys2 = { version = "0.9.9", default-features = false }
 
 # Per monitor DPI awareness, so a pointer position and a captured pixel are
 # the same coordinate on a scaled Windows display.

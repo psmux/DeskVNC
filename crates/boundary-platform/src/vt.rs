@@ -43,8 +43,7 @@ const PIXEL_BGRA: u32 = 0x4247_5241;
 const CF_NUMBER_SINT32: isize = 3;
 const CF_NUMBER_FLOAT64: isize = 6;
 
-type OutputCallback =
-    unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, *const c_void);
+type OutputCallback = unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, *const c_void);
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -266,11 +265,23 @@ impl Drop for Owned {
 }
 fn int(value: i32) -> Owned {
     // SAFETY: a plain number.
-    Owned(unsafe { CFNumberCreate(std::ptr::null(), CF_NUMBER_SINT32, (&value as *const i32).cast()) })
+    Owned(unsafe {
+        CFNumberCreate(
+            std::ptr::null(),
+            CF_NUMBER_SINT32,
+            (&value as *const i32).cast(),
+        )
+    })
 }
 fn float(value: f64) -> Owned {
     // SAFETY: a plain number.
-    Owned(unsafe { CFNumberCreate(std::ptr::null(), CF_NUMBER_FLOAT64, (&value as *const f64).cast()) })
+    Owned(unsafe {
+        CFNumberCreate(
+            std::ptr::null(),
+            CF_NUMBER_FLOAT64,
+            (&value as *const f64).cast(),
+        )
+    })
 }
 fn dictionary(pairs: &[(CFStringRef, CFTypeRef)]) -> Owned {
     let keys: Vec<CFTypeRef> = pairs.iter().map(|p| p.0).collect();
@@ -300,6 +311,7 @@ pub struct VideoToolbox {
     height: u32,
     started: Instant,
     hardware: bool,
+    low_latency: bool,
 }
 // SAFETY: a compression session may be used from any thread, one call at a
 // time, which `&mut self` guarantees.
@@ -328,7 +340,14 @@ impl VideoToolbox {
             spec.push((k.low_latency.context("No low latency mode")?, yes));
         }
         let spec = dictionary(&spec);
-        let (w, h, format) = (int(width as i32), int(height as i32), int(PIXEL_BGRA as i32));
+        // 4:2:0 needs even sides; the extra column or row is cropped off
+        // again by the helper, which draws only the screen's own size.
+        let (even_w, even_h) = (width.next_multiple_of(2), height.next_multiple_of(2));
+        let (w, h, format) = (
+            int(even_w as i32),
+            int(even_h as i32),
+            int(PIXEL_BGRA as i32),
+        );
         let source = dictionary(&[(k.pixel_format, format.0), (k.width, w.0), (k.height, h.0)]);
         let slot: Box<Slot> = Box::new(Mutex::new(None));
         let mut session: *mut c_void = std::ptr::null_mut();
@@ -337,8 +356,8 @@ impl VideoToolbox {
         let status = unsafe {
             (api.create)(
                 std::ptr::null(),
-                width as i32,
-                height as i32,
+                even_w as i32,
+                even_h as i32,
                 CODEC_H264,
                 spec.0,
                 source.0,
@@ -359,14 +378,17 @@ impl VideoToolbox {
             height,
             started: Instant::now(),
             hardware: false,
+            low_latency,
         };
-        let set = |key: CFStringRef, value: CFTypeRef| unsafe {
-            (api.set_property)(session, key, value)
-        };
+        let set =
+            |key: CFStringRef, value: CFTypeRef| unsafe { (api.set_property)(session, key, value) };
         let no = unsafe { kCFBooleanFalse };
         ensure!(set(k.real_time, yes) == 0, "No real time encoding");
         // No B frames: every picture can be shown as soon as it arrives.
-        ensure!(set(k.allow_reordering, no) == 0, "Frames would be reordered");
+        ensure!(
+            set(k.allow_reordering, no) == 0,
+            "Frames would be reordered"
+        );
         if let Some(key) = k.max_delay {
             // One picture in, the same picture out. Not every encoder takes
             // it; one that does not still hands each frame over at once in
@@ -421,10 +443,11 @@ impl Drop for VideoToolbox {
 
 impl VideoEncoder for VideoToolbox {
     fn name(&self) -> &str {
-        if self.hardware {
-            "VideoToolbox (hardware)"
-        } else {
-            "VideoToolbox (software)"
+        match (self.hardware, self.low_latency) {
+            (true, true) => "VideoToolbox (hardware, low latency)",
+            (true, false) => "VideoToolbox (hardware)",
+            (false, true) => "VideoToolbox (low latency)",
+            (false, false) => "VideoToolbox (software)",
         }
     }
     fn set_rate(&mut self, bits_per_second: u32, frames_per_second: u32) {
@@ -462,32 +485,45 @@ impl VideoEncoder for VideoToolbox {
         let mut pixels: *mut c_void = std::ptr::null_mut();
         // SAFETY: a Create function: the buffer is released below.
         let status = unsafe { (api.pool_buffer)(std::ptr::null(), pool, &mut pixels) };
-        ensure!(status == 0 && !pixels.is_null(), "No picture buffer ({status})");
+        ensure!(
+            status == 0 && !pixels.is_null(),
+            "No picture buffer ({status})"
+        );
         let pixels = Owned(pixels);
         let buffer = pixels.0 as *mut c_void;
         // SAFETY: the buffer is locked while it is written, and holds
-        // `height` rows of `stride` bytes of BGRA.
+        // `height` rows of `stride` bytes of BGRA, both rounded up to even.
         unsafe {
             ensure!((api.lock)(buffer, 0) == 0, "Cannot lock a picture buffer");
             let stride = (api.stride)(buffer);
             let base = (api.base)(buffer);
             let row = self.width as usize * 4;
-            if !base.is_null() && stride >= row {
-                let out = std::slice::from_raw_parts_mut(base, stride * self.height as usize);
-                for (dst, src) in out.chunks_exact_mut(stride).zip(frame.rgba.chunks_exact(row)) {
-                    for (d, s) in dst[..row]
-                        .as_chunks_mut::<4>()
-                        .0
-                        .iter_mut()
-                        .zip(src.as_chunks::<4>().0)
-                    {
-                        *d = [s[2], s[1], s[0], 255];
+            let (even_w, even_h) = (
+                self.width.next_multiple_of(2) as usize,
+                self.height.next_multiple_of(2) as usize,
+            );
+            if !base.is_null() && stride >= even_w * 4 {
+                let out = std::slice::from_raw_parts_mut(base, stride * even_h);
+                for (dst, src) in out
+                    .chunks_exact_mut(stride)
+                    .zip(frame.rgba.chunks_exact(row))
+                {
+                    swizzle(&mut dst[..row], src);
+                    if even_w * 4 != row {
+                        // 4:2:0 needs even sides: repeat the last column.
+                        dst.copy_within(row - 4..row, row);
                     }
+                }
+                if even_h != self.height as usize {
+                    // And the last row.
+                    let last = (self.height as usize - 1) * stride;
+                    out.copy_within(last..last + even_w * 4, last + stride);
                 }
             }
             (api.unlock)(buffer, 0);
         }
-        let force = keyframe.then(|| dictionary(&[(api.keys.force_key_frame, unsafe { kCFBooleanTrue })]));
+        let force =
+            keyframe.then(|| dictionary(&[(api.keys.force_key_frame, unsafe { kCFBooleanTrue })]));
         let now = CMTime {
             value: self.started.elapsed().as_micros() as i64,
             timescale: 1_000_000,
@@ -516,6 +552,18 @@ impl VideoEncoder for VideoToolbox {
             Some(result) => result,
             None => bail!("VideoToolbox dropped a picture"),
         }
+    }
+}
+
+/// RGBA to the BGRA VideoToolbox takes.
+fn swizzle(dst: &mut [u8], src: &[u8]) {
+    for (d, s) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
+        *d = [s[2], s[1], s[0], 255];
     }
 }
 
