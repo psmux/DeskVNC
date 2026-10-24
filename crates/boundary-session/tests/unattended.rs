@@ -24,6 +24,14 @@ impl Desktop for Fake {
     fn release(&mut self) {}
 }
 
+/// Every test here listens on the machine's own addresses, which on Windows
+/// raises a firewall prompt for each new test build, and iroh on Windows does
+/// not complete a loopback path to avoid that. So on Windows they run only
+/// when asked for, on a machine where somebody can answer the prompt once.
+fn skipped() -> bool {
+    cfg!(windows) && std::env::var_os("BOUNDARY_LAN_TESTS").is_none()
+}
+
 fn local() -> HostOptions {
     HostOptions {
         relay: false,
@@ -61,6 +69,9 @@ async fn outcome(mut session: Session) -> Result<bool, String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("flow");
         let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
@@ -344,6 +355,9 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn at_the_sign_in_screen_strangers_are_refused_and_tools_stay_off() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("login");
         let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
@@ -418,6 +432,9 @@ async fn at_the_sign_in_screen_strangers_are_refused_and_tools_stay_off() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_paired_helpers_are_in_at_the_same_time() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("two");
         let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
@@ -471,6 +488,9 @@ async fn two_paired_helpers_are_in_at_the_same_time() {
 /// The holder hears when a helper leaves, so nothing keeps saying it is in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn whoever_holds_the_session_hears_the_helper_left() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("left");
         let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
@@ -515,6 +535,9 @@ async fn whoever_holds_the_session_hears_the_helper_left() {
 /// the helper seeing only that the connection was lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_helper_hears_why_the_computer_ended_the_session() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("why");
         let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
@@ -567,6 +590,9 @@ async fn the_helper_hears_why_the_computer_ended_the_session() {
 /// for a lost link that would be worth knocking again for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_helper_turned_away_is_not_a_lost_link() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("away");
         let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
@@ -609,6 +635,9 @@ async fn a_helper_turned_away_is_not_a_lost_link() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let dir = scratch("address");
         let access_path = dir.join("access.json");
@@ -658,6 +687,9 @@ async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_address_with_nothing_listening_says_so() {
+    if skipped() {
+        return;
+    }
     let helper_key = unattended::SecretKey::generate();
     // A port nobody listens on, on this machine.
     let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
