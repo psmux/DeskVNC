@@ -3,6 +3,8 @@ use boundary_session::{Button, Desktop, Frame, Input, Key};
 use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use xcap::Monitor;
 
+#[cfg(target_os = "macos")]
+mod sck;
 #[cfg(windows)]
 pub mod system;
 
@@ -139,6 +141,11 @@ const MAX_HEIGHT: u32 = 1200;
 pub struct Capturer {
     monitor: Monitor,
     resizer: fast_image_resize::Resizer,
+    /// A ScreenCaptureKit stream, where one could be started.
+    #[cfg(target_os = "macos")]
+    stream: Option<sck::Stream>,
+    /// The last screen, for a caller that wants one whether or not it changed.
+    last: Option<Frame>,
 }
 impl Capturer {
     pub fn new(id: u32) -> Result<Self> {
@@ -148,11 +155,47 @@ impl Capturer {
             .find(|m| m.id().ok() == Some(id))
             .context("The selected display is no longer connected")?;
         Ok(Self {
+            #[cfg(target_os = "macos")]
+            stream: sck::Stream::open(monitor.id()?, (MAX_WIDTH, MAX_HEIGHT)).ok(),
             monitor,
             resizer: fast_image_resize::Resizer::new(),
+            last: None,
         })
     }
+    /// Whether screens come from a ScreenCaptureKit stream.
+    pub fn streaming(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.stream.is_some();
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+    /// The screen, changed or not.
     pub fn capture(&mut self) -> Result<Frame> {
+        match self.capture_changed()? {
+            Some(frame) => Ok(frame),
+            None => self.last.clone().context("No screen yet"),
+        }
+    }
+    /// The screen if it changed since the last call.
+    pub fn capture_changed(&mut self) -> Result<Option<Frame>> {
+        #[cfg(target_os = "macos")]
+        if let Some(stream) = &self.stream {
+            match stream.next() {
+                Ok(None) if self.last.is_some() => return Ok(None),
+                Ok(Some(frame)) => {
+                    self.last = Some(frame.clone());
+                    return Ok(Some(frame));
+                }
+                // Stopped, as when the display went away: ask for pictures
+                // instead, which says what is wrong if that fails too.
+                Ok(None) | Err(_) => self.stream = None,
+            }
+        }
+        let frame = self.grab()?;
+        self.last = Some(frame.clone());
+        Ok(Some(frame))
+    }
+    fn grab(&mut self) -> Result<Frame> {
         let (width, height, rgba) = capture_pixels(&self.monitor)?;
         if width <= MAX_WIDTH && height <= MAX_HEIGHT {
             return Ok(Frame {
@@ -212,6 +255,10 @@ impl Desktop for NativeDesktop {
     fn capture(&mut self) -> Result<Frame> {
         on_input_desktop();
         self.screen.capture()
+    }
+    fn capture_changed(&mut self) -> Result<Option<Frame>> {
+        on_input_desktop();
+        self.screen.capture_changed()
     }
     fn input(&mut self, input: Input) -> Result<()> {
         input.validate()?;

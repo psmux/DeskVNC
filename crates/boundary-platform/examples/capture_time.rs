@@ -6,6 +6,27 @@ use std::time::Instant;
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 fn main() {
+    // What the app uses: a stream where one starts, pictures otherwise.
+    let id = boundary_platform::displays().unwrap()[0].id;
+    let t = Instant::now();
+    let mut capturer = boundary_platform::Capturer::new(id).unwrap();
+    println!(
+        "capturer ready in {:?}, streaming {}",
+        t.elapsed(),
+        capturer.streaming()
+    );
+    let t = Instant::now();
+    let (mut new, mut calls) = (0, 0);
+    while t.elapsed().as_secs() < 3 {
+        calls += 1;
+        if let Some(f) = capturer.capture_changed().unwrap() {
+            new += 1;
+            if new == 1 {
+                println!("first screen {}x{}", f.width, f.height);
+            }
+        }
+    }
+    println!("3 s: {calls} calls, {new} new screens");
     use objc2_core_graphics::{
         CGDataProvider, CGDisplayBounds, CGImage, CGMainDisplayID, CGWindowImageOption,
         CGWindowListCreateImage, CGWindowListOption,

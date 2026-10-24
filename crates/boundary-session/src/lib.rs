@@ -23,6 +23,12 @@ pub use wire::{Button, Input, Invitation, Key};
 /// Implemented by a local platform backend, created only after consent.
 pub trait Desktop {
     fn capture(&mut self) -> Result<Frame>;
+    /// The screen if it changed since the last call, or `None` if it did not.
+    /// A backend that is told about changes, such as a capture stream, says
+    /// so here and saves comparing a whole screen with the last one.
+    fn capture_changed(&mut self) -> Result<Option<Frame>> {
+        self.capture().map(Some)
+    }
     fn input(&mut self, input: Input) -> Result<()>;
     fn release(&mut self);
 }

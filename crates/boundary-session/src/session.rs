@@ -719,14 +719,12 @@ where
 }
 
 /// How soon to capture again while the screen is changing or someone is
-/// using it: about thirty screens a second.
-const BUSY_CAPTURE: Duration = Duration::from_millis(33);
+/// using it: sixty screens a second, as often as a display draws.
+const BUSY_CAPTURE: Duration = Duration::from_millis(16);
 /// How soon to capture again on a screen that has stayed still for a while.
 const IDLE_CAPTURE: Duration = Duration::from_millis(100);
 /// How long a still screen stays on the busy pace after it last changed.
 const BUSY_FOR: Duration = Duration::from_secs(1);
-/// After input, how long to give an app to draw what it did before capturing.
-const AFTER_INPUT: Duration = Duration::from_millis(12);
 
 fn desktop_loop<F>(
     factory: F,
@@ -772,7 +770,7 @@ where
                     desktop.0.input(event)?;
                     // Show what the input did as soon as it is drawn,
                     // rather than at the next turn of the clock.
-                    capture_at = capture_at.min(Instant::now() + AFTER_INPUT);
+                    capture_at = Instant::now();
                     last_change = Instant::now();
                 }
             }
@@ -783,10 +781,11 @@ where
         }
         if Instant::now() >= capture_at {
             let started = Instant::now();
-            let frame = desktop.0.capture()?;
             // A still screen is not handed on: sending the same picture
             // again only costs the link.
-            if last.as_ref().is_none_or(|last| **last != frame) {
+            if let Some(frame) = desktop.0.capture_changed()?
+                && last.as_ref().is_none_or(|last| **last != frame)
+            {
                 let frame = Arc::new(frame);
                 last = Some(frame.clone());
                 last_change = Instant::now();
