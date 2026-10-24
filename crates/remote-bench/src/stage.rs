@@ -42,22 +42,111 @@ impl Offscreen {
     }
 }
 
-pub struct OffscreenDesktop(pub Arc<Mutex<Offscreen>>);
+/// Serve the client's link for an offscreen stage on another machine, the
+/// way the stage window does: clock pings, scene changes and a CPU report.
+pub fn dial(addr: String, offscreen: Arc<Mutex<Offscreen>>) {
+    use std::io::{BufRead, Write};
+    std::thread::spawn(move || {
+        loop {
+            let Ok(stream) = std::net::TcpStream::connect(&addr) else {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            };
+            let _ = stream.set_nodelay(true);
+            let Ok(mut out) = stream.try_clone() else {
+                continue;
+            };
+            let size = {
+                let o = offscreen.lock().unwrap();
+                (o.layout.width, o.layout.height)
+            };
+            let _ = writeln!(out, "hello {} {}", size.0, size.1);
+            if let Ok(mut cpu_out) = stream.try_clone() {
+                std::thread::spawn(move || {
+                    let mut sys = sysinfo::System::new();
+                    loop {
+                        std::thread::sleep(Duration::from_secs(1));
+                        sys.refresh_cpu_usage();
+                        let line = format!("cpu {:.1} fps 60.0 active 1", sys.global_cpu_usage());
+                        if writeln!(cpu_out, "{line}").is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+            for line in std::io::BufReader::new(stream).lines() {
+                let Ok(line) = line else { break };
+                let mut words = line.split_whitespace();
+                match (words.next(), words.next()) {
+                    (Some("ping"), Some(n)) => {
+                        let _ = writeln!(out, "pong {n} {}", clock_ms());
+                    }
+                    (Some("scene"), Some(name)) => {
+                        if let Some(scene) = Scene::parse(name) {
+                            let mut o = offscreen.lock().unwrap();
+                            let frame = o.frame();
+                            o.state.set_scene(scene, frame);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let _ = out.shutdown(std::net::Shutdown::Both);
+        }
+    });
+}
+
+/// The offscreen stage as a Boundary host's screen. Like the stage window,
+/// the still scenes change only when the pointer, a key or the scene does,
+/// and the moving ones change every frame.
+pub struct OffscreenDesktop {
+    stage: Arc<Mutex<Offscreen>>,
+    last: Option<(StageState, Frame)>,
+}
+
+impl OffscreenDesktop {
+    pub fn new(stage: Arc<Mutex<Offscreen>>) -> Self {
+        OffscreenDesktop { stage, last: None }
+    }
+}
+
+fn same(a: &StageState, b: &StageState) -> bool {
+    (a.scene, a.scene_start, a.pointer, a.keys) == (b.scene, b.scene_start, b.pointer, b.keys)
+}
 
 impl Desktop for OffscreenDesktop {
     fn capture(&mut self) -> Result<Frame> {
+        match self.capture_changed()? {
+            Some(frame) => Ok(frame),
+            None => Ok(self
+                .last
+                .as_ref()
+                .map(|(_, f)| f.clone())
+                .expect("a frame was drawn")),
+        }
+    }
+    fn capture_changed(&mut self) -> Result<Option<Frame>> {
         let (layout, state, frame) = {
-            let s = self.0.lock().unwrap();
+            let s = self.stage.lock().unwrap();
             (s.layout, s.state, s.frame())
         };
-        Ok(Frame {
+        let moving = matches!(state.scene, Scene::Scroll | Scene::Motion);
+        if let Some((drawn, _)) = &self.last
+            && !moving
+            && same(drawn, &state)
+        {
+            return Ok(None);
+        }
+        let shot = Frame {
             width: layout.width,
             height: layout.height,
             rgba: render_rgba(layout, &state, frame, clock_ms()),
-        })
+        };
+        self.last = Some((state, shot.clone()));
+        Ok(Some(shot))
     }
     fn input(&mut self, input: Input) -> Result<()> {
-        let mut s = self.0.lock().unwrap();
+        let mut s = self.stage.lock().unwrap();
         let (w, h) = (s.layout.width as f32, s.layout.height as f32);
         match input {
             Input::Move { x, y } => s.state.pointer = Some((x * (w - 1.0), y * (h - 1.0))),

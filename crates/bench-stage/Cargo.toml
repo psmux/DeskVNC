@@ -12,10 +12,15 @@ publish = false
 
 [features]
 default = ["window"]
-window = ["dep:minifb", "dep:sysinfo"]
+window = ["dep:winit", "dep:softbuffer", "dep:sysinfo"]
 
 [dependencies]
-minifb = { version = "0.29", optional = true }
+# softbuffer presents only the damaged rectangles, so the stage changes on
+# screen exactly what changed in the scene, the way a real application does.
+# A stage that repainted its whole window every frame would make a server
+# that follows damage (xrdp, Windows RDP) resend the whole screen.
+winit = { version = "0.30.13", optional = true }
+softbuffer = { version = "0.4.8", optional = true }
 sysinfo = { version = "0.39", optional = true, default-features = false, features = ["system"] }
 
 [[bin]]

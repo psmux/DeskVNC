@@ -415,6 +415,40 @@ pub fn render(
     }
 }
 
+/// What changed between two frames, as rectangles `(x, y, width, height)`:
+/// one per band of 16 rows that has any change, spanning the changed
+/// columns. The window presents only these, so the stage damages the screen
+/// as little as a real application would.
+pub fn damage(prev: &[u32], cur: &[u32], width: u32, height: u32) -> Vec<(u32, u32, u32, u32)> {
+    const BAND_ROWS: u32 = 16;
+    let mut out = Vec::new();
+    for y0 in (0..height).step_by(BAND_ROWS as usize) {
+        let y1 = (y0 + BAND_ROWS).min(height);
+        let (mut x0, mut x1) = (u32::MAX, 0);
+        for y in y0..y1 {
+            let row = (y * width) as usize..((y + 1) * width) as usize;
+            let (a, b) = (&prev[row.clone()], &cur[row]);
+            if a == b {
+                continue;
+            }
+            let first = a.iter().zip(b).position(|(p, q)| p != q).unwrap_or(0) as u32;
+            let last = width
+                - 1
+                - a.iter()
+                    .rev()
+                    .zip(b.iter().rev())
+                    .position(|(p, q)| p != q)
+                    .unwrap_or(0) as u32;
+            x0 = x0.min(first);
+            x1 = x1.max(last);
+        }
+        if x0 <= x1 {
+            out.push((x0, y0, x1 - x0 + 1, y1 - y0));
+        }
+    }
+    out
+}
+
 /// Where the stage sits in a received frame, in that frame's pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mapping {
@@ -675,6 +709,19 @@ mod tests {
         };
         let map = view.locate().unwrap();
         assert_eq!(view.code(&map).unwrap().frame, 7);
+    }
+
+    #[test]
+    fn damage_covers_exactly_the_changed_bands() {
+        let (w, h) = (100u32, 40u32);
+        let prev = vec![0u32; (w * h) as usize];
+        let mut cur = prev.clone();
+        assert!(damage(&prev, &cur, w, h).is_empty());
+        cur[(20 * w + 30) as usize] = 1;
+        cur[(21 * w + 70) as usize] = 1;
+        assert_eq!(damage(&prev, &cur, w, h), vec![(30, 16, 41, 16)]);
+        cur[(39 * w + 99) as usize] = 1;
+        assert_eq!(damage(&prev, &cur, w, h).last(), Some(&(99, 32, 1, 8)));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //!
 //! # A Boundary host on the machine being measured, sharing its real screen.
 //! remote-bench host [--bind 10.0.0.9]                 # prints INVITATION
+//! remote-bench host --synthetic --control 10.0.0.5:47800  # offscreen stage
 //!
 //! # The measuring client. Start bench-stage on the host with
 //! # --control <this machine>:47800 first.
@@ -96,19 +97,24 @@ async fn main() -> Result<()> {
             let offscreen = stage::Offscreen::new(w, h);
             let shared = offscreen.clone();
             let ticket = serve(host_options(&args)?, move || {
-                Ok(Box::new(stage::OffscreenDesktop(shared)))
+                Ok(Box::new(stage::OffscreenDesktop::new(shared)))
             })
             .await?;
             let config = measure::Config::from_args(&args, "boundary", ticket)?;
             measure::run(config, async { Ok(stage::Stage::Local(offscreen)) }).await
         }
         Some("host") => {
-            let synthetic = arg(&args, "--synthetic").is_some();
+            let synthetic = flag(&args, "--synthetic");
             let (w, h) = size(&args);
             let _ticket = if synthetic {
                 let offscreen = stage::Offscreen::new(w, h);
+                // The offscreen stage answers the client's link as the stage
+                // window does, so a remote run gets its clocks synced.
+                if let Some(addr) = arg(&args, "--control") {
+                    stage::dial(addr, offscreen.clone());
+                }
                 serve(host_options(&args)?, move || {
-                    Ok(Box::new(stage::OffscreenDesktop(offscreen)))
+                    Ok(Box::new(stage::OffscreenDesktop::new(offscreen)))
                 })
             } else {
                 serve(host_options(&args)?, boundary_platform::open_primary)
