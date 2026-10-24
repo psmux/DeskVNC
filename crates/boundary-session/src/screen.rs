@@ -41,12 +41,20 @@ pub struct Rect {
 #[derive(Default)]
 pub(crate) struct Encoder {
     reference: Option<std::sync::Arc<Frame>>,
+    /// The reference is the last capture this encoder was shown, so what
+    /// the desktop said changed since then is all that can differ.
+    current: bool,
 }
 impl Encoder {
     /// Forget what the helper has, so the next update is the whole screen,
     /// as after video drew over it.
     pub fn reset(&mut self) {
         self.reference = None;
+    }
+    /// A capture went to the helper some other way, as video, so the
+    /// reference is no longer the last capture.
+    pub fn passed(&mut self) {
+        self.current = false;
     }
     /// The update that turns what the helper has into `frame`, or nothing
     /// when the two are the same.
@@ -61,13 +69,30 @@ impl Encoder {
         seq: u64,
         quality: u8,
     ) -> Result<Option<Vec<u8>>> {
+        self.update_with(frame, seq, quality, None)
+    }
+    /// [`Encoder::update_at`], told what the desktop said changed since the
+    /// last capture, so only those tiles are compared: a whole screen
+    /// compared for a caret cost a millisecond or two of every keystroke.
+    pub fn update_with(
+        &mut self,
+        frame: std::sync::Arc<Frame>,
+        seq: u64,
+        quality: u8,
+        damage: Option<&[Rect]>,
+    ) -> Result<Option<Vec<u8>>> {
         frame.validate()?;
+        let damage = damage.filter(|_| self.current);
+        self.current = true;
         let rects = match self
             .reference
             .as_ref()
             .filter(|r| r.width == frame.width && r.height == frame.height)
         {
-            Some(reference) => changed(reference, &frame),
+            Some(reference) => match damage {
+                Some(damage) => changed_within(reference, &frame, damage),
+                None => changed(reference, &frame),
+            },
             None => vec![Rect {
                 x: 0,
                 y: 0,
@@ -88,6 +113,7 @@ impl Encoder {
         quality: u8,
     ) -> Result<Option<Vec<u8>>> {
         frame.validate()?;
+        self.current = true;
         let cols = frame.width.div_ceil(TILE);
         let rects = joined(frame.width, frame.height, |tx, ty| {
             stale
@@ -137,6 +163,37 @@ fn changed(old: &Frame, new: &Frame) -> Vec<Rect> {
     let (w, h) = (new.width, new.height);
     let stride = w as usize * 4;
     joined(w, h, |tx, ty| {
+        let (y0, x0) = (ty * TILE, (tx * TILE) as usize * 4);
+        let th = TILE.min(h - y0);
+        let tw = TILE.min(w - tx * TILE) as usize * 4;
+        (y0..y0 + th).any(|y| {
+            let i = y as usize * stride + x0;
+            old.rgba[i..i + tw] != new.rgba[i..i + tw]
+        })
+    })
+}
+
+/// [`changed`], looking only at the tiles `damage` touches.
+fn changed_within(old: &Frame, new: &Frame, damage: &[Rect]) -> Vec<Rect> {
+    let (w, h) = (new.width, new.height);
+    let (cols, rows) = (w.div_ceil(TILE), h.div_ceil(TILE));
+    let mut touched = vec![false; (cols * rows) as usize];
+    for r in damage {
+        if r.width == 0 || r.height == 0 || r.x >= w || r.y >= h {
+            continue;
+        }
+        let (x1, y1) = ((r.x + r.width).min(w) - 1, (r.y + r.height).min(h) - 1);
+        for ty in r.y / TILE..=y1 / TILE {
+            for tx in r.x / TILE..=x1 / TILE {
+                touched[(ty * cols + tx) as usize] = true;
+            }
+        }
+    }
+    let stride = w as usize * 4;
+    joined(w, h, |tx, ty| {
+        if !touched[(ty * cols + tx) as usize] {
+            return false;
+        }
         let (y0, x0) = (ty * TILE, (tx * TILE) as usize * 4);
         let th = TILE.min(h - y0);
         let tw = TILE.min(w - tx * TILE) as usize * 4;

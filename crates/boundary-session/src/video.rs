@@ -157,12 +157,13 @@ pub(crate) const QUIET_SHARE: f32 = 0.02;
 /// only the tiles video drew wrong go then.
 pub(crate) const SETTLE: Duration = Duration::from_millis(60);
 /// Once they are known, the screen has settled when it has been quiet for
-/// this many of the usual gaps between its changes: 40 ms for a screen
-/// changing 60 times a second, 83 for a 30 frame video, which does not count
-/// as stopped between its frames.
-const SETTLE_GAPS: u32 = 5;
+/// one and a half of the usual gaps between its changes: 25 ms for a screen
+/// changing 60 times a second, 50 for a 30 frame video, which does not count
+/// as stopped between its frames. A pause that was not a stop picks video
+/// up again at once and waits [`SETTLE_AGAIN`] from then on.
+const SETTLE_GAPS: u32 = 3;
 const SETTLE_GAPS_PER: u32 = 2;
-pub(crate) const SETTLE_MIN: Duration = Duration::from_millis(25);
+pub(crate) const SETTLE_MIN: Duration = Duration::from_millis(20);
 pub(crate) const SETTLE_MAX: Duration = Duration::from_millis(100);
 /// Motion again this soon after the screen settled was a pause, not a stop,
 /// as between the turns of a scroll wheel: video picks up at once, and waits
@@ -431,12 +432,18 @@ mod tests {
         assert_eq!(policy.capture(0.6, ms(64)), Choice::Video { start: true });
         // Before the gaps are known, the screen settles after SETTLE.
         assert_eq!(policy.settles_at(), Some(ms(64) + SETTLE));
-        // Changing every 16 ms, it has settled after two and a half gaps.
+        // Changing every 16 ms, it has settled after one and a half gaps.
         assert_eq!(policy.capture(0.6, ms(80)), Choice::Video { start: false });
-        assert_eq!(policy.settles_at(), Some(ms(80) + Duration::from_millis(40)));
+        assert_eq!(
+            policy.settles_at(),
+            Some(ms(80) + Duration::from_millis(24))
+        );
         // The pointer moving after the scroll stops does not hold video.
         assert_eq!(policy.capture(0.01, ms(96)), Choice::Video { start: false });
-        assert_eq!(policy.settles_at(), Some(ms(80) + Duration::from_millis(40)));
+        assert_eq!(
+            policy.settles_at(),
+            Some(ms(80) + Duration::from_millis(24))
+        );
         policy.settle(ms(180));
         assert_eq!(policy.settles_at(), None);
         assert_eq!(policy.capture(0.01, ms(300)), Choice::Tiles);

@@ -1168,13 +1168,11 @@ impl Coder {
                 self.tiles(frame, seq, SETTLED_QUALITY)
             }
             Work::Capture(frame, damage) => {
-                let share = match (&self.last, damage) {
+                let share = match (&self.last, &damage) {
                     (Some(last), _) if last.width != frame.width || last.height != frame.height => {
                         1.0
                     }
-                    (Some(_), Some(rects)) => {
-                        video::damage_share(&rects, frame.width, frame.height)
-                    }
+                    (Some(_), Some(rects)) => video::damage_share(rects, frame.width, frame.height),
                     (Some(last), None) => video::changed_share(last, &frame),
                     (None, _) => 1.0,
                 };
@@ -1184,8 +1182,14 @@ impl Coder {
                     None => video::Choice::Tiles,
                 };
                 match choice {
-                    video::Choice::Tiles => self.tiles(frame, seq, crate::JPEG_QUALITY),
-                    video::Choice::Video { start } => match self.video(&frame, seq, rate) {
+                    video::Choice::Tiles => Ok(self
+                        .tiles
+                        .update_with(frame, seq, crate::JPEG_QUALITY, damage.as_deref())?
+                        .map(|u| self.kind(u))),
+                    video::Choice::Video { start } => match {
+                        self.tiles.passed();
+                        self.video(&frame, seq, rate)
+                    } {
                         Ok(bytes) => Ok(bytes),
                         Err(_) => {
                             // An encoder that failed is not tried again in

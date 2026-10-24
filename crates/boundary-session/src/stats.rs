@@ -22,7 +22,14 @@ impl Counter {
     fn take(&self) -> (u64, f64) {
         let n = self.count.swap(0, Relaxed);
         let us = self.micros.swap(0, Relaxed);
-        (n, if n > 0 { us as f64 / n as f64 / 1000.0 } else { 0.0 })
+        (
+            n,
+            if n > 0 {
+                us as f64 / n as f64 / 1000.0
+            } else {
+                0.0
+            },
+        )
     }
 }
 
