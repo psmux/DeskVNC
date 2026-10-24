@@ -156,7 +156,7 @@ export function SplitView({
     tabs, sessions, activeId, close, closePane, focusPane, setTitle, setState, resize,
     reportArea, split: splitPane, adopt, toggleZoom,
   } = useTabs();
-  const { forSession, takeWheel, stopAgent } = useAgentActivity();
+  const { forSession, stopAgent } = useAgentActivity();
   const areaRef = useRef<HTMLDivElement>(null);
   const area = useArea(areaRef);
 
@@ -398,17 +398,16 @@ export function SplitView({
               // readings when the desktop in question belongs to a machine the
               // user was not typing at a moment ago.
               //
-              // Clicking a pane an agent is driving takes the wheel as well as
-              // the focus, and the two are the same gesture on purpose: a
-              // person who has started typing at a machine has already decided
-              // they are driving it, and asking them to press something first
-              // would mean their first few keystrokes went in alongside a
-              // robot's. A human outranks an agent by default (`00 R11`), so
-              // this needs nothing from the agent and waits for nothing; it is
-              // a no-op on every pane a person already holds, which is all of
-              // them until the plane is switched on.
+              // Focusing a pane does NOT take the wheel from an agent. It used
+              // to, and since this click never reaches the remote machine, a
+              // person merely selecting or looking at a pane stopped the agent
+              // on it for good. The person takes the wheel by using the
+              // machine: their first key or button reaches `send_input`, the
+              // shell moves the shared lease to them there and fences the
+              // agent before that input goes, and it hands the machine back
+              // once they have been quiet for a while. The stop control on the
+              // pane header still takes it on purpose.
               onPointerDownCapture={() => {
-                if (session) takeWheel(session.id);
                 if (!focused) focusPane(tab.id, pane.id);
               }}
             >

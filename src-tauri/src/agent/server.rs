@@ -107,7 +107,7 @@ use serde_json::{json, Value};
 use vnc_core::{ClientCommand, ProtocolKind, QualityPreset, Rect};
 
 use crate::agent::mirror::{self, MirrorStatus, Perceive};
-use crate::agent::wire;
+use crate::agent::{control, wire};
 use crate::agent::{AgentPlane, Attachment, PROTOCOL};
 use crate::state::{MachineKey, SessionEntry};
 
@@ -272,6 +272,13 @@ pub async fn dispatch(
         "files.remove" => files_remove(ctx, peer, params).await,
         "files.rename" => files_rename(ctx, peer, params).await,
         "control.report" => control_report(ctx, peer, params),
+        // The shared lease (see `crate::agent::control`). Each answers at
+        // once: a party that wants to wait asks again, which also keeps its
+        // place in the queue, because a call that blocked here would block
+        // every other call on the same connection for as long as it waited.
+        "control.acquire" => control_acquire(ctx, peer, params),
+        "control.release" => control_release(ctx, peer, params),
+        "control.status" => control_status(ctx, peer, params),
         // The perception pair, split the way `00 R5` splits it: pixels and
         // rectangles are two different powers and the weaker one does not
         // imply the stronger.
@@ -387,10 +394,14 @@ fn hello(ctx: &Ctx, peer: &mut Peer, params: &Value) -> Result<Value, RpcError> 
             ),
         ));
     }
+    // `client.agent`, when a client sends it, names the agent behind the
+    // client ("claude-code", "codex"), which is what a pane and another agent
+    // waiting for the machine need to read. Older clients send only `name`.
     let client = params
         .get("client")
-        .and_then(|c| c.get("name"))
+        .and_then(|c| c.get("agent").or_else(|| c.get("name")))
         .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
         .unwrap_or("unnamed")
         .to_string();
     let attachment_id = ctx.plane.mint_attachment_id();
@@ -401,6 +412,11 @@ fn hello(ctx: &Ctx, peer: &mut Peer, params: &Value) -> Result<Value, RpcError> 
     // twice until it hung up.
     if peer.connection.is_none() {
         peer.connection = Some(ctx.plane.client_connected(&client));
+    }
+    // Whatever this attachment comes to hold is let go when the connection
+    // ends, however it ends.
+    if let Some(connection) = &peer.connection {
+        connection.bind(&attachment_id);
     }
     // A client may ask for LESS and never for more. Intersecting rather than
     // replacing is the whole of it: an unrecognised name narrows nothing and
@@ -510,6 +526,12 @@ pub fn limb_records(ctx: &Ctx) -> Vec<Value> {
         }
         let slot = slot_of(&sessions, id, &entry.machine_key());
         out.push(record(id, entry, slot, attached.get(id).cloned()));
+    }
+    drop(sessions);
+    // Who holds each one, so `dvv limbs` can say so without a call per limb.
+    for record in &mut out {
+        let id = record["sessionId"].as_str().unwrap_or_default().to_string();
+        record["lease"] = ctx.plane.lease_for(&id, None);
     }
     // Id order, so two calls in a row read the same way and a diff of two
     // `dvv limbs` runs is a diff of what changed.
@@ -709,11 +731,6 @@ fn limb_attach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
             attachment_id: attachment_id.clone(),
             client: peer.client.clone().unwrap_or_default(),
             revoked: false,
-            held: false,
-            phase: "free".to_string(),
-            holder_kind: None,
-            holder_label: None,
-            human_took_over: false,
             inflight: Vec::new(),
             // Nothing has been observed yet, and the attach reply carries no
             // pixels however `perceive` was set: the mirror is allocated here
@@ -910,12 +927,22 @@ fn send_now(ctx: &Ctx, session_id: &str, command: ClientCommand) -> Result<(), R
 
 fn limb_detach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
     let session_id = session_id_of(params)?;
-    ctx.plane.detach(&session_id);
+    ctx.plane.detach(
+        &session_id,
+        peer.attachment_id.as_deref().unwrap_or_default(),
+    );
     // The person gets their session back. `AGENT_BRIEF` D2: the interactive
     // product does not regress because an agent looked once, so the preset the
     // mirror moved is moved back, and the refresh after it repaints whatever
     // the new encoding set changes.
-    let restored = match ctx.plane.mirrors.detach(&session_id) {
+    //
+    // Only when this was the last attachment: another agent still on the
+    // session is still reading the mirror.
+    let last = !ctx.plane.attached_ids().contains_key(&session_id);
+    let restored = match last
+        .then(|| ctx.plane.mirrors.detach(&session_id))
+        .flatten()
+    {
         Some(preset) => {
             let name = wire::quality_name(preset);
             let ok = send_now(ctx, &session_id, ClientCommand::SetQuality(preset)).is_ok()
@@ -962,6 +989,9 @@ fn limb_status(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
     // false to true when the refresh lands and an agent needs somewhere cheap
     // to watch for that. This is rung 0 and costs nothing.
     out["perception"] = perception_json(&ctx.plane.mirrors.status(&session_id), None, &[]);
+    out["lease"] = ctx
+        .plane
+        .lease_for(&session_id, peer.attachment_id.as_deref());
     // The content fence's answer, BEFORE the agent is refused by it.
     //
     // `04 §4.4`'s rule is that a code is what an agent branches on and the
@@ -1339,6 +1369,24 @@ fn limb_command(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcErro
         admit_typing(ctx, &session_id, &attachment_id)?;
     }
 
+    // The wheel. Asked on every pointer event and key press, because this is
+    // the one place every agent's input on every connection passes through,
+    // and it is the shared lease's answer rather than the agent's own. Allowed
+    // input is also what keeps the lease: nothing else moves its idle clock.
+    //
+    // Tagged LEASE_NOT_HELD and not LEASE_REVOKED, deliberately: a client
+    // built before the lease moved here stops its relay for good on
+    // LEASE_REVOKED, and this refusal lasts only until the holder goes quiet.
+    if needs_wheel(&command) {
+        let answer = ctx.plane.lease_input(&session_id, &attachment_id);
+        if answer.refusal.is_some() {
+            return Err(RpcError::tagged(
+                "LEASE_NOT_HELD",
+                control::not_yours(&session_id, &answer.status, &ctx.plane.lease_policy()),
+            ));
+        }
+    }
+
     match handle.try_send(command) {
         Ok(()) => Ok(json!({ "delivered": true })),
         Err(vnc_core::TrySendFailed::Full) => Err(RpcError::tagged(
@@ -1386,6 +1434,20 @@ fn limb_command(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcErro
 /// and that is a `Key` press and is fenced above.
 fn types_into_focus(command: &ClientCommand) -> bool {
     matches!(command, ClientCommand::Key { down: true, .. })
+}
+
+/// Does this command need the wheel?
+///
+/// A pointer event or a key press. A key going up and a release of
+/// everything always pass, for the reason [`types_into_focus`] gives: a
+/// refused release strands a modifier on somebody's desktop. The rest
+/// (clipboard, quality, refresh) changes nothing a person at the machine is
+/// in the middle of.
+fn needs_wheel(command: &ClientCommand) -> bool {
+    matches!(
+        command,
+        ClientCommand::Pointer { .. } | ClientCommand::Key { down: true, .. }
+    )
 }
 
 /// May this attachment put text on this session's wire right now?
@@ -2401,37 +2463,16 @@ fn unexpected(answer: &FileAnswer, method: &str) -> RpcError {
     )
 }
 
-/// The agent telling the shell where its lease is, so a pane can say so.
+/// The agent telling the shell what it has in flight, so a pane can say so.
 ///
-/// The lease itself lives in `agent-lease`, inside the agent's own process,
-/// because that is where the plane runs. The shell cannot read it and must not
-/// keep a second opinion about it, so the holder REPORTS and the shell renders
-/// what it was told. `08 §5.5` makes that a safety property rather than a
-/// nicety: a pane whose limb is held by an agent says so, visibly, always.
+/// Only `inflight` is read. The fields an older client sends beside it
+/// (`held`, `holderKind`, `humanTookOver`) are ignored: who holds the wheel is
+/// the shared lease's answer (`crate::agent::control`), and an agent process
+/// reporting itself holding from the moment it attached is how a pane came to
+/// show agents driving machines nobody was touching.
 fn control_report(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
     let session_id = session_id_of(params)?;
     let attachment_id = peer.attachment_id.clone().unwrap_or_default();
-    let held = params
-        .get("held")
-        .and_then(Value::as_bool)
-        .unwrap_or_default();
-    let phase = params
-        .get("phase")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let holder_kind = params
-        .get("holderKind")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let holder_label = params
-        .get("holderLabel")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let human_took_over = params
-        .get("humanTookOver")
-        .and_then(Value::as_bool)
-        .unwrap_or_default();
     let inflight: Vec<String> = params
         .get("inflight")
         .and_then(Value::as_array)
@@ -2442,18 +2483,7 @@ fn control_report(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcEr
                 .collect()
         })
         .unwrap_or_default();
-
-    let event = ctx.plane.report(
-        &session_id,
-        &attachment_id,
-        held,
-        phase,
-        holder_kind,
-        holder_label,
-        human_took_over,
-        inflight,
-    );
-    match event {
+    match ctx.plane.report(&session_id, &attachment_id, inflight) {
         Some(event) => {
             (ctx.emit)(event);
             Ok(json!({ "recorded": true }))
@@ -2464,6 +2494,58 @@ fn control_report(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcEr
         // let go of.
         None => Ok(json!({ "recorded": false })),
     }
+}
+
+/// The session id, for an attachment that is on it.
+fn attached_session(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<(String, String), RpcError> {
+    let session_id = session_id_of(params)?;
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    ctx.plane.check_allowed(&session_id, &attachment_id)?;
+    Ok((session_id, attachment_id))
+}
+
+/// Ask for the wheel. Answers at once with where the caller stands: holding
+/// it, waiting at a position, or refused with the number of milliseconds
+/// until asking can succeed. Asking again while waiting keeps the place.
+fn control_acquire(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    require(peer, Capability::Control)?;
+    let (session_id, attachment_id) = attached_session(ctx, peer, params)?;
+    let label = params.get("label").and_then(Value::as_str);
+    let answer = ctx.plane.lease_ask(&session_id, &attachment_id, label);
+    let policy = ctx.plane.lease_policy();
+    let mut out = control::status_json(&answer.status, Some(&attachment_id), &policy);
+    out["granted"] = json!(answer.status.dispatching(&attachment_id.as_str().into()));
+    if let Some(refusal) = &answer.refusal {
+        out["refused"] = json!(refusal.to_string());
+    }
+    if !answer.status.held_by(&attachment_id.as_str().into()) {
+        out["why"] = json!(control::not_yours(&session_id, &answer.status, &policy));
+    }
+    Ok(out)
+}
+
+/// Let go of the wheel and leave the queue. Safe to call when holding nothing.
+fn control_release(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    let answer = ctx.plane.lease_release(&session_id, &attachment_id);
+    Ok(control::status_json(
+        &answer.status,
+        Some(&attachment_id),
+        &ctx.plane.lease_policy(),
+    ))
+}
+
+/// Where the wheel is: who holds it, kind, since, idle for, and who waits.
+fn control_status(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    let session_id = session_id_of(params)?;
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    let answer = ctx.plane.lease_status(&session_id);
+    Ok(control::status_json(
+        &answer.status,
+        Some(&attachment_id),
+        &ctx.plane.lease_policy(),
+    ))
 }
 
 fn session_id_of(params: &Value) -> Result<String, RpcError> {
@@ -2876,20 +2958,85 @@ mod tests {
         )
         .await;
 
-        fixture.ctx.plane.revoke("s1");
+        let _ = fixture.ctx.plane.person_takes("s1");
         let refused = dispatch(
             &fixture.ctx,
             &mut peer,
             "limb.command",
-            &json!({ "sessionId": "s1", "command": { "kind": "release-all-keys" } }),
+            &json!({ "sessionId": "s1", "command": { "kind": "pointer", "x": 7, "y": 9, "buttonMask": 1 } }),
         )
         .await
         .expect_err("a person is driving");
-        assert_eq!(refused.tag, Some("LEASE_REVOKED"));
+        // Not LEASE_REVOKED: it lasts only while the person keeps using it,
+        // and the sentence says when agents get it back.
+        assert_eq!(refused.tag, Some("LEASE_NOT_HELD"));
+        assert!(refused.message.contains("a person"), "{}", refused.message);
+        assert!(refused.message.contains("acquire"), "{}", refused.message);
         assert!(
             fixture.commands.try_recv().is_err(),
-            "nothing may reach the wire after a revocation"
+            "nothing may reach the wire while a person has the wheel"
         );
+        // A release still goes through: a refused release strands a key.
+        call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.command",
+            json!({ "sessionId": "s1", "command": { "kind": "release-all-keys" } }),
+        )
+        .await;
+    }
+
+    /// Two agent connections on one session share its lease: the second is
+    /// refused while the first is using it, can queue, and is told who holds
+    /// it. Before, the second attach replaced the first one's row.
+    #[tokio::test]
+    async fn two_agents_on_one_session_contend_for_the_wheel() {
+        let fixture = fixture();
+        let attach = json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 });
+        let mut first = greeted(&fixture.ctx).await;
+        call(&fixture.ctx, &mut first, "limb.attach", attach.clone()).await;
+        let mut second = greeted(&fixture.ctx).await;
+        call(&fixture.ctx, &mut second, "limb.attach", attach).await;
+
+        let pointer = json!({ "sessionId": "s1", "command": { "kind": "pointer", "x": 1, "y": 1, "buttonMask": 0 } });
+        call(&fixture.ctx, &mut first, "limb.command", pointer.clone()).await;
+        let refused = dispatch(&fixture.ctx, &mut second, "limb.command", &pointer)
+            .await
+            .expect_err("the first agent holds it");
+        assert_eq!(refused.tag, Some("LEASE_NOT_HELD"));
+
+        let asked = call(
+            &fixture.ctx,
+            &mut second,
+            "control.acquire",
+            json!({ "sessionId": "s1", "label": "codex" }),
+        )
+        .await;
+        assert_eq!(asked["granted"], false);
+        assert_eq!(asked["yourPosition"], 0);
+        assert_eq!(asked["holder"]["kind"], "agent");
+        assert!(asked["why"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("holds s1"));
+
+        // The first one lets go, and the second is next.
+        call(
+            &fixture.ctx,
+            &mut first,
+            "control.release",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        let status = call(
+            &fixture.ctx,
+            &mut second,
+            "control.status",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(status["youHold"], true, "{status}");
+        call(&fixture.ctx, &mut second, "limb.command", pointer).await;
     }
 
     #[tokio::test]
@@ -3844,30 +3991,54 @@ mod tests {
             json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 }),
         )
         .await;
-        call(
+        // What a client says about holding is not believed: the report
+        // carries `held: true` and the event says nobody holds it, because
+        // nobody has asked the board.
+        let report = json!({
+            "sessionId": "s1",
+            "held": true,
+            "phase": "held",
+            "holderKind": "agent",
+            "holderLabel": "agent att_local",
+            "humanTookOver": false,
+            "inflight": ["type"],
+        });
+        call(&fixture.ctx, &mut peer, "control.report", report.clone()).await;
+        {
+            let events = fixture.events.lock();
+            let lease = events
+                .iter()
+                .rfind(|event| event["type"] == "lease")
+                .expect("a lease event");
+            assert_eq!(lease["held"], false);
+        }
+        let granted = call(
             &fixture.ctx,
             &mut peer,
-            "control.report",
-            json!({
-                "sessionId": "s1",
-                "held": true,
-                "phase": "held",
-                "holderKind": "agent",
-                "holderLabel": "agent att_local",
-                "humanTookOver": false,
-                "inflight": ["type"],
-            }),
+            "control.acquire",
+            json!({ "sessionId": "s1", "label": "claude-code" }),
         )
         .await;
+        assert_eq!(granted["granted"], true, "{granted}");
+        call(&fixture.ctx, &mut peer, "control.report", report).await;
         let events = fixture.events.lock();
         let lease = events
             .iter()
-            .find(|event| event["type"] == "lease")
+            .rfind(|event| event["type"] == "lease")
             .expect("a lease event");
         assert_eq!(lease["sessionId"], "s1");
         assert_eq!(lease["held"], true);
         assert_eq!(lease["holderKind"], "agent");
+        assert_eq!(
+            lease["holderLabel"],
+            format!(
+                "claude-code ({})",
+                lease["attachmentId"].as_str().unwrap_or_default()
+            )
+        );
         assert_eq!(lease["inflight"][0], "type");
+        assert_eq!(lease["lease"]["holder"]["kind"], "agent");
+        assert!(lease["lease"]["holder"]["idleForMs"].is_u64());
     }
 
     // ---------------------------------------------------------------------
@@ -4850,7 +5021,7 @@ mod tests {
         )
         .await;
 
-        fixture.ctx.plane.revoke("s1");
+        fixture.ctx.plane.revoke_consent("s1");
         let refused = dispatch(
             &fixture.ctx,
             &mut peer,

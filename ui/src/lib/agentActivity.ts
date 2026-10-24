@@ -355,12 +355,19 @@ export function fromWire(raw: unknown): unknown | null {
   const held = r.held === true;
   // `held: false` is the whole of "nobody is driving". The badge goes away on
   // that alone, so a revoked lease needs no second signal to be believed.
+  // The shell's shared lease rides along as `lease`, and its holder says when
+  // the grant started, as unix milliseconds.
+  const lease = r.lease && typeof r.lease === "object" ? (r.lease as Record<string, unknown>) : null;
+  const leaseHolder =
+    lease && lease.holder && typeof lease.holder === "object"
+      ? (lease.holder as Record<string, unknown>)
+      : null;
   const holder = held
     ? {
         kind: str(r.holderKind) || "unknown",
         name: str(r.holderLabel) || str(r.client) || "",
         capability: null,
-        since: 0,
+        since: leaseHolder ? num(leaseHolder.since) : 0,
       }
     : null;
 

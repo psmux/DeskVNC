@@ -151,10 +151,10 @@ pub fn code_for_refusal(reason: RefusalReason) -> &'static str {
 pub fn hint_for(code: &str) -> &'static str {
     match code {
         "LEASE_NOT_HELD" => {
-            "Call dvv_control with action acquire before acting. If it refuses, call it with action yield_status: if humanTookOver is true, a PERSON is driving and the right move is to stop and report back, not to retry."
+            "Somebody else is using this machine right now; the message says who and when it frees up. Call dvv_control with action acquire, which waits in the queue for it (waitMs, 25 s by default), then carry on. A person gets 20 s after their last input and an agent 8 s after you start waiting. Tell the user only if a person is still using it after a couple of tries."
         }
         "LEASE_REVOKED" => {
-            "Call dvv_control with action yield_status before anything else. If humanTookOver is true, STOP: do not reacquire and do not act on this machine. Tell the user."
+            "The person at the remote computer has taken back the helper's tools in DeskVNC Support. Nothing is sent until they allow them again: tell the user, and try again after they have."
         }
         "NOT_READY" | "NOT_CONNECTED" => {
             "The limb is not connected yet, or its picture has not filled yet. Call dvv_wait with until connected and try again; if it stays like this, call dvv_reconnect. Do not ask the user to reopen the machine."

@@ -54,6 +54,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   keeps one connection per identity, so it dropped the older tab ("another
   endpoint connected with the same endpoint id"). Sessions now share one
   endpoint.
+* Agents no longer hold machines they have stopped using, and no longer stop
+  for good because somebody clicked a pane. DeskVNCViewer now keeps one
+  control lease per session that every agent and the person at the window
+  share, and frees it on a timer: an agent that sends no click or key for 30
+  seconds lets go, and one somebody else is waiting for lets go after 8. A
+  person takes the machine by typing or clicking in it, not by selecting or
+  looking at the pane, and agents may have it back 20 seconds after their last
+  input. An agent connection that ends lets go of everything it held.
+* Two agents on one machine now take turns. The second one used to replace
+  the first one's attachment; now it waits in a queue and gets the machine
+  when the first lets go or stops acting.
 
 ### Changed
 
@@ -62,6 +73,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   not read at all. Pointer to screen lag while a third of the screen kept
   changing went from 36 ms to 19 ms in our test. The Linux build no longer
   needs libxcb.
+* Agent tools wait for the machine instead of failing. A click, key or typed
+  text takes the control lease itself and waits up to 25 seconds for it, and
+  `dvv_control` acquire waits by default (`waitMs`, `dvv control acquire
+  --wait-ms`). A refusal says who has the machine, whether that is a person or
+  which agent, how long since their last input, and when it frees up.
+  `dvv_limbs`, `dvv_status` and `dvv_control` status show the holder, how long
+  it has held the machine, how long it has been idle, and who is waiting.
+
 * Boundary sessions are much more responsive across long distances. Measured
   from India to two iMacs in the US, a pointer move now shows up in about
   one network round trip (270 to 380 ms) instead of 0.6 to 1.3 s, and a busy

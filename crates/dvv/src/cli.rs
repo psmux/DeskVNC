@@ -311,6 +311,13 @@ fn tool_call(args: &Args) -> Result<(String, Value), ToolError> {
                     .expect("an object")
                     .insert("reason".to_string(), json!(reason));
             }
+            // How long acquire waits in the queue, 25 s when not given.
+            if let Some(wait) = args.flag("wait-ms").and_then(|w| w.parse::<u64>().ok()) {
+                object
+                    .as_object_mut()
+                    .expect("an object")
+                    .insert("waitMs".to_string(), json!(wait));
+            }
             ("dvv_control".to_string(), with_limb(object, 1))
         }
         "click" => {
@@ -1196,7 +1203,7 @@ dvv, the agent plane for DeskVNCViewer.
   dvv status <limbId>              the full observation object
   dvv signals <limbId>             which negotiated signals this session has
 
-  dvv control acquire|release|status|yield|yield_status <limbId> [--reason ...]
+  dvv control acquire|release|status|yield|yield_status <limbId> [--reason ...] [--wait-ms 25000]
   dvv stop <limbId>                revoke the wheel: keys released, no grace
 
   dvv click <limbId> <x> <y> [--action move|click|double|right|middle|drag|scroll]

@@ -23,7 +23,7 @@
 
 use crate::error::{codes, ToolError};
 use crate::plane::{
-    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, OpenRequest, SessionSource,
+    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, LeaseAsk, OpenRequest, SessionSource,
     TypingRefused,
 };
 use agent_plane::{Attach, Damage, Frame, FrameSource, LimbRegistry, PerceptionUnavailable};
@@ -424,6 +424,11 @@ pub struct FakeSource {
     /// Which limbs' far side accepts only so many more key presses, and the
     /// refusal it answers the rest with. See [`FakeSource::refuse_presses_after`].
     press_refusals: Mutex<BTreeMap<String, PressRefusal>>,
+    /// The lease the application would keep for each session, shared with
+    /// every other fake process handed the same board, and this process's
+    /// attachment id on it. `None` is an application that keeps none, which
+    /// is what every fake was before the lease moved into the viewer.
+    shared: Option<(Arc<Mutex<agent_lease::Board>>, String)>,
 }
 
 /// A far side that takes `allowed` more key presses and refuses the rest.
@@ -446,7 +451,18 @@ impl FakeSource {
             disk: Mutex::new(BTreeMap::new()),
             typing_refusals: Mutex::new(BTreeMap::new()),
             press_refusals: Mutex::new(BTreeMap::new()),
+            shared: None,
         }
+    }
+
+    /// This source as one agent process among several, all arbitrated by
+    /// one board the way DeskVNCViewer arbitrates every connection. Two
+    /// sources handed the same board and different attachment ids are two
+    /// agents contending for the same machines.
+    #[must_use]
+    pub fn sharing(mut self, board: Arc<Mutex<agent_lease::Board>>, attachment_id: &str) -> Self {
+        self.shared = Some((board, attachment_id.to_string()));
+        self
     }
 
     /// One desktop and one terminal, which is the smallest set that exercises
@@ -810,7 +826,74 @@ impl SessionSource for FakeSource {
         }
     }
 
+    fn shared_lease(
+        &self,
+        limb: &LimbId,
+        ask: LeaseAsk<'_>,
+    ) -> Option<Result<serde_json::Value, ToolError>> {
+        use agent_lease::{HolderKind, Party, PartyId};
+        let (board, me) = self.shared.as_ref()?;
+        let now = crate::clock::lease_now();
+        let id = PartyId::from(me.as_str());
+        let mut board = lock(board);
+        let answer = match ask {
+            LeaseAsk::Acquire { label } => board.ask(
+                limb.as_str(),
+                Party::new(me.as_str(), HolderKind::Agent, label),
+                now,
+            ),
+            LeaseAsk::Release => board.release(limb.as_str(), &id, now),
+            LeaseAsk::Status => board.status(limb.as_str(), now),
+        };
+        Some(Ok(shared_json(&answer.status, &id)))
+    }
+
     fn describe(&self) -> &'static str {
         "a fake limb with a recorder on the other end of its command channel, for proving the round trip with no server anywhere"
     }
+}
+
+/// A board's answer in the shape DeskVNCViewer's `control.*` verbs answer
+/// with, the fields the plane reads.
+fn shared_json(status: &agent_lease::LeaseStatus, me: &agent_lease::PartyId) -> serde_json::Value {
+    let kind = |k: agent_lease::HolderKind| {
+        if k.is_person() {
+            "human"
+        } else {
+            "agent"
+        }
+    };
+    let holder = status.holder.as_ref().map(|h| {
+        serde_json::json!({
+            "kind": kind(h.kind),
+            "label": h.label,
+            "you": &h.id == me,
+            "heldForMs": h.held_for_ms,
+            "idleForMs": h.idle_for_ms,
+        })
+    });
+    let waiter = |w: &agent_lease::WaiterStatus| {
+        serde_json::json!({
+            "kind": kind(w.kind),
+            "label": w.label,
+            "you": &w.id == me,
+            "waitingMs": w.waiting_ms,
+        })
+    };
+    let why = match &status.holder {
+        Some(h) if &h.id != me => format!("{} holds it", h.label),
+        _ => "it is not this attachment's yet".to_string(),
+    };
+    serde_json::json!({
+        "granted": status.dispatching(me),
+        "youHold": status.held_by(me),
+        "dispatching": status.dispatching(me),
+        "personHolds": status.person_holds(),
+        "holder": holder,
+        "queue": status.queue.iter().map(waiter).collect::<Vec<_>>(),
+        "preempting": status.preempting.as_ref().map(waiter),
+        "yourPosition": status.position_of(me),
+        "changesInMs": status.changes_in_ms,
+        "why": why,
+    })
 }

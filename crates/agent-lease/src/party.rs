@@ -262,8 +262,13 @@ impl Holder {
 pub struct Waiter {
     /// Who is waiting.
     pub party: Party,
-    /// When they asked. The queue time to live is measured from here.
+    /// When they last asked. The queue time to live is measured from here,
+    /// and asking again moves it forward.
     pub queued_at: LeaseInstant,
+    /// When they first asked, which asking again does not move. Only for
+    /// saying how long somebody has been waiting.
+    #[serde(default)]
+    pub first_asked_at: LeaseInstant,
     /// What they said they wanted it for, passed through untouched for the
     /// pane and the trace.
     pub reason: Option<String>,

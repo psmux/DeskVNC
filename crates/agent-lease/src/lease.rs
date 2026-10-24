@@ -16,6 +16,12 @@
 //! never heard about. So a caller ticks first and acts second, and a caller
 //! that forgets sees a stale holder keep the wheel, which is a visible bug
 //! rather than a silent stuck modifier.
+//!
+//! Ticking only on the way into a call is not enough either, and that one was
+//! not visible: a lease whose holder went quiet stays held for as long as
+//! nobody calls, so the pane and every other process go on seeing it held.
+//! The plane that owns a lease ticks it on a timer as well (the viewer's
+//! [`crate::Board`] is ticked twice a second).
 
 use crate::clock::LeaseInstant;
 use crate::error::LeaseError;
@@ -97,6 +103,13 @@ pub struct Lease {
     queue: Vec<Waiter>,
     next_lease_id: u64,
     force_release_until: Option<LeaseInstant>,
+    /// When the current holder was first kept from somebody who is waiting.
+    /// Set when the queue goes from empty to not, and when a holder is
+    /// granted with people already in line; cleared when the queue empties.
+    /// [`LeasePolicy::contended_idle_ms`] counts from the later of this and
+    /// the holder's last input, so a holder that had been quiet for a minute
+    /// still gets the whole grace once somebody starts waiting.
+    contended_since: Option<LeaseInstant>,
 }
 
 impl Lease {
@@ -126,6 +139,7 @@ impl Lease {
             // happened rather than the first one.
             next_lease_id: 1,
             force_release_until: None,
+            contended_since: None,
         })
     }
 
@@ -144,6 +158,7 @@ impl Lease {
             queue: Vec::new(),
             next_lease_id: 1,
             force_release_until: None,
+            contended_since: None,
         }
     }
 
@@ -316,8 +331,11 @@ impl Lease {
 
         // Asking twice while queued returns the position instead of taking a
         // second slot. An agent that retries on a timer would otherwise fill
-        // the queue with itself and lock everyone else out at the cap.
+        // the queue with itself and lock everyone else out at the cap. It
+        // does keep the place alive: a waiter is expected to keep asking, and
+        // one that stops is dropped after `queue_ttl_ms`.
         if let Some(position) = self.queue_position(&request.party.id) {
+            self.queue[position].queued_at = now;
             return Ok(self.draft(
                 now,
                 from,
@@ -404,6 +422,9 @@ impl Lease {
         match self.queue_position(party) {
             Some(position) => {
                 self.queue.remove(position);
+                if self.queue.is_empty() {
+                    self.contended_since = None;
+                }
                 self.draft(
                     now,
                     from,
@@ -441,6 +462,7 @@ impl Lease {
         let departed = self.take_holder(now, DepartureCause::ForceReleased);
         let mut dropped: Vec<Waiter> = self.pending.take().map(|p| p.waiter).into_iter().collect();
         dropped.append(&mut self.queue);
+        self.contended_since = None;
         self.phase = LeasePhase::Unheld;
         self.force_release_until = Some(now.plus(self.policy.force_release_backoff_ms));
 
@@ -615,6 +637,9 @@ impl Lease {
                 true
             }
         });
+        if self.queue.is_empty() {
+            self.contended_since = None;
+        }
 
         let mut transition = self.tick_holder(now, from);
         transition.expired_waiters = expired;
@@ -691,6 +716,7 @@ impl Lease {
             waiter: Waiter {
                 party: request.party,
                 queued_at: now,
+                first_asked_at: now,
                 reason: request.reason,
             },
             deadline,
@@ -739,9 +765,16 @@ impl Lease {
             Waiter {
                 party: request.party,
                 queued_at: now,
+                first_asked_at: now,
                 reason: request.reason,
             },
         );
+        // The holder's grace starts when the first waiter arrives, not at its
+        // last input: a holder that had been thinking for a minute still gets
+        // the whole of `contended_idle_ms` to act before it is handed on.
+        if self.contended_since.is_none() {
+            self.contended_since = Some(now);
+        }
         Ok(self.draft(
             now,
             from,
@@ -788,10 +821,16 @@ impl Lease {
                 let Some(holder) = self.holder.as_ref() else {
                     return unchanged(self);
                 };
+                let idle_for = now.since(holder.last_intent_at);
                 let cause = if now.since(holder.last_activity()) >= self.policy.lease_ttl_ms {
                     DepartureCause::Expired
-                } else if now.since(holder.last_intent_at) >= self.policy.idle_revoke_ms {
+                } else if idle_for >= self.idle_limit(holder) {
                     DepartureCause::IdleRevoked
+                } else if self
+                    .contended_deadline(holder)
+                    .is_some_and(|deadline| now.reached(deadline))
+                {
+                    DepartureCause::YieldedToWaiter
                 } else {
                     return unchanged(self);
                 };
@@ -802,6 +841,80 @@ impl Lease {
             // cannot happen, because a party asking while unheld is granted
             // rather than queued.
             LeasePhase::Unheld | LeasePhase::HandingOver => unchanged(self),
+        }
+    }
+
+    /// How long this holder may go without input before it loses the lease
+    /// with nobody waiting: the person number for a person, the agent number
+    /// for anything else.
+    fn idle_limit(&self, holder: &Holder) -> crate::clock::Millis {
+        if holder.party.kind.is_person() {
+            self.policy.person_idle_ms
+        } else {
+            self.policy.idle_revoke_ms
+        }
+    }
+
+    /// When an agent holder that somebody is waiting behind is handed on if
+    /// it sends nothing more, or `None` when nobody is waiting or the holder
+    /// is a person (a person waiting behind an agent preempts it instead,
+    /// and a person holding is released by its own idle time).
+    fn contended_deadline(&self, holder: &Holder) -> Option<LeaseInstant> {
+        if holder.party.kind.is_person() || self.queue.is_empty() {
+            return None;
+        }
+        let since = self.contended_since?;
+        let quiet_from = holder.last_intent_at.max(since);
+        let deadline = quiet_from.plus(self.policy.contended_idle_ms);
+        // The floor under a grant holds here too: a holder granted a moment
+        // ago is not handed on before it could have sent anything.
+        Some(deadline.max(holder.granted_at.plus(self.policy.min_hold_ms)))
+    }
+
+    /// Who holds it, since when, how idle, who is waiting, and when it
+    /// changes hands by itself. Reads the state as it is: call
+    /// [`Lease::tick`] first for an answer about `now`.
+    #[must_use]
+    pub fn status(&self, now: LeaseInstant) -> crate::transition::LeaseStatus {
+        use crate::transition::{HolderStatus, LeaseStatus, WaiterStatus};
+        let waiter = |w: &Waiter| WaiterStatus {
+            id: w.party.id.clone(),
+            kind: w.party.kind,
+            label: w.party.label.clone(),
+            waiting_ms: now.since(w.first_asked_at),
+        };
+        let changes_at = match (self.phase, self.holder.as_ref()) {
+            (LeasePhase::PreemptPending, _) => self.pending.as_ref().map(|p| p.deadline),
+            (LeasePhase::HeldGrace, Some(h)) => h.grace_until,
+            (LeasePhase::Held, Some(h)) => {
+                let expiry = h.last_activity().plus(self.policy.lease_ttl_ms);
+                let idle = h.last_intent_at.plus(self.idle_limit(h));
+                let mut at = expiry.min(idle);
+                if let Some(contended) = self.contended_deadline(h) {
+                    at = at.min(contended);
+                }
+                Some(at)
+            }
+            _ => None,
+        };
+        LeaseStatus {
+            limb: self.limb.clone(),
+            phase: self.phase,
+            holder: self.holder.as_ref().map(|h| HolderStatus {
+                id: h.party.id.clone(),
+                kind: h.party.kind,
+                label: h.party.label.clone(),
+                since: h.granted_at,
+                held_for_ms: now.since(h.granted_at),
+                idle_for_ms: now.since(h.last_intent_at),
+            }),
+            queue: self.queue.iter().map(waiter).collect(),
+            preempting: self.pending.as_ref().map(|p| waiter(&p.waiter)),
+            changes_in_ms: changes_at.map(|at| at.since(now)),
+            refused_for_ms: self
+                .force_release_until
+                .filter(|until| !now.reached(*until))
+                .map(|until| until.since(now)),
         }
     }
 
@@ -862,6 +975,8 @@ impl Lease {
             connected: true,
             grace_until: None,
         });
+        // A new holder gets its own grace against whoever is still in line.
+        self.contended_since = (!self.queue.is_empty()).then_some(now);
         // Not `Held`. R11 owes the limb a release before this party's first
         // intent, and the phase is how that obligation is enforced rather
         // than merely reported.

@@ -19,10 +19,11 @@ steps below.
 ## With the dvv_ tools (OpenCode, Claude Code, Codex and other MCP clients)
 
 `dvv_hosts`, `dvv_limbs`, `dvv_open` with `perceive: true` (a machine's saved
-name works as `hostId`), `dvv_wait` with `until: "connected"`, `dvv_control`
-with `action: "acquire"`, `dvv_screen` (use `scale: 0.5`), `dvv_click`,
-`dvv_type`, `dvv_key`, `dvv_reconnect`, `dvv_close`. Carry the `generation`
-from the screen you read into a click.
+name works as `hostId`), `dvv_wait` with `until: "connected"`, `dvv_screen`
+(use `scale: 0.5`), `dvv_click`, `dvv_type`, `dvv_key`, `dvv_reconnect`,
+`dvv_close`. `dvv_control` with `action: "acquire"` waits for control,
+`"status"` says who has it, and `"release"` lets it go when you are done.
+Carry the `generation` from the screen you read into a click.
 
 ## With the shell, only when you have no `dvv_` tools (Pi)
 
@@ -36,7 +37,9 @@ dvv hosts                            # saved machines and their hostId
 dvv limbs                            # what is open, and its limbId
 dvv open <name or hostId> --perceive # open a machine (keeps it open between commands)
 dvv wait <limbId> --until connected
-dvv control acquire <limbId>         # take control before any click or key
+dvv control acquire <limbId>         # take control (waits up to 25 s; --wait-ms to change)
+dvv control status <limbId>          # who has it, person or agent, idle how long, who waits
+dvv control release <limbId>         # let go when you are done, so nobody waits for you
 dvv screen <limbId> --scale 0.5 --out ./dvv-screen.png  # then open that image file to see the screen
 dvv click <limbId> <x> <y>           # x and y are REMOTE pixels, see below
 dvv click <limbId> <x> <y> --action double
@@ -59,11 +62,30 @@ convert before clicking.
 
 1. `limbs` first. If the machine is listed under available, use that limbId
    directly; it is attached for you. Otherwise `open` it from `hosts`.
-2. Take control, then look before every action. Typing and keys are refused
-   until you have read the screen since it last changed a lot: when that
-   happens, read the screen again and retry.
+2. Look before every action. Clicks, keys and typing take control
+   themselves and wait for it if someone else has the machine, so you do not
+   need to acquire first. Typing and keys are refused until you have read the
+   screen since it last changed a lot: when that happens, read the screen
+   again and retry.
 3. Act, then wait for the screen to settle, then look again.
-4. Close when done.
+4. When you are finished with a machine, release control (or close it), so
+   another agent does not have to wait for you.
+
+## Sharing a machine
+
+Several agents and the person at DeskVNCViewer can be on one machine. They
+take turns, and the rules are short:
+
+* You keep control while you keep acting. After 30 seconds with no click or
+  key from you it is released, and your next action asks for it again.
+* If another agent is waiting, you have 8 seconds after it starts waiting to
+  act again; then it gets the machine. Finish what you are doing and release.
+* A person always comes first. The moment they type or click in the
+  machine's window it is theirs. Selecting or looking at the window does not
+  count. Agents get it back 20 seconds after the person's last input.
+* `control status` (or `dvv_control` with `action: "status"`) names who has
+  it, whether a person or which agent, how long since their last input, and
+  who is waiting.
 
 ## When something goes wrong, fix it yourself
 
@@ -76,8 +98,15 @@ convert before clicking.
   text goes into whatever already had focus. If it came partway through a
   long `type`, the message says how many characters went and quotes the part
   that did not: read the screen and type only that part.
-* `LEASE_REVOKED`: check `control yield_status`. If a person took over, stop
-  and tell the user. That is the only case where you stop.
+* `LEASE_NOT_HELD`: someone else is using the machine, and the message says
+  who and when it frees up. Run `control acquire` again; it waits for the
+  machine and then you carry on. If a person is using it, do something else
+  for a while and ask again after they go quiet. Tell the user only if a
+  person is still using it after two or three tries, and then say what you
+  were about to do.
+* `LEASE_REVOKED`: the person at the remote computer took back the helper's
+  tools in DeskVNC Support. Tell the user; nothing works there until they
+  allow them again.
 
 ## Rules
 

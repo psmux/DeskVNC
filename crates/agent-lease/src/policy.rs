@@ -27,37 +27,59 @@ pub enum LeaseMode {
     Shared,
 }
 
-/// The timers and bounds from `08 §5.4`.
+/// The timers and bounds from `08 §5.4`, with the idle numbers cut down after
+/// leases were seen holding machines nobody was using.
 ///
 /// All of them are millisecond counts on the caller's clock, and none of them
 /// are consulted except by [`crate::Lease::tick`], which is the only place in
-/// this crate where time is applied to state.
+/// this crate where time is applied to state. That makes a timer only as good
+/// as whoever calls `tick`: the plane that owns a lease has to call it on a
+/// timer of its own, not only when a party happens to ask for something,
+/// or a forgotten lease looks held to everyone watching until the next call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LeasePolicy {
     /// Hard expiry. Reset by any dispatched intent and by an explicit renew.
     /// A holder that stops acting loses the lease in a minute.
     pub lease_ttl_ms: Millis,
-    /// Idle revocation, measured from the last dispatched intent alone and
-    /// never reset by a renew.
+    /// How long an agent holder may go without real input (a click, a key, a
+    /// drag) before the lease is taken back. Never reset by a renew, a status
+    /// call or a screen read: none of those is somebody using the machine.
     ///
-    /// Two timers where one looks like it would do, and the reason is worth
-    /// stating because the numbers otherwise look redundant (the shorter one
-    /// would always fire first). They measure different things.
-    /// [`LeasePolicy::lease_ttl_ms`] catches a party that went quiet
-    /// altogether. This one catches a party that is still talking, still
-    /// renewing, and has not actually done anything for two minutes, which is
-    /// exactly the shape of a crashed agent whose socket is still open. It is
-    /// the longer number precisely because a renew is evidence of life and a
-    /// silent holder is not.
+    /// Thirty seconds, down from two minutes. An agent thinks for a few
+    /// seconds to a few tens of seconds between actions, and the plane asks
+    /// for the lease again on the agent's next action, so losing it to this
+    /// timer costs the agent one round trip. Holding it costs everyone else
+    /// the machine, which is what made two minutes wrong.
     pub idle_revoke_ms: Millis,
+    /// How long a person holder may go without input before agents may have
+    /// the machine again.
+    ///
+    /// A person who touches a machine an agent is driving takes it at once.
+    /// That used to be for good, and a single click on a pane was enough to
+    /// stop an agent for the rest of the day. Twenty seconds is long enough
+    /// that somebody reading what is on the screen between two clicks keeps
+    /// it, and short enough that somebody who walked away hands it back.
+    #[serde(default = "default_person_idle_ms")]
+    pub person_idle_ms: Millis,
+    /// How long an agent holder may go without input while somebody is
+    /// waiting, measured from the later of its last input and the moment the
+    /// first waiter arrived. Then the head of the queue takes over.
+    ///
+    /// Eight seconds: longer than one ordinary action and the screen read
+    /// after it, so an agent that is working is never yanked, and short
+    /// enough that a waiting agent is not stalled by one that forgot to let
+    /// go. The minimum hold still applies on top of it.
+    #[serde(default = "default_contended_idle_ms")]
+    pub contended_idle_ms: Millis,
     /// How long a holder whose transport dropped keeps the lease, so a
     /// reconnect does not lose the wheel.
     pub disconnect_grace_ms: Millis,
-    /// How long a waiter stays in the queue before it is dropped.
+    /// How long a waiter stays in the queue after it last asked.
     ///
-    /// A grant of control a minute after it was asked for arrives when the
-    /// agent has moved on, which is the same reasoning as refusing rather
-    /// than queueing a clipboard write (`08 §2.9`).
+    /// A waiter is expected to keep asking while it waits (the plane polls
+    /// twice a second), and asking again refreshes this. So the number only
+    /// decides how long a waiter that died keeps a place in line, which is
+    /// why it is short.
     pub queue_ttl_ms: Millis,
     /// The hard cap on the queue. Reached, the next acquire is refused rather
     /// than the queue growing.
@@ -81,20 +103,32 @@ pub struct LeasePolicy {
     ///
     /// Without it an agent in a loop re acquires before the person who hit
     /// the panic chord can click anything, and the panic button does nothing.
+    /// The same as the person idle time, so a stop and a takeover both give
+    /// the person the same quiet window.
     pub force_release_backoff_ms: Millis,
+}
+
+fn default_person_idle_ms() -> Millis {
+    LeasePolicy::default().person_idle_ms
+}
+
+fn default_contended_idle_ms() -> Millis {
+    LeasePolicy::default().contended_idle_ms
 }
 
 impl Default for LeasePolicy {
     fn default() -> Self {
         LeasePolicy {
             lease_ttl_ms: 60_000,
-            idle_revoke_ms: 120_000,
+            idle_revoke_ms: 30_000,
+            person_idle_ms: 20_000,
+            contended_idle_ms: 8_000,
             disconnect_grace_ms: 10_000,
-            queue_ttl_ms: 60_000,
+            queue_ttl_ms: 15_000,
             max_queue_depth: 8,
             min_hold_ms: 3_000,
             agent_preempt_grace_ms: 2_000,
-            force_release_backoff_ms: 30_000,
+            force_release_backoff_ms: 20_000,
         }
     }
 }

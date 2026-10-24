@@ -73,6 +73,7 @@
 // worth more than the exception.
 #![forbid(unsafe_code)]
 
+pub mod board;
 pub mod clock;
 pub mod error;
 pub mod lease;
@@ -80,12 +81,13 @@ pub mod party;
 pub mod policy;
 pub mod transition;
 
+pub use board::{Answer, Board};
 pub use clock::{LeaseInstant, Millis};
 pub use error::LeaseError;
 pub use lease::{AcquireRequest, Lease};
 pub use party::{Holder, HolderKind, LeaseId, LimbId, Party, PartyId, Waiter};
 pub use policy::{LeaseConfig, LeaseMode, LeasePolicy};
 pub use transition::{
-    Departure, DepartureCause, Fencing, LeaseOutcome, LeasePhase, LeaseTransition, LeaseView,
-    ReleaseObligation,
+    Departure, DepartureCause, Fencing, HolderStatus, LeaseOutcome, LeasePhase, LeaseStatus,
+    LeaseTransition, LeaseView, ReleaseObligation, WaiterStatus,
 };

@@ -42,6 +42,7 @@
 //! the product name (`DeskVNCViewer`). The published path wins, and the
 //! directory is created here if it is missing.
 
+pub mod control;
 pub mod mirror;
 pub mod server;
 pub mod wire;
@@ -517,24 +518,25 @@ fn run_bounded(
     })
 }
 
-/// What one attachment holds on one session.
+/// What one attachment has on one session.
 ///
-/// The lease itself is NOT here and cannot be: it lives in `agent-lease`,
-/// inside the agent's own process, because that is where the plane runs. What
-/// is here is what the holder reported, so a pane can render it. Keeping a
-/// second opinion about who holds a lease is how the two drift.
+/// Who holds the wheel is NOT here. It used to be, as whatever the agent's own
+/// process last reported, and that is how a pane came to show an agent
+/// driving a machine for as long as the agent stayed attached, and how two
+/// agents on one machine never contended at all: each kept a lease nobody
+/// else could see. The lease now lives in this process, one per session, in
+/// [`AgentPlane`]'s board (see [`control`]), and every attachment on every
+/// connection asks the same one.
 #[derive(Debug, Clone)]
 pub struct Attachment {
     pub attachment_id: String,
     pub client: String,
-    /// True once a person has taken the wheel. Every further command from this
-    /// attachment is refused with `LEASE_REVOKED` (`04 §5.4`).
+    /// True while the person at a Boundary computer has taken back the
+    /// helper's tools. Every command from this attachment is refused with
+    /// `LEASE_REVOKED` until they allow them again. A person in DeskVNCViewer
+    /// taking the wheel is NOT this: that is the lease, and it hands the
+    /// machine back once they stop using it.
     pub revoked: bool,
-    pub held: bool,
-    pub phase: String,
-    pub holder_kind: Option<String>,
-    pub holder_label: Option<String>,
-    pub human_took_over: bool,
     pub inflight: Vec<String>,
     /// The content generation this attachment last read PIXELS at, and `None`
     /// while it has read none.
@@ -553,22 +555,6 @@ pub struct Attachment {
     /// cleared the fence with a damage call would be typing into a screen it had
     /// still not seen.
     pub observed_content: Option<ContentGeneration>,
-}
-
-impl Attachment {
-    /// Is an agent DRIVING this machine right now?
-    ///
-    /// Held, plus a holder that is an agent, and nothing else. Attached and
-    /// idle is not driving: a bar that counted every attachment would tell
-    /// somebody four machines are being operated when nobody is touching any
-    /// of them, which is worse than showing no number at all.
-    ///
-    /// `revoked` needs no arm here because [`AgentPlane::revoke`] clears
-    /// `held` in the same breath, and a revoked attachment cannot report
-    /// itself back in (`04 §5.4`, D5).
-    fn driving(&self) -> bool {
-        self.held && self.holder_kind.as_deref() == Some("agent")
-    }
 }
 
 /// The three numbers a status bar reads: how many agents are connected, how
@@ -633,8 +619,15 @@ struct Running {
 pub struct AgentPlane {
     running: Mutex<Option<Running>>,
     /// Keyed by the shell's session id, which is the id every window, every
-    /// event and every registry entry already uses.
-    attachments: Mutex<HashMap<String, Attachment>>,
+    /// event and every registry entry already uses, and then by attachment
+    /// id. Several agents may attach to one session; they share its lease.
+    attachments: Mutex<HashMap<String, HashMap<String, Attachment>>>,
+    /// One lease per session, shared by every agent connection and by the
+    /// person at the window. See [`control`].
+    board: Mutex<agent_lease::Board>,
+    /// Which attachment ids each connection minted, so a connection that
+    /// ends lets go of everything it held.
+    bound: Mutex<HashMap<u64, Vec<String>>>,
     next_attachment: AtomicU64,
     /// One row per connected client, keyed by a per connection number, valued
     /// by the name it gave in `hello`.
@@ -687,8 +680,29 @@ pub struct ConnectionGuard {
     id: u64,
 }
 
+impl ConnectionGuard {
+    /// Tie an attachment id to this connection, so the connection ending lets
+    /// go of whatever that attachment held.
+    pub fn bind(&self, attachment_id: &str) {
+        self.plane
+            .bound
+            .lock()
+            .entry(self.id)
+            .or_default()
+            .push(attachment_id.to_string());
+    }
+}
+
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
+        // An agent that hung up, crashed or was killed holds nothing. Before
+        // this, its attachment stayed in the table and the pane went on
+        // showing it driving the machine, with nothing anybody could press to
+        // make it stop.
+        let bound = self.plane.bound.lock().remove(&self.id).unwrap_or_default();
+        for attachment_id in bound {
+            self.plane.forget_attachment(&attachment_id);
+        }
         if self.plane.connections.lock().remove(&self.id).is_none() {
             // [`stop`] already cleared the table and announced. Saying it
             // twice would be a second wakeup for no change.
@@ -699,6 +713,16 @@ impl Drop for ConnectionGuard {
 }
 
 impl AgentPlane {
+    /// A plane whose leases run on other timers, for a test that cannot wait
+    /// out the real ones.
+    #[cfg(test)]
+    pub fn with_lease_policy(policy: agent_lease::LeasePolicy) -> Self {
+        AgentPlane {
+            board: Mutex::new(agent_lease::Board::new(policy)),
+            ..AgentPlane::default()
+        }
+    }
+
     /// A fresh attachment id, unique within this process run.
     ///
     /// `att_` prefixed so a log line tells one from a session id at a glance,
@@ -720,15 +744,32 @@ impl AgentPlane {
         self.running.lock().as_ref().map(|r| r.path.clone())
     }
 
+    /// Record an attachment. Another attachment on the same session stays:
+    /// two agents on one machine is a contention for its lease, not a
+    /// replacement of one by the other.
     pub fn attach(&self, session_id: &str, attachment: Attachment) {
         self.attachments
             .lock()
-            .insert(session_id.to_string(), attachment);
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(attachment.attachment_id.clone(), attachment);
         self.announce();
     }
 
-    pub fn detach(&self, session_id: &str) {
-        let removed = self.attachments.lock().remove(session_id);
+    /// Drop one attachment from a session, letting go of its lease and its
+    /// place in the queue.
+    pub fn detach(&self, session_id: &str, attachment_id: &str) {
+        let removed = {
+            let mut attachments = self.attachments.lock();
+            let removed = attachments
+                .get_mut(session_id)
+                .and_then(|rows| rows.remove(attachment_id));
+            if attachments.get(session_id).is_some_and(HashMap::is_empty) {
+                attachments.remove(session_id);
+            }
+            removed
+        };
+        self.lease_release(session_id, attachment_id);
         if removed.is_some() {
             self.announce();
         }
@@ -783,12 +824,11 @@ impl AgentPlane {
     pub fn counts(&self, sessions: &HashMap<String, SessionEntry>) -> AgentCounts {
         AgentCounts {
             agents_connected: self.connections.lock().len(),
-            sessions_driven: self
-                .attachments
-                .lock()
-                .values()
-                .filter(|attachment| attachment.driving())
-                .count(),
+            // Held by an agent, on the shared board, and nothing else.
+            // Attached and idle is not driving: a bar that counted every
+            // attachment would tell somebody four machines are being operated
+            // when nobody is touching any of them.
+            sessions_driven: self.sessions_driven(),
             sessions_live: sessions.values().filter(|entry| entry.is_live()).count(),
         }
     }
@@ -830,13 +870,40 @@ impl AgentPlane {
         emit(counts.event());
     }
 
-    /// Which sessions an agent holds, as session id to attachment id.
+    /// Which sessions have an agent attached, as session id to one attachment
+    /// id: the one holding the lease when an attached agent holds it, and
+    /// otherwise the lowest id, so the answer does not move between calls.
     pub fn attached_ids(&self) -> HashMap<String, String> {
+        let attachments = self.attachments.lock();
+        let mut out = HashMap::new();
+        for (session, rows) in attachments.iter() {
+            let holder = self.lease_holder_id(session);
+            let pick = holder
+                .filter(|id| rows.contains_key(id))
+                .or_else(|| rows.keys().min().cloned());
+            if let Some(id) = pick {
+                out.insert(session.clone(), id);
+            }
+        }
+        out
+    }
+
+    /// Is this attachment attached to this session?
+    #[cfg(test)]
+    pub fn is_attached(&self, session_id: &str, attachment_id: &str) -> bool {
         self.attachments
             .lock()
-            .iter()
-            .map(|(session, held)| (session.clone(), held.attachment_id.clone()))
-            .collect()
+            .get(session_id)
+            .is_some_and(|rows| rows.contains_key(attachment_id))
+    }
+
+    /// The client name an attachment gave, for the label a pane shows.
+    fn client_of(&self, session_id: &str, attachment_id: &str) -> Option<String> {
+        self.attachments
+            .lock()
+            .get(session_id)
+            .and_then(|rows| rows.get(attachment_id))
+            .map(|row| row.client.clone())
     }
 
     /// Record that this attachment has just looked at this session's screen.
@@ -846,19 +913,18 @@ impl AgentPlane {
     /// reason is the incident: an attachment whose "I have looked" flag can be
     /// set by a call that returned no pixels has a fence that clears itself.
     ///
-    /// A no op when the asking connection is not the one holding the session.
-    /// It cannot have been served pixels either, so there is nothing to record,
-    /// and recording it against somebody else's attachment would clear THEIR
-    /// fence with an observation they never saw.
+    /// A no op when the asking connection has not attached the session. It
+    /// cannot have been served pixels either, and recording it against
+    /// somebody else's attachment would clear THEIR fence with an observation
+    /// they never saw.
     pub fn note_observed(&self, session_id: &str, attachment_id: &str, at: ContentGeneration) {
         let mut attachments = self.attachments.lock();
-        let Some(held) = attachments.get_mut(session_id) else {
-            return;
-        };
-        if held.attachment_id != attachment_id {
-            return;
+        if let Some(held) = attachments
+            .get_mut(session_id)
+            .and_then(|rows| rows.get_mut(attachment_id))
+        {
+            held.observed_content = Some(at);
         }
-        held.observed_content = Some(at);
     }
 
     /// The content generation this attachment last read pixels at.
@@ -870,46 +936,40 @@ impl AgentPlane {
         session_id: &str,
         attachment_id: &str,
     ) -> Option<ContentGeneration> {
-        let attachments = self.attachments.lock();
-        let held = attachments.get(session_id)?;
-        if held.attachment_id != attachment_id {
-            return None;
-        }
-        held.observed_content
+        self.attachments
+            .lock()
+            .get(session_id)?
+            .get(attachment_id)?
+            .observed_content
     }
 
-    /// May this attachment still act on this session?
+    /// May this attachment still act on this session at all?
+    ///
+    /// Whether it may drive the pointer and keyboard right now is the lease's
+    /// question and is asked separately, in `limb.command`. This only checks
+    /// that the attachment exists and that the person at a Boundary computer
+    /// has not taken the helper's tools back.
     ///
     /// # Errors
     ///
-    /// An [`RpcError`] tagged `NOT_ATTACHED` or `LEASE_REVOKED`. The tag is
-    /// what an agent branches on, because `04 §4.4`'s stand down trailer says
-    /// the model has to get one decision right and only one: a person took the
-    /// machine, so stop, rather than retry.
+    /// An [`RpcError`] tagged `NOT_ATTACHED` or `LEASE_REVOKED`.
     pub fn check_allowed(&self, session_id: &str, attachment_id: &str) -> Result<(), RpcError> {
         let attachments = self.attachments.lock();
-        let held = attachments.get(session_id).ok_or_else(|| RpcError {
-            code: -32000,
-            message: format!(
-                "this attachment is not attached to {session_id}; call limb.attach first"
-            ),
-            tag: Some("NOT_ATTACHED"),
-        })?;
-        if held.attachment_id != attachment_id {
-            return Err(RpcError {
+        let held = attachments
+            .get(session_id)
+            .and_then(|rows| rows.get(attachment_id))
+            .ok_or_else(|| RpcError {
                 code: -32000,
                 message: format!(
-                    "{session_id} is attached by {} and not by this connection",
-                    held.attachment_id
+                    "this attachment is not attached to {session_id}; call limb.attach first"
                 ),
                 tag: Some("NOT_ATTACHED"),
-            });
-        }
+            })?;
         if held.revoked {
             return Err(RpcError {
                 code: -32000,
                 message: format!(
-                    "a person took the wheel on {session_id} in DeskVNCViewer. Nothing was sent. Do not act on this machine and do not try to acquire control: report back to the user instead"
+                    "the person at the computer behind {session_id} has taken back the helper's tools, so nothing was sent. This lasts until they allow the tools again in DeskVNC Support; tell the user, and try again after they have"
                 ),
                 tag: Some("LEASE_REVOKED"),
             });
@@ -917,77 +977,69 @@ impl AgentPlane {
         Ok(())
     }
 
-    /// A person took the wheel (`04 §5.4`, D5).
+    /// The person at a Boundary computer took the helper's tools back.
     ///
-    /// A revocation, not a request. The attachment is refused from this
-    /// instant, before any grace window, because BrowserGlass's own demo
-    /// measures two seconds for a polite handover and two seconds of a button
-    /// labelled stop doing nothing is the failure.
-    ///
-    /// The session itself is untouched: a revoked agent that had a build
-    /// running should not take the build with it.
-    pub fn revoke(&self, session_id: &str) -> Option<Value> {
-        let event = {
+    /// Every attachment on the session is refused from this instant, and any
+    /// agent holding its lease lets go. Unlike a person in DeskVNCViewer
+    /// taking the wheel, this lasts until they allow the tools again, because
+    /// it is their consent and not their attention.
+    pub fn revoke_consent(&self, session_id: &str) -> Option<Value> {
+        let ids: Vec<String> = {
             let mut attachments = self.attachments.lock();
-            let held = attachments.get_mut(session_id)?;
-            held.revoked = true;
-            held.held = false;
-            held.phase = "revoked".to_string();
-            held.holder_kind = Some("human".to_string());
-            held.human_took_over = true;
-            held.inflight.clear();
-            lease_event(session_id, held)
+            let rows = attachments.get_mut(session_id)?;
+            for row in rows.values_mut() {
+                row.revoked = true;
+                row.inflight.clear();
+            }
+            rows.keys().cloned().collect()
         };
-        // The machine just stopped being agent driven, and the agent is still
-        // connected. Announced after the lock is back, never while it is held.
+        for id in ids {
+            self.lease_release(session_id, &id);
+        }
         self.announce();
-        Some(event)
+        Some(self.lease_event(session_id))
     }
 
-    /// Record what a holder reported, and produce the event a pane renders.
+    /// The person at a Boundary computer allowed the helper's tools again.
+    pub fn restore_consent(&self, session_id: &str) -> Option<Value> {
+        {
+            let mut attachments = self.attachments.lock();
+            let rows = attachments.get_mut(session_id)?;
+            for row in rows.values_mut() {
+                row.revoked = false;
+            }
+        }
+        Some(self.lease_event(session_id))
+    }
+
+    /// Record what an attachment says it is doing, and produce the event a
+    /// pane renders.
     ///
-    /// `None` when nothing is attached to that session, which is a client
-    /// talking about a limb it let go of rather than an error worth failing a
-    /// control call over.
-    #[allow(clippy::too_many_arguments)] // one report, one row, not an API
+    /// Only the in flight intent names are taken from the report. Whether the
+    /// attachment holds the wheel is the board's answer and not the agent's
+    /// opinion: an agent process used to report itself holding from the
+    /// moment it attached, and the pane believed it for as long as it stayed.
+    ///
+    /// `None` when that attachment is not on that session.
     pub fn report(
         &self,
         session_id: &str,
         attachment_id: &str,
-        held: bool,
-        phase: String,
-        holder_kind: Option<String>,
-        holder_label: Option<String>,
-        human_took_over: bool,
         inflight: Vec<String>,
     ) -> Option<Value> {
-        let event = {
+        {
             let mut attachments = self.attachments.lock();
-            let entry = attachments.get_mut(session_id)?;
-            if entry.attachment_id != attachment_id {
-                return None;
-            }
-            // A revoked attachment cannot report itself back into the wheel.
-            // The person's decision outranks the agent's opinion of it, which
-            // is D5 one layer down from `agent-lease`.
+            let entry = attachments.get_mut(session_id)?.get_mut(attachment_id)?;
             if entry.revoked {
                 return None;
             }
-            entry.held = held;
-            entry.phase = phase;
-            entry.holder_kind = holder_kind;
-            entry.holder_label = holder_label;
-            entry.human_took_over = human_took_over;
             entry.inflight = inflight;
-            lease_event(session_id, entry)
-        };
-        // A lease moving is the commonest reason the driven count changes, and
-        // it is the one the bar exists to show.
-        self.announce();
-        Some(event)
+        }
+        Some(self.lease_event(session_id))
     }
 
-    /// Every attachment, for a pane that has just mounted.
+    /// One lease event per session that has an attachment or a lease, for a
+    /// pane that has just mounted.
     ///
     /// Tauri events are fire and forget: anything emitted before a window's
     /// `listen()` registration completes is dropped. The same reasoning that
@@ -995,19 +1047,24 @@ impl AgentPlane {
     /// there, and for the same failure: a pane that subscribed a moment late
     /// would show no agent badge for a machine an agent is driving.
     pub fn snapshot(&self) -> Vec<Value> {
-        self.attachments
-            .lock()
+        let mut sessions: Vec<String> = self.attachments.lock().keys().cloned().collect();
+        sessions.extend(self.board.lock().keys().map(str::to_string));
+        sessions.sort();
+        sessions.dedup();
+        sessions
             .iter()
-            .map(|(session, held)| lease_event(session, held))
+            .map(|session| self.lease_event(session))
             .collect()
     }
 
-    /// Forget a session that has ended, so its attachment does not outlive it.
+    /// Forget a session that has ended, so its attachments and its lease do
+    /// not outlive it.
     ///
     /// The mirror goes with it, and no quality preset is restored: the session
     /// is over, so there is no wire to put one on and nobody left to see it.
     pub fn forget(&self, session_id: &str) {
         self.attachments.lock().remove(session_id);
+        self.board.lock().remove(session_id);
         self.mirrors.forget(session_id);
         // The live total just fell, and the driven one may have with it. This
         // is the only session lifecycle edge the plane is told about: a
@@ -1060,22 +1117,6 @@ pub fn now() -> limb_core::observation::Timestamp {
             .map(|d| d.as_millis() as u64)
             .unwrap_or_default(),
     )
-}
-
-fn lease_event(session_id: &str, attachment: &Attachment) -> Value {
-    json!({
-        "type": "lease",
-        "sessionId": session_id,
-        "attachmentId": attachment.attachment_id,
-        "client": attachment.client,
-        "held": attachment.held,
-        "phase": attachment.phase,
-        "holderKind": attachment.holder_kind,
-        "holderLabel": attachment.holder_label,
-        "humanTookOver": attachment.human_took_over,
-        "revoked": attachment.revoked,
-        "inflight": attachment.inflight,
-    })
 }
 
 /// Bind the socket and start accepting, or say why not.
@@ -1150,6 +1191,7 @@ pub fn start(plane: &Arc<AgentPlane>, ctx: Arc<Ctx>, path: PathBuf) -> std::io::
 
     tracing::info!(socket = %path.display(), "agent plane listening (dvvp.v1)");
     tauri::async_runtime::spawn(reaper(plane.clone(), cancel.clone()));
+    tauri::async_runtime::spawn(control::tick_leases(plane.clone(), cancel.clone()));
     tauri::async_runtime::spawn(accept_loop(listener, ctx, cancel));
     Ok(())
 }
@@ -1237,6 +1279,7 @@ pub fn start(plane: &Arc<AgentPlane>, ctx: Arc<Ctx>, path: PathBuf) -> std::io::
 
     tracing::info!(pipe = %name, "agent plane listening (dvvp.v1)");
     tauri::async_runtime::spawn(reaper(plane.clone(), cancel.clone()));
+    tauri::async_runtime::spawn(control::tick_leases(plane.clone(), cancel.clone()));
     tauri::async_runtime::spawn(accept_pipe(first, name, ctx, cancel));
     Ok(())
 }
@@ -1312,6 +1355,14 @@ pub fn stop(plane: &Arc<AgentPlane>) {
         }
     }
     plane.attachments.lock().clear();
+    plane.bound.lock().clear();
+    {
+        // Every agent is gone, so none of them holds anything. The person's
+        // own leases go too: they only ever kept agents out.
+        let mut board = plane.board.lock();
+        let policy = *board.policy();
+        *board = agent_lease::Board::new(policy);
+    }
     // The socket is gone, so every client on it is gone with it. Cleared here
     // rather than left to each [`ConnectionGuard`] because those drop when the
     // cancelled connection tasks next wake, and a bar that said "1 agent" for
@@ -1521,19 +1572,21 @@ mod tests {
         (Arc::new(Mutex::new(sessions)), alive)
     }
 
-    /// What one agent's attachment looks like, driving or merely watching.
-    fn attachment_of(attachment_id: &str, driving: bool) -> Attachment {
-        Attachment {
-            attachment_id: attachment_id.into(),
-            client: "dvv".into(),
-            revoked: false,
-            held: driving,
-            phase: if driving { "held" } else { "free" }.into(),
-            holder_kind: driving.then(|| "agent".to_string()),
-            holder_label: None,
-            human_took_over: false,
-            inflight: Vec::new(),
-            observed_content: None,
+    /// Attach one agent, driving (it has sent input, so it holds the wheel)
+    /// or merely watching.
+    fn attach_as(plane: &AgentPlane, session: &str, attachment_id: &str, driving: bool) {
+        plane.attach(
+            session,
+            Attachment {
+                attachment_id: attachment_id.into(),
+                client: "dvv".into(),
+                revoked: false,
+                inflight: Vec::new(),
+                observed_content: None,
+            },
+        );
+        if driving {
+            assert!(plane.lease_input(session, attachment_id).refusal.is_none());
         }
     }
 
@@ -1571,7 +1624,7 @@ mod tests {
         let plane = Arc::new(AgentPlane::default());
         let _connected = plane.client_connected("dvv");
         for session in ["s1", "s2", "s3", "s4"] {
-            plane.attach(session, attachment_of("att_0", true));
+            attach_as(&plane, session, "att_0", true);
         }
 
         let counts = counts_of(&plane, &sessions);
@@ -1598,8 +1651,8 @@ mod tests {
         let (sessions, _alive) = registry(&["s1", "s2"]);
         let plane = Arc::new(AgentPlane::default());
         let _connected = plane.client_connected("dvv");
-        plane.attach("s1", attachment_of("att_0", false));
-        plane.attach("s2", attachment_of("att_0", false));
+        attach_as(&plane, "s1", "att_0", false);
+        attach_as(&plane, "s2", "att_0", false);
 
         let counts = counts_of(&plane, &sessions);
         assert_eq!(counts.agents_connected, 1);
@@ -1608,16 +1661,7 @@ mod tests {
 
         // A holder that is not an agent is not an agent driving either, even
         // while it holds.
-        plane.report(
-            "s1",
-            "att_0",
-            true,
-            "held".into(),
-            Some("human".into()),
-            None,
-            false,
-            Vec::new(),
-        );
+        let _ = plane.person_input("s1");
         assert_eq!(counts_of(&plane, &sessions).sessions_driven, 0);
     }
 
@@ -1632,10 +1676,10 @@ mod tests {
         let (sessions, _alive) = registry(&["s1"]);
         let plane = Arc::new(AgentPlane::default());
         let _connected = plane.client_connected("dvv");
-        plane.attach("s1", attachment_of("att_0", true));
+        attach_as(&plane, "s1", "att_0", true);
         assert_eq!(counts_of(&plane, &sessions).sessions_driven, 1);
 
-        plane.revoke("s1").expect("something was attached");
+        let _ = plane.person_takes("s1");
         let counts = counts_of(&plane, &sessions);
         assert_eq!(counts.sessions_driven, 0, "a person has the machine now");
         assert_eq!(counts.agents_connected, 1, "the agent is still connected");
@@ -1662,7 +1706,7 @@ mod tests {
         // still a fact about what is attached and connected right now, not
         // about the setting.
         let _connected = plane.client_connected("dvv");
-        plane.attach("s1", attachment_of("att_0", true));
+        attach_as(&plane, "s1", "att_0", true);
         assert_eq!(
             counts_of(&plane, &sessions),
             AgentCounts {
@@ -1700,7 +1744,7 @@ mod tests {
         start(&plane, ctx, dir.path().join("agent.sock")).expect("the plane starts");
 
         let _connected = plane.client_connected("dvv");
-        plane.attach("s1", attachment_of("att_0", true));
+        attach_as(&plane, "s1", "att_0", true);
         assert_eq!(
             counts_of(&plane, &sessions),
             AgentCounts {
@@ -1735,21 +1779,14 @@ mod tests {
 
         let mut expected = Vec::new();
         let connected = plane.client_connected("dvv");
+        connected.bind("att_0");
         expected.push(json!({ "type": "counts", "agentsConnected": 1, "sessionsDriven": 0, "sessionsLive": 2 }));
         // Attaching moves no number: the agent was already connected and it is
         // not driving anything yet. The pane hears about the attach on the
         // `attached` payload, and nothing repaints here.
-        plane.attach("s1", attachment_of("att_0", false));
-        plane.report(
-            "s1",
-            "att_0",
-            true,
-            "held".into(),
-            Some("agent".into()),
-            None,
-            false,
-            vec!["type".into()],
-        );
+        attach_as(&plane, "s1", "att_0", false);
+        // Its first input takes the free wheel, and that is driving.
+        let _ = plane.lease_input("s1", "att_0");
         expected.push(json!({ "type": "counts", "agentsConnected": 1, "sessionsDriven": 1, "sessionsLive": 2 }));
         // A session ends. `forget` is called after the registry entry is gone,
         // which is the order `commands::session` ends a session in.
@@ -1757,23 +1794,26 @@ mod tests {
         alive.pop();
         plane.forget("s2");
         expected.push(json!({ "type": "counts", "agentsConnected": 1, "sessionsDriven": 1, "sessionsLive": 1 }));
-        // The connection ends. The driven count follows the ATTACHMENT table
-        // and so does the pane's own agent badge, so a hung up agent that
-        // never let go of its limb is still counted as driving it, exactly as
-        // the pane still shows the badge and the take the wheel control for
-        // it. Two surfaces reading one table is the point: a bar that was
-        // cleverer than the badge would contradict it on screen.
+        // The connection ends. A hung up agent holds nothing: it used to go
+        // on counting as driving, and the pane went on showing its badge,
+        // for as long as the viewer ran. The lease goes first and the client
+        // after it.
         drop(connected);
-        expected.push(json!({ "type": "counts", "agentsConnected": 0, "sessionsDriven": 1, "sessionsLive": 1 }));
+        expected.push(json!({ "type": "counts", "agentsConnected": 1, "sessionsDriven": 0, "sessionsLive": 1 }));
+        expected.push(json!({ "type": "counts", "agentsConnected": 0, "sessionsDriven": 0, "sessionsLive": 1 }));
 
-        assert_eq!(
-            *events.lock(),
-            expected,
-            "one event per change, and no others"
-        );
+        // The same sink carries the lease events the board emits; only the
+        // counts are this test's business.
+        let counts: Vec<Value> = events
+            .lock()
+            .iter()
+            .filter(|event| event["type"] == "counts")
+            .cloned()
+            .collect();
+        assert_eq!(counts, expected, "one event per change, and no others");
         // …and the last one is what `agent_status` would answer right now.
         assert_eq!(
-            events.lock().last().cloned().unwrap(),
+            counts.last().cloned().unwrap(),
             counts_of(&plane, &sessions).event()
         );
     }
@@ -1821,47 +1861,30 @@ mod tests {
         assert!(first.starts_with("att_"));
     }
 
-    /// A revoked attachment cannot report itself back into the wheel: the
-    /// person's decision outranks the agent's opinion of it (D5).
+    /// An agent cannot report itself into the wheel, and the person at a
+    /// Boundary computer taking the tools back holds until they give them
+    /// back, which a person in DeskVNCViewer taking the wheel does not.
     #[test]
-    fn a_revoked_attachment_cannot_report_itself_back_in() {
+    fn an_agent_cannot_report_itself_holding_and_consent_is_its_own_thing() {
         let plane = AgentPlane::default();
-        plane.attach(
-            "s1",
-            Attachment {
-                attachment_id: "att_0".into(),
-                client: "test".into(),
-                revoked: false,
-                held: true,
-                phase: "held".into(),
-                holder_kind: Some("agent".into()),
-                holder_label: None,
-                human_took_over: false,
-                inflight: vec!["type".into()],
-                observed_content: None,
-            },
-        );
-        let revoked = plane.revoke("s1").expect("something was attached");
-        assert_eq!(revoked["humanTookOver"], true);
-        assert_eq!(revoked["held"], false);
+        attach_as(&plane, "s1", "att_0", false);
+        // What an older client sends on attach, held and all.
+        let event = plane
+            .report("s1", "att_0", vec!["type".into()])
+            .expect("attached");
+        assert_eq!(event["held"], false, "a report moves nothing on the board");
 
+        let revoked = plane.revoke_consent("s1").expect("something was attached");
+        assert_eq!(revoked["revoked"], true);
+        assert!(plane.check_allowed("s1", "att_0").is_err());
         assert!(
-            plane
-                .report(
-                    "s1",
-                    "att_0",
-                    true,
-                    "held".into(),
-                    Some("agent".into()),
-                    None,
-                    false,
-                    Vec::new(),
-                )
-                .is_none(),
+            plane.report("s1", "att_0", Vec::new()).is_none(),
             "a revocation is not a request"
         );
-        let snapshot = plane.snapshot();
-        assert_eq!(snapshot[0]["revoked"], true);
+        assert_eq!(plane.snapshot()[0]["revoked"], true);
+
+        plane.restore_consent("s1").expect("still attached");
+        assert!(plane.check_allowed("s1", "att_0").is_ok());
     }
 
     /// The whole of "off", and the whole of "on", over a real socket.

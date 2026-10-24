@@ -127,6 +127,16 @@ fn serve(listener: UnixListener, heard: Arc<std::sync::Mutex<Heard>>) {
                 "limb.attach" => attached(),
                 "limb.status" => attached(),
                 "control.report" => json!({ "recorded": true }),
+                // The shared lease, which this stand in always grants: the
+                // test is about exec, and the arbitration has its own tests.
+                "control.acquire" | "control.status" | "control.release" => json!({
+                    "granted": method != "control.release",
+                    "youHold": method != "control.release",
+                    "dispatching": method != "control.release",
+                    "personHolds": false,
+                    "holder": null,
+                    "queue": [],
+                }),
                 // The release a lease change owes the limb (`00 R11`): a zero
                 // mask pointer and every key up, put on the wire by `acquire`
                 // before the wheel changes hands.
@@ -282,7 +292,7 @@ async fn an_exec_crosses_the_socket_and_the_answer_comes_back() {
     // `exec` needs the control lease (`02 §2.4`'s L column), the same as a
     // click does, and nothing about this path is a way around that.
     let control = plane
-        .acquire(&limb, None, false)
+        .acquire(&limb, None, None)
         .await
         .expect("nobody else holds this limb");
     assert!(control.held, "the wheel is this attachment's");
