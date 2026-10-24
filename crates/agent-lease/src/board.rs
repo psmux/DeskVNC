@@ -107,6 +107,15 @@ impl Board {
         })
     }
 
+    /// Where a session's lease is as of the last tick, without applying
+    /// elapsed time and without creating a lease for a session that has
+    /// none. For a reader that holds other locks and must not change
+    /// anything; it can lag a timer by one tick.
+    #[must_use]
+    pub fn peek(&self, key: &str, now: LeaseInstant) -> Option<LeaseStatus> {
+        self.leases.get(key).map(|lease| lease.status(now))
+    }
+
     /// Where a session's lease is, after applying elapsed time.
     pub fn status(&mut self, key: &str, now: LeaseInstant) -> Answer {
         let lease = self.lease(key);

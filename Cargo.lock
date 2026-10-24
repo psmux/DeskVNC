@@ -2170,6 +2170,7 @@ dependencies = [
 name = "deskvncviewer"
 version = "0.31.1"
 dependencies = [
+ "agent-lease",
  "agent-perception",
  "anyhow",
  "base64 0.22.1",

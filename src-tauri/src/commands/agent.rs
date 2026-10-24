@@ -469,15 +469,17 @@ fn wire_agents_in_background() {
     });
 }
 
-/// A person takes the wheel of a session an agent is driving (D5, `04 §5.4`).
+/// A person takes the wheel of a session an agent is driving (D5, `04 §5.4`),
+/// from the take the wheel or stop control on a pane.
 ///
-/// A revocation and not a request. The agent's next command is refused with
-/// `LEASE_REVOKED` and nothing further of its reaches the wire, and there is
-/// no grace window: two seconds of a button labelled stop doing nothing is the
-/// failure this exists to prevent.
+/// The agent is fenced at once: its next pointer event or key press is
+/// refused and the keys it held are released. It is a person's input on the
+/// shared lease and lasts exactly as long as one, so agents may ask again
+/// once the person has sent nothing for the person idle time. Before, this
+/// was a flag nothing ever cleared, and one press stopped an agent for good.
 ///
-/// The session is untouched. A revoked agent that had a build running should
-/// not take the build with it.
+/// The session is untouched. An agent that had a build running should not
+/// take the build with it.
 #[tauri::command]
 pub fn agent_take_the_wheel(
     app: AppHandle,
@@ -485,16 +487,11 @@ pub fn agent_take_the_wheel(
     session_id: String,
 ) -> Result<(), String> {
     crate::windows::validate_session_id(&session_id)?;
-    match state.agent.revoke(&session_id) {
-        Some(event) => {
-            let _ = app.emit(agent::AGENT_EVENT, event);
-            tracing::info!(session = %session_id, "a person took the wheel from an agent");
-            Ok(())
-        }
-        // Not an error: a person pressing "take the wheel" on a machine no
-        // agent is driving has got what they asked for.
-        None => Ok(()),
-    }
+    let event = state.agent.person_takes(&session_id);
+    // The board emits on change through its own wiring; this is for a
+    // window that pressed the control on a session nothing had changed on.
+    let _ = app.emit(agent::AGENT_EVENT, event);
+    Ok(())
 }
 
 #[cfg(test)]
