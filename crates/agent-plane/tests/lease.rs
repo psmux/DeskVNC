@@ -166,3 +166,57 @@ async fn an_intent_from_a_party_that_does_not_hold_the_wheel_sends_nothing() {
         "refused before anything reached the wire"
     );
 }
+
+/// A holder that stops acting loses the wheel to the timer alone, and the
+/// limb is owed the same release as for any other lease change. Thirty
+/// seconds after its last intent, on the default policy, with no call from
+/// the holder in between.
+#[tokio::test]
+async fn a_forgotten_lease_is_released_by_the_tick_with_no_call_from_its_holder() {
+    let grant = operator("att_agent", "desk.example");
+    let (_registry, limb, mut rx) = connected(
+        PlaneConfig::default(),
+        &grant,
+        "desk.example",
+        TestLimb::desktop(),
+        256,
+    );
+    let t0 = LeaseInstant::from_millis(1_000);
+    let agent = Party::new(grant.id().clone(), HolderKind::Agent, "forgetful");
+    let granted = limb
+        .acquire(AcquireRequest::new(agent), t0)
+        .expect("an unheld lease is granted");
+    limb.honour(&granted, t0).await;
+    limb.dispatch(
+        &grant,
+        fenced(
+            &limb,
+            &grant,
+            IntentKind::Move {
+                to: Point::new(10, 10),
+            },
+        ),
+        t0.plus(1_000),
+    )
+    .await;
+    drain(&mut rx);
+
+    assert!(!limb.tick(t0.plus(30_999)).changed());
+    let freed = limb.tick(t0.plus(31_000));
+    assert_eq!(freed.to, LeasePhase::Unheld);
+    assert!(freed.must_release());
+    limb.honour(&freed, t0.plus(31_000)).await;
+    assert!(!limb.fencing(grant.id()).is_allowed());
+    let released = drain(&mut rx);
+    assert!(
+        matches!(
+            released.first(),
+            Some(ClientCommand::Pointer { button_mask: 0, .. })
+        ),
+        "buttons first: {released:?}"
+    );
+    assert!(matches!(
+        released.last(),
+        Some(ClientCommand::ReleaseAllKeys)
+    ));
+}
