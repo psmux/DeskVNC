@@ -1034,6 +1034,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "openh264",
  "openh264-sys2",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
  "xcap",
 ]
