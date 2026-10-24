@@ -254,7 +254,15 @@ fn only_the_ruled_crates_reach_into_the_rdp_set() {
         // matched nothing, which nobody noticed until the shell actually took
         // the dependency and the rule fired on the one crate it was written to
         // allow.
-        if LEAVES.iter().any(|(l, _)| *l == name) || name == "rdp-core" || name == "deskvncviewer" {
+        //
+        // `remote-bench` is exempt for the same reason as the shell: it
+        // starts a session through `rdp-core`'s public spawn, exactly as the
+        // registry does, to measure the viewer's own RDP path.
+        if LEAVES.iter().any(|(l, _)| *l == name)
+            || name == "rdp-core"
+            || name == "deskvncviewer"
+            || name == "remote-bench"
+        {
             continue;
         }
         let text = std::fs::read_to_string(&manifest).expect("read manifest");

@@ -575,10 +575,12 @@ pub enum EgfxPdu<'a> {
     },
     /// `RDPGFX_WIRE_TO_SURFACE_PDU_2` (MS-RDPEGFX 2.2.2.2), server to client.
     ///
-    /// No `bitmapDataLength`: the payload runs to the end of the PDU as
-    /// `pduLength` declared it. That asymmetry with `_1` is why the
-    /// dispatcher takes `pduLength - 8` before calling a body decoder rather
-    /// than letting one read from the outer reader.
+    /// The payload runs to the end of the PDU as `pduLength` declared it,
+    /// and that is how this crate encodes one. Servers in the field put a
+    /// four byte `bitmapDataLength` in front of it, as `_1` has: xrdp 0.10
+    /// writes one and FreeRDP reads one. The decoder takes either form (see
+    /// `wire_to_surface_2_data`), so `bitmap_data` is always the codec's own
+    /// bitstream.
     WireToSurface2 {
         /// `surfaceId`.
         surface_id: u16,
@@ -994,13 +996,19 @@ fn decode_body<'a>(b: &mut Reader<'a>, header: EgfxHeader) -> PduResult<EgfxPdu<
                 bitmap_data,
             })
         }
-        cmd_id::WIRE_TO_SURFACE_2 => Ok(EgfxPdu::WireToSurface2 {
-            surface_id: b.u16("RDPGFX_WIRE_TO_SURFACE_PDU_2")?,
-            codec_id: b.u16("RDPGFX_WIRE_TO_SURFACE_PDU_2")?,
-            codec_context_id: b.u32("RDPGFX_WIRE_TO_SURFACE_PDU_2")?,
-            pixel_format: b.u8("RDPGFX_WIRE_TO_SURFACE_PDU_2")?,
-            bitmap_data: Payload::new(b.rest()),
-        }),
+        cmd_id::WIRE_TO_SURFACE_2 => {
+            let surface_id = b.u16("RDPGFX_WIRE_TO_SURFACE_PDU_2")?;
+            let codec_id = b.u16("RDPGFX_WIRE_TO_SURFACE_PDU_2")?;
+            let codec_context_id = b.u32("RDPGFX_WIRE_TO_SURFACE_PDU_2")?;
+            let pixel_format = b.u8("RDPGFX_WIRE_TO_SURFACE_PDU_2")?;
+            Ok(EgfxPdu::WireToSurface2 {
+                surface_id,
+                codec_id,
+                codec_context_id,
+                pixel_format,
+                bitmap_data: Payload::new(wire_to_surface_2_data(b.rest())),
+            })
+        }
         cmd_id::DELETE_ENCODING_CONTEXT => Ok(EgfxPdu::DeleteEncodingContext {
             surface_id: b.u16("RDPGFX_DELETE_ENCODING_CONTEXT_PDU")?,
             codec_context_id: b.u32("RDPGFX_DELETE_ENCODING_CONTEXT_PDU")?,
@@ -1450,6 +1458,18 @@ fn encode_count(w: &mut Writer<'_>, count: usize, context: &'static str) -> PduR
     Ok(())
 }
 
+/// The bitstream of a `WIRE_TO_SURFACE_2`, with the `bitmapDataLength`
+/// prefix that xrdp and FreeRDP use taken off when it is there. The prefix is
+/// recognised by its value, the length of what follows it; a progressive
+/// RemoteFX stream starts with a block type of 0xCCCx instead, so the two
+/// cannot be confused.
+fn wire_to_surface_2_data(rest: &[u8]) -> &[u8] {
+    match rest.split_first_chunk::<4>() {
+        Some((len, data)) if u32::from_le_bytes(*len) as usize == data.len() => data,
+        _ => rest,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
@@ -1849,6 +1869,33 @@ mod tests {
             } if bitmap_data.as_slice() == [9, 9, 9, 9]
         ));
         assert_eq!(got[2], EgfxPdu::EndFrame { frame_id: 7 });
+    }
+
+    /// xrdp 0.10 and FreeRDP put a `bitmapDataLength` in front of a Wire To
+    /// Surface 2's bitstream. It is taken off, and a payload without one
+    /// comes through untouched.
+    #[test]
+    fn a_wire_to_surface_2_length_prefix_is_taken_off() {
+        let stream = [0xC0, 0xCC, 0x0C, 0, 0, 0];
+        let mut prefixed = 6u32.to_le_bytes().to_vec();
+        prefixed.extend_from_slice(&stream);
+        for (payload, want) in [(&prefixed[..], &stream[..]), (&stream[..], &stream[..])] {
+            let mut buf = Vec::new();
+            EgfxPdu::WireToSurface2 {
+                surface_id: 1,
+                codec_id: 0x0009,
+                codec_context_id: 3,
+                pixel_format: pixel_format::XRGB_8888,
+                bitmap_data: Payload::new(payload),
+            }
+            .encode_checked(&mut Writer::new(&mut buf))
+            .unwrap();
+            let got: Vec<_> = EgfxPdu::iter(&buf).map(Result::unwrap).collect();
+            assert!(matches!(
+                got[0],
+                EgfxPdu::WireToSurface2 { ref bitmap_data, .. } if bitmap_data.as_slice() == want
+            ));
+        }
     }
 
     #[test]
