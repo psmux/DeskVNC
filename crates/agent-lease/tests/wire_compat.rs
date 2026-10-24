@@ -367,13 +367,29 @@ fn a_lease_id_is_a_bare_number_in_both_directions() {
 // The numbers
 // ---------------------------------------------------------------------------
 
-/// The defaults are quoted in `08 §5.4`, and a deployment that overrides them
-/// writes this object. Pinning the keys and the numbers together means a
-/// change to either is a change somebody had to make on purpose.
+/// A deployment that overrides the defaults writes this object. Pinning the
+/// keys and the numbers together means a change to either is a change
+/// somebody had to make on purpose. The idle numbers are shorter than the
+/// ones `08 §5.4` first stated, because leases held by agents and people who
+/// had stopped using a machine were blocking everyone else; `policy.rs` says
+/// why each one is what it is.
 #[test]
-fn the_policy_defaults_are_the_numbers_eight_states() {
+fn the_policy_defaults_are_pinned() {
     assert_eq!(
         to_json(&LeasePolicy::default()),
-        r#"{"lease_ttl_ms":60000,"idle_revoke_ms":120000,"disconnect_grace_ms":10000,"queue_ttl_ms":60000,"max_queue_depth":8,"min_hold_ms":3000,"agent_preempt_grace_ms":2000,"force_release_backoff_ms":30000}"#
+        r#"{"lease_ttl_ms":60000,"idle_revoke_ms":30000,"person_idle_ms":20000,"contended_idle_ms":8000,"disconnect_grace_ms":10000,"queue_ttl_ms":15000,"max_queue_depth":8,"min_hold_ms":3000,"agent_preempt_grace_ms":2000,"force_release_backoff_ms":20000}"#
     );
+}
+
+/// A policy written before the person and contended timers existed still
+/// reads, and gets today's numbers for the two it does not name.
+#[test]
+fn an_older_policy_object_still_reads() {
+    let old: LeasePolicy = serde_json::from_str(
+        r#"{"lease_ttl_ms":60000,"idle_revoke_ms":120000,"disconnect_grace_ms":10000,"queue_ttl_ms":60000,"max_queue_depth":8,"min_hold_ms":3000,"agent_preempt_grace_ms":2000,"force_release_backoff_ms":30000}"#,
+    )
+    .expect("an old policy reads");
+    assert_eq!(old.idle_revoke_ms, 120_000);
+    assert_eq!(old.person_idle_ms, 20_000);
+    assert_eq!(old.contended_idle_ms, 8_000);
 }
