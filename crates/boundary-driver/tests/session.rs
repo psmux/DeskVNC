@@ -201,7 +201,6 @@ async fn deskvnc_is_handed_only_the_rectangles_that_changed() {
         let (width, height) = (640usize, 400usize);
         let mut screen = vec![0u8; width * height * 4];
         let mut updates = 0;
-        let mut moved = false;
         loop {
             match rx.recv().await.unwrap() {
                 SessionEvent::FramebufferUpdate { rects, .. } => {
@@ -244,7 +243,6 @@ async fn deskvnc_is_handed_only_the_rectangles_that_changed() {
                     );
                     let dark = |x: usize| screen[((320 * width) + x) * 4] < 80;
                     if dark(330) && !dark(25) {
-                        moved = true;
                         break;
                     }
                 }
@@ -254,7 +252,6 @@ async fn deskvnc_is_handed_only_the_rectangles_that_changed() {
                 _ => {}
             }
         }
-        assert!(moved);
         handle.shutdown();
         host.stop();
     })
