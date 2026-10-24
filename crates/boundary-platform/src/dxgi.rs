@@ -162,6 +162,10 @@ impl Duplication {
         }
     }
 
+    /// The picture last handed over.
+    pub fn picture(&self) -> Option<&Frame> {
+        (!self.fresh).then_some(&self.frame)
+    }
     /// Nothing has been handed over yet.
     pub fn fresh(&self) -> bool {
         self.fresh

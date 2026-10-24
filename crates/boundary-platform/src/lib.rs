@@ -219,17 +219,24 @@ pub struct Capturer {
     damage: Option<Vec<Rect>>,
     /// The last screen, for a caller that wants one whether or not it changed.
     last: Option<Frame>,
+    /// The largest screen handed over; larger ones are shrunk to fit.
+    max: (u32, u32),
 }
 impl Capturer {
     pub fn new(id: u32) -> Result<Self> {
-        Self::with(id, true)
+        Self::with(id, true, (MAX_WIDTH, MAX_HEIGHT))
     }
     /// A capturer that asks for a whole picture on every call, as before
     /// there were streams, for timing the two against each other.
     pub fn polling(id: u32) -> Result<Self> {
-        Self::with(id, false)
+        Self::with(id, false, (MAX_WIDTH, MAX_HEIGHT))
     }
-    fn with(id: u32, accelerated: bool) -> Result<Self> {
+    /// A capturer that shrinks screens to fit `max` rather than the size
+    /// they are sent at, so shrinking can be timed on a screen that fits.
+    pub fn sized(id: u32, accelerated: bool, max: (u32, u32)) -> Result<Self> {
+        Self::with(id, accelerated, max)
+    }
+    fn with(id: u32, accelerated: bool, max: (u32, u32)) -> Result<Self> {
         dpi_aware();
         let monitor = Monitor::all()?
             .into_iter()
@@ -238,8 +245,9 @@ impl Capturer {
         Ok(Self {
             #[cfg(target_os = "macos")]
             stream: accelerated
-                .then(|| sck::Stream::open(id, (MAX_WIDTH, MAX_HEIGHT)).ok())
+                .then(|| sck::Stream::open(id, max).ok())
                 .flatten(),
+            max,
             #[cfg(windows)]
             duplication: None,
             #[cfg(windows)]
@@ -280,8 +288,16 @@ impl Capturer {
     pub fn capture(&mut self) -> Result<Frame> {
         match self.capture_changed()? {
             Some(frame) => Ok(frame),
-            None => self.last.clone().context("No screen yet"),
+            None => self.previous().context("No screen yet"),
         }
+    }
+    /// The last screen handed over.
+    fn previous(&self) -> Option<Frame> {
+        #[cfg(windows)]
+        if self.last.is_none() {
+            return self.duplication.as_ref().and_then(|d| d.picture()).cloned();
+        }
+        self.last.clone()
     }
     /// The screen if it changed since the last call.
     pub fn capture_changed(&mut self) -> Result<Option<Frame>> {
@@ -292,7 +308,7 @@ impl Capturer {
                 self.damage = Some(Vec::new());
                 return Ok(None);
             };
-            let frame = if frame.width > MAX_WIDTH || frame.height > MAX_HEIGHT {
+            if frame.width > self.max.0 || frame.height > self.max.1 {
                 // The GPU could not shrink it.
                 let from = (frame.width, frame.height);
                 let frame = self.shrink(frame)?;
@@ -302,12 +318,14 @@ impl Capturer {
                     to.0,
                     to.1,
                 ));
-                frame
-            } else {
-                self.damage = Some(damage);
-                frame
-            };
-            self.last = Some(frame.clone());
+                self.last = Some(frame.clone());
+                return Ok(Some(frame));
+            }
+            // The duplication keeps the picture itself. A second copy of a
+            // 1920 by 1080 screen took 1.6 ms of an i7-8750H, a third of
+            // the whole capture, for a picture that is rarely asked for.
+            self.damage = Some(damage);
+            self.last = None;
             return Ok(Some(frame));
         }
         #[cfg(target_os = "macos")]
@@ -346,7 +364,7 @@ impl Capturer {
                 return None;
             }
             let id = self.monitor.id().ok()?;
-            match dxgi::Duplication::open(id, (MAX_WIDTH, MAX_HEIGHT)) {
+            match dxgi::Duplication::open(id, self.max) {
                 Ok(duplication) => self.duplication = Some(duplication),
                 Err(e) => {
                     self.trouble = Some(format!("{e:#}"));
@@ -397,7 +415,7 @@ impl Capturer {
             height,
             rgba,
         } = frame;
-        let (w, h) = fit(width, height, (MAX_WIDTH, MAX_HEIGHT));
+        let (w, h) = fit(width, height, self.max);
         if (w, h) == (width, height) {
             return Ok(Frame {
                 width,

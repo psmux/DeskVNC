@@ -11,6 +11,9 @@
 //! every 15 ms for the length of the run, so there is something to capture;
 //! without it the numbers are for whatever the screen does by itself.
 //! `--input` also times pointer moves through the same path the host uses.
+//! `--max=1280x720` shrinks to that size instead of 1920 by 1200, to time
+//! shrinking on a screen that already fits. `--save` writes each way's last
+//! screen to stream.png and poll.png in the current folder.
 //!
 //! It asks for no permission first, so it can run over SSH. A Mac that
 //! refuses the windows still returns the wallpaper, which costs the same.
@@ -24,6 +27,7 @@ fn main() -> anyhow::Result<()> {
     let seconds: u64 = args.iter().find_map(|a| a.parse().ok()).unwrap_or(5);
     let motion = args.iter().any(|a| a == "--motion");
     let input = args.iter().any(|a| a == "--input");
+    let save = args.iter().any(|a| a == "--save");
     let displays = boundary_platform::displays()?;
     for d in &displays {
         println!("display {} {}", d.id, d.name);
@@ -34,19 +38,31 @@ fn main() -> anyhow::Result<()> {
         // Let the window appear before timing starts.
         std::thread::sleep(Duration::from_millis(1500));
     }
+    let max = args.iter().find_map(|a| {
+        let (w, h) = a.strip_prefix("--max=")?.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    });
     for stream in [true, false] {
         let t = Instant::now();
-        let capturer = if stream {
-            boundary_platform::Capturer::new(id)?
-        } else {
-            boundary_platform::Capturer::polling(id)?
+        let mut capturer = match max {
+            Some(max) => boundary_platform::Capturer::sized(id, stream, max)?,
+            None if stream => boundary_platform::Capturer::new(id)?,
+            None => boundary_platform::Capturer::polling(id)?,
         };
-        println!(
-            "{}: ready in {:?}",
-            if stream { "stream" } else { "poll" },
-            t.elapsed()
-        );
-        run(capturer, Duration::from_secs(seconds), stream)?;
+        let name = if stream { "stream" } else { "poll" };
+        println!("{name}: ready in {:?}", t.elapsed());
+        run(&mut capturer, Duration::from_secs(seconds), stream)?;
+        if save {
+            // The last screen, to check by eye that both ways see the same.
+            let frame = capturer.capture()?;
+            image::save_buffer(
+                format!("{name}.png"),
+                &frame.rgba,
+                frame.width,
+                frame.height,
+                image::ExtendedColorType::Rgba8,
+            )?;
+        }
     }
     if input {
         time_input(id)?;
@@ -57,7 +73,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run(
-    mut capturer: boundary_platform::Capturer,
+    capturer: &mut boundary_platform::Capturer,
     length: Duration,
     stream: bool,
 ) -> anyhow::Result<()> {
@@ -76,6 +92,15 @@ fn run(
         if let Some(frame) = frame {
             frames += 1;
             times.push(took);
+            if size != (frame.width, frame.height) && frames > 1 {
+                println!(
+                    "{name}: screen became {}x{} at {:.1} s, streaming {}",
+                    frame.width,
+                    frame.height,
+                    t.elapsed().as_secs_f64(),
+                    capturer.streaming()
+                );
+            }
             size = (frame.width, frame.height);
             let area = (frame.width as f64 * frame.height as f64).max(1.0);
             changed_share += match capturer.capture_damage() {
