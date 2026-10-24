@@ -431,6 +431,9 @@ async fn drive(
     connected_at: &mut Option<Instant>,
 ) -> Result<()> {
     let mut size = (0u16, 0u16);
+    // The whole screen as it stands, for a window or mirror that asks for
+    // all of it again: updates after the first carry only what changed.
+    let mut current: Option<std::sync::Arc<boundary_session::Frame>> = None;
     let mut input = InputState::default();
     let mut allowed = false;
     let mut tools_allowed = false;
@@ -482,6 +485,7 @@ async fn drive(
                     return Ok(());
                 }
                 if let Some((frame, changed)) = session.screen() {
+                    current = Some(frame.clone());
                     let current = (frame.width as u16, frame.height as u16);
                     let resized = size != current;
                     if resized {
@@ -508,6 +512,12 @@ async fn drive(
                     view_only = value;
                     input = InputState::default();
                     session.input(Input::Release)?;
+                }
+                Some(ClientCommand::Refresh) => {
+                    if let Some(frame) = &current {
+                        let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                        emit(events, SessionEvent::FramebufferUpdate { rects: vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], damage: whole }).await?;
+                    }
                 }
                 Some(ClientCommand::ReleaseAllKeys) => { input = InputState::default(); session.input(Input::Release)?; }
                 Some(command @ (ClientCommand::Pointer { .. } | ClientCommand::Key { .. })) if allowed && !view_only => {

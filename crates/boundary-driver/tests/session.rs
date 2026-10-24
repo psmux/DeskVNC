@@ -252,6 +252,19 @@ async fn deskvnc_is_handed_only_the_rectangles_that_changed() {
                 _ => {}
             }
         }
+        // A window or mirror that lost track asks for everything again, and
+        // gets the whole screen from what the driver holds.
+        handle.send(ClientCommand::Refresh).await.unwrap();
+        loop {
+            if let SessionEvent::FramebufferUpdate { rects, .. } = rx.recv().await.unwrap() {
+                if rects.len() == 1
+                    && rects[0].rect.width as usize == width
+                    && rects[0].rect.height as usize == height
+                {
+                    break;
+                }
+            }
+        }
         handle.shutdown();
         host.stop();
     })
