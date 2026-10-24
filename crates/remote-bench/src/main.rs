@@ -13,13 +13,18 @@
 //! remote-bench run --proto vnc --target 10.0.0.9:5900 [--password p]
 //! remote-bench run --proto rdp --target 10.0.0.9:3389 --user u --password p
 //! remote-bench run --proto boundary --target <invitation>|@host-output.log
+//!
+//! # Someone else's client, full screen on DISPLAY, read off that display.
+//! DISPLAY=:20 remote-bench run --proto local --as rdp --client "FreeRDP 3.15"
 //! ```
 //!
 //! Every run writes `<label>.json` (summary and raw samples) and
 //! `<label>.csv` (one row per sample) into `--out`, default
 //! `docs/benchmarks/raw`.
 mod fb;
+mod local;
 mod measure;
+mod negotiated;
 mod stage;
 
 use anyhow::{Context, Result, bail};
@@ -91,6 +96,7 @@ where
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    negotiated::install();
     match args.first().map(String::as_str) {
         Some("loopback") => {
             let (w, h) = size(&args);

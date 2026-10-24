@@ -137,6 +137,9 @@ pub fn wire_to_surface(
     dst: &mut DstView<'_>,
 ) -> Result<()> {
     let (w, h) = (dst.width(), dst.height());
+    // Which codec the server chose, for a trace or a benchmark that has to
+    // say what it measured.
+    tracing::trace!(codec, w, h, "wire to surface");
     match codec {
         // MS-RDPEGFX 2.2.2.1: an uncompressed payload is 32 bits per pixel,
         // top down, with rows packed to `width * 4` and no DIB padding.

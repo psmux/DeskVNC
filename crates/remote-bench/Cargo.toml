@@ -30,3 +30,7 @@ boundary-platform.workspace = true
 bench-stage = { path = "../bench-stage", default-features = false }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 openh264 = { version = "0.9", optional = true }
+tokio-util.workspace = true
+# To see which graphics codec an RDP server chose, from rdp-core's traces.
+tracing.workspace = true
+tracing-subscriber.workspace = true

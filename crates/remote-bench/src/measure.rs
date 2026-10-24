@@ -16,7 +16,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
 pub struct Config {
-    kind: ProtocolKind,
+    /// `None` for a local run, where another client owns the display.
+    kind: Option<ProtocolKind>,
+    /// The protocol, as the report names it.
+    protocol: String,
+    /// Which client did the talking.
+    client: String,
     target: String,
     user: Option<String>,
     password: Option<String>,
@@ -36,7 +41,18 @@ pub struct Config {
 
 impl Config {
     pub fn from_args(args: &[String], proto: &str, target: String) -> Result<Config> {
-        let kind = ProtocolKind::parse(proto).context("unknown protocol")?;
+        let kind = match proto {
+            "local" => None,
+            other => Some(ProtocolKind::parse(other).context("unknown protocol")?),
+        };
+        let protocol = match kind {
+            Some(k) => k.to_string(),
+            None => arg(args, "--as").context("a local run needs --as rdp|vnc|boundary")?,
+        };
+        let client = match kind {
+            Some(_) => "DeskVNC's own protocol code".into(),
+            None => arg(args, "--client").context("a local run needs --client with its name")?,
+        };
         let quality = match arg(args, "--quality").as_deref() {
             None | Some("auto") => QualityPreset::Auto,
             Some("high") => QualityPreset::High,
@@ -52,6 +68,8 @@ impl Config {
             .unwrap_or((1920, 1080));
         Ok(Config {
             kind,
+            protocol,
+            client,
             target,
             user: arg(args, "--user"),
             password: arg(args, "--password"),
@@ -402,6 +420,13 @@ struct Report {
     build: String,
     note: String,
     protocol: String,
+    client: String,
+    /// What the run actually used: the RDP graphics codec, the VNC
+    /// encoding, the kinds of rectangle that arrived.
+    negotiated: Vec<String>,
+    /// For a local run, the mean time one reading of the display took. Lag
+    /// includes on average half of it plus one whole one.
+    grab_ms: Option<f64>,
     target_kind: String,
     quality: String,
     started_unix_ms: u64,
@@ -744,7 +769,10 @@ fn connect(
     events: mpsc::Sender<SessionEvent>,
 ) -> Result<(SessionHandle, Option<boundary_driver::BoundaryDriver>)> {
     let id = format!("bench-{}", clock_ms());
-    let mut options = match config.kind {
+    let Some(kind) = config.kind else {
+        return Ok((crate::local::spawn(events), None));
+    };
+    let mut options = match kind {
         ProtocolKind::Vnc => {
             let (host, port) = split_target(&config.target, 5900);
             let mut o = ConnectOptions::vnc(host, port);
@@ -771,7 +799,7 @@ fn connect(
     options.credentials.password = config.password.clone();
     options.quality = config.quality;
     options.connect_timeout = Duration::from_secs(20);
-    Ok(match config.kind {
+    Ok(match kind {
         ProtocolKind::Vnc => (vnc_core::Session::spawn(id, options, events), None),
         ProtocolKind::Rdp => (rdp_core::RdpSession::spawn(id, options, events), None),
         _ => {
@@ -873,7 +901,8 @@ pub async fn run(
         label: config.label.clone(),
         build: config.build.clone(),
         note: config.note.clone(),
-        protocol: config.kind.to_string(),
+        protocol: config.protocol.clone(),
+        client: config.client.clone(),
         target_kind: match &bench.stage {
             Stage::Local(_) => "offscreen stage in this process".into(),
             Stage::Linked(_) => "stage window on the host".into(),
@@ -917,6 +946,11 @@ pub async fn run(
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect();
         report.driver_encodings = s.encodings.clone();
+        report.negotiated =
+            crate::negotiated::describe(&config.protocol, &s.encodings, &report.rect_kinds);
+        if config.kind.is_none() {
+            report.grab_ms = s.stats.map(|st| st.decode_ms as f64);
+        }
         report.errors = s.errors.clone();
     }
     let _ = handle.send(ClientCommand::Disconnect).await;
