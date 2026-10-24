@@ -140,14 +140,6 @@ impl Unattended {
         if self.listener.is_some() {
             return;
         }
-        // The primary display: nobody is there to pick another.
-        let display = boundary_platform::displays()
-            .ok()
-            .and_then(|all| all.first().map(|d| d.id));
-        let Some(display) = display else {
-            self.fail("No display found to share unattended".into());
-            return;
-        };
         // One answerer per computer: DeskVNC, this app, or the copy at the
         // sign in or lock screen. Whoever holds the claim has the ID; this
         // copy keeps asking and takes over when the holder lets go.
@@ -172,7 +164,9 @@ impl Unattended {
             boundary_session::HostOptions::default(),
             key,
             self.access_path.clone(),
-            move || boundary_platform::open(display),
+            // The primary display, found when a helper arrives: nobody is
+            // there to pick another, and a sleeping screen lists none now.
+            boundary_platform::open_primary,
         ));
         self.say("Starting unattended access");
     }

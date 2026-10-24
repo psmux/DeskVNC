@@ -24,6 +24,11 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* A Mac with unattended access on now answers helpers even when DeskVNC
+  started while its screen was asleep. A sleeping screen lists no display, so
+  a copy started then (after an update, a restart, or a quit and reopen) never
+  began listening and kept saying no display was found. It now listens at
+  once, picks the screen when a helper arrives, and wakes it if it is off.
 * Opening a second Boundary computer no longer freezes the first one. Every
   tab bound its own endpoint with the same helper identity, and the relay
   keeps one connection per identity, so it dropped the older tab ("another

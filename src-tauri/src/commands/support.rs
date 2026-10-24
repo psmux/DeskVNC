@@ -420,11 +420,6 @@ impl Model {
             return;
         }
         self.last_start = Some(Instant::now());
-        // The primary display: nobody is there to pick another.
-        let Some(display) = self.displays.first().map(|d| d.id) else {
-            self.fail("No display found to share unattended".into());
-            return;
-        };
         match boundary_provision::platform::claim_unattended() {
             Ok(Some(claim)) => self.claim = Some(claim),
             Ok(None) => {
@@ -440,7 +435,9 @@ impl Model {
             boundary_session::HostOptions::default(),
             key,
             self.access_path.clone(),
-            move || boundary_platform::open(display),
+            // The primary display, found when a helper arrives: nobody is
+            // there to pick another, and a sleeping screen lists none now.
+            boundary_platform::open_primary,
         ));
         self.say("Starting unattended access");
     }

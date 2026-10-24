@@ -55,6 +55,34 @@ pub fn displays() -> Result<Vec<Display>> {
         })
         .collect()
 }
+/// The primary display, for a computer nobody is at, chosen when a helper
+/// arrives rather than when listening starts. A Mac whose screen has gone to
+/// sleep lists no display at all, so a copy started then used to give up on
+/// unattended access for good; this wakes the screen and asks again.
+pub fn open_primary() -> Result<Box<dyn Desktop>> {
+    open(primary_display()?)
+}
+fn primary_display() -> Result<u32> {
+    let first = || displays().ok().and_then(|all| all.first().map(|d| d.id));
+    if let Some(id) = first() {
+        return Ok(id);
+    }
+    wake_screen();
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Some(id) = first() {
+            return Ok(id);
+        }
+    }
+    anyhow::bail!("No display found to share. The screen may be switched off")
+}
+/// Wake a sleeping screen the way a key press would.
+fn wake_screen() {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/caffeinate")
+        .args(["-u", "-t", "5"])
+        .spawn();
+}
 pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
     dpi_aware();
     ensure!(
