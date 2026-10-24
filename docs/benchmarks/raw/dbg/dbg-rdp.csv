@@ -1,0 +1,11 @@
+label,build,protocol,scene,metric,value
+dbg-rdp,unknown,rdp,typing,lag_ms,45.015
+dbg-rdp,unknown,rdp,typing,lag_ms,25.883
+dbg-rdp,unknown,rdp,typing,lag_ms,42.476
+dbg-rdp,unknown,rdp,typing,lag_ms,24.524
+dbg-rdp,unknown,rdp,typing,lag_ms,39.197
+dbg-rdp,unknown,rdp,typing,lag_ms,49.549
+dbg-rdp,unknown,rdp,typing,lag_ms,18.153
+dbg-rdp,unknown,rdp,typing,lag_ms,16.753
+dbg-rdp,unknown,rdp,typing,lag_ms,33.851
+dbg-rdp,unknown,rdp,typing,lag_ms,37.298

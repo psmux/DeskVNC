@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xrdp xorgxrdp x11vnc xauth x11-utils dbus-x11 \
         build-essential pkg-config curl ca-certificates git procps \
         libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxkbcommon-dev \
-        libxkbcommon-x11-dev libxcb1-dev libxcb-randr0-dev libxdo-dev \
+        libxkbcommon-x11-dev libxcb1-dev libxcb-randr0-dev libxdo-dev xdotool \
         libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev \
         libdbus-1-dev libssl-dev clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*

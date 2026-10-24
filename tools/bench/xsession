@@ -1,9 +1,17 @@
 #!/bin/sh
 # The whole desktop is the stage. No window manager: nothing else should
-# draw, and the stage covers the screen at 0,0. It dials the bench on
-# BENCH_CONTROL, and dials again for each run.
+# draw, and the stage covers the screen at 0,0. It dials the bench on the
+# address in /tmp/bench-control, and dials again for each run.
 CONTROL=$(cat /tmp/bench-control 2>/dev/null || echo 127.0.0.1:47800)
 SIZE=$(xdpyinfo | awk '/dimensions:/ {print $2}')
-exec /opt/bench/bench-stage --borderless --focused --pos 0,0 \
+/opt/bench/bench-stage --borderless --pos 0,0 \
     --size "${SIZE:-1920x1080}" --control "$CONTROL" --secs 36000 \
-    > /tmp/bench-stage.log 2>&1
+    > /tmp/bench-stage.log 2>&1 &
+STAGE=$!
+# With no window manager nothing gives the stage the keyboard focus, and
+# without it the window never hears a key.
+for _ in $(seq 50); do
+  xdotool search --name "DeskVNC bench stage" windowfocus 2>/dev/null && break
+  sleep 0.2
+done
+wait $STAGE

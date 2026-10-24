@@ -101,7 +101,6 @@ enum Probe {
 struct Shared {
     fb: Framebuffer,
     map: Option<Mapping>,
-    unread: u32,
     log: Vec<Obs>,
     updates: Vec<Instant>,
     probe: Option<Probe>,
@@ -183,18 +182,25 @@ async fn pump(
                 }
                 let at = Instant::now();
                 s.updates.push(at);
-                if s.map.is_none() {
-                    s.map = s.fb.view().locate();
-                    if let Some(map) = s.map {
+                // Look for the stage again whenever its code does not read:
+                // the first updates can hold only part of the screen, and a
+                // stage window can move.
+                let mut code = s.map.and_then(|m| s.fb.view().code(&m));
+                if code.is_none() {
+                    let found = s.fb.view().locate();
+                    if found != s.map
+                        && let Some(map) = found
+                    {
                         eprintln!(
                             "stage found at {map:?} in a {}x{} screen",
                             s.fb.width, s.fb.height
                         );
                     }
+                    s.map = found;
+                    code = found.and_then(|m| s.fb.view().code(&m));
                 }
                 if let Some(map) = s.map {
                     let view = s.fb.view();
-                    let code = view.code(&map);
                     let hit = match s.probe {
                         Some(Probe::Marker(x, y)) => view.marked(&map, x, y),
                         Some(Probe::Typed(k)) => {
@@ -208,28 +214,16 @@ async fn pump(
                     if hit && s.hit.is_none() {
                         s.hit = Some(at);
                     }
-                    match code {
-                        Some(code) => {
-                            s.unread = 0;
-                            let obs = Obs {
-                                at,
-                                ms: clock_ms(),
-                                code,
-                            };
-                            if let (Some(patch), Some(patches)) = (patch, s.patches.as_mut()) {
-                                patches.push((obs.clone(), patch));
-                            }
-                            s.log.push(obs);
+                    if let Some(code) = code {
+                        let obs = Obs {
+                            at,
+                            ms: clock_ms(),
+                            code,
+                        };
+                        if let (Some(patch), Some(patches)) = (patch, s.patches.as_mut()) {
+                            patches.push((obs.clone(), patch));
                         }
-                        None => {
-                            s.unread += 1;
-                            // A stage that moved, or a desktop that changed
-                            // under it: look for it again.
-                            if s.unread > 120 {
-                                s.map = None;
-                                s.unread = 0;
-                            }
-                        }
+                        s.log.push(obs);
                     }
                 }
                 drop(s);
@@ -607,7 +601,8 @@ impl Bench {
             let k = start.wrapping_add(n as u16);
             let key = |down| ClientCommand::Key {
                 keysym: 0x61,
-                keycode: None,
+                // The XT scancode for A, as the viewer sends with every key.
+                keycode: Some(0x1e),
                 down,
             };
             match self
@@ -796,7 +791,6 @@ pub async fn run(
     let shared = Arc::new(Mutex::new(Shared {
         fb: Framebuffer::new(),
         map: None,
-        unread: 0,
         log: Vec::new(),
         updates: Vec::new(),
         probe: None,
@@ -838,6 +832,15 @@ pub async fn run(
     while shared.lock().unwrap().last_code().is_none() {
         if !bench.changed(until).await {
             let s = shared.lock().unwrap();
+            // Keep what the client saw, to tell a stage that never drew from
+            // one the reader could not make out.
+            let shot = config.out.join(format!("{}-screen.png", config.label));
+            let _ = std::fs::create_dir_all(&config.out);
+            if let Some(image) =
+                image::RgbaImage::from_raw(s.fb.width, s.fb.height, s.fb.rgba.clone())
+            {
+                let _ = image.save(&shot);
+            }
             bail!(
                 "never read the stage (screen {}x{}, stage at {:?}, {} updates)",
                 s.fb.width,

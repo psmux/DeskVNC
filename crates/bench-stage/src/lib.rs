@@ -526,7 +526,9 @@ impl View<'_> {
                 }
             }
         }
-        if count < 200 || x1 <= x0 + 60 || y1 <= y0 + 20 {
+        // A stage is at least eight units tall; anything flatter is part of
+        // one, seen before the rest of the screen arrived.
+        if count < 200 || x1 <= x0 + 60 || (y1 - y0) * UNITS < (x1 - x0) * 8 {
             return None;
         }
         // Each sample stands for a two pixel square.
