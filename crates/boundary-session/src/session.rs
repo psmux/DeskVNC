@@ -1045,6 +1045,11 @@ async fn send_screens(
     }
 }
 
+/// Changes this small are encoded, and updates this small drawn, on the
+/// task that has them rather than on a blocking thread.
+const SMALL_PIXELS: u64 = 128 * 128;
+const SMALL_BYTES: usize = 32 * 1024;
+
 /// At most this many updates wait to be shown, however small they are.
 const MAX_UPDATES_IN_FLIGHT: usize = 12;
 /// The same for pictures of video, which are small and come many a second:
@@ -1537,11 +1542,21 @@ async fn send_updates(
         working.fast = link_fast(connection);
         let next = seq + 1;
         let began = tokio::time::Instant::now();
-        let (working, update) = tokio::task::spawn_blocking(move || {
+        // A pointer or a caret is a millisecond of work at most, done here:
+        // handing it to a blocking thread and back cost more than that.
+        let small = !working.policy.on_video()
+            && matches!(&work, Work::Capture(_, Some(rects))
+                if rects.iter().map(|r| r.width as u64 * r.height as u64).sum::<u64>() <= SMALL_PIXELS);
+        let (working, update) = if small {
             let update = working.work(work, next, rate, Instant::now());
             (working, update)
-        })
-        .await?;
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let update = working.work(work, next, rate, Instant::now());
+                (working, update)
+            })
+            .await?
+        };
         crate::stats::encoded(began.elapsed());
         if working.policy.on_video() {
             // From when this screen was taken, not from when its encoding
@@ -1905,11 +1920,17 @@ async fn read_updates(
             }
         }
         let mut drawing = canvas.take().context("Screen lost")?;
-        let (drawing, result) = tokio::task::spawn_blocking(move || {
+        // A small update is drawn here, as on the host's side.
+        let (drawing, result) = if bytes.len() <= SMALL_BYTES {
             let result = drawing.apply(&bytes[skip..]);
             (drawing, result)
-        })
-        .await?;
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let result = drawing.apply(&bytes[skip..]);
+                (drawing, result)
+            })
+            .await?
+        };
         canvas = Some(drawing);
         let (seq, frame, rects) = result?;
         show(frames, damage, frame, Some(rects));
