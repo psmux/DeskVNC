@@ -18,8 +18,10 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   screen updates 11 to 18 times a second instead of about once. The host now
   sends only the parts of the screen that changed, keeps sending without
   waiting a round trip after each screen, captures as soon as input arrives
-  instead of on the next tick, and on a Mac captures at point size rather
-  than Retina pixels. The first screen arrives about a second sooner.
+  instead of on the next tick, and on a Mac takes each new screen from
+  ScreenCaptureKit as it is drawn, up to sixty a second. What DeskVNC adds on
+  top of the network is now 13 to 25 ms. The first screen arrives about a
+  second sooner.
   Both sides still work with older copies, which get whole screens as before.
 
 ## [0.31.1] (2026-10-21)
