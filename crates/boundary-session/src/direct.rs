@@ -210,6 +210,30 @@ pub(crate) fn answer(sockets: Vec<SocketAddr>, id: EndpointId, stop: Cancellatio
     bound
 }
 
+/// The addresses a person would type for this computer: the ones on the
+/// direct port, LAN and VPN first, without loopback or link local noise.
+pub fn typed_addresses(address: &EndpointAddr) -> Vec<String> {
+    let mut found: Vec<std::net::SocketAddr> = address
+        .ip_addrs()
+        .filter(|a| a.port() == PORT)
+        .filter(|a| !a.ip().is_loopback() && !a.ip().is_unspecified())
+        .filter(|a| match a.ip() {
+            std::net::IpAddr::V4(ip) => !ip.is_link_local(),
+            std::net::IpAddr::V6(ip) => (ip.segments()[0] & 0xffc0) != 0xfe80,
+        })
+        .copied()
+        .collect();
+    found.sort_by_key(|a| (!a.is_ipv4(), !is_private(a.ip()), a.ip()));
+    found.dedup();
+    found.iter().map(|a| a.ip().to_string()).collect()
+}
+fn is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.octets()[0] == 100,
+        std::net::IpAddr::V6(ip) => (ip.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +290,27 @@ mod tests {
         ] {
             assert!(Target::parse(bad).is_err(), "{bad} parsed");
         }
+    }
+
+    #[test]
+    fn the_addresses_shown_are_the_ones_a_person_types() {
+        let id = EndpointId::from_str(ID).unwrap();
+        let addr = [
+            "127.0.0.1:5940",
+            "203.0.113.9:5940",
+            "192.168.50.173:5940",
+            "169.254.3.4:5940",
+            "10.8.0.4:6000",
+            "[fe80::1]:5940",
+            "[2606:4700::4]:5940",
+        ]
+        .into_iter()
+        .map(|a| a.parse().unwrap())
+        .fold(EndpointAddr::new(id), EndpointAddr::with_ip_addr);
+        assert_eq!(
+            typed_addresses(&addr),
+            ["192.168.50.173", "203.0.113.9", "2606:4700::4"]
+        );
     }
 
     #[tokio::test]

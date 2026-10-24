@@ -53,6 +53,8 @@ export interface SupportView {
     enabled: boolean;
     reachable: boolean;
     machineId: string;
+    /** What a helper on a network that routes here can type instead of the ID. */
+    addresses: string[];
     autostart: boolean;
     helpers: PairedHelper[];
     hasPassword: boolean;
@@ -128,6 +130,10 @@ export const support = {
   setTools: (allowed: boolean) => mustInvoke("support_set_tools", { allowed }),
   pair: () => mustInvoke("support_pair"),
   setUnattended: (enabled: boolean) => mustInvoke("support_set_unattended", { enabled }),
+  /** Windows only: whether the firewall lets helpers in by address. Null elsewhere. */
+  directAllowed: () => mustInvoke<boolean | null>("support_direct_allowed"),
+  /** Windows only: one administrator prompt to let helpers in by address. */
+  allowDirect: () => mustInvoke("support_allow_direct"),
   setHelper: (id: string, control: boolean, tools: boolean) =>
     mustInvoke("support_set_helper", { id, control, tools }),
   removeHelper: (id: string) => mustInvoke("support_remove_helper", { id }),

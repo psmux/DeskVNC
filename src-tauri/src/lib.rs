@@ -245,6 +245,8 @@ pub fn run() {
             commands::support::support_set_tools,
             commands::support::support_pair,
             commands::support::support_set_unattended,
+            commands::support::support_direct_allowed,
+            commands::support::support_allow_direct,
             commands::support::support_set_helper,
             commands::support::support_remove_helper,
             commands::support::support_set_password,

@@ -134,6 +134,9 @@ struct Model {
     next_active: u64,
     ask: Option<Ask>,
     reachable: bool,
+    /// Where a helper on a network that routes here can type to reach this
+    /// computer, as well as its ID.
+    addresses: Vec<String>,
     message: String,
     message_error: bool,
     autostart: bool,
@@ -195,6 +198,7 @@ struct UnattendedView {
     enabled: bool,
     reachable: bool,
     machine_id: String,
+    addresses: Vec<String>,
     autostart: bool,
     helpers: Vec<unattended::Helper>,
     has_password: bool,
@@ -259,6 +263,7 @@ impl Model {
             machine: String::new(),
             key: None,
             access: Access::default(),
+            addresses: Vec::new(),
             listener: None,
             claim: None,
             active: Vec::new(),
@@ -446,6 +451,7 @@ impl Model {
         // Dropping the answer turns the helper away.
         self.ask = None;
         self.reachable = false;
+        self.addresses.clear();
     }
     fn set_unattended(&mut self, enabled: bool) -> Result<(), String> {
         self.access.enabled = enabled;
@@ -561,8 +567,9 @@ impl Model {
         if let Some(listener) = self.listener.as_mut() {
             while let Ok(notice) = listener.notices.try_recv() {
                 match notice {
-                    Notice::Ready { .. } => {
+                    Notice::Ready { address, .. } => {
                         self.reachable = true;
+                        self.addresses = boundary_session::direct::typed_addresses(&address);
                         self.message =
                             "Unattended access is on. Paired helpers can connect any time".into();
                         self.message_error = false;
@@ -707,6 +714,7 @@ impl Model {
                 enabled: self.access.enabled,
                 reachable: self.reachable,
                 machine_id: self.machine.clone(),
+                addresses: self.addresses.clone(),
                 autostart: self.autostart,
                 helpers: self.access.helpers.clone(),
                 has_password: self.access.has_password(),
@@ -937,6 +945,19 @@ pub async fn support_set_unattended(
     enabled: bool,
 ) -> Result<(), String> {
     support.act(&app, |m| m.set_unattended(enabled))
+}
+/// Whether Windows Firewall lets helpers reach this computer by address.
+/// Null off Windows, where there is nothing to allow.
+#[tauri::command]
+pub async fn support_direct_allowed() -> Result<Option<bool>, String> {
+    Ok(boundary_provision::platform::direct_inbound_allowed().await)
+}
+/// Ask Windows, with one administrator prompt, to let helpers in by address.
+#[tauri::command]
+pub async fn support_allow_direct() -> Result<(), String> {
+    boundary_provision::platform::allow_direct_inbound(boundary_session::direct::PORT)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 #[tauri::command]
 pub async fn support_set_helper(

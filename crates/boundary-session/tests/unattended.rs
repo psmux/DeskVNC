@@ -629,13 +629,24 @@ async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
                 _ => {}
             }
         };
-        // The usual port when this test has it, another when a test beside
-        // it got there first. Either way only the address is typed.
-        let port = address.ip_addrs().next().expect("a direct address").port();
-        let typed = if port == boundary_session::direct::PORT {
-            "127.0.0.1".to_string()
+        // An address a person would type: a LAN one where there is one,
+        // since iroh on Windows does not complete a loopback path, and the
+        // port only when a test beside this one got the usual port first.
+        let picked = address
+            .ip_addrs()
+            .find(|a| a.is_ipv4() && !a.ip().is_loopback())
+            .or_else(|| address.ip_addrs().next())
+            .copied()
+            .expect("a direct address");
+        let ip = if picked.ip().is_unspecified() {
+            "127.0.0.1".parse().unwrap()
         } else {
-            format!("127.0.0.1:{port}")
+            picked.ip()
+        };
+        let typed = if picked.port() == boundary_session::direct::PORT {
+            ip.to_string()
+        } else {
+            format!("{ip}:{}", picked.port())
         };
         let helper = unattended::connect(typed, "Godwin".into(), None, helper_key, local());
         assert_eq!(outcome(helper).await, Ok(true));
