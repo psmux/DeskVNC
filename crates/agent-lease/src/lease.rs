@@ -336,6 +336,9 @@ impl Lease {
         // one that stops is dropped after `queue_ttl_ms`.
         if let Some(position) = self.queue_position(&request.party.id) {
             self.queue[position].queued_at = now;
+            if request.reason.is_some() {
+                self.queue[position].reason = request.reason;
+            }
             return Ok(self.draft(
                 now,
                 from,
@@ -380,6 +383,23 @@ impl Lease {
         }
         let departed = self.take_holder(now, DepartureCause::Released);
         self.settle(now, from, departed)
+    }
+
+    /// Put this waiter at the head of the queue, ahead of any priority.
+    ///
+    /// For a person choosing who goes next: "let this agent use the machine"
+    /// is a decision about one agent, and the priority order that would
+    /// otherwise pick the head of the queue is not what they asked for. A no
+    /// op, returning false, for a party that is not waiting.
+    pub fn promote(&mut self, party: &PartyId) -> bool {
+        match self.queue_position(party) {
+            Some(position) => {
+                let waiter = self.queue.remove(position);
+                self.queue.insert(0, waiter);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Give up waiting.
@@ -882,6 +902,7 @@ impl Lease {
             kind: w.party.kind,
             label: w.party.label.clone(),
             waiting_ms: now.since(w.first_asked_at),
+            reason: w.reason.clone(),
         };
         let changes_at = match (self.phase, self.holder.as_ref()) {
             (LeasePhase::PreemptPending, _) => self.pending.as_ref().map(|p| p.deadline),

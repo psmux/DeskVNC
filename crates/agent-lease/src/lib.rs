@@ -81,7 +81,7 @@ pub mod party;
 pub mod policy;
 pub mod transition;
 
-pub use board::{Answer, Board};
+pub use board::{Answer, Board, MuteUntil, Request, NOT_NOW_MS};
 pub use clock::{LeaseInstant, Millis};
 pub use error::LeaseError;
 pub use lease::{AcquireRequest, Lease};

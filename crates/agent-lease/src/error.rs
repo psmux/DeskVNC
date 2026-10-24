@@ -83,4 +83,28 @@ pub enum LeaseError {
         /// How long until acquires are accepted again.
         retry_after_ms: Millis,
     },
+
+    /// A person is using the machine and has muted requests from agents.
+    ///
+    /// What to do about it: other work, and ask again after
+    /// `retry_after_ms`. The request was not shown to the person and is not
+    /// in the queue.
+    #[error("the person using this machine has muted requests from agents for another {retry_after_ms} ms")]
+    Muted {
+        /// How long until the mute ends, or until the person can next go
+        /// idle when the mute lasts until then.
+        retry_after_ms: Millis,
+    },
+
+    /// A person is using the machine and answered this agent's request with
+    /// "not now".
+    ///
+    /// What to do about it: other work. Asking again before
+    /// `retry_after_ms` is answered the same way without asking the person
+    /// again; the machine still comes back once the person stops using it.
+    #[error("the person using this machine said not now; asking again is refused for another {retry_after_ms} ms")]
+    NotNow {
+        /// How long until a request from this agent is shown again.
+        retry_after_ms: Millis,
+    },
 }
