@@ -36,7 +36,7 @@ async fn the_stop_path_puts_a_zero_mask_pointer_out_before_the_key_releases() {
     // Take the wheel and put the pointer somewhere that is not the origin, so
     // the assertion below is about the mask rather than about a default.
     plane
-        .acquire(&limb, Some("about to be stopped".to_string()), false)
+        .acquire(&limb, Some("about to be stopped".to_string()), None)
         .await
         .expect("an unheld lease is granted");
     plane
@@ -114,7 +114,7 @@ async fn a_stop_takes_the_wheel_away_and_the_next_action_is_refused() {
         .expect("the limb is attached");
 
     plane
-        .acquire(&limb, None, false)
+        .acquire(&limb, None, None)
         .await
         .expect("an unheld lease is granted");
     plane.stop(&limb).await;
@@ -140,7 +140,7 @@ async fn a_stop_takes_the_wheel_away_and_the_next_action_is_refused() {
     // And re-acquiring is refused for the backoff window, because without it an
     // agent in a loop reacquires before the person who hit the button can click
     // anything, and the button does nothing.
-    let reacquired = plane.acquire(&limb, None, false).await;
+    let reacquired = plane.acquire(&limb, None, None).await;
     assert!(
         reacquired.is_err(),
         "a force release holds a backoff, or the panic chord is decorative"

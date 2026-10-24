@@ -153,9 +153,23 @@ pub struct LeaseBlock {
     pub queue_depth: usize,
     pub queue_position: Option<usize>,
     /// A spelled out boolean rather than a reason string to pattern match
-    /// (`04 §4.4`): the model has to get one decision right and only one, and
-    /// the decision is "a person is driving, stop, do not reacquire".
+    /// (`04 §4.4`): true while a person is using the machine. It ends when
+    /// they stop: agents may ask again 20 seconds after their last input.
     pub human_took_over: bool,
+    /// The holder as the application's shared lease reports it: kind, label,
+    /// since (unix ms), heldForMs, idleForMs. Absent when nobody holds it or
+    /// the application keeps no shared lease.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<serde_json::Value>,
+    /// Everyone waiting, in order: kind, label, waitingMs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<serde_json::Value>,
+    /// When the wheel changes hands by itself if the holder sends nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes_in_ms: Option<u64>,
+    /// What to do about it, when this attachment does not hold it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advice: Option<&'static str>,
 }
 
 /// The numbers the session already emits once a second, where a caller has
