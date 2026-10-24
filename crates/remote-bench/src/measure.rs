@@ -404,6 +404,12 @@ struct Report {
     started_unix_ms: u64,
     host: String,
     client_os: String,
+    /// The measuring machine's load when the run started, and its cores. A
+    /// run on a busy machine measures the machine, so `loaded` marks one
+    /// whose load was above half a task per core.
+    load_1m: f64,
+    cpus: usize,
+    loaded: bool,
     connect_secs: f64,
     first_stage_secs: f64,
     screen: (u32, u32),
@@ -855,6 +861,13 @@ pub async fn run(
     bench.offset = offset;
     eprintln!("stage clock offset {offset} ms over a {rtt:.2} ms round trip");
 
+    let load_1m = sysinfo::System::load_average().one;
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    if load_1m > 0.5 * cpus as f64 {
+        eprintln!(
+            "WARNING: load {load_1m:.1} on {cpus} cores is above half a task per core; this run is marked loaded and its timings measure a busy machine"
+        );
+    }
     let mut report = Report {
         label: config.label.clone(),
         build: config.build.clone(),
@@ -870,6 +883,9 @@ pub async fn run(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         host: sysinfo::System::host_name().unwrap_or_default(),
+        load_1m,
+        cpus,
+        loaded: load_1m > 0.5 * cpus as f64,
         client_os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         connect_secs,
         first_stage_secs,
@@ -962,8 +978,14 @@ fn summary(r: &Report) {
             .map_or("n/a".into(), |k| format!("{:.0} kbit/s", k))
     };
     println!(
-        "== {} ({}, build {}) screen {:?}",
-        r.label, r.protocol, r.build, r.screen
+        "== {} ({}, build {}) screen {:?}, load {:.1} on {} cores{}",
+        r.label,
+        r.protocol,
+        r.build,
+        r.screen,
+        r.load_1m,
+        r.cpus,
+        if r.loaded { ", LOADED" } else { "" }
     );
     for (name, i) in [("pointer", &r.pointer), ("typing", &r.typing)] {
         if let Some(i) = i {

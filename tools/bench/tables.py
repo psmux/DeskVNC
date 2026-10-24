@@ -35,6 +35,11 @@ def main(paths):
         with open(p) as f:
             runs.append(json.load(f))
     runs.sort(key=lambda r: (r["label"].rsplit("-", 1)[0], r["protocol"]))
+    for r in runs:
+        # A run on a machine with more than half a task per core measured
+        # the machine as much as the protocol. Say so in every table.
+        if r.get("loaded"):
+            r["label"] += f" (LOADED {r['load_1m']:.0f}/{r['cpus']})"
 
     print("### Input to screen (ms)\n")
     print("| Run | Build | Protocol | Pointer p50 | p90 | p99 | missed | Key p50 | p90 | p99 | missed |")
