@@ -3,6 +3,8 @@ use boundary_session::{Button, Desktop, Frame, Input, Key};
 use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use xcap::Monitor;
 
+#[cfg(windows)]
+mod mf;
 #[cfg(target_os = "macos")]
 mod sck;
 #[cfg(windows)]

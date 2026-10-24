@@ -1,8 +1,9 @@
 //! H.264 encoders for moving screens (`boundary_session::video`).
 //!
 //! The platform's hardware encoder where there is one: VideoToolbox on a
-//! Mac. Everywhere else, and on a Mac whose VideoToolbox will not start,
-//! OpenH264 in software, built from source with this crate.
+//! Mac, a Media Foundation hardware encoder on Windows. Everywhere else,
+//! and where the hardware one will not start, OpenH264 in software, built
+//! from source with this crate.
 use anyhow::{Result, ensure};
 use boundary_session::{
     Frame,
@@ -28,6 +29,10 @@ pub fn software() -> VideoEncoders {
 fn best(width: u32, height: u32) -> Result<Box<dyn VideoEncoder>> {
     #[cfg(target_os = "macos")]
     if let Ok(encoder) = crate::vt::VideoToolbox::new(width, height) {
+        return Ok(Box::new(encoder));
+    }
+    #[cfg(windows)]
+    if let Ok(encoder) = crate::mf::MediaFoundation::new(width, height) {
         return Ok(Box::new(encoder));
     }
     Ok(Box::new(OpenH264::new(width, height)?))
