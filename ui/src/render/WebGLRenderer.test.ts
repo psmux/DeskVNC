@@ -199,3 +199,28 @@ describe("pruneUpdates", () => {
     });
   });
 });
+
+describe("Boundary video then tiles", () => {
+  // Boundary sends moving screens as whole-screen H.264 and, once the screen
+  // stops, the whole screen again as pixels so text is sharp. Those pixels
+  // must land on top of the video, in that order, and no picture of video
+  // may be dropped, or the decoder loses its place.
+  it("keeps every picture and the sharp screen after them, in order", () => {
+    const { kept, dropped } = pruneUpdates<TestRect>([
+      [fullScreen("v1", RectFormat.H264)],
+      [fullScreen("v2", RectFormat.H264)],
+      [fullScreen("sharp", RectFormat.Rgba)],
+      [rect("pointer", RectFormat.Rgba, 640, 320, 64, 64)],
+    ]);
+    expect(survivors(kept)).toEqual(["v1", "v2", "sharp", "pointer"]);
+    expect(dropped).toBe(0);
+  });
+
+  it("keeps the sharp screen under video that starts again after it", () => {
+    const { kept } = pruneUpdates<TestRect>([
+      [fullScreen("sharp", RectFormat.Rgba)],
+      [fullScreen("v1", RectFormat.H264)],
+    ]);
+    expect(survivors(kept)).toEqual(["sharp", "v1"]);
+  });
+});
