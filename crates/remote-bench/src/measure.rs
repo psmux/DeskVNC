@@ -368,8 +368,11 @@ struct InputResult {
 struct StreamResult {
     /// Distinct stage frames seen per second.
     fps: f64,
-    /// The rate the stage drew at over the same time.
+    /// The rate the stage drew at over the same time, from the span of
+    /// frame numbers seen, since the counter moves only when it draws.
     stage_fps: f64,
+    /// The rate the stage itself reported over its link, as a cross check.
+    stage_reported_fps: Option<f64>,
     distinct: usize,
     span: u64,
     dropped: u64,
@@ -675,11 +678,9 @@ impl Bench {
             .collect();
         Ok(StreamResult {
             fps: seen.len() as f64 / secs,
-            stage_fps: if stage_fps.is_empty() {
-                bench_stage::FPS as f64
-            } else {
-                stage_fps.iter().sum::<f64>() / stage_fps.len() as f64
-            },
+            stage_fps: span as f64 / secs,
+            stage_reported_fps: (!stage_fps.is_empty())
+                .then(|| stage_fps.iter().sum::<f64>() / stage_fps.len() as f64),
             distinct: seen.len(),
             span,
             dropped: span.saturating_sub(seen.len() as u64),

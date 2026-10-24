@@ -139,3 +139,19 @@ Input lag sits at the round trip, which is as low as it can go. Anything that
 moves is starved: at about 300 ms per round trip and JPEG tiles, a full screen
 change costs too much to keep up. That is the row the video work has to beat.
 Raw data: `raw/i9-wan-offscreen-base.json`.
+
+## Harness checks, not results
+
+`raw/harness-proof` holds the runs that proved the harness end to end on
+2026-10-24: all three protocols in the container on loopback, and RDP and
+Boundary over the shaped link. They were taken while this Mac carried a load
+of about 48 on 14 cores from other builds, so they show that every measure
+reads and adds up (frames seen plus frames dropped equal the span, and the
+span over the window comes to the stage's 60 a second), not how fast anything
+is. Do not quote them.
+
+One thing they did show that matters for the final run: DeskVNC's RDP client
+does not advertise RemoteFX surface commands or AVC to xrdp yet, so xrdp falls
+back to plain bitmaps, and over the 30 Mbit/s link motion drops to under one
+frame a second. The RDP rows measure DeskVNC's RDP client against xrdp, not
+RDP at its best.
