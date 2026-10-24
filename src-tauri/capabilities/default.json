@@ -89,6 +89,8 @@
     "allow-support-request-screen-permission",
     "allow-support-open-input-settings",
     "allow-support-save-network",
+    "allow-support-direct-allowed",
+    "allow-support-allow-direct",
     "allow-disconnect-session",
     "allow-send-input",
     "allow-trace-enabled",

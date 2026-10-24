@@ -186,6 +186,8 @@ fn main() {
             "support_request_screen_permission",
             "support_open_input_settings",
             "support_save_network",
+            "support_direct_allowed",
+            "support_allow_direct",
             "disconnect_session",
             "send_input",
             "trace_enabled",
