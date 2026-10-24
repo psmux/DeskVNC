@@ -22,8 +22,35 @@ use tauri::{Manager, RunEvent};
 
 use state::AppState;
 
+/// Lift the soft limit on open files to what the system allows.
+///
+/// An app started by launchd gets a soft limit of 256. DeskVNC holds a socket
+/// per session, per agent attachment and per Boundary path, and every agent
+/// session on the machine reconnects at once when the viewer starts, so on
+/// a busy Mac it reached 256 two seconds after launch and the agent socket
+/// stopped accepting anyone.
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    // SAFETY: getrlimit and setrlimit only read and write the struct given.
+    unsafe {
+        let mut limit = std::mem::zeroed::<libc::rlimit>();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            return;
+        }
+        // macOS refuses more than OPEN_MAX for the soft limit even when the
+        // hard limit says unlimited.
+        let wanted = limit.rlim_max.min(10_240);
+        if limit.rlim_cur < wanted {
+            limit.rlim_cur = wanted;
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 pub fn run() {
     logging::init();
+    #[cfg(unix)]
+    raise_open_file_limit();
 
     let mut builder = tauri::Builder::default();
 

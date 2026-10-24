@@ -2222,6 +2222,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "directories",
+ "libc",
  "limb-core",
  "local-pipe",
  "os_info",

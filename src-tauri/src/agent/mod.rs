@@ -1311,11 +1311,18 @@ async fn accept_pipe(
                     tracing::debug!("an agent left the pipe before it was served: {e}");
                     continue;
                 }
-                let next = match local_pipe::create(&name, false) {
-                    Ok(next) => next,
-                    Err(e) => {
-                        tracing::warn!("the agent pipe stopped accepting: {e}");
-                        return;
+                // Creating the next instance can fail for want of handles.
+                // Keep trying rather than leave every agent locked out.
+                let next = loop {
+                    match local_pipe::create(&name, false) {
+                        Ok(next) => break next,
+                        Err(e) => {
+                            tracing::warn!("the agent pipe could not open another instance, trying again: {e}");
+                            tokio::select! {
+                                _ = cancel.cancelled() => return,
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                            }
+                        }
                     }
                 };
                 let stream = std::mem::replace(&mut listening, next);
@@ -1429,9 +1436,16 @@ async fn accept_loop(
                         }
                     });
                 }
+                // Out of file descriptors, or a peer that gave up while it
+                // was queued. Neither is the socket failing, and returning
+                // here left every agent on the machine locked out until the
+                // app was restarted, so wait a little and accept again.
                 Err(e) => {
-                    tracing::warn!("the agent socket stopped accepting: {e}");
-                    return;
+                    tracing::warn!("the agent socket could not accept, trying again: {e}");
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                    }
                 }
             },
         }
