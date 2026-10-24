@@ -1,0 +1,32 @@
+[package]
+name = "remote-bench"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+# Measures Boundary, VNC and RDP the same way: connect with DeskVNC's own
+# protocol drivers, decode what arrives into pixels, and read the stage's
+# frame code and markers out of them. See docs/benchmarks/README.md.
+
+[features]
+default = ["h264"]
+# Decode H.264 rectangles (VNC Open H.264, RDP AVC420, Boundary video) in the
+# bench. The viewer decodes them in the webview; the bench needs pixels.
+h264 = ["dep:openh264"]
+
+[dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+remote-core = { path = "../remote-core" }
+vnc-core = { path = "../vnc-core" }
+rdp-core = { path = "../rdp-core" }
+boundary-driver = { path = "../boundary-driver" }
+boundary-session.workspace = true
+boundary-platform.workspace = true
+bench-stage = { path = "../bench-stage", default-features = false }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+openh264 = { version = "0.9", optional = true }

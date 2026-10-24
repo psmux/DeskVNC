@@ -1,0 +1,28 @@
+[package]
+name = "bench-stage"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+# The picture a remote desktop benchmark looks at. The library draws the
+# scenes and reads the frame code back; the binary puts the scenes in a real
+# window on the computer being measured. The library has no dependencies, so
+# the measuring client can draw the same scenes offscreen.
+
+[features]
+default = ["window"]
+window = ["dep:winit", "dep:softbuffer", "dep:sysinfo"]
+
+[dependencies]
+# softbuffer presents only the damaged rectangles, so the stage changes on
+# screen exactly what changed in the scene, the way a real application does.
+# A stage that repainted its whole window every frame would make a server
+# that follows damage (xrdp, Windows RDP) resend the whole screen.
+winit = { version = "0.30.13", optional = true }
+softbuffer = { version = "0.4.8", optional = true }
+sysinfo = { version = "0.39", optional = true, default-features = false, features = ["system"] }
+
+[[bin]]
+name = "bench-stage"
+required-features = ["window"]
