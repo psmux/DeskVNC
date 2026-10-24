@@ -295,6 +295,111 @@ mod tests {
             assert!(input.validate().is_err());
         }
     }
+    /// The first messages as a copy from before video wrote and read them.
+    mod before_video {
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub enum Message {
+            Hello {
+                version: u8,
+                secret: [u8; 32],
+                name: String,
+                #[serde(default)]
+                tools: bool,
+                #[serde(default)]
+                jpeg: bool,
+                #[serde(default)]
+                tiles: bool,
+            },
+            Knock {
+                version: u8,
+                name: String,
+                password: Option<String>,
+                #[serde(default)]
+                tools: bool,
+                #[serde(default)]
+                jpeg: bool,
+                #[serde(default)]
+                tiles: bool,
+            },
+        }
+    }
+
+    #[test]
+    fn video_is_offered_without_breaking_older_peers() {
+        // A helper that decodes video, read by a host from before video:
+        // the new field is passed over and it is sent tiles.
+        let hello = serde_json::to_vec(&Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: true,
+            jpeg: true,
+            tiles: true,
+            video: vec![H264.into()],
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&hello).unwrap(),
+            before_video::Message::Hello { tiles: true, .. }
+        ));
+        let knock = serde_json::to_vec(&Message::Knock {
+            version: 2,
+            name: "Helper".into(),
+            password: None,
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: vec![H264.into()],
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&knock).unwrap(),
+            before_video::Message::Knock { tiles: true, .. }
+        ));
+        // A helper from before video, read by this host: no codecs, tiles.
+        let old = serde_json::to_vec(&before_video::Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+        })
+        .unwrap();
+        let Message::Hello {
+            jpeg, tiles, video, ..
+        } = serde_json::from_slice(&old).unwrap()
+        else {
+            panic!("not a hello");
+        };
+        assert_eq!(Screens::from_hello(jpeg, tiles, &video), Screens::Tiles);
+        // A helper that does not decode video writes exactly what an older
+        // one did.
+        let plain = serde_json::to_string(&Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(plain, String::from_utf8(old).unwrap());
+        // Codecs this host does not send, and video without tiles, get none.
+        let other = ["av1".to_string()];
+        assert_eq!(Screens::from_hello(true, true, &other), Screens::Tiles);
+        assert_eq!(
+            Screens::from_hello(true, false, &[H264.into()]),
+            Screens::Jpeg
+        );
+        assert_eq!(
+            Screens::from_hello(true, true, &[H264.into()]),
+            Screens::Video
+        );
+    }
+
     #[test]
     fn rejects_bad_tickets() {
         assert!(Invitation::decode("hello").is_err());

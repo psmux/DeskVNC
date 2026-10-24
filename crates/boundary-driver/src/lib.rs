@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, ensure, Result};
 use boundary_session::{
     tools::{Client, Reply, Request},
     unattended::{self, SecretKey},
-    Button, Event, HostOptions, Input, Invitation, Key, LinkLost, Session,
+    Abilities, Button, Event, HostOptions, Input, Invitation, Key, LinkLost, Session, Update,
 };
 use parking_lot::Mutex;
 use remote_core::{
@@ -19,6 +19,12 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// What this helper says it can do: send commands and files for the agent
+/// plane, and draw H.264, which the window decodes with WebCodecs.
+const ABILITIES: Abilities = Abilities {
+    tools: true,
+    video: true,
+};
 struct Pending {
     ticket: String,
     helper: String,
@@ -140,12 +146,14 @@ impl ProtocolDriver for BoundaryDriver {
                             );
                             // With tools declared, so the person is asked about
                             // commands and files and an agent can use them once
-                            // they say yes.
-                            boundary_session::viewer_with_tools(
+                            // they say yes. And with video, which the window decodes
+                            // in hardware, so a moving screen comes as H.264.
+                            boundary_session::viewer_with(
                                 pending.ticket,
                                 pending.helper,
                                 HostOptions::default(),
                                 identity.clone(),
+                                ABILITIES,
                             )
                         }
                         None if unattended => {
@@ -156,12 +164,13 @@ impl ProtocolDriver for BoundaryDriver {
                                 .clone()
                                 .filter(|n| !n.trim().is_empty())
                                 .unwrap_or_else(helper_name);
-                            unattended::connect_with_tools(
+                            unattended::connect_with(
                                 machine.clone(),
                                 name,
                                 options.credentials.password.clone().filter(|p| !p.is_empty()),
                                 key,
                                 HostOptions::default(),
+                                ABILITIES,
                             )
                         }
                         None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
@@ -461,6 +470,7 @@ async fn drive(
     // The whole screen as it stands, for a window or mirror that asks for
     // all of it again: updates after the first carry only what changed.
     let mut current: Option<std::sync::Arc<boundary_session::Frame>> = None;
+    let mut video = Video::default();
     let mut input = InputState::default();
     let mut allowed = false;
     let mut tools_allowed = false;
@@ -511,26 +521,47 @@ async fn drive(
                     }
                     return Ok(());
                 }
-                if let Some((frame, changed)) = session.screen() {
-                    current = Some(frame.clone());
-                    let current = (frame.width as u16, frame.height as u16);
-                    let resized = size != current;
-                    if resized {
-                        size = current;
-                        emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
-                    }
-                    let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
-                    // Only what changed goes on to the window: a pointer
-                    // moving is a few tiles, not the 9 MB of a whole screen.
-                    let (rects, damage) = match changed.filter(|_| !resized) {
-                        Some(changed) => {
-                            let rects: Vec<DecodedRect> = changed.iter().map(|r| crop(&frame, r)).collect();
-                            let damage = rects.iter().skip(1).fold(rects[0].rect, |u, r| u.union(&r.rect));
-                            (rects, damage)
+                for update in session.updates() {
+                    match update {
+                        Update::Screen { frame, rects: changed } => {
+                            current = Some(frame.clone());
+                            let current = (frame.width as u16, frame.height as u16);
+                            let resized = size != current;
+                            if resized {
+                                size = current;
+                                // The window starts its decoders again at a new size.
+                                video.started = false;
+                                emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
+                            }
+                            let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                            // Only what changed goes on to the window: a pointer
+                            // moving is a few tiles, not the 9 MB of a whole screen.
+                            let (rects, damage) = match changed.filter(|_| !resized) {
+                                Some(changed) => {
+                                    let rects: Vec<DecodedRect> = changed.iter().map(|r| crop(&frame, r)).collect();
+                                    let damage = rects.iter().skip(1).fold(rects[0].rect, |u, r| u.union(&r.rect));
+                                    (rects, damage)
+                                }
+                                None => (vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], whole),
+                            };
+                            // A whole screen of tiles covers whatever video drew.
+                            if damage == whole {
+                                video.stale = false;
+                            }
+                            emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
                         }
-                        None => (vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], whole),
-                    };
-                    emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
+                        Update::Video(unit) => {
+                            let unit_size = (unit.width as u16, unit.height as u16);
+                            let resized = size != unit_size;
+                            if resized {
+                                size = unit_size;
+                                emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
+                            }
+                            let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                            let rect = video.rect(unit, whole, resized);
+                            emit(events, SessionEvent::FramebufferUpdate { rects: vec![rect], damage: whole }).await?;
+                        }
+                    }
                 }
             },
             command = commands.recv() => match command {
@@ -539,6 +570,13 @@ async fn drive(
                     view_only = value;
                     input = InputState::default();
                     session.input(Input::Release)?;
+                }
+                Some(ClientCommand::Refresh) if video.stale => {
+                    // The window shows video that `current` never saw, so
+                    // sending it would put an older screen over a newer one.
+                    // The computer sends the whole screen as tiles instead,
+                    // which also gives the agent's mirror real pixels.
+                    session.refresh();
                 }
                 Some(ClientCommand::Refresh) => {
                     if let Some(frame) = &current {
@@ -656,6 +694,46 @@ impl InputState {
         out
     }
 }
+/// The H.264 the computer sends while much of its screen moves, on its way
+/// to the window's WebCodecs decoder.
+#[derive(Default)]
+struct Video {
+    /// The window's decoder has started on this stream since the last
+    /// resize, so a picture may follow on from the one before.
+    started: bool,
+    /// Video has drawn since the last whole screen of tiles, so `current`
+    /// is not what the window shows.
+    stale: bool,
+}
+impl Video {
+    /// The decoder context every Boundary picture goes to: one, covering
+    /// the whole screen.
+    const CONTEXT: u32 = 0;
+
+    fn rect(
+        &mut self,
+        unit: boundary_session::VideoUnit,
+        whole: Rect,
+        resized: bool,
+    ) -> DecodedRect {
+        // A new encoder or a new size starts the decoder again, which it
+        // can only do on a keyframe; the host sends one at both.
+        let reset = unit.fresh || resized || !self.started;
+        self.started = true;
+        self.stale = true;
+        DecodedRect {
+            rect: whole,
+            payload: RectPayload::H264 {
+                data: unit.data,
+                flags: 0,
+                context_id: Self::CONTEXT,
+                reset,
+                keyframe: unit.keyframe,
+            },
+        }
+    }
+}
+
 /// One changed rectangle of a Boundary screen, as its own pixels.
 fn crop(frame: &boundary_session::Frame, r: &boundary_session::Rect) -> DecodedRect {
     let stride = frame.width as usize * 4;
