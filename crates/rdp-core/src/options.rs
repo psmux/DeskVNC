@@ -129,6 +129,9 @@ pub struct ResolvedOptions {
     /// (PRDRDP/00 R29, off by default: it leaks the username in cleartext
     /// ahead of the TLS upgrade).
     pub send_mstshash_cookie: bool,
+    /// Whether to ask for the graphics pipeline, see
+    /// `remote_core::RdpOptions::graphics_pipeline`.
+    pub graphics_pipeline: bool,
     /// The static virtual channels to ask for in `TS_UD_CS_NET`, in the order
     /// they will be joined. Never more than
     /// [`rdp_pdu::io::limits::MAX_CHANNELS`].
@@ -304,6 +307,7 @@ impl ResolvedOptions {
             nla: rdp.nla,
             legacy_tls: rdp.legacy_tls,
             send_mstshash_cookie: rdp.send_mstshash_cookie,
+            graphics_pipeline: rdp.graphics_pipeline,
             channels,
             quality: options.quality,
             // A redirection is the only thing that puts a token here, and it

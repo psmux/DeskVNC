@@ -133,7 +133,12 @@ async fn main() -> Result<()> {
         }
         Some("run") => {
             let proto = arg(&args, "--proto").context("--proto vnc|rdp|boundary")?;
-            let mut target = arg(&args, "--target").context("--target")?;
+            // A local run reads a display, so it has nothing to dial.
+            let mut target = match arg(&args, "--target") {
+                Some(t) => t,
+                None if arg(&args, "--proto").as_deref() == Some("local") => String::new(),
+                None => anyhow::bail!("--target"),
+            };
             // `@file` takes the invitation from a host's output, so a script
             // need not pass a long token around.
             if let Some(path) = target.strip_prefix('@') {

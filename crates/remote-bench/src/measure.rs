@@ -786,6 +786,9 @@ fn connect(
             rdp.nla = remote_core::NlaPolicy::AllowFallback;
             rdp.audio = remote_core::AudioMode::Off;
             rdp.redirect_clipboard = false;
+            // The graphics pipeline, which the viewer does not ask for yet.
+            // Every codec set this client can decode is on by default.
+            rdp.graphics_pipeline = true;
             rdp.resolution = RdpResolution::Fixed {
                 width: config.rdp_size.0,
                 height: config.rdp_size.1,
