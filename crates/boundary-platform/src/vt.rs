@@ -667,3 +667,374 @@ unsafe fn annex_b(sample: *const c_void) -> Result<Encoded> {
         keyframe,
     })
 }
+
+/// H.264 decoded by VideoToolbox, in hardware, for the host's own copy of
+/// what the helper sees (`crate::video` shadow). OpenH264 in software fell
+/// behind the encoder at 60 screens a second of 1920 by 1200 on the Intel
+/// i9, and a copy that is behind is no use when the screen settles.
+pub struct VtDecoder {
+    session: *mut c_void,
+    format: *const c_void,
+    /// The parameter sets the session was made for.
+    sets: Vec<Vec<u8>>,
+    /// Boxed so its address, which VideoToolbox holds, never moves.
+    slot: Box<Mutex<Option<Planes>>>,
+}
+// SAFETY: a decompression session may be used from any thread, one call at
+// a time, which `&mut self` guarantees.
+unsafe impl Send for VtDecoder {}
+
+/// A decoded picture as 4:2:0 planes.
+pub struct Planes {
+    pub luma: Vec<u8>,
+    pub stride: usize,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub chroma_stride: usize,
+}
+
+struct DecodeApi {
+    format_from_sets: unsafe extern "C" fn(
+        CFAllocatorRef,
+        usize,
+        *const *const u8,
+        *const usize,
+        i32,
+        *mut *const c_void,
+    ) -> OSStatus,
+    create: unsafe extern "C" fn(
+        CFAllocatorRef,
+        *const c_void,
+        CFDictionaryRef,
+        CFDictionaryRef,
+        *const OutputRecord,
+        *mut *mut c_void,
+    ) -> OSStatus,
+    decode: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut c_void, *mut u32) -> OSStatus,
+    wait: unsafe extern "C" fn(*mut c_void) -> OSStatus,
+    invalidate: unsafe extern "C" fn(*mut c_void),
+    block: unsafe extern "C" fn(
+        CFAllocatorRef,
+        *mut c_void,
+        usize,
+        CFAllocatorRef,
+        *const c_void,
+        usize,
+        usize,
+        u32,
+        *mut *mut c_void,
+    ) -> OSStatus,
+    sample: unsafe extern "C" fn(
+        CFAllocatorRef,
+        *mut c_void,
+        *const c_void,
+        isize,
+        isize,
+        *const c_void,
+        isize,
+        *const usize,
+        *mut *mut c_void,
+    ) -> OSStatus,
+    plane_base: unsafe extern "C" fn(*mut c_void, usize) -> *mut u8,
+    plane_stride: unsafe extern "C" fn(*mut c_void, usize) -> usize,
+    plane_height: unsafe extern "C" fn(*mut c_void, usize) -> usize,
+    lock: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+    unlock: unsafe extern "C" fn(*mut c_void, u64) -> i32,
+    allocator_null: CFAllocatorRef,
+    pixel_format: CFStringRef,
+}
+// SAFETY: process wide constants and functions.
+unsafe impl Send for DecodeApi {}
+unsafe impl Sync for DecodeApi {}
+
+#[repr(C)]
+struct OutputRecord {
+    callback:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, *mut c_void, CMTime, CMTime),
+    refcon: *mut c_void,
+}
+
+/// `'420v'`: NV12, video range.
+const PIXEL_NV12: u32 = 0x3432_3076;
+
+#[allow(clippy::missing_transmute_annotations)]
+fn decode_api() -> Option<&'static DecodeApi> {
+    static API: OnceLock<Option<DecodeApi>> = OnceLock::new();
+    API.get_or_init(|| {
+        let vt = open(c"/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox");
+        let cm = open(c"/System/Library/Frameworks/CoreMedia.framework/CoreMedia");
+        let cv = open(c"/System/Library/Frameworks/CoreVideo.framework/CoreVideo");
+        let cf = open(c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation");
+        macro_rules! function {
+            ($lib:expr, $name:literal) => {
+                // SAFETY: each symbol has the C signature of the field it
+                // fills, as declared in the framework headers.
+                unsafe { std::mem::transmute::<*mut c_void, _>(symbol($lib, $name)?) }
+            };
+        }
+        Some(DecodeApi {
+            format_from_sets: function!(cm, c"CMVideoFormatDescriptionCreateFromH264ParameterSets"),
+            create: function!(vt, c"VTDecompressionSessionCreate"),
+            decode: function!(vt, c"VTDecompressionSessionDecodeFrame"),
+            wait: function!(vt, c"VTDecompressionSessionWaitForAsynchronousFrames"),
+            invalidate: function!(vt, c"VTDecompressionSessionInvalidate"),
+            block: function!(cm, c"CMBlockBufferCreateWithMemoryBlock"),
+            sample: function!(cm, c"CMSampleBufferCreateReady"),
+            plane_base: function!(cv, c"CVPixelBufferGetBaseAddressOfPlane"),
+            plane_stride: function!(cv, c"CVPixelBufferGetBytesPerRowOfPlane"),
+            plane_height: function!(cv, c"CVPixelBufferGetHeightOfPlane"),
+            lock: function!(cv, c"CVPixelBufferLockBaseAddress"),
+            unlock: function!(cv, c"CVPixelBufferUnlockBaseAddress"),
+            allocator_null: constant(cf, c"kCFAllocatorNull")?,
+            pixel_format: constant(cv, c"kCVPixelBufferPixelFormatTypeKey")?,
+        })
+    })
+    .as_ref()
+}
+
+/// The NAL units of an Annex B picture.
+fn units(data: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut start = None;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            if let Some(s) = start {
+                let mut end = i;
+                while end > s && data[end - 1] == 0 {
+                    end -= 1;
+                }
+                out.push(&data[s..end]);
+            }
+            i += 3;
+            start = Some(i);
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(s) = start
+        && s < data.len()
+    {
+        out.push(&data[s..]);
+    }
+    out
+}
+
+impl VtDecoder {
+    pub fn new() -> Result<Self> {
+        decode_api().context("VideoToolbox decoding is not available")?;
+        Ok(Self {
+            session: std::ptr::null_mut(),
+            format: std::ptr::null(),
+            sets: Vec::new(),
+            slot: Box::new(Mutex::new(None)),
+        })
+    }
+    fn close(&mut self) {
+        let Some(api) = decode_api() else { return };
+        // SAFETY: objects this decoder made, released once.
+        unsafe {
+            if !self.session.is_null() {
+                (api.invalidate)(self.session);
+                CFRelease(self.session);
+                self.session = std::ptr::null_mut();
+            }
+            if !self.format.is_null() {
+                CFRelease(self.format);
+                self.format = std::ptr::null();
+            }
+        }
+    }
+    /// A session for these parameter sets, made again when they change.
+    fn open(&mut self, sets: Vec<Vec<u8>>) -> Result<()> {
+        let api = decode_api().context("VideoToolbox decoding is not available")?;
+        self.close();
+        let pointers: Vec<*const u8> = sets.iter().map(|s| s.as_ptr()).collect();
+        let sizes: Vec<usize> = sets.iter().map(|s| s.len()).collect();
+        let mut format: *const c_void = std::ptr::null();
+        // SAFETY: arrays of `sets.len()` parameter sets that outlive the call.
+        let status = unsafe {
+            (api.format_from_sets)(
+                std::ptr::null(),
+                sets.len(),
+                pointers.as_ptr(),
+                sizes.as_ptr(),
+                4,
+                &mut format,
+            )
+        };
+        ensure!(
+            status == 0 && !format.is_null(),
+            "Bad parameter sets ({status})"
+        );
+        self.format = format;
+        let nv12 = int(PIXEL_NV12 as i32);
+        let attributes = dictionary(&[(api.pixel_format, nv12.0)]);
+        let record = OutputRecord {
+            callback: decoded,
+            refcon: (&*self.slot as *const Mutex<Option<Planes>>)
+                .cast_mut()
+                .cast(),
+        };
+        let mut session: *mut c_void = std::ptr::null_mut();
+        // SAFETY: as the header declares; the refcon is the boxed slot,
+        // which outlives the session (see `close`).
+        let status = unsafe {
+            (api.create)(
+                std::ptr::null(),
+                format,
+                std::ptr::null(),
+                attributes.0,
+                &record,
+                &mut session,
+            )
+        };
+        ensure!(
+            status == 0 && !session.is_null(),
+            "No H.264 decoder ({status})"
+        );
+        self.session = session;
+        self.sets = sets;
+        Ok(())
+    }
+    /// Decode one Annex B picture, and give its planes.
+    pub fn decode(&mut self, picture: &[u8]) -> Result<Option<Planes>> {
+        let api = decode_api().context("VideoToolbox decoding is not available")?;
+        let units = units(picture);
+        let sets: Vec<Vec<u8>> = units
+            .iter()
+            .filter(|u| matches!(u.first().map(|b| b & 31), Some(7 | 8)))
+            .map(|u| u.to_vec())
+            .collect();
+        if !sets.is_empty() && sets != self.sets {
+            self.open(sets)?;
+        }
+        ensure!(!self.session.is_null(), "No keyframe yet");
+        let mut avcc = Vec::with_capacity(picture.len() + 16);
+        for unit in units
+            .iter()
+            .filter(|u| !matches!(u.first().map(|b| b & 31), Some(7..=9)))
+        {
+            avcc.extend_from_slice(&(unit.len() as u32).to_be_bytes());
+            avcc.extend_from_slice(unit);
+        }
+        ensure!(!avcc.is_empty(), "A picture with no slices");
+        let mut block: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `avcc` outlives the synchronous decode below, and the null
+        // allocator tells CoreMedia not to free it.
+        let status = unsafe {
+            (api.block)(
+                std::ptr::null(),
+                avcc.as_mut_ptr().cast(),
+                avcc.len(),
+                api.allocator_null,
+                std::ptr::null(),
+                0,
+                avcc.len(),
+                0,
+                &mut block,
+            )
+        };
+        ensure!(
+            status == 0 && !block.is_null(),
+            "No block buffer ({status})"
+        );
+        let block = Owned(block);
+        let size = avcc.len();
+        let mut sample: *mut c_void = std::ptr::null_mut();
+        // SAFETY: one sample of `size` bytes in a live block and format.
+        let status = unsafe {
+            (api.sample)(
+                std::ptr::null(),
+                block.0 as *mut c_void,
+                self.format,
+                1,
+                0,
+                std::ptr::null(),
+                1,
+                &size,
+                &mut sample,
+            )
+        };
+        ensure!(
+            status == 0 && !sample.is_null(),
+            "No sample buffer ({status})"
+        );
+        let sample = Owned(sample);
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        // SAFETY: a live session and sample; flags 0 decode synchronously.
+        let status = unsafe {
+            (api.decode)(
+                self.session,
+                sample.0 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        ensure!(status == 0, "VideoToolbox could not decode ({status})");
+        // SAFETY: a live session.
+        unsafe { (api.wait)(self.session) };
+        drop(sample);
+        drop(block);
+        Ok(self.slot.lock().unwrap_or_else(|e| e.into_inner()).take())
+    }
+}
+impl Drop for VtDecoder {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// VideoToolbox's decoder callback: copy the planes of the picture out.
+unsafe extern "C" fn decoded(
+    refcon: *mut c_void,
+    _frame: *mut c_void,
+    status: OSStatus,
+    _flags: u32,
+    image: *mut c_void,
+    _time: CMTime,
+    _duration: CMTime,
+) {
+    // SAFETY: the refcon is the decoder's boxed slot (see `open`).
+    let slot = unsafe { &*(refcon as *const Mutex<Option<Planes>>) };
+    let Some(api) = decode_api() else { return };
+    if status != 0 || image.is_null() {
+        return;
+    }
+    // SAFETY: an NV12 image buffer VideoToolbox hands over for this call,
+    // locked while it is read.
+    let planes = unsafe {
+        if (api.lock)(image, 1) != 0 {
+            return;
+        }
+        let (stride, height) = ((api.plane_stride)(image, 0), (api.plane_height)(image, 0));
+        let (cstride, cheight) = ((api.plane_stride)(image, 1), (api.plane_height)(image, 1));
+        let (y, uv) = ((api.plane_base)(image, 0), (api.plane_base)(image, 1));
+        let planes = (!y.is_null() && !uv.is_null()).then(|| {
+            let luma = std::slice::from_raw_parts(y, stride * height).to_vec();
+            let uv = std::slice::from_raw_parts(uv, cstride * cheight);
+            let half = cstride / 2;
+            let (mut u, mut v) = (
+                Vec::with_capacity(half * cheight),
+                Vec::with_capacity(half * cheight),
+            );
+            for row in uv.chunks_exact(cstride) {
+                for pair in row[..half * 2].as_chunks::<2>().0 {
+                    u.push(pair[0]);
+                    v.push(pair[1]);
+                }
+            }
+            Planes {
+                luma,
+                stride,
+                u,
+                v,
+                chroma_stride: half,
+            }
+        });
+        (api.unlock)(image, 1);
+        planes
+    };
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = planes;
+}

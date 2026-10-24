@@ -176,3 +176,17 @@ pub(crate) fn phase(name: &str, at: Duration) {
         eprintln!("SETTLE {name} at {:.1} ms", at.as_secs_f64() * 1000.0);
     }
 }
+
+/// Each message, as it goes, when `BOUNDARY_STATS` is 2.
+pub(crate) fn each(kind: u8, bytes: usize, in_flight: usize, took: Duration) {
+    static EACH: OnceLock<bool> = OnceLock::new();
+    if *EACH.get_or_init(|| std::env::var("BOUNDARY_STATS").is_ok_and(|v| v == "2")) {
+        static START: OnceLock<Instant> = OnceLock::new();
+        let t = START.get_or_init(Instant::now).elapsed();
+        eprintln!(
+            "SEND {:.1} kind {kind} {bytes} bytes, {in_flight} in flight, made in {:.1} ms",
+            t.as_secs_f64() * 1000.0,
+            took.as_secs_f64() * 1000.0
+        );
+    }
+}

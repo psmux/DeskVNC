@@ -24,7 +24,7 @@ pub fn encoders() -> VideoEncoders {
 
 /// Only the software encoder, to compare against the hardware one.
 pub fn software() -> VideoEncoders {
-    Arc::new(|width, height| Shadowed::wrap(Box::new(OpenH264::new(width, height)?), false))
+    Arc::new(|width, height| Shadowed::wrap(Box::new(OpenH264::new(width, height)?), false, false))
 }
 
 fn best(width: u32, height: u32) -> Result<Box<dyn VideoEncoder>> {
@@ -32,13 +32,13 @@ fn best(width: u32, height: u32) -> Result<Box<dyn VideoEncoder>> {
     // BT.601 themselves.
     #[cfg(target_os = "macos")]
     if let Ok(encoder) = crate::vt::VideoToolbox::new(width, height) {
-        return Shadowed::wrap(Box::new(encoder), true);
+        return Shadowed::wrap(Box::new(encoder), true, true);
     }
     #[cfg(windows)]
     if let Ok(encoder) = crate::mf::MediaFoundation::new(width, height) {
-        return Shadowed::wrap(Box::new(encoder), false);
+        return Shadowed::wrap(Box::new(encoder), false, false);
     }
-    Shadowed::wrap(Box::new(OpenH264::new(width, height)?), false)
+    Shadowed::wrap(Box::new(OpenH264::new(width, height)?), false, false)
 }
 
 /// How long to wait for the shadow decoder to catch up when the screen
@@ -72,13 +72,19 @@ struct Mirror {
     lost: bool,
 }
 impl Shadowed {
-    fn wrap(inner: Box<dyn VideoEncoder>, bt709: bool) -> Result<Box<dyn VideoEncoder>> {
+    /// `hardware` decodes with the platform's own decoder where it has one,
+    /// for a hardware encoder's pictures.
+    fn wrap(
+        inner: Box<dyn VideoEncoder>,
+        bt709: bool,
+        hardware: bool,
+    ) -> Result<Box<dyn VideoEncoder>> {
         let (pictures, queue) = mpsc::channel::<Vec<u8>>();
         let state = Arc::new((Mutex::new(Mirror::default()), Condvar::new()));
         let shared = state.clone();
         let thread = std::thread::Builder::new()
             .name("boundary-shadow-decoder".into())
-            .spawn(move || shadow(queue, &shared))?;
+            .spawn(move || shadow(queue, &shared, hardware))?;
         Ok(Box::new(Self {
             inner,
             bt709,
@@ -89,7 +95,13 @@ impl Shadowed {
         }))
     }
 }
-fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
+fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar), hardware: bool) {
+    // VideoToolbox decodes in hardware where it encoded, and keeps up at 60
+    // screens a second where OpenH264 fell behind on the Intel i9.
+    #[cfg(target_os = "macos")]
+    let mut hardware = hardware.then(|| crate::vt::VtDecoder::new().ok()).flatten();
+    #[cfg(not(target_os = "macos"))]
+    let _ = hardware;
     let mut decoder = openh264::decoder::Decoder::new().ok();
     let mut waiting = std::collections::VecDeque::new();
     loop {
@@ -110,27 +122,23 @@ fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
         // slices handed over at once.
         let mut luma = None;
         let mut failed = decoder.is_none();
-        if let Some(decoder) = decoder.as_mut() {
-            for nal in openh264::nal_units(&picture) {
-                match decoder.decode(nal) {
-                    Ok(Some(_)) if !newest => {}
-                    Ok(Some(yuv)) => {
-                        use openh264::formats::YUVSource;
-                        let (_, height) = yuv.dimensions();
-                        let (stride, chroma, _) = yuv.strides();
-                        let half = height.div_ceil(2);
-                        luma = Some((
-                            yuv.y()[..stride * height].to_vec(),
-                            stride,
-                            yuv.u()[..chroma * half].to_vec(),
-                            yuv.v()[..chroma * half].to_vec(),
-                            chroma,
-                        ));
-                    }
-                    Ok(None) => {}
-                    Err(_) => failed = true,
+        #[cfg(target_os = "macos")]
+        if let Some(vt) = hardware.as_mut() {
+            match vt.decode(&picture) {
+                Ok(planes) => {
+                    failed = false;
+                    luma = planes
+                        .filter(|_| newest)
+                        .map(|p| (p.luma, p.stride, p.u, p.v, p.chroma_stride));
                 }
+                Err(_) => failed = true,
             }
+        } else if let Some(decoder) = decoder.as_mut() {
+            failed |= decode_software(decoder, &picture, newest, &mut luma);
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(decoder) = decoder.as_mut() {
+            failed |= decode_software(decoder, &picture, newest, &mut luma);
         }
         let keyframe = openh264::nal_units(&picture).any(|nal| {
             nal.get(if nal[2] == 1 { 3 } else { 4 })
@@ -155,6 +163,40 @@ fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
         mirror.decoded += 1;
         ready.notify_all();
     }
+}
+/// Decode a picture with OpenH264, a NAL unit at a time, keeping its planes
+/// when it is the newest. True when it failed.
+#[allow(clippy::type_complexity)]
+fn decode_software(
+    decoder: &mut openh264::decoder::Decoder,
+    picture: &[u8],
+    newest: bool,
+    luma: &mut Option<(Vec<u8>, usize, Vec<u8>, Vec<u8>, usize)>,
+) -> bool {
+    let mut failed = false;
+    // A NAL unit at a time: OpenH264 refuses a picture of several slices
+    // handed over at once.
+    for nal in openh264::nal_units(picture) {
+        match decoder.decode(nal) {
+            Ok(Some(_)) if !newest => {}
+            Ok(Some(yuv)) => {
+                use openh264::formats::YUVSource;
+                let (_, height) = yuv.dimensions();
+                let (stride, chroma, _) = yuv.strides();
+                let half = height.div_ceil(2);
+                *luma = Some((
+                    yuv.y()[..stride * height].to_vec(),
+                    stride,
+                    yuv.u()[..chroma * half].to_vec(),
+                    yuv.v()[..chroma * half].to_vec(),
+                    chroma,
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => failed = true,
+        }
+    }
+    failed
 }
 impl Drop for Shadowed {
     fn drop(&mut self) {
@@ -405,6 +447,39 @@ mod tests {
                 assert!(
                     sizes.iter().filter(|s| **s > 0).count() >= 7,
                     "{} skipped too much: {sizes:?}",
+                    encoder.name()
+                );
+                // The host's own decoded copy keeps up, and is the last
+                // screen: nearer it than the one before.
+                let shown = encoder
+                    .shown()
+                    .unwrap_or_else(|| panic!("{} has no copy", encoder.name()));
+                let (w, h) = (width as usize, height as usize);
+                let off = |n: u32| {
+                    let frame = screen(width, height, n * 6);
+                    let (kr, kg, kb) = if shown.bt709 {
+                        (47, 157, 16)
+                    } else {
+                        (66, 129, 25)
+                    };
+                    let mut off = 0u64;
+                    for y in 0..h {
+                        for x in 0..w {
+                            let p = &frame.rgba[(y * w + x) * 4..];
+                            let luma =
+                                ((kr * p[0] as u32 + kg * p[1] as u32 + kb * p[2] as u32 + 128)
+                                    >> 8)
+                                    + 16;
+                            off += (luma as i32 - shown.luma[y * shown.stride + x] as i32)
+                                .unsigned_abs() as u64;
+                        }
+                    }
+                    off / (w * h) as u64
+                };
+                let (now, before) = (off(9), off(8));
+                assert!(
+                    now * 2 < before,
+                    "{}: {now} against {before}",
                     encoder.name()
                 );
                 // A keyframe on demand, as when video starts again.

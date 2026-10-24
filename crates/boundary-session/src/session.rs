@@ -1445,6 +1445,7 @@ async fn send_updates(
         .context("The helper stopped taking screens")??;
         crate::stats::sent(writing.elapsed());
         crate::stats::written();
+        crate::stats::each(update[0], update.len(), in_flight.len(), began.elapsed());
         in_flight.push_back((seq, update.len() as u64));
     }
 }
