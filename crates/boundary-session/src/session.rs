@@ -1358,12 +1358,13 @@ impl Coder {
         // then stays still, tiles serve better.
         let cut =
             !video.fresh && video.typical > 0 && size > (video.typical * CUT_TIMES).max(CUT_BYTES);
-        if !cut {
-            video.typical = if video.typical == 0 {
-                size
-            } else {
-                (video.typical * 7 + size) / 8
-            };
+        // A keyframe starts the count again: the pictures after one are
+        // large while the encoder finds its rate, and counted as cuts they
+        // dropped each other and started over from a keyframe every time.
+        if video.fresh || video.typical == 0 {
+            video.typical = size;
+        } else if !cut {
+            video.typical = (video.typical * 7 + size) / 8;
         }
         let fresh = std::mem::replace(&mut video.fresh, false);
         Ok(Some(Unit {
