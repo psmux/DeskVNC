@@ -64,10 +64,12 @@ pub(crate) enum Screen {
 }
 impl Screen {
     /// The display `id` (a RandR output on X11; on Wayland the person or a
-    /// saved permission picks the screen in the portal).
-    pub fn open(id: u32) -> Result<Self> {
+    /// saved permission picks the screen in the portal). Without
+    /// `accelerated`, X11 is read whole over the socket every time, as xcap
+    /// did, for timing the two against each other.
+    pub fn open(id: u32, accelerated: bool) -> Result<Self> {
         match kind() {
-            Kind::X11 => Ok(Self::X11(Box::new(x11::Screen::open(id)?))),
+            Kind::X11 => Ok(Self::X11(Box::new(x11::Screen::open(id, accelerated)?))),
             Kind::Wayland => match portal::Screen::open() {
                 Ok(screen) => Ok(Self::Portal(screen)),
                 Err(e) => bail!(

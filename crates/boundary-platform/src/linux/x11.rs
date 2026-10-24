@@ -21,8 +21,6 @@ use x11rb::rust_connection::RustConnection;
 /// With damage, a whole screen is still read this often, for the rare
 /// driver that draws without reporting it.
 const RECHECK: Duration = Duration::from_secs(2);
-/// More damaged rectangles than this are sent on as their bounding box.
-const MAX_RECTS: usize = 128;
 
 /// Monitors, as (RandR output, name with size).
 pub(crate) fn displays() -> Result<Vec<(u32, String)>> {
@@ -147,7 +145,7 @@ pub(crate) struct Screen {
     checked: Instant,
 }
 impl Screen {
-    pub fn open(id: u32) -> Result<Self> {
+    pub fn open(id: u32, accelerated: bool) -> Result<Self> {
         let (conn, screen) = RustConnection::connect(None).context("No X display to share")?;
         let setup = conn.setup();
         let root = setup.roots[screen].root;
@@ -188,10 +186,12 @@ impl Screen {
             first: true,
             checked: Instant::now(),
         };
-        if this.conn.shm_query_version()?.reply().is_ok() {
-            this.shm = Shm::new(&this.conn, this.rgba.len()).ok();
+        if accelerated {
+            if this.conn.shm_query_version()?.reply().is_ok() {
+                this.shm = Shm::new(&this.conn, this.rgba.len()).ok();
+            }
+            this.damage = this.watch().ok();
         }
-        this.damage = this.watch().ok();
         Ok(this)
     }
     fn watch(&self) -> Result<Damage> {
@@ -265,11 +265,7 @@ impl Screen {
                 if !changed {
                     return Ok(None);
                 }
-                Some(if rects.len() > MAX_RECTS {
-                    vec![bounds]
-                } else {
-                    rects
-                })
+                Some(rects)
             }
             _ => {
                 let changed = self.read(whole)?;

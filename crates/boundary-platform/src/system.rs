@@ -373,3 +373,11 @@ pub fn run_service(body: fn(&'static AtomicBool)) -> Result<()> {
     }
     Ok(())
 }
+
+/// This process runs in a remote desktop session, which has no display that
+/// Desktop Duplication can show.
+pub(crate) fn remote_session() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    // SAFETY: no pointers.
+    unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
+}

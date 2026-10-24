@@ -41,7 +41,21 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Services",
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+# Desktop Duplication and the video processor that shrinks its pictures, in
+# the version xcap already builds.
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+] }
+
+# CPU time in the capture_time example.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-graphics = "0.3.2"

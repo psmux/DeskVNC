@@ -4,6 +4,9 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 #[cfg(not(target_os = "linux"))]
 use xcap::Monitor;
 
+mod damage;
+#[cfg(windows)]
+mod dxgi;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -176,6 +179,32 @@ fn capture_pixels(monitor: &Monitor) -> Result<(u32, u32, Vec<u8>)> {
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1200;
 
+/// The size a `width` by `height` screen is sent at: itself if it fits in
+/// `max`, otherwise shrunk to fit with its shape kept.
+fn fit(width: u32, height: u32, max: (u32, u32)) -> (u32, u32) {
+    if width <= max.0 && height <= max.1 {
+        return (width, height);
+    }
+    let scale = (max.0 as f64 / width as f64).min(max.1 as f64 / height as f64);
+    (
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
+    )
+}
+
+/// How long a Windows capture waits for the desktop to be drawn before it
+/// says nothing changed, as the Mac stream does.
+#[cfg(windows)]
+const DUPLICATION_WAIT_MS: u32 = 8;
+/// How long the first picture from a new duplication may take.
+#[cfg(windows)]
+const DUPLICATION_FIRST_MS: u32 = 100;
+/// How often to try Desktop Duplication again where it failed to start, as
+/// in a remote desktop session, where it never will, or on the secure
+/// desktop, where it will once the desktop switches back.
+#[cfg(windows)]
+const DUPLICATION_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// One display's screen, captured and shrunk to the size it is sent at.
 ///
 /// Opening one does not check for permission, which is [`open`]'s job: on a
@@ -191,13 +220,40 @@ pub struct Capturer {
     /// A ScreenCaptureKit stream, where one could be started.
     #[cfg(target_os = "macos")]
     stream: Option<sck::Stream>,
+    /// Desktop Duplication, once it has started on the capturing thread.
+    #[cfg(windows)]
+    duplication: Option<dxgi::Duplication>,
+    /// When starting Desktop Duplication last failed.
+    #[cfg(windows)]
+    retry: Option<std::time::Instant>,
+    /// Why Desktop Duplication last stopped or would not start.
+    #[cfg(windows)]
+    trouble: Option<String>,
+    /// Whether to try a stream or a duplication at all.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    accelerated: bool,
+    /// What changed in the last screen handed over, where the backend said.
+    damage: Option<Vec<Rect>>,
     /// The last screen, for a caller that wants one whether or not it changed.
     last: Option<Frame>,
-    /// What changed in `last`, where the system said.
-    damage: Option<Vec<Rect>>,
+    /// The largest screen handed over; larger ones are shrunk to fit.
+    max: (u32, u32),
 }
 impl Capturer {
     pub fn new(id: u32) -> Result<Self> {
+        Self::with(id, true, (MAX_WIDTH, MAX_HEIGHT))
+    }
+    /// A capturer that asks for a whole picture on every call, as before
+    /// there were streams, for timing the two against each other.
+    pub fn polling(id: u32) -> Result<Self> {
+        Self::with(id, false, (MAX_WIDTH, MAX_HEIGHT))
+    }
+    /// A capturer that shrinks screens to fit `max` rather than the size
+    /// they are sent at, so shrinking can be timed on a screen that fits.
+    pub fn sized(id: u32, accelerated: bool, max: (u32, u32)) -> Result<Self> {
+        Self::with(id, accelerated, max)
+    }
+    fn with(id: u32, accelerated: bool, max: (u32, u32)) -> Result<Self> {
         dpi_aware();
         #[cfg(not(target_os = "linux"))]
         let monitor = Monitor::all()?
@@ -206,24 +262,35 @@ impl Capturer {
             .context("The selected display is no longer connected")?;
         Ok(Self {
             #[cfg(target_os = "macos")]
-            stream: sck::Stream::open(monitor.id()?, (MAX_WIDTH, MAX_HEIGHT)).ok(),
+            stream: accelerated
+                .then(|| sck::Stream::open(id, max).ok())
+                .flatten(),
+            max,
+            #[cfg(windows)]
+            duplication: None,
+            #[cfg(windows)]
+            retry: None,
+            #[cfg(windows)]
+            trouble: None,
+            accelerated,
             #[cfg(not(target_os = "linux"))]
             monitor,
             #[cfg(target_os = "linux")]
-            linux: linux::Screen::open(id)?,
+            linux: linux::Screen::open(id, accelerated)?,
             resizer: fast_image_resize::Resizer::new(),
-            last: None,
             damage: None,
+            last: None,
         })
     }
-    /// Whether screens come from a stream that says when they change.
+    /// Whether screens come from a ScreenCaptureKit stream or Desktop
+    /// Duplication, which hand over only changed screens.
     pub fn streaming(&self) -> bool {
         #[cfg(target_os = "macos")]
         return self.stream.is_some();
-        #[cfg(target_os = "linux")]
-        return true;
         #[cfg(windows)]
-        false
+        return self.duplication.is_some();
+        #[cfg(target_os = "linux")]
+        true
     }
     /// How screens are captured, for logs and measurements.
     pub fn backend(&self) -> &'static str {
@@ -236,22 +303,63 @@ impl Capturer {
             "pictures"
         }
     }
+    /// The parts of the last screen [`Self::capture_changed`] handed over
+    /// that changed since the one before, in that screen's pixels. `None`
+    /// when the backend did not say, and the screens must be compared.
+    pub fn capture_damage(&self) -> Option<Vec<Rect>> {
+        self.damage.clone()
+    }
+    /// Why screens are not streamed, where that is known.
+    pub fn trouble(&self) -> Option<String> {
+        #[cfg(windows)]
+        return self.trouble.clone();
+        #[cfg(not(windows))]
+        None
+    }
     /// The screen, changed or not.
     pub fn capture(&mut self) -> Result<Frame> {
         match self.capture_changed()? {
             Some(frame) => Ok(frame),
-            None => self.last.clone().context("No screen yet"),
+            None => self.previous().context("No screen yet"),
         }
     }
-    /// What changed in the screen `capture_changed` last returned, in its
-    /// pixels, where the system said. `None` when it did not, or when the
-    /// whole screen may have changed.
-    pub fn damage(&self) -> Option<&[Rect]> {
-        self.damage.as_deref()
+    /// The last screen handed over.
+    fn previous(&self) -> Option<Frame> {
+        #[cfg(windows)]
+        if self.last.is_none() {
+            return self.duplication.as_ref().and_then(|d| d.picture()).cloned();
+        }
+        self.last.clone()
     }
     /// The screen if it changed since the last call.
     pub fn capture_changed(&mut self) -> Result<Option<Frame>> {
         self.damage = None;
+        #[cfg(windows)]
+        if let Some(changed) = self.duplicated() {
+            let Some((frame, damage)) = changed else {
+                self.damage = Some(Vec::new());
+                return Ok(None);
+            };
+            if frame.width > self.max.0 || frame.height > self.max.1 {
+                // The GPU could not shrink it.
+                let from = (frame.width, frame.height);
+                let frame = self.shrink(frame)?;
+                let to = (frame.width, frame.height);
+                self.damage = Some(damage::tidy(
+                    damage.into_iter().map(|r| damage::scale(r, from, to)),
+                    to.0,
+                    to.1,
+                ));
+                self.last = Some(frame.clone());
+                return Ok(Some(frame));
+            }
+            // The duplication keeps the picture itself. A second copy of a
+            // 1920 by 1080 screen took 1.6 ms of an i7-8750H, a third of
+            // the whole capture, for a picture that is rarely asked for.
+            self.damage = Some(damage);
+            self.last = None;
+            return Ok(Some(frame));
+        }
         #[cfg(target_os = "macos")]
         if let Some(stream) = &self.stream {
             match stream.next() {
@@ -268,47 +376,115 @@ impl Capturer {
         #[cfg(target_os = "linux")]
         {
             let Some(raw) = self.linux.next()? else {
+                self.damage = Some(Vec::new());
                 return Ok(None);
             };
-            let (frame, scale) = self.fit(raw.width, raw.height, raw.rgba)?;
+            let from = (raw.width, raw.height);
+            let frame = self.shrink(Frame {
+                width: raw.width,
+                height: raw.height,
+                rgba: raw.rgba,
+            })?;
+            let to = (frame.width, frame.height);
             self.damage = raw.damage.map(|rects| {
-                rects
-                    .iter()
-                    .map(|r| scaled(*r, scale, frame.width, frame.height))
-                    .collect()
+                damage::tidy(
+                    rects.into_iter().map(|r| damage::scale(r, from, to)),
+                    to.0,
+                    to.1,
+                )
             });
             self.last = Some(frame.clone());
             Ok(Some(frame))
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let (width, height, rgba) = capture_pixels(&self.monitor)?;
-            let frame = self.fit(width, height, rgba)?.0;
+            let frame = self.grab()?;
             self.last = Some(frame.clone());
             Ok(Some(frame))
         }
     }
-    /// The screen at no more than the size it is sent at, and how much it
-    /// was shrunk.
-    fn fit(&mut self, width: u32, height: u32, rgba: Vec<u8>) -> Result<(Frame, f64)> {
-        if width <= MAX_WIDTH && height <= MAX_HEIGHT {
-            return Ok((
-                Frame {
-                    width,
-                    height,
-                    rgba,
-                },
-                1.0,
-            ));
+    /// A new screen from Desktop Duplication: `None` to capture another
+    /// way, `Some(None)` when the desktop was not drawn, and otherwise the
+    /// screen with what changed in it.
+    #[cfg(windows)]
+    fn duplicated(&mut self) -> Option<Option<(Frame, Vec<Rect>)>> {
+        if !self.accelerated {
+            return None;
+        }
+        if self.duplication.is_none() {
+            if self.retry.is_some_and(|t| t.elapsed() < DUPLICATION_RETRY) {
+                return None;
+            }
+            self.retry = Some(std::time::Instant::now());
+            // A remote desktop session has no display to duplicate.
+            if system::remote_session() {
+                self.trouble = Some("A remote desktop session".into());
+                return None;
+            }
+            let id = self.monitor.id().ok()?;
+            match dxgi::Duplication::open(id, self.max) {
+                Ok(duplication) => self.duplication = Some(duplication),
+                Err(e) => {
+                    self.trouble = Some(format!("{e:#}"));
+                    return None;
+                }
+            }
+        }
+        let duplication = self.duplication.as_mut()?;
+        let fresh = duplication.fresh();
+        let wait = if fresh {
+            DUPLICATION_FIRST_MS
+        } else {
+            DUPLICATION_WAIT_MS
+        };
+        match duplication.next(wait) {
+            Ok(Some((frame, damage))) => Some(Some((frame.clone(), damage))),
+            // Nothing yet from a new duplication, and nothing to repeat.
+            Ok(None) if fresh && self.last.is_none() => None,
+            Ok(None) => Some(None),
+            // The desktop switched or changed size: open a new duplication
+            // at once, on whatever desktop has the input by then, and take
+            // this picture the old way.
+            Err(dxgi::Lost::Access) => {
+                self.duplication = None;
+                self.retry = None;
+                self.trouble = Some("The desktop changed".into());
+                None
+            }
+            Err(dxgi::Lost::Other(e)) => {
+                self.duplication = None;
+                self.trouble = Some(format!("{e:#}"));
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn grab(&mut self) -> Result<Frame> {
+        let (width, height, rgba) = capture_pixels(&self.monitor)?;
+        self.shrink(Frame {
+            width,
+            height,
+            rgba,
+        })
+    }
+    /// The screen at no more than the size it is sent at.
+    fn shrink(&mut self, frame: Frame) -> Result<Frame> {
+        let Frame {
+            width,
+            height,
+            rgba,
+        } = frame;
+        let (w, h) = fit(width, height, self.max);
+        if (w, h) == (width, height) {
+            return Ok(Frame {
+                width,
+                height,
+                rgba,
+            });
         }
         // A 5K iMac screen shrunk with the image crate took 140 ms of a
         // 2020 i5, which by itself held Boundary to about six screens a
         // second. The same filter with SIMD takes a few milliseconds.
-        let scale = (MAX_WIDTH as f64 / width as f64).min(MAX_HEIGHT as f64 / height as f64);
-        let (w, h) = (
-            ((width as f64 * scale).round() as u32).max(1),
-            ((height as f64 * scale).round() as u32).max(1),
-        );
         use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, images::Image};
         let src = Image::from_vec_u8(width, height, rgba, PixelType::U8x4)?;
         let mut dst = Image::new(w, h, PixelType::U8x4);
@@ -319,34 +495,11 @@ impl Capturer {
                 .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
                 .use_alpha(false),
         )?;
-        Ok((
-            Frame {
-                width: w,
-                height: h,
-                rgba: dst.into_vec(),
-            },
-            scale,
-        ))
-    }
-}
-
-/// A changed area of a screen, in the pixels of the same screen shrunk by
-/// `scale`: rounded outward, and a pixel wider each way, since the filter
-/// blends each pixel with its neighbours.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn scaled(r: Rect, scale: f64, width: u32, height: u32) -> Rect {
-    if scale >= 1.0 {
-        return r;
-    }
-    let x0 = ((r.x as f64 * scale).floor() as u32).saturating_sub(1);
-    let y0 = ((r.y as f64 * scale).floor() as u32).saturating_sub(1);
-    let x1 = (((r.x + r.width) as f64 * scale).ceil() as u32 + 1).min(width);
-    let y1 = (((r.y + r.height) as f64 * scale).ceil() as u32 + 1).min(height);
-    Rect {
-        x: x0,
-        y: y0,
-        width: x1.saturating_sub(x0),
-        height: y1.saturating_sub(y0),
+        Ok(Frame {
+            width: w,
+            height: h,
+            rgba: dst.into_vec(),
+        })
     }
 }
 
@@ -501,8 +654,8 @@ impl Desktop for NativeDesktop {
         on_input_desktop();
         self.screen.capture_changed()
     }
-    fn damage(&self) -> Option<Vec<Rect>> {
-        self.screen.damage().map(<[Rect]>::to_vec)
+    fn capture_damage(&self) -> Option<Vec<Rect>> {
+        self.screen.capture_damage()
     }
     fn input(&mut self, input: Input) -> Result<()> {
         input.validate()?;
