@@ -486,7 +486,20 @@ impl Bench {
                 return Ok(());
             }
             if !self.changed(until).await {
-                bail!("the stage never showed {}", scene.name());
+                let shot = std::env::temp_dir().join(format!("bench-never-{}.png", scene.name()));
+                {
+                    let s = self.shared.lock().unwrap();
+                    if let Some(image) =
+                        image::RgbaImage::from_raw(s.fb.width, s.fb.height, s.fb.rgba.clone())
+                    {
+                        let _ = image.save(&shot);
+                    }
+                }
+                bail!(
+                    "the stage never showed {} (what the client had is in {})",
+                    scene.name(),
+                    shot.display()
+                );
             }
         }
     }

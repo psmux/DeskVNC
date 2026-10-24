@@ -2,8 +2,8 @@
 //! own, and this reads that display and types into it, as a person in front
 //! of it would. The bench's pump sees it as one more session.
 //!
-//! The display is read with the same capture code the Boundary host uses, so
-//! each reading costs a capture. The report carries that cost (`grab_ms`)
+//! The display is read whole every time with xcap, so each reading costs a
+//! capture. The report carries that cost (`grab_ms`)
 //! so a reader can take it off the lag.
 use boundary_session::Input;
 use remote_core::{
@@ -14,6 +14,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+fn grab(monitor: &xcap::Monitor) -> anyhow::Result<boundary_session::Frame> {
+    let image = monitor.capture_image()?;
+    Ok(boundary_session::Frame {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
+}
+
 pub fn spawn(events: mpsc::Sender<SessionEvent>) -> SessionHandle {
     let (commands, mut rx) = mpsc::channel::<ClientCommand>(256);
     let cancel = CancellationToken::new();
@@ -22,22 +31,46 @@ pub fn spawn(events: mpsc::Sender<SessionEvent>) -> SessionHandle {
         let fail = |e: anyhow::Error| {
             let _ = events.blocking_send(SessionEvent::Error(format!("{e:#}")));
         };
+        // Input goes in the way the Boundary host puts it in; the picture
+        // comes out through xcap, a plain whole screen read with no damage
+        // tracking, so nothing about how the client draws can hide a change.
         let mut desktop = match boundary_platform::open_primary() {
             Ok(d) => d,
+            Err(e) => return fail(e),
+        };
+        let monitor = match xcap::Monitor::all()
+            .map_err(anyhow::Error::from)
+            .and_then(|all| {
+                all.into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no display"))
+            }) {
+            Ok(m) => m,
             Err(e) => return fail(e),
         };
         let _ = events.blocking_send(SessionEvent::StateChanged(SessionState::Connected));
         let mut size = (0u32, 0u32);
         let mut grabs: Vec<f32> = Vec::new();
         let mut last_stats = Instant::now();
+        let mut last: Vec<u8> = Vec::new();
         while !token.is_cancelled() {
             while let Ok(command) = rx.try_recv() {
                 let input = match command {
-                    ClientCommand::Pointer { x, y, .. } if size.0 > 1 && size.1 > 1 => {
-                        Some(Input::Move {
-                            x: x as f32 / (size.0 - 1) as f32,
-                            y: y as f32 / (size.1 - 1) as f32,
-                        })
+                    // The pointer moves with xdotool, as a hand on a mouse
+                    // would: FreeRDP's X11 client forwards a motion only when
+                    // the next one arrives, and ignored XTest's moves
+                    // outright, so the move is followed by a one pixel nudge
+                    // that releases it.
+                    ClientCommand::Pointer { x, y, .. } => {
+                        let (x, y) = (x.to_string(), (y + 1).to_string());
+                        let moved = std::process::Command::new("xdotool")
+                            .args(["mousemove", &x, &y, "mousemove", "--sync"])
+                            .args([&x, &(y.parse::<u32>().unwrap_or(0) - 1).to_string()])
+                            .status();
+                        if let Err(e) = moved {
+                            fail(anyhow::anyhow!("xdotool: {e}"));
+                        }
+                        None
                     }
                     ClientCommand::Key {
                         keysym, down: true, ..
@@ -52,8 +85,16 @@ pub fn spawn(events: mpsc::Sender<SessionEvent>) -> SessionHandle {
                 }
             }
             let started = Instant::now();
-            match desktop.capture_changed() {
+            // A whole reading every time, compared here, rather than the
+            // host's damage tracking: another client's drawing is what is
+            // being measured, and a reading must not depend on how it draws.
+            let shot = grab(&monitor).map(|frame| {
+                let changed = frame.rgba != last;
+                changed.then_some(frame)
+            });
+            match shot {
                 Ok(Some(frame)) => {
+                    last.clone_from(&frame.rgba);
                     grabs.push(started.elapsed().as_secs_f32() * 1000.0);
                     if (frame.width, frame.height) != size {
                         size = (frame.width, frame.height);

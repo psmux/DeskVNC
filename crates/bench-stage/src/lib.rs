@@ -512,9 +512,7 @@ impl View<'_> {
         // reads a full range picture as limited range, or the other way
         // round, moves every channel by up to an eighth. No other colour the
         // stage draws has red this low with green and blue this high.
-        let near = |[r, g, b]: [u8; 3]| {
-            r < 60 && g > 140 && b > 110 && g > r + 90 && b > r + 70
-        };
+        let near = |[r, g, b]: [u8; 3]| r < 60 && g > 140 && b > 110 && g > r + 90 && b > r + 70;
         let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
         let mut count = 0u64;
         for y in (0..self.height).step_by(2) {
@@ -560,7 +558,7 @@ impl View<'_> {
             .all(|(dx, dy)| {
                 let (x, y) = map.pixel(ux + dx, uy + dy);
                 let [r, g, b] = self.rgb(x, y);
-                r > 190 && g < 90 && b > 190
+                r > 150 && b > 150 && g < 120 && r > g + 80
             })
     }
 

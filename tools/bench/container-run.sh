@@ -5,8 +5,10 @@
 #
 # Display :10 is xrdp's (xorgxrdp). On it, in turn:
 #   rdp        DeskVNC's RDP client (graphics pipeline 8.1, no H.264 yet)
-#   freerdp    FreeRDP 3 asking for H.264 (/gfx:AVC420), a reference client,
-#              drawing on Xvfb :20 and read off that display
+#   freerdp    FreeRDP 3 with progressive RemoteFX, a reference client,
+#              drawing on Xvfb :20 and read off that display. Its H.264
+#              mode against this xrdp left stale, smeared pictures on
+#              screen, which no bench can read, so it is not used.
 #   x11vnc     x11vnc, with XDamage
 #   x0vnc      TigerVNC's x0vncserver
 #   boundary   the Boundary host
@@ -69,17 +71,19 @@ sleep 2
     --note "${NOTE_LINK}xrdp 0.10.6.1 with x264, xorgxrdp 0.10.5" $COMMON
 
 for proto in $PROTOS; do
+  # One protocol failing must not lose the others' rows.
+  set +e
   case $proto in
     freerdp)
       Xvfb :20 -screen 0 ${SIZE}x24 -ac -nolisten tcp > /tmp/xvfb20.log 2>&1 &
       sleep 1
       DISPLAY=:20 nohup xfreerdp3 /v:127.0.0.1 /u:bench /p:bench /cert:ignore \
-          /size:$SIZE -decorations /gfx:AVC420 /network:lan /audio-mode:2 -clipboard \
+          /size:$SIZE -decorations /gfx:RFX:on,AVC420:off,AVC444:off /network:lan /audio-mode:2 -clipboard \
           > /tmp/xfreerdp.log 2>&1 &
       sleep 4
       focus :20 FreeRDP
       DISPLAY=:20 "$B" run --proto local --as rdp \
-          --client "FreeRDP $(dpkg-query -W -f='${Version}' freerdp3-x11) xfreerdp3 /gfx:AVC420, read off its Xvfb display" \
+          --client "FreeRDP $(dpkg-query -W -f='${Version}' freerdp3-x11) xfreerdp3 /gfx:RFX, read off its Xvfb display with xcap" \
           --label "$PREFIX-freerdp" --watch-procs xrdp,Xorg,xfreerdp \
           --note "${NOTE_LINK}xrdp 0.10.6.1 with x264, reference client" $COMMON
       pkill xfreerdp3 || true
@@ -125,4 +129,5 @@ for proto in $PROTOS; do
       fi
       ;;
   esac
+  set -e
 done
