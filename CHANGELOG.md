@@ -21,6 +21,20 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   you a different one. Pairing or the unattended password still decides who
   gets in. If port 5940 is taken the computer still answers by ID. A bare
   machine ID typed into quick connect now opens it over Boundary too.
+* DeskVNC Support shares a Wayland desktop on Linux. GNOME and KDE ask once
+  through the desktop's sharing prompt; with "Remember this selection" ticked
+  later sessions start without asking, so unattended access works there too.
+  Switch on "Allow Remote Interaction" in GNOME's prompt for the helper to
+  control the computer. Characters the keyboard layout has no key for, such
+  as € on a US layout, cannot be typed on GNOME or KDE.
+
+### Changed
+
+* On an X11 desktop, DeskVNC Support reads the screen through shared memory
+  and only when the X server says something was drawn, so a still screen is
+  not read at all. Pointer to screen lag while a third of the screen kept
+  changing went from 36 ms to 19 ms in our test. The Linux build no longer
+  needs libxcb.
 
 ### Fixed
 
