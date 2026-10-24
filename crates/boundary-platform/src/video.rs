@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// The best encoder this machine has, made for each size of screen.
 pub fn encoders() -> VideoEncoders {
-    Arc::new(|width, height| best(width, height))
+    Arc::new(best)
 }
 
 /// Only the software encoder, to compare against the hardware one.

@@ -477,6 +477,7 @@ async fn main() -> anyhow::Result<()> {
             if video || busy {
                 screen.settled = None;
                 let stopped = Instant::now();
+                let before = session.received();
                 session.input(Input::Key {
                     key: Key::Letter('q'),
                     down: true,
@@ -486,7 +487,7 @@ async fn main() -> anyhow::Result<()> {
                         session.frames.changed().await?;
                         screen.apply(session.updates())?;
                         if let Some(at) = screen.settled {
-                            sharp = Some(at.duration_since(stopped));
+                            sharp = Some((at.duration_since(stopped), session.received() - before));
                             return anyhow::Ok(());
                         }
                     }
@@ -513,7 +514,10 @@ async fn main() -> anyhow::Result<()> {
                 shown as f64 / elapsed,
                 as_video,
                 bits / 1e6,
-                sharp.map_or("n/a".into(), |d| format!("{d:?}")),
+                sharp.map_or("n/a".into(), |(d, bytes)| format!(
+                    "{d:?} ({} KB since)",
+                    bytes / 1024
+                )),
                 screen.decoding / screen.video.max(1) as u32,
             );
             session.stop();

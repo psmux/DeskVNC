@@ -133,7 +133,7 @@ pub(crate) const MOTION_RUN: u32 = 2;
 pub(crate) const QUIET_SHARE: f32 = 0.02;
 /// How long the screen has to stay quiet before video stops and the screen
 /// is sent sharp again.
-pub(crate) const SETTLE: Duration = Duration::from_millis(150);
+pub(crate) const SETTLE: Duration = Duration::from_millis(100);
 
 /// When to send video and when tiles.
 #[derive(Default)]
@@ -212,6 +212,29 @@ pub(crate) fn changed_share(old: &Frame, new: &Frame) -> f32 {
         }
     }
     dirty as f32 / (cols * rows) as f32
+}
+
+/// [`changed_share`] from the rectangles a desktop said changed, without
+/// looking at a pixel: the share of 64 pixel tiles they touch.
+pub(crate) fn damage_share(rects: &[screen::Rect], width: u32, height: u32) -> f32 {
+    const TILE: u32 = 64;
+    let (cols, rows) = (width.div_ceil(TILE), height.div_ceil(TILE));
+    let mut touched = vec![false; (cols * rows) as usize];
+    for r in rects {
+        if r.width == 0 || r.height == 0 || r.x >= width || r.y >= height {
+            continue;
+        }
+        let (x1, y1) = (
+            (r.x + r.width).min(width) - 1,
+            (r.y + r.height).min(height) - 1,
+        );
+        for ty in r.y / TILE..=y1 / TILE {
+            for tx in r.x / TILE..=x1 / TILE {
+                touched[(ty * cols + tx) as usize] = true;
+            }
+        }
+    }
+    touched.iter().filter(|t| **t).count() as f32 / touched.len() as f32
 }
 
 /// Bits a second to aim the encoder at, from what the link carries.
@@ -315,5 +338,19 @@ mod tests {
         assert_eq!(changed_share(&a, &b), 0.0);
         b.rgba[0] = 1;
         assert_eq!(changed_share(&a, &b), 1.0 / 8.0);
+        // The same, from what a desktop said changed.
+        let rect = |x, y, width, height| screen::Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert_eq!(damage_share(&[rect(0, 0, 1, 1)], 256, 128), 1.0 / 8.0);
+        assert_eq!(damage_share(&[rect(60, 0, 10, 70)], 256, 128), 4.0 / 8.0);
+        assert_eq!(
+            damage_share(&[rect(0, 0, 256, 128), rect(0, 0, 9, 9)], 256, 128),
+            1.0
+        );
+        assert_eq!(damage_share(&[rect(300, 0, 5, 5)], 256, 128), 0.0);
     }
 }

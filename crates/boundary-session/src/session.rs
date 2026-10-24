@@ -747,16 +747,21 @@ where
     let (shown_tx, shown_rx) = watch::channel(0u64);
     let (refresh_tx, refresh_rx) = watch::channel(0u64);
     let (encoders_tx, encoders_rx) = oneshot::channel();
+    let changes: Changes = Arc::new(Mutex::new(Some(Vec::new())));
     let cancel = worker.cancel.clone();
-    let capture = tokio::task::spawn_blocking(move || {
-        desktop_loop(
-            desktop,
-            input_rx,
-            permission_rx,
-            screen_tx,
-            encoders_tx,
-            cancel,
-        )
+    let capture = tokio::task::spawn_blocking({
+        let changes = changes.clone();
+        move || {
+            desktop_loop(
+                desktop,
+                input_rx,
+                permission_rx,
+                screen_tx,
+                encoders_tx,
+                changes,
+                cancel,
+            )
+        }
     });
     wire::write(
         &mut send,
@@ -855,9 +860,16 @@ where
         result = serve_tools => result,
         result = async {
             match screens {
-                Screens::Tiles => send_updates(connection, screen_rx, shown_rx, None).await,
+                Screens::Tiles => send_updates(connection, screen_rx, shown_rx, &changes, None).await,
                 Screens::Video => {
-                    send_updates(connection, screen_rx, shown_rx, Some((encoders_rx, refresh_rx))).await
+                    send_updates(
+                        connection,
+                        screen_rx,
+                        shown_rx,
+                        &changes,
+                        Some((encoders_rx, refresh_rx)),
+                    )
+                    .await
                 }
                 _ => send_screens(connection, screen_rx, screens == Screens::Jpeg).await,
             }
@@ -882,6 +894,7 @@ fn desktop_loop<F>(
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Frame>>>,
     encoders: oneshot::Sender<Option<VideoEncoders>>,
+    changes: Changes,
     cancel: CancellationToken,
 ) -> Result<()>
 where
@@ -935,9 +948,15 @@ where
             let started = Instant::now();
             // A still screen is not handed on: sending the same picture
             // again only costs the link.
+            // A backend that says what changed saves comparing whole screens.
             if let Some(frame) = desktop.0.capture_changed()?
-                && last.as_ref().is_none_or(|last| **last != frame)
+                && let damage = desktop.0.capture_damage()
+                && damage.as_ref().map_or_else(
+                    || last.as_ref().is_none_or(|last| **last != frame),
+                    |rects| !rects.is_empty() || last.is_none(),
+                )
             {
+                note_changes(&changes, damage);
                 let frame = Arc::new(frame);
                 last = Some(frame.clone());
                 last_change = Instant::now();
@@ -1033,10 +1052,24 @@ fn window(connection: &Connection) -> u64 {
 /// JPEG quality of the whole screen sent when motion stops, after video
 /// drew over it. Higher than for ordinary tiles: it goes once per stop, and
 /// it is the picture that sits there while the person reads.
-const SETTLED_QUALITY: u8 = 85;
+const SETTLED_QUALITY: u8 = 80;
 
 /// For a helper that decodes video: where the desktop's encoders come from,
 /// once it has started, and the helper's requests for the whole screen.
+/// What changed on the screen since the sender last took a capture, as the
+/// desktop said, or `None` when it did not say and screens must be compared.
+type Changes = Arc<Mutex<Option<Vec<Rect>>>>;
+
+/// Add what the desktop said changed in the screen just captured.
+fn note_changes(changes: &Mutex<Option<Vec<Rect>>>, damage: Option<Vec<Rect>>) {
+    let mut changes = changes.lock().unwrap_or_else(|e| e.into_inner());
+    match (changes.as_mut(), damage) {
+        // Bounded, for a sender that never takes them, as for whole screens.
+        (Some(known), Some(rects)) if known.len() + rects.len() <= 4096 => known.extend(rects),
+        _ => *changes = None,
+    }
+}
+
 type VideoSetup = (
     oneshot::Receiver<Option<VideoEncoders>>,
     watch::Receiver<u64>,
@@ -1066,8 +1099,9 @@ struct Coder {
     last: Option<Arc<Frame>>,
 }
 enum Work {
-    /// A new capture.
-    Capture(Arc<Frame>),
+    /// A new capture, and what the desktop said changed since the last one
+    /// taken, when it said.
+    Capture(Arc<Frame>, Option<Vec<Rect>>),
     /// The whole screen, sharp, as when motion stopped or the helper asked.
     Whole(Arc<Frame>),
 }
@@ -1098,10 +1132,16 @@ impl Coder {
                 self.last = Some(frame.clone());
                 self.tiles(frame, seq, SETTLED_QUALITY)
             }
-            Work::Capture(frame) => {
-                let share = match &self.last {
-                    Some(last) => video::changed_share(last, &frame),
-                    None => 1.0,
+            Work::Capture(frame, damage) => {
+                let share = match (&self.last, damage) {
+                    (Some(last), _) if last.width != frame.width || last.height != frame.height => {
+                        1.0
+                    }
+                    (Some(_), Some(rects)) => {
+                        video::damage_share(&rects, frame.width, frame.height)
+                    }
+                    (Some(last), None) => video::changed_share(last, &frame),
+                    (None, _) => 1.0,
                 };
                 self.last = Some(frame.clone());
                 let choice = match self.encoders {
@@ -1217,6 +1257,7 @@ async fn send_updates(
     connection: &Connection,
     mut screens: watch::Receiver<Option<Arc<Frame>>>,
     mut shown: watch::Receiver<u64>,
+    changes: &Mutex<Option<Vec<Rect>>>,
     video: Option<VideoSetup>,
 ) -> Result<()> {
     let framed = video.is_some();
@@ -1285,7 +1326,12 @@ async fn send_updates(
                     // wait, then take the newest.
                     tokio::time::sleep_until(next_video).await;
                 }
-                Work::Capture(screens.borrow_and_update().clone().context("Missing screen")?)
+                let frame = screens.borrow_and_update().clone().context("Missing screen")?;
+                let damage = changes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(Vec::new());
+                Work::Capture(frame, damage)
             }
             _ = tokio::time::sleep_until(settles.unwrap_or_else(tokio::time::Instant::now)), if settles.is_some() => {
                 match screens.borrow_and_update().clone() {

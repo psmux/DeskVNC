@@ -169,6 +169,8 @@ fn constant(library: *mut c_void, name: &CStr) -> Option<CFStringRef> {
     symbol(library, name).map(|p| unsafe { *(p as *const CFStringRef) })
 }
 
+// Each transmute fills a field whose type is the function's signature.
+#[allow(clippy::missing_transmute_annotations)]
 fn api() -> Option<&'static Api> {
     static API: OnceLock<Option<Api>> = OnceLock::new();
     API.get_or_init(|| {

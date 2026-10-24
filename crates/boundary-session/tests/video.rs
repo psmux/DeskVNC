@@ -136,14 +136,15 @@ fn whole(update: &Update) -> bool {
     }
 }
 
-fn close(a: &Frame, b: &Frame) -> bool {
+/// The mean difference of two screens, per channel.
+fn difference(a: &Frame, b: &Frame) -> u64 {
     let diff: u64 = a
         .rgba
         .iter()
         .zip(&b.rgba)
         .map(|(x, y)| x.abs_diff(*y) as u64)
         .sum();
-    diff / (a.rgba.len() as u64) < 6
+    diff / a.rgba.len() as u64
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -209,10 +210,24 @@ async fn moving_screens_come_as_h264_and_settle_back_to_sharp_tiles() {
             "{:?}",
             settle.0 - stopped
         );
-        let Update::Screen { frame, .. } = settle.1 else {
-            unreachable!()
-        };
-        assert!(close(&frame, &picture(pair.step.load(Ordering::SeqCst))));
+        assert!(matches!(settle.1, Update::Screen { .. }));
+        // What the helper holds in the end is the still screen. A last change
+        // may come as tiles after the sharp one, so it is the last screen.
+        let last = after
+            .iter()
+            .rev()
+            .find_map(|(_, u)| match u {
+                Update::Screen { frame, .. } => Some(frame.clone()),
+                _ => None,
+            })
+            .expect("a screen");
+        // Near the still screen, as JPEG is, and far from one a step earlier.
+        let step = pair.step.load(Ordering::SeqCst);
+        let (now, before) = (
+            difference(&last, &picture(step)),
+            difference(&last, &picture(step - 1)),
+        );
+        assert!(now < 9 && before > now * 2, "{now} {before}");
         pair.helper.stop();
         pair.host.stop();
     })
