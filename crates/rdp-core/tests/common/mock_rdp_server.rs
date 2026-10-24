@@ -64,7 +64,6 @@ use rdp_pdu::update::slowpath::GraphicsUpdate;
 use rdp_pdu::update::{BitmapData, BitmapUpdate, RectExclusive, RectInclusive};
 use rdp_pdu::vc::dvc::{cmd as dvc_cmd, dvc_version, read_channel_id, DvcHeader, DvcPdu};
 use rdp_pdu::vc::egfx::{caps_version, codec_id, pixel_format, Capset, EgfxPdu};
-use rdp_pdu::vc::segment::Segmented;
 use rdp_pdu::vc::static_vc::{channel_flags, ChannelPduHeader};
 use rdp_pdu::x224::{
     self, security_protocol, NegotiationFailure, NegotiationResponse, X224ConnectionConfirm,
@@ -1389,25 +1388,22 @@ impl ChannelScript {
         }
     }
 
-    /// One EGFX message from the client: the envelope, then its commands
-    /// (MS-RDPEGFX 2.2.5.1, 2.2.1.5).
+    /// One EGFX message from the client: its commands, with no envelope
+    /// (MS-RDPEGFX 2.2.1.5). Only the server's messages ride in
+    /// `RDP_SEGMENTED_DATA`; xrdp 0.10 drops the channel when a client wraps
+    /// its own, and FreeRDP never does.
     async fn egfx(
         &mut self,
         message: &[u8],
         stream: &mut TcpStream,
         recorded: &Arc<Mutex<Recorded>>,
     ) -> std::io::Result<()> {
-        // The client sends the literal form, so the mock reads the envelope
-        // rather than decompressing: there is no ZGFX compressor in the tree
-        // and a client to server message is never compressed.
-        let segmented =
-            Segmented::decode(&mut Reader::new(message)).map_err(std::io::Error::other)?;
-        let Segmented::Literal { data, .. } = segmented else {
+        if message.first() == Some(&0xE0) || message.first() == Some(&0xE1) {
             return Err(std::io::Error::other(
-                "the client compressed an EGFX message, which it never should",
+                "the client wrapped an EGFX message in RDP_SEGMENTED_DATA, which only a server does",
             ));
-        };
-        for item in EgfxPdu::iter(data.as_slice()) {
+        }
+        for item in EgfxPdu::iter(message) {
             match item.map_err(std::io::Error::other)? {
                 EgfxPdu::CapsAdvertise { capsets } => {
                     recorded.lock().expect("not poisoned").egfx_advertised =

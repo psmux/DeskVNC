@@ -57,8 +57,16 @@ impl<S: tracing::Subscriber> Layer<S> for Recorder {
 /// paths of every other crate stay as cheap as in the viewer.
 pub fn install() {
     let targets = Targets::new().with_target("rdp_core::channels::egfx", tracing::Level::TRACE);
+    // RUST_LOG, when set, also prints the drivers' own logs, to see why a
+    // connection did not come up.
+    let log = std::env::var("RUST_LOG").ok().map(|_| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(tracing_subscriber::EnvFilter::from_default_env())
+    });
     let _ = tracing_subscriber::registry()
         .with(Recorder.with_filter(targets))
+        .with(log)
         .try_init();
 }
 
