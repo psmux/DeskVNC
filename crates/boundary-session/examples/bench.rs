@@ -9,7 +9,7 @@
 //! ```sh
 //! bench host [--image screen.png] [--bind 10.42.0.9]    # prints INVITATION
 //! bench host --real                                      # the real screen under the square
-//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy]
+//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy] [--video]
 //! bench encode [--image screen.png]                      # time capture side work
 //! ```
 use boundary_session::{Approval, Desktop, Event, Frame, HostOptions, Input, Key, Route};
@@ -65,6 +65,7 @@ struct State {
     x: f32,
     y: f32,
     busy: bool,
+    video: bool,
     tick: u32,
 }
 
@@ -85,6 +86,19 @@ impl Desktop for Synthetic {
         };
         let mut s = self.state.lock().unwrap();
         s.tick = s.tick.wrapping_add(1);
+        if s.video {
+            // The whole screen moves, as a video or a dragged window does:
+            // the picture slides along by a few pixels every capture.
+            let shift = (s.tick * 6) as usize % w as usize;
+            let old = rgba.clone();
+            let stride = w as usize * 4;
+            for y in 0..h as usize {
+                let row = &old[y * stride..(y + 1) * stride];
+                let (a, b) = row.split_at(shift * 4);
+                rgba[y * stride..y * stride + b.len()].copy_from_slice(b);
+                rgba[y * stride + b.len()..(y + 1) * stride].copy_from_slice(a);
+            }
+        }
         if s.busy {
             // A third of the screen changes every capture.
             let shift = s.tick * 37;
@@ -118,6 +132,10 @@ impl Desktop for Synthetic {
                 key: Key::Letter('b'),
                 down: true,
             } => s.busy = true,
+            Input::Key {
+                key: Key::Letter('v'),
+                down: true,
+            } => s.video = true,
             Input::Key {
                 key: Key::Letter('q'),
                 down: true,
@@ -170,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
                         x: 0.5,
                         y: 0.5,
                         busy: false,
+                        video: false,
                         tick: 0,
                     })),
                 }))
@@ -194,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(20);
             let busy = args.iter().any(|a| a == "--busy");
+            let video = args.iter().any(|a| a == "--video");
             let mut session =
                 boundary_session::viewer(args[1].clone(), "Bench".into(), options(&args));
             loop {
@@ -207,11 +227,13 @@ async fn main() -> anyhow::Result<()> {
             let connected = started.elapsed();
             session.frames.changed().await?;
             let first = started.elapsed();
-            if busy {
-                session.input(Input::Key {
-                    key: Key::Letter('b'),
-                    down: true,
-                })?;
+            for (on, letter) in [(busy, 'b'), (video, 'v')] {
+                if on {
+                    session.input(Input::Key {
+                        key: Key::Letter(letter),
+                        down: true,
+                    })?;
+                }
             }
             let mut lags = Vec::new();
             let mut frames = 0u32;
