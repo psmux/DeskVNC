@@ -6,6 +6,7 @@ pub mod nearby;
 mod screen;
 mod session;
 mod shared;
+mod stats;
 pub mod tools;
 pub mod unattended;
 pub mod video;

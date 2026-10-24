@@ -22,5 +22,5 @@ docker run --rm --name deskvnc-bench --cap-add NET_ADMIN \
     -v deskvnc-bench-cargo:/root/.cargo/registry \
     -v "$ROOT/docs/benchmarks/raw:/out" \
     -e BENCH_BUILD="$BUILD" -e PREFIX="$PREFIX" \
-    -e COUNT="${COUNT:-40}" -e SECS="${SECS:-10}" -e PROTOS="${PROTOS:-freerdp x11vnc x0vnc boundary xvnc xvnc-boundary}" -e NETEM="${NETEM:-}" \
+    -e COUNT="${COUNT:-40}" -e SECS="${SECS:-10}" -e PROTOS="${PROTOS:-freerdp x11vnc x0vnc boundary xvnc xvnc-boundary}" -e NETEM="${NETEM:-}" -e BOUNDARY_STATS="${BOUNDARY_STATS:-}" \
     deskvnc-bench /usr/local/bin/container-run.sh

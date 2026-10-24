@@ -883,6 +883,8 @@ where
 /// How soon to capture again while the screen is changing or someone is
 /// using it: sixty screens a second, as often as a display draws.
 const BUSY_CAPTURE: Duration = Duration::from_millis(16);
+/// The same for a desktop that says what changed, which costs little to ask.
+const POLL_CAPTURE: Duration = Duration::from_millis(4);
 /// How soon to capture again on a screen that has stayed still for a while.
 const IDLE_CAPTURE: Duration = Duration::from_millis(100);
 /// How long a still screen stays on the busy pace after it last changed.
@@ -949,13 +951,17 @@ where
             // A still screen is not handed on: sending the same picture
             // again only costs the link.
             // A backend that says what changed saves comparing whole screens.
-            if let Some(frame) = desktop.0.capture_changed()?
-                && let damage = desktop.0.capture_damage()
-                && damage.as_ref().map_or_else(
-                    || last.as_ref().is_none_or(|last| **last != frame),
+            let captured = desktop.0.capture_changed()?;
+            let damage = desktop.0.capture_damage();
+            let told = damage.is_some();
+            let changed = captured.as_ref().is_some_and(|frame| {
+                damage.as_ref().map_or_else(
+                    || last.as_ref().is_none_or(|last| **last != *frame),
                     |rects| !rects.is_empty() || last.is_none(),
                 )
-            {
+            });
+            crate::stats::captured(started.elapsed(), changed);
+            if let Some(frame) = captured.filter(|_| changed) {
                 note_changes(&changes, damage);
                 let frame = Arc::new(frame);
                 last = Some(frame.clone());
@@ -964,10 +970,16 @@ where
                     screens.send_replace(Some(frame));
                 }
             }
-            let pace = if last_change.elapsed() < BUSY_FOR {
-                BUSY_CAPTURE
-            } else {
+            // A desktop that says what changed answers "nothing" for next to
+            // nothing, so while it is busy it is asked four times as often:
+            // a change is then picked up within a few milliseconds of being
+            // drawn, not up to a whole screen later.
+            let pace = if last_change.elapsed() >= BUSY_FOR {
                 IDLE_CAPTURE
+            } else if told {
+                POLL_CAPTURE
+            } else {
+                BUSY_CAPTURE
             };
             capture_at = started + pace;
         }
@@ -1315,9 +1327,11 @@ async fn send_updates(
             if in_flight.is_empty() || (in_flight.len() < most && bytes < window(connection)) {
                 break;
             }
+            let waiting = Instant::now();
             if shown.changed().await.is_err() {
                 return std::future::pending().await;
             }
+            crate::stats::waited(waiting.elapsed());
         }
         let mut working = coder.take().context("Screen encoder lost")?;
         // The desktop says what it encodes with as soon as it starts, which
@@ -1380,19 +1394,28 @@ async fn send_updates(
         let rate = link_rate(connection);
         let mut working = coder.take().context("Screen encoder lost")?;
         let next = seq + 1;
+        let began = tokio::time::Instant::now();
         let (working, update) = tokio::task::spawn_blocking(move || {
             let update = working.work(work, next, rate, Instant::now());
             (working, update)
         })
         .await?;
+        crate::stats::encoded(began.elapsed());
         if working.policy.on_video() {
-            next_video = tokio::time::Instant::now() + Duration::from_secs(1) / rate.1.max(1);
+            // From when this screen was taken, not from when its encoding
+            // ended: counting from the end added the encoding time to every
+            // screen, which held video to 33 to 38 screens a second where
+            // it took 10 to 15 ms. A little under the interval, so that a
+            // capture landing just before the deadline is not put off a
+            // whole screen.
+            next_video = began + Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
         }
         coder = Some(working);
         let Some(update) = update? else {
             continue;
         };
         seq = next;
+        let writing = Instant::now();
         tokio::time::timeout(SCREEN_DEADLINE, async {
             stream
                 .write_all(&(update.len() as u32).to_be_bytes())
@@ -1401,6 +1424,7 @@ async fn send_updates(
         })
         .await
         .context("The helper stopped taking screens")??;
+        crate::stats::sent(writing.elapsed());
         in_flight.push_back((seq, update.len() as u64));
     }
 }

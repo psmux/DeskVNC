@@ -50,7 +50,7 @@ focus() { # display, window name
   echo "could not focus $2 on $1" >&2
 }
 boundary_host() { # display, log
-  as_bench "DISPLAY=$1 XAUTHORITY=/home/bench/.Xauthority nohup $B host --bind 127.0.0.1 --secs 900 > $2 2>&1 &"
+  as_bench "DISPLAY=$1 XAUTHORITY=/home/bench/.Xauthority BOUNDARY_STATS=${BOUNDARY_STATS:-} nohup $B host --bind 127.0.0.1 --secs 900 > $2 2>&1 &"
   for _ in $(seq 60); do
     grep -q '^INVITATION ' "$2" && return 0
     sleep 1
@@ -110,6 +110,8 @@ for proto in $PROTOS; do
       "$B" run --proto boundary --target @/tmp/boundary-host.log --label "$PREFIX-boundary" \
           --watch-procs remote-bench,Xorg --note "${NOTE_LINK}Boundary host on the xrdp display" $COMMON
       pkill -f "remote-bench host" || true
+      # With BOUNDARY_STATS set, keep what the host said about its time.
+      [ -n "${BOUNDARY_STATS:-}" ] && cp /tmp/boundary-host.log "$OUT/$PREFIX-boundary-host.log"
       ;;
     xvnc|xvnc-boundary)
       if ! pgrep -f "Xvnc :1" > /dev/null; then

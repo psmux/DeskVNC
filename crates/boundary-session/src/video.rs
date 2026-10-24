@@ -152,9 +152,18 @@ pub(crate) const MOTION_RUN: u32 = 2;
 /// Below this share a capture counts as quiet: a pointer or a caret.
 pub(crate) const QUIET_SHARE: f32 = 0.02;
 /// How long the screen has to stay quiet before video stops and the screen
-/// is sent sharp again. It is most of the time from the last moving picture
-/// to the sharp one, since only the tiles video drew wrong go then.
+/// is sent sharp again, before the gaps between changes are known. It is
+/// most of the time from the last moving picture to the sharp one, since
+/// only the tiles video drew wrong go then.
 pub(crate) const SETTLE: Duration = Duration::from_millis(60);
+/// Once they are known, the screen has settled when it has been quiet for
+/// this many of the usual gaps between its changes: 40 ms for a screen
+/// changing 60 times a second, 83 for a 30 frame video, which does not count
+/// as stopped between its frames.
+const SETTLE_GAPS: u32 = 5;
+const SETTLE_GAPS_PER: u32 = 2;
+pub(crate) const SETTLE_MIN: Duration = Duration::from_millis(25);
+pub(crate) const SETTLE_MAX: Duration = Duration::from_millis(100);
 /// Motion again this soon after the screen settled was a pause, not a stop,
 /// as between the turns of a scroll wheel: video picks up at once, and waits
 /// longer before it settles again.
@@ -172,6 +181,10 @@ pub(crate) struct Policy {
     settled: Option<Instant>,
     /// How long to wait for this run of video to settle.
     wait: Duration,
+    /// The last capture that changed, while on video, and the usual gap
+    /// between those captures.
+    previous: Option<Instant>,
+    gap: Duration,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Choice {
@@ -191,6 +204,17 @@ impl Policy {
         }
         if share >= QUIET_SHARE {
             self.busy = Some(now);
+            if self.video {
+                if let Some(previous) = self.previous {
+                    let gap = now.saturating_duration_since(previous);
+                    self.gap = if self.gap.is_zero() {
+                        gap
+                    } else {
+                        self.gap * 3 / 4 + gap / 4
+                    };
+                }
+                self.previous = Some(now);
+            }
         }
         if self.video {
             return Choice::Video { start: false };
@@ -202,13 +226,21 @@ impl Policy {
             self.video = true;
             self.busy = Some(now);
             self.wait = if resumed { SETTLE_AGAIN } else { SETTLE };
+            self.previous = Some(now);
+            self.gap = Duration::ZERO;
             return Choice::Video { start: true };
         }
         Choice::Tiles
     }
     /// When the screen will have settled, while on video.
     pub fn settles_at(&self) -> Option<Instant> {
-        let wait = self.wait.max(SETTLE);
+        let wait = if self.wait == SETTLE_AGAIN {
+            SETTLE_AGAIN
+        } else if self.gap.is_zero() {
+            SETTLE
+        } else {
+            (self.gap * SETTLE_GAPS / SETTLE_GAPS_PER).clamp(SETTLE_MIN, SETTLE_MAX)
+        };
         self.video.then(|| self.busy.map(|b| b + wait)).flatten()
     }
     /// Video has stopped, as the helper asked for the whole screen: the next
@@ -354,9 +386,12 @@ pub(crate) fn damage_share(rects: &[screen::Rect], width: u32, height: u32) -> f
 /// second right now. Video takes about half of that, so the tiles of the
 /// settle refresh and the input still find room, and the queue at the
 /// bottleneck stays short: a frame that waits there is lag the helper feels.
+/// On a fast link 8 Mbit/s is the ceiling, near what video used when it ran
+/// at 33 screens a second. More buys a sharper moving picture, and the
+/// screen is sent sharp anyway once it settles.
 pub(crate) fn bitrate(cwnd: u64, rtt: Duration) -> u32 {
     const MIN: u64 = 300_000;
-    const MAX: u64 = 16_000_000;
+    const MAX: u64 = 8_000_000;
     let rtt = rtt.max(Duration::from_millis(5)).as_secs_f64();
     ((cwnd as f64 * 8.0 / rtt * 0.5) as u64).clamp(MIN, MAX) as u32
 }
@@ -394,11 +429,14 @@ mod tests {
         // Scrolling: two captures of motion in a row start video.
         assert_eq!(policy.capture(0.6, ms(48)), Choice::Tiles);
         assert_eq!(policy.capture(0.6, ms(64)), Choice::Video { start: true });
+        // Before the gaps are known, the screen settles after SETTLE.
+        assert_eq!(policy.settles_at(), Some(ms(64) + SETTLE));
+        // Changing every 16 ms, it has settled after two and a half gaps.
         assert_eq!(policy.capture(0.6, ms(80)), Choice::Video { start: false });
-        assert_eq!(policy.settles_at(), Some(ms(80) + SETTLE));
+        assert_eq!(policy.settles_at(), Some(ms(80) + Duration::from_millis(40)));
         // The pointer moving after the scroll stops does not hold video.
         assert_eq!(policy.capture(0.01, ms(96)), Choice::Video { start: false });
-        assert_eq!(policy.settles_at(), Some(ms(80) + SETTLE));
+        assert_eq!(policy.settles_at(), Some(ms(80) + Duration::from_millis(40)));
         policy.settle(ms(180));
         assert_eq!(policy.settles_at(), None);
         assert_eq!(policy.capture(0.01, ms(300)), Choice::Tiles);
@@ -444,7 +482,7 @@ mod tests {
         let cell = bitrate(30_000, Duration::from_millis(200));
         assert!(cell < 1_000_000 && frame_rate(cell) < 30);
         // A LAN is capped.
-        assert_eq!(bitrate(10_000_000, Duration::from_millis(1)), 16_000_000);
+        assert_eq!(bitrate(10_000_000, Duration::from_millis(1)), 8_000_000);
     }
 
     #[test]
