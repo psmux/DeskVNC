@@ -14,7 +14,7 @@
 //!
 //! `crates/vnc-discovery/src/boundary.rs` is the reading half. The two do
 //! not share a crate, so the service type and the TXT keys are written in
-//! both and checked against each other by `tests/nearby.rs`.
+//! both and checked against each other by the test below.
 
 use iroh::EndpointId;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -83,4 +83,52 @@ pub fn computer_name() -> String {
     };
     name.filter(|n| !n.is_empty() && n.len() <= 80)
         .unwrap_or_else(|| "This computer".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The reading half agrees on the type, and what this side publishes is
+    /// what it accepts. Real multicast on this machine's interfaces: the
+    /// record is browsed back with a second daemon, as a scan on another
+    /// computer would.
+    #[test]
+    fn the_record_is_published_and_read_back() {
+        assert_eq!(SERVICE_TYPE, vnc_discovery::boundary::SERVICE_TYPE);
+        let id = iroh::SecretKey::generate().public();
+        let Some(advert) = advertise(id, 61234, "Front Desk") else {
+            eprintln!("SKIP: no multicast interface to publish on");
+            return;
+        };
+        let browser = ServiceDaemon::new().unwrap();
+        let events = browser.browse(SERVICE_TYPE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut found = None;
+        while found.is_none() && Instant::now() < deadline {
+            if let Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) =
+                events.recv_timeout(Duration::from_millis(200))
+            {
+                if info.get_fullname() == advert.fullname {
+                    found = Some(info);
+                }
+            }
+        }
+        let _ = browser.shutdown();
+        let info = found.expect("the record was not seen within ten seconds");
+        assert_eq!(info.get_port(), 61234);
+        let txt_id = info.get_property_val_str("id").unwrap();
+        assert_eq!(
+            vnc_discovery::boundary::machine_id(txt_id),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            info.get_property_val_str("name")
+                .and_then(vnc_discovery::boundary::clean_name)
+                .as_deref(),
+            Some("Front Desk")
+        );
+        assert!(!info.get_addresses().is_empty());
+    }
 }

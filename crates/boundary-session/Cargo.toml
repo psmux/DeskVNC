@@ -21,5 +21,7 @@ argon2.workspace = true
 mdns-sd.workspace = true
 
 [dev-dependencies]
+# Checks the record this crate publishes against the scan that reads it.
+vnc-discovery = { path = "../vnc-discovery" }
 boundary-platform = { path = "../boundary-platform" }
 fast_image_resize.workspace = true

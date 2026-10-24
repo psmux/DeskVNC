@@ -16,8 +16,8 @@
 //! The constants here are the other half of
 //! `crates/boundary-session/src/nearby.rs` and `direct.rs`. This crate does
 //! not link boundary-session (it would pull QUIC and a TLS stack into
-//! discovery), so the two are kept in step by hand and by the live test in
-//! `crates/boundary-session/tests/nearby.rs`.
+//! discovery), so the two are kept in step by hand and by the test in
+//! `crates/boundary-session/src/nearby.rs`.
 
 use std::net::SocketAddr;
 use std::time::Duration;
