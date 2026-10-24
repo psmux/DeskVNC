@@ -27,16 +27,20 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   Switch on "Allow Remote Interaction" in GNOME's prompt for the helper to
   control the computer. Characters the keyboard layout has no key for, such
   as € on a US layout, cannot be typed on GNOME or KDE.
-
-### Changed
-
-* On an X11 desktop, DeskVNC Support reads the screen through shared memory
-  and only when the X server says something was drawn, so a still screen is
-  not read at all. Pointer to screen lag while a third of the screen kept
-  changing went from 36 ms to 19 ms in our test. The Linux build no longer
-  needs libxcb.
+* Scan network lists Boundary computers beside VNC and RDP machines, with
+  their own icon and a Boundary badge. The scan reads the one line a
+  computer with unattended access answers on TCP 5940 and writes nothing
+  back. While unattended access is on, the computer also announces itself on
+  the local network (`_boundary._udp` over mDNS, with its ID, port and name),
+  so it is still found when port 5940 was taken or a firewall drops the TCP
+  probe. A double click on a found computer connects with its ID pinned, on
+  the port it was found on. The probe can be turned off with the
+  `probe_boundary` setting, like `probe_rdp`.
 
 ### Fixed
+
+* A saved Boundary computer with a port other than 5940 is now dialled on
+  that port. The port was dropped on the way to the connection.
 
 * A Mac with unattended access on now answers helpers even when DeskVNC
   started while its screen was asleep. A sleeping screen lists no display, so
@@ -53,6 +57,11 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Changed
 
+* On an X11 desktop, DeskVNC Support reads the screen through shared memory
+  and only when the X server says something was drawn, so a still screen is
+  not read at all. Pointer to screen lag while a third of the screen kept
+  changing went from 36 ms to 19 ms in our test. The Linux build no longer
+  needs libxcb.
 * Boundary sessions are much more responsive across long distances. Measured
   from India to two iMacs in the US, a pointer move now shows up in about
   one network round trip (270 to 380 ms) instead of 0.6 to 1.3 s, and a busy

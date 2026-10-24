@@ -17,10 +17,15 @@
 //! as well as by this comment: this crate depends on `rdp-pdu` for the wire
 //! format and on none of the crates that know how to authenticate
 //! (PRDRDP/00 R44).
+//!
+//! Boundary computers (unattended DeskVNC Support machines) are found by the
+//! one line they answer on TCP 5940 and by the DNS-SD record they advertise,
+//! see [`boundary`]. That probe writes nothing at all.
 
 #![forbid(unsafe_code)]
 
 mod banner;
+pub mod boundary;
 mod dnsmsg;
 mod error;
 pub mod filter;
@@ -166,6 +171,8 @@ mod integration_tests {
             // in tests/rdp_probe.rs is the other half.
             probe_rdp: false,
             rdp_ports: Vec::new(),
+            probe_boundary: false,
+            boundary_ports: Vec::new(),
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
@@ -220,6 +227,59 @@ mod integration_tests {
         }
         assert_eq!(handle.await.unwrap().unwrap(), 0);
         assert!(found.is_empty(), "loopback must never be listed: {found:?}");
+    }
+
+    /// A machine answering the way an unattended Boundary computer does is
+    /// listed as one, with the ID it gave, and the RFB probe aimed at the
+    /// same address finds nothing there.
+    #[tokio::test]
+    async fn scan_finds_a_boundary_computer() {
+        const ID: &str = "3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723";
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock.write_all(format!("BOUNDARY1 {ID}\n").as_bytes()).await;
+            }
+        });
+
+        let opts = ScanOptions {
+            subnets: vec![Subnet::new(Ipv4Addr::LOCALHOST, 32)],
+            // An unused port for the RFB side, so only the Boundary probe
+            // can find anything.
+            ports: vec![1],
+            concurrency: 16,
+            connect_timeout: std::time::Duration::from_millis(500),
+            max_rate_per_sec: 1000,
+            allow_large: true,
+            include_local: true,
+            resolve_names: false,
+            probe_rdp: false,
+            probe_boundary: true,
+            boundary_ports: vec![port],
+            ..Default::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let handle = tokio::spawn(async move {
+            Discovery::new()
+                .scan_subnet(opts, tx, CancellationToken::new())
+                .await
+        });
+        let mut found = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let DiscoveryEvent::Found(h) = ev {
+                found.push(h);
+            }
+        }
+        assert_eq!(handle.await.unwrap().unwrap(), 1);
+        let [h] = found.as_slice() else {
+            panic!("expected one row, got {found:?}");
+        };
+        assert_eq!(h.protocol, ProtocolKind::Boundary);
+        assert_eq!(h.port, port);
+        assert_eq!(h.boundary_id.as_deref(), Some(ID));
+        assert_eq!(h.server_label, boundary::LABEL);
+        assert_eq!(h.rfb_version, None);
     }
 
     #[tokio::test]

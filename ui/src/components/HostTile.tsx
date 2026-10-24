@@ -13,7 +13,7 @@ import {
 import { classNames, colorFromId, formatBps } from "../lib/util";
 import { useHosts } from "../state/HostsContext";
 import { useSessions, type TileActivity } from "../state/SessionsContext";
-import { IconKey, IconMonitor, IconZap, IconEdit, IconLock, IconAlert, IconPlus } from "./icons";
+import { IconBoundary, IconKey, IconMonitor, IconZap, IconEdit, IconLock, IconAlert, IconPlus } from "./icons";
 
 /**
  * The OS badge.
@@ -295,7 +295,11 @@ export function HostTile({
             className="flex h-full w-full items-center justify-center"
             style={{ background: colorFromId(host.id) }}
           >
-            <IconMonitor size={40} className="text-white/80" />
+            {host.protocol === "boundary" ? (
+              <IconBoundary size={40} className="text-white/80" />
+            ) : (
+              <IconMonitor size={40} className="text-white/80" />
+            )}
           </div>
         )}
         {preview ? <LiveBadge /> : null}
@@ -471,7 +475,11 @@ export function DiscoveredTile({
       </span>
     );
   return (
-    <div className="flex flex-col overflow-hidden rounded-md border border-dashed border-strong bg-transparent">
+    <div
+      className="flex flex-col overflow-hidden rounded-md border border-dashed border-strong bg-transparent"
+      // One double click connects, the same as a saved tile.
+      onDoubleClick={onConnect}
+    >
       <div
         className="relative flex aspect-[16/10] items-center justify-center overflow-hidden"
         style={{ background: `color-mix(in srgb, ${colorFromId(host.address)} 22%, transparent)` }}
@@ -486,7 +494,13 @@ export function DiscoveredTile({
             draggable={false}
           />
         ) : (
-          <IconMonitor size={36} className="text-tertiary" />
+          // A Boundary computer gets its own mark, so it reads as something
+          // other than a VNC screen before anyone looks at the badge.
+          host.protocol === "boundary" ? (
+            <IconBoundary size={36} className="text-tertiary" />
+          ) : (
+            <IconMonitor size={36} className="text-tertiary" />
+          )
         )}
         {preview ? <LiveBadge /> : null}
         {activity.bandwidth ? <BandwidthStrip bandwidth={activity.bandwidth} /> : null}
@@ -514,7 +528,8 @@ export function DiscoveredTile({
           </span>
           {secIcon}
         </div>
-        <div className="flex gap-1.5 pt-1">
+        {/* A double click on a button is two clicks on it, not a connect. */}
+        <div className="flex gap-1.5 pt-1" onDoubleClick={(e) => e.stopPropagation()}>
           {/* "Add host" is the primary intent here, so it takes the leftover
               width; Connect stays at its natural size. */}
           <button

@@ -84,6 +84,12 @@ pub struct DiscoveredHost {
 
     /// What the X.224 probe learned. Always `None` for a VNC row.
     pub rdp: Option<RdpCaps>,
+
+    /// The machine ID a Boundary computer gave, from its TCP answer or its
+    /// DNS-SD record: 64 lowercase hex characters. Always `None` for a VNC
+    /// or RDP row. It is what lets a connection pin the computer's key
+    /// (`id@address:port`) instead of asking the address who it is.
+    pub boundary_id: Option<String>,
 }
 
 /// What one X.224 negotiation told us about an RDP server.
@@ -187,6 +193,7 @@ impl DiscoveredHost {
             // edited: a row built by the RFB probe or by mDNS is a VNC row.
             protocol: ProtocolKind::Vnc,
             rdp: None,
+            boundary_id: None,
         }
     }
 
@@ -329,6 +336,20 @@ pub struct ScanOptions {
     /// default because an unnamed row is close to useless to a human; the
     /// operator can turn it off.
     pub probe_other_services: bool,
+
+    /// Probe for Boundary computers: machines that turned on unattended
+    /// access and so answer TCP on 5940 with their machine ID.
+    ///
+    /// On by default for the same reason as `probe_rdp`, and with the same
+    /// cost: one more connection per address in phase 1, under the same
+    /// semaphore and rate limiter. The probe writes nothing. A machine on a
+    /// random port, or behind a firewall that drops TCP, is still found by
+    /// its DNS-SD advertisement, which needs no probe at all.
+    pub probe_boundary: bool,
+
+    /// Ports probed for Boundary. 5940 is the port every unattended machine
+    /// tries first; one that could not have it is found by mDNS.
+    pub boundary_ports: Vec<u16>,
 }
 
 impl Default for ScanOptions {
@@ -346,6 +367,8 @@ impl Default for ScanOptions {
             probe_other_services: true,
             probe_rdp: true,
             rdp_ports: vec![crate::tlsname::RDP_PORT],
+            probe_boundary: true,
+            boundary_ports: vec![crate::boundary::BOUNDARY_PORT],
         }
     }
 }

@@ -17,7 +17,11 @@ base64 = "0.22"
 getrandom = "0.3"
 subtle = "2"
 argon2.workspace = true
+# Publishes an unattended machine on the local network so a scan finds it.
+mdns-sd.workspace = true
 
 [dev-dependencies]
+# Checks the record this crate publishes against the scan that reads it.
+vnc-discovery = { path = "../vnc-discovery" }
 boundary-platform = { path = "../boundary-platform" }
 fast_image_resize.workspace = true

@@ -397,3 +397,28 @@ export function presetProtocol(target: { port: number }): ProtocolKind {
   if (target.port === DEFAULT_SSH_PORT) return "ssh";
   return target.port === DEFAULT_RDP_PORT ? "rdp" : "vnc";
 }
+
+/**
+ * Where to dial a row the network scan found, and what to save for it.
+ *
+ * Most rows are their address and port as found. A Boundary computer also
+ * told the scan its machine ID, so the address carries it in front
+ * (`id@192.168.1.42`): the key is then pinned rather than asked for, and
+ * another machine that later takes the address cannot answer in its place.
+ * The port travels as found, since a computer that could not have 5940
+ * listens somewhere else.
+ */
+export function discoveredEndpoint(d: {
+  address: string;
+  port: number;
+  protocol?: ProtocolKind | null;
+  boundaryId?: string | null;
+}): { protocol: ProtocolKind; address: string; port: number } {
+  const protocol = d.protocol ?? "vnc";
+  const id = protocol === "boundary" && d.boundaryId && MACHINE_ID.test(d.boundaryId) ? d.boundaryId : null;
+  return {
+    protocol,
+    address: id ? `${id.toLowerCase()}@${d.address}` : d.address,
+    port: d.port,
+  };
+}

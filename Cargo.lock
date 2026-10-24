@@ -1088,12 +1088,14 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "iroh",
+ "mdns-sd",
  "noq-proto",
  "serde",
  "serde_json",
  "subtle",
  "tokio",
  "tokio-util",
+ "vnc-discovery",
 ]
 
 [[package]]
