@@ -10,6 +10,26 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* A Boundary computer can be reached by its address, the way a VNC or RDP
+  machine is. Type `192.168.1.20`, `box:6000` or `boundary://box` in quick
+  connect or in a saved computer's address field. A computer with unattended
+  access on now listens on port 5940 (UDP for the session, TCP to say which
+  machine it is), so any network that routes to it works: a LAN, a VPN, a
+  forwarded port. `ID@address` pins the machine so the address cannot hand
+  you a different one. Pairing or the unattended password still decides who
+  gets in. If port 5940 is taken the computer still answers by ID. A bare
+  machine ID typed into quick connect now opens it over Boundary too.
+
+### Fixed
+
+* Opening a second Boundary computer no longer freezes the first one. Every
+  tab bound its own endpoint with the same helper identity, and the relay
+  keeps one connection per identity, so it dropped the older tab ("another
+  endpoint connected with the same endpoint id"). Sessions now share one
+  endpoint.
+
 ### Changed
 
 * Boundary sessions are much more responsive across long distances. Measured
