@@ -48,6 +48,7 @@ export function isProtocolKind(value: unknown): value is ProtocolKind {
  * mislabelled as one of ours.
  */
 export function protocolLabel(p: string): string {
+  if (p === "boundary") return "Boundary";
   return p === "vnc" ? "VNC" : p === "rdp" ? "RDP" : p === "ssh" ? "SSH" : p.toUpperCase();
 }
 
@@ -371,6 +372,12 @@ export interface DiscoveredHost {
   protocol?: ProtocolKind | null;
   /** What the X.224 negotiation learned; `null` for a VNC row. */
   rdp?: RdpCaps | null;
+  /**
+   * The machine ID a Boundary computer gave the scan, 64 hex characters;
+   * `null` for every other row. Connecting puts it in front of the address
+   * so the key is pinned. Read it through `discoveredEndpoint()`.
+   */
+  boundaryId?: string | null;
   /** Always null from the shell; the UI de-dupes against its own host list. */
   savedHostId: string | null;
 }

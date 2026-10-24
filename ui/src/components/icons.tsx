@@ -39,6 +39,10 @@ export const IconPlus = (p: IconProps): ReactNode => (
 export const IconMonitor = (p: IconProps): ReactNode => (
   <Icon {...p}><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /></Icon>
 );
+/** A screen reached over Boundary: the monitor with a link through it. */
+export const IconBoundary = (p: IconProps): ReactNode => (
+  <Icon {...p}><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /><path d="M10 8.5a2 2 0 0 1 2.8 0l.7.7a2 2 0 0 1 0 2.8M14 11.5a2 2 0 0 1-2.8 0l-.7-.7a2 2 0 0 1 0-2.8" /></Icon>
+);
 export const IconKey = (p: IconProps): ReactNode => (
   <Icon {...p}><circle cx="7.5" cy="15.5" r="4.5" /><path d="m11 12 9-9M17 6l3 3" /></Icon>
 );

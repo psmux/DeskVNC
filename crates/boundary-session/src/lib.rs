@@ -2,6 +2,7 @@
 
 pub mod direct;
 mod dns;
+pub mod nearby;
 mod screen;
 mod session;
 mod shared;

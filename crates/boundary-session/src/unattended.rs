@@ -325,9 +325,18 @@ where
     // the random port of a machine that could not have the usual one this
     // costs nothing and still serves a helper told the port.
     let sockets = endpoint.bound_sockets();
-    if crate::direct::answer(sockets.clone(), endpoint.id(), stop.child_token()) == 0
-        || !sockets.iter().any(|s| s.port() == crate::direct::PORT)
-    {
+    let answering = crate::direct::answer(sockets.clone(), endpoint.id(), stop.child_token());
+    // Tell the local network too, so a scan lists this machine even on a
+    // random port. Only where it answers by address anyway: a machine held
+    // to one private interface stays off the LAN's multicast.
+    let _advertised = match sockets.first() {
+        Some(socket) if answering > 0 && options.bind_ip.is_none() => {
+            let name = crate::nearby::computer_name();
+            crate::nearby::advertise(endpoint.id(), socket.port(), &name)
+        }
+        _ => None,
+    };
+    if answering == 0 || !sockets.iter().any(|s| s.port() == crate::direct::PORT) {
         let _ = notices
             .send(Notice::Status(format!(
                 "Port {} is taken, so helpers must connect by machine ID",

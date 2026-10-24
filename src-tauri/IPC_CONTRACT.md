@@ -296,10 +296,14 @@ authenticates. The RDP probe sends a second X.224 negotiation advertising
 `PROTOCOL_SSL` alone, which is the only way to learn whether NLA is
 *required* rather than merely available.
 
-`scan_network` reads two settings out of the store's KV table, both defaulting
+`scan_network` reads three settings out of the store's KV table, all defaulting
 on: `probe_other_services` (names disclosed by MSRPC on 135 and the RDP
-certificate on 3389) and `probe_rdp` (one extra connection per address, to
-3389, without which an RDP-only machine is invisible to the scan). Both take
+certificate on 3389), `probe_rdp` (one extra connection per address, to
+3389, without which an RDP-only machine is invisible to the scan) and
+`probe_boundary` (one extra connection per address, to 5940, which reads the
+`BOUNDARY1 <machine id>` line an unattended Boundary computer answers with
+and writes nothing). The mDNS browse also lists Boundary computers from the
+`_boundary._udp` record they publish while unattended access is on. All take
 the same politeness permit as every RFB probe, so the rate cap stays a cap on
 the total rather than becoming one per service.
 
@@ -1095,9 +1099,12 @@ thumbnail would otherwise never ask for one. See
 - `security` is `verified` | `unverified` | `unencrypted` | `unknown`, derived
   from `securityTypes`. Only a `deep_probe` fills `securityTypes`, so an
   un-probed host is `unknown`, never optimistically "secure".
-- `protocol` is `"vnc"` or `"rdp"` and says what answers on **this row's
-  port**, not what the machine runs. A machine running both produces two
+- `protocol` is `"vnc"`, `"rdp"` or `"boundary"` and says what answers on
+  **this row's port**, not what the machine runs. A machine running both produces two
   rows; joining them is the interface's job, not the registry's.
+- `boundaryId` is the 64 character machine ID a Boundary row gave, `null` on
+  every other row. The UI connects to `id@address` on the row's port, so the
+  key is pinned. A Boundary row's `security` is `verified` when it has one.
 - `rdp` is what the X.224 negotiation learned, `null` for a VNC row:
 
   ```ts
