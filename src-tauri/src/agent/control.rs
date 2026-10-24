@@ -253,20 +253,24 @@ impl AgentPlane {
     /// and keeps it while the input keeps coming. Any release of an agent's
     /// held keys goes onto the session's channel before this returns, which
     /// is before the person's own input does.
-    pub fn person_input(&self, session_id: &str) -> Answer {
+    pub fn person_input(&self, session_id: &str) -> Option<Answer> {
+        // With the plane off and no agent on the session there is nobody to
+        // keep out, and nothing would tick the lease this leaves behind.
+        if !self.is_running() && !self.attachments.lock().contains_key(session_id) {
+            return None;
+        }
         let answer = self
             .board
             .lock()
             .person_input(session_id, person(), lease_now());
         self.settle(session_id, &answer);
-        answer
+        Some(answer)
     }
 
     /// A person pressed take the wheel, or stop. The same as their input, so
     /// it lasts as long as they keep using the machine and no longer.
     pub fn person_takes(&self, session_id: &str) -> Value {
-        let answer = self.person_input(session_id);
-        if answer.changed() {
+        if self.person_input(session_id).is_some_and(|a| a.changed()) {
             tracing::info!(session = %session_id, "a person took the wheel from an agent");
         }
         self.lease_event(session_id)
@@ -574,7 +578,8 @@ mod tests {
     #[test]
     fn the_sentence_for_a_person_says_when_agents_get_it_back() {
         let plane = Arc::new(AgentPlane::default());
-        let answer = plane.person_input("s1");
+        plane.attach("s1", row("att_1", "claude-code"));
+        let answer = plane.person_input("s1").expect("an agent is attached");
         let sentence = not_yours("s1", &answer.status, &plane.lease_policy());
         assert!(sentence.contains("a person is using s1"), "{sentence}");
         assert!(

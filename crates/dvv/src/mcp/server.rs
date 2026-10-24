@@ -1279,6 +1279,11 @@ fn summarise_status(observation: &crate::observation::Observation) -> String {
     } else if let (Some(label), false) = (&observation.lease.holder_label, observation.lease.held) {
         summary.push_str(&format!(" The wheel is held by {label}."));
     }
+    if observation.lease.held && !observation.lease.queue.is_empty() {
+        // The holder hears that somebody is waiting here, on the call it
+        // makes most, rather than only in a field it may never read.
+        summary.push_str(" Another agent is waiting for this machine: finish what you are doing and release it with dvv_control.");
+    }
     summary
 }
 
