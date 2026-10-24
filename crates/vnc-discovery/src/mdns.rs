@@ -1,5 +1,6 @@
 //! Continuous mDNS / DNS-SD browsing.
 
+use crate::boundary;
 use crate::filter::{self, LocalNetwork};
 use crate::types::{DiscoveredHost, DiscoveryEvent, DiscoverySource};
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
@@ -12,6 +13,17 @@ use tokio_util::sync::CancellationToken;
 const RFB_TYPE: &str = "_rfb._tcp.local.";
 /// Defensive extra service types, logged only (see PRD/04 §3).
 const AUX_TYPES: &[&str] = &["_ard._tcp.local.", "_workstation._tcp.local."];
+
+/// What one browse is for: which service type it emits rows for, or none.
+#[derive(Clone)]
+enum Browse {
+    /// `_rfb._tcp`: a VNC row per instance.
+    Vnc(Arc<LocalNetwork>),
+    /// [`boundary::SERVICE_TYPE`]: a Boundary row per instance.
+    Boundary(Arc<LocalNetwork>),
+    /// The auxiliary types: logged, never listed.
+    LogOnly,
+}
 
 /// Poll interval for bridging the mdns-sd flume channel into tokio.
 const RECV_TICK: Duration = Duration::from_millis(200);
@@ -35,22 +47,25 @@ pub fn browse_mdns(tx: Sender<DiscoveryEvent>, cancel: CancellationToken) {
         // which advertised addresses are usable and which are just us.
         let local = Arc::new(LocalNetwork::detect());
 
-        // Primary: _rfb._tcp emits real Found/Lost events.
-        match daemon.browse(RFB_TYPE) {
-            Ok(rx) => {
-                let tx = tx.clone();
-                let cancel = cancel.clone();
-                let local = local.clone();
-                handles.push(tokio::task::spawn_blocking(move || {
-                    pump(rx, tx, cancel, Some(local));
-                }));
-            }
-            Err(e) => {
-                let _ = tx
-                    .send(DiscoveryEvent::Error(format!(
-                        "browse {RFB_TYPE} failed: {e}"
-                    )))
-                    .await;
+        // Primary: _rfb._tcp, and the record an unattended Boundary machine
+        // publishes, emit real Found events.
+        for (ty, browse) in [
+            (RFB_TYPE, Browse::Vnc(local.clone())),
+            (boundary::SERVICE_TYPE, Browse::Boundary(local.clone())),
+        ] {
+            match daemon.browse(ty) {
+                Ok(rx) => {
+                    let tx = tx.clone();
+                    let cancel = cancel.clone();
+                    handles.push(tokio::task::spawn_blocking(move || {
+                        pump(rx, tx, cancel, browse);
+                    }));
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(DiscoveryEvent::Error(format!("browse {ty} failed: {e}")))
+                        .await;
+                }
             }
         }
 
@@ -61,7 +76,7 @@ pub fn browse_mdns(tx: Sender<DiscoveryEvent>, cancel: CancellationToken) {
                     let tx = tx.clone();
                     let cancel = cancel.clone();
                     handles.push(tokio::task::spawn_blocking(move || {
-                        pump(rx, tx, cancel, None);
+                        pump(rx, tx, cancel, Browse::LogOnly);
                     }));
                 }
                 Err(e) => tracing::debug!(service = ty, error = %e, "aux mDNS browse failed"),
@@ -78,21 +93,18 @@ pub fn browse_mdns(tx: Sender<DiscoveryEvent>, cancel: CancellationToken) {
 }
 
 /// Blocking loop that bridges one flume receiver into the tokio channel.
-///
-/// `local` is `Some` for the browse that emits hosts and `None` for the
-/// log-only auxiliary browses.
 fn pump(
     rx: mdns_sd::Receiver<ServiceEvent>,
     tx: Sender<DiscoveryEvent>,
     cancel: CancellationToken,
-    local: Option<Arc<LocalNetwork>>,
+    browse: Browse,
 ) {
     loop {
         if cancel.is_cancelled() {
             return;
         }
         match rx.recv_timeout(RECV_TICK) {
-            Ok(event) => handle_event(event, &tx, local.as_deref()),
+            Ok(event) => handle_event(event, &tx, &browse),
             Err(_) => {
                 // Timeout (normal) or disconnected. Stop only on disconnect.
                 if rx.is_disconnected() {
@@ -104,23 +116,27 @@ fn pump(
 }
 
 /// Translate one mdns-sd event into discovery events.
-fn handle_event(event: ServiceEvent, tx: &Sender<DiscoveryEvent>, local: Option<&LocalNetwork>) {
+fn handle_event(event: ServiceEvent, tx: &Sender<DiscoveryEvent>, browse: &Browse) {
     match event {
         ServiceEvent::ServiceResolved(info) => {
-            let Some(local) = local else {
-                tracing::debug!(
-                    service = %info.ty_domain,
-                    instance = info.get_fullname(),
-                    "aux mDNS resolved (log only)"
-                );
-                return;
+            let host = match browse {
+                Browse::Vnc(local) => host_from_info(&info, local),
+                Browse::Boundary(local) => boundary_from_info(&info, local),
+                Browse::LogOnly => {
+                    tracing::debug!(
+                        service = %info.ty_domain,
+                        instance = info.get_fullname(),
+                        "aux mDNS resolved (log only)"
+                    );
+                    return;
+                }
             };
-            if let Some(host) = host_from_info(&info, local) {
+            if let Some(host) = host {
                 let _ = tx.blocking_send(DiscoveryEvent::Found(host));
             }
         }
         ServiceEvent::ServiceRemoved(_ty, fullname) => {
-            if local.is_none() {
+            if matches!(browse, Browse::LogOnly) {
                 return;
             }
             // We do not have addresses at removal time; report the instance so
@@ -164,6 +180,42 @@ fn host_from_info(info: &ResolvedService, local: &LocalNetwork) -> Option<Discov
         "VNC server (mDNS)".to_string(),
     );
     host.hostname = instance_name(info);
+    host.alternate_addresses = alternates.to_vec();
+    Some(host)
+}
+
+/// Build one Boundary row from the record an unattended machine publishes.
+///
+/// The TXT record carries `id` (the machine ID, which a connection pins) and
+/// `name` (what the machine calls itself). A record without a well formed ID
+/// is dropped: the service type is short enough that something else could
+/// one day use it, and a row that cannot be dialled by key is no use. The
+/// port is the machine's real one, which is the point of the record: a
+/// machine that could not have 5940 is still found, and still dialled.
+fn boundary_from_info(info: &ResolvedService, local: &LocalNetwork) -> Option<DiscoveredHost> {
+    let id = info
+        .get_property_val_str("id")
+        .and_then(boundary::machine_id)?;
+    let addrs = filter::rank_addresses(info.addresses.iter().map(|a| a.to_ip_addr()), local);
+    let Some((best, alternates)) = addrs.split_first() else {
+        tracing::debug!(
+            instance = %info.fullname,
+            "Boundary record has no usable address (own machine / link-local only)"
+        );
+        return None;
+    };
+    let mut host = DiscoveredHost::new(
+        *best,
+        info.port,
+        DiscoverySource::Mdns,
+        boundary::LABEL.to_string(),
+    );
+    host.protocol = remote_core::ProtocolKind::Boundary;
+    host.boundary_id = Some(id);
+    host.hostname = info
+        .get_property_val_str("name")
+        .and_then(boundary::clean_name)
+        .or_else(|| instance_name(info));
     host.alternate_addresses = alternates.to_vec();
     Some(host)
 }

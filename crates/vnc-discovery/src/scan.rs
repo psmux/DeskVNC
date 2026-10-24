@@ -1,6 +1,7 @@
 //! Polite two-phase subnet scan engine.
 
 use crate::banner::server_label;
+use crate::boundary;
 use crate::error::Result;
 use crate::filter::{self, LocalNetwork};
 use crate::probe::{fingerprint, rdp_fingerprint};
@@ -246,7 +247,7 @@ pub async fn scan_subnet(
     let scanned = Arc::new(AtomicU32::new(0));
     let found = Arc::new(AtomicU32::new(0));
 
-    // ---- Phase 1: probe base_port, and 3389, across all hosts. ----
+    // ---- Phase 1: probe base_port, 3389 and 5940, across all hosts. ----
     //
     // One task per address per service rather than one per address. Both take
     // the same semaphore permit and the same rate limiter slot before
@@ -257,6 +258,11 @@ pub async fn scan_subnet(
     // answer arrives.
     let rdp_ports: Vec<u16> = if opts.probe_rdp {
         opts.rdp_ports.clone()
+    } else {
+        Vec::new()
+    };
+    let boundary_ports: Vec<u16> = if opts.probe_boundary {
+        opts.boundary_ports.clone()
     } else {
         Vec::new()
     };
@@ -330,6 +336,35 @@ pub async fn scan_subnet(
                 Some(Hit { host, cert_name })
             });
         }
+        for &port in &boundary_ports {
+            let sem = semaphore.clone();
+            let lim = limiter.clone();
+            let cancel = cancel.clone();
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok()?;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                lim.acquire().await;
+                if cancel.is_cancelled() {
+                    return None;
+                }
+                let addr = SocketAddr::new(IpAddr::V4(ip), port);
+                let id = boundary::fingerprint(addr, connect_timeout).await?;
+                let mut host = DiscoveredHost::new(
+                    IpAddr::V4(ip),
+                    port,
+                    DiscoverySource::Scan,
+                    boundary::LABEL.to_string(),
+                );
+                host.protocol = ProtocolKind::Boundary;
+                host.boundary_id = Some(id);
+                Some(Hit {
+                    host,
+                    cert_name: None,
+                })
+            });
+        }
     }
 
     // Hostname resolution runs alongside the scan, never in front of it.
@@ -361,10 +396,10 @@ pub async fn scan_subnet(
                 let Some(joined) = res else { break };
                 scanned.fetch_add(1, Ordering::Relaxed);
                 if let Ok(Some(Hit { mut host, cert_name })) = joined {
-                    // An address that answers on 3389 counts as a responder,
-                    // so a Windows box found by RDP gets its 5901 to 5906
-                    // probed as well. It is the same machine and it might run
-                    // both.
+                    // An address that answers on 3389 or 5940 counts as a
+                    // responder, so a Windows box found by RDP gets its 5901
+                    // to 5906 probed as well. It is the same machine and it
+                    // might run both.
                     if let IpAddr::V4(v4) = host.address {
                         if !responders.contains(&v4) {
                             responders.push(v4);

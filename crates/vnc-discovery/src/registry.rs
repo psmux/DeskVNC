@@ -409,6 +409,13 @@ fn banner_conflict(a: &DiscoveredHost, b: &DiscoveredHost) -> bool {
             return true;
         }
     }
+    // Two Boundary machine IDs are two keys, so two computers, whatever
+    // name they both report.
+    if let (Some(x), Some(y)) = (&a.boundary_id, &b.boundary_id) {
+        if x != y {
+            return true;
+        }
+    }
     !is_placeholder_label(&a.server_label)
         && !is_placeholder_label(&b.server_label)
         && a.server_label != b.server_label
@@ -440,6 +447,7 @@ fn is_placeholder_label(label: &str) -> bool {
 /// * **server_label / rfb_version**, the scan's banner fingerprint
 ///   ("macOS Screen Sharing") beats mDNS's placeholder.
 /// * **security_types**, filled in once known, never cleared.
+/// * **boundary_id**, the latest one seen, never cleared.
 /// * **mac / alternate_addresses**, union. Nothing that could be a route to
 ///   the machine, or a way to wake it, is ever dropped.
 fn merge_into(existing: &mut DiscoveredHost, incoming: &DiscoveredHost) -> bool {
@@ -478,6 +486,14 @@ fn merge_into(existing: &mut DiscoveredHost, incoming: &DiscoveredHost) -> bool 
             || existing.server_label != incoming.server_label)
     {
         existing.server_label = incoming.server_label.clone();
+        changed = true;
+    }
+
+    // A newer ID on the same address and port is the machine's key now (it
+    // was reinstalled, or another computer took the address), and dialling
+    // the old one would only be refused.
+    if incoming.boundary_id.is_some() && existing.boundary_id != incoming.boundary_id {
+        existing.boundary_id = incoming.boundary_id.clone();
         changed = true;
     }
 
@@ -1177,5 +1193,60 @@ mod tests {
         netbios.hostname = Some("anything".into());
         netbios.name_source = Some(NameSource::NetBios);
         assert!(netbios.implies_windows());
+    }
+
+    fn boundary(addr: &str, port: u16, source: DiscoverySource, id: &str) -> DiscoveredHost {
+        let mut h = DiscoveredHost::new(ip(addr), port, source, crate::boundary::LABEL.to_string());
+        h.protocol = remote_core::ProtocolKind::Boundary;
+        h.boundary_id = Some(id.repeat(64));
+        h
+    }
+
+    /// The TCP probe and the DNS-SD record see one machine on one port, and
+    /// it is one row, keeping the name only the record carries.
+    #[test]
+    fn a_boundary_computer_seen_both_ways_is_one_row() {
+        let mut reg = registry();
+        let mut advertised = boundary("192.168.50.40", 5940, DiscoverySource::Mdns, "a");
+        advertised.hostname = Some("Front Desk".into());
+        assert!(matches!(
+            reg.observe(advertised).as_slice(),
+            [DiscoveryEvent::Found(_)]
+        ));
+        let scanned = boundary("192.168.50.40", 5940, DiscoverySource::Scan, "a");
+        assert!(
+            reg.observe(scanned).is_empty(),
+            "a re-sighting that adds nothing is silent"
+        );
+        assert_eq!(reg.len(), 1);
+        let row = reg.hosts().next().unwrap();
+        assert_eq!(row.hostname.as_deref(), Some("Front Desk"));
+        assert_eq!(row.boundary_id.as_deref(), Some("a".repeat(64).as_str()));
+    }
+
+    /// Two machines imaged from one install can share a name. Two IDs are two
+    /// keys, so they stay two rows.
+    #[test]
+    fn two_boundary_ids_never_merge_on_a_name() {
+        let mut reg = registry();
+        let mut one = boundary("192.168.50.41", 5940, DiscoverySource::Mdns, "a");
+        one.hostname = Some("Reception".into());
+        let mut two = boundary("192.168.50.42", 5940, DiscoverySource::Mdns, "b");
+        two.hostname = Some("Reception".into());
+        reg.observe(one);
+        reg.observe(two);
+        assert_eq!(reg.len(), 2);
+    }
+
+    /// The same address answering with a new ID is the key to dial now.
+    #[test]
+    fn a_new_boundary_id_on_the_same_address_replaces_the_old() {
+        let mut reg = registry();
+        reg.observe(boundary("192.168.50.43", 5940, DiscoverySource::Scan, "a"));
+        let events = reg.observe(boundary("192.168.50.43", 5940, DiscoverySource::Scan, "c"));
+        let [DiscoveryEvent::Updated(row)] = events.as_slice() else {
+            panic!("expected one update, got {events:?}");
+        };
+        assert_eq!(row.boundary_id.as_deref(), Some("c".repeat(64).as_str()));
     }
 }
