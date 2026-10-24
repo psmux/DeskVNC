@@ -23,12 +23,18 @@ use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long the person has to answer the sharing prompt.
 const ANSWER: Duration = Duration::from_secs(120);
 /// How long a capture waits for a new screen before saying nothing changed.
 const WAIT: Duration = Duration::from_millis(8);
+/// How long after the portal starts a session its input is taken.
+const SETTLE: Duration = Duration::from_secs(1);
+/// How long the first key's keyboard takes to be ready.
+const PRIME: Duration = Duration::from_millis(300);
+/// The left Shift keysym.
+const SHIFT: i32 = 0xffe1;
 
 fn block_on<T>(future: impl Future<Output = Result<T, ashpd::Error>>) -> Result<T> {
     async_io::block_on(future).map_err(|e| anyhow!("{e}"))
@@ -88,9 +94,29 @@ pub(crate) struct Remote {
     /// The stream's size in the compositor's logical pixels, which is what
     /// absolute pointer positions are measured in.
     size: Mutex<Option<(f64, f64)>>,
+    /// What the person allowed. GNOME's prompt shares the screen alone
+    /// unless "Allow Remote Interaction" is switched on.
+    granted: BitFlags<DeviceType>,
+    /// When the compositor takes events. GNOME dropped everything sent in
+    /// about the first second after the session started.
+    ready: Instant,
+    /// Whether a key has been sent yet. See [`Remote::keysym`].
+    typed: std::sync::atomic::AtomicBool,
 }
 impl Remote {
+    /// Wait until the session takes events, or say why it never will.
+    fn settle(&self, device: DeviceType) -> Result<()> {
+        ensure!(
+            self.granted.contains(device),
+            "Control was not allowed. Share again and switch on Allow Remote Interaction in the sharing prompt"
+        );
+        if let Some(wait) = self.ready.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        Ok(())
+    }
     pub fn move_to(&self, x: f32, y: f32) -> Result<()> {
+        self.settle(DeviceType::Pointer)?;
         let (w, h) = self
             .size
             .lock()
@@ -112,6 +138,7 @@ impl Remote {
             Button::Right => 0x111,
             Button::Middle => 0x112,
         };
+        self.settle(DeviceType::Pointer)?;
         block_on(self.portal.notify_pointer_button(
             &self.session,
             code,
@@ -120,6 +147,21 @@ impl Remote {
         ))
     }
     pub fn keysym(&self, keysym: u32, down: bool) -> Result<()> {
+        self.settle(DeviceType::Keyboard)?;
+        // GNOME makes its virtual keyboard on the first key and drops the
+        // keys that come in the next moment, which lost the first three to
+        // ten characters typed. A Shift tap first takes that loss.
+        if !self.typed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            for down in [true, false] {
+                block_on(self.portal.notify_keyboard_keysym(
+                    &self.session,
+                    SHIFT,
+                    state(down),
+                    Default::default(),
+                ))?;
+            }
+            std::thread::sleep(PRIME);
+        }
         block_on(self.portal.notify_keyboard_keysym(
             &self.session,
             keysym as i32,
@@ -139,6 +181,7 @@ impl Remote {
         Ok(())
     }
     pub fn scroll(&self, lines: i32) -> Result<()> {
+        self.settle(DeviceType::Pointer)?;
         block_on(self.portal.notify_pointer_axis_discrete(
             &self.session,
             Axis::Vertical,
@@ -277,6 +320,9 @@ async fn remote(token: Option<&str>) -> Result<(Held, OwnedFd, PortalStream), as
         session,
         node: stream.pipe_wire_node_id(),
         size: Mutex::new(None),
+        granted: started.devices(),
+        ready: Instant::now() + SETTLE,
+        typed: Default::default(),
     };
     Ok((Held::Remote(Arc::new(remote)), fd, stream))
 }
