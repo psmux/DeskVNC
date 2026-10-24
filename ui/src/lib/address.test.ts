@@ -221,8 +221,43 @@ describe("parseConnectTarget for a Boundary computer", () => {
       protocol: "boundary",
     });
   });
-  it("refuses anything that is not a machine ID", () => {
-    expect(parseConnectTarget("192.168.1.4", "boundary").ok).toBe(false);
+  it("refuses what is neither a machine ID nor an address", () => {
     expect(parseConnectTarget(id.slice(1), "boundary").ok).toBe(false);
+    expect(parseConnectTarget("nothex@10.0.0.1", "boundary").ok).toBe(false);
+    expect(parseConnectTarget("box:0", "boundary").ok).toBe(false);
+  });
+  it("takes an address, keeping port 0 when none was typed", () => {
+    const result = parseConnectTarget("10.42.0.2", "boundary");
+    expect(result.ok && result.target).toMatchObject({
+      address: "10.42.0.2",
+      port: 0,
+      explicitPort: false,
+      protocol: "boundary",
+    });
+    const typed = parseConnectTarget("box.lan:6000", "boundary");
+    expect(typed.ok && typed.target).toMatchObject({ address: "box.lan", port: 6000, explicitPort: true });
+  });
+  it("keeps a pinned machine ID in front of the address", () => {
+    const result = parseConnectTarget(`${id}@[fd00::2]:6001`, "boundary");
+    expect(result.ok && result.target).toMatchObject({
+      address: `${id.toLowerCase()}@fd00::2`,
+      port: 6001,
+    });
+  });
+  it("knows a boundary:// link and a bare machine ID with nothing assumed", () => {
+    const link = parseConnectTarget("boundary://10.42.0.2/");
+    expect(link.ok && link.target).toMatchObject({ address: "10.42.0.2", port: 0, protocol: "boundary" });
+    const bare = parseConnectTarget(id);
+    expect(bare.ok && bare.target.protocol).toBe("boundary");
+  });
+  it("formats a Boundary target so it parses back to itself", () => {
+    for (const typed of ["boundary://10.42.0.2", "boundary://box:6000", `boundary://${id.toLowerCase()}@[fd00::2]:6001`]) {
+      const parsed = parseConnectTarget(typed);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) continue;
+      const { protocol, address, port } = parsed.target;
+      expect(formatTarget(protocol ?? "vnc", address, port)).toBe(typed);
+    }
+    expect(formatTarget("boundary", id.toLowerCase(), 0)).toBe(id.toLowerCase());
   });
 });

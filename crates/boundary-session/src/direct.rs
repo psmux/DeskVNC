@@ -55,6 +55,13 @@ impl Target {
         if let Ok(id) = EndpointId::from_str(text) {
             return Ok(Self::Id(id));
         }
+        // A long run of hex is a machine ID with a character missing or
+        // extra, not a host name anybody has.
+        ensure!(
+            text.len() < 40 || !text.chars().all(|c| c.is_ascii_hexdigit()),
+            "A machine ID has 64 characters, and this has {}",
+            text.len()
+        );
         let (id, rest) = match text.rsplit_once('@') {
             Some((id, rest)) => (
                 Some(
@@ -255,6 +262,7 @@ mod tests {
             "10.0.0.1:99999",
             "[fd00::2",
             "a/b",
+            &ID[1..],
         ] {
             assert!(Target::parse(bad).is_err(), "{bad} parsed");
         }

@@ -16,6 +16,9 @@
  * - `rdp://alice@box`      -> box:3389, user alice
  * - `ssh://box`            -> box:22
  * - `ssh://alice@box`      -> box:22, user alice
+ * - `boundary://box`       -> a Boundary computer at box, on its usual port
+ * - `boundary://<id>@box`  -> the same, with its machine ID pinned
+ * - `<64 hex characters>`  -> a Boundary computer by machine ID
  * - `alice@box`            -> box:5900, user alice  (no port typed, so nothing
  *                             names a protocol; see `presetProtocol` for how
  *                             a caller decides what badge to preset)
@@ -129,10 +132,53 @@ function readScheme(raw: string): { protocol: ProtocolKind | null; rest: string;
   if (/^ssh:\/\//i.test(raw)) {
     return { protocol: "ssh", rest: raw.replace(/^ssh:\/\//i, ""), url: true };
   }
+  if (/^boundary:\/\//i.test(raw)) {
+    return { protocol: "boundary", rest: raw.replace(/^boundary:\/\//i, ""), url: true };
+  }
   if (/^(?:vncs?|rfb):\/\//i.test(raw)) {
     return { protocol: "vnc", rest: raw.replace(/^(?:vncs?|rfb):\/\//i, ""), url: true };
   }
   return { protocol: null, rest: raw, url: false };
+}
+
+const MACHINE_ID = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * A Boundary target: `id`, `id@host[:port]` or `host[:port]`. The address
+ * keeps the ID in front when one was given, so it travels with the host to
+ * the driver. With no port typed the port is 0, which the driver reads as
+ * the computer's usual one.
+ */
+function parseBoundary(text: string): TargetResult {
+  const boundary = (address: string, port: number, explicitPort: boolean): TargetResult => ({
+    ok: true,
+    target: { address, port, explicitPort, protocol: "boundary", username: null },
+  });
+  if (MACHINE_ID.test(text)) return boundary(text.toLowerCase(), 0, false);
+  // A long run of hex is a machine ID with a character missing or extra,
+  // not a host name anybody has.
+  if (/^[0-9a-fA-F]{40,}$/.test(text)) {
+    return { ok: false, error: `A machine ID has 64 characters, and this has ${text.length}` };
+  }
+  const at = text.lastIndexOf("@");
+  const id = at >= 0 ? text.slice(0, at) : null;
+  if (id !== null && !MACHINE_ID.test(id)) {
+    return { ok: false, error: "Before the @ goes the 64 character machine ID" };
+  }
+  // Parsed as an RDP address: no display numbers, so `box:6000` is a port.
+  const where = parseConnectTarget(text.slice(at + 1), "rdp");
+  if (!where.ok) {
+    return {
+      ok: false,
+      error:
+        at >= 0 || /[.:]/.test(text)
+          ? where.error
+          : "Enter the 64 character ID shown under Unattended access in DeskVNC Support, or an address",
+    };
+  }
+  const { address, port, explicitPort } = where.target;
+  const prefix = id === null ? "" : `${id.toLowerCase()}@`;
+  return boundary(`${prefix}${address}`, explicitPort ? port : 0, explicitPort);
 }
 
 /**
@@ -151,25 +197,10 @@ export function parseConnectTarget(input: string, assume?: ProtocolKind): Target
 
   const { protocol: named, rest, url } = readScheme(trimmed);
 
-  // A Boundary computer has no host or port, only the machine ID that
-  // DeskVNC Support shows under unattended access.
-  if (assume === "boundary" && named === null) {
-    if (!/^[0-9a-fA-F]{64}$/.test(trimmed)) {
-      return {
-        ok: false,
-        error: "Enter the 64 character ID shown under Unattended access in DeskVNC Support",
-      };
-    }
-    return {
-      ok: true,
-      target: {
-        address: trimmed.toLowerCase(),
-        port: 0,
-        explicitPort: false,
-        protocol: "boundary",
-        username: null,
-      },
-    };
+  // A Boundary computer is reached by the machine ID that DeskVNC Support
+  // shows under unattended access, or by its address like any other.
+  if (named === "boundary" || (named === null && (assume === "boundary" || MACHINE_ID.test(trimmed)))) {
+    return parseBoundary(named === "boundary" ? rest.replace(/[/?#].*$/, "") : trimmed);
   }
   let raw = rest;
   let username: string | null = null;
@@ -319,6 +350,13 @@ export function formatTarget(
     return port === DEFAULT_RDP_PORT
       ? `rdp://${user}${host}`
       : `rdp://${user}${host}:${port}`;
+  }
+  if (protocol === "boundary") {
+    if (MACHINE_ID.test(address)) return address;
+    const at = address.lastIndexOf("@");
+    const bare = address.slice(at + 1);
+    const where = `${address.slice(0, at + 1)}${isIpv6Literal(bare) ? `[${bare}]` : bare}`;
+    return port === 0 ? `boundary://${where}` : `boundary://${where}:${port}`;
   }
   if (protocol === "ssh") {
     const user = username ? `${username}@` : "";
