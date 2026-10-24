@@ -1071,6 +1071,7 @@ dependencies = [
  "image",
  "iroh",
  "noq-proto",
+ "openh264",
  "serde",
  "serde_json",
  "subtle",

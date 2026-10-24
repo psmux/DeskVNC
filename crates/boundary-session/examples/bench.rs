@@ -9,10 +9,14 @@
 //! ```sh
 //! bench host [--image screen.png] [--bind 10.42.0.9]    # prints INVITATION
 //! bench host --real                                      # the real screen under the square
-//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy] [--video]
+//! bench host --software | --no-video                     # OpenH264 only, or tiles only
+//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy] [--video] [--tiles]
 //! bench encode [--image screen.png]                      # time capture side work
 //! ```
-use boundary_session::{Approval, Desktop, Event, Frame, HostOptions, Input, Key, Route};
+use boundary_session::video::{VideoEncoder, VideoEncoders};
+use boundary_session::{
+    Abilities, Approval, Desktop, Event, Frame, HostOptions, Input, Key, Route, Update,
+};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,6 +78,7 @@ struct Synthetic {
     /// Capture the real screen, as the app does, and draw over that.
     real: Option<boundary_platform::Capturer>,
     state: Arc<Mutex<State>>,
+    encoders: Option<VideoEncoders>,
 }
 impl Desktop for Synthetic {
     fn capture(&mut self) -> anyhow::Result<Frame> {
@@ -139,12 +144,15 @@ impl Desktop for Synthetic {
             Input::Key {
                 key: Key::Letter('q'),
                 down: true,
-            } => s.busy = false,
+            } => (s.busy, s.video) = (false, false),
             _ => {}
         }
         Ok(())
     }
     fn release(&mut self) {}
+    fn video(&self) -> Option<VideoEncoders> {
+        self.encoders.clone()
+    }
 }
 
 /// Is the square drawn at this normalised point?
@@ -154,6 +162,102 @@ fn marked(frame: &Frame, x: f32, y: f32) -> bool {
     let i = (py * frame.width as usize + px) * 4;
     let p = &frame.rgba[i..i + 3];
     p[0] > 200 && p[1] < 70 && p[2] > 200
+}
+
+/// What the helper's window would show: screens of tiles, and video decoded
+/// over them, in the order they came.
+#[derive(Default)]
+struct Screen {
+    canvas: Option<Frame>,
+    decoder: Option<openh264::decoder::Decoder>,
+    /// Updates drawn, and how many of them were video.
+    shown: u64,
+    video: u64,
+    /// When the whole screen last came as tiles after video.
+    settled: Option<Instant>,
+    after_video: bool,
+    /// Time spent decoding video here, which the webview does in hardware.
+    decoding: Duration,
+    last: Option<Instant>,
+    /// The longest wait between two updates.
+    gap: Duration,
+}
+impl Screen {
+    fn apply(&mut self, updates: Vec<Update>) -> anyhow::Result<()> {
+        for update in updates {
+            self.shown += 1;
+            if let Some(last) = self.last.replace(Instant::now()) {
+                self.gap = self.gap.max(last.elapsed());
+            }
+            match update {
+                Update::Screen { frame, rects } => {
+                    let canvas = match self.canvas.as_mut() {
+                        Some(c) if c.width == frame.width && c.height == frame.height => c,
+                        _ => self.canvas.insert((*frame).clone()),
+                    };
+                    match &rects {
+                        None => canvas.rgba.copy_from_slice(&frame.rgba),
+                        Some(rects) => {
+                            let stride = frame.width as usize * 4;
+                            for r in rects {
+                                for y in r.y..r.y + r.height {
+                                    let i = y as usize * stride + r.x as usize * 4;
+                                    let n = r.width as usize * 4;
+                                    canvas.rgba[i..i + n].copy_from_slice(&frame.rgba[i..i + n]);
+                                }
+                            }
+                        }
+                    }
+                    let whole = rects.as_ref().is_none_or(|rects| {
+                        rects
+                            .iter()
+                            .map(|r| r.width as u64 * r.height as u64)
+                            .sum::<u64>()
+                            == frame.width as u64 * frame.height as u64
+                    });
+                    if self.after_video && whole {
+                        self.after_video = false;
+                        self.settled = Some(Instant::now());
+                    }
+                }
+                Update::Video(unit) => {
+                    self.video += 1;
+                    self.after_video = true;
+                    if unit.fresh || self.decoder.is_none() {
+                        self.decoder = Some(openh264::decoder::Decoder::new()?);
+                    }
+                    let decoder = self.decoder.as_mut().expect("made above");
+                    let t = Instant::now();
+                    let Some(picture) = decoder.decode(&unit.data)? else {
+                        anyhow::bail!("the decoder held a picture back");
+                    };
+                    use openh264::formats::YUVSource;
+                    let (dw, dh) = picture.dimensions();
+                    let mut rgba = vec![0u8; dw * dh * 4];
+                    picture.write_rgba8(&mut rgba);
+                    let canvas = match self.canvas.as_mut() {
+                        Some(c) if c.width == unit.width && c.height == unit.height => c,
+                        _ => self.canvas.insert(Frame {
+                            width: unit.width,
+                            height: unit.height,
+                            rgba: vec![0; unit.width as usize * unit.height as usize * 4],
+                        }),
+                    };
+                    let (w, h) = (dw.min(unit.width as usize), dh.min(unit.height as usize));
+                    for y in 0..h {
+                        let to = y * unit.width as usize * 4;
+                        let from = y * dw * 4;
+                        canvas.rgba[to..to + w * 4].copy_from_slice(&rgba[from..from + w * 4]);
+                    }
+                    self.decoding += t.elapsed();
+                }
+            }
+        }
+        Ok(())
+    }
+    fn marked(&self, x: f32, y: f32) -> bool {
+        self.canvas.as_ref().is_some_and(|c| marked(c, x, y))
+    }
 }
 
 fn percentile(sorted: &[Duration], p: f64) -> Duration {
@@ -171,6 +275,21 @@ async fn main() -> anyhow::Result<()> {
         Some("host") => {
             let base = base(&args);
             let real = args.iter().any(|a| a == "--real");
+            let encoders: Option<VideoEncoders> = if args.iter().any(|a| a == "--no-video") {
+                None
+            } else {
+                let inner = if args.iter().any(|a| a == "--software") {
+                    boundary_platform::video::software()
+                } else {
+                    boundary_platform::video::encoders()
+                };
+                // Say which encoder each session got.
+                Some(Arc::new(move |w, h| {
+                    let encoder: Box<dyn VideoEncoder> = inner(w, h)?;
+                    println!("video encoder {} {w}x{h}", encoder.name());
+                    Ok(encoder)
+                }))
+            };
             let mut session = boundary_session::host(options(&args), move || {
                 let real = if real {
                     let id = boundary_platform::displays()?
@@ -191,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
                         video: false,
                         tick: 0,
                     })),
+                    encoders,
                 }))
             });
             while let Some(event) = session.events.recv().await {
@@ -214,8 +334,18 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(20);
             let busy = args.iter().any(|a| a == "--busy");
             let video = args.iter().any(|a| a == "--video");
-            let mut session =
-                boundary_session::viewer(args[1].clone(), "Bench".into(), options(&args));
+            // Without --tiles the helper says it decodes H.264, as DeskVNC does.
+            let tiles_only = args.iter().any(|a| a == "--tiles");
+            let mut session = boundary_session::viewer_with(
+                args[1].clone(),
+                "Bench".into(),
+                options(&args),
+                None,
+                Abilities {
+                    tools: false,
+                    video: !tiles_only,
+                },
+            );
             loop {
                 match session.events.recv().await {
                     Some(Event::Connected { .. }) => break,
@@ -225,7 +355,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             let connected = started.elapsed();
-            session.frames.changed().await?;
+            let mut screen = Screen::default();
+            while screen.canvas.is_none() {
+                session.frames.changed().await?;
+                screen.apply(session.updates())?;
+            }
             let first = started.elapsed();
             for (on, letter) in [(busy, 'b'), (video, 'v')] {
                 if on {
@@ -236,12 +370,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             let mut lags = Vec::new();
-            let mut frames = 0u32;
             let mut misses = 0u32;
             let points = [(0.2, 0.2), (0.8, 0.3), (0.3, 0.8), (0.7, 0.7), (0.5, 0.15)];
             let end = Instant::now() + Duration::from_secs(secs);
             let mut n = 0;
             let measured = Instant::now();
+            let (shown_before, video_before, bytes_before) =
+                (screen.shown, screen.video, session.received());
             while Instant::now() < end {
                 let (x, y) = points[n % points.len()];
                 n += 1;
@@ -250,10 +385,19 @@ async fn main() -> anyhow::Result<()> {
                 let seen = tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
                         session.frames.changed().await?;
-                        frames += 1;
-                        let frame = session.frames.borrow_and_update().clone();
-                        if frame.is_some_and(|f| marked(&f, x, y)) {
+                        screen.apply(session.updates())?;
+                        if screen.marked(x, y) {
                             return anyhow::Ok(());
+                        }
+                        if std::env::var_os("BENCH_DEBUG").is_some()
+                            && sent.elapsed() > Duration::from_millis(400)
+                            && let Some(c) = screen.canvas.as_ref()
+                        {
+                            let px = (x * (c.width - 1) as f32) as usize;
+                            let py = (y * (c.height - 1) as f32) as usize;
+                            let i = (py * c.width as usize + px) * 4;
+                            eprintln!("slow move {n} at {px},{py}: {:?}", &c.rgba[i..i + 4]);
+                            let _ = image::save_buffer("/private/tmp/claude-501/-Users-godwin-workspace-DeskVNC/1e3123ad-01eb-4793-b40b-e5a5170e601b/scratchpad/fv/slow.png", &c.rgba, c.width, c.height, image::ExtendedColorType::Rgba8);
                         }
                     }
                 })
@@ -262,23 +406,79 @@ async fn main() -> anyhow::Result<()> {
                     Ok(r) => {
                         r?;
                         lags.push(sent.elapsed());
+                        if std::env::var_os("BENCH_DEBUG").is_some() {
+                            eprintln!(
+                                "move {n} lag {:?} shown {} video {} gap {:?}",
+                                sent.elapsed(),
+                                screen.shown,
+                                screen.video,
+                                screen.gap
+                            );
+                            screen.gap = Duration::ZERO;
+                        }
                     }
-                    Err(_) => misses += 1,
+                    Err(_) => {
+                        misses += 1;
+                        if std::env::var_os("BENCH_DEBUG").is_some()
+                            && let Some(c) = screen.canvas.as_ref()
+                        {
+                            let px = (x * (c.width - 1) as f32) as usize;
+                            let py = (y * (c.height - 1) as f32) as usize;
+                            let i = (py * c.width as usize + px) * 4;
+                            eprintln!(
+                                "missed move {n} at {px},{py}: {:?} shown {} video {}",
+                                &c.rgba[i..i + 4],
+                                screen.shown,
+                                screen.video
+                            );
+                            let _ = image::save_buffer(
+                                "/private/tmp/claude-501/-Users-godwin-workspace-DeskVNC/1e3123ad-01eb-4793-b40b-e5a5170e601b/scratchpad/fv/miss.png",
+                                &c.rgba,
+                                c.width,
+                                c.height,
+                                image::ExtendedColorType::Rgba8,
+                            );
+                        }
+                    }
                 }
                 // Keep counting screens for a moment, as a person pausing would.
                 let pause = Instant::now() + Duration::from_millis(300);
                 while let Ok(Ok(())) =
                     tokio::time::timeout_at(pause.into(), session.frames.changed()).await
                 {
-                    session.frames.borrow_and_update();
-                    frames += 1;
+                    screen.apply(session.updates())?;
                 }
             }
             let elapsed = measured.elapsed().as_secs_f64();
+            let shown = screen.shown - shown_before;
+            let as_video = screen.video - video_before;
+            let bits = (session.received() - bytes_before) as f64 * 8.0 / elapsed;
+            // Stop the motion and time until the screen is sent sharp again:
+            // a whole screen of tiles after the last picture of video.
+            let mut sharp = None;
+            if video || busy {
+                screen.settled = None;
+                let stopped = Instant::now();
+                session.input(Input::Key {
+                    key: Key::Letter('q'),
+                    down: true,
+                })?;
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        session.frames.changed().await?;
+                        screen.apply(session.updates())?;
+                        if let Some(at) = screen.settled {
+                            sharp = Some(at.duration_since(stopped));
+                            return anyhow::Ok(());
+                        }
+                    }
+                })
+                .await;
+            }
             let c = session.connectivity.borrow().clone();
             lags.sort();
             println!(
-                "route {} rtt {:?} | connect {:.2}s first screen {:.2}s | lag p50 {:?} p90 {:?} max {:?} ({} moves, {} missed) | {:.1} screens/s",
+                "route {} rtt {:?} | connect {:.2}s first screen {:.2}s | lag p50 {:?} p90 {:?} max {:?} ({} moves, {} missed) | {:.1} screens/s ({} video) | {:.2} Mbit/s | sharp after stop {} | decode {:?} a picture",
                 match c.route {
                     Some(Route::Direct) => "direct",
                     Some(Route::Relay) => "relay",
@@ -292,7 +492,11 @@ async fn main() -> anyhow::Result<()> {
                 lags.last().copied().unwrap_or_default(),
                 lags.len(),
                 misses,
-                frames as f64 / elapsed,
+                shown as f64 / elapsed,
+                as_video,
+                bits / 1e6,
+                sharp.map_or("n/a".into(), |d| format!("{d:?}")),
+                screen.decoding / screen.video.max(1) as u32,
             );
             session.stop();
         }

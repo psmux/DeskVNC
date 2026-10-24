@@ -94,6 +94,8 @@ pub struct Session {
     pub frames: watch::Receiver<Option<Arc<Frame>>>,
     pub connectivity: watch::Receiver<Connectivity>,
     damage: Arc<Mutex<Damage>>,
+    /// Bytes of screens received, for measuring.
+    received: Arc<std::sync::atomic::AtomicU64>,
     input: mpsc::Sender<Input>,
     control: watch::Sender<Permission>,
     /// On the host's side, whether the person allows commands and files. On
@@ -220,6 +222,10 @@ impl Session {
     pub fn refresh(&self) {
         self.refresh.send_modify(|n| *n += 1);
     }
+    /// Bytes of screens and video received so far, on the helper's side.
+    pub fn received(&self) -> u64 {
+        self.received.load(std::sync::atomic::Ordering::Relaxed)
+    }
     pub(crate) fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -284,6 +290,7 @@ pub(crate) struct Worker {
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<Frame>>>,
     damage: Arc<Mutex<Damage>>,
+    received: Arc<std::sync::atomic::AtomicU64>,
     input: mpsc::Receiver<Input>,
     control: watch::Receiver<Permission>,
     control_tx: watch::Sender<Permission>,
@@ -309,12 +316,14 @@ pub(crate) fn channels() -> (Session, Worker) {
     let (client_tx, client) = watch::channel(None);
     let cancel = CancellationToken::new();
     let damage = Arc::new(Mutex::new(Damage::default()));
+    let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
     (
         Session {
             connectivity,
             events,
             frames,
             damage: damage.clone(),
+            received: received.clone(),
             input,
             control: control.clone(),
             tools: tools_tx.clone(),
@@ -328,6 +337,7 @@ pub(crate) fn channels() -> (Session, Worker) {
             events: events_tx,
             frames: frames_tx,
             damage,
+            received,
             input: input_rx,
             control: control_rx,
             control_tx: control.clone(),
@@ -1560,6 +1570,7 @@ async fn watch(
         Ok::<(), anyhow::Error>(())
     };
     let (frames, damage) = (&worker.frames, &*worker.damage);
+    let received = &*worker.received;
     let read_frames = async {
         loop {
             let mut stream = connection.accept_uni().await?;
@@ -1572,11 +1583,11 @@ async fn watch(
                 Err(error) => return Err(error.into()),
             }
             if &head == screen::MAGIC {
-                return read_updates(frames, damage, stream, &shown_tx, false).await;
+                return read_updates(frames, damage, received, stream, &shown_tx, false).await;
             }
             if &head == screen::MAGIC_VIDEO {
                 video_tx.send_replace(true);
-                return read_updates(frames, damage, stream, &shown_tx, true).await;
+                return read_updates(frames, damage, received, stream, &shown_tx, true).await;
             }
             let rest = match tokio::time::timeout(
                 SCREEN_DEADLINE,
@@ -1595,6 +1606,7 @@ async fn watch(
                 }
             };
             let bytes = [&head[..], &rest].concat();
+            received.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             let frame = tokio::task::spawn_blocking(move || Frame::decode(&bytes)).await??;
             show(frames, damage, frame, None);
         }
@@ -1614,6 +1626,7 @@ async fn watch(
 async fn read_updates(
     frames: &watch::Sender<Option<Arc<Frame>>>,
     damage: &Mutex<Damage>,
+    received: &std::sync::atomic::AtomicU64,
     mut stream: iroh::endpoint::RecvStream,
     shown: &watch::Sender<u64>,
     video: bool,
@@ -1626,6 +1639,7 @@ async fn read_updates(
         let mut bytes = vec![0; length];
         stream.read_exact(&mut bytes).await?;
         let mut skip = 0;
+        received.fetch_add(length as u64 + 4, std::sync::atomic::Ordering::Relaxed);
         if video {
             match bytes[0] {
                 video::KIND_TILES => skip = 1,
