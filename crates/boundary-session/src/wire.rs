@@ -132,6 +132,12 @@ pub enum Message {
         /// older helper leaves it out and is sent whole screens.
         #[serde(default)]
         tiles: bool,
+        /// Video codecs the helper decodes, such as `"h264"`. A host that
+        /// can encode one may send moving parts of the screen as video on
+        /// the stream of updates. An older helper leaves it out and gets
+        /// rectangles only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        video: Vec<String>,
     },
     Granted {
         control: bool,
@@ -151,6 +157,11 @@ pub enum Message {
     /// The helper has drawn the screen update with this number. Sent only
     /// to a host that sends updates, which is the only kind that reads it.
     Shown(u64),
+    /// The helper asks for the whole screen again as rectangles, because
+    /// what it holds went stale under video. Sent only to a host whose
+    /// stream of updates said it sends video, since an older host ends the
+    /// session on a message it does not know.
+    Refresh,
     /// A helper asking an unattended machine to let it in. The helper's
     /// identity is the key it connected with, which the encrypted handshake
     /// has already proved, so a paired helper sends no password at all.
@@ -169,6 +180,12 @@ pub enum Message {
         /// older helper leaves it out and is sent whole screens.
         #[serde(default)]
         tiles: bool,
+        /// Video codecs the helper decodes, such as `"h264"`. A host that
+        /// can encode one may send moving parts of the screen as video on
+        /// the stream of updates. An older helper leaves it out and gets
+        /// rectangles only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        video: Vec<String>,
     },
     /// Sent during an attended session when the person being helped chooses
     /// to let this helper connect any time. `machine` is the ID the helper
@@ -201,20 +218,31 @@ pub async fn read<T: DeserializeOwned>(stream: &mut RecvStream) -> Result<T> {
     stream.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+/// The one video codec a host sends today.
+pub const H264: &str = "h264";
+
 /// How screens go to a helper, from what its first message said it takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screens {
     Png,
     Jpeg,
     Tiles,
+    /// Rectangles, and H.264 while much of the screen moves, on one stream
+    /// that starts with [`crate::screen::MAGIC_VIDEO`].
+    Video,
 }
 impl Screens {
-    pub fn from_hello(jpeg: bool, tiles: bool) -> Self {
+    pub fn from_hello(jpeg: bool, tiles: bool, video: &[String]) -> Self {
         match (jpeg, tiles) {
+            (_, true) if video.iter().any(|c| c == H264) => Self::Video,
             (_, true) => Self::Tiles,
             (true, false) => Self::Jpeg,
             (false, false) => Self::Png,
         }
+    }
+    /// Whether the helper says when it has shown each update.
+    pub fn acknowledged(self) -> bool {
+        matches!(self, Self::Tiles | Self::Video)
     }
 }
 /// The helper's name, whether it can send commands and file requests, and
@@ -228,6 +256,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
         tools,
         jpeg,
         tiles,
+        video,
     } = message
     {
         ensure!(
@@ -239,7 +268,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
             !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
             "Invalid helper name"
         );
-        Ok((name, tools, Screens::from_hello(jpeg, tiles)))
+        Ok((name, tools, Screens::from_hello(jpeg, tiles, &video)))
     } else {
         bail!("Expected session handshake")
     }
