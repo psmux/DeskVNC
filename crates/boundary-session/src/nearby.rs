@@ -109,10 +109,9 @@ mod tests {
         while found.is_none() && Instant::now() < deadline {
             if let Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) =
                 events.recv_timeout(Duration::from_millis(200))
+                && info.get_fullname() == advert.fullname
             {
-                if info.get_fullname() == advert.fullname {
-                    found = Some(info);
-                }
+                found = Some(info);
             }
         }
         let _ = browser.shutdown();
