@@ -62,15 +62,12 @@ unsafe extern "C" {
         key_callbacks: *const c_void,
         value_callbacks: *const c_void,
     ) -> CFDictionaryRef;
-    fn CFDictionaryGetValue(dictionary: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
     fn CFArrayCreate(
         allocator: CFAllocatorRef,
         values: *const CFTypeRef,
         count: isize,
         callbacks: *const c_void,
     ) -> CFTypeRef;
-    fn CFArrayGetCount(array: CFTypeRef) -> isize;
-    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
     fn CFBooleanGetValue(boolean: CFTypeRef) -> u8;
 }
 
@@ -121,7 +118,6 @@ struct Api {
         *mut usize,
         *mut i32,
     ) -> OSStatus,
-    attachments: unsafe extern "C" fn(*const c_void, u8) -> CFTypeRef,
     keys: Keys,
 }
 /// Constant names, each a `CFStringRef` VideoToolbox, CoreMedia or
@@ -141,7 +137,6 @@ struct Keys {
     enable_hardware: Option<CFStringRef>,
     low_latency: Option<CFStringRef>,
     using_hardware: Option<CFStringRef>,
-    not_sync: CFStringRef,
     pixel_format: CFStringRef,
     width: CFStringRef,
     height: CFStringRef,
@@ -213,7 +208,6 @@ fn api() -> Option<&'static Api> {
             copy_bytes: function!(cm, c"CMBlockBufferCopyDataBytes"),
             format: function!(cm, c"CMSampleBufferGetFormatDescription"),
             parameter_set: function!(cm, c"CMVideoFormatDescriptionGetH264ParameterSetAtIndex"),
-            attachments: function!(cm, c"CMSampleBufferGetSampleAttachmentsArray"),
             keys: Keys {
                 real_time: constant(vt, c"kVTCompressionPropertyKey_RealTime")?,
                 allow_reordering: constant(vt, c"kVTCompressionPropertyKey_AllowFrameReordering")?,
@@ -244,7 +238,6 @@ fn api() -> Option<&'static Api> {
                     vt,
                     c"kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder",
                 ),
-                not_sync: constant(cm, c"kCMSampleAttachmentKey_NotSync")?,
                 pixel_format: constant(cv, c"kCVPixelBufferPixelFormatTypeKey")?,
                 width: constant(cv, c"kCVPixelBufferWidthKey")?,
                 height: constant(cv, c"kCVPixelBufferHeightKey")?,
@@ -606,36 +599,47 @@ unsafe extern "C" fn output(
 unsafe fn annex_b(sample: *const c_void) -> Result<Encoded> {
     let api = api().context("VideoToolbox is not available")?;
     const START: [u8; 4] = [0, 0, 0, 1];
-    // A sample is a sync sample unless it carries NotSync = true.
-    let keyframe = unsafe {
-        let attachments = (api.attachments)(sample, 0);
-        if attachments.is_null() || CFArrayGetCount(attachments) == 0 {
-            true
-        } else {
-            let first = CFArrayGetValueAtIndex(attachments, 0);
-            let not_sync = CFDictionaryGetValue(first, api.keys.not_sync);
-            not_sync.is_null() || CFBooleanGetValue(not_sync) == 0
-        }
+    let format = unsafe { (api.format)(sample) };
+    ensure!(!format.is_null(), "An encoded picture without its format");
+    let mut count = 0usize;
+    let mut length = 0i32;
+    let status = unsafe {
+        (api.parameter_set)(
+            format,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut count,
+            &mut length,
+        )
     };
-    let mut out = Vec::new();
-    let mut header = 4usize;
+    ensure!(status == 0, "No parameter sets ({status})");
+    let header = length.max(1) as usize;
+    let block = unsafe { (api.data_buffer)(sample) };
+    ensure!(!block.is_null(), "An encoded picture without data");
+    let size = unsafe { (api.data_length)(block) };
+    let mut avcc = vec![0u8; size];
+    let status = unsafe { (api.copy_bytes)(block, 0, size, avcc.as_mut_ptr()) };
+    ensure!(status == 0, "Cannot read an encoded picture ({status})");
+    let mut units = Vec::new();
+    let mut rest = &avcc[..];
+    while rest.len() > header {
+        let size = rest[..header]
+            .iter()
+            .fold(0usize, |n, b| (n << 8) | *b as usize);
+        rest = &rest[header..];
+        ensure!(
+            size > 0 && size <= rest.len(),
+            "A NAL unit runs past its picture"
+        );
+        units.push(&rest[..size]);
+        rest = &rest[size..];
+    }
+    // A keyframe is a picture of IDR slices. The sample's NotSync
+    // attachment disagreed with that on the Intel i9, so the slices are read.
+    let keyframe = units.iter().any(|unit| unit[0] & 31 == 5);
+    let mut out = Vec::with_capacity(size + 64);
     if keyframe {
-        let format = unsafe { (api.format)(sample) };
-        ensure!(!format.is_null(), "A keyframe without its format");
-        let mut count = 0usize;
-        let mut length = 0i32;
-        let status = unsafe {
-            (api.parameter_set)(
-                format,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut count,
-                &mut length,
-            )
-        };
-        ensure!(status == 0, "No parameter sets ({status})");
-        header = length.max(1) as usize;
         for i in 0..count {
             let mut pointer: *const u8 = std::ptr::null();
             let mut size = 0usize;
@@ -654,23 +658,9 @@ unsafe fn annex_b(sample: *const c_void) -> Result<Encoded> {
             out.extend_from_slice(unsafe { std::slice::from_raw_parts(pointer, size) });
         }
     }
-    let block = unsafe { (api.data_buffer)(sample) };
-    ensure!(!block.is_null(), "An encoded picture without data");
-    let length = unsafe { (api.data_length)(block) };
-    let mut avcc = vec![0u8; length];
-    let status = unsafe { (api.copy_bytes)(block, 0, length, avcc.as_mut_ptr()) };
-    ensure!(status == 0, "Cannot read an encoded picture ({status})");
-    out.reserve(length + 16);
-    let mut rest = &avcc[..];
-    while rest.len() > header {
-        let size = rest[..header]
-            .iter()
-            .fold(0usize, |n, b| (n << 8) | *b as usize);
-        rest = &rest[header..];
-        ensure!(size <= rest.len(), "A NAL unit runs past its picture");
+    for unit in units {
         out.extend_from_slice(&START);
-        out.extend_from_slice(&rest[..size]);
-        rest = &rest[size..];
+        out.extend_from_slice(unit);
     }
     Ok(Encoded {
         data: out,
