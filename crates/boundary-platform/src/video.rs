@@ -43,7 +43,9 @@ fn best(width: u32, height: u32) -> Result<Box<dyn VideoEncoder>> {
 
 /// How long to wait for the shadow decoder to catch up when the screen
 /// settles, before sending the whole screen instead.
-const SHADOW_WAIT: Duration = Duration::from_millis(150);
+const SHADOW_WAIT: Duration = Duration::from_millis(50);
+/// More pictures than this still to decode, and the decoder is not waited for.
+const SHADOW_BEHIND: u64 = 2;
 
 /// An encoder with a decoder of its own output beside it, on its own
 /// thread, so that when the screen settles the host knows what the helper's
@@ -89,7 +91,21 @@ impl Shadowed {
 }
 fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
     let mut decoder = openh264::decoder::Decoder::new().ok();
-    for picture in queue {
+    let mut waiting = std::collections::VecDeque::new();
+    loop {
+        if waiting.is_empty() {
+            match queue.recv() {
+                Ok(picture) => waiting.push_back(picture),
+                Err(_) => return,
+            }
+        }
+        waiting.extend(queue.try_iter());
+        let Some(picture) = waiting.pop_front() else {
+            continue;
+        };
+        // Only the newest picture is ever compared with, so the planes of
+        // one with others queued behind it are not copied out.
+        let newest = waiting.is_empty();
         // A NAL unit at a time: OpenH264 refuses a picture of several
         // slices handed over at once.
         let mut luma = None;
@@ -97,6 +113,7 @@ fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
         if let Some(decoder) = decoder.as_mut() {
             for nal in openh264::nal_units(&picture) {
                 match decoder.decode(nal) {
+                    Ok(Some(_)) if !newest => {}
                     Ok(Some(yuv)) => {
                         use openh264::formats::YUVSource;
                         let (_, height) = yuv.dimensions();
@@ -122,6 +139,7 @@ fn shadow(queue: mpsc::Receiver<Vec<u8>>, state: &(Mutex<Mirror>, Condvar)) {
         let (lock, ready) = state;
         let mut mirror = lock.lock().unwrap_or_else(|e| e.into_inner());
         match luma {
+            None if !failed && !newest => {}
             Some((luma, stride, u, v, chroma)) if !failed => {
                 mirror.luma = luma;
                 mirror.stride = stride;
@@ -166,6 +184,13 @@ impl VideoEncoder for Shadowed {
     fn shown(&mut self) -> Option<Shown> {
         let (lock, ready) = &*self.state;
         let mirror = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // A decoder more than a couple of pictures behind is slower than the
+        // encoder, as OpenH264 is behind VideoToolbox at 60 screens a second
+        // of 1920 by 1200 on an Intel i9: waiting for it only delays the
+        // whole screen the caller sends instead.
+        if self.sent - mirror.decoded > SHADOW_BEHIND {
+            return None;
+        }
         let (mirror, _) = ready
             .wait_timeout_while(mirror, SHADOW_WAIT, |m| m.decoded < self.sent)
             .unwrap_or_else(|e| e.into_inner());
