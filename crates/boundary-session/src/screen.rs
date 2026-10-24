@@ -347,12 +347,22 @@ fn encode_rects(frame: &Frame, rects: &[Rect], quality: u8) -> Result<Vec<Vec<u8
 /// The helper's side: the screen as it stands, updated in place.
 #[derive(Default)]
 pub(crate) struct Canvas {
-    frame: Option<Frame>,
+    /// The screen as it stands, as last handed out.
+    shown: Option<std::sync::Arc<Frame>>,
+    /// The one before it, drawn into next when nobody holds it any more,
+    /// and the rectangles it lacks.
+    spare: Option<std::sync::Arc<Frame>>,
+    behind: Vec<Rect>,
 }
 impl Canvas {
     /// Draw one update. Returns its sequence number, the screen after it and
     /// the rectangles it changed.
-    pub fn apply(&mut self, bytes: &[u8]) -> Result<(u64, Frame, Vec<Rect>)> {
+    ///
+    /// The screen is drawn into the one before last, brought up to date by
+    /// the rectangles it lacks, rather than into a copy of the last one: a
+    /// copy of a 1920 by 1080 screen cost a few milliseconds of every
+    /// keystroke and pointer move.
+    pub fn apply(&mut self, bytes: &[u8]) -> Result<(u64, std::sync::Arc<Frame>, Vec<Rect>)> {
         let mut r = Reader(bytes);
         let seq = u64::from_be_bytes(r.take::<8>()?);
         let width = u16::from_be_bytes(r.take::<2>()?) as u32;
@@ -360,15 +370,32 @@ impl Canvas {
         dimensions(width, height)?;
         let count = u16::from_be_bytes(r.take::<2>()?) as usize;
         ensure!(count > 0 && count <= MAX_RECTS * 8, "Invalid screen update");
-        let frame = match self.frame.take() {
-            Some(f) if f.width == width && f.height == height => f,
-            _ => Frame {
+        let fits = |f: &Frame| f.width == width && f.height == height;
+        let shown = self.shown.clone().filter(|s| fits(s));
+        let spare = self
+            .spare
+            .take()
+            .and_then(|a| std::sync::Arc::try_unwrap(a).ok())
+            .filter(fits);
+        let mut frame = match (spare, &shown) {
+            (Some(mut spare), Some(shown)) => {
+                let stride = width as usize * 4;
+                for b in &self.behind {
+                    for y in b.y..b.y + b.height {
+                        let i = y as usize * stride + b.x as usize * 4;
+                        let n = b.width as usize * 4;
+                        spare.rgba[i..i + n].copy_from_slice(&shown.rgba[i..i + n]);
+                    }
+                }
+                spare
+            }
+            (_, Some(shown)) => (**shown).clone(),
+            (_, None) => Frame {
                 width,
                 height,
                 rgba: vec![0; width as usize * height as usize * 4],
             },
         };
-        let mut frame = frame;
         let mut rects = Vec::with_capacity(count);
         for _ in 0..count {
             let [x, y, w, h] = [(); 4].map(|_| r.take::<2>().map(u16::from_be_bytes));
@@ -391,9 +418,10 @@ impl Canvas {
             rects.push(rect);
         }
         ensure!(r.0.is_empty(), "Trailing bytes in screen update");
-        let out = frame.clone();
-        self.frame = Some(frame);
-        Ok((seq, out, rects))
+        let frame = std::sync::Arc::new(frame);
+        self.spare = self.shown.replace(frame.clone());
+        self.behind = rects.clone();
+        Ok((seq, frame, rects))
     }
 }
 
@@ -506,6 +534,56 @@ mod tests {
         let (_, shown, _) = canvas.apply(&update).unwrap();
         let i = (600 * 1000 + 900) * 4;
         assert!((shown.rgba[i] as i32 - (900u32 as u8 / 4).wrapping_add(90) as i32).abs() < 12);
+    }
+
+    /// Drawing into the screen before last gives the same screens as
+    /// drawing into a copy, whether or not somebody still holds the old one,
+    /// and when told what changed the encoder sends the same.
+    #[test]
+    fn the_spare_screen_and_damage_give_the_same_pictures() {
+        let mut encoder = Encoder::default();
+        let mut hinted = Encoder::default();
+        let (mut free, mut held) = (Canvas::default(), Canvas::default());
+        let mut keep = Vec::new();
+        let mut frame = screen(512, 256, 0);
+        for step in 0..8u32 {
+            let damage = if step > 0 {
+                let (x0, y0) = ((step * 37) % 400, (step * 23) % 200);
+                for y in y0..y0 + 30 {
+                    for x in x0..x0 + 50 {
+                        let i = ((y * 512 + x) * 4) as usize;
+                        frame.rgba[i..i + 3].copy_from_slice(&[255, step as u8 * 30, 0]);
+                    }
+                }
+                vec![Rect {
+                    x: x0,
+                    y: y0,
+                    width: 50,
+                    height: 30,
+                }]
+            } else {
+                Vec::new()
+            };
+            let arc = Arc::new(frame.clone());
+            let update = encoder
+                .update(arc.clone(), step as u64 + 1)
+                .unwrap()
+                .unwrap();
+            let with = hinted
+                .update_with(
+                    arc,
+                    step as u64 + 1,
+                    crate::JPEG_QUALITY,
+                    (step > 0).then_some(&damage[..]),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(update, with);
+            let (_, a, _) = free.apply(&update).unwrap();
+            let (_, b, _) = held.apply(&update).unwrap();
+            assert_eq!(a.rgba, b.rgba, "step {step}");
+            keep.push(b);
+        }
     }
 
     #[test]

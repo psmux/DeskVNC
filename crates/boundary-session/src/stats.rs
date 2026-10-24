@@ -53,7 +53,62 @@ static SENT: Counter = Counter {
     count: AtomicU64::new(0),
     micros: AtomicU64::new(0),
 };
+static TO_CAPTURE: Counter = Counter {
+    count: AtomicU64::new(0),
+    micros: AtomicU64::new(0),
+};
+static TO_TAKE: Counter = Counter {
+    count: AtomicU64::new(0),
+    micros: AtomicU64::new(0),
+};
+static TO_SEND: Counter = Counter {
+    count: AtomicU64::new(0),
+    micros: AtomicU64::new(0),
+};
 static SINCE: OnceLock<std::sync::Mutex<Instant>> = OnceLock::new();
+static INPUT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+static PRODUCED: std::sync::Mutex<Option<(Instant, bool)>> = std::sync::Mutex::new(None);
+static TAKEN: std::sync::Mutex<Option<(Instant, bool)>> = std::sync::Mutex::new(None);
+
+/// Input was applied to the desktop.
+pub(crate) fn input() {
+    if on() {
+        *INPUT.lock().unwrap() = Some(Instant::now());
+    }
+}
+/// A changed screen went to the sender.
+pub(crate) fn produced() {
+    if !on() {
+        return;
+    }
+    let after_input = INPUT.lock().unwrap().take();
+    if let Some(at) = after_input {
+        TO_CAPTURE.add(at.elapsed());
+    }
+    *PRODUCED.lock().unwrap() = Some((Instant::now(), after_input.is_some()));
+}
+/// The sender took the newest screen.
+pub(crate) fn taken() {
+    if !on() {
+        return;
+    }
+    let produced = PRODUCED.lock().unwrap().take();
+    if let Some((at, input)) = produced {
+        if input {
+            TO_TAKE.add(at.elapsed());
+        }
+        *TAKEN.lock().unwrap() = Some((at, input));
+    }
+}
+/// The screen taken last is on the wire.
+pub(crate) fn written() {
+    if !on() {
+        return;
+    }
+    if let Some((at, true)) = TAKEN.lock().unwrap().take() {
+        TO_SEND.add(at.elapsed());
+    }
+}
 
 pub(crate) fn captured(took: Duration, changed: bool) {
     if !on() {
@@ -93,8 +148,11 @@ fn report() {
     let (e, ems) = ENCODED.take();
     let (w, wms) = WINDOW.take();
     let (s, sms) = SENT.take();
+    let (ic, icms) = TO_CAPTURE.take();
+    let (_, itms) = TO_TAKE.take();
+    let (_, isms) = TO_SEND.take();
     eprintln!(
-        "STATS captures {:.1}/s {:.1} ms | changed {:.1}/s {:.1} ms | encoded {:.1}/s {:.1} ms | window waits {:.1}/s {:.1} ms | writes {:.1}/s {:.1} ms",
+        "STATS captures {:.1}/s {:.1} ms | changed {:.1}/s {:.1} ms | encoded {:.1}/s {:.1} ms | window waits {:.1}/s {:.1} ms | writes {:.1}/s {:.1} ms | after input x{}: captured {:.1} ms, taken +{:.1}, written +{:.1}",
         c as f64 / secs,
         cms,
         ch as f64 / secs,
@@ -104,6 +162,10 @@ fn report() {
         w as f64 / secs,
         wms,
         s as f64 / secs,
-        sms
+        sms,
+        ic,
+        icms,
+        itms,
+        isms
     );
 }

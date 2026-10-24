@@ -132,7 +132,7 @@ impl Abilities {
 fn show(
     frames: &watch::Sender<Option<Arc<Frame>>>,
     damage: &Mutex<Damage>,
-    frame: Frame,
+    frame: Arc<Frame>,
     rects: Option<Vec<Rect>>,
 ) {
     let mut damage = damage.lock().unwrap_or_else(|e| e.into_inner());
@@ -143,7 +143,7 @@ fn show(
             damage.rects.clear();
         }
     }
-    frames.send_replace(Some(Arc::new(frame)));
+    frames.send_replace(Some(frame));
 }
 /// What changed on the helper's screen since it was last read.
 #[derive(Default)]
@@ -884,7 +884,7 @@ where
 /// using it: sixty screens a second, as often as a display draws.
 const BUSY_CAPTURE: Duration = Duration::from_millis(16);
 /// The same for a desktop that says what changed, which costs little to ask.
-const POLL_CAPTURE: Duration = Duration::from_millis(4);
+const POLL_CAPTURE: Duration = Duration::from_millis(2);
 /// How soon to capture again on a screen that has stayed still for a while.
 const IDLE_CAPTURE: Duration = Duration::from_millis(100);
 /// How long a still screen stays on the busy pace after it last changed.
@@ -935,6 +935,7 @@ where
                 let current = *permission.borrow();
                 if current.allowed && current.generation == epoch {
                     desktop.0.input(event)?;
+                    crate::stats::input();
                     // Show what the input did as soon as it is drawn,
                     // rather than at the next turn of the clock.
                     capture_at = Instant::now();
@@ -968,10 +969,11 @@ where
                 last_change = Instant::now();
                 if !cancel.is_cancelled() {
                     screens.send_replace(Some(frame));
+                    crate::stats::produced();
                 }
             }
             // A desktop that says what changed answers "nothing" for next to
-            // nothing, so while it is busy it is asked four times as often:
+            // nothing, so while it is busy it is asked eight times as often:
             // a change is then picked up within a few milliseconds of being
             // drawn, not up to a whole screen later.
             let pace = if last_change.elapsed() >= BUSY_FOR {
@@ -983,10 +985,12 @@ where
             };
             capture_at = started + pace;
         }
+        // Input is looked for at least every millisecond: waiting up to four
+        // here held each pointer move and key back two on average.
         let wait = capture_at
             .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(4));
-        std::thread::sleep(wait.max(Duration::from_millis(1)));
+            .min(Duration::from_millis(1));
+        std::thread::sleep(wait.max(Duration::from_micros(500)));
     }
     Ok(())
 }
@@ -1382,6 +1386,7 @@ async fn send_updates(
                     tokio::time::sleep_until(next_video).await;
                 }
                 let frame = screens.borrow_and_update().clone().context("Missing screen")?;
+                crate::stats::taken();
                 let damage = changes
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1429,6 +1434,7 @@ async fn send_updates(
         .await
         .context("The helper stopped taking screens")??;
         crate::stats::sent(writing.elapsed());
+        crate::stats::written();
         in_flight.push_back((seq, update.len() as u64));
     }
 }
@@ -1719,7 +1725,7 @@ async fn watch(
             let bytes = [&head[..], &rest].concat();
             received.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             let frame = tokio::task::spawn_blocking(move || Frame::decode(&bytes)).await??;
-            show(frames, damage, frame, None);
+            show(frames, damage, Arc::new(frame), None);
         }
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
