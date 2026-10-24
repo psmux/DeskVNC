@@ -19,4 +19,5 @@ subtle = "2"
 argon2.workspace = true
 
 [dev-dependencies]
+boundary-platform = { path = "../boundary-platform" }
 fast_image_resize.workspace = true

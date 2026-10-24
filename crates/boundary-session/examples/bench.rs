@@ -8,6 +8,7 @@
 //!
 //! ```sh
 //! bench host [--image screen.png] [--bind 10.42.0.9]    # prints INVITATION
+//! bench host --real                                      # the real screen under the square
 //! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy]
 //! bench encode [--image screen.png]                      # time capture side work
 //! ```
@@ -69,35 +70,43 @@ struct State {
 
 struct Synthetic {
     base: Vec<u8>,
+    /// Capture the real screen, as the app does, and draw over that.
+    real: Option<boundary_platform::Capturer>,
     state: Arc<Mutex<State>>,
 }
 impl Desktop for Synthetic {
     fn capture(&mut self) -> anyhow::Result<Frame> {
-        let mut rgba = self.base.clone();
+        let (w, h, mut rgba) = match self.real.as_mut() {
+            Some(real) => {
+                let f = real.capture()?;
+                (f.width, f.height, f.rgba)
+            }
+            None => (W, H, self.base.clone()),
+        };
         let mut s = self.state.lock().unwrap();
         s.tick = s.tick.wrapping_add(1);
         if s.busy {
             // A third of the screen changes every capture.
             let shift = s.tick * 37;
-            for y in 300..700u32 {
-                for x in 0..W {
-                    let i = ((y * W + x) * 4) as usize;
+            for y in 300..700u32.min(h) {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
                     let v = (((x + shift) ^ y) % 251) as u8;
                     rgba[i..i + 3].copy_from_slice(&[v, v / 2, 255 - v]);
                 }
             }
         }
-        let cx = (s.x * (W - 1) as f32) as i64;
-        let cy = (s.y * (H - 1) as f32) as i64;
-        for y in (cy - MARK / 2).max(0)..(cy + MARK / 2).min(H as i64) {
-            for x in (cx - MARK / 2).max(0)..(cx + MARK / 2).min(W as i64) {
-                let i = ((y as u32 * W + x as u32) * 4) as usize;
+        let cx = (s.x * (w - 1) as f32) as i64;
+        let cy = (s.y * (h - 1) as f32) as i64;
+        for y in (cy - MARK / 2).max(0)..(cy + MARK / 2).min(h as i64) {
+            for x in (cx - MARK / 2).max(0)..(cx + MARK / 2).min(w as i64) {
+                let i = ((y as u32 * w + x as u32) * 4) as usize;
                 rgba[i..i + 3].copy_from_slice(&[255, 0, 255]);
             }
         }
         Ok(Frame {
-            width: W,
-            height: H,
+            width: w,
+            height: h,
             rgba,
         })
     }
@@ -143,9 +152,20 @@ async fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("host") => {
             let base = base(&args);
+            let real = args.iter().any(|a| a == "--real");
             let mut session = boundary_session::host(options(&args), move || {
+                let real = if real {
+                    let id = boundary_platform::displays()?
+                        .first()
+                        .map(|d| d.id)
+                        .ok_or_else(|| anyhow::anyhow!("no display"))?;
+                    Some(boundary_platform::Capturer::new(id)?)
+                } else {
+                    None
+                };
                 Ok(Box::new(Synthetic {
                     base,
+                    real,
                     state: Arc::new(Mutex::new(State {
                         x: 0.5,
                         y: 0.5,

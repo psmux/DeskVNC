@@ -59,13 +59,8 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         screen_permission(),
         "Allow this app in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen the app"
     );
-    let monitor = Monitor::all()?
-        .into_iter()
-        .find(|m| m.id().ok() == Some(id))
-        .context("The selected display is no longer connected")?;
     Ok(Box::new(NativeDesktop {
-        monitor,
-        resizer: fast_image_resize::Resizer::new(),
+        screen: Capturer::new(id)?,
         enigo: None,
         buttons: Vec::new(),
         keys: Vec::new(),
@@ -136,31 +131,28 @@ fn capture_pixels(monitor: &Monitor) -> Result<(u32, u32, Vec<u8>)> {
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1200;
 
-struct NativeDesktop {
+/// One display's screen, captured and shrunk to the size it is sent at.
+///
+/// Opening one does not check for permission, which is [`open`]'s job: on a
+/// Mac without it the picture is the wallpaper alone, at the same cost, which
+/// is what makes this usable for timing a machine over SSH.
+pub struct Capturer {
     monitor: Monitor,
     resizer: fast_image_resize::Resizer,
-    enigo: Option<Enigo>,
-    buttons: Vec<Button>,
-    keys: Vec<Key>,
 }
-impl NativeDesktop {
-    fn injector(&mut self) -> Result<&mut Enigo> {
-        ensure!(
-            input_permission(),
-            "Allow this app in System Settings > Privacy & Security > Accessibility to use control"
-        );
-        if self.enigo.is_none() {
-            self.enigo = Some(Enigo::new(&Settings {
-                open_prompt_to_get_permissions: false,
-                ..Settings::default()
-            })?);
-        }
-        self.enigo.as_mut().context("Input is unavailable")
+impl Capturer {
+    pub fn new(id: u32) -> Result<Self> {
+        dpi_aware();
+        let monitor = Monitor::all()?
+            .into_iter()
+            .find(|m| m.id().ok() == Some(id))
+            .context("The selected display is no longer connected")?;
+        Ok(Self {
+            monitor,
+            resizer: fast_image_resize::Resizer::new(),
+        })
     }
-}
-impl Desktop for NativeDesktop {
-    fn capture(&mut self) -> Result<Frame> {
-        on_input_desktop();
+    pub fn capture(&mut self) -> Result<Frame> {
         let (width, height, rgba) = capture_pixels(&self.monitor)?;
         if width <= MAX_WIDTH && height <= MAX_HEIGHT {
             return Ok(Frame {
@@ -193,16 +185,44 @@ impl Desktop for NativeDesktop {
             rgba: dst.into_vec(),
         })
     }
+}
+
+struct NativeDesktop {
+    screen: Capturer,
+    enigo: Option<Enigo>,
+    buttons: Vec<Button>,
+    keys: Vec<Key>,
+}
+impl NativeDesktop {
+    fn injector(&mut self) -> Result<&mut Enigo> {
+        ensure!(
+            input_permission(),
+            "Allow this app in System Settings > Privacy & Security > Accessibility to use control"
+        );
+        if self.enigo.is_none() {
+            self.enigo = Some(Enigo::new(&Settings {
+                open_prompt_to_get_permissions: false,
+                ..Settings::default()
+            })?);
+        }
+        self.enigo.as_mut().context("Input is unavailable")
+    }
+}
+impl Desktop for NativeDesktop {
+    fn capture(&mut self) -> Result<Frame> {
+        on_input_desktop();
+        self.screen.capture()
+    }
     fn input(&mut self, input: Input) -> Result<()> {
         input.validate()?;
         on_input_desktop();
         match input {
             Input::Move { x, y } => {
                 // xcap reports macOS display bounds in points, matching CGEvent coordinates.
-                let px = self.monitor.x()?
-                    + (x * self.monitor.width()?.saturating_sub(1) as f32).round() as i32;
-                let py = self.monitor.y()?
-                    + (y * self.monitor.height()?.saturating_sub(1) as f32).round() as i32;
+                let px = self.screen.monitor.x()?
+                    + (x * self.screen.monitor.width()?.saturating_sub(1) as f32).round() as i32;
+                let py = self.screen.monitor.y()?
+                    + (y * self.screen.monitor.height()?.saturating_sub(1) as f32).round() as i32;
                 self.injector()?.move_mouse(px, py, Coordinate::Abs)?;
             }
             Input::Button { button, down } => {
