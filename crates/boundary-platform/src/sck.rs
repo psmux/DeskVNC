@@ -13,18 +13,19 @@ use objc2::{
     rc::Retained,
     runtime::{NSObject, NSObjectProtocol, ProtocolObject},
 };
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_foundation::CFRetained;
+use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
 use objc2_core_video::{
-    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
-    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
+    CVImageBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
 };
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
     SCStreamOutput, SCStreamOutputType,
 };
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 /// How long a capture waits for a new screen before saying nothing changed.
@@ -86,12 +87,42 @@ impl Output {
     }
 }
 
+/// `CMSampleBufferGetImageBuffer`, found in CoreMedia itself when first used.
+///
+/// Linking it the ordinary way bound it to Swift's CoreMedia overlay, which
+/// lists the symbol when the app is built and, on an Intel Mac, does not
+/// provide it when the app runs: the call went to address zero and the
+/// Support app crashed as soon as a helper connected.
+fn image_buffer_fn() -> Option<unsafe extern "C" fn(*const CMSampleBuffer) -> *mut CVImageBuffer> {
+    static FOUND: OnceLock<usize> = OnceLock::new();
+    let address = *FOUND.get_or_init(|| unsafe {
+        let framework = libc::dlopen(
+            c"/System/Library/Frameworks/CoreMedia.framework/CoreMedia".as_ptr(),
+            libc::RTLD_LAZY,
+        );
+        if framework.is_null() {
+            return 0;
+        }
+        libc::dlsym(framework, c"CMSampleBufferGetImageBuffer".as_ptr()) as usize
+    });
+    // SAFETY: the symbol has this C signature in every CoreMedia.
+    (address != 0).then(|| unsafe {
+        std::mem::transmute::<
+            usize,
+            unsafe extern "C" fn(*const CMSampleBuffer) -> *mut CVImageBuffer,
+        >(address)
+    })
+}
+
 /// The pixels of one screen sample, as RGBA.
 ///
 /// # Safety
 /// `sample` must be a screen sample from ScreenCaptureKit in 32BGRA.
 unsafe fn copy(sample: &CMSampleBuffer) -> Option<Frame> {
-    let pixels = unsafe { sample.image_buffer() }?;
+    let get = image_buffer_fn()?;
+    // SAFETY: a "Get" function: the buffer belongs to the sample, which
+    // outlives this call, so it is retained here for as long as it is read.
+    let pixels = unsafe { CFRetained::retain(std::ptr::NonNull::new(get(sample))?) };
     unsafe { CVPixelBufferLockBaseAddress(&pixels, CVPixelBufferLockFlags::ReadOnly) };
     let (width, height) = (
         CVPixelBufferGetWidth(&pixels),
@@ -142,6 +173,7 @@ unsafe impl Send for Stream {}
 impl Stream {
     /// Stream the display `id`, at no more than `max` pixels across and down.
     pub fn open(id: u32, max: (u32, u32)) -> Result<Self> {
+        ensure!(image_buffer_fn().is_some(), "CoreMedia is not available");
         let (tx, rx) = mpsc::channel();
         let handler = block2::RcBlock::new(
             move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -185,7 +217,14 @@ impl Stream {
         unsafe {
             config.setWidth(width);
             config.setHeight(height);
-            config.setMinimumFrameInterval(CMTime::new(1, 60));
+            // Built here rather than with CMTimeMake, for the reason
+            // `image_buffer_fn` gives.
+            config.setMinimumFrameInterval(CMTime {
+                value: 1,
+                timescale: 60,
+                flags: CMTimeFlags::Valid,
+                epoch: 0,
+            });
             config.setPixelFormat(kCVPixelFormatType_32BGRA);
             // DeskVNC draws its own pointer, which moves with no lag at all.
             config.setShowsCursor(false);
