@@ -43,21 +43,7 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 /// What to call this computer when a helper saves it.
 pub fn computer_name() -> String {
-    let name = if cfg!(target_os = "macos") {
-        std::process::Command::new("scutil")
-            .args(["--get", "ComputerName"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else if cfg!(windows) {
-        std::env::var("COMPUTERNAME").ok()
-    } else {
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|s| s.trim().to_string())
-    };
-    name.filter(|n| !n.is_empty() && n.len() <= 80)
-        .unwrap_or_else(|| "This computer".into())
+    boundary_session::nearby::computer_name()
 }
 /// Claim this computer's unattended listener for this process.
 ///

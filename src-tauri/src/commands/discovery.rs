@@ -140,13 +140,28 @@ fn security_level(types: &[u8]) -> &'static str {
 
 /// Map a `vnc_discovery::DiscoveredHost` onto the webview's `DiscoveredHost`.
 fn host_json(host: &DiscoveredHost) -> serde_json::Value {
-    let security_hint = host
-        .security_types
-        .iter()
-        .copied()
-        .find_map(security_type_label)
-        .map(str::to_string)
-        .or_else(|| host.rfb_version.clone());
+    let boundary = host.protocol == vnc_discovery::ProtocolKind::Boundary;
+    let security_hint = if boundary {
+        // QUIC under a key the row already names: encrypted, and pinned once
+        // the connection puts the ID in front of the address.
+        Some("Encrypted".to_string())
+    } else {
+        host.security_types
+            .iter()
+            .copied()
+            .find_map(security_type_label)
+            .map(str::to_string)
+            .or_else(|| host.rfb_version.clone())
+    };
+    let security = if boundary {
+        if host.boundary_id.is_some() {
+            "verified"
+        } else {
+            "unverified"
+        }
+    } else {
+        security_level(&host.security_types)
+    };
     serde_json::json!({
         "id": discovered_id(&host.address, host.port),
         "name": host.hostname.clone().unwrap_or_else(|| host.address.to_string()),
@@ -155,7 +170,7 @@ fn host_json(host: &DiscoveredHost) -> serde_json::Value {
         "osHint": os_hint(host),
         "serverHint": host.server_label,
         "securityHint": security_hint,
-        "security": security_level(&host.security_types),
+        "security": security,
         "securityTypes": host.security_types,
         "source": match host.source {
             DiscoverySource::Mdns => "mdns",
@@ -182,6 +197,10 @@ fn host_json(host: &DiscoveredHost) -> serde_json::Value {
         // NLA is available and says nothing about whether TLS alone would
         // have been refused.
         "rdp": host.rdp,
+        // The machine ID a Boundary computer gave, `null` on every other
+        // row. The UI dials `id@address:port` with it, so the key is pinned
+        // rather than asked of whatever answers at that address.
+        "boundaryId": host.boundary_id,
         // The shell does not join against the host library on the hot path;
         // the UI already de-dupes discovered entries against its own list.
         "savedHostId": serde_json::Value::Null,
@@ -390,9 +409,21 @@ pub async fn scan_network(
         .map(|v| v != "false")
         .unwrap_or(true);
 
+    // One more connection per address, to 5940, read the same way: it is
+    // what lists a computer that turned on unattended access. The probe
+    // only reads the one line such a machine answers with.
+    let probe_boundary = state
+        .store
+        .get_setting("probe_boundary")
+        .ok()
+        .flatten()
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
     let options = ScanOptions {
         probe_other_services,
         probe_rdp,
+        probe_boundary,
         subnets: parsed,
         ..ScanOptions::default()
     };
@@ -569,6 +600,29 @@ mod tests {
         let complete = event_json(&DiscoveryEvent::ScanComplete { found: 3 });
         assert_eq!(complete["type"], "scan-complete");
         assert_eq!(complete["found"], 3);
+    }
+
+    /// A Boundary row carries its ID to the UI, and reads as encrypted and
+    /// pinned rather than as an unprobed VNC server.
+    #[test]
+    fn a_boundary_row_carries_its_machine_id() {
+        let mut h = DiscoveredHost::new(
+            "192.168.1.9".parse::<IpAddr>().unwrap(),
+            5940,
+            DiscoverySource::Scan,
+            vnc_discovery::boundary::LABEL.to_string(),
+        );
+        h.protocol = vnc_discovery::ProtocolKind::Boundary;
+        h.boundary_id = Some("ab".repeat(32));
+        let json = host_json(&h);
+        assert_eq!(json["protocol"], "boundary");
+        assert_eq!(json["boundaryId"], "ab".repeat(32));
+        assert_eq!(json["securityHint"], "Encrypted");
+        assert_eq!(json["security"], "verified");
+        assert_eq!(json["id"], "192.168.1.9:5940");
+
+        let vnc = host_json(&host("VNC", vec![]));
+        assert!(vnc["boundaryId"].is_null());
     }
 
     #[test]

@@ -117,6 +117,8 @@ fn scan_options(port: u16) -> ScanOptions {
         probe_other_services: false,
         probe_rdp: true,
         rdp_ports: vec![port],
+        probe_boundary: false,
+        boundary_ports: Vec::new(),
     }
 }
 

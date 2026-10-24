@@ -1071,6 +1071,7 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "iroh",
+ "mdns-sd",
  "noq-proto",
  "openh264",
  "serde",
@@ -1078,6 +1079,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-util",
+ "vnc-discovery",
 ]
 
 [[package]]

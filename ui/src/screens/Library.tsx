@@ -14,6 +14,7 @@ import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/S
 import { useToasts } from "../state/ToastContext";
 import type { DiscoveredHost, HostGroup, HostProfile, ProtocolKind } from "../lib/types";
 import { serializeRdpSettings } from "../lib/rdp";
+import { discoveredEndpoint } from "../lib/address";
 import { serializeSshSettings } from "../lib/ssh";
 import { loadSshDefaults } from "../lib/sshDefaults";
 import { vncCredentialPayload, vncTakesUsername } from "../lib/hostDraft";
@@ -530,7 +531,11 @@ export function Library({
       discovered.filter(
         (d) =>
           d.savedHostId === null &&
-          !hosts.some((h) => h.address === d.address && h.port === d.port) &&
+          !hosts.some((h) => {
+            // A saved Boundary computer keeps its ID in front of the address.
+            const e = discoveredEndpoint(d);
+            return h.address === e.address && h.port === e.port;
+          }) &&
           (!search.trim() || fuzzyMatch(search, `${d.name} ${d.address}`)),
       ),
     [discovered, hosts, search],
@@ -696,15 +701,17 @@ export function Library({
    * name proven to come from Windows wins over the server-string guess.
    */
   const addDiscovered = useCallback((d: DiscoveredHost): void => {
+    // A Boundary row is saved as `id@address`, so the key stays pinned.
+    const endpoint = discoveredEndpoint(d);
     setHostDialog(
       draftFromHost(null, {
         friendlyName: d.name,
-        address: d.address,
-        port: d.port,
+        address: endpoint.address,
+        port: endpoint.port,
         // The discovery row already knows what answers on that port, so the
         // editor opens on the right side of the protocol selector rather
         // than making the user notice and switch it.
-        protocol: d.protocol ?? "vnc",
+        protocol: endpoint.protocol,
         osHint: resolvedOsHint(d),
         wolMac: hostMac(d),
       }),
@@ -1370,7 +1377,10 @@ export function Library({
                         key={d.id}
                         host={d}
                         onAdd={() => addDiscovered(d)}
-                        onConnect={() => connectAdHoc(d.protocol ?? "vnc", d.address, d.port)}
+                        onConnect={() => {
+                          const e = discoveredEndpoint(d);
+                          connectAdHoc(e.protocol, e.address, e.port);
+                        }}
                       />
                     ))}
                   </div>

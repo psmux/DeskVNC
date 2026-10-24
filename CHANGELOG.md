@@ -21,8 +21,20 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   you a different one. Pairing or the unattended password still decides who
   gets in. If port 5940 is taken the computer still answers by ID. A bare
   machine ID typed into quick connect now opens it over Boundary too.
+* Scan network lists Boundary computers beside VNC and RDP machines, with
+  their own icon and a Boundary badge. The scan reads the one line a
+  computer with unattended access answers on TCP 5940 and writes nothing
+  back. While unattended access is on, the computer also announces itself on
+  the local network (`_boundary._udp` over mDNS, with its ID, port and name),
+  so it is still found when port 5940 was taken or a firewall drops the TCP
+  probe. A double click on a found computer connects with its ID pinned, on
+  the port it was found on. The probe can be turned off with the
+  `probe_boundary` setting, like `probe_rdp`.
 
 ### Fixed
+
+* A saved Boundary computer with a port other than 5940 is now dialled on
+  that port. The port was dropped on the way to the connection.
 
 * A Mac with unattended access on now answers helpers even when DeskVNC
   started while its screen was asleep. A sleeping screen lists no display, so

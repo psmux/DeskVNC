@@ -488,11 +488,10 @@ pub(crate) async fn endpoint_with(
     // A machine waiting for unattended helpers sits on a port people can
     // type, so it can be dialled by address like a VNC server. Somebody else
     // on that port only costs it the address: it still answers by ID.
-    if lookup == Lookup::Publish {
-        if let Ok(endpoint) = bind_endpoint(options, key.clone(), lookup, crate::direct::PORT).await
-        {
-            return Ok(endpoint);
-        }
+    if lookup == Lookup::Publish
+        && let Ok(endpoint) = bind_endpoint(options, key.clone(), lookup, crate::direct::PORT).await
+    {
+        return Ok(endpoint);
     }
     bind_endpoint(options, key, lookup, 0).await
 }

@@ -2,6 +2,7 @@
 
 pub mod direct;
 mod dns;
+pub mod nearby;
 mod screen;
 mod session;
 mod shared;
@@ -32,6 +33,13 @@ pub trait Desktop {
     /// so here and saves comparing a whole screen with the last one.
     fn capture_changed(&mut self) -> Result<Option<Frame>> {
         self.capture().map(Some)
+    }
+    /// What changed in the screen the last [`Desktop::capture_changed`]
+    /// handed over, since the screen before it, in that screen's pixels.
+    /// `None` means the backend was not told, so screens must be compared;
+    /// an empty list means nothing changed.
+    fn capture_damage(&self) -> Option<Vec<Rect>> {
+        None
     }
     fn input(&mut self, input: Input) -> Result<()>;
     fn release(&mut self);

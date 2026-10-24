@@ -1163,7 +1163,13 @@ pub async fn connect_session(
     let mut options = match kind {
         ProtocolKind::Rdp => ConnectOptions::rdp(address, port),
         ProtocolKind::Ssh => ConnectOptions::ssh(address, port),
-        ProtocolKind::Boundary => ConnectOptions::boundary(address),
+        // The port rides along: the driver puts it after the address, which
+        // is how a computer found on a port other than 5940 is reached.
+        // Zero, the default for a machine ID, adds nothing.
+        ProtocolKind::Boundary => ConnectOptions {
+            port,
+            ..ConnectOptions::boundary(address)
+        },
         _ => ConnectOptions::vnc(address, port),
     };
 
