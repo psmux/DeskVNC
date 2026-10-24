@@ -10,6 +10,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Changed
+
+* Boundary sessions are much more responsive across long distances. Measured
+  from India to two iMacs in the US, a pointer move now shows up in about
+  one network round trip (270 to 380 ms) instead of 0.6 to 1.3 s, and a busy
+  screen updates 11 to 18 times a second instead of about once. The host now
+  sends only the parts of the screen that changed, keeps sending without
+  waiting a round trip after each screen, captures as soon as input arrives
+  instead of on the next tick, and on a Mac captures at point size rather
+  than Retina pixels. The first screen arrives about a second sooner.
+  Both sides still work with older copies, which get whole screens as before.
+
 ## [0.31.1] (2026-10-21)
 
 ### Fixed
