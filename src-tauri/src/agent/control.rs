@@ -129,6 +129,7 @@ pub fn status_json(
             "label": w.label,
             "you": mine(&w.id),
             "waitingMs": w.waiting_ms,
+            "reason": w.reason,
         })
     };
     json!({
@@ -216,10 +217,23 @@ impl AgentPlane {
     }
 
     /// Ask for the wheel on a session: granted, queued, or a preemption.
-    pub fn lease_ask(&self, session_id: &str, attachment_id: &str, label: Option<&str>) -> Answer {
+    pub fn lease_ask(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+        label: Option<&str>,
+        reason: Option<String>,
+    ) -> Answer {
         let party = self.agent_party(session_id, attachment_id, label);
-        let answer = self.board.lock().ask(session_id, party, lease_now());
+        let answer = self
+            .board
+            .lock()
+            .ask(session_id, party, reason, lease_now());
+        if matches!(answer.refusal, Some(agent_lease::LeaseError::Muted { .. })) {
+            self.note_muted_ask(session_id, attachment_id);
+        }
         self.settle(session_id, &answer);
+        self.announce_requests(false);
         answer
     }
 
@@ -282,6 +296,10 @@ impl AgentPlane {
         for (session_id, answer) in moved {
             self.settle(&session_id, &answer);
         }
+        // Once a second at most while somebody is waiting, so the panel's
+        // countdown follows the person's own typing; immediately on any
+        // change to who is waiting.
+        self.announce_requests(true);
     }
 
     /// An attachment went away: let go of everything it held or waited for,
@@ -421,7 +439,7 @@ impl AgentPlane {
     /// the one now holding: a person's own keys are theirs, and releasing them
     /// under their fingers is the bug the obligation exists to prevent, not
     /// to cause. Every lease call in this file goes through here.
-    fn settle(&self, session_id: &str, answer: &Answer) {
+    pub(super) fn settle(&self, session_id: &str, answer: &Answer) {
         if !answer.changed() {
             return;
         }
@@ -477,6 +495,7 @@ impl AgentPlane {
         }
         emit(self.lease_event(session_id));
         self.announce();
+        self.announce_requests(false);
     }
 }
 
@@ -523,7 +542,7 @@ mod tests {
         let sentence = not_yours("s1", &refused.status, &plane.lease_policy());
         assert!(sentence.contains("claude-code (att_1)"), "{sentence}");
 
-        let queued = plane.lease_ask("s1", "att_2", Some("codex"));
+        let queued = plane.lease_ask("s1", "att_2", Some("codex"), None);
         assert_eq!(queued.status.position_of(&PartyId::from("att_2")), Some(0));
         let event = plane.lease_event("s1");
         assert_eq!(event["holderKind"], "agent");

@@ -268,6 +268,12 @@ fn main() {
             // machine off them are different acts.
             "agent_status",
             "agent_take_the_wheel",
+            // A person answering agents that ask for a machine they are using:
+            // read the list, let one in or say not now, and mute or unmute.
+            "agent_requests",
+            "agent_request_answer",
+            "agent_requests_mute",
+            "agent_requests_unmute",
             // Registering the bundled `dvv` with Claude Code, which runs a
             // program on the person's behalf. Its own grant for that reason:
             // reading the plane's state and spawning a process are not the

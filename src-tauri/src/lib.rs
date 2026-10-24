@@ -286,6 +286,10 @@ pub fn run() {
             // agent plane (dvvp.v1)
             commands::agent::agent_status,
             commands::agent::agent_take_the_wheel,
+            commands::agent::agent_requests,
+            commands::agent::agent_request_answer,
+            commands::agent::agent_requests_mute,
+            commands::agent::agent_requests_unmute,
             commands::agent::agent_register_with_claude,
             commands::agent::agent_setup_agents,
             // file transfer (SFTP sidecar)

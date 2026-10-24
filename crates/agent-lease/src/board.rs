@@ -134,7 +134,7 @@ impl Board {
 
     /// How long a muted request on this session should wait before asking
     /// again: until the mute ends, or until the person can next go idle.
-    fn mute_left(&self, key: &str, now: LeaseInstant) -> Option<crate::clock::Millis> {
+    pub fn mute_left(&self, key: &str, now: LeaseInstant) -> Option<crate::clock::Millis> {
         match self.muted(now)? {
             MuteUntil::At(until) => Some(until.since(now)),
             MuteUntil::PersonIdle => Some(
