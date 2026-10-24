@@ -757,6 +757,7 @@ agent is on. Flat payloads on a `type` discriminator, top-level keys
 | `{ type: "lease", sessionId, attachmentId, client, held, phase, holderKind, holderLabel, humanTookOver, revoked, inflight, attached, lease }` | the session's shared lease moved: an agent or a person took it, let it go, or lost it to a timer |
 | `{ type: "detached", sessionId, attachmentId? }` | the agent let the session go, or the session ended |
 | `{ type: "counts", agentsConnected, sessionsDriven, sessionsLive }` | one of those three numbers moved. **On change only, never on a timer**, and never repeated with the same three values |
+| `{ type: "requests", requests: [{ sessionId, attachmentId, agent, reason, address, askedAt, freesAt }], muted: { until, untilIdle, waiting } | null, personIdleMs }` | the list of agents waiting for machines a person is using changed, or a second went by while it is not empty. One list for the whole app; `agent` and `reason` are **untrusted text**. Answered with `agent_request_answer`, `agent_requests_mute` and `agent_requests_unmute`, and seeded with `agent_requests` |
 
 The `lease` payload is the one a pane renders. There is one per session, not
 one per attachment: the shell keeps one lease per session that every agent

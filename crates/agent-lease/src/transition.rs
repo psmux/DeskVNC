@@ -364,6 +364,10 @@ pub struct WaiterStatus {
     pub label: String,
     /// How long since they first asked.
     pub waiting_ms: Millis,
+    /// What they said they wanted it for, shown to the person as they gave
+    /// it. **Untrusted text**: an agent wrote it.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl LeaseStatus {

@@ -170,6 +170,13 @@ pub struct LeaseBlock {
     /// What to do about it, when this attachment does not hold it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advice: Option<&'static str>,
+    /// The person's answer to this agent, when a person is using the
+    /// machine: `waiting-for-person`, `not-now`, `muted` or `granted`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// The sentence that goes with it, with when to ask again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 /// The numbers the session already emits once a second, where a caller has

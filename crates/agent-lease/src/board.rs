@@ -49,11 +49,52 @@ impl Answer {
     }
 }
 
+/// How long a "not now" from a person keeps answering the same agent on the
+/// same session without asking the person again. Long enough that an agent
+/// polling for the machine does not raise the request again a second later,
+/// short enough that a person who changes their mind is asked again soon.
+pub const NOT_NOW_MS: crate::clock::Millis = 60_000;
+
+/// How long a person muted requests from agents for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "until", content = "at")]
+pub enum MuteUntil {
+    /// Until this instant on the board's clock.
+    At(LeaseInstant),
+    /// Until the person stops using every machine they are using, which is
+    /// when their last lease frees itself by the person idle time.
+    PersonIdle,
+}
+
+/// One agent waiting for a machine a person is using, as the person is
+/// shown it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    /// The session.
+    pub key: String,
+    /// The waiting agent.
+    pub party: PartyId,
+    /// What everyone is shown for it.
+    pub label: String,
+    /// What it said it wanted the machine for. **Untrusted text.**
+    pub reason: Option<String>,
+    /// How long since it first asked.
+    pub waiting_ms: crate::clock::Millis,
+    /// How long until the person's hold frees itself if they send nothing
+    /// more, which is when the head of the queue gets the machine anyway.
+    pub frees_in_ms: Option<crate::clock::Millis>,
+}
+
 /// Every session's lease, keyed by whatever the plane calls a session.
 #[derive(Debug, Default)]
 pub struct Board {
     policy: LeasePolicy,
     leases: BTreeMap<String, Lease>,
+    /// Requests from agents are muted, for machines a person is using.
+    mute: Option<MuteUntil>,
+    /// "Not now", per session and agent, until the instant it stops
+    /// answering for the person.
+    declined: BTreeMap<(String, PartyId), LeaseInstant>,
 }
 
 impl Board {
@@ -63,7 +104,206 @@ impl Board {
         Board {
             policy,
             leases: BTreeMap::new(),
+            mute: None,
+            declined: BTreeMap::new(),
         }
+    }
+
+    /// Does a person hold, or is a person taking, this session?
+    fn person_holds(&self, key: &str, now: LeaseInstant) -> bool {
+        self.peek(key, now).is_some_and(|s| s.person_holds())
+    }
+
+    /// Does a person hold any session at all?
+    fn person_holds_any(&self, now: LeaseInstant) -> bool {
+        self.leases
+            .values()
+            .any(|lease| lease.status(now).person_holds())
+    }
+
+    /// The mute in force, if any. A mute until a time that has passed, or
+    /// until the person goes idle when they hold nothing, is none.
+    #[must_use]
+    pub fn muted(&self, now: LeaseInstant) -> Option<MuteUntil> {
+        match self.mute? {
+            MuteUntil::At(until) if now.reached(until) => None,
+            MuteUntil::PersonIdle if !self.person_holds_any(now) => None,
+            mute => Some(mute),
+        }
+    }
+
+    /// How long a muted request on this session should wait before asking
+    /// again: until the mute ends, or until the person can next go idle.
+    pub fn mute_left(&self, key: &str, now: LeaseInstant) -> Option<crate::clock::Millis> {
+        match self.muted(now)? {
+            MuteUntil::At(until) => Some(until.since(now)),
+            MuteUntil::PersonIdle => Some(
+                self.peek(key, now)
+                    .and_then(|s| s.changes_in_ms)
+                    .unwrap_or(self.policy.person_idle_ms),
+            ),
+        }
+    }
+
+    /// How long this agent's "not now" on this session still answers, if it
+    /// does.
+    #[must_use]
+    pub fn not_now_left(
+        &self,
+        key: &str,
+        party: &PartyId,
+        now: LeaseInstant,
+    ) -> Option<crate::clock::Millis> {
+        self.declined
+            .get(&(key.to_string(), party.clone()))
+            .filter(|until| !now.reached(**until))
+            .map(|until| until.since(now))
+    }
+
+    /// Mute requests from agents for machines a person is using. Agents
+    /// already waiting on those machines are taken out of line, and are told
+    /// it is muted when they next ask.
+    pub fn mute(&mut self, until: MuteUntil, now: LeaseInstant) -> Vec<(String, Answer)> {
+        self.mute = Some(until);
+        self.drop_requests(now)
+    }
+
+    /// Show requests again.
+    pub fn unmute(&mut self) {
+        self.mute = None;
+    }
+
+    /// The person said "not now" to one agent's request on one session. It
+    /// leaves the queue, and asking again is answered the same way for
+    /// [`NOT_NOW_MS`] without the person being asked.
+    pub fn not_now(&mut self, key: &str, party: &PartyId, now: LeaseInstant) -> Answer {
+        self.declined
+            .insert((key.to_string(), party.clone()), now.plus(NOT_NOW_MS));
+        let lease = self.lease(key);
+        let mut transitions = Vec::new();
+        tick_into(lease, now, &mut transitions);
+        transitions.push(lease.cancel_wait(party, now));
+        Answer {
+            transitions,
+            status: lease.status(now),
+            refusal: Some(LeaseError::NotNow {
+                retry_after_ms: NOT_NOW_MS,
+            }),
+        }
+    }
+
+    /// "Not now" to every request on every machine a person is using.
+    pub fn not_now_all(&mut self, now: LeaseInstant) -> Vec<(String, Answer)> {
+        let asked: Vec<(String, PartyId)> = self
+            .requests(now)
+            .into_iter()
+            .map(|r| (r.key, r.party))
+            .collect();
+        asked
+            .into_iter()
+            .map(|(key, party)| {
+                let answer = self.not_now(&key, &party, now);
+                (key, answer)
+            })
+            .collect()
+    }
+
+    /// The person lets this agent have this session now: it goes to the head
+    /// of the queue and the person lets go, so it is granted at once.
+    /// Refused, with nothing changed, when that agent is not waiting.
+    pub fn yield_to(
+        &mut self,
+        key: &str,
+        party: &PartyId,
+        person: &PartyId,
+        now: LeaseInstant,
+    ) -> Answer {
+        let lease = self.lease(key);
+        let mut transitions = Vec::new();
+        tick_into(lease, now, &mut transitions);
+        if !lease.promote(party) {
+            let refusal = Some(LeaseError::Held {
+                holder_kind: crate::party::HolderKind::Human,
+                holder_label: "nobody is waiting under that name".to_string(),
+            });
+            return Answer {
+                transitions,
+                status: lease.status(now),
+                refusal,
+            };
+        }
+        // A person taking over from an agent is a pending preemption, not a
+        // holder yet: calling it off hands the wheel straight back.
+        transitions.push(lease.cancel_wait(person, now));
+        if let Some(lease_id) = lease
+            .holder()
+            .filter(|h| &h.party.id == person)
+            .map(|h| h.lease_id)
+        {
+            transitions.push(lease.release(person, lease_id, now));
+        }
+        confirm_into(lease, now, &mut transitions);
+        Answer {
+            transitions,
+            status: lease.status(now),
+            refusal: None,
+        }
+    }
+
+    /// Every agent waiting for a machine a person is using, oldest first.
+    /// This is what the person is shown.
+    #[must_use]
+    pub fn requests(&self, now: LeaseInstant) -> Vec<Request> {
+        let mut out: Vec<Request> = self
+            .leases
+            .iter()
+            .filter_map(|(key, lease)| {
+                let status = lease.status(now);
+                status.person_holds().then_some((key, status))
+            })
+            .flat_map(|(key, status)| {
+                let frees_in_ms = status.changes_in_ms;
+                status
+                    .queue
+                    .into_iter()
+                    .filter(|w| !w.kind.is_person())
+                    .map(move |w| Request {
+                        key: key.clone(),
+                        party: w.id,
+                        label: w.label,
+                        reason: w.reason,
+                        waiting_ms: w.waiting_ms,
+                        frees_in_ms,
+                    })
+            })
+            .collect();
+        out.sort_by(|a, b| b.waiting_ms.cmp(&a.waiting_ms).then(a.key.cmp(&b.key)));
+        out
+    }
+
+    /// Take every agent out of line on machines a person is using.
+    fn drop_requests(&mut self, now: LeaseInstant) -> Vec<(String, Answer)> {
+        let asked: Vec<(String, PartyId)> = self
+            .requests(now)
+            .into_iter()
+            .map(|r| (r.key, r.party))
+            .collect();
+        asked
+            .into_iter()
+            .map(|(key, party)| {
+                let lease = self.lease(&key);
+                let transitions = vec![lease.cancel_wait(&party, now)];
+                let status = lease.status(now);
+                (
+                    key,
+                    Answer {
+                        transitions,
+                        status,
+                        refusal: None,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// The timers in force.
@@ -135,11 +375,44 @@ impl Board {
     /// that stops asking is dropped after `queue_ttl_ms`. Asking again while
     /// holding is a renew, which keeps the lease from expiring outright but
     /// does not move its idle clock: only [`Board::input`] does that.
-    pub fn ask(&mut self, key: &str, party: Party, now: LeaseInstant) -> Answer {
-        let lease = self.lease(key);
+    ///
+    /// An agent asking for a machine a person is using is a request to that
+    /// person. It is refused without being queued while the person has
+    /// muted requests ([`LeaseError::Muted`]) or has said "not now" to this
+    /// agent on this machine in the last [`NOT_NOW_MS`]
+    /// ([`LeaseError::NotNow`]). Neither applies once the person stops using
+    /// the machine: then it is an ordinary ask.
+    pub fn ask(
+        &mut self,
+        key: &str,
+        party: Party,
+        reason: Option<String>,
+        now: LeaseInstant,
+    ) -> Answer {
         let mut transitions = Vec::new();
-        tick_into(lease, now, &mut transitions);
-        let refusal = match lease.acquire(AcquireRequest::new(party), now) {
+        tick_into(self.lease(key), now, &mut transitions);
+        if !party.kind.is_person() && self.person_holds(key, now) {
+            let gate = self
+                .mute_left(key, now)
+                .map(|retry_after_ms| LeaseError::Muted { retry_after_ms })
+                .or_else(|| {
+                    self.not_now_left(key, &party.id, now)
+                        .map(|retry_after_ms| LeaseError::NotNow { retry_after_ms })
+                });
+            if let Some(refusal) = gate {
+                let lease = self.lease(key);
+                transitions.push(lease.cancel_wait(&party.id, now));
+                return Answer {
+                    transitions,
+                    status: lease.status(now),
+                    refusal: Some(refusal),
+                };
+            }
+        }
+        let lease = self.lease(key);
+        let mut request = AcquireRequest::new(party);
+        request.reason = reason;
+        let refusal = match lease.acquire(request, now) {
             Ok(transition) => {
                 transitions.push(transition);
                 confirm_into(lease, now, &mut transitions);
@@ -254,6 +527,7 @@ impl Board {
     /// something moved, which is what a plane emits an event for.
     pub fn tick_all(&mut self, now: LeaseInstant) -> Vec<(String, Answer)> {
         let mut out = Vec::new();
+        self.declined.retain(|_, until| !now.reached(*until));
         for (key, lease) in &mut self.leases {
             let mut transitions = Vec::new();
             tick_into(lease, now, &mut transitions);
@@ -267,6 +541,11 @@ impl Board {
                     },
                 ));
             }
+        }
+        // After the leases moved, so a mute until the person goes idle ends
+        // on the same tick their last hold freed itself.
+        if self.muted(now).is_none() {
+            self.mute = None;
         }
         out
     }
@@ -330,7 +609,7 @@ mod tests {
     #[test]
     fn a_free_session_is_granted_and_held_at_once() {
         let mut board = Board::default();
-        let answer = board.ask("s1", agent("a"), at(0));
+        let answer = board.ask("s1", agent("a"), None, at(0));
         assert_eq!(holder(&answer).as_deref(), Some("a"));
         assert_eq!(answer.status.phase, LeasePhase::Held);
         assert!(answer.transitions.iter().any(LeaseTransition::must_release));
@@ -359,7 +638,7 @@ mod tests {
         let _ = board.input("s1", agent("a"), at(0));
         for t in (1_000..30_000).step_by(1_000) {
             let _ = board.status("s1", at(t));
-            let _ = board.ask("s1", agent("a"), at(t));
+            let _ = board.ask("s1", agent("a"), None, at(t));
         }
         let answer = board.status("s1", at(30_000));
         assert!(answer.status.holder.is_none(), "{:?}", answer.status);
@@ -382,15 +661,15 @@ mod tests {
     fn a_waiting_agent_takes_over_when_the_holder_stops_acting() {
         let mut board = Board::default();
         let _ = board.input("s1", agent("a"), at(0));
-        let queued = board.ask("s1", agent("b"), at(1_000));
+        let queued = board.ask("s1", agent("b"), None, at(1_000));
         assert_eq!(queued.status.position_of(&PartyId::from("b")), Some(0));
         assert_eq!(queued.status.changes_in_ms, Some(8_000));
         // b keeps asking, as the plane does while it waits.
         for t in (1_500..9_000).step_by(500) {
-            let answer = board.ask("s1", agent("b"), at(t));
+            let answer = board.ask("s1", agent("b"), None, at(t));
             assert_eq!(holder(&answer).as_deref(), Some("a"));
         }
-        let answer = board.ask("s1", agent("b"), at(9_000));
+        let answer = board.ask("s1", agent("b"), None, at(9_000));
         assert_eq!(holder(&answer).as_deref(), Some("b"));
         let departed = answer
             .transitions
@@ -405,7 +684,7 @@ mod tests {
         let mut board = Board::default();
         let _ = board.input("s1", agent("a"), at(0));
         for t in (1_000..40_000).step_by(1_000) {
-            let _ = board.ask("s1", agent("b"), at(t));
+            let _ = board.ask("s1", agent("b"), None, at(t));
             if t % 4_000 == 0 {
                 assert!(board.input("s1", agent("a"), at(t)).refusal.is_none());
             }
@@ -443,7 +722,7 @@ mod tests {
         let _ = board.person_input("s1", person(), at(0));
         let mut got = None;
         for t in (0..25_000).step_by(500) {
-            let answer = board.ask("s1", agent("a"), at(t));
+            let answer = board.ask("s1", agent("a"), None, at(t));
             if holder(&answer).as_deref() == Some("a") {
                 got = Some(t);
                 break;
@@ -456,7 +735,7 @@ mod tests {
     fn a_waiter_that_stops_asking_loses_its_place() {
         let mut board = Board::default();
         let _ = board.input("s1", agent("a"), at(0));
-        let _ = board.ask("s1", agent("b"), at(1_000));
+        let _ = board.ask("s1", agent("b"), None, at(1_000));
         let _ = board.input("s1", agent("a"), at(5_000));
         let _ = board.input("s1", agent("a"), at(12_000));
         let answer = board.status("s1", at(16_000));
@@ -469,7 +748,7 @@ mod tests {
         let mut board = Board::default();
         let _ = board.input("s1", agent("a"), at(0));
         let _ = board.input("s2", agent("a"), at(0));
-        let _ = board.ask("s1", agent("b"), at(1_000));
+        let _ = board.ask("s1", agent("b"), None, at(1_000));
         let moved = board.forget_party(&PartyId::from("a"), at(2_000));
         assert_eq!(moved.len(), 2);
         assert_eq!(holder(&board.status("s1", at(2_000))).as_deref(), Some("b"));

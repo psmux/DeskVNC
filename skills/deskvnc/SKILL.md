@@ -83,6 +83,13 @@ take turns, and the rules are short:
 * A person always comes first. The moment they type or click in the
   machine's window it is theirs. Selecting or looking at the window does not
   count. Agents get it back 20 seconds after the person's last input.
+* Asking for a machine a person is using shows them your request, with your
+  reason. Always give one: `dvv_control` with `action: "acquire"` and
+  `reason: "..."`, or `reason` on a click, key or type (`dvv control acquire
+  <limbId> --reason "..."` in the shell). Say what you will do in a few
+  words, such as "run the test suite in the open terminal". The person can
+  let you in at once, say not now, or mute requests; if they say nothing you
+  get the machine 20 seconds after their last input.
 * `control status` (or `dvv_control` with `action: "status"`) names who has
   it, whether a person or which agent, how long since their last input, and
   who is waiting.
@@ -99,11 +106,15 @@ take turns, and the rules are short:
   long `type`, the message says how many characters went and quotes the part
   that did not: read the screen and type only that part.
 * `LEASE_NOT_HELD`: someone else is using the machine, and the message says
-  who and when it frees up. Run `control acquire` again; it waits for the
-  machine and then you carry on. If a person is using it, do something else
-  for a while and ask again after they go quiet. Tell the user only if a
-  person is still using it after two or three tries, and then say what you
-  were about to do.
+  who and what to do:
+  * "the person said not now": do other work. Asking again within a minute
+    gets the same answer without asking them, so wait at least that long.
+  * "muted requests ... until 14:32 UTC": do other work and ask again after
+    that time.
+  * "waiting for the person" or another agent holding it: run `control
+    acquire` again; it waits for the machine and then you carry on.
+  Tell the user only if a person is still using it after two or three tries,
+  and then say what you were about to do.
 * `LEASE_REVOKED`: the person at the remote computer took back the helper's
   tools in DeskVNC Support. Tell the user; nothing works there until they
   allow them again.

@@ -153,6 +153,10 @@
 
     "allow-agent-status",
     "allow-agent-take-the-wheel",
+    "allow-agent-requests",
+    "allow-agent-request-answer",
+    "allow-agent-requests-mute",
+    "allow-agent-requests-unmute",
     "allow-agent-register-with-claude",
     "allow-agent-setup-agents",
 

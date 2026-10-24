@@ -44,6 +44,7 @@
 
 pub mod control;
 pub mod mirror;
+pub mod requests;
 pub mod server;
 pub mod wire;
 
@@ -628,6 +629,12 @@ pub struct AgentPlane {
     /// Which attachment ids each connection minted, so a connection that
     /// ends lets go of everything it held.
     bound: Mutex<HashMap<u64, Vec<String>>>,
+    /// The last `requests` event's shape and when it went, so the panel is
+    /// sent the list on change and not on every call. See [`requests`].
+    last_requests: Mutex<Option<(Value, std::time::Instant)>>,
+    /// Agents refused because requests are muted, by session and attachment,
+    /// with when they last asked, for the count on the muted badge.
+    muted_asks: Mutex<HashMap<(String, String), std::time::Instant>>,
     next_attachment: AtomicU64,
     /// One row per connected client, keyed by a per connection number, valued
     /// by the name it gave in `hello`.

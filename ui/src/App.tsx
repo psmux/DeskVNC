@@ -14,6 +14,7 @@ import { Onboarding } from "./screens/Onboarding";
 import { TabStrip, tabPanelId } from "./components/TabStrip";
 import { Pane } from "./components/Pane";
 import { SplitView } from "./components/SplitView";
+import { AgentRequests } from "./components/AgentRequests";
 import { AgentWall } from "./components/AgentWall";
 import { SupportOverlay } from "./components/SupportOverlay";
 import { ToastShelf } from "./components/primitives";
@@ -452,6 +453,12 @@ function MainShell(): ReactNode {
         it. See the file header of `AgentWall`.
       */}
       <AgentWall onShowSession={selectSession} />
+
+      {/*
+        Agents asking for a machine the person is using: one corner panel for
+        all of them, never a dialog, and nothing at all when nobody asks.
+      */}
+      <AgentRequests />
 
       {prefsOpen ? <Preferences onClose={() => setPrefsOpen(false)} /> : null}
       {aboutOpen ? <About onClose={() => setAboutOpen(false)} /> : null}

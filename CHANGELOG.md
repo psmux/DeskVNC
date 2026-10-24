@@ -12,6 +12,19 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Added
 
+* When agents ask for a machine you are using, DeskVNCViewer shows one small
+  panel in the corner of the window listing every one of them: which agent,
+  which machine, what it says it wants the machine for, how long it has
+  waited, and when it gets the machine anyway if you stop typing. It does not
+  take the keyboard from the session you are typing in, and a second agent
+  asking adds a row rather than a second panel. Answer each one, or all at
+  once: let it use the machine now, say not now, or mute requests for 5
+  minutes, 15 minutes, an hour, or until you take your hands off. While
+  muted, a small badge says so, counts the agents that asked, and unmutes. If
+  the window is in the background, one system notification says an agent is
+  asking. Agents are told your answer: waiting for you, not now, or muted
+  until a time.
+
 * Boundary sends a screen that is moving as H.264 video while most of it
   changes, as when a page scrolls, a window is dragged or a video plays, and
   the whole screen again as sharp tiles 100 ms after it stops. The computer

@@ -107,7 +107,7 @@ use serde_json::{json, Value};
 use vnc_core::{ClientCommand, ProtocolKind, QualityPreset, Rect};
 
 use crate::agent::mirror::{self, MirrorStatus, Perceive};
-use crate::agent::{control, wire};
+use crate::agent::{control, requests, wire};
 use crate::agent::{AgentPlane, Attachment, PROTOCOL};
 use crate::state::{MachineKey, SessionEntry};
 
@@ -2511,14 +2511,28 @@ fn control_acquire(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
     require(peer, Capability::Control)?;
     let (session_id, attachment_id) = attached_session(ctx, peer, params)?;
     let label = params.get("label").and_then(Value::as_str);
-    let answer = ctx.plane.lease_ask(&session_id, &attachment_id, label);
+    // What the agent says it wants the machine for, shown to the person
+    // using it. Trimmed and bounded: it is untrusted text in a window.
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(|r| r.trim().chars().take(200).collect::<String>())
+        .filter(|r| !r.is_empty());
+    let answer = ctx
+        .plane
+        .lease_ask(&session_id, &attachment_id, label, reason);
     let policy = ctx.plane.lease_policy();
     let mut out = control::status_json(&answer.status, Some(&attachment_id), &policy);
     out["granted"] = json!(answer.status.dispatching(&attachment_id.as_str().into()));
     if let Some(refusal) = &answer.refusal {
         out["refused"] = json!(refusal.to_string());
     }
-    if !answer.status.held_by(&attachment_id.as_str().into()) {
+    let verdict = requests::verdict(&session_id, &attachment_id, &answer, policy.person_idle_ms);
+    out["answer"] = json!(verdict.word);
+    out["mutedUntil"] = json!(verdict.muted_until);
+    if let Some(why) = verdict.why {
+        out["why"] = json!(why);
+    } else if !answer.status.held_by(&attachment_id.as_str().into()) {
         out["why"] = json!(control::not_yours(&session_id, &answer.status, &policy));
     }
     Ok(out)
@@ -2540,12 +2554,16 @@ fn control_release(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
 fn control_status(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
     let session_id = session_id_of(params)?;
     let attachment_id = peer.attachment_id.clone().unwrap_or_default();
-    let answer = ctx.plane.lease_status(&session_id);
-    Ok(control::status_json(
-        &answer.status,
-        Some(&attachment_id),
-        &ctx.plane.lease_policy(),
-    ))
+    let answer = ctx.plane.lease_status_for(&session_id, &attachment_id);
+    let policy = ctx.plane.lease_policy();
+    let mut out = control::status_json(&answer.status, Some(&attachment_id), &policy);
+    let verdict = requests::verdict(&session_id, &attachment_id, &answer, policy.person_idle_ms);
+    out["answer"] = json!(verdict.word);
+    out["mutedUntil"] = json!(verdict.muted_until);
+    if let Some(why) = verdict.why {
+        out["why"] = json!(why);
+    }
+    Ok(out)
 }
 
 fn session_id_of(params: &Value) -> Result<String, RpcError> {
