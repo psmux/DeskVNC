@@ -12,7 +12,7 @@
 //! # --control <this machine>:47800 first.
 //! remote-bench run --proto vnc --target 10.0.0.9:5900 [--password p]
 //! remote-bench run --proto rdp --target 10.0.0.9:3389 --user u --password p
-//! remote-bench run --proto boundary --target <invitation>
+//! remote-bench run --proto boundary --target <invitation>|@host-output.log
 //! ```
 //!
 //! Every run writes `<label>.json` (summary and raw samples) and
@@ -127,7 +127,18 @@ async fn main() -> Result<()> {
         }
         Some("run") => {
             let proto = arg(&args, "--proto").context("--proto vnc|rdp|boundary")?;
-            let target = arg(&args, "--target").context("--target")?;
+            let mut target = arg(&args, "--target").context("--target")?;
+            // `@file` takes the invitation from a host's output, so a script
+            // need not pass a long token around.
+            if let Some(path) = target.strip_prefix('@') {
+                let text = std::fs::read_to_string(path).context("read the host's output")?;
+                target = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("INVITATION "))
+                    .context("no INVITATION line in that file")?
+                    .trim()
+                    .to_owned();
+            }
             let config = measure::Config::from_args(&args, &proto, target)?;
             let port: u16 = arg(&args, "--control")
                 .and_then(|p| p.parse().ok())
