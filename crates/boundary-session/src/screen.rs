@@ -329,6 +329,7 @@ fn few_colours(frame: &Frame, rects: Vec<Rect>) -> Vec<(Rect, bool)> {
 fn encode_png(frame: &Frame, rect: &Rect) -> Result<Vec<u8>> {
     let stride = frame.width as usize * 4;
     let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut last = ([0u8; 3], 0usize);
     let mut indices = Vec::with_capacity((rect.width * rect.height) as usize);
     let mut rgb = Vec::new();
     for y in rect.y..rect.y + rect.height {
@@ -340,13 +341,20 @@ fn encode_png(frame: &Frame, rect: &Rect) -> Result<Vec<u8>> {
             let c = [p[0], p[1], p[2]];
             rgb.extend_from_slice(&c);
             if palette.len() <= 256 {
-                let at = match palette.iter().position(|q| *q == c) {
-                    Some(at) => at,
-                    None => {
-                        palette.push(c);
-                        palette.len() - 1
+                // Runs of one colour are the rule, so the last one is
+                // tried before the palette is searched.
+                let at = if last.0 == c && !indices.is_empty() {
+                    last.1
+                } else {
+                    match palette.iter().position(|q| *q == c) {
+                        Some(at) => at,
+                        None => {
+                            palette.push(c);
+                            palette.len() - 1
+                        }
                     }
                 };
+                last = (c, at);
                 indices.push(at as u8);
             }
         }

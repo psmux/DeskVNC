@@ -1117,6 +1117,8 @@ struct Coder {
     last: Option<Arc<Frame>>,
     /// A cut, not sent yet (see [`Coder::video`]).
     held: Option<Unit>,
+    /// The link carries a cut's tiles in a few milliseconds.
+    fast: bool,
 }
 enum Work {
     /// A new capture, and what the desktop said changed since the last one
@@ -1142,6 +1144,7 @@ impl Coder {
             policy: video::Policy::default(),
             last: None,
             held: None,
+            fast: false,
         }
     }
     /// The messages that carry `work` to the helper, numbered from `seq` on,
@@ -1232,6 +1235,24 @@ impl Coder {
                             .map(|u| self.kind(u)),
                     ),
                     video::Choice::Video { start } => match self.passed_video(&frame, rate) {
+                        Ok(Some(held)) if held.cut && self.fast => {
+                            // On a fast link nothing is gained by waiting to
+                            // see whether the screen stays: the screen goes
+                            // as tiles now, exact where it has few colours,
+                            // and video, if the motion goes on, starts again
+                            // from a keyframe.
+                            drop(held);
+                            if let Some(video) = self.video.as_mut() {
+                                video.fresh = true;
+                            }
+                            self.policy.settle(now);
+                            self.tiles.reset();
+                            out.extend(
+                                self.tiles
+                                    .update_at(frame, next, SETTLED_QUALITY)?
+                                    .map(|u| self.kind(u)),
+                            );
+                        }
                         Ok(Some(held)) if held.cut => self.held = Some(held),
                         Ok(Some(unit)) => out.push(video::encode_unit(
                             next,
@@ -1382,6 +1403,19 @@ fn link_rate(connection: &Connection) -> (u32, u32) {
     (bits, video::frame_rate(bits))
 }
 
+/// Whether the link carries 100 Mbit/s or more, as its congestion window
+/// over the round trip says.
+fn link_fast(connection: &Connection) -> bool {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .is_some_and(|path| {
+            let rtt = path.rtt().max(Duration::from_micros(200)).as_secs_f64();
+            path.stats().cwnd as f64 * 8.0 / rtt >= 100e6
+        })
+}
+
 /// Changed rectangles, one update after another on a single stream, to a
 /// helper that takes them, and video while much of the screen moves to one
 /// that decodes it.
@@ -1499,6 +1533,7 @@ async fn send_updates(
         };
         let rate = link_rate(connection);
         let mut working = coder.take().context("Screen encoder lost")?;
+        working.fast = link_fast(connection);
         let next = seq + 1;
         let began = tokio::time::Instant::now();
         let (working, update) = tokio::task::spawn_blocking(move || {
