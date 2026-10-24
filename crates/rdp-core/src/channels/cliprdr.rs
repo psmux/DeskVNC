@@ -727,6 +727,7 @@ mod tests {
             user_channel_id: 1007,
             desktop: (800, 600),
             event_backlog: 0,
+            avc420: false,
         }
     }
 

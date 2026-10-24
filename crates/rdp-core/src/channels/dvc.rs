@@ -513,7 +513,7 @@ impl DvcMux {
             ctx,
             out,
         )?;
-        egfx.opened(&mut self.replies)?;
+        egfx.opened(ctx.avc420, &mut self.replies)?;
         self.open.push(DynChannel {
             id: channel_id,
             kind: DynKind::Egfx(egfx),
@@ -730,6 +730,7 @@ mod tests {
             user_channel_id: 1007,
             desktop: (800, 600),
             event_backlog: 0,
+            avc420: false,
         }
     }
 

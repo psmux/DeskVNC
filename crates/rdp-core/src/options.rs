@@ -132,6 +132,9 @@ pub struct ResolvedOptions {
     /// Whether to ask for the graphics pipeline, see
     /// `remote_core::RdpOptions::graphics_pipeline`.
     pub graphics_pipeline: bool,
+    /// Whether that pipeline may carry H.264 (AVC420). Only with the
+    /// pipeline, and only when the host's codec set allows it.
+    pub avc420: bool,
     /// The static virtual channels to ask for in `TS_UD_CS_NET`, in the order
     /// they will be joined. Never more than
     /// [`rdp_pdu::io::limits::MAX_CHANNELS`].
@@ -308,6 +311,7 @@ impl ResolvedOptions {
             legacy_tls: rdp.legacy_tls,
             send_mstshash_cookie: rdp.send_mstshash_cookie,
             graphics_pipeline: rdp.graphics_pipeline,
+            avc420: rdp.graphics_pipeline && rdp.codecs.avc420,
             channels,
             quality: options.quality,
             // A redirection is the only thing that puts a token here, and it

@@ -32,6 +32,7 @@ fn ctx() -> ChannelCtx {
         user_channel_id: 1007,
         desktop: (800, 600),
         event_backlog: 0,
+        avc420: false,
     }
 }
 
@@ -69,7 +70,7 @@ fn confirmed() -> (Egfx, Vec<SessionEvent>, ReplyBuf) {
     let mut egfx = Egfx::new();
     let mut replies = ReplyBuf::default();
     let mut events = Vec::new();
-    egfx.opened(&mut replies).expect("advertises");
+    egfx.opened(false, &mut replies).expect("advertises");
     replies.take();
     egfx.message(
         &message(&[EgfxPdu::CapsConfirm {
@@ -145,7 +146,7 @@ fn rects(events: &[SessionEvent]) -> Vec<(u16, u16, u16, u16, Vec<u8>)> {
 fn opening_the_channel_advertises_versions_eight_and_eight_one() {
     let mut egfx = Egfx::new();
     let mut replies = ReplyBuf::default();
-    egfx.opened(&mut replies).expect("advertises");
+    egfx.opened(false, &mut replies).expect("advertises");
 
     let sent = queued(&replies);
     assert_eq!(sent.len(), 1);
@@ -168,7 +169,7 @@ fn a_confirm_settles_the_version_and_offers_an_empty_cache() {
     let mut egfx = Egfx::new();
     let mut replies = ReplyBuf::default();
     let mut events = Vec::new();
-    egfx.opened(&mut replies).expect("advertises");
+    egfx.opened(false, &mut replies).expect("advertises");
     replies.take();
 
     egfx.message(
@@ -933,4 +934,66 @@ fn an_unknown_command_is_skipped_and_the_next_one_still_runs() {
     let rects = rects(&events);
     assert_eq!(rects.len(), 1, "the command after the unknown one ran");
     assert_eq!(&rects[0].4, &[0x00, 0x00, 0xFF, 0xFF], "blue, opaque");
+}
+
+/// With H.264 offered, an AVC420 rectangle goes to the renderer undecoded,
+/// at its surface's place on the screen, as one `RectPayload::H264` whose
+/// first rectangle per surface tells the renderer to build a decoder.
+#[test]
+fn with_h264_offered_an_avc420_rectangle_goes_out_undecoded() {
+    let mut egfx = Egfx::new();
+    let mut replies = ReplyBuf::default();
+    let mut events = Vec::new();
+    egfx.opened(true, &mut replies).expect("advertises");
+    replies.take();
+    egfx.message(
+        &message(&[EgfxPdu::CapsConfirm {
+            capset: Capset::new(caps_version::V8_1, &[0x10, 0, 0, 0]),
+        }]),
+        ctx(),
+        &mut events,
+        &mut replies,
+    )
+    .expect("confirms");
+    mapped_surface(&mut egfx, 1, 64, 64, 10, 20);
+    // No region rectangles, then one IDR slice NAL in Annex B.
+    let metablock = [0u8, 0, 0, 0, 0, 0, 0, 1, 0x65, 0x88];
+    for first in [true, false] {
+        events.clear();
+        egfx.message(
+            &message(&[EgfxPdu::WireToSurface1 {
+                surface_id: 1,
+                codec_id: rdp_pdu::vc::egfx::codec_id::AVC420,
+                pixel_format: pixel_format::XRGB_8888,
+                dest_rect: rect(0, 0, 16, 16),
+                bitmap_data: rdp_pdu::Payload::new(&metablock),
+            }]),
+            ctx(),
+            &mut events,
+            &mut replies,
+        )
+        .expect("an AVC420 rectangle");
+        let found = events.iter().find_map(|e| match e {
+            SessionEvent::FramebufferUpdate { rects, .. } => rects.first().cloned(),
+            _ => None,
+        });
+        let r = found.expect("one rectangle");
+        assert_eq!(
+            (r.rect.x, r.rect.y, r.rect.width, r.rect.height),
+            (10, 20, 16, 16)
+        );
+        match r.payload {
+            remote_core::RectPayload::H264 {
+                data,
+                context_id,
+                reset,
+                keyframe,
+                ..
+            } => {
+                assert_eq!(data, &metablock[4..]);
+                assert_eq!((context_id, reset, keyframe), (1, first, true));
+            }
+            other => panic!("expected H.264, got {other:?}"),
+        }
+    }
 }
