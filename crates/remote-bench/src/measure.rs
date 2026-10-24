@@ -962,8 +962,12 @@ pub async fn run(
                 .map(|(k, v)| (k.to_string(), *v))
                 .collect();
         report.driver_encodings = s.encodings.clone();
-        report.negotiated =
-            crate::negotiated::describe(&config.protocol, &s.encodings, &report.rect_kinds);
+        report.negotiated = crate::negotiated::describe(
+            &config.protocol,
+            config.kind.is_none(),
+            &s.encodings,
+            &report.rect_kinds,
+        );
         if config.kind.is_none() {
             report.grab_ms = s.stats.map(|st| st.decode_ms as f64);
         }

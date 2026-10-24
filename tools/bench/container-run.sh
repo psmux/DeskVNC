@@ -82,10 +82,12 @@ for proto in $PROTOS; do
           > /tmp/xfreerdp.log 2>&1 &
       sleep 4
       focus :20 FreeRDP
+      # What xrdp chose for this client, from its own log.
+      MODE=$(grep -o 'Matched [A-Za-z0-9.]* mode' /var/log/xrdp.log | tail -1)
       DISPLAY=:20 "$B" run --proto local --as rdp \
           --client "FreeRDP $(dpkg-query -W -f='${Version}' freerdp3-x11) xfreerdp3 /gfx:RFX, read off its Xvfb display with xcap" \
           --label "$PREFIX-freerdp" --watch-procs xrdp,Xorg,xfreerdp \
-          --note "${NOTE_LINK}xrdp 0.10.6.1 with x264, reference client" $COMMON
+          --note "${NOTE_LINK}xrdp 0.10.6.1 with x264, reference client, xrdp log: ${MODE:-no codec line}" $COMMON
       pkill xfreerdp3 || true
       pkill -f "Xvfb :20" || true
       ;;

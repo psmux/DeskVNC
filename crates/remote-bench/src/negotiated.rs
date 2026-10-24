@@ -104,10 +104,17 @@ fn vnc_encoding(id: i32) -> String {
 /// One line per thing seen, with how often.
 pub fn describe(
     protocol: &str,
+    local: bool,
     encodings: &BTreeMap<i32, u64>,
     kinds: &BTreeMap<String, u64>,
 ) -> Vec<String> {
     let mut out = Vec::new();
+    if local {
+        // Another client did the talking, so this process saw no protocol at
+        // all; what the server chose belongs in the run's note.
+        out.push("another client's display, read whole; see the note for the codec".into());
+        return out;
+    }
     match protocol {
         "rdp" => {
             let seen = std::mem::take(&mut *SEEN.lock().unwrap());
@@ -121,6 +128,9 @@ pub fn describe(
                 .iter()
                 .map(|(e, n)| format!("encoding {} in {n} stats ticks", vnc_encoding(*e))),
         ),
+        "boundary" => {
+            out.push("the Boundary driver hands over decoded pixels; h264 rects mean video".into())
+        }
         _ => {}
     }
     out.extend(kinds.iter().map(|(k, n)| format!("{k} rects x{n}")));
