@@ -639,6 +639,44 @@ fn a_progressive_rectangle_reaches_the_progressive_decoder() {
     .expect("a well formed progressive message");
 }
 
+/// The form servers actually send progressive RemoteFX in: `WIRE_TO_SURFACE_2`,
+/// with a codec context and no destination rectangle (MS-RDPEGFX 2.2.2.2).
+/// xrdp 0.10 does, and this used to end the session. Any other codec in that
+/// PDU is still refused by name.
+#[test]
+fn progressive_in_a_wire_to_surface_2_reaches_the_decoder() {
+    let (mut egfx, mut events, mut replies) = confirmed();
+    mapped_surface(&mut egfx, 1, 16, 16, 0, 0);
+    egfx.message(
+        &message(&[EgfxPdu::WireToSurface2 {
+            surface_id: 1,
+            codec_id: CODEC_CAPROGRESSIVE,
+            codec_context_id: 7,
+            pixel_format: pixel_format::XRGB_8888,
+            bitmap_data: rdp_pdu::Payload::new(&progressive_sync(0xCACC_ACCA)),
+        }]),
+        ctx(),
+        &mut events,
+        &mut replies,
+    )
+    .expect("a well formed progressive message");
+    let err = egfx
+        .message(
+            &message(&[EgfxPdu::WireToSurface2 {
+                surface_id: 1,
+                codec_id: 0x0003,
+                codec_context_id: 7,
+                pixel_format: pixel_format::XRGB_8888,
+                bitmap_data: rdp_pdu::Payload::new(&[]),
+            }]),
+            ctx(),
+            &mut events,
+            &mut replies,
+        )
+        .expect_err("a codec with no context decoder");
+    assert!(err.to_string().contains("0x0003"), "{err}");
+}
+
 /// A bitstream the progressive decoder refuses is named the way every other
 /// codec's refusal is named, and carries no byte of the bitstream
 /// (PRDRDP/12 §6.4).

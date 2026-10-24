@@ -225,6 +225,29 @@ fn wants_alpha(pixel_fmt: u8, surface_alpha: bool) -> bool {
 /// The same shape as the legacy path's `codec_error`
 /// (`crates/rdp-core/src/session/graphics.rs:371`), so a support log reads
 /// the same whichever path the pixels came down.
+/// A progressive RemoteFX message from `WIRE_TO_SURFACE_2`, decoded over the
+/// whole surface `dst` (MS-RDPEGFX 2.2.2.2, 2.2.4.2).
+///
+/// That PDU carries no destination rectangle: every tile names its own place
+/// in the surface. The answer is the box the message wrote, in surface
+/// coordinates, as `(x, y, width, height)`, or `None` when it wrote nothing.
+///
+/// # Errors
+///
+/// [`RdpError::Protocol`] when the message does not decode.
+pub fn progressive_to_surface(
+    src: &[u8],
+    decoders: &mut Decoders,
+    progressive_state: &mut ProgressiveState,
+    dst: &mut DstView<'_>,
+) -> Result<Option<(u16, u16, u16, u16)>> {
+    let (w, h) = (dst.width(), dst.height());
+    tracing::trace!(codec = CAPROGRESSIVE, w, h, "wire to surface");
+    let frame = progressive::decode_message(src, progressive_state, &mut decoders.rfx_scratch, dst)
+        .map_err(|e| refused("progressive", w, h, &e))?;
+    Ok(frame.damage.map(|r| (r.x, r.y, r.w, r.h)))
+}
+
 fn refused(codec: &str, width: u16, height: u16, e: &DecodeError) -> RdpError {
     RdpError::Protocol(format!(
         "the {codec} decoder refused a {width}x{height} egfx rectangle: {e}"

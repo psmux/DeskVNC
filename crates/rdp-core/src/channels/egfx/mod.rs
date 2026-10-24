@@ -364,10 +364,50 @@ impl Egfx {
                 )?;
                 self.damaged(surface_id, dest_rect)
             }
-            // `WIRE_TO_SURFACE_2` carries a persistent codec context, which
-            // only the progressive codec uses (MS-RDPEGFX 2.2.2.2). We never
-            // advertise it, so this is a server drawing with something it was
-            // not offered.
+            // `WIRE_TO_SURFACE_2` is how a server sends progressive RemoteFX
+            // (MS-RDPEGFX 2.2.2.2): no destination rectangle, because every
+            // tile names its own place in the surface. xrdp 0.10 sends its
+            // RemoteFX this way. The codec context is the surface's own tile
+            // store, which is the one context a server keeps per surface.
+            EgfxPdu::WireToSurface2 {
+                surface_id,
+                codec_id: CODEC_CAPROGRESSIVE,
+                bitmap_data,
+                ..
+            } => {
+                let Self {
+                    surfaces, decoders, ..
+                } = self;
+                let surface = surfaces.get_mut(surface_id, "a wire to surface 2 command")?;
+                let whole = RectExclusive {
+                    left: 0,
+                    top: 0,
+                    right: surface.width,
+                    bottom: surface.height,
+                };
+                let (progressive, mut dst) =
+                    surface.progressive_view(whole, "a wire to surface 2 command")?;
+                let wrote = decode::progressive_to_surface(
+                    bitmap_data.as_slice(),
+                    decoders,
+                    progressive,
+                    &mut dst,
+                )?;
+                match wrote {
+                    Some((x, y, w, h)) => self.damaged(
+                        surface_id,
+                        RectExclusive {
+                            left: x,
+                            top: y,
+                            right: x.saturating_add(w),
+                            bottom: y.saturating_add(h),
+                        },
+                    ),
+                    None => Ok(()),
+                }
+            }
+            // Any other codec in `WIRE_TO_SURFACE_2` needs a persistent
+            // context this client has no decoder for.
             EgfxPdu::WireToSurface2 { codec_id, .. } => Err(RdpError::Protocol(format!(
                 "the server sent a wire to surface 2 command in codec 0x{codec_id:04x}, which \
                  needs a persistent codec context this client never created \
