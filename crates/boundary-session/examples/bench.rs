@@ -10,7 +10,7 @@
 //! bench host [--image screen.png] [--bind 10.42.0.9]    # prints INVITATION
 //! bench host --real                                      # the real screen under the square
 //! bench host --software | --no-video                     # OpenH264 only, or tiles only
-//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy] [--video] [--tiles]
+//! bench view <invitation> [--bind 10.42.0.8] [--secs 20] [--busy] [--video] [--tiles] [--settle 10]
 //! bench encode [--image screen.png]                      # time capture side work
 //! ```
 use boundary_session::video::{VideoEncoder, VideoEncoders};
@@ -520,6 +520,75 @@ async fn main() -> anyhow::Result<()> {
                 )),
                 screen.decoding / screen.video.max(1) as u32,
             );
+            // Start and stop the motion again and again, and time each stop
+            // until the last update that follows it: what is sent once the
+            // screen is still is what makes it sharp.
+            if let Some(cycles) = arg(&args, "--settle").and_then(|n| n.parse::<usize>().ok()) {
+                let mut sharp = Vec::new();
+                let mut first = Vec::new();
+                let mut bytes = Vec::new();
+                let mut seen = Vec::new();
+                for _ in 0..cycles {
+                    session.input(Input::Key {
+                        key: Key::Letter('v'),
+                        down: true,
+                    })?;
+                    let moving = Instant::now() + Duration::from_millis(1500);
+                    while let Ok(Ok(())) =
+                        tokio::time::timeout_at(moving.into(), session.frames.changed()).await
+                    {
+                        screen.apply(session.updates())?;
+                    }
+                    let video = screen.video;
+                    session.input(Input::Key {
+                        key: Key::Letter('q'),
+                        down: true,
+                    })?;
+                    let stopped = Instant::now();
+                    let before = session.received();
+                    let (mut last, mut earliest, mut still) = (None, None, stopped);
+                    let quiet = stopped + Duration::from_millis(2500);
+                    while let Ok(Ok(())) =
+                        tokio::time::timeout_at(quiet.into(), session.frames.changed()).await
+                    {
+                        let updates = session.updates();
+                        let tiles = updates.iter().any(|u| matches!(u, Update::Screen { .. }));
+                        let videos = updates.iter().any(|u| matches!(u, Update::Video(_)));
+                        screen.apply(updates)?;
+                        if videos {
+                            (last, earliest, still) = (None, None, Instant::now());
+                        } else if tiles {
+                            last = Some(stopped.elapsed());
+                            earliest.get_or_insert(stopped.elapsed());
+                        }
+                    }
+                    if screen.video > video
+                        && let (Some(last), Some(earliest)) = (last, earliest)
+                    {
+                        sharp.push(last);
+                        // From when the picture stopped moving here, which is
+                        // what the person watching sees.
+                        seen.push(stopped + last - still);
+                        first.push(earliest);
+                        bytes.push(session.received() - before);
+                    }
+                }
+                sharp.sort();
+                seen.sort();
+                first.sort();
+                bytes.sort();
+                println!(
+                    "settle over {} stops: sharp after stop key p50 {:?} p90 {:?} | after last video picture p50 {:?} p90 {:?} | first tiles p50 {:?} | KB after stop p50 {} max {}",
+                    sharp.len(),
+                    percentile(&sharp, 0.5),
+                    percentile(&sharp, 0.9),
+                    percentile(&seen, 0.5),
+                    percentile(&seen, 0.9),
+                    percentile(&first, 0.5),
+                    bytes.get(bytes.len() / 2).copied().unwrap_or(0) / 1024,
+                    bytes.last().copied().unwrap_or(0) / 1024,
+                );
+            }
             session.stop();
         }
         Some("encode") => {

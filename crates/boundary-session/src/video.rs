@@ -36,6 +36,26 @@ pub trait VideoEncoder: Send {
     /// The bits a second to aim for and the screens a second expected,
     /// which the sender changes as it measures the link.
     fn set_rate(&mut self, bits_per_second: u32, frames_per_second: u32);
+    /// The last picture as the helper's decoder draws it,
+    /// once every picture encoded so far has been decoded here too, so the
+    /// host can tell which parts video already drew well. `None` when this
+    /// encoder does not keep a decoded copy.
+    fn shown(&mut self) -> Option<Shown> {
+        None
+    }
+}
+
+/// A decoded picture, as YUV 4:2:0 planes, and how to compare a screen with it.
+pub struct Shown {
+    pub luma: Vec<u8>,
+    /// Bytes from one row of `luma` to the next.
+    pub stride: usize,
+    /// The colour planes, at half the width and half the height.
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub chroma_stride: usize,
+    /// The colours were encoded as BT.709, not BT.601.
+    pub bt709: bool,
 }
 
 /// Makes an encoder for screens of a given width and height.
@@ -132,8 +152,14 @@ pub(crate) const MOTION_RUN: u32 = 2;
 /// Below this share a capture counts as quiet: a pointer or a caret.
 pub(crate) const QUIET_SHARE: f32 = 0.02;
 /// How long the screen has to stay quiet before video stops and the screen
-/// is sent sharp again.
-pub(crate) const SETTLE: Duration = Duration::from_millis(100);
+/// is sent sharp again. It is most of the time from the last moving picture
+/// to the sharp one, since only the tiles video drew wrong go then.
+pub(crate) const SETTLE: Duration = Duration::from_millis(60);
+/// Motion again this soon after the screen settled was a pause, not a stop,
+/// as between the turns of a scroll wheel: video picks up at once, and waits
+/// longer before it settles again.
+pub(crate) const RESUME: Duration = Duration::from_millis(500);
+pub(crate) const SETTLE_AGAIN: Duration = Duration::from_millis(200);
 
 /// When to send video and when tiles.
 #[derive(Default)]
@@ -142,6 +168,10 @@ pub(crate) struct Policy {
     video: bool,
     /// When the last capture that was not quiet came, while on video.
     busy: Option<Instant>,
+    /// When the screen last settled.
+    settled: Option<Instant>,
+    /// How long to wait for this run of video to settle.
+    wait: Duration,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Choice {
@@ -165,22 +195,34 @@ impl Policy {
         if self.video {
             return Choice::Video { start: false };
         }
-        if self.run >= MOTION_RUN {
+        let resumed = self
+            .settled
+            .is_some_and(|at| now.saturating_duration_since(at) < RESUME);
+        if self.run >= MOTION_RUN || (resumed && share >= MOTION_SHARE) {
             self.video = true;
             self.busy = Some(now);
+            self.wait = if resumed { SETTLE_AGAIN } else { SETTLE };
             return Choice::Video { start: true };
         }
         Choice::Tiles
     }
     /// When the screen will have settled, while on video.
     pub fn settles_at(&self) -> Option<Instant> {
-        self.video.then(|| self.busy.map(|b| b + SETTLE)).flatten()
+        let wait = self.wait.max(SETTLE);
+        self.video.then(|| self.busy.map(|b| b + wait)).flatten()
     }
-    /// Video has stopped: the next capture goes as tiles.
+    /// Video has stopped, as the helper asked for the whole screen: the next
+    /// capture goes as tiles.
     pub fn stop(&mut self) {
         self.video = false;
         self.run = 0;
         self.busy = None;
+        self.settled = None;
+    }
+    /// The screen settled at `now`.
+    pub fn settle(&mut self, now: Instant) {
+        self.stop();
+        self.settled = Some(now);
     }
     pub fn on_video(&self) -> bool {
         self.video
@@ -212,6 +254,75 @@ pub(crate) fn changed_share(old: &Frame, new: &Frame) -> f32 {
         }
     }
     dirty as f32 / (cols * rows) as f32
+}
+
+/// A tile whose brightness is off by more than this at any pixel, as the
+/// edges of blurred text are, is sent again sharp once the screen settles.
+/// JPEG at the settled quality is off by about this much itself, so what is
+/// left alone looks as good as what is sent.
+pub(crate) const STALE_PEAK: u32 = 24;
+/// Or off by more than this on average. On a desktop picture that scrolled,
+/// this is what picks most tiles: a fifth to four fifths of the screen, where
+/// sending all of it was the rule before.
+pub(crate) const STALE_MEAN: u32 = 2;
+
+/// Which 64 pixel tiles, in rows, the helper's video picture shows visibly
+/// differently from `frame`. Tiles video drew well enough, such as plain
+/// backgrounds, need not be sent again when the screen settles.
+pub(crate) fn stale_tiles(frame: &Frame, shown: &Shown) -> Vec<bool> {
+    const TILE: usize = 64;
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let (cols, rows) = (w.div_ceil(TILE), h.div_ceil(TILE));
+    // Limited range YUV to RGB, in 256ths: red from V, green from U and V,
+    // blue from U, after 298 Y.
+    let (rv, gu, gv, bu) = if shown.bt709 {
+        (459, 55, 136, 541)
+    } else {
+        (409, 100, 208, 516)
+    };
+    let mut stale = vec![false; cols * rows];
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    if shown.stride < w
+        || shown.luma.len() < shown.stride * h
+        || shown.chroma_stride < cw
+        || shown.u.len() < shown.chroma_stride * ch
+        || shown.v.len() < shown.chroma_stride * ch
+    {
+        stale.fill(true);
+        return stale;
+    }
+    for ty in 0..rows {
+        for tx in 0..cols {
+            let (x0, y0) = (tx * TILE, ty * TILE);
+            let (x1, y1) = ((x0 + TILE).min(w), (y0 + TILE).min(h));
+            let (mut peak, mut sum) = (0u32, 0u32);
+            for y in y0..y1 {
+                let rgba = &frame.rgba[(y * w + x0) * 4..(y * w + x1) * 4];
+                let luma = &shown.luma[y * shown.stride..];
+                let (u, v) = (
+                    &shown.u[y / 2 * shown.chroma_stride..],
+                    &shown.v[y / 2 * shown.chroma_stride..],
+                );
+                for (x, p) in (x0..x1).zip(rgba.as_chunks::<4>().0) {
+                    let c = 298 * (luma[x] as i32 - 16);
+                    let (d, e) = (u[x / 2] as i32 - 128, v[x / 2] as i32 - 128);
+                    let shown = [
+                        (c + rv * e + 128) >> 8,
+                        (c - gu * d - gv * e + 128) >> 8,
+                        (c + bu * d + 128) >> 8,
+                    ];
+                    for (s, t) in shown.into_iter().zip(&p[..3]) {
+                        let diff = s.clamp(0, 255).abs_diff(*t as i32);
+                        peak = peak.max(diff);
+                        sum += diff;
+                    }
+                }
+            }
+            let area = ((x1 - x0) * (y1 - y0) * 3) as u32;
+            stale[ty * cols + tx] = peak > STALE_PEAK || sum > STALE_MEAN * area;
+        }
+    }
+    stale
 }
 
 /// [`changed_share`] from the rectangles a desktop said changed, without
@@ -288,9 +399,18 @@ mod tests {
         // The pointer moving after the scroll stops does not hold video.
         assert_eq!(policy.capture(0.01, ms(96)), Choice::Video { start: false });
         assert_eq!(policy.settles_at(), Some(ms(80) + SETTLE));
-        policy.stop();
+        policy.settle(ms(180));
         assert_eq!(policy.settles_at(), None);
         assert_eq!(policy.capture(0.01, ms(300)), Choice::Tiles);
+        // Motion again soon after: a pause in a scroll. Video at once, and a
+        // longer wait before settling again.
+        assert_eq!(policy.capture(0.6, ms(400)), Choice::Video { start: true });
+        assert_eq!(policy.settles_at(), Some(ms(400) + SETTLE_AGAIN));
+        policy.settle(ms(700));
+        // Long after, motion starts as new: two captures in a row.
+        assert_eq!(policy.capture(0.6, ms(2000)), Choice::Tiles);
+        assert_eq!(policy.capture(0.6, ms(2016)), Choice::Video { start: true });
+        assert_eq!(policy.settles_at(), Some(ms(2016) + SETTLE));
     }
 
     #[test]
