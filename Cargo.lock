@@ -7893,7 +7893,11 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "vnc-core",
+ "xcap",
 ]
 
 [[package]]

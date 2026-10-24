@@ -975,6 +975,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             user_channel_id: self.channels.user_channel_id,
             desktop: self.activated.desktop,
             event_backlog: self.event_backlog,
+            avc420: self.opts.avc420,
         }
     }
 

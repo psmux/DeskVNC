@@ -70,22 +70,73 @@ per core. A loaded run says LOADED in every table.
    opens and nothing touches the desktop, so this can run while someone works
    on the machine. It leaves out screen capture, so it measures the protocol
    and its encoder.
-2. One Linux desktop in a container, served three ways at once. xrdp makes
-   the X display when the bench logs in over RDP and starts the stage on it.
-   x11vnc and the Boundary host then attach to that same display. RDP, VNC
-   and Boundary each get a turn against the same stage, on the same CPU, over
-   the container's loopback. This is the fair three way comparison.
+2. Linux desktops in a container (Debian 13), each protocol at its best.
+   xrdp makes the X display when the bench logs in over RDP and starts the
+   stage on it. On that display, in turn:
+   * RDP from DeskVNC's own client, with the graphics pipeline and H.264
+     (AVC420) on.
+   * RDP from FreeRDP 3, as a reference client.
+   * x11vnc, and TigerVNC's x0vncserver, both reading the same display.
+   * The Boundary host.
+   A second display is TigerVNC's Xvnc, where the X server is the VNC server
+   itself, which is the fastest way to serve VNC. It runs its own copy of the
+   stage, and a Boundary host there gives a pair measured on the same
+   display.
 3. The same container with its loopback shaped by netem to a 30 ms round trip
    and 30 Mbit/s, which is roughly a good home connection.
 4. Boundary to a real computer across the internet: the Customer i9 iMac from
    a MacBook in India. Over SSH macOS only lets a program capture the
    wallpaper, so the i9 runs the offscreen stage. Capture is again left out.
 
-The container's servers are what a Linux user would install: xrdp with
-xorgxrdp, and x11vnc with its defaults. The VNC client asks for Tight with
-JPEG, as the viewer does. A different VNC server (TigerVNC's own X server)
-or Windows' RDP server would give different numbers, so those are named
-whenever they are measured.
+### Each protocol in its best mode
+
+Every result file says what the run actually used, in `negotiated`, and the
+tables print it beside each row, so no row can claim a mode it did not run.
+
+* RDP, server: xrdp 0.10.6.1 and xorgxrdp 0.10.5, built from source with
+  x264, because Debian's xrdp has no H.264 encoder. Its graphics pipeline
+  (MS-RDPEGFX) sends H.264 to a client that offers it, and progressive
+  RemoteFX to one that does not.
+* RDP, DeskVNC's client: confirmed capability set 8.1 with AVC420. The H.264
+  rectangles reach the bench undecoded, as they reach the viewer's renderer,
+  and the bench decodes them with openh264. Static detail comes as Planar.
+  Getting there needed four fixes in DeskVNC's RDP code, listed below.
+* RDP, FreeRDP 3.15 (`xfreerdp3`): progressive RemoteFX. It draws full
+  screen on a display of its own, and the bench reads that display whole
+  (about 8 ms a reading, which the result records) and moves the pointer
+  with xdotool. Its H.264 mode against this xrdp left stale, smeared
+  pictures on screen that nothing could read, so the reference row uses
+  RemoteFX. FreeRDP only forwards a pointer move when the next one arrives,
+  so each move is followed by a one pixel nudge.
+* VNC: TigerVNC 1.15 (Xvnc and x0vncserver) and x11vnc 0.9.17. DeskVNC's VNC
+  client asks for Tight with JPEG first, and for Open H.264 when a server
+  offers it. None of these three does, so every VNC row ran Tight with JPEG.
+* Boundary: whatever the build under test negotiates. The Boundary driver
+  hands the viewer decoded pixels, so its rows show `rgba` rectangles unless
+  the build sends video.
+
+### What it took to get RDP to its best mode
+
+The graphics pipeline code was in DeskVNC's RDP client, but no server had
+ever used it. Four things stood in the way, each fixed with a test:
+
+1. The client never set `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in its Client
+   Core Data, so no server opened the graphics channel. It is now set when
+   `RdpOptions::graphics_pipeline` is on. That option is off by default and
+   the viewer does not set it yet; the bench does.
+2. The client wrapped its own graphics messages (the capability
+   advertisement, the frame acknowledgements) in `RDP_SEGMENTED_DATA`. Only a
+   server's messages ride in that envelope. xrdp read the advertisement as
+   command 0x04E0 and dropped the channel. They now go bare, as FreeRDP's do.
+3. xrdp sends progressive RemoteFX in `WIRE_TO_SURFACE_2`, which the client
+   refused, and it puts a four byte `bitmapDataLength` in front of the
+   bitstream, as FreeRDP expects. Both are handled now.
+4. H.264 was refused outright. With the option on, the client offers AVC420
+   on capability set 8.1 and passes the H.264 rectangles to the renderer
+   undecoded, as VNC's Open H.264 ones already go. The surface's own pixels
+   are not updated by an H.264 rectangle, so a later copy out of such an area
+   would read stale pixels. That is one reason the option stays off in the
+   viewer until it has been tried against more servers.
 
 ## Running it
 
@@ -102,7 +153,7 @@ its own:
 
 ```sh
 remote-bench loopback --bind 127.0.0.1 --label mac-loopback
-PROTOS="vnc boundary" tools/bench/run-container.sh
+PROTOS="xvnc xvnc-boundary" tools/bench/run-container.sh   # RDP always runs first
 NETEM="delay 15ms rate 30mbit limit 10000" PREFIX=wan tools/bench/run-container.sh
 ```
 
@@ -150,8 +201,7 @@ reads and adds up (frames seen plus frames dropped equal the span, and the
 span over the window comes to the stage's 60 a second), not how fast anything
 is. Do not quote them.
 
-One thing they did show that matters for the final run: DeskVNC's RDP client
-does not advertise RemoteFX surface commands or AVC to xrdp yet, so xrdp falls
-back to plain bitmaps, and over the 30 Mbit/s link motion drops to under one
-frame a second. The RDP rows measure DeskVNC's RDP client against xrdp, not
-RDP at its best.
+`raw/harness-proof/modes-*` are the short runs (8 moves, 3 seconds a scene)
+that checked each protocol ran in the mode above, on 2026-10-24 with the
+bench's own VM at a load between 1 and 3 on 4 cores. Their `negotiated`
+fields are the evidence for the modes; their timings are not results.

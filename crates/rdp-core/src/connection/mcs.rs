@@ -17,7 +17,8 @@
 //! copy.
 
 use rdp_pdu::gcc::client::{
-    ChannelDef, ClientCoreData, ClientMessageChannelData, ClientNetworkData, ClientSecurityData,
+    early_capability_flags, ChannelDef, ClientCoreData, ClientMessageChannelData,
+    ClientNetworkData, ClientSecurityData,
 };
 use rdp_pdu::gcc::server::ServerGccBlocks;
 use rdp_pdu::io::{Decode, Encode, Writer};
@@ -141,6 +142,13 @@ pub fn client_blocks(opts: &ResolvedOptions, selected: SecurityProtocol) -> Clie
             desktop_orientation: Some(0),
             desktop_scale_factor: Some(opts.scale_factor),
             device_scale_factor: Some(device_scale_factor(opts.scale_factor)),
+            early_capability_flags: ClientCoreData::default().early_capability_flags.map(|f| {
+                if opts.graphics_pipeline {
+                    f | early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL
+                } else {
+                    f
+                }
+            }),
             ..ClientCoreData::default()
         }),
         // Both words zero is the correct "I am using TLS or CredSSP" signal
@@ -629,6 +637,23 @@ mod tests {
                 Some(p.wire())
             );
         }
+    }
+
+    /// The graphics pipeline is asked for only when the options say so. With
+    /// the flag clear no server opens the EGFX channel.
+    #[test]
+    fn the_graphics_pipeline_flag_follows_the_option() {
+        let gfx = |o: &ResolvedOptions| {
+            client_blocks(o, SecurityProtocol::Ssl)
+                .core
+                .and_then(|c| c.early_capability_flags)
+                .expect("flags")
+                & early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL
+        };
+        let mut o = opts();
+        assert_eq!(gfx(&o), 0);
+        o.graphics_pipeline = true;
+        assert_ne!(gfx(&o), 0);
     }
 
     /// `deviceScaleFactor` takes three values and no others, so the user's

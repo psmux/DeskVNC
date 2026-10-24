@@ -85,6 +85,14 @@ def main(paths):
             f"| {num(s.get('detail_first'))} | {num(s.get('detail_final'))} |"
         )
 
+    print("\n### What each run used\n")
+    print("| Run | Protocol | Client | Server and link | Negotiated |")
+    print("|---|---|---|---|---|")
+    for r in runs:
+        mode = "; ".join(r.get("negotiated", [])) or "n/a"
+        grab = f" (display read in {r['grab_ms']:.1f} ms)" if r.get("grab_ms") else ""
+        print(f"| {r['label']} | {r['protocol']} | {r.get('client', 'DeskVNC')}{grab} | {r.get('note', '')} | {mode} |")
+
     print("\n### Idle and typing bandwidth (Mbit/s)\n")
     print("| Run | Protocol | pointer test | typing test | rects by kind |")
     print("|---|---|---|---|---|")

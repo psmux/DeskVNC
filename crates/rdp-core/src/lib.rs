@@ -77,10 +77,12 @@
 //!   back to Bitmap Updates rather than drawing into a surface we cannot
 //!   decode. EGFX is a different negotiation and having it does not change
 //!   this ([`connection::activate::client_capabilities`]).
-//! * H.264 and RemoteFX Progressive. The graphics channel advertises
-//!   capability set versions 8 and 8.1, which have no H.264 in them, and a
-//!   progressive rectangle is refused by name because `rdp-codecs` has no
-//!   progressive decoder in a default build.
+//! * The graphics pipeline by default. It is asked for only when
+//!   `RdpOptions::graphics_pipeline` is set, which the viewer does not do yet
+//!   and the bench does. With it, capability set 8.1 is confirmed, RemoteFX
+//!   Progressive is decoded from both wire to surface commands, and when the
+//!   codec set allows AVC420 the H.264 rectangles go to the renderer
+//!   undecoded, as VNC's Open H.264 ones do.
 //! * Audio, display control and file clipboard transfer.
 //! * `remote_core::reconnect::supervise` and its `ConnectOnce` trait do not
 //!   exist, so a failed attempt reports and stops rather than retrying.

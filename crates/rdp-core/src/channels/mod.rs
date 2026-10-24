@@ -104,6 +104,9 @@ pub struct ChannelCtx {
     /// 2.2.2.13's `queueDepth` is the field it belongs in. See
     /// [`egfx::Egfx::frame_acknowledge`].
     pub event_backlog: u32,
+    /// Whether the graphics channel offers H.264 (AVC420). The rectangles
+    /// go to the renderer undecoded, as VNC's Open H.264 ones do.
+    pub avc420: bool,
 }
 
 /// One static virtual channel: its id, its reassembler and its handler.
@@ -440,6 +443,7 @@ mod tests {
             user_channel_id: 1007,
             desktop: (800, 600),
             event_backlog: 0,
+            avc420: false,
         }
     }
 
