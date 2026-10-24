@@ -448,6 +448,38 @@ mod tests {
     }
 
     #[test]
+    fn only_tiles_video_drew_visibly_wrong_are_stale() {
+        // Video drew a plain grey screen; the screen has text in one tile.
+        let (w, h) = (256usize, 128usize);
+        let grey = 128u32;
+        for bt709 in [false, true] {
+            let (kr, kg, kb) = if bt709 { (47, 157, 16) } else { (66, 129, 25) };
+            let y = (((kr + kg + kb) * grey + 128) >> 8) + 16;
+            let shown = Shown {
+                luma: vec![y as u8; w * h],
+                stride: w,
+                u: vec![128; w / 2 * h / 2],
+                v: vec![128; w / 2 * h / 2],
+                chroma_stride: w / 2,
+                bt709,
+            };
+            let mut frame = Frame {
+                width: w as u32,
+                height: h as u32,
+                rgba: [grey as u8, grey as u8, grey as u8, 255].repeat(w * h),
+            };
+            assert!(stale_tiles(&frame, &shown).iter().all(|s| !s));
+            for x in 70..80 {
+                let i = (100 * w + x) * 4;
+                frame.rgba[i..i + 3].copy_from_slice(&[0, 0, 0]);
+            }
+            let stale = stale_tiles(&frame, &shown);
+            assert_eq!(stale.iter().filter(|s| **s).count(), 1);
+            assert!(stale[4 + 1], "the tile at (1, 1) of 4 by 2");
+        }
+    }
+
+    #[test]
     fn share_counts_tiles() {
         let a = Frame {
             width: 256,

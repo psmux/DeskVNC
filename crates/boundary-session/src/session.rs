@@ -1136,18 +1136,10 @@ impl Coder {
                     .video
                     .as_mut()
                     .filter(|v| v.width == frame.width && v.height == frame.height)
-                    .and_then(|v| v.encoder.shown())
-                    .filter(|_| std::env::var_os("SOLD").is_none());
+                    .and_then(|v| v.encoder.shown());
                 match shown {
                     Some(shown) => {
                         let stale = video::stale_tiles(&frame, &shown);
-                        if std::env::var_os("SDEBUG").is_some() {
-                            eprintln!(
-                                "SETTLE stale {} of {}",
-                                stale.iter().filter(|s| **s).count(),
-                                stale.len()
-                            );
-                        }
                         let update = self.tiles.refine(frame, &stale, seq, SETTLED_QUALITY)?;
                         Ok(update.map(|u| self.kind(u)))
                     }

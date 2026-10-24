@@ -13,8 +13,11 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 ### Added
 
 * Boundary sends a screen that is moving as H.264 video while most of it
-  changes, as when a page scrolls, a window is dragged or a video plays, and
-  the whole screen again as sharp tiles 100 ms after it stops. The computer
+  changes, as when a page scrolls, a window is dragged or a video plays.
+  60 ms after it stops, the computer sends sharp tiles for the parts the
+  video drew visibly wrong, which it knows by decoding its own video: about
+  a quarter of the bytes of the whole screen it sent before, and on the
+  screen 60 ms after the last moving picture instead of 110. The computer
   encodes with VideoToolbox on a Mac (Apple silicon and Intel), a Media
   Foundation hardware encoder on Windows, and OpenH264 otherwise, at a bit
   rate that follows the link. The viewer decodes it in hardware. From India

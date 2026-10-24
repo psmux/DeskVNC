@@ -528,6 +528,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut first = Vec::new();
                 let mut bytes = Vec::new();
                 let mut seen = Vec::new();
+                let mut settled = Vec::new();
                 for _ in 0..cycles {
                     session.input(Input::Key {
                         key: Key::Letter('v'),
@@ -547,6 +548,7 @@ async fn main() -> anyhow::Result<()> {
                     let stopped = Instant::now();
                     let before = session.received();
                     let (mut last, mut earliest, mut still) = (None, None, stopped);
+                    let (mut at_still, mut at_sharp) = (session.received(), 0);
                     let quiet = stopped + Duration::from_millis(2500);
                     while let Ok(Ok(())) =
                         tokio::time::timeout_at(quiet.into(), session.frames.changed()).await
@@ -557,8 +559,10 @@ async fn main() -> anyhow::Result<()> {
                         screen.apply(updates)?;
                         if videos {
                             (last, earliest, still) = (None, None, Instant::now());
+                            at_still = session.received();
                         } else if tiles {
                             last = Some(stopped.elapsed());
+                            at_sharp = session.received();
                             earliest.get_or_insert(stopped.elapsed());
                         }
                     }
@@ -571,14 +575,16 @@ async fn main() -> anyhow::Result<()> {
                         seen.push(stopped + last - still);
                         first.push(earliest);
                         bytes.push(session.received() - before);
+                        settled.push(at_sharp.saturating_sub(at_still));
                     }
                 }
                 sharp.sort();
                 seen.sort();
                 first.sort();
                 bytes.sort();
+                settled.sort();
                 println!(
-                    "settle over {} stops: sharp after stop key p50 {:?} p90 {:?} | after last video picture p50 {:?} p90 {:?} | first tiles p50 {:?} | KB after stop p50 {} max {}",
+                    "settle over {} stops: sharp after stop key p50 {:?} p90 {:?} | after last video picture p50 {:?} p90 {:?} | first tiles p50 {:?} | KB after stop p50 {} max {} | KB of sharp tiles p50 {} max {}",
                     sharp.len(),
                     percentile(&sharp, 0.5),
                     percentile(&sharp, 0.9),
@@ -587,6 +593,8 @@ async fn main() -> anyhow::Result<()> {
                     percentile(&first, 0.5),
                     bytes.get(bytes.len() / 2).copied().unwrap_or(0) / 1024,
                     bytes.last().copied().unwrap_or(0) / 1024,
+                    settled.get(settled.len() / 2).copied().unwrap_or(0) / 1024,
+                    settled.last().copied().unwrap_or(0) / 1024,
                 );
             }
             session.stop();
