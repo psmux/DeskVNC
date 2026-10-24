@@ -44,12 +44,19 @@ pub(crate) struct Encoder {
     /// The reference is the last capture this encoder was shown, so what
     /// the desktop said changed since then is all that can differ.
     current: bool,
+    /// The helper decodes PNG too, so tiles of few colours go exact.
+    lossless: bool,
 }
 impl Encoder {
     /// Forget what the helper has, so the next update is the whole screen,
     /// as after video drew over it.
     pub fn reset(&mut self) {
         self.reference = None;
+    }
+    /// Send tiles of few colours as PNG, to a helper on the stream that may
+    /// carry video, which decodes them. Older helpers take JPEG only.
+    pub fn lossless(&mut self) {
+        self.lossless = true;
     }
     /// A capture went to the helper some other way, as video, so the
     /// reference is no longer the last capture.
@@ -137,6 +144,11 @@ impl Encoder {
         if rects.is_empty() {
             return Ok(None);
         }
+        let rects: Vec<(Rect, bool)> = if self.lossless {
+            few_colours(&frame, rects)
+        } else {
+            rects.into_iter().map(|r| (r, false)).collect()
+        };
         let rects = split(&frame, rects);
         let encoded = encode_rects(&frame, &rects, quality)?;
         let mut out = Vec::with_capacity(16 + encoded.iter().map(|e| e.len() + 12).sum::<usize>());
@@ -144,7 +156,7 @@ impl Encoder {
         out.extend_from_slice(&(frame.width as u16).to_be_bytes());
         out.extend_from_slice(&(frame.height as u16).to_be_bytes());
         out.extend_from_slice(&(rects.len() as u16).to_be_bytes());
-        for (rect, jpeg) in rects.iter().zip(&encoded) {
+        for ((rect, _), jpeg) in rects.iter().zip(&encoded) {
             for v in [rect.x, rect.y, rect.width, rect.height] {
                 out.extend_from_slice(&(v as u16).to_be_bytes());
             }
@@ -259,7 +271,108 @@ fn joined(w: u32, h: u32, dirty: impl Fn(u32, u32) -> bool) -> Vec<Rect> {
     rects
 }
 
-fn encode_rect(frame: &Frame, rect: &Rect, quality: u8) -> Result<Vec<u8>> {
+/// Tiles of this many colours or fewer, as text on a plain background is,
+/// go as PNG with a palette: exact, and on such a tile smaller than JPEG.
+const FEW_COLOURS: usize = 64;
+
+/// Which of these rectangles are made of tiles with few colours, as
+/// rectangles of their own beside the rest.
+fn few_colours(frame: &Frame, rects: Vec<Rect>) -> Vec<(Rect, bool)> {
+    let (w, h) = (frame.width, frame.height);
+    let cols = w.div_ceil(TILE);
+    let rows = h.div_ceil(TILE);
+    // 0 not to send, 1 few colours, 2 many.
+    let mut tiles = vec![0u8; (cols * rows) as usize];
+    let stride = w as usize * 4;
+    for r in &rects {
+        for ty in r.y / TILE..(r.y + r.height).div_ceil(TILE) {
+            for tx in r.x / TILE..(r.x + r.width).div_ceil(TILE) {
+                let cell = &mut tiles[(ty * cols + tx) as usize];
+                if *cell != 0 {
+                    continue;
+                }
+                let (x0, y0) = (tx * TILE, ty * TILE);
+                let (x1, y1) = ((x0 + TILE).min(w), (y0 + TILE).min(h));
+                let mut seen: Vec<[u8; 3]> = Vec::with_capacity(FEW_COLOURS + 1);
+                let few = (y0..y1).all(|y| {
+                    let i = y as usize * stride + x0 as usize * 4;
+                    frame.rgba[i..i + (x1 - x0) as usize * 4]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| {
+                            let c = [p[0], p[1], p[2]];
+                            if !seen.contains(&c) {
+                                seen.push(c);
+                            }
+                            seen.len() <= FEW_COLOURS
+                        })
+                });
+                *cell = if few { 1 } else { 2 };
+            }
+        }
+    }
+    let at = |tx: u32, ty: u32| tiles[(ty * cols + tx) as usize];
+    let mut out: Vec<(Rect, bool)> = joined(w, h, |tx, ty| at(tx, ty) == 1)
+        .into_iter()
+        .map(|r| (r, true))
+        .collect();
+    out.extend(
+        joined(w, h, |tx, ty| at(tx, ty) == 2)
+            .into_iter()
+            .map(|r| (r, false)),
+    );
+    out
+}
+
+/// A rectangle as PNG, with a palette when it has few enough colours.
+fn encode_png(frame: &Frame, rect: &Rect) -> Result<Vec<u8>> {
+    let stride = frame.width as usize * 4;
+    let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut indices = Vec::with_capacity((rect.width * rect.height) as usize);
+    let mut rgb = Vec::new();
+    for y in rect.y..rect.y + rect.height {
+        let i = y as usize * stride + rect.x as usize * 4;
+        for p in frame.rgba[i..i + rect.width as usize * 4]
+            .as_chunks::<4>()
+            .0
+        {
+            let c = [p[0], p[1], p[2]];
+            rgb.extend_from_slice(&c);
+            if palette.len() <= 256 {
+                let at = match palette.iter().position(|q| *q == c) {
+                    Some(at) => at,
+                    None => {
+                        palette.push(c);
+                        palette.len() - 1
+                    }
+                };
+                indices.push(at as u8);
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, rect.width, rect.height);
+        encoder.set_compression(png::Compression::Fast);
+        if palette.len() <= 256 {
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(palette.concat());
+            encoder.write_header()?.write_image_data(&indices)?;
+        } else {
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header()?.write_image_data(&rgb)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn encode_rect(frame: &Frame, rect: &Rect, png: bool, quality: u8) -> Result<Vec<u8>> {
+    if png {
+        return encode_png(frame, rect);
+    }
     let stride = frame.width as usize * 4;
     let mut rgb = Vec::with_capacity((rect.width * rect.height * 3) as usize);
     for y in rect.y..rect.y + rect.height {
@@ -291,33 +404,39 @@ fn threads() -> usize {
 /// Cut large rectangles into bands when much of the screen changed, as when
 /// a page scrolls, so that several cores can share the encoding: one core
 /// takes about 40 ms for a whole screen on a 2020 iMac.
-fn split(frame: &Frame, rects: Vec<Rect>) -> Vec<Rect> {
-    let pixels: u64 = rects.iter().map(|r| r.width as u64 * r.height as u64).sum();
+fn split(frame: &Frame, rects: Vec<(Rect, bool)>) -> Vec<(Rect, bool)> {
+    let pixels: u64 = rects
+        .iter()
+        .map(|(r, _)| r.width as u64 * r.height as u64)
+        .sum();
     if pixels < PARALLEL_PIXELS || threads() < 2 {
         return rects;
     }
     let band = (frame.height / threads() as u32).max(TILE);
     rects
         .into_iter()
-        .flat_map(|r| {
+        .flat_map(|(r, png)| {
             (0..r.height.div_ceil(band)).map(move |b| {
                 let y = r.y + b * band;
-                Rect {
-                    y,
-                    height: band.min(r.y + r.height - y),
-                    ..r
-                }
+                (
+                    Rect {
+                        y,
+                        height: band.min(r.y + r.height - y),
+                        ..r
+                    },
+                    png,
+                )
             })
         })
         .collect()
 }
 
 /// Encode each rectangle, in order, on as many cores as there are bands.
-fn encode_rects(frame: &Frame, rects: &[Rect], quality: u8) -> Result<Vec<Vec<u8>>> {
+fn encode_rects(frame: &Frame, rects: &[(Rect, bool)], quality: u8) -> Result<Vec<Vec<u8>>> {
     if rects.len() < 2 || threads() < 2 {
         return rects
             .iter()
-            .map(|r| encode_rect(frame, r, quality))
+            .map(|(r, png)| encode_rect(frame, r, *png, quality))
             .collect();
     }
     let chunk = rects.len().div_ceil(threads());
@@ -327,7 +446,7 @@ fn encode_rects(frame: &Frame, rects: &[Rect], quality: u8) -> Result<Vec<Vec<u8
             .map(|part| {
                 s.spawn(move || {
                     part.iter()
-                        .map(|r| encode_rect(frame, r, quality))
+                        .map(|(r, png)| encode_rect(frame, r, *png, quality))
                         .collect::<Result<Vec<_>>>()
                 })
             })
@@ -426,6 +545,9 @@ impl Canvas {
 }
 
 fn draw(frame: &mut Frame, rect: &Rect, jpeg: &[u8]) -> Result<()> {
+    if jpeg.starts_with(b"\x89PNG") {
+        return draw_png(frame, rect, jpeg);
+    }
     ensure!(jpeg.starts_with(&[0xff, 0xd8]), "Screen update is not JPEG");
     let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(jpeg))?;
     let mut limits = image::Limits::default();
@@ -433,6 +555,37 @@ fn draw(frame: &mut Frame, rect: &Rect, jpeg: &[u8]) -> Result<()> {
     limits.max_image_height = Some(wire::MAX_SIDE);
     limits.max_alloc = Some(64 * 1024 * 1024);
     decoder.set_limits(limits)?;
+    ensure!(
+        decoder.dimensions() == (rect.width, rect.height),
+        "Screen update has the wrong size"
+    );
+    let rgb = image::DynamicImage::from_decoder(decoder)?.into_rgb8();
+    let stride = frame.width as usize * 4;
+    for (row, line) in rgb
+        .as_raw()
+        .chunks_exact(rect.width as usize * 3)
+        .enumerate()
+    {
+        let i = (rect.y as usize + row) * stride + rect.x as usize * 4;
+        for (dst, src) in frame.rgba[i..i + rect.width as usize * 4]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(line.as_chunks::<3>().0)
+        {
+            *dst = [src[0], src[1], src[2], 255];
+        }
+    }
+    Ok(())
+}
+
+/// A tile of few colours, sent exact as PNG.
+fn draw_png(frame: &mut Frame, rect: &Rect, png: &[u8]) -> Result<()> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(wire::MAX_SIDE);
+    limits.max_image_height = Some(wire::MAX_SIDE);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    let decoder = image::codecs::png::PngDecoder::with_limits(Cursor::new(png), limits)?;
     ensure!(
         decoder.dimensions() == (rect.width, rect.height),
         "Screen update has the wrong size"
@@ -584,6 +737,49 @@ mod tests {
             assert_eq!(a.rgba, b.rgba, "step {step}");
             keep.push(b);
         }
+    }
+
+    /// Text on a plain background goes exact and small as PNG, a busy
+    /// picture beside it as JPEG, and both draw back.
+    #[test]
+    fn few_colour_tiles_go_exact() {
+        let (w, h) = (256u32, 128u32);
+        let mut frame = Frame {
+            width: w,
+            height: h,
+            rgba: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    if x < 128 {
+                        // Text: two colours, fine detail.
+                        let ink = (x + y) % 3 == 0 || (y % 9 < 2);
+                        if ink {
+                            [20, 20, 30, 255]
+                        } else {
+                            [250, 250, 245, 255]
+                        }
+                    } else {
+                        // A photograph: every pixel its own colour.
+                        [(x * 7 + y) as u8, (x * y) as u8, (y * 5) as u8, 255]
+                    }
+                })
+                .collect(),
+        };
+        frame.rgba[0] = 21;
+        let frame = Arc::new(frame);
+        let mut exact = Encoder::default();
+        exact.lossless();
+        let mut lossy = Encoder::default();
+        let a = exact.update(frame.clone(), 1).unwrap().unwrap();
+        let b = lossy.update(frame.clone(), 1).unwrap().unwrap();
+        let (_, shown, _) = Canvas::default().apply(&a).unwrap();
+        let half = |f: &Frame| -> Vec<u8> {
+            (0..h as usize)
+                .flat_map(|y| f.rgba[y * w as usize * 4..(y * w as usize + 128) * 4].to_vec())
+                .collect()
+        };
+        assert_eq!(half(&shown), half(&frame), "the text is exact");
+        assert!(a.len() < b.len(), "{} against {}", a.len(), b.len());
     }
 
     #[test]

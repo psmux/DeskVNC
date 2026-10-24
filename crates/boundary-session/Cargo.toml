@@ -11,6 +11,8 @@ tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image.workspace = true
+# Tiles of few colours go exact, as PNG with a palette.
+png = "0.18"
 iroh = "1.2"
 noq-proto = "1.3"
 base64 = "0.22"
