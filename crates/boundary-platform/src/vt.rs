@@ -577,8 +577,15 @@ unsafe extern "C" fn output(
 ) {
     // SAFETY: the refcon is the encoder's boxed slot (see `create`).
     let slot = unsafe { &*(refcon as *const Slot) };
-    let result = if status != 0 || sample.is_null() {
+    let result = if status != 0 {
         Err(anyhow::anyhow!("VideoToolbox failed to encode ({status})"))
+    } else if sample.is_null() {
+        // Dropped to keep to the bit rate, which the low latency mode does
+        // on an Intel Mac when a picture would not fit: nothing to send.
+        Ok(Encoded {
+            data: Vec::new(),
+            keyframe: false,
+        })
     } else {
         // SAFETY: a sample VideoToolbox hands over for this call.
         unsafe { annex_b(sample) }

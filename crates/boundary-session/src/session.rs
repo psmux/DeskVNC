@@ -1263,7 +1263,12 @@ async fn send_updates(
             .map(tokio::time::Instant::from_std);
         let on_video = working.policy.on_video();
         coder = Some(working);
+        // A capture waiting is looked at before the settle timer: while the
+        // link was full nothing was looked at, and the timer ran out on a
+        // screen that never stopped moving. That sent a whole sharp screen
+        // in the middle of every scroll on a slow link.
         let work = tokio::select! {
+            biased;
             changed = screens.changed() => {
                 if changed.is_err() {
                     return std::future::pending().await;

@@ -227,6 +227,15 @@ impl Screen {
                         self.decoder = Some(openh264::decoder::Decoder::new()?);
                     }
                     let decoder = self.decoder.as_mut().expect("made above");
+                    // Keep the stream, to look at with ffprobe.
+                    if let Some(path) = std::env::var_os("BENCH_DUMP") {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)?
+                            .write_all(&unit.data)?;
+                    }
                     let t = Instant::now();
                     let Some(picture) = decoder.decode(&unit.data)? else {
                         anyhow::bail!("the decoder held a picture back");
