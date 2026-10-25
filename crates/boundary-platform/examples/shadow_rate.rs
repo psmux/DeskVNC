@@ -30,7 +30,11 @@ fn main() -> anyhow::Result<()> {
         .flat_map(|i| {
             let (x, y) = (i % w, i / w);
             let ink = (y % 18) < 11 && ((x * 31 + y * 7) % 13) < 6 && (x % 400) < 320;
-            if ink { [30, 30, 40, 255] } else { [240, 240, 235, 255] }
+            if ink {
+                [30, 30, 40, 255]
+            } else {
+                [240, 240, 235, 255]
+            }
         })
         .collect();
     let interval = Duration::from_secs(1) / 60;
