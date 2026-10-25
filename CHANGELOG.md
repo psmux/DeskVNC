@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.32.0] (2026-10-25)
+
 ### Added
 
 * When agents ask for a machine you are using, DeskVNCViewer shows one small
@@ -31,8 +33,7 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   the parts the video drew visibly wrong, which it knows by decoding its own
   video: about a quarter of the bytes of the whole screen it sent before,
   and on the screen 35 ms after the last moving picture instead of 110. The
-  computer
-  encodes with VideoToolbox on a Mac (Apple silicon and Intel), a Media
+  computer encodes with VideoToolbox on a Mac (Apple silicon and Intel), a Media
   Foundation hardware encoder on Windows, and OpenH264 otherwise, at a bit
   rate that follows the link. The viewer decodes it in hardware. From India
   to an Intel iMac in the US, with a 300 ms round trip, a moving screen went
@@ -67,6 +68,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* DeskVNCViewer kept running but stopped taking agent connections once it ran
+  out of open files ("Too many open files"). It now raises its own limit at
+  start and keeps listening after an error.
+* The first agent tool call after DeskVNCViewer restarted failed with "Broken
+  pipe". `dvv` now sends a request that never got out again, once, on a new
+  connection.
 * A saved Boundary computer with a port other than 5940 is now dialled on
   that port. The port was dropped on the way to the connection.
 
@@ -96,6 +103,9 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Changed
 
+* On Windows, DeskVNC Support reads the screen through Desktop Duplication
+  and sends only the parts Windows says changed. Reading a screen went from
+  29 ms to 2.3 ms on our test PC, which keeps up with 60 screens a second.
 * On an X11 desktop, DeskVNC Support reads the screen through shared memory
   and only when the X server says something was drawn, so a still screen is
   not read at all. Pointer to screen lag while a third of the screen kept
