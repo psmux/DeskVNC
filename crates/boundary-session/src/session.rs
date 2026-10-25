@@ -1045,6 +1045,11 @@ async fn send_screens(
     }
 }
 
+/// Changes this small are encoded, and updates this small drawn, on the
+/// task that has them rather than on a blocking thread.
+const SMALL_PIXELS: u64 = 128 * 128;
+const SMALL_BYTES: usize = 32 * 1024;
+
 /// At most this many updates wait to be shown, however small they are.
 const MAX_UPDATES_IN_FLIGHT: usize = 12;
 /// The same for pictures of video, which are small and come many a second:
@@ -1099,6 +1104,8 @@ struct Video {
     /// Nothing has been sent from this encoder yet.
     fresh: bool,
     rate: (u32, u32),
+    /// The usual size of a picture, to tell a cut by.
+    typical: usize,
 }
 
 /// The host's side of a stream of updates: what the helper holds, and
@@ -1113,6 +1120,10 @@ struct Coder {
     policy: video::Policy,
     /// The capture before this one, to tell how much of the screen moved.
     last: Option<Arc<Frame>>,
+    /// A cut, not sent yet (see [`Coder::video`]).
+    held: Option<Unit>,
+    /// The link carries a cut's tiles in a few milliseconds.
+    fast: bool,
 }
 enum Work {
     /// A new capture, and what the desktop said changed since the last one
@@ -1126,55 +1137,89 @@ enum Work {
 }
 impl Coder {
     fn new(framed: bool) -> Self {
+        let mut tiles = screen::Encoder::default();
+        if framed {
+            tiles.lossless();
+        }
         Self {
-            tiles: screen::Encoder::default(),
+            tiles,
             framed,
             encoders: None,
             video: None,
             policy: video::Policy::default(),
             last: None,
+            held: None,
+            fast: false,
         }
     }
-    /// The message that carries `work` to the helper, or nothing when there
-    /// is nothing new to send.
+    /// The messages that carry `work` to the helper, numbered from `seq` on,
+    /// or none when there is nothing new to send.
     fn work(
         &mut self,
         work: Work,
         seq: u64,
         rate: (u32, u32),
         now: Instant,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        let mut next = seq;
         match work {
             Work::Settle(frame) => {
                 self.policy.settle(now);
                 self.last = Some(frame.clone());
-                let shown = self
-                    .video
-                    .as_mut()
-                    .filter(|v| v.width == frame.width && v.height == frame.height)
-                    .and_then(|v| v.encoder.shown());
+                // A cut held back and never followed by motion: the screen
+                // changed to something new and stayed. Its picture of video
+                // is not sent, so the whole screen goes as tiles, exact where
+                // it has few colours. Sending both cost 364 KB of video and
+                // then 738 KB of tiles on the shaped 30 ms link.
+                let cut = self.drop_held();
+                let shown = if cut {
+                    None
+                } else {
+                    self.video
+                        .as_mut()
+                        .filter(|v| v.width == frame.width && v.height == frame.height)
+                        .filter(|v| !v.fresh)
+                        .and_then(|v| v.encoder.shown())
+                };
                 crate::stats::phase("shadow", now.elapsed());
-                match shown {
+                let update = match shown {
                     Some(shown) => {
                         let stale = video::stale_tiles(&frame, &shown);
                         crate::stats::phase("compare", now.elapsed());
-                        let update = self.tiles.refine(frame, &stale, seq, SETTLED_QUALITY)?;
-                        crate::stats::phase("tiles", now.elapsed());
-                        Ok(update.map(|u| self.kind(u)))
+                        self.tiles.refine(frame, &stale, next, SETTLED_QUALITY)?
                     }
                     None => {
                         self.tiles.reset();
-                        self.tiles(frame, seq, SETTLED_QUALITY)
+                        self.tiles.update_at(frame, next, SETTLED_QUALITY)?
                     }
-                }
+                };
+                crate::stats::phase("tiles", now.elapsed());
+                out.extend(update.map(|u| self.kind(u)));
             }
             Work::Whole(frame) => {
+                self.drop_held();
                 self.policy.stop();
                 self.tiles.reset();
                 self.last = Some(frame.clone());
-                self.tiles(frame, seq, SETTLED_QUALITY)
+                out.extend(
+                    self.tiles
+                        .update_at(frame, next, SETTLED_QUALITY)?
+                        .map(|u| self.kind(u)),
+                );
             }
             Work::Capture(frame, damage) => {
+                // Motion went on after a cut: send it after all, first.
+                if let Some(held) = self.held.take() {
+                    out.push(video::encode_unit(
+                        next,
+                        held.width,
+                        held.height,
+                        &held.encoded,
+                        held.fresh,
+                    ));
+                    next += 1;
+                }
                 let share = match (&self.last, &damage) {
                     (Some(last), _) if last.width != frame.width || last.height != frame.height => {
                         1.0
@@ -1189,12 +1234,39 @@ impl Coder {
                     None => video::Choice::Tiles,
                 };
                 match choice {
-                    video::Choice::Tiles => Ok(self
-                        .tiles
-                        .update_with(frame, seq, crate::JPEG_QUALITY, damage.as_deref())?
-                        .map(|u| self.kind(u))),
-                    video::Choice::Video { start } => match self.passed_video(&frame, seq, rate) {
-                        Ok(bytes) => Ok(bytes),
+                    video::Choice::Tiles => out.extend(
+                        self.tiles
+                            .update_with(frame, next, crate::JPEG_QUALITY, damage.as_deref())?
+                            .map(|u| self.kind(u)),
+                    ),
+                    video::Choice::Video { start } => match self.passed_video(&frame, rate) {
+                        Ok(Some(held)) if held.cut && self.fast => {
+                            // On a fast link nothing is gained by waiting to
+                            // see whether the screen stays: the screen goes
+                            // as tiles now, exact where it has few colours,
+                            // and video, if the motion goes on, starts again
+                            // from a keyframe.
+                            drop(held);
+                            if let Some(video) = self.video.as_mut() {
+                                video.fresh = true;
+                            }
+                            self.policy.settle(now);
+                            self.tiles.reset();
+                            out.extend(
+                                self.tiles
+                                    .update_at(frame, next, SETTLED_QUALITY)?
+                                    .map(|u| self.kind(u)),
+                            );
+                        }
+                        Ok(Some(held)) if held.cut => self.held = Some(held),
+                        Ok(Some(unit)) => out.push(video::encode_unit(
+                            next,
+                            unit.width,
+                            unit.height,
+                            &unit.encoded,
+                            unit.fresh,
+                        )),
+                        Ok(None) => {}
                         Err(_) => {
                             // An encoder that failed is not tried again in
                             // this session. What video already drew is
@@ -1205,18 +1277,35 @@ impl Coder {
                             if !start {
                                 self.tiles.reset();
                             }
-                            self.tiles(frame, seq, crate::JPEG_QUALITY)
+                            out.extend(
+                                self.tiles
+                                    .update_at(frame, next, crate::JPEG_QUALITY)?
+                                    .map(|u| self.kind(u)),
+                            );
                         }
                     },
                 }
             }
         }
+        for message in &out {
+            ensure!(
+                message.len() <= wire::MAX_FRAME,
+                "Encoded screen is too large"
+            );
+        }
+        Ok(out)
     }
-    fn tiles(&mut self, frame: Arc<Frame>, seq: u64, quality: u8) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .tiles
-            .update_at(frame, seq, quality)?
-            .map(|u| self.kind(u)))
+    /// Forget a picture held back as a cut. The helper's decoder never gets
+    /// it, so the encoder starts again from a keyframe, and the host's own
+    /// decoded copy, which did get it, is not trusted until then.
+    fn drop_held(&mut self) -> bool {
+        if self.held.take().is_none() {
+            return false;
+        }
+        if let Some(video) = self.video.as_mut() {
+            video.fresh = true;
+        }
+        true
     }
     /// A tile update as it goes on this stream.
     fn kind(&self, mut update: Vec<u8>) -> Vec<u8> {
@@ -1226,16 +1315,11 @@ impl Coder {
         update
     }
     /// A capture as video, which the tile encoder then did not see.
-    fn passed_video(
-        &mut self,
-        frame: &Frame,
-        seq: u64,
-        rate: (u32, u32),
-    ) -> Result<Option<Vec<u8>>> {
+    fn passed_video(&mut self, frame: &Frame, rate: (u32, u32)) -> Result<Option<Unit>> {
         self.tiles.passed();
-        self.video(frame, seq, rate)
+        self.video(frame, rate)
     }
-    fn video(&mut self, frame: &Frame, seq: u64, rate: (u32, u32)) -> Result<Option<Vec<u8>>> {
+    fn video(&mut self, frame: &Frame, rate: (u32, u32)) -> Result<Option<Unit>> {
         let video = match self.video.take() {
             Some(v) if v.width == frame.width && v.height == frame.height => v,
             _ => {
@@ -1246,6 +1330,7 @@ impl Coder {
                     height: frame.height,
                     fresh: true,
                     rate: (0, 0),
+                    typical: 0,
                 }
             }
         };
@@ -1272,14 +1357,45 @@ impl Coder {
             !video.fresh || encoded.keyframe,
             "The video encoder did not start with a keyframe"
         );
-        let bytes = video::encode_unit(seq, frame.width, frame.height, &encoded, video.fresh);
-        video.fresh = false;
-        ensure!(
-            bytes.len() <= wire::MAX_FRAME,
-            "Encoded screen is too large"
-        );
-        Ok(Some(bytes))
+        let size = encoded.data.len();
+        // A picture many times the usual size is a cut to something new,
+        // which video does badly. It is held back for a moment: if the screen
+        // then stays still, tiles serve better.
+        let cut =
+            !video.fresh && video.typical > 0 && size > (video.typical * CUT_TIMES).max(CUT_BYTES);
+        // A keyframe starts the count again: the pictures after one are
+        // large while the encoder finds its rate, and counted as cuts they
+        // dropped each other and started over from a keyframe every time.
+        if video.fresh || video.typical == 0 {
+            video.typical = size;
+        } else if !cut {
+            video.typical = (video.typical * 7 + size) / 8;
+        }
+        let fresh = std::mem::replace(&mut video.fresh, false);
+        Ok(Some(Unit {
+            encoded,
+            width: frame.width,
+            height: frame.height,
+            fresh,
+            cut,
+        }))
     }
+}
+
+/// A picture of video this many times the usual size, and at least this
+/// big, is held back as a cut. On the bench a cut to a page of text was
+/// 364 KB, and the biggest picture of a scroll 70 KB: at 64 KB scrolls were
+/// taken for cuts, and each started the video over from a keyframe.
+const CUT_TIMES: usize = 6;
+const CUT_BYTES: usize = 160 * 1024;
+
+/// A picture of video, encoded, not yet numbered.
+struct Unit {
+    encoded: video::Encoded,
+    width: u32,
+    height: u32,
+    fresh: bool,
+    cut: bool,
 }
 
 /// The bit rate and screens a second video should aim at on this link now.
@@ -1293,6 +1409,19 @@ fn link_rate(connection: &Connection) -> (u32, u32) {
         });
     let bits = video::bitrate(cwnd.max(MIN_BYTES_IN_FLIGHT), rtt);
     (bits, video::frame_rate(bits))
+}
+
+/// Whether the link carries 100 Mbit/s or more, as its congestion window
+/// over the round trip says.
+fn link_fast(connection: &Connection) -> bool {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .is_some_and(|path| {
+            let rtt = path.rtt().max(Duration::from_micros(200)).as_secs_f64();
+            path.stats().cwnd as f64 * 8.0 / rtt >= 100e6
+        })
 }
 
 /// Changed rectangles, one update after another on a single stream, to a
@@ -1412,13 +1541,24 @@ async fn send_updates(
         };
         let rate = link_rate(connection);
         let mut working = coder.take().context("Screen encoder lost")?;
+        working.fast = link_fast(connection);
         let next = seq + 1;
         let began = tokio::time::Instant::now();
-        let (working, update) = tokio::task::spawn_blocking(move || {
+        // A pointer or a caret is a millisecond of work at most, done here:
+        // handing it to a blocking thread and back cost more than that.
+        let small = !working.policy.on_video()
+            && matches!(&work, Work::Capture(_, Some(rects))
+                if rects.iter().map(|r| r.width as u64 * r.height as u64).sum::<u64>() <= SMALL_PIXELS);
+        let (working, update) = if small {
             let update = working.work(work, next, rate, Instant::now());
             (working, update)
-        })
-        .await?;
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let update = working.work(work, next, rate, Instant::now());
+                (working, update)
+            })
+            .await?
+        };
         crate::stats::encoded(began.elapsed());
         if working.policy.on_video() {
             // From when this screen was taken, not from when its encoding
@@ -1430,23 +1570,22 @@ async fn send_updates(
             next_video = began + Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
         }
         coder = Some(working);
-        let Some(update) = update? else {
-            continue;
-        };
-        seq = next;
-        let writing = Instant::now();
-        tokio::time::timeout(SCREEN_DEADLINE, async {
-            stream
-                .write_all(&(update.len() as u32).to_be_bytes())
-                .await?;
-            stream.write_all(&update).await
-        })
-        .await
-        .context("The helper stopped taking screens")??;
-        crate::stats::sent(writing.elapsed());
-        crate::stats::written();
-        crate::stats::each(update[0], update.len(), in_flight.len(), began.elapsed());
-        in_flight.push_back((seq, update.len() as u64));
+        for update in update? {
+            seq += 1;
+            let writing = Instant::now();
+            tokio::time::timeout(SCREEN_DEADLINE, async {
+                stream
+                    .write_all(&(update.len() as u32).to_be_bytes())
+                    .await?;
+                stream.write_all(&update).await
+            })
+            .await
+            .context("The helper stopped taking screens")??;
+            crate::stats::sent(writing.elapsed());
+            crate::stats::written();
+            crate::stats::each(update[0], update.len(), in_flight.len(), began.elapsed());
+            in_flight.push_back((seq, update.len() as u64));
+        }
     }
 }
 fn viewer_network_options(invitation: &Invitation, mut options: HostOptions) -> HostOptions {
@@ -1783,11 +1922,17 @@ async fn read_updates(
             }
         }
         let mut drawing = canvas.take().context("Screen lost")?;
-        let (drawing, result) = tokio::task::spawn_blocking(move || {
+        // A small update is drawn here, as on the host's side.
+        let (drawing, result) = if bytes.len() <= SMALL_BYTES {
             let result = drawing.apply(&bytes[skip..]);
             (drawing, result)
-        })
-        .await?;
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let result = drawing.apply(&bytes[skip..]);
+                (drawing, result)
+            })
+            .await?
+        };
         canvas = Some(drawing);
         let (seq, frame, rects) = result?;
         show(frames, damage, frame, Some(rects));

@@ -1102,6 +1102,7 @@ dependencies = [
  "mdns-sd",
  "noq-proto",
  "openh264",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "subtle",
