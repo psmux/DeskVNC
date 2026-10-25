@@ -1,0 +1,170 @@
+{
+  "label": "proof-wan-rdp",
+  "build": "fast-bench@1ffec18",
+  "note": "netem delay 15ms rate 30mbit limit 10000, xrdp 0.9.24-4ubuntu0.1, xorgxrdp",
+  "protocol": "rdp",
+  "target_kind": "stage window on the host",
+  "quality": "Auto",
+  "started_unix_ms": 1792863093523,
+  "host": "dfc61c5e33d3",
+  "client_os": "linux aarch64",
+  "load_1m": 1.89,
+  "cpus": 4,
+  "loaded": false,
+  "connect_secs": 0.824787074,
+  "first_stage_secs": 1.717180795,
+  "screen": [
+    1920,
+    1080
+  ],
+  "stage_size": [
+    1920,
+    1080
+  ],
+  "stage_in_screen": [
+    0.0,
+    0.0,
+    1920.0,
+    1080.0
+  ],
+  "clock_offset_ms": 0,
+  "clock_rtt_ms": 30.843335,
+  "rect_kinds": {
+    "rgba": 7035
+  },
+  "driver_encodings": {
+    "0": 33
+  },
+  "errors": [],
+  "pointer": {
+    "lag_ms": {
+      "n": 10,
+      "p50": 62.188641000000004,
+      "p90": 67.06084299999999,
+      "p99": 67.861446,
+      "max": 67.861446,
+      "mean": 60.4912954
+    },
+    "missed": 0,
+    "samples": [
+      67.06084299999999,
+      62.188641000000004,
+      53.933357,
+      60.839358000000004,
+      55.997031,
+      47.738372,
+      67.861446,
+      63.18291500000001,
+      65.964817,
+      60.146173999999995
+    ],
+    "skipped": null,
+    "window": {
+      "secs": 4.07342484,
+      "driver_kbps": 254.54354522962058,
+      "os_kbps": 342.1631807989858,
+      "host_cpu": 0.5000000037252903,
+      "server_cpu": 0.2506265640258789,
+      "client_cpu": 0.2506265640258789,
+      "updates_per_sec": 12.765670668419647
+    }
+  },
+  "typing": {
+    "lag_ms": {
+      "n": 10,
+      "p50": 61.292868,
+      "p90": 67.41055999999999,
+      "p99": 68.38591600000001,
+      "max": 68.38591600000001,
+      "mean": 59.9826908
+    },
+    "missed": 0,
+    "samples": [
+      63.98055900000001,
+      67.41055999999999,
+      54.181362,
+      57.254854,
+      57.561653,
+      61.292868,
+      59.643744999999996,
+      68.38591600000001,
+      46.857975,
+      63.257416
+    ],
+    "skipped": null,
+    "window": {
+      "secs": 2.535682658,
+      "driver_kbps": 110.7362544418206,
+      "os_kbps": 186.79940035303898,
+      "host_cpu": 0.9333333373069763,
+      "server_cpu": 1.0050251483917236,
+      "client_cpu": 0.6700167655944824,
+      "updates_per_sec": 11.831133484054455
+    }
+  },
+  "scroll": {
+    "fps": 0.4994904960930592,
+    "stage_fps": 0.7492357441395887,
+    "stage_reported_fps": 53.75,
+    "distinct": 2,
+    "span": 3,
+    "dropped": 1,
+    "latency_ms": {
+      "n": 2,
+      "p50": 1991.0,
+      "p90": 1991.0,
+      "p99": 1991.0,
+      "max": 1991.0,
+      "mean": 1586.5
+    },
+    "latency_samples": [
+      1182.0,
+      1991.0
+    ],
+    "window": {
+      "secs": 4.004080189,
+      "driver_kbps": 9466.629590519422,
+      "os_kbps": 9542.869821881082,
+      "host_cpu": 14.200000286102295,
+      "server_cpu": 9.864256381988525,
+      "client_cpu": 8.59770667552948,
+      "updates_per_sec": 75.922555406145
+    }
+  },
+  "motion": {
+    "fps": 0.49969362597019407,
+    "stage_fps": 50.4690562229896,
+    "stage_reported_fps": 59.95000076293945,
+    "distinct": 2,
+    "span": 202,
+    "dropped": 200,
+    "latency_ms": {
+      "n": 2,
+      "p50": 3898.0,
+      "p90": 3898.0,
+      "p99": 3898.0,
+      "max": 3898.0,
+      "mean": 3662.5
+    },
+    "latency_samples": [
+      3898.0,
+      3427.0
+    ],
+    "window": {
+      "secs": 4.002452495,
+      "driver_kbps": 9023.63539482809,
+      "os_kbps": 9101.85943381197,
+      "host_cpu": 11.625000238418579,
+      "server_cpu": 8.053019165992737,
+      "client_cpu": 1.5094588100910187,
+      "updates_per_sec": 78.20205246433537
+    }
+  },
+  "still": {
+    "first_ms": 5759.0,
+    "sharp_ms": 5759.0,
+    "detail_first": 203.0,
+    "detail_final": 203.0,
+    "updates_after": 18
+  }
+}

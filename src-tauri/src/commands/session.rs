@@ -672,10 +672,20 @@ fn forward_events(
                     let revoked = (was == Some(true) && !*tools)
                         .then(|| app.try_state::<AppState>())
                         .flatten()
-                        .and_then(|state| state.agent.revoke(&session_id));
+                        .and_then(|state| state.agent.revoke_consent(&session_id));
                     if let Some(event) = revoked {
                         let _ = app.emit(crate::agent::AGENT_EVENT, event);
                         tracing::info!(session = %session_id, "the person at a Boundary computer took back commands and files, so its agent was stopped");
+                    }
+                    // And allowing them again lets the agents already
+                    // attached carry on, rather than leaving them refused
+                    // for a consent that has been given back.
+                    let restored = (was == Some(false) && *tools)
+                        .then(|| app.try_state::<AppState>())
+                        .flatten()
+                        .and_then(|state| state.agent.restore_consent(&session_id));
+                    if let Some(event) = restored {
+                        let _ = app.emit(crate::agent::AGENT_EVENT, event);
                     }
                 }
                 SessionEvent::DesktopResize { width, height } => {
@@ -1163,7 +1173,13 @@ pub async fn connect_session(
     let mut options = match kind {
         ProtocolKind::Rdp => ConnectOptions::rdp(address, port),
         ProtocolKind::Ssh => ConnectOptions::ssh(address, port),
-        ProtocolKind::Boundary => ConnectOptions::boundary(address),
+        // The port rides along: the driver puts it after the address, which
+        // is how a computer found on a port other than 5940 is reached.
+        // Zero, the default for a machine ID, adds nothing.
+        ProtocolKind::Boundary => ConnectOptions {
+            port,
+            ..ConnectOptions::boundary(address)
+        },
         _ => ConnectOptions::vnc(address, port),
     };
 
@@ -1743,6 +1759,23 @@ pub async fn send_input(
 
     let commands = framing::decode_input(body)?;
     let (sender, last_pointer_mask) = state.command_channel(&session_id)?;
+    // A person's key or button on this session is the person using it, and a
+    // person outranks an agent: the shared lease moves to them, an agent
+    // holding it is fenced and its keys released, and it comes back to the
+    // agents once the person goes quiet. A bare pointer move is not use (a
+    // mouse crossing the pane takes nothing), and neither is focusing or
+    // looking at a pane, which never reaches this command at all.
+    let last_mask = last_pointer_mask.load(std::sync::atomic::Ordering::Relaxed);
+    let used = commands.iter().any(|command| match command {
+        ClientCommand::Key { .. } => true,
+        ClientCommand::Pointer { button_mask, .. } => {
+            *button_mask != 0 || i32::from(*button_mask) != last_mask
+        }
+        _ => false,
+    });
+    if used {
+        let _ = state.agent.person_input(&session_id);
+    }
     for command in commands {
         let motion_only = if let ClientCommand::Pointer { button_mask, .. } = &command {
             let mask = *button_mask as i32;

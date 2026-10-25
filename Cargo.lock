@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "agent-lease"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "agent-perception"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "image",
  "limb-core",
@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "agent-plane"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -444,6 +444,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
  "libloading 0.8.9",
+]
+
+[[package]]
+name = "ashpd"
+version = "0.13.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb8421aaa9644a5faf26735f258b669b15f063313ef8f8e2bdb28912a1a6f111"
+dependencies = [
+ "enumflags2",
+ "futures-util",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_repr",
+ "zbus",
 ]
 
 [[package]]
@@ -795,6 +809,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-stage"
+version = "0.32.0"
+dependencies = [
+ "softbuffer",
+ "sysinfo",
+ "winit",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -969,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "boundary"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "boundary-codes",
@@ -988,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-codes"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1002,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-driver"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "boundary-session",
@@ -1015,19 +1038,38 @@ dependencies = [
 
 [[package]]
 name = "boundary-platform"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
+ "ashpd",
+ "async-io",
+ "block2 0.6.2",
  "boundary-session",
+ "dispatch2",
  "enigo",
+ "fast_image_resize",
+ "futures-lite",
  "image",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-screen-capture-kit",
+ "openh264",
+ "openh264-sys2",
+ "pipewire",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
+ "x11rb",
  "xcap",
 ]
 
 [[package]]
 name = "boundary-provision"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1047,19 +1089,26 @@ dependencies = [
 
 [[package]]
 name = "boundary-session"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
  "base64 0.22.1",
+ "boundary-platform",
+ "fast_image_resize",
  "getrandom 0.3.4",
  "image",
  "iroh",
+ "mdns-sd",
+ "noq-proto",
+ "openh264",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "subtle",
  "tokio",
  "tokio-util",
+ "vnc-discovery",
 ]
 
 [[package]]
@@ -1825,9 +1874,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "d726facc8b27e604391b232b970cdc19b5468c69f08b466b9734c759216c7415"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -1902,7 +1951,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "352d39c2f7bef1d6ad73db6f5160efcaed66d94ef8c6c573a8410c00bf909a98"
 dependencies = [
  "ctor-proc-macro",
- "dtor",
+ "dtor 0.3.0",
+]
+
+[[package]]
+name = "ctor"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83cf0d42651b16c6dfe68685716d18480d18a9c39c62d76e8cf3eb6ed5d8bcbf"
+dependencies = [
+ "dtor 0.8.1",
 ]
 
 [[package]]
@@ -1940,9 +1998,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -2151,8 +2209,9 @@ dependencies = [
 
 [[package]]
 name = "deskvncviewer"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
+ "agent-lease",
  "agent-perception",
  "anyhow",
  "base64 0.22.1",
@@ -2164,6 +2223,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "directories",
+ "libc",
  "limb-core",
  "local-pipe",
  "os_info",
@@ -2293,7 +2353,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -2450,6 +2510,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dtor"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
+
+[[package]]
 name = "dtor-proc-macro"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2463,7 +2529,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dvv"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -2767,6 +2833,10 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
  "windows 0.61.3",
  "x11rb",
  "xkbcommon",
@@ -2932,6 +3002,18 @@ dependencies = [
  "document-features",
  "num-traits",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "fastbloom"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef975e30683b2d965054bb0a836f8973857c4ebf6acf274fe46617cd285060d8"
+dependencies = [
+ "foldhash 0.2.0",
+ "libm",
+ "portable-atomic",
+ "siphasher",
 ]
 
 [[package]]
@@ -4960,7 +5042,7 @@ dependencies = [
 
 [[package]]
 name = "limb-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "agent-lease",
  "bytes",
@@ -5011,7 +5093,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "local-pipe"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "tokio",
  "windows-sys 0.59.0",
@@ -5388,6 +5470,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasm-rs"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "706bf8a5e8c8ddb99128c3291d31bd21f4bcde17f0f4c20ec678d85c74faa149"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5673,6 +5764,7 @@ dependencies = [
  "bytes",
  "derive_more",
  "enum-assoc",
+ "fastbloom",
  "getrandom 0.4.3",
  "identity-hash",
  "lru-slab",
@@ -5715,6 +5807,15 @@ dependencies = [
  "serde",
  "tauri-winrt-notification",
  "zbus",
+]
+
+[[package]]
+name = "ntapi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b335231dfd352ffb0f8017f3b6027a4917f7df785ea2143d8af2adc66980ae"
+dependencies = [
+ "winapi",
 ]
 
 [[package]]
@@ -6201,6 +6302,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6287,6 +6398,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-screen-capture-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74b7c5390f477482f001bc354d6571a70db7e4f8d5288e860c45521fbce11394"
+dependencies = [
+ "bitflags 2.13.1",
+ "block2 0.6.2",
+ "dispatch2",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-av-foundation",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-foundation 0.3.2",
+ "objc2-uniform-type-identifiers 0.3.2",
+]
+
+[[package]]
 name = "objc2-security"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6348,7 +6478,7 @@ dependencies = [
  "objc2-link-presentation",
  "objc2-quartz-core 0.2.2",
  "objc2-symbols",
- "objc2-uniform-type-identifiers",
+ "objc2-uniform-type-identifiers 0.2.2",
  "objc2-user-notifications 0.2.2",
 ]
 
@@ -6382,6 +6512,16 @@ dependencies = [
  "block2 0.5.1",
  "objc2 0.5.2",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -6448,6 +6588,27 @@ dependencies = [
  "dunce",
  "is-wsl",
  "libc",
+]
+
+[[package]]
+name = "openh264"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e54411f498088327bf5c45d2de7e5b0ed25875ee3be5800485afe45da7206bff"
+dependencies = [
+ "openh264-sys2",
+ "wide",
+]
+
+[[package]]
+name = "openh264-sys2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "414f5bd53da84e126dc9449eb6f0003bb6994b2de63c48119b0c9b7a8b28086a"
+dependencies = [
+ "cc",
+ "nasm-rs",
+ "walkdir",
 ]
 
 [[package]]
@@ -7550,7 +7711,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-auth"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -7574,7 +7735,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-codecs"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "criterion",
  "hex",
@@ -7585,7 +7746,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "bytes",
  "futures",
@@ -7610,7 +7771,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-pdu"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "bytes",
  "hex",
@@ -7718,8 +7879,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "remote-bench"
+version = "0.32.0"
+dependencies = [
+ "anyhow",
+ "bench-stage",
+ "boundary-driver",
+ "boundary-platform",
+ "boundary-session",
+ "image",
+ "openh264",
+ "rdp-core",
+ "remote-core",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "vnc-core",
+ "xcap",
+]
+
+[[package]]
 name = "remote-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "agent-lease",
  "bytes",
@@ -7735,7 +7920,7 @@ dependencies = [
 
 [[package]]
 name = "remote-pixel"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "criterion",
 ]
@@ -8129,6 +8314,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "salsa20"
@@ -8839,8 +9033,12 @@ version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
 dependencies = [
+ "as-raw-xcb-connection",
  "bytemuck",
+ "drm 0.14.1",
+ "fastrand",
  "js-sys",
+ "memmap2",
  "ndk",
  "objc2 0.6.4",
  "objc2-core-foundation",
@@ -8849,10 +9047,16 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "raw-window-handle",
  "redox_syscall 0.5.18",
+ "rustix 1.1.4",
+ "tiny-xlib",
  "tracing",
  "wasm-bindgen",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-sys",
  "web-sys",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]
@@ -8970,7 +9174,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -9029,7 +9233,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-transport"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "aes 0.8.4",
  "argon2 0.5.3",
@@ -9186,6 +9390,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -9649,7 +9867,7 @@ dependencies = [
  "anyhow",
  "brotli",
  "cargo_metadata",
- "ctor",
+ "ctor 0.8.0",
  "dom_query",
  "dunce",
  "glob",
@@ -9848,6 +10066,19 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
+]
+
+[[package]]
+name = "tiny-xlib"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a90a0ca3ee6a69f2ad28fd11621a4c3f03b371f366be500b64df260c4ffbafb4"
+dependencies = [
+ "as-raw-xcb-connection",
+ "ctor 0.10.1",
+ "libloading 0.8.9",
+ "pkg-config",
+ "tracing",
 ]
 
 [[package]]
@@ -10488,7 +10719,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vnc-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "aes 0.8.4",
  "byteorder",
@@ -10525,7 +10756,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-discovery"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -10546,7 +10777,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-files"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -10568,7 +10799,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-input-capture"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
@@ -10585,7 +10816,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-store"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -10610,7 +10841,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-transport"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "hex",
  "openssl",
@@ -11219,6 +11450,16 @@ dependencies = [
  "raw-window-handle",
  "static_assertions",
  "web-sys",
+]
+
+[[package]]
+name = "wide"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]

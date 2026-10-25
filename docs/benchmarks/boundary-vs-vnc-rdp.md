@@ -1,0 +1,207 @@
+# Boundary, VNC and RDP, measured the same way
+
+This is how I compare DeskVNC's own protocol, Boundary, with VNC and RDP. All
+three are measured by the same program, against the same picture, on the same
+machine, over the same link. The comparison tables are filled in by
+`tools/bench/run-all.sh` on a quiet machine. Until that run, the only numbers
+here are the "before" baseline at the end.
+
+## What is measured
+
+A small program called the stage runs on the computer being reached. It draws
+five scenes:
+
+1. Idle. A still desktop with a magenta square under the pointer.
+2. Typing. A grid where every key press fills the next cell.
+3. Scroll. Lines of text that slide up a quarter of a unit every frame.
+4. Motion. The whole content area changes every frame, the way a video does.
+5. Still. Fine detail (a one pixel checkerboard) that a lossy codec has to
+   settle on once motion stops.
+
+Two rows of black and white squares at the top of every frame carry a code:
+a frame counter, the stage's clock in milliseconds, the scene, how many keys
+it has seen, and a checksum. The measuring client reads that code out of
+whatever pixels arrive, so frame rate, dropped frames and latency come from
+the content itself, not from what the protocol says about its own updates.
+
+The still scenes draw only when something changes, and every frame puts on
+screen only the rectangles that changed. An idle stage is as quiet as an idle
+desktop, so a server that follows damage (xrdp, Windows RDP) is not made to
+resend the whole screen for nothing.
+
+The client is `remote-bench`. It connects with the same protocol code the
+DeskVNC viewer uses (`vnc-core`, `rdp-core`, and `boundary-driver` on top of
+`boundary-session`), paints every rectangle that arrives into a framebuffer
+as the viewer's canvas would, and decodes JPEG and H.264 rectangles to pixels
+(H.264 through openh264, in the bench only). Then it measures:
+
+* Pointer to screen. Move the pointer through the protocol and time until the
+  magenta square is painted at the new place. 40 moves, with uneven pauses so
+  the moves do not lock to a capture rhythm. Reported as p50, p90 and p99.
+* Key to screen. Press a key (with its scancode, as the viewer sends it) and
+  time until the next grid cell is painted. 40 presses.
+* Frames delivered during scroll and motion, over 10 seconds: distinct stage
+  frames seen per second, the stage's own frame rate over the same time, and
+  how many frames in the span were never seen.
+* Frame latency during scroll and motion: from the moment the stage drew a
+  frame (its clock, in the code) to the moment the client painted it. When
+  the stage and the client are on different machines the clocks are synced
+  NTP style over the stage's control link, keeping the ping with the shortest
+  round trip.
+* Time to sharp. After 3 seconds of motion the stage switches to the still
+  scene. The client records when the first still frame arrives, and when the
+  detail patch last changes, which is when the picture is final. It also
+  reports how much fine detail the patch holds when it first arrives and at
+  the end. The checkerboard measures about 200 when it is pixel exact.
+* Bandwidth, as the operating system counts the bytes the client received
+  (nettop on macOS; every interface in the container's network namespace on
+  Linux) and as the protocol driver counts them where it does.
+* CPU: the whole stage machine's, reported by the stage once a second; the
+  server processes' (`--watch-procs`); and the client's own.
+
+Every result file records the build it came from, the load average and core
+count of the measuring machine, and whether that load was above half a task
+per core. A loaded run says LOADED in every table.
+
+## Where it runs
+
+1. Boundary on loopback on a Mac. The host and the helper run in one
+   process, and the host's screen is the stage drawn offscreen. No window
+   opens and nothing touches the desktop, so this can run while someone works
+   on the machine. It leaves out screen capture, so it measures the protocol
+   and its encoder.
+2. Linux desktops in a container (Debian 13), each protocol at its best.
+   xrdp makes the X display when the bench logs in over RDP and starts the
+   stage on it. On that display, in turn:
+   * RDP from DeskVNC's own client, with the graphics pipeline and H.264
+     (AVC420) on.
+   * RDP from FreeRDP 3, as a reference client.
+   * x11vnc, and TigerVNC's x0vncserver, both reading the same display.
+   * The Boundary host.
+   A second display is TigerVNC's Xvnc, where the X server is the VNC server
+   itself, which is the fastest way to serve VNC. It runs its own copy of the
+   stage, and a Boundary host there gives a pair measured on the same
+   display.
+3. The same container with its loopback shaped by netem to a 30 ms round trip
+   and 30 Mbit/s, which is roughly a good home connection.
+4. Boundary to a real computer across the internet: the Customer i9 iMac from
+   a MacBook in India. Over SSH macOS only lets a program capture the
+   wallpaper, so the i9 runs the offscreen stage. Capture is again left out.
+
+### Each protocol in its best mode
+
+Every result file says what the run actually used, in `negotiated`, and the
+tables print it beside each row, so no row can claim a mode it did not run.
+
+* RDP, server: xrdp 0.10.6.1 and xorgxrdp 0.10.5, built from source with
+  x264, because Debian's xrdp has no H.264 encoder. Its graphics pipeline
+  (MS-RDPEGFX) sends H.264 to a client that offers it, and progressive
+  RemoteFX to one that does not.
+* RDP, DeskVNC's client: confirmed capability set 8.1 with AVC420. The H.264
+  rectangles reach the bench undecoded, as they reach the viewer's renderer,
+  and the bench decodes them with openh264. Static detail comes as Planar.
+  Getting there needed four fixes in DeskVNC's RDP code, listed below.
+* RDP, FreeRDP 3.15 (`xfreerdp3`): progressive RemoteFX. It draws full
+  screen on a display of its own, and the bench reads that display whole
+  (about 8 ms a reading, which the result records) and moves the pointer
+  with xdotool. Its H.264 mode against this xrdp left stale, smeared
+  pictures on screen that nothing could read, so the reference row uses
+  RemoteFX. FreeRDP only forwards a pointer move when the next one arrives,
+  so each move is followed by a one pixel nudge.
+* VNC: TigerVNC 1.15 (Xvnc and x0vncserver) and x11vnc 0.9.17. DeskVNC's VNC
+  client asks for Tight with JPEG first, and for Open H.264 when a server
+  offers it. None of these three does, so every VNC row ran Tight with JPEG.
+* Boundary: whatever the build under test negotiates. The Boundary driver
+  hands the viewer decoded pixels, so its rows show `rgba` rectangles unless
+  the build sends video.
+
+### What it took to get RDP to its best mode
+
+The graphics pipeline code was in DeskVNC's RDP client, but no server had
+ever used it. Four things stood in the way, each fixed with a test:
+
+1. The client never set `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in its Client
+   Core Data, so no server opened the graphics channel. It is now set when
+   `RdpOptions::graphics_pipeline` is on. That option is off by default and
+   the viewer does not set it yet; the bench does.
+2. The client wrapped its own graphics messages (the capability
+   advertisement, the frame acknowledgements) in `RDP_SEGMENTED_DATA`. Only a
+   server's messages ride in that envelope. xrdp read the advertisement as
+   command 0x04E0 and dropped the channel. They now go bare, as FreeRDP's do.
+3. xrdp sends progressive RemoteFX in `WIRE_TO_SURFACE_2`, which the client
+   refused, and it puts a four byte `bitmapDataLength` in front of the
+   bitstream, as FreeRDP expects. Both are handled now.
+4. H.264 was refused outright. With the option on, the client offers AVC420
+   on capability set 8.1 and passes the H.264 rectangles to the renderer
+   undecoded, as VNC's Open H.264 ones already go. The surface's own pixels
+   are not updated by an H.264 rectangle, so a later copy out of such an area
+   would read stale pixels. That is one reason the option stays off in the
+   viewer until it has been tried against more servers.
+
+## Running it
+
+From a branch that has the bench:
+
+```sh
+tools/bench/run-all.sh
+```
+
+It refuses to start when this machine or the Docker VM carries more than half
+a task per core. It writes the raw JSON and CSV to `docs/benchmarks/raw` and
+the tables to `docs/benchmarks/latest-<branch>.md`. Each part also runs on
+its own:
+
+```sh
+remote-bench loopback --bind 127.0.0.1 --label mac-loopback
+PROTOS="xvnc xvnc-boundary" tools/bench/run-container.sh   # RDP always runs first
+NETEM="delay 15ms rate 30mbit limit 10000" PREFIX=wan tools/bench/run-container.sh
+```
+
+For a real host, start the stage there and point the client at it:
+
+```sh
+bench-stage --size 960x600 --pos 40,80 --control <client address>:47800
+remote-bench run --proto vnc --target host:5900 --password ...
+remote-bench run --proto rdp --target host:3389 --user ... --password ...
+remote-bench host --bind <host address>          # on the host, for Boundary
+remote-bench run --proto boundary --target @host-output.log
+```
+
+Typing is skipped, and says so, when the stage window does not have the
+keyboard focus, so key presses never land in some other window.
+
+## Baseline: Boundary before the video work
+
+Build 183fa2c, the base of the speed work: tiles of changed screen sent as
+JPEG on one QUIC stream. Customer i9 iMac (Intel, macOS 26.7.1), offscreen
+stage at 1920x1080, helper on a MacBook in India. The round trip through the
+SSH tunnel used for clock sync was 294 ms, and the i9 had a load average of
+4.6 from an Android emulator another job left running.
+
+| Measure | Result |
+|---|---|
+| Pointer to screen | p50 282 ms, p90 299, p99 309 |
+| Key to screen | p50 278 ms, p90 285, p99 305 |
+| Scroll | 1.3 frames a second of 60, frame latency p50 791 ms, 6.2 Mbit/s |
+| Motion | 6.2 frames a second of 60, frame latency p50 321 ms, 10.4 Mbit/s |
+| First still frame, and sharp | 727 ms, sharp on arrival |
+
+Input lag sits at the round trip, which is as low as it can go. Anything that
+moves is starved: at about 300 ms per round trip and JPEG tiles, a full screen
+change costs too much to keep up. That is the row the video work has to beat.
+Raw data: `raw/i9-wan-offscreen-base.json`.
+
+## Harness checks, not results
+
+`raw/harness-proof` holds the runs that proved the harness end to end on
+2026-10-24: all three protocols in the container on loopback, and RDP and
+Boundary over the shaped link. They were taken while this Mac carried a load
+of about 48 on 14 cores from other builds, so they show that every measure
+reads and adds up (frames seen plus frames dropped equal the span, and the
+span over the window comes to the stage's 60 a second), not how fast anything
+is. Do not quote them.
+
+`raw/harness-proof/modes-*` are the short runs (8 moves, 3 seconds a scene)
+that checked each protocol ran in the mode above, on 2026-10-24 with the
+bench's own VM at a load between 1 and 3 on 4 cores. Their `negotiated`
+fields are the evidence for the modes; their timings are not results.

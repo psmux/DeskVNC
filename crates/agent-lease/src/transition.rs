@@ -16,7 +16,7 @@
 //! the obligation at the same time.
 
 use crate::clock::{LeaseInstant, Millis};
-use crate::party::{HolderKind, LeaseId, LimbId, Party, Waiter};
+use crate::party::{HolderKind, LeaseId, LimbId, Party, PartyId, Waiter};
 use crate::policy::LeaseMode;
 
 /// Where the lease is, from `08 §5.1`.
@@ -106,6 +106,9 @@ pub enum DepartureCause {
     IdleRevoked,
     /// Their transport dropped and the disconnect grace ran out.
     DisconnectGraceElapsed,
+    /// Somebody was waiting and this holder sent no input for
+    /// [`crate::LeasePolicy::contended_idle_ms`], so the waiter took over.
+    YieldedToWaiter,
     /// The panic chord (`08 §6.3`, R13).
     ForceReleased,
 }
@@ -303,4 +306,93 @@ pub struct LeaseView {
     /// The recipient's own position, counted from zero, or `None` if they are
     /// not waiting.
     pub queue_position: Option<usize>,
+}
+
+/// Everything about one lease that somebody deciding what to do needs, at one
+/// instant.
+///
+/// [`LeaseView`] is what a pane renders and it leaves the times out. This is
+/// the fuller answer a plane gives a party that asked who has it, since when,
+/// how long they have been idle, who is waiting, and when it frees up by
+/// itself. An agent told only "held" retries on a guess; an agent told "free
+/// in 6 seconds" waits 6 seconds.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaseStatus {
+    /// Which limb.
+    pub limb: LimbId,
+    /// Where the lease is.
+    pub phase: LeasePhase,
+    /// Who holds it, if anybody does.
+    pub holder: Option<HolderStatus>,
+    /// Everyone waiting, in the order they will be served.
+    pub queue: Vec<WaiterStatus>,
+    /// The party a preemption is running for, if one is.
+    pub preempting: Option<WaiterStatus>,
+    /// How long until the lease changes hands by itself if nobody acts: the
+    /// holder's idle or expiry deadline, the preemption deadline, or the end
+    /// of a disconnect grace. `None` when nobody holds it.
+    pub changes_in_ms: Option<Millis>,
+    /// How long acquires are still refused after a force release.
+    pub refused_for_ms: Option<Millis>,
+}
+
+/// The holder, as [`LeaseStatus`] reports it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HolderStatus {
+    /// The holder's identity, so a plane can tell which of its parties it is.
+    pub id: PartyId,
+    /// Person or agent.
+    pub kind: HolderKind,
+    /// What everyone else is shown.
+    pub label: String,
+    /// When the grant started, on the lease's clock.
+    pub since: LeaseInstant,
+    /// How long it has been held.
+    pub held_for_ms: Millis,
+    /// How long since the holder last sent real input.
+    pub idle_for_ms: Millis,
+}
+
+/// A waiter, as [`LeaseStatus`] reports it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaiterStatus {
+    /// The waiter's identity.
+    pub id: PartyId,
+    /// Person or agent.
+    pub kind: HolderKind,
+    /// What everyone else is shown.
+    pub label: String,
+    /// How long since they first asked.
+    pub waiting_ms: Millis,
+    /// What they said they wanted it for, shown to the person as they gave
+    /// it. **Untrusted text**: an agent wrote it.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl LeaseStatus {
+    /// Does this party hold the lease?
+    #[must_use]
+    pub fn held_by(&self, party: &PartyId) -> bool {
+        self.holder.as_ref().is_some_and(|h| &h.id == party)
+    }
+
+    /// Does this party hold it and may it dispatch right now?
+    #[must_use]
+    pub fn dispatching(&self, party: &PartyId) -> bool {
+        self.held_by(party) && self.phase == LeasePhase::Held
+    }
+
+    /// Where this party is in the queue, counted from zero.
+    #[must_use]
+    pub fn position_of(&self, party: &PartyId) -> Option<usize> {
+        self.queue.iter().position(|w| &w.id == party)
+    }
+
+    /// Is a person holding it, or about to?
+    #[must_use]
+    pub fn person_holds(&self) -> bool {
+        self.holder.as_ref().is_some_and(|h| h.kind.is_person())
+            || self.preempting.as_ref().is_some_and(|w| w.kind.is_person())
+    }
 }

@@ -341,6 +341,19 @@ pub struct RdpOptions {
     /// stored and never read, and the channel was requested whatever it said.
     #[serde(skip)]
     pub redirect_clipboard: bool,
+
+    /// Ask the server for the graphics pipeline (MS-RDPEGFX) by setting
+    /// `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` in the Client Core Data
+    /// (MS-RDPBCGR 2.2.1.3.2). Without that flag no server opens the
+    /// graphics channel, whatever the client could decode, and the session
+    /// runs on legacy bitmap updates.
+    ///
+    /// Off by default and not stored: the pipeline (capability sets 8 and
+    /// 8.1, RemoteFX, Progressive, ClearCodec, Planar) has not yet been
+    /// tested against enough servers to turn on for every host. The bench
+    /// turns it on, and a host setting can follow once it has been.
+    #[serde(skip)]
+    pub graphics_pipeline: bool,
 }
 
 impl Default for RdpOptions {
@@ -367,6 +380,7 @@ impl Default for RdpOptions {
             allow_auto_reconnect: true,
             desktop_scale_factor: 100,
             redirect_clipboard: true,
+            graphics_pipeline: false,
         }
     }
 }

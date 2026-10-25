@@ -380,6 +380,56 @@ function ScreenSettings({ view, run }: { view: SupportView; run: Run }): ReactNo
   );
 }
 
+/**
+ * The addresses a helper on the same network, or a VPN, can type instead of
+ * the ID, and on Windows the one firewall change that lets them in.
+ */
+function DirectAddresses({ addresses, reachable, run }: { addresses: string[]; reachable: boolean; run: Run }): ReactNode {
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!reachable) return;
+    let live = true;
+    void support
+      .directAllowed()
+      .then((answer) => live && setAllowed(answer))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [reachable]);
+  if (addresses.length === 0) return null;
+  return (
+    <div className="mt-2">
+      <p className="text-xs text-secondary">Or by address, on a network that reaches this computer</p>
+      <ul className="flex flex-col gap-1">
+        {addresses.map((address) => (
+          <li key={address} className="flex items-center gap-2">
+            <span className="mono text-xs">{address}</span>
+            <Copy text={address} label="Copy" />
+          </li>
+        ))}
+      </ul>
+      {allowed === false ? (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <p className="text-xs text-secondary">Windows Firewall turns these away until you allow DeskVNC in.</p>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() =>
+              run(async () => {
+                await support.allowDirect();
+                setAllowed(await support.directAllowed());
+              })
+            }
+          >
+            Allow connections by address
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function UnattendedSettings({ view, run }: { view: SupportView; run: Run }): ReactNode {
   const u = view.unattended;
   const [password, setPassword] = useState("");
@@ -416,6 +466,7 @@ function UnattendedSettings({ view, run }: { view: SupportView; run: Run }): Rea
           <p className="mt-1 text-xs text-secondary">
             A helper enters it as the computer ID, with the unattended password unless they were paired here.
           </p>
+          <DirectAddresses addresses={u.addresses} reachable={u.reachable} run={run} />
         </div>
       ) : null}
       <label className="flex items-center gap-2">

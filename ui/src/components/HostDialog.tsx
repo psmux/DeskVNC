@@ -400,18 +400,18 @@ export function HostDialog({
 
         <div className={isBoundary ? "grid grid-cols-1 gap-3" : "grid grid-cols-[1fr_120px] gap-3"}>
           <Field
-            label={isBoundary ? "Machine ID" : "Address"}
+            label={isBoundary ? "Machine ID or address" : "Address"}
             error={addressError}
             hint={
               isBoundary
-                ? "Shown under Unattended access in DeskVNC Support on that computer. If you are not paired, the person there approves you, or you use the unattended password below."
+                ? "The ID is shown under Unattended access in DeskVNC Support on that computer. An address such as 192.168.1.42 or box:5940 works on a network that reaches it, and ID@address pins the computer. If you are not paired, the person there approves you, or you use the unattended password below."
                 : undefined
             }
           >
             <input
               className="field mono"
               value={d.address}
-              placeholder={isBoundary ? "64 character machine ID" : "192.168.1.42 or hostname"}
+              placeholder={isBoundary ? "Machine ID, or 192.168.1.42" : "192.168.1.42 or hostname"}
               spellCheck={false}
               onBlur={() => {
                 setTouched(true);

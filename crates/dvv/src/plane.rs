@@ -413,9 +413,85 @@ pub trait SessionSource: Send + Sync {
         )))
     }
 
+    /// Ask the lease the application keeps for this limb's session, which
+    /// every agent process and the person at the window share.
+    ///
+    /// `None` when the source keeps no shared lease (a fake built without
+    /// one, or a DeskVNCViewer from before it kept them), and then this
+    /// process's own lease is the only arbitration there is. The answer is
+    /// the application's own JSON: `granted`, `youHold`, `holder`, `queue`,
+    /// `changesInMs`, `why`.
+    fn shared_lease(
+        &self,
+        limb: &LimbId,
+        ask: LeaseAsk<'_>,
+    ) -> Option<Result<serde_json::Value, ToolError>> {
+        let _ = (limb, ask);
+        None
+    }
+
     /// One sentence for `dvv doctor`, so a person can tell which source a
     /// running `dvv` is on without reading the code.
     fn describe(&self) -> &'static str;
+}
+
+/// What [`SessionSource::shared_lease`] is asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseAsk<'a> {
+    /// Take the wheel, or keep a place in the queue for it. Answers at once;
+    /// waiting is asking again.
+    Acquire {
+        /// What everyone else is shown while this agent holds or waits.
+        label: &'a str,
+        /// What the agent wants the machine for, shown to a person who is
+        /// using it and is asked to let the agent in.
+        reason: Option<&'a str>,
+    },
+    /// Let go, and leave the queue.
+    Release,
+    /// Where it is.
+    Status,
+}
+
+/// How long an action waits for the wheel before it gives up and says why.
+///
+/// Long enough to outlast an agent that is in the middle of something (the
+/// contended handover is 8 seconds after the waiter arrives) and a person who
+/// stops typing (20 seconds after their last key), and short enough to come
+/// back inside the time an MCP client allows one tool call.
+pub const DEFAULT_LEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// How often a waiting acquire asks again. Asking again is also what keeps a
+/// waiter's place: the application drops one that stops asking.
+const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The agent behind this process, for the label other agents and the person
+/// see. Set from the MCP client's own name when it introduces itself, or
+/// from `DVV_AGENT`, and "dvv" otherwise.
+pub fn set_agent_label(name: &str) {
+    let name = name.trim();
+    if !name.is_empty() {
+        *lock(agent_label_cell()) = Some(name.to_string());
+    }
+}
+
+fn agent_label_cell() -> &'static Mutex<Option<String>> {
+    static LABEL: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    LABEL.get_or_init(|| Mutex::new(None))
+}
+
+/// The label this process arbitrates under: the agent's name and this
+/// process's id, so two sessions of the same agent can be told apart.
+pub fn agent_label() -> String {
+    let name = lock(agent_label_cell())
+        .clone()
+        .or_else(|| {
+            std::env::var("DVV_AGENT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "dvv".to_string());
+    format!("{name} pid {}", std::process::id())
 }
 
 /// A session the application has open, as `dvv_limbs` reports it.
@@ -622,14 +698,27 @@ fn open_stream(path: &str) -> std::io::Result<Stream> {
 /// the application has closed.
 fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
     let mut guard = lock(link());
-    if guard.is_none() {
+    let reused = guard.is_some();
+    if !reused {
         *guard = Some(connect()?);
     }
-    let outcome = {
+    let mut outcome = {
         let held = guard.as_mut().expect("just connected");
-        request(held, method, params)
+        send(held, method, params.clone())
     };
-    match outcome {
+    // A link held from before DeskVNCViewer restarted fails on the first
+    // write. That request never reached anyone, so it is sent again on a
+    // fresh connection, once. Without this every agent's first call after a
+    // restart came back LIMB_GONE, which reads to an agent like a failure.
+    // A failure after the request went out is not retried: the old
+    // application may have acted on it.
+    if reused && matches!(outcome, Err(Failure::Unsent(_))) {
+        *guard = None;
+        *guard = Some(connect()?);
+        let held = guard.as_mut().expect("just connected");
+        outcome = send(held, method, params);
+    }
+    match outcome.map_err(Failure::into_error) {
         Ok(value) => Ok(value),
         Err(error) => {
             // A transport failure invalidates the connection, and a
@@ -666,7 +755,7 @@ fn connect() -> Result<Link, ToolError> {
         "hello",
         serde_json::json!({
             "protocol": DVVP,
-            "client": { "name": "dvv", "version": crate::DVV_VERSION },
+            "client": { "name": "dvv", "version": crate::DVV_VERSION, "agent": agent_label() },
         }),
     )?;
     link.attachment_id = hello
@@ -677,12 +766,35 @@ fn connect() -> Result<Link, ToolError> {
     Ok(link)
 }
 
+/// Why a request failed: before it was written, or after.
+enum Failure {
+    /// Writing it failed, so the plane never saw it.
+    Unsent(ToolError),
+    /// It went out, or was refused.
+    Sent(ToolError),
+}
+impl Failure {
+    fn into_error(self) -> ToolError {
+        match self {
+            Failure::Unsent(e) | Failure::Sent(e) => e,
+        }
+    }
+}
+
 /// Write one framed request and read the reply that matches its id.
 fn request(
     link: &mut Link,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, ToolError> {
+    send(link, method, params).map_err(Failure::into_error)
+}
+
+fn send(
+    link: &mut Link,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Failure> {
     use std::io::{Read, Write};
 
     link.next_id += 1;
@@ -690,7 +802,11 @@ fn request(
     let body = serde_json::to_vec(&serde_json::json!({
         "jsonrpc": "2.0", "id": id, "method": method, "params": params,
     }))
-    .map_err(|e| ToolError::bad_request(format!("that request could not be encoded: {e}")))?;
+    .map_err(|e| {
+        Failure::Unsent(ToolError::bad_request(format!(
+            "that request could not be encoded: {e}"
+        )))
+    })?;
 
     let mut framed = Vec::with_capacity(8 + body.len());
     framed.push(MSG_JSONRPC);
@@ -699,37 +815,45 @@ fn request(
     framed.extend_from_slice(&0u16.to_le_bytes());
     framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
     framed.extend_from_slice(&body);
-    link.stream.write_all(&framed).map_err(transport)?;
-    link.stream.flush().map_err(transport)?;
+    link.stream
+        .write_all(&framed)
+        .map_err(|e| Failure::Unsent(transport(e)))?;
+    link.stream
+        .flush()
+        .map_err(|e| Failure::Unsent(transport(e)))?;
 
     loop {
         let mut header = [0u8; 8];
-        link.stream.read_exact(&mut header).map_err(transport)?;
+        link.stream
+            .read_exact(&mut header)
+            .map_err(|e| Failure::Sent(transport(e)))?;
         let msg_type = header[0];
         let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
         if len > MAX_PAYLOAD {
-            return Err(transport(std::io::Error::other(format!(
+            return Err(Failure::Sent(transport(std::io::Error::other(format!(
                 "the plane sent {len} bytes, which is above this client's cap"
-            ))));
+            )))));
         }
         let mut payload = vec![0u8; len as usize];
-        link.stream.read_exact(&mut payload).map_err(transport)?;
+        link.stream
+            .read_exact(&mut payload)
+            .map_err(|e| Failure::Sent(transport(e)))?;
         // An unknown `msg_type` is ignored rather than refused, which is what
         // lets the plane grow the pixel lane without this client changing.
         if msg_type != MSG_JSONRPC {
             continue;
         }
         let message: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
-            transport(std::io::Error::other(format!(
+            Failure::Sent(transport(std::io::Error::other(format!(
                 "the plane sent something that is not JSON: {e}"
-            )))
+            ))))
         })?;
         // A notification carries no id and is not this call's answer.
         if message.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
             continue;
         }
         if let Some(error) = message.get("error") {
-            return Err(from_rpc_error(error));
+            return Err(Failure::Sent(from_rpc_error(error)));
         }
         return Ok(message
             .get("result")
@@ -956,6 +1080,35 @@ impl SessionSource for ShellSource {
         let (method, params) = files_request(&session_id, op)?;
         let answer = call(method, params)?;
         files_outcome(op, &answer)
+    }
+
+    fn shared_lease(
+        &self,
+        limb: &LimbId,
+        ask: LeaseAsk<'_>,
+    ) -> Option<Result<serde_json::Value, ToolError>> {
+        let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
+        let (method, params) = match ask {
+            LeaseAsk::Acquire { label, reason } => (
+                "control.acquire",
+                serde_json::json!({ "sessionId": session_id, "label": label, "reason": reason }),
+            ),
+            LeaseAsk::Release => (
+                "control.release",
+                serde_json::json!({ "sessionId": session_id }),
+            ),
+            LeaseAsk::Status => (
+                "control.status",
+                serde_json::json!({ "sessionId": session_id }),
+            ),
+        };
+        match call(method, params) {
+            // A DeskVNCViewer from before the lease moved into it answers an
+            // unknown method, and then this process's own lease is all there
+            // is, as it always was.
+            Err(error) if error.code == codes::NOT_IMPLEMENTED => None,
+            other => Some(other),
+        }
     }
 
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
@@ -1384,18 +1537,17 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
         }
     }
     relay(session_id.clone(), receiver, ledger);
-    // The agent holds this limb from the shell's point of view the moment it
-    // attaches, and a pane has to say so, visibly, always (`08 §5.5`). Sent
-    // once here rather than per command, because a report per pointer event
-    // would be a notification storm in a webview.
+    // Attaching is not holding. This used to report the agent holding the
+    // machine from the moment it attached, and an older DeskVNCViewer
+    // believed it for as long as the agent stayed attached, which for an MCP
+    // server is all day. A current one ignores the claim and asks its own
+    // lease; an older one is told nothing is held until a command goes.
     let _ = call(
         "control.report",
         serde_json::json!({
             "sessionId": session_id,
-            "held": true,
-            "phase": "held",
-            "holderKind": "agent",
-            "holderLabel": "dvv",
+            "held": false,
+            "phase": "free",
             "humanTookOver": false,
             "inflight": Vec::<String>::new(),
         }),
@@ -1748,10 +1900,17 @@ fn relay(
             if let Err(error) = send_command(&session_id, &encoded) {
                 tracing::warn!(session = %session_id, "{name} was refused: {}", error.message);
                 ledger.refused(&error, press);
-                if error.code == codes::LEASE_REVOKED || error.code == codes::LIMB_GONE {
+                if error.code == codes::LIMB_GONE {
                     // Nothing further of this attachment's will be accepted,
                     // so the thread stops rather than spinning a refusal per
                     // command for the rest of the session.
+                    //
+                    // Not on LEASE_REVOKED or LEASE_NOT_HELD any more. Both
+                    // end: a person stops using the machine, or the person
+                    // at a Boundary computer allows the tools again. A relay
+                    // that stopped on them left the limb unable to carry
+                    // anything for the rest of the process, which is how one
+                    // click on a pane stopped an agent for good.
                     return;
                 }
             }
@@ -2627,6 +2786,12 @@ pub struct ControlReport {
     pub released: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control_yield: Option<ControlYield>,
+    /// The lease DeskVNCViewer keeps for the session, shared by every agent
+    /// and the person at the window: `holder` (kind, label, since,
+    /// heldForMs, idleForMs), `queue`, `changesInMs`, `timers`. Absent when
+    /// the application keeps none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared: Option<serde_json::Value>,
 }
 
 /// What the stop path did (`00 R13`).
@@ -3194,47 +3359,38 @@ impl Plane {
         report
     }
 
-    /// Ask for the wheel.
+    /// Ask for the wheel, and wait for it up to `wait`.
     ///
-    /// Acquire and discharge in one call, which is what a caller almost always
-    /// wants and what `agent-plane` already offers as `take_control`. The
-    /// release the transition owes the limb goes out before the new holder's
-    /// first intent, buttons before keys, and what went is in the report so a
-    /// caller can assert it rather than trust it.
+    /// Two leases are asked, in order. First the one DeskVNCViewer keeps for
+    /// the session, which every agent process and the person at the window
+    /// share: this asks it, and while somebody else has it, asks again every
+    /// 400 ms (which is also what keeps this agent's place in the queue) until
+    /// it is granted or `wait` runs out. The holder is told somebody is waiting
+    /// by the queue in every status it reads, and if it sends no input for the
+    /// contended idle time the wheel passes here. Then this process's own
+    /// lease, which only this agent uses and which carries the release a
+    /// lease change owes the limb, buttons before keys.
+    ///
+    /// `wait` of `None` or zero asks once and does not wait.
     ///
     /// # Errors
     ///
-    /// A [`ToolError`] when the grant does not carry `control`, or when
-    /// arbitration refused.
+    /// A [`ToolError`] when the grant does not carry `control`, or when the
+    /// wheel did not come within `wait`. The sentence says who has it, how
+    /// long they have been idle, and when it can come here.
     pub async fn acquire(
         &self,
         limb: &AttachedLimb,
         reason: Option<String>,
-        no_queue: bool,
+        wait: Option<std::time::Duration>,
     ) -> Result<ControlReport, ToolError> {
         self.require(Capability::Control, "holding the control lease")?;
-        let now = clock::lease_now();
-        let expiries = limb.tick(now);
-        self.honour(limb, &expiries, now).await;
-
-        let mut request = AcquireRequest::new(self.party());
-        if let Some(reason) = reason {
-            request = request.reason(reason);
-        }
-        if no_queue {
-            request = request.no_queue();
-        }
-        let transition = limb.acquire(request, now).map_err(|e| {
-            ToolError::new(
-                codes::LEASE_NOT_HELD,
-                format!("{e}; nothing was sent to {}", limb.id()),
-            )
-        })?;
-        let released = self.honour(limb, &transition, now).await;
-
+        let shared = self
+            .acquire_shared(limb, wait.unwrap_or_default(), reason.as_deref())
+            .await?;
+        let (transition, released) = self.acquire_local(limb, reason).await?;
         let lease_id = match &transition.outcome {
             LeaseOutcome::Granted { lease_id, .. } | LeaseOutcome::Renewed { lease_id } => {
-                lock(&self.leases).insert(limb.id().to_string(), *lease_id);
                 Some(lease_id.as_u64())
             }
             _ => None,
@@ -3245,10 +3401,131 @@ impl Plane {
             outcome_name(&transition.outcome),
             lease_id,
             released,
+            shared,
         ))
     }
 
-    /// Let go.
+    /// The shared half of [`Plane::acquire`]. `None` when the source keeps no
+    /// shared lease.
+    async fn acquire_shared(
+        &self,
+        limb: &AttachedLimb,
+        wait: std::time::Duration,
+        reason: Option<&str>,
+    ) -> Result<Option<serde_json::Value>, ToolError> {
+        let label = agent_label();
+        let started = std::time::Instant::now();
+        loop {
+            let Some(answer) = self.source.shared_lease(
+                limb.id(),
+                LeaseAsk::Acquire {
+                    label: &label,
+                    reason,
+                },
+            ) else {
+                return Ok(None);
+            };
+            let answer = answer?;
+            if answer["granted"].as_bool() == Some(true) {
+                return Ok(Some(answer));
+            }
+            // The person using the machine has answered: "not now", or
+            // requests are muted. Waiting on would only ask them again, so
+            // the answer comes back now, with when it is worth asking again.
+            if matches!(answer["answer"].as_str(), Some("not-now" | "muted")) {
+                let why = answer["why"]
+                    .as_str()
+                    .unwrap_or("the person using this machine said not now")
+                    .trim_end_matches('.');
+                return Err(ToolError::new(codes::LEASE_NOT_HELD, format!("{why}.")));
+            }
+            let waited = started.elapsed();
+            if waited >= wait {
+                // Out of the queue, so a waiter that gave up is not handed a
+                // machine it is no longer watching.
+                let _ = self.source.shared_lease(limb.id(), LeaseAsk::Release);
+                let why = answer["why"]
+                    .as_str()
+                    .unwrap_or("somebody else has the wheel")
+                    .trim_end_matches('.');
+                let waited = if wait.is_zero() {
+                    "This call did not wait (waitMs 0).".to_string()
+                } else {
+                    format!("This call waited {} s for it.", waited.as_secs())
+                };
+                return Err(ToolError::new(
+                    codes::LEASE_NOT_HELD,
+                    format!("{why}. {waited}"),
+                ));
+            }
+            tokio::time::sleep(LEASE_POLL.min(wait - waited)).await;
+        }
+    }
+
+    /// This process's own lease, which nobody but this agent asks. Granted at
+    /// once unless a stop is in its quiet window.
+    async fn acquire_local(
+        &self,
+        limb: &AttachedLimb,
+        reason: Option<String>,
+    ) -> Result<(agent_lease::LeaseTransition, Vec<String>), ToolError> {
+        let now = clock::lease_now();
+        let expiries = limb.tick(now);
+        self.honour(limb, &expiries, now).await;
+
+        let mut request = AcquireRequest::new(self.party());
+        if let Some(reason) = reason {
+            request = request.reason(reason);
+        }
+        let transition = limb.acquire(request, now).map_err(|e| {
+            ToolError::new(
+                codes::LEASE_NOT_HELD,
+                format!("{e}; nothing was sent to {}", limb.id()),
+            )
+        })?;
+        let released = self.honour(limb, &transition, now).await;
+        if let LeaseOutcome::Granted { lease_id, .. } | LeaseOutcome::Renewed { lease_id } =
+            &transition.outcome
+        {
+            lock(&self.leases).insert(limb.id().to_string(), *lease_id);
+        }
+        Ok((transition, released))
+    }
+
+    /// Make sure this agent may act on the limb before an action goes,
+    /// waiting for the wheel if somebody else has it.
+    ///
+    /// Every action asks, so an agent never has to remember to, and never
+    /// fails for having forgotten: the lease is let go by the timers when the
+    /// agent stops acting, and asked for again by its next action. Pointer
+    /// and keyboard actions ask the shared lease too; a command run or bytes
+    /// to a terminal touch nothing a person at the screen is in the middle
+    /// of, so they need only this process's own.
+    async fn ensure_wheel(
+        &self,
+        limb: &AttachedLimb,
+        kind: &IntentKind,
+        reason: Option<String>,
+    ) -> Result<(), ToolError> {
+        if !kind.needs_control_lease()
+            || !self
+                .grant()
+                .allows_all(limb_core::capability::CapabilitySet::of(&[
+                    Capability::Control,
+                ]))
+        {
+            // No lease needed, or no right to one: dispatch answers for it.
+            return Ok(());
+        }
+        if uses_the_screen(kind) {
+            self.acquire(limb, reason, Some(DEFAULT_LEASE_WAIT)).await?;
+        } else if !limb.fencing(self.party_id()).is_allowed() {
+            let _honoured = self.acquire_local(limb, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Let go, of both leases.
     ///
     /// A release from a party that no longer holds the lease is an ordinary
     /// unchanged result, not an error, because a cleanup path has to be safe to
@@ -3265,21 +3542,31 @@ impl Plane {
             None => limb.release_lease(self.party_id(), LeaseId::from_u64(0), now),
         };
         let released = self.honour(limb, &transition, now).await;
+        let shared = self
+            .source
+            .shared_lease(limb.id(), LeaseAsk::Release)
+            .and_then(Result::ok);
         self.control_report(
             limb,
             "release",
             outcome_name(&transition.outcome),
             None,
             released,
+            shared,
         )
     }
 
-    /// Where the lease is, with no side effect but the tick.
+    /// Where the lease is: who holds it, person or agent, since when, idle
+    /// for how long, and who is waiting. No side effect but the tick.
     pub async fn control_status(&self, limb: &AttachedLimb) -> ControlReport {
         let now = clock::lease_now();
         let expiries = limb.tick(now);
         let released = self.honour(limb, &expiries, now).await;
-        self.control_report(limb, "status", "unchanged", None, released)
+        let shared = self
+            .source
+            .shared_lease(limb.id(), LeaseAsk::Status)
+            .and_then(Result::ok);
+        self.control_report(limb, "status", "unchanged", None, released, shared)
     }
 
     /// The panic chord, for one limb (`00 R13`).
@@ -3349,6 +3636,23 @@ impl Plane {
         kind: IntentKind,
         generation: Option<u32>,
     ) -> Result<Settlement, ToolError> {
+        self.submit_for(limb, kind, generation, None).await
+    }
+
+    /// [`Plane::submit`], with what the action is for. When the wheel has to
+    /// be asked for and a person is using the machine, the reason is what
+    /// they are shown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Plane::submit`].
+    pub async fn submit_for(
+        &self,
+        limb: &AttachedLimb,
+        kind: IntentKind,
+        generation: Option<u32>,
+        reason: Option<String>,
+    ) -> Result<Settlement, ToolError> {
         self.refresh(limb);
         let now = clock::lease_now();
         let expiries = limb.tick(now);
@@ -3372,6 +3676,12 @@ impl Plane {
                 return Err(ToolError::new(refused.code, refused.why));
             }
         }
+
+        // The wheel, asked for and waited for here rather than demanded of the
+        // agent beforehand. The clock is read again after it, because the
+        // wait can be long and the dispatch below counts idle time from it.
+        self.ensure_wheel(limb, &kind, reason).await?;
+        let now = clock::lease_now();
 
         let fence = self.fence_for(limb, &kind, generation)?;
         // Kept for the sentence that names what went and what did not, if the
@@ -3707,50 +4017,80 @@ impl Plane {
         outcome: &str,
         lease_id: Option<u64>,
         released: Vec<String>,
+        shared: Option<serde_json::Value>,
     ) -> ControlReport {
         let view = limb.lease_view(self.party_id());
-        let human_took_over = took_over(&view);
+        let who = Who::read(&view, shared.as_ref());
         ControlReport {
             limb_id: limb.id().to_string(),
             action: action.to_string(),
             outcome: outcome.to_string(),
             lease_id,
-            held: view.you_hold,
-            control_yield: (!view.you_hold).then(|| ControlYield {
+            held: who.held,
+            control_yield: (!who.held).then(|| ControlYield {
                 limb_id: limb.id().to_string(),
-                reason: if human_took_over {
+                reason: if who.person {
                     "human_takeover".to_string()
+                } else if who.label.is_some() {
+                    "held_by_another_agent".to_string()
                 } else {
                     phase_name(view.phase)
                 },
-                by_label: view.holder_label.clone(),
-                human_took_over,
+                by_label: who.label.clone(),
+                human_took_over: who.person,
                 interrupted: self
                     .inflight_ids(limb.id().as_str())
                     .iter()
                     .map(|id| format!("intent {id}"))
                     .collect(),
-                advice: if human_took_over {
-                    "A person is driving this machine. Do not act on it and do not acquire control. Report back to the user instead."
-                } else {
-                    "This attachment does not hold the wheel. Call dvv_control with action acquire before acting."
-                },
+                advice: who.advice(),
             }),
             view,
             released,
+            shared,
         }
     }
 
     fn lease_block(&self, limb: &AttachedLimb) -> LeaseBlock {
         let view = limb.lease_view(self.party_id());
+        let shared = self
+            .source
+            .shared_lease(limb.id(), LeaseAsk::Status)
+            .and_then(Result::ok);
+        let who = Who::read(&view, shared.as_ref());
         LeaseBlock {
-            held: view.you_hold,
-            phase: phase_name(view.phase),
-            holder_kind: view.holder_kind.map(|k| format!("{k:?}").to_lowercase()),
-            holder_label: view.holder_label.clone(),
-            queue_depth: view.queue_depth,
-            queue_position: view.queue_position,
-            human_took_over: took_over(&view),
+            held: who.held,
+            phase: shared
+                .as_ref()
+                .and_then(|s| s["phase"].as_str().map(str::to_string))
+                .unwrap_or_else(|| phase_name(view.phase)),
+            holder_kind: who.kind.clone(),
+            holder_label: who.label.clone(),
+            queue_depth: shared
+                .as_ref()
+                .and_then(|s| s["queue"].as_array().map(Vec::len))
+                .unwrap_or(view.queue_depth),
+            queue_position: shared
+                .as_ref()
+                .map(|s| s["yourPosition"].as_u64().map(|p| p as usize))
+                .unwrap_or(view.queue_position),
+            human_took_over: who.person,
+            holder: shared
+                .as_ref()
+                .map(|s| s["holder"].clone())
+                .filter(|h| !h.is_null()),
+            queue: shared
+                .as_ref()
+                .and_then(|s| s["queue"].as_array().cloned())
+                .unwrap_or_default(),
+            changes_in_ms: shared.as_ref().and_then(|s| s["changesInMs"].as_u64()),
+            advice: (!who.held).then(|| who.advice()),
+            answer: shared
+                .as_ref()
+                .and_then(|s| s["answer"].as_str().map(str::to_string)),
+            why: shared
+                .as_ref()
+                .and_then(|s| s["why"].as_str().map(str::to_string)),
         }
     }
 
@@ -3956,12 +4296,74 @@ fn phase_name(phase: agent_lease::LeasePhase) -> String {
         .to_string()
 }
 
-/// Did a PERSON take this machine?
+/// Does this intent drive the pointer or the keyboard of the screen a person
+/// may be at, and so need the lease the application shares with them?
+fn uses_the_screen(kind: &IntentKind) -> bool {
+    matches!(
+        kind,
+        IntentKind::Type { .. }
+            | IntentKind::Press { .. }
+            | IntentKind::Scancode { .. }
+            | IntentKind::Move { .. }
+            | IntentKind::Click { .. }
+            | IntentKind::Drag { .. }
+            | IntentKind::Scroll { .. }
+    )
+}
+
+/// Who has the wheel, read from the application's shared lease when there is
+/// one and from this process's own when there is not.
+struct Who {
+    held: bool,
+    person: bool,
+    kind: Option<String>,
+    label: Option<String>,
+}
+
+impl Who {
+    fn read(view: &LeaseView, shared: Option<&serde_json::Value>) -> Who {
+        let Some(shared) = shared else {
+            return Who {
+                held: view.you_hold,
+                person: took_over(view),
+                kind: view.holder_kind.map(|k| format!("{k:?}").to_lowercase()),
+                label: view.holder_label.clone(),
+            };
+        };
+        let held = shared["youHold"].as_bool() == Some(true)
+            && shared["dispatching"].as_bool() != Some(false);
+        // A person taking over is who has it from the moment they act.
+        let preempting = &shared["preempting"];
+        let holder = if preempting["kind"].as_str() == Some("human") {
+            preempting
+        } else {
+            &shared["holder"]
+        };
+        Who {
+            held,
+            person: !held && shared["personHolds"].as_bool() == Some(true),
+            kind: holder["kind"].as_str().map(str::to_string),
+            label: holder["label"].as_str().map(str::to_string),
+        }
+    }
+
+    fn advice(&self) -> &'static str {
+        if self.held {
+            "This attachment holds the wheel."
+        } else if self.person {
+            "A person is using this machine in DeskVNCViewer. Do not act on it while they are. dvv_control with action acquire (give a reason) asks them and waits: they can let you in at once, say not now, or mute requests, and if they say nothing you get it 20 seconds after their last input. If they said not now or muted requests, do other work and ask again after the time you were told. Tell the user only if the person keeps using it."
+        } else if self.label.is_some() {
+            "Another agent holds this machine. Call dvv_control with action acquire: it waits in the queue, and the wheel passes to you if that agent sends no input for 8 seconds after you ask."
+        } else {
+            "Nobody holds the wheel. Actions ask for it themselves, and dvv_control with action acquire takes it explicitly."
+        }
+    }
+}
+
+/// Did a PERSON take this machine, by this process's own lease?
 ///
-/// The one decision the model has to get right. True only when somebody else
-/// holds the wheel AND that somebody is person shaped, so an agent preempted by
-/// another agent is told to retry and an agent preempted by a person is told to
-/// stop.
+/// True only when somebody else holds the wheel AND that somebody is person
+/// shaped. Only the fallback for a source with no shared lease; see [`Who`].
 fn took_over(view: &LeaseView) -> bool {
     !view.you_hold
         && view

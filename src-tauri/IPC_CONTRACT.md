@@ -296,10 +296,14 @@ authenticates. The RDP probe sends a second X.224 negotiation advertising
 `PROTOCOL_SSL` alone, which is the only way to learn whether NLA is
 *required* rather than merely available.
 
-`scan_network` reads two settings out of the store's KV table, both defaulting
+`scan_network` reads three settings out of the store's KV table, all defaulting
 on: `probe_other_services` (names disclosed by MSRPC on 135 and the RDP
-certificate on 3389) and `probe_rdp` (one extra connection per address, to
-3389, without which an RDP-only machine is invisible to the scan). Both take
+certificate on 3389), `probe_rdp` (one extra connection per address, to
+3389, without which an RDP-only machine is invisible to the scan) and
+`probe_boundary` (one extra connection per address, to 5940, which reads the
+`BOUNDARY1 <machine id>` line an unattended Boundary computer answers with
+and writes nothing). The mDNS browse also lists Boundary computers from the
+`_boundary._udp` record they publish while unattended access is on. All take
 the same politeness permit as every RFB probe, so the rate cap stays a cap on
 the total rather than becoming one per service.
 
@@ -750,21 +754,35 @@ agent is on. Flat payloads on a `type` discriminator, top-level keys
 |---|---|
 | `{ type: "plane", enabled, socket, error? }` | the agent plane was switched on or off. `socket` is the unix socket's path, or `null`. `error` is present only when it was asked to start and could not |
 | `{ type: "attached", sessionId, attachmentId, client }` | an agent attached to that session over `dvvp.v1`. `client` is the name the agent gave in `hello`, e.g. `"dvv"`, and it is **untrusted text**: render it as text, never as HTML |
-| `{ type: "lease", sessionId, attachmentId, client, held, phase, holderKind, holderLabel, humanTookOver, revoked, inflight }` | the agent reported where its lease is, or a person took the wheel |
+| `{ type: "lease", sessionId, attachmentId, client, held, phase, holderKind, holderLabel, humanTookOver, revoked, inflight, attached, lease }` | the session's shared lease moved: an agent or a person took it, let it go, or lost it to a timer |
 | `{ type: "detached", sessionId, attachmentId? }` | the agent let the session go, or the session ended |
 | `{ type: "counts", agentsConnected, sessionsDriven, sessionsLive }` | one of those three numbers moved. **On change only, never on a timer**, and never repeated with the same three values |
+| `{ type: "requests", requests: [{ sessionId, attachmentId, agent, reason, address, askedAt, freesAt }], muted: { until, untilIdle, waiting } | null, personIdleMs }` | the list of agents waiting for machines a person is using changed, or a second went by while it is not empty. One list for the whole app; `agent` and `reason` are **untrusted text**. Answered with `agent_request_answer`, `agent_requests_mute` and `agent_requests_unmute`, and seeded with `agent_requests` |
 
-The `lease` payload is the one a pane renders, and its fields are:
+The `lease` payload is the one a pane renders. There is one per session, not
+one per attachment: the shell keeps one lease per session that every agent
+connection and the person at the window share (`src/agent/control.rs`), ticks
+it twice a second, and emits this when it moves. Its fields are:
 
 | Field | Meaning |
 |---|---|
-| `held` | the agent holds the control lease on this session right now |
-| `phase` | the lease phase as the agent spells it: `"held"`, `"free"`, `"handing-over"`, `"revoked"` |
-| `holderKind` | `"agent"`, `"human"`, `"admin"` or `null` |
+| `held` | somebody holds the control lease on this session right now |
+| `attachmentId` | the attachment holding it when an agent does, otherwise `null` |
+| `client` | the holding attachment's client name, or `null`. **Untrusted text** |
+| `phase` | `"free"`, `"held"`, `"held-grace"`, `"preempt-pending"` or `"handing-over"` |
+| `holderKind` | `"agent"`, `"human"`, `"admin"` or `null`. A person taking over is `"human"` from their first input |
 | `holderLabel` | display name of the holder, or `null`. **Untrusted text** |
-| `humanTookOver` | a spelled-out boolean rather than a `reason` string to pattern match: true means a PERSON has the machine |
-| `revoked` | this attachment has been stood down and every further command from it is refused |
-| `inflight` | zero or more command kinds the agent has on the wire right now, e.g. `["pointer"]`. Coalesced: a drag of two hundred pointer events is one payload, not two hundred |
+| `humanTookOver` | true while a PERSON has the machine. It ends when they stop: agents may have it again 20 s after their last input |
+| `revoked` | the person at a Boundary computer took the helper's tools back; every command from an attachment on it is refused until they allow them again |
+| `inflight` | zero or more command kinds the holding agent has on the wire right now, e.g. `["pointer"]`. Coalesced: a drag of two hundred pointer events is one payload, not two hundred |
+| `attached` | how many agent attachments are on the session |
+| `lease` | the full status: `holder` (`kind`, `label`, `since` as unix ms, `heldForMs`, `idleForMs`), `queue` (`kind`, `label`, `waitingMs`), `changesInMs` (when it changes hands by itself if the holder sends no input), and `timers` |
+
+Use, for these timers, is input and nothing else: an agent's pointer event or
+key press through `limb.command`, and a person's key or button through
+`send_input`. Focusing a pane, a bare pointer move, a status call and a screen
+read are not use. An agent holder loses the lease after 30 s with no input, or
+8 s after another agent starts waiting; a person holder after 20 s.
 
 The `counts` payload is what a status bar reads, and only the shell knows all
 three of its numbers:
@@ -1095,9 +1113,12 @@ thumbnail would otherwise never ask for one. See
 - `security` is `verified` | `unverified` | `unencrypted` | `unknown`, derived
   from `securityTypes`. Only a `deep_probe` fills `securityTypes`, so an
   un-probed host is `unknown`, never optimistically "secure".
-- `protocol` is `"vnc"` or `"rdp"` and says what answers on **this row's
-  port**, not what the machine runs. A machine running both produces two
+- `protocol` is `"vnc"`, `"rdp"` or `"boundary"` and says what answers on
+  **this row's port**, not what the machine runs. A machine running both produces two
   rows; joining them is the interface's job, not the registry's.
+- `boundaryId` is the 64 character machine ID a Boundary row gave, `null` on
+  every other row. The UI connects to `id@address` on the row's port, so the
+  key is pinned. A Boundary row's `security` is `verified` when it has one.
 - `rdp` is what the X.224 negotiation learned, `null` for a VNC row:
 
   ```ts

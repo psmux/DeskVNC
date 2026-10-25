@@ -10,6 +10,127 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.32.0] (2026-10-25)
+
+### Added
+
+* When agents ask for a machine you are using, DeskVNCViewer shows one small
+  panel in the corner of the window listing every one of them: which agent,
+  which machine, what it says it wants the machine for, how long it has
+  waited, and when it gets the machine anyway if you stop typing. It does not
+  take the keyboard from the session you are typing in, and a second agent
+  asking adds a row rather than a second panel. Answer each one, or all at
+  once: let it use the machine now, say not now, or mute requests for 5
+  minutes, 15 minutes, an hour, or until you take your hands off. While
+  muted, a small badge says so, counts the agents that asked, and unmutes. If
+  the window is in the background, one system notification says an agent is
+  asking. Agents are told your answer: waiting for you, not now, or muted
+  until a time.
+
+* Boundary sends a screen that is moving as H.264 video while most of it
+  changes, as when a page scrolls, a window is dragged or a video plays,
+  at 60 screens a second. Once it stops, the computer sends sharp tiles for
+  the parts the video drew visibly wrong, which it knows by decoding its own
+  video: about a quarter of the bytes of the whole screen it sent before,
+  and on the screen 35 ms after the last moving picture instead of 110. The
+  computer encodes with VideoToolbox on a Mac (Apple silicon and Intel), a Media
+  Foundation hardware encoder on Windows, and OpenH264 otherwise, at a bit
+  rate that follows the link. The viewer decodes it in hardware. From India
+  to an Intel iMac in the US, with a 300 ms round trip, a moving screen went
+  from 15 to 27 screens a second to 54, at less than half the bits, with
+  the pointer lag p90 from 0.5 to 0.9 s down to 0.37 s. Older viewers and
+  older computers keep getting tiles.
+
+* A Boundary computer can be reached by its address, the way a VNC or RDP
+  machine is. Type `192.168.1.20`, `box:6000` or `boundary://box` in quick
+  connect or in a saved computer's address field. A computer with unattended
+  access on now listens on port 5940 (UDP for the session, TCP to say which
+  machine it is), so any network that routes to it works: a LAN, a VPN, a
+  forwarded port. `ID@address` pins the machine so the address cannot hand
+  you a different one. Pairing or the unattended password still decides who
+  gets in. If port 5940 is taken the computer still answers by ID. A bare
+  machine ID typed into quick connect now opens it over Boundary too.
+* DeskVNC Support shares a Wayland desktop on Linux. GNOME and KDE ask once
+  through the desktop's sharing prompt; with "Remember this selection" ticked
+  later sessions start without asking, so unattended access works there too.
+  Switch on "Allow Remote Interaction" in GNOME's prompt for the helper to
+  control the computer. Characters the keyboard layout has no key for, such
+  as € on a US layout, cannot be typed on GNOME or KDE.
+* Scan network lists Boundary computers beside VNC and RDP machines, with
+  their own icon and a Boundary badge. The scan reads the one line a
+  computer with unattended access answers on TCP 5940 and writes nothing
+  back. While unattended access is on, the computer also announces itself on
+  the local network (`_boundary._udp` over mDNS, with its ID, port and name),
+  so it is still found when port 5940 was taken or a firewall drops the TCP
+  probe. A double click on a found computer connects with its ID pinned, on
+  the port it was found on. The probe can be turned off with the
+  `probe_boundary` setting, like `probe_rdp`.
+
+### Fixed
+
+* DeskVNCViewer kept running but stopped taking agent connections once it ran
+  out of open files ("Too many open files"). It now raises its own limit at
+  start and keeps listening after an error.
+* The first agent tool call after DeskVNCViewer restarted failed with "Broken
+  pipe". `dvv` now sends a request that never got out again, once, on a new
+  connection.
+* A saved Boundary computer with a port other than 5940 is now dialled on
+  that port. The port was dropped on the way to the connection.
+
+* A Mac with unattended access on now answers helpers even when DeskVNC
+  started while its screen was asleep. A sleeping screen lists no display, so
+  a copy started then (after an update, a restart, or a quit and reopen) never
+  began listening and kept saying no display was found. It now listens at
+  once, picks the screen when a helper arrives, and wakes it if it is off.
+  The screen then stays on while the helper is connected; before, a locked
+  Mac switched it off again after thirty seconds and the helper saw black.
+* Opening a second Boundary computer no longer freezes the first one. Every
+  tab bound its own endpoint with the same helper identity, and the relay
+  keeps one connection per identity, so it dropped the older tab ("another
+  endpoint connected with the same endpoint id"). Sessions now share one
+  endpoint.
+* Agents no longer hold machines they have stopped using, and no longer stop
+  for good because somebody clicked a pane. DeskVNCViewer now keeps one
+  control lease per session that every agent and the person at the window
+  share, and frees it on a timer: an agent that sends no click or key for 30
+  seconds lets go, and one somebody else is waiting for lets go after 8. A
+  person takes the machine by typing or clicking in it, not by selecting or
+  looking at the pane, and agents may have it back 20 seconds after their last
+  input. An agent connection that ends lets go of everything it held.
+* Two agents on one machine now take turns. The second one used to replace
+  the first one's attachment; now it waits in a queue and gets the machine
+  when the first lets go or stops acting.
+
+### Changed
+
+* On Windows, DeskVNC Support reads the screen through Desktop Duplication
+  and sends only the parts Windows says changed. Reading a screen went from
+  29 ms to 2.3 ms on our test PC, which keeps up with 60 screens a second.
+* On an X11 desktop, DeskVNC Support reads the screen through shared memory
+  and only when the X server says something was drawn, so a still screen is
+  not read at all. Pointer to screen lag while a third of the screen kept
+  changing went from 36 ms to 19 ms in our test. The Linux build no longer
+  needs libxcb.
+* Agent tools wait for the machine instead of failing. A click, key or typed
+  text takes the control lease itself and waits up to 25 seconds for it, and
+  `dvv_control` acquire waits by default (`waitMs`, `dvv control acquire
+  --wait-ms`). A refusal says who has the machine, whether that is a person or
+  which agent, how long since their last input, and when it frees up.
+  `dvv_limbs`, `dvv_status` and `dvv_control` status show the holder, how long
+  it has held the machine, how long it has been idle, and who is waiting.
+
+* Boundary sessions are much more responsive across long distances. Measured
+  from India to two iMacs in the US, a pointer move now shows up in about
+  one network round trip (270 to 380 ms) instead of 0.6 to 1.3 s, and a busy
+  screen updates 11 to 18 times a second instead of about once. The host now
+  sends only the parts of the screen that changed, keeps sending without
+  waiting a round trip after each screen, captures as soon as input arrives
+  instead of on the next tick, and on a Mac takes each new screen from
+  ScreenCaptureKit as it is drawn, up to sixty a second. What DeskVNC adds on
+  top of the network is now 13 to 25 ms. The first screen arrives about a
+  second sooner.
+  Both sides still work with older copies, which get whole screens as before.
+
 ## [0.31.1] (2026-10-21)
 
 ### Fixed

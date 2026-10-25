@@ -11,6 +11,7 @@ import {
   DEFAULT_RDP_PORT,
   DEFAULT_SSH_PORT,
   DEFAULT_VNC_PORT,
+  discoveredEndpoint,
   formatTarget,
   parseConnectTarget,
   presetProtocol,
@@ -221,8 +222,70 @@ describe("parseConnectTarget for a Boundary computer", () => {
       protocol: "boundary",
     });
   });
-  it("refuses anything that is not a machine ID", () => {
-    expect(parseConnectTarget("192.168.1.4", "boundary").ok).toBe(false);
+  it("refuses what is neither a machine ID nor an address", () => {
     expect(parseConnectTarget(id.slice(1), "boundary").ok).toBe(false);
+    expect(parseConnectTarget("nothex@10.0.0.1", "boundary").ok).toBe(false);
+    expect(parseConnectTarget("box:0", "boundary").ok).toBe(false);
+  });
+  it("takes an address, keeping port 0 when none was typed", () => {
+    const result = parseConnectTarget("10.42.0.2", "boundary");
+    expect(result.ok && result.target).toMatchObject({
+      address: "10.42.0.2",
+      port: 0,
+      explicitPort: false,
+      protocol: "boundary",
+    });
+    const typed = parseConnectTarget("box.lan:6000", "boundary");
+    expect(typed.ok && typed.target).toMatchObject({ address: "box.lan", port: 6000, explicitPort: true });
+  });
+  it("keeps a pinned machine ID in front of the address", () => {
+    const result = parseConnectTarget(`${id}@[fd00::2]:6001`, "boundary");
+    expect(result.ok && result.target).toMatchObject({
+      address: `${id.toLowerCase()}@fd00::2`,
+      port: 6001,
+    });
+  });
+  it("knows a boundary:// link and a bare machine ID with nothing assumed", () => {
+    const link = parseConnectTarget("boundary://10.42.0.2/");
+    expect(link.ok && link.target).toMatchObject({ address: "10.42.0.2", port: 0, protocol: "boundary" });
+    const bare = parseConnectTarget(id);
+    expect(bare.ok && bare.target.protocol).toBe("boundary");
+  });
+  it("formats a Boundary target so it parses back to itself", () => {
+    for (const typed of ["boundary://10.42.0.2", "boundary://box:6000", `boundary://${id.toLowerCase()}@[fd00::2]:6001`]) {
+      const parsed = parseConnectTarget(typed);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) continue;
+      const { protocol, address, port } = parsed.target;
+      expect(formatTarget(protocol ?? "vnc", address, port)).toBe(typed);
+    }
+    expect(formatTarget("boundary", id.toLowerCase(), 0)).toBe(id.toLowerCase());
+  });
+});
+
+describe("discoveredEndpoint", () => {
+  const id = "3AE432AB7FD87DBD85B26C69E3D00BE3F1AD47688DF3E79E650EA9C8F0440723";
+
+  it("pins a Boundary computer's key and keeps the port it was found on", () => {
+    const e = discoveredEndpoint({ address: "192.168.50.40", port: 61234, protocol: "boundary", boundaryId: id });
+    expect(e).toEqual({ protocol: "boundary", address: `${id.toLowerCase()}@192.168.50.40`, port: 61234 });
+    // What a saved host made from it reads back as: the same computer.
+    const typed = formatTarget(e.protocol, e.address, e.port);
+    expect(typed).toBe(`boundary://${id.toLowerCase()}@192.168.50.40:61234`);
+    expect(ok(typed)).toMatchObject({ protocol: "boundary", address: e.address, port: 61234 });
+  });
+
+  it("dials by address alone when no well formed ID came with the row", () => {
+    expect(discoveredEndpoint({ address: "10.0.0.5", port: 5940, protocol: "boundary", boundaryId: "abc" }).address).toBe("10.0.0.5");
+    expect(discoveredEndpoint({ address: "10.0.0.5", port: 5940, protocol: "boundary" }).address).toBe("10.0.0.5");
+  });
+
+  it("leaves every other row as it was found", () => {
+    expect(discoveredEndpoint({ address: "10.0.0.6", port: 3389, protocol: "rdp", boundaryId: id })).toEqual({
+      protocol: "rdp",
+      address: "10.0.0.6",
+      port: 3389,
+    });
+    expect(discoveredEndpoint({ address: "10.0.0.7", port: 5900 }).protocol).toBe("vnc");
   });
 });

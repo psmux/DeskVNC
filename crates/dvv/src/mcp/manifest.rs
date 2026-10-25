@@ -158,19 +158,19 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "dvv_status",
-            "State, protocol, size, geometry generation, lease holder and the negotiated signals for one limb, as the full dvv.observation.v1 object. It does not clear the typing fence: it reads no pixels, and a call that told you nothing about what is on the screen must not be able to say you have looked at it. Cheapest call in the manifest; safe to call constantly; does not need a lease and does not read a pixel. If a tool has just failed with LEASE_REVOKED, read lease.human_took_over here: true means a PERSON is driving and the right move is to stop.",
+            "State, protocol, size, geometry generation, lease holder and the negotiated signals for one limb, as the full dvv.observation.v1 object. It does not clear the typing fence: it reads no pixels, and a call that told you nothing about what is on the screen must not be able to say you have looked at it. Cheapest call in the manifest; safe to call constantly; does not need a lease and does not read a pixel. lease says who holds the wheel, since when, how long since their last input, and who waits; lease.human_took_over true means a person is using the machine now, and agents get it back 20 s after their last input.",
             merge(selector(), json!({})),
             &[],
         ),
         tool(
             "dvv_control",
-            "Acquire, release or check the control lease. This is what lets an agent act at all when a person might be present. If any tool has just failed with LEASE_REVOKED, call this with action yield_status before anything else: it says whether a PERSON took the machine, which is the one case where the right move is to stop rather than retry. A person outranks an agent by default and takes the wheel with no application code, so losing it is ordinary and not an error.",
+            "Acquire, release or check the control lease, which every agent on every machine and the person at DeskVNCViewer share. Clicks, keys and typing take it themselves, so you need this to wait longer, to let go when you are done (release, so the next agent does not wait), or to see who has it: status names the holder, person or agent, how long they have held it, how long since their last input, who is waiting, and when it changes hands by itself. acquire waits in the queue (waitMs, 25 s by default). A person outranks an agent and takes the wheel by using the machine; agents get it back 20 s after the person's last input, so wait and ask again rather than stopping. An agent holding it hands it to the head of the queue after 8 s with no input once somebody is waiting, and any holder loses it after 30 s with no input.",
             merge(
                 selector(),
                 json!({
                     "action": { "type": "string", "enum": ["acquire", "release", "status", "yield", "yield_status"], "description": "yield and release are the same act from this attachment's side; yield records a reason. yield_status reads who holds it without changing anything." },
-                    "reason": { "type": "string", "description": "acquire: shown to the person watching this machine. yield: recorded as why the agent stood down." },
-                    "waitMs": { "type": "number", "description": "acquire only. 0 fails immediately rather than queueing, which is what you want when you have something else to do." },
+                    "reason": { "type": "string", "description": "acquire: what you want the machine for, shown to the person if they are using it and are asked to let you in. yield: recorded as why the agent stood down." },
+                    "waitMs": { "type": "number", "description": "acquire only. How long to wait in the queue for the wheel, 25000 by default and at most 120000. 0 asks once and does not wait, which is what you want when you have something else to do." },
                 }),
             ),
             &["action"],
@@ -182,6 +182,7 @@ pub fn tools() -> Vec<Value> {
                 merge(selector(), generation()),
                 json!({
                     "action": { "type": "string", "enum": ["move", "click", "double", "right", "middle", "drag", "scroll"], "description": "Which gesture." },
+                    "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
                     "x": { "type": "number", "description": "Framebuffer pixels from the left. Rejected rather than clamped when outside, because a clamped click lands on whatever is at the edge and that is a different action performed silently." },
                     "y": { "type": "number", "description": "Framebuffer pixels from the top." },
                     "toX": { "type": "number", "description": "drag only: where the button is released." },
@@ -201,6 +202,7 @@ pub fn tools() -> Vec<Value> {
                 selector(),
                 json!({
                     "text": { "type": "string", "description": "What to type." },
+                    "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
                     "wpm": { "type": "number", "description": "Throttle, in words per minute. Not politeness: a machine that drops characters under a fast synthetic type does it silently, because neither wire carries an acknowledgement." },
                 }),
             ),
@@ -213,6 +215,7 @@ pub fn tools() -> Vec<Value> {
                 selector(),
                 json!({
                     "keys": { "type": "string", "description": "One name, or a chord joined with '+'." },
+                    "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
                 }),
             ),
             &["keys"],

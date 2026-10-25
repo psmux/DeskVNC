@@ -531,3 +531,47 @@ describe("the status line", () => {
     expect(detail).toContain("holds the lease");
   });
 });
+
+describe("the shared lease on the wire", () => {
+  it("names the holding agent and when it took the wheel", () => {
+    const event = parseActivityEvent({
+      type: "lease",
+      sessionId: "s1",
+      held: true,
+      holderKind: "agent",
+      holderLabel: "codex (att_2)",
+      inflight: [],
+      lease: { holder: { kind: "agent", label: "codex (att_2)", since: 1_700_000_000_000 } },
+    });
+    expect(event?.holder?.name).toBe("codex (att_2)");
+    expect(event?.holder?.since).toBe(1_700_000_000_000);
+  });
+
+  it("a person holding is not an agent driving", () => {
+    const event = parseActivityEvent({
+      type: "lease",
+      sessionId: "s1",
+      held: true,
+      holderKind: "human",
+      holderLabel: "a person in DeskVNCViewer",
+      humanTookOver: true,
+    });
+    const state = applyActivityEvent(EMPTY_AGENT_STATE, event!, 0);
+    expect(drivenByAgent(state.s1)).toBe(false);
+  });
+
+  it("a lease nobody holds clears the badge", () => {
+    const held = applyActivityEvent(
+      EMPTY_AGENT_STATE,
+      parseActivityEvent({ type: "lease", sessionId: "s1", held: true, holderKind: "agent" })!,
+      0,
+    );
+    expect(drivenByAgent(held.s1)).toBe(true);
+    const freed = applyActivityEvent(
+      held,
+      parseActivityEvent({ type: "lease", sessionId: "s1", held: false, phase: "free" })!,
+      HANDOVER_MUTE_MS + 1,
+    );
+    expect(drivenByAgent(freed.s1)).toBe(false);
+  });
+});

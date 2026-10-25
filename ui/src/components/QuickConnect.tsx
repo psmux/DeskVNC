@@ -16,7 +16,7 @@ import { GetHelp } from "./GetHelp";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredHost, HostProfile, ProtocolKind } from "../lib/types";
 import { DEFAULT_PORT, PROTOCOLS, hostProtocol, protocolLabel, protocolName } from "../lib/types";
-import { formatTarget, parseConnectTarget, presetProtocol } from "../lib/address";
+import { discoveredEndpoint, formatTarget, parseConnectTarget, presetProtocol } from "../lib/address";
 import { classNames, fuzzyMatch, modKeyLabel } from "../lib/util";
 import { IconArrowRight, IconClock, IconMonitor, IconZap } from "./icons";
 
@@ -224,12 +224,15 @@ export function QuickConnect({
       }
 
       const nearby = discovered
-        .filter((d) => !hosts.some((h) => sameAddress(h.address, d.address) && h.port === d.port))
+        .filter((d) => {
+          const e = discoveredEndpoint(d);
+          return !hosts.some((h) => sameAddress(h.address, e.address) && h.port === e.port);
+        })
         .filter((d) => fuzzyMatch(trimmed, `${d.name} ${d.address}`) !== null)
         .slice(0, MAX_NEARBY_SUGGESTIONS);
       for (const d of nearby) {
-        const kind = d.protocol ?? "vnc";
-        const label = formatTarget(kind, d.address, d.port);
+        const { protocol: kind, address, port } = discoveredEndpoint(d);
+        const label = formatTarget(kind, address, port);
         out.push({
           key: `nearby-${d.id}`,
           kind: "nearby",
@@ -237,7 +240,7 @@ export function QuickConnect({
           sub: label,
           protocol: kind,
           run: () => {
-            onConnectAddress(kind, d.address, d.port);
+            onConnectAddress(kind, address, port);
             onRemember(label);
             setValue("");
             setFlipped(null);

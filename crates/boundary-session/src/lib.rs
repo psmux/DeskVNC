@@ -1,30 +1,56 @@
 #![forbid(unsafe_code)]
 
+pub mod direct;
 mod dns;
+pub mod nearby;
+mod screen;
 mod session;
+mod shared;
+mod stats;
 pub mod tools;
 pub mod unattended;
+pub mod video;
 mod wire;
 use anyhow::{Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
 pub use session::{
-    Approval, Connectivity, Event, HostOptions, LinkLost, Route, Session, host, validate_relay_url,
-    viewer, viewer_as, viewer_with_tools,
+    Abilities, Approval, Connectivity, Event, HostOptions, LinkLost, Route, Session, host,
+    validate_relay_url, viewer, viewer_as, viewer_with, viewer_with_tools,
 };
 use std::io::Cursor;
 
 /// JPEG quality for screens: small enough for a cellular uplink, sharp
 /// enough to read text.
 const JPEG_QUALITY: u8 = 70;
+pub use screen::Rect;
+pub use video::{Update, VideoUnit};
 pub use wire::{Button, Input, Invitation, Key};
 
 /// Implemented by a local platform backend, created only after consent.
 pub trait Desktop {
     fn capture(&mut self) -> Result<Frame>;
+    /// The screen if it changed since the last call, or `None` if it did not.
+    /// A backend that is told about changes, such as a capture stream, says
+    /// so here and saves comparing a whole screen with the last one.
+    fn capture_changed(&mut self) -> Result<Option<Frame>> {
+        self.capture().map(Some)
+    }
+    /// What changed in the screen the last [`Desktop::capture_changed`]
+    /// handed over, since the screen before it, in that screen's pixels.
+    /// `None` means the backend was not told, so screens must be compared;
+    /// an empty list means nothing changed.
+    fn capture_damage(&self) -> Option<Vec<Rect>> {
+        None
+    }
     fn input(&mut self, input: Input) -> Result<()>;
     fn release(&mut self);
+    /// How to make an H.264 encoder for this desktop's screens, for a helper
+    /// that decodes video. `None`, the default, sends rectangles only.
+    fn video(&self) -> Option<video::VideoEncoders> {
+        None
+    }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,

@@ -43,21 +43,7 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 /// What to call this computer when a helper saves it.
 pub fn computer_name() -> String {
-    let name = if cfg!(target_os = "macos") {
-        std::process::Command::new("scutil")
-            .args(["--get", "ComputerName"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else if cfg!(windows) {
-        std::env::var("COMPUTERNAME").ok()
-    } else {
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|s| s.trim().to_string())
-    };
-    name.filter(|n| !n.is_empty() && n.len() <= 80)
-        .unwrap_or_else(|| "This computer".into())
+    boundary_session::nearby::computer_name()
 }
 /// Claim this computer's unattended listener for this process.
 ///
@@ -143,6 +129,98 @@ pub async fn install(provider: Provider) -> Result<()> {
         Platform::Windows => install_windows(provider).await,
         Platform::Linux => install_linux(provider).await,
     }
+}
+/// The Windows Firewall rule that lets helpers reach unattended access by
+/// this computer's address, named after this copy of the app so two installs
+/// never fight over one rule.
+fn direct_rule() -> Result<(String, String)> {
+    use std::hash::{Hash, Hasher};
+    let executable = std::env::current_exe()?;
+    let executable = executable
+        .to_str()
+        .context("Invalid application path")?
+        .to_string();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    executable.hash(&mut hash);
+    Ok((
+        format!("Boundary-direct-{:016x}", hash.finish()),
+        executable,
+    ))
+}
+
+/// Whether Windows Firewall lets helpers in on the direct port: `None` off
+/// Windows, where nothing needs doing, or when it cannot be told.
+pub async fn direct_inbound_allowed() -> Option<bool> {
+    if Platform::current().ok()? != Platform::Windows {
+        return None;
+    }
+    let (rule, _) = direct_rule().ok()?;
+    let script = format!(
+        "if (Get-NetFirewallRule -Name {} -ErrorAction SilentlyContinue) {{ 'yes' }} else {{ 'no' }}",
+        powershell_literal(&rule)
+    );
+    let output = process::output(
+        Path::new("powershell.exe"),
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded_powershell(&script),
+        ],
+        Duration::from_secs(20),
+    )
+    .await
+    .ok()?;
+    Some(String::from_utf8_lossy(&output).trim() == "yes")
+}
+
+/// Let helpers reach this computer by address on Windows: allow this app in
+/// on `port`, UDP and TCP, on every network profile, and remove the block
+/// rules Windows made for this same program when its "allow access" prompt
+/// was dismissed, since a block rule beats an allow rule. Asks for
+/// administrator rights once. Who may come in is still decided by pairing or
+/// the unattended password.
+pub async fn allow_direct_inbound(port: u16) -> Result<()> {
+    if Platform::current()? != Platform::Windows {
+        return Ok(());
+    }
+    let (rule, executable) = direct_rule()?;
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$name = {name}
+$program = {program}
+Get-NetFirewallApplicationFilter -Program $program -ErrorAction SilentlyContinue | Get-NetFirewallRule | Where-Object {{ $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' }} | Remove-NetFirewallRule
+Get-NetFirewallRule -Name $name, "$name-tcp" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -Name $name -DisplayName 'DeskVNC unattended access by address (UDP)' -Group 'Boundary direct access' -Direction Inbound -Action Allow -Protocol UDP -LocalPort {port} -Program $program -Profile Any | Out-Null
+New-NetFirewallRule -Name "$name-tcp" -DisplayName 'DeskVNC unattended access by address (TCP)' -Group 'Boundary direct access' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -Program $program -Profile Any | Out-Null
+"#,
+        name = powershell_literal(&rule),
+        program = powershell_literal(&executable),
+        port = port,
+    );
+    let argument = format!(
+        "-NoProfile -NonInteractive -EncodedCommand {}",
+        encoded_powershell(&script)
+    );
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$p = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList {} -Verb RunAs -Wait -PassThru
+if ($p.ExitCode -ne 0) {{ throw 'Firewall setup failed or was cancelled' }}
+"#,
+        powershell_literal(&argument)
+    );
+    process::output(
+        Path::new("powershell.exe"),
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded_powershell(&script),
+        ],
+        Duration::from_secs(180),
+    )
+    .await?;
+    Ok(())
 }
 pub async fn allow_private_inbound(provider: Provider, address: std::net::IpAddr) -> Result<()> {
     if Platform::current()? != Platform::Windows {

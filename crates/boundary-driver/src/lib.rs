@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, ensure, Result};
 use boundary_session::{
     tools::{Client, Reply, Request},
     unattended::{self, SecretKey},
-    Button, Event, HostOptions, Input, Invitation, Key, LinkLost, Session,
+    Abilities, Button, Event, HostOptions, Input, Invitation, Key, LinkLost, Session, Update,
 };
 use parking_lot::Mutex;
 use remote_core::{
@@ -19,6 +19,12 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// What this helper says it can do: send commands and files for the agent
+/// plane, and draw H.264, which the window decodes with WebCodecs.
+const ABILITIES: Abilities = Abilities {
+    tools: true,
+    video: true,
+};
 struct Pending {
     ticket: String,
     helper: String,
@@ -106,10 +112,14 @@ impl ProtocolDriver for BoundaryDriver {
             });
         }
         let pending = self.pending.lock().remove(&options.host);
-        // A saved machine is opened by its ID; an invitation by the one use
-        // token `prepare` handed out. Only a saved machine can be retried.
-        let unattended =
-            pending.is_none() && unattended::validate_machine_id(&options.host).is_ok();
+        // A saved machine is opened by its ID or its address; an invitation
+        // by the one use token `prepare` handed out. Only a saved machine can
+        // be retried.
+        let unattended = pending.is_none()
+            && !is_invitation_token(&options.host)
+            && unattended::validate_target(&options.host).is_ok();
+        // The Library keeps a port beside the address, as it does for VNC.
+        let machine = with_port(&options.host, options.port);
         let identity = self.identity.lock().clone();
         let paired = self.paired.lock().clone();
         let registry = self.tools.clone();
@@ -136,12 +146,14 @@ impl ProtocolDriver for BoundaryDriver {
                             );
                             // With tools declared, so the person is asked about
                             // commands and files and an agent can use them once
-                            // they say yes.
-                            boundary_session::viewer_with_tools(
+                            // they say yes. And with video, which the window decodes
+                            // in hardware, so a moving screen comes as H.264.
+                            boundary_session::viewer_with(
                                 pending.ticket,
                                 pending.helper,
                                 HostOptions::default(),
                                 identity.clone(),
+                                ABILITIES,
                             )
                         }
                         None if unattended => {
@@ -152,12 +164,13 @@ impl ProtocolDriver for BoundaryDriver {
                                 .clone()
                                 .filter(|n| !n.trim().is_empty())
                                 .unwrap_or_else(helper_name);
-                            unattended::connect_with_tools(
-                                options.host.clone(),
+                            unattended::connect_with(
+                                machine.clone(),
                                 name,
                                 options.credentials.password.clone().filter(|p| !p.is_empty()),
                                 key,
                                 HostOptions::default(),
+                                ABILITIES,
                             )
                         }
                         None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
@@ -414,6 +427,29 @@ fn exec(
     });
 }
 /// The name a helper is shown by when none was given: the account name.
+/// One of the tokens `prepare` hands out. Once used or expired it must not
+/// be taken for a host name and dialled.
+fn is_invitation_token(host: &str) -> bool {
+    host.strip_prefix("boundary-")
+        .is_some_and(|rest| uuid::Uuid::parse_str(rest).is_ok())
+}
+/// A saved Boundary address with the Library's port added, unless it is an
+/// ID, the port is 0, or the address already names one.
+fn with_port(host: &str, port: u16) -> String {
+    if port == 0 || unattended::validate_machine_id(host).is_ok() {
+        return host.to_string();
+    }
+    let (id, rest) = match host.rsplit_once('@') {
+        Some((id, rest)) => (format!("{id}@"), rest),
+        None => (String::new(), host),
+    };
+    match rest.matches(':').count() {
+        _ if rest.starts_with('[') => host.to_string(),
+        0 => format!("{id}{rest}:{port}"),
+        1 => host.to_string(),
+        _ => format!("{id}[{rest}]:{port}"),
+    }
+}
 fn helper_name() -> String {
     std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
@@ -431,6 +467,10 @@ async fn drive(
     connected_at: &mut Option<Instant>,
 ) -> Result<()> {
     let mut size = (0u16, 0u16);
+    // The whole screen as it stands, for a window or mirror that asks for
+    // all of it again: updates after the first carry only what changed.
+    let mut current: Option<std::sync::Arc<boundary_session::Frame>> = None;
+    let mut video = Video::default();
     let mut input = InputState::default();
     let mut allowed = false;
     let mut tools_allowed = false;
@@ -481,15 +521,47 @@ async fn drive(
                     }
                     return Ok(());
                 }
-                let frame = session.frames.borrow_and_update().clone();
-                if let Some(frame) = frame {
-                    let current = (frame.width as u16, frame.height as u16);
-                    if size != current {
-                        size = current;
-                        emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
+                for update in session.updates() {
+                    match update {
+                        Update::Screen { frame, rects: changed } => {
+                            current = Some(frame.clone());
+                            let current = (frame.width as u16, frame.height as u16);
+                            let resized = size != current;
+                            if resized {
+                                size = current;
+                                // The window starts its decoders again at a new size.
+                                video.started = false;
+                                emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
+                            }
+                            let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                            // Only what changed goes on to the window: a pointer
+                            // moving is a few tiles, not the 9 MB of a whole screen.
+                            let (rects, damage) = match changed.filter(|_| !resized) {
+                                Some(changed) => {
+                                    let rects: Vec<DecodedRect> = changed.iter().map(|r| crop(&frame, r)).collect();
+                                    let damage = rects.iter().skip(1).fold(rects[0].rect, |u, r| u.union(&r.rect));
+                                    (rects, damage)
+                                }
+                                None => (vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], whole),
+                            };
+                            // A whole screen of tiles covers whatever video drew.
+                            if damage == whole {
+                                video.stale = false;
+                            }
+                            emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
+                        }
+                        Update::Video(unit) => {
+                            let unit_size = (unit.width as u16, unit.height as u16);
+                            let resized = size != unit_size;
+                            if resized {
+                                size = unit_size;
+                                emit(events, SessionEvent::DesktopResize { width: size.0, height: size.1 }).await?;
+                            }
+                            let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                            let rect = video.rect(unit, whole, resized);
+                            emit(events, SessionEvent::FramebufferUpdate { rects: vec![rect], damage: whole }).await?;
+                        }
                     }
-                    let rect = Rect { x: 0, y: 0, width: size.0, height: size.1 };
-                    emit(events, SessionEvent::FramebufferUpdate { rects: vec![DecodedRect { rect, payload: RectPayload::Rgba(frame.rgba.clone()) }], damage: rect }).await?;
                 }
             },
             command = commands.recv() => match command {
@@ -498,6 +570,19 @@ async fn drive(
                     view_only = value;
                     input = InputState::default();
                     session.input(Input::Release)?;
+                }
+                Some(ClientCommand::Refresh) if video.stale => {
+                    // The window shows video that `current` never saw, so
+                    // sending it would put an older screen over a newer one.
+                    // The computer sends the whole screen as tiles instead,
+                    // which also gives the agent's mirror real pixels.
+                    session.refresh();
+                }
+                Some(ClientCommand::Refresh) => {
+                    if let Some(frame) = &current {
+                        let whole = Rect { x: 0, y: 0, width: size.0, height: size.1 };
+                        emit(events, SessionEvent::FramebufferUpdate { rects: vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], damage: whole }).await?;
+                    }
                 }
                 Some(ClientCommand::ReleaseAllKeys) => { input = InputState::default(); session.input(Input::Release)?; }
                 Some(command @ (ClientCommand::Pointer { .. } | ClientCommand::Key { .. })) if allowed && !view_only => {
@@ -609,9 +694,82 @@ impl InputState {
         out
     }
 }
+/// The H.264 the computer sends while much of its screen moves, on its way
+/// to the window's WebCodecs decoder.
+#[derive(Default)]
+struct Video {
+    /// The window's decoder has started on this stream since the last
+    /// resize, so a picture may follow on from the one before.
+    started: bool,
+    /// Video has drawn since the last whole screen of tiles, so `current`
+    /// is not what the window shows.
+    stale: bool,
+}
+impl Video {
+    /// The decoder context every Boundary picture goes to: one, covering
+    /// the whole screen.
+    const CONTEXT: u32 = 0;
+
+    fn rect(
+        &mut self,
+        unit: boundary_session::VideoUnit,
+        whole: Rect,
+        resized: bool,
+    ) -> DecodedRect {
+        // A new encoder or a new size starts the decoder again, which it
+        // can only do on a keyframe; the host sends one at both.
+        let reset = unit.fresh || resized || !self.started;
+        self.started = true;
+        self.stale = true;
+        DecodedRect {
+            rect: whole,
+            payload: RectPayload::H264 {
+                data: unit.data,
+                flags: 0,
+                context_id: Self::CONTEXT,
+                reset,
+                keyframe: unit.keyframe,
+            },
+        }
+    }
+}
+
+/// One changed rectangle of a Boundary screen, as its own pixels.
+fn crop(frame: &boundary_session::Frame, r: &boundary_session::Rect) -> DecodedRect {
+    let stride = frame.width as usize * 4;
+    let mut rgba = Vec::with_capacity(r.width as usize * r.height as usize * 4);
+    for y in r.y..r.y + r.height {
+        let i = y as usize * stride + r.x as usize * 4;
+        rgba.extend_from_slice(&frame.rgba[i..i + r.width as usize * 4]);
+    }
+    DecodedRect {
+        rect: Rect {
+            x: r.x as u16,
+            y: r.y as u16,
+            width: r.width as u16,
+            height: r.height as u16,
+        },
+        payload: RectPayload::Rgba(rgba),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_saved_port_is_added_only_where_one_is_missing() {
+        let id = "3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723";
+        assert_eq!(with_port(id, 5940), id);
+        assert_eq!(with_port("10.42.0.2", 0), "10.42.0.2");
+        assert_eq!(with_port("10.42.0.2", 6000), "10.42.0.2:6000");
+        assert_eq!(with_port("10.42.0.2:7000", 6000), "10.42.0.2:7000");
+        assert_eq!(with_port("fd00::2", 6000), "[fd00::2]:6000");
+        assert_eq!(with_port("[fd00::2]:7000", 6000), "[fd00::2]:7000");
+        assert_eq!(
+            with_port(&format!("{id}@box"), 6000),
+            format!("{id}@box:6000")
+        );
+    }
     #[test]
     fn coordinates_buttons_and_unicode_are_translated() {
         let mut state = InputState::default();

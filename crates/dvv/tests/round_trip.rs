@@ -63,20 +63,25 @@ async fn the_whole_conversation_works_over_a_pipe() {
         "opening the same machine at the same slot resolves to the same limb, and does not open a second session"
     );
 
-    // 4. Acting without the wheel is refused, and the refusal names the repair.
-    let unleased = client
+    // 4. Acting without asking first takes the free wheel itself: an agent
+    //    never fails for having forgotten to acquire. The release the grant
+    //    owes the limb goes out before the click, buttons before keys.
+    let unasked = client
         .tool(
             "dvv_click",
             json!({ "limbId": limb, "action": "click", "x": 10, "y": 20, "generation": 1 }),
         )
         .await;
-    assert_eq!(error_code(&unleased), Some("LEASE_NOT_HELD"), "{unleased}");
-    assert!(structured(&unleased)["hint"]
-        .as_str()
-        .expect("a hint")
-        .contains("dvv_control"));
+    assert_eq!(error_code(&unasked), None, "{unasked}");
+    let recorder = source.recorder(&limb).expect("a recorder for this limb");
+    assert_eq!(
+        recorder.names()[..2],
+        ["pointer(0,0,mask=0)", "release all keys"],
+        "a lease change owes the limb a release, buttons before keys"
+    );
+    recorder.clear();
 
-    // 5. Take the wheel. The release the grant owes the limb goes out first.
+    // 5. Asking explicitly while holding it is a renew, and owes nothing.
     let control = client
         .tool(
             "dvv_control",
@@ -84,14 +89,8 @@ async fn the_whole_conversation_works_over_a_pipe() {
         )
         .await;
     assert_eq!(structured(&control)["held"], true);
-    assert_eq!(structured(&control)["outcome"], "granted");
-
-    let recorder = source.recorder(&limb).expect("a recorder for this limb");
-    assert_eq!(
-        recorder.names(),
-        vec!["pointer(0,0,mask=0)", "release all keys"],
-        "a lease change owes the limb a release, buttons before keys"
-    );
+    assert_eq!(structured(&control)["outcome"], "renewed");
+    assert!(recorder.names().is_empty(), "{:?}", recorder.names());
     recorder.clear();
 
     // 6. Click, and read what actually reached the wire.

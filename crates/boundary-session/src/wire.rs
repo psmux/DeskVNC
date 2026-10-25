@@ -127,6 +127,17 @@ pub enum Message {
         /// PNG. An older helper leaves it out and is sent PNG.
         #[serde(default)]
         jpeg: bool,
+        /// The helper draws screens sent as changed rectangles on one
+        /// stream (`crate::screen`) and says when it has shown each one. An
+        /// older helper leaves it out and is sent whole screens.
+        #[serde(default)]
+        tiles: bool,
+        /// Video codecs the helper decodes, such as `"h264"`. A host that
+        /// can encode one may send moving parts of the screen as video on
+        /// the stream of updates. An older helper leaves it out and gets
+        /// rectangles only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        video: Vec<String>,
     },
     Granted {
         control: bool,
@@ -143,6 +154,14 @@ pub enum Message {
     Tools(bool),
     Input(Input),
     Ping,
+    /// The helper has drawn the screen update with this number. Sent only
+    /// to a host that sends updates, which is the only kind that reads it.
+    Shown(u64),
+    /// The helper asks for the whole screen again as rectangles, because
+    /// what it holds went stale under video. Sent only to a host whose
+    /// stream of updates said it sends video, since an older host ends the
+    /// session on a message it does not know.
+    Refresh,
     /// A helper asking an unattended machine to let it in. The helper's
     /// identity is the key it connected with, which the encrypted handshake
     /// has already proved, so a paired helper sends no password at all.
@@ -156,6 +175,17 @@ pub enum Message {
         /// PNG. An older helper leaves it out and is sent PNG.
         #[serde(default)]
         jpeg: bool,
+        /// The helper draws screens sent as changed rectangles on one
+        /// stream (`crate::screen`) and says when it has shown each one. An
+        /// older helper leaves it out and is sent whole screens.
+        #[serde(default)]
+        tiles: bool,
+        /// Video codecs the helper decodes, such as `"h264"`. A host that
+        /// can encode one may send moving parts of the screen as video on
+        /// the stream of updates. An older helper leaves it out and gets
+        /// rectangles only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        video: Vec<String>,
     },
     /// Sent during an attended session when the person being helped chooses
     /// to let this helper connect any time. `machine` is the ID the helper
@@ -188,9 +218,36 @@ pub async fn read<T: DeserializeOwned>(stream: &mut RecvStream) -> Result<T> {
     stream.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+/// The one video codec a host sends today.
+pub const H264: &str = "h264";
+
+/// How screens go to a helper, from what its first message said it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screens {
+    Png,
+    Jpeg,
+    Tiles,
+    /// Rectangles, and H.264 while much of the screen moves, on one stream
+    /// that starts with [`crate::screen::MAGIC_VIDEO`].
+    Video,
+}
+impl Screens {
+    pub fn from_hello(jpeg: bool, tiles: bool, video: &[String]) -> Self {
+        match (jpeg, tiles) {
+            (_, true) if video.iter().any(|c| c == H264) => Self::Video,
+            (_, true) => Self::Tiles,
+            (true, false) => Self::Jpeg,
+            (false, false) => Self::Png,
+        }
+    }
+    /// Whether the helper says when it has shown each update.
+    pub fn acknowledged(self) -> bool {
+        matches!(self, Self::Tiles | Self::Video)
+    }
+}
 /// The helper's name, whether it can send commands and file requests, and
-/// whether it takes JPEG screens.
-pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool, bool)> {
+/// how it takes screens.
+pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, bool, Screens)> {
     use subtle::ConstantTimeEq;
     if let Message::Hello {
         version,
@@ -198,6 +255,8 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
         name,
         tools,
         jpeg,
+        tiles,
+        video,
     } = message
     {
         ensure!(
@@ -209,7 +268,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<(String, 
             !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
             "Invalid helper name"
         );
-        Ok((name, tools, jpeg))
+        Ok((name, tools, Screens::from_hello(jpeg, tiles, &video)))
     } else {
         bail!("Expected session handshake")
     }
@@ -236,6 +295,111 @@ mod tests {
             assert!(input.validate().is_err());
         }
     }
+    /// The first messages as a copy from before video wrote and read them.
+    mod before_video {
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub enum Message {
+            Hello {
+                version: u8,
+                secret: [u8; 32],
+                name: String,
+                #[serde(default)]
+                tools: bool,
+                #[serde(default)]
+                jpeg: bool,
+                #[serde(default)]
+                tiles: bool,
+            },
+            Knock {
+                version: u8,
+                name: String,
+                password: Option<String>,
+                #[serde(default)]
+                tools: bool,
+                #[serde(default)]
+                jpeg: bool,
+                #[serde(default)]
+                tiles: bool,
+            },
+        }
+    }
+
+    #[test]
+    fn video_is_offered_without_breaking_older_peers() {
+        // A helper that decodes video, read by a host from before video:
+        // the new field is passed over and it is sent tiles.
+        let hello = serde_json::to_vec(&Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: true,
+            jpeg: true,
+            tiles: true,
+            video: vec![H264.into()],
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&hello).unwrap(),
+            before_video::Message::Hello { tiles: true, .. }
+        ));
+        let knock = serde_json::to_vec(&Message::Knock {
+            version: 2,
+            name: "Helper".into(),
+            password: None,
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: vec![H264.into()],
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&knock).unwrap(),
+            before_video::Message::Knock { tiles: true, .. }
+        ));
+        // A helper from before video, read by this host: no codecs, tiles.
+        let old = serde_json::to_vec(&before_video::Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+        })
+        .unwrap();
+        let Message::Hello {
+            jpeg, tiles, video, ..
+        } = serde_json::from_slice(&old).unwrap()
+        else {
+            panic!("not a hello");
+        };
+        assert_eq!(Screens::from_hello(jpeg, tiles, &video), Screens::Tiles);
+        // A helper that does not decode video writes exactly what an older
+        // one did.
+        let plain = serde_json::to_string(&Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(plain, String::from_utf8(old).unwrap());
+        // Codecs this host does not send, and video without tiles, get none.
+        let other = ["av1".to_string()];
+        assert_eq!(Screens::from_hello(true, true, &other), Screens::Tiles);
+        assert_eq!(
+            Screens::from_hello(true, false, &[H264.into()]),
+            Screens::Jpeg
+        );
+        assert_eq!(
+            Screens::from_hello(true, true, &[H264.into()]),
+            Screens::Video
+        );
+    }
+
     #[test]
     fn rejects_bad_tickets() {
         assert!(Invitation::decode("hello").is_err());

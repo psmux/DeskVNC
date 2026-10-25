@@ -20,7 +20,7 @@
 //! the ID. Only one session runs at a time.
 
 use crate::{
-    Approval, Desktop, Event, HostOptions, Session,
+    Abilities, Approval, Desktop, Event, HostOptions, Session,
     session::{self, Lookup},
     wire::{self, Message},
 };
@@ -321,6 +321,29 @@ where
     let machine = machine_id(&key);
     let endpoint = session::endpoint_with(&options, Some(key), Lookup::Publish).await?;
     let _close = Closing(endpoint.clone());
+    // Say which computer this is to a helper that dialled the address. On
+    // the random port of a machine that could not have the usual one this
+    // costs nothing and still serves a helper told the port.
+    let sockets = endpoint.bound_sockets();
+    let answering = crate::direct::answer(sockets.clone(), endpoint.id(), stop.child_token());
+    // Tell the local network too, so a scan lists this machine even on a
+    // random port. Only where it answers by address anyway: a machine held
+    // to one private interface stays off the LAN's multicast.
+    let _advertised = match sockets.first() {
+        Some(socket) if answering > 0 && options.bind_ip.is_none() => {
+            let name = crate::nearby::computer_name();
+            crate::nearby::advertise(endpoint.id(), socket.port(), &name)
+        }
+        _ => None,
+    };
+    if answering == 0 || !sockets.iter().any(|s| s.port() == crate::direct::PORT) {
+        let _ = notices
+            .send(Notice::Status(format!(
+                "Port {} is taken, so helpers must connect by machine ID",
+                crate::direct::PORT
+            )))
+            .await;
+    }
     if options.relay
         && tokio::time::timeout(Duration::from_secs(12), endpoint.online())
             .await
@@ -361,6 +384,8 @@ where
             password,
             tools,
             jpeg,
+            tiles,
+            video,
         } = message
         else {
             refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -425,7 +450,7 @@ where
             let result = tokio::select! {
                 _ = stop.cancelled() => Ok(()),
                 _ = ended.cancelled() => Ok(()),
-                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, jpeg, move || desktop()) => result,
+                result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
             };
             session::close_served(&connection, &result);
             // Whoever holds the session hears that it ended, so a banner
@@ -610,7 +635,14 @@ pub fn connect(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(machine_addr(&machine), name, password, key, options, false)
+    open(
+        Dial::Text(machine),
+        name,
+        password,
+        key,
+        options,
+        Abilities::default(),
+    )
 }
 /// [`connect`] for a helper whose tools send commands and file requests,
 /// such as DeskVNC's agent plane. They run only if the computer allows them
@@ -622,16 +654,55 @@ pub fn connect_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(machine_addr(&machine), name, password, key, options, true)
+    open(
+        Dial::Text(machine),
+        name,
+        password,
+        key,
+        options,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
 }
-fn machine_addr(machine: &str) -> Result<EndpointAddr> {
-    EndpointId::from_str(machine.trim())
-        .map(EndpointAddr::from)
-        .map_err(|_| {
-            anyhow!(
-                "That is not a machine ID. Copy it from the computer's unattended access settings"
-            )
-        })
+/// [`connect`] for a helper that says what more it can do, such as take
+/// moving screens as video.
+pub fn connect_with(
+    machine: String,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+    abilities: Abilities,
+) -> Session {
+    open(Dial::Text(machine), name, password, key, options, abilities)
+}
+/// What [`open`] dials: an address already worked out, or what the helper
+/// typed, which may be an ID or an address and is resolved once the session
+/// has started so a slow lookup shows as "Finding the computer".
+enum Dial {
+    Addr(Result<EndpointAddr>),
+    Text(String),
+}
+impl Dial {
+    /// A mistyped target is the helper's to fix; a lookup that fails is a
+    /// network that may come back, so only that is worth trying again.
+    async fn resolve(self) -> Result<EndpointAddr> {
+        match self {
+            Self::Addr(addr) => addr,
+            Self::Text(text) => crate::direct::resolve(target(&text)?)
+                .await
+                .map_err(session::link_lost),
+        }
+    }
+}
+fn target(text: &str) -> Result<crate::direct::Target> {
+    crate::direct::Target::parse(text).map_err(|error| {
+        anyhow!(
+            "{error}. Enter the machine ID from the computer's unattended access settings, or its address"
+        )
+    })
 }
 
 /// [`connect`] with a full address, for a helper that already knows where
@@ -643,7 +714,14 @@ pub fn connect_to(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(target, name, password, key, options, false)
+    open(
+        Dial::Addr(target),
+        name,
+        password,
+        key,
+        options,
+        Abilities::default(),
+    )
 }
 /// [`connect_to`] for a helper whose tools send commands and file requests.
 pub fn connect_to_with_tools(
@@ -653,15 +731,36 @@ pub fn connect_to_with_tools(
     key: SecretKey,
     options: HostOptions,
 ) -> Session {
-    open(target, name, password, key, options, true)
+    open(
+        Dial::Addr(target),
+        name,
+        password,
+        key,
+        options,
+        Abilities {
+            tools: true,
+            video: false,
+        },
+    )
 }
-fn open(
+/// [`connect_to`] for a helper that says what more it can do.
+pub fn connect_to_with(
     target: Result<EndpointAddr>,
     name: String,
     password: Option<String>,
     key: SecretKey,
     options: HostOptions,
-    tools: bool,
+    abilities: Abilities,
+) -> Session {
+    open(Dial::Addr(target), name, password, key, options, abilities)
+}
+fn open(
+    target: Dial,
+    name: String,
+    password: Option<String>,
+    key: SecretKey,
+    options: HostOptions,
+    abilities: Abilities,
 ) -> Session {
     let (session, mut worker) = session::channels();
     tokio::spawn(async move {
@@ -669,7 +768,7 @@ fn open(
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Ok(()),
-            result = run_connect(&mut worker, target, name, password, key, options, tools) => result,
+            result = run_connect(&mut worker, target, name, password, key, options, abilities) => result,
         };
         cancel.cancel();
         let _ = worker.emit(Event::Finished(result)).await;
@@ -678,14 +777,13 @@ fn open(
 }
 async fn run_connect(
     worker: &mut session::Worker,
-    target: Result<EndpointAddr>,
+    target: Dial,
     name: String,
     password: Option<String>,
     key: SecretKey,
     options: HostOptions,
-    tools: bool,
+    abilities: Abilities,
 ) -> Result<()> {
-    let target = target?;
     ensure!(
         !name.trim().is_empty() && name.len() <= 80 && !name.chars().any(char::is_control),
         "Enter a helper name of at most 80 bytes"
@@ -693,8 +791,8 @@ async fn run_connect(
     worker
         .emit(Event::Status("Finding the computer".into()))
         .await?;
-    let endpoint = session::endpoint_with(&options, Some(key), Lookup::Resolve).await?;
-    let _close = Closing(endpoint.clone());
+    let target = target.resolve().await?;
+    let endpoint = crate::shared::helper(&options, key).await?;
     let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(target, wire::ALPN))
         .await
         .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
@@ -708,8 +806,10 @@ async fn run_connect(
             version: 2,
             name,
             password,
-            tools,
+            tools: abilities.tools,
             jpeg: true,
+            tiles: true,
+            video: abilities.codecs(),
         },
     )
     .await?;
@@ -764,6 +864,10 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
 
 /// Reject anything but the expected machine, so a helper is never let into
 /// the wrong computer by a confused address.
+pub fn validate_target(text: &str) -> Result<()> {
+    target(text).map(|_| ())
+}
+/// Accept only a machine ID, for places that must not take an address.
 pub fn validate_machine_id(text: &str) -> Result<()> {
     if EndpointId::from_str(text.trim()).is_err() {
         bail!("That is not a machine ID");

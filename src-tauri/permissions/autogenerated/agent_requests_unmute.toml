@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-requests-unmute"
+description = "Enables the agent_requests_unmute command without any pre-configured scope."
+commands.allow = ["agent_requests_unmute"]
+
+[[permission]]
+identifier = "deny-agent-requests-unmute"
+description = "Denies the agent_requests_unmute command without any pre-configured scope."
+commands.deny = ["agent_requests_unmute"]

@@ -76,9 +76,50 @@ fn filer(app: &AppHandle) -> agent::server::Filer {
 /// them share one window. The status bar's counts are app wide by nature.
 fn emitter(app: &AppHandle) -> Arc<dyn Fn(serde_json::Value) + Send + Sync> {
     let app = app.clone();
+    // How many requests the last `requests` event carried, so a system
+    // notification goes only when the list goes from empty to not.
+    let shown = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     Arc::new(move |value| {
+        if value["type"] == "requests" {
+            let count = value["requests"].as_array().map_or(0, Vec::len);
+            let before = shown.swap(count, std::sync::atomic::Ordering::Relaxed);
+            if before == 0 && count > 0 {
+                notify_requests(&app, &value);
+            }
+        }
         let _ = app.emit(agent::AGENT_EVENT, value);
     })
+}
+
+/// One system notification when agents start asking for a machine the person
+/// is using and no DeskVNCViewer window is in front.
+///
+/// Never more than one: it goes when the list of requests goes from empty to
+/// not, and not again until the list has emptied. Agents that join while it
+/// is up are in the panel, which is where the answer is given. With a window
+/// in front the panel is already on screen and a notification would only
+/// repeat it.
+fn notify_requests(app: &AppHandle, event: &serde_json::Value) {
+    use tauri_plugin_notification::NotificationExt;
+    let in_front = app
+        .webview_windows()
+        .values()
+        .any(|window| window.is_focused().unwrap_or(false));
+    if in_front {
+        return;
+    }
+    let first = &event["requests"][0];
+    let agent = first["agent"].as_str().unwrap_or("An agent");
+    let body = match first["reason"].as_str() {
+        Some(reason) => format!("{agent} wants to use a machine you are using: {reason}"),
+        None => format!("{agent} wants to use a machine you are using."),
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .title("An agent is asking for a machine")
+        .body(body)
+        .show();
 }
 
 /// Start or stop the plane to match the setting.
@@ -469,15 +510,17 @@ fn wire_agents_in_background() {
     });
 }
 
-/// A person takes the wheel of a session an agent is driving (D5, `04 §5.4`).
+/// A person takes the wheel of a session an agent is driving (D5, `04 §5.4`),
+/// from the take the wheel or stop control on a pane.
 ///
-/// A revocation and not a request. The agent's next command is refused with
-/// `LEASE_REVOKED` and nothing further of its reaches the wire, and there is
-/// no grace window: two seconds of a button labelled stop doing nothing is the
-/// failure this exists to prevent.
+/// The agent is fenced at once: its next pointer event or key press is
+/// refused and the keys it held are released. It is a person's input on the
+/// shared lease and lasts exactly as long as one, so agents may ask again
+/// once the person has sent nothing for the person idle time. Before, this
+/// was a flag nothing ever cleared, and one press stopped an agent for good.
 ///
-/// The session is untouched. A revoked agent that had a build running should
-/// not take the build with it.
+/// The session is untouched. An agent that had a build running should not
+/// take the build with it.
 #[tauri::command]
 pub fn agent_take_the_wheel(
     app: AppHandle,
@@ -485,16 +528,67 @@ pub fn agent_take_the_wheel(
     session_id: String,
 ) -> Result<(), String> {
     crate::windows::validate_session_id(&session_id)?;
-    match state.agent.revoke(&session_id) {
-        Some(event) => {
-            let _ = app.emit(agent::AGENT_EVENT, event);
-            tracing::info!(session = %session_id, "a person took the wheel from an agent");
-            Ok(())
-        }
-        // Not an error: a person pressing "take the wheel" on a machine no
-        // agent is driving has got what they asked for.
-        None => Ok(()),
+    let event = state.agent.person_takes(&session_id);
+    // The board emits on change through its own wiring; this is for a
+    // window that pressed the control on a session nothing had changed on.
+    let _ = app.emit(agent::AGENT_EVENT, event);
+    Ok(())
+}
+
+/// The agents waiting for machines a person is using, and the mute, for a
+/// window that has just mounted the request panel. The same object as the
+/// `requests` event.
+#[tauri::command]
+pub fn agent_requests(state: State<'_, AppState>) -> serde_json::Value {
+    state.agent.requests_event()
+}
+
+/// A person's answer to one request, or to every request when `session_id`
+/// is absent: `"allow"` lets that agent use the machine now, `"not-now"`
+/// refuses it.
+#[tauri::command]
+pub fn agent_request_answer(
+    state: State<'_, AppState>,
+    session_id: Option<String>,
+    attachment_id: Option<String>,
+    answer: String,
+) -> Result<(), String> {
+    if let Some(session_id) = &session_id {
+        crate::windows::validate_session_id(session_id)?;
     }
+    match (answer.as_str(), session_id, attachment_id) {
+        ("allow", Some(session), Some(attachment)) => {
+            state.agent.allow_request(&session, &attachment);
+        }
+        ("not-now", Some(session), Some(attachment)) => {
+            state.agent.decline_request(&session, &attachment);
+        }
+        ("allow", None, None) => {
+            state.agent.allow_all_requests();
+        }
+        ("not-now", None, None) => state.agent.decline_all_requests(),
+        (other, _, _) => {
+            return Err(format!(
+                "{other:?} with those ids is not an answer; it is \"allow\" or \"not-now\", for one request (sessionId and attachmentId) or for all (neither)"
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Mute requests from agents for `minutes`, or until the person stops using
+/// every machine when `minutes` is absent.
+#[tauri::command]
+pub fn agent_requests_mute(state: State<'_, AppState>, minutes: Option<u64>) {
+    state
+        .agent
+        .mute_requests(minutes.map(|m| m.clamp(1, 24 * 60)));
+}
+
+/// Show requests again.
+#[tauri::command]
+pub fn agent_requests_unmute(state: State<'_, AppState>) {
+    state.agent.unmute_requests();
 }
 
 #[cfg(test)]

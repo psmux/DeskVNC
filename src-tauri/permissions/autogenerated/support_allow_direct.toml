@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-support-allow-direct"
+description = "Enables the support_allow_direct command without any pre-configured scope."
+commands.allow = ["support_allow_direct"]
+
+[[permission]]
+identifier = "deny-support-allow-direct"
+description = "Denies the support_allow_direct command without any pre-configured scope."
+commands.deny = ["support_allow_direct"]

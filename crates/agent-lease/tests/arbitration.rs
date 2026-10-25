@@ -32,6 +32,33 @@ fn human(id: &str) -> Party {
     party(id, HolderKind::Human)
 }
 
+/// A lease on the numbers `08 §5.4` first stated, with the person idle and
+/// the contended handover pushed out of the way.
+///
+/// The rules in this file are about ordering and obligations, and they were
+/// written against those numbers. The shorter defaults that replaced them
+/// have their own tests in `idle.rs`; here the point is that every rule still
+/// holds whatever the numbers are.
+fn spec_lease() -> Lease {
+    let policy = LeasePolicy {
+        lease_ttl_ms: 60_000,
+        idle_revoke_ms: 120_000,
+        person_idle_ms: 600_000,
+        contended_idle_ms: 600_000,
+        queue_ttl_ms: 60_000,
+        force_release_backoff_ms: 30_000,
+        ..LeasePolicy::default()
+    };
+    Lease::new(
+        "limb-1",
+        LeaseConfig {
+            mode: LeaseMode::Exclusive,
+            policy,
+        },
+    )
+    .expect("exclusive is buildable")
+}
+
 /// Acquire and complete the handover, which is what "holds it" means: the
 /// grant alone leaves the lease in [`LeasePhase::HandingOver`] with a release
 /// outstanding.
@@ -83,7 +110,7 @@ fn exclusive_is_the_default_and_is_accepted() {
 
 #[test]
 fn an_agent_is_preempted_by_a_human() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
 
     // Half a second in, well inside the three second floor. The floor is
@@ -117,7 +144,7 @@ fn an_agent_is_preempted_by_a_human() {
 
 #[test]
 fn the_fast_path_flips_as_soon_as_the_agent_lets_go() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let lease_id = lease.holder().expect("held").lease_id;
 
@@ -138,7 +165,7 @@ fn the_fast_path_flips_as_soon_as_the_agent_lets_go() {
 
 #[test]
 fn a_human_is_not_preempted_by_an_agent() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("h"), at(0));
 
     let refused = lease
@@ -172,7 +199,7 @@ fn a_human_is_not_preempted_by_an_agent() {
 
 #[test]
 fn equal_priority_queues_rather_than_steals() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("first"), at(0));
 
     let queued = lease
@@ -195,7 +222,7 @@ fn the_ladder_decides_who_may_take_the_wheel() {
     let kinds = [Admin, Owner, Human, Agent];
     for holder in kinds {
         for requester in kinds {
-            let mut lease = Lease::exclusive("limb-1");
+            let mut lease = spec_lease();
             seat(&mut lease, party("held", holder), at(0));
 
             let outcome = lease
@@ -226,7 +253,7 @@ fn the_ladder_decides_who_may_take_the_wheel() {
 
 #[test]
 fn a_priority_override_moves_a_party_up_the_ladder() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     // The unattended run a deployment does not want interrupted by a passing
     // click: an agent placed above `human` on purpose.
     seat(&mut lease, agent("a").with_priority(500), at(0));
@@ -244,7 +271,7 @@ fn a_priority_override_moves_a_party_up_the_ladder() {
 
 #[test]
 fn the_floor_protects_a_hand_on_a_mouse() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("first"), at(0));
 
     let refused = lease
@@ -276,7 +303,7 @@ fn the_floor_protects_a_hand_on_a_mouse() {
 #[test]
 fn the_floor_is_lifted_for_a_person_taking_over_from_an_agent() {
     for requester in [HolderKind::Human, HolderKind::Owner, HolderKind::Admin] {
-        let mut lease = Lease::exclusive("limb-1");
+        let mut lease = spec_lease();
         seat(&mut lease, agent("a"), at(0));
         let taken = lease
             .acquire(
@@ -293,7 +320,7 @@ fn the_floor_is_lifted_for_a_person_taking_over_from_an_agent() {
 
 #[test]
 fn an_agent_still_waits_out_the_floor_behind_another_agent() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a").with_priority(10), at(0));
     let refused = lease
         .acquire(AcquireRequest::new(agent("b")).no_queue(), at(1_000))
@@ -307,7 +334,7 @@ fn an_agent_still_waits_out_the_floor_behind_another_agent() {
 
 #[test]
 fn the_queue_refuses_at_its_cap_rather_than_growing() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("holder"), at(0));
     let cap = lease.policy().max_queue_depth;
 
@@ -328,7 +355,7 @@ fn the_queue_refuses_at_its_cap_rather_than_growing() {
 
 #[test]
 fn the_queue_is_priority_descending_and_first_come_first_served_within_one() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, party("boss", HolderKind::Admin), at(0));
 
     for (id, kind) in [
@@ -352,7 +379,7 @@ fn the_queue_is_priority_descending_and_first_come_first_served_within_one() {
 
 #[test]
 fn asking_twice_while_queued_reports_the_position_instead_of_taking_a_second_slot() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("holder"), at(0));
 
     let _ = lease
@@ -371,7 +398,7 @@ fn asking_twice_while_queued_reports_the_position_instead_of_taking_a_second_slo
 
 #[test]
 fn a_waiter_that_has_waited_a_minute_is_dropped() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("holder"), at(0));
     let _ = lease
         .acquire(AcquireRequest::new(agent("a")), at(1_000))
@@ -396,7 +423,7 @@ fn a_waiter_that_has_waited_a_minute_is_dropped() {
 
 #[test]
 fn an_expired_waiter_is_never_promoted() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("holder"), at(0));
     let _ = lease
         .acquire(AcquireRequest::new(agent("stale")), at(0))
@@ -413,7 +440,7 @@ fn an_expired_waiter_is_never_promoted() {
 
 #[test]
 fn releasing_hands_the_wheel_to_the_head_of_the_queue() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("holder"), at(0));
     let lease_id = lease.holder().expect("held").lease_id;
     let _ = lease
@@ -438,7 +465,7 @@ fn releasing_hands_the_wheel_to_the_head_of_the_queue() {
 
 #[test]
 fn giving_up_waiting_takes_the_party_out_of_the_queue() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, human("holder"), at(0));
     let lease_id = lease.holder().expect("held").lease_id;
     let _ = lease
@@ -458,7 +485,7 @@ fn giving_up_waiting_takes_the_party_out_of_the_queue() {
 
 #[test]
 fn withdrawing_a_preemption_gives_the_holder_the_wheel_back() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let _ = lease
         .acquire(AcquireRequest::new(human("h")), at(500))
@@ -485,7 +512,7 @@ fn withdrawing_a_preemption_gives_the_holder_the_wheel_back() {
 
 #[test]
 fn an_expired_holder_frees_the_lease() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
 
     let early = lease.tick(at(59_999));
@@ -506,7 +533,7 @@ fn an_expired_holder_frees_the_lease() {
 
 #[test]
 fn an_intent_pushes_the_hard_expiry_out() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     lease.note_intent(&pid("a"), at(59_000));
 
@@ -523,7 +550,7 @@ fn an_intent_pushes_the_hard_expiry_out() {
 
 #[test]
 fn a_holder_that_renews_but_never_acts_is_revoked_for_idling() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
 
     // The shape of a crashed agent whose socket is still open: a heartbeat
@@ -544,7 +571,7 @@ fn a_holder_that_renews_but_never_acts_is_revoked_for_idling() {
 
 #[test]
 fn a_dropped_transport_keeps_the_lease_for_the_grace_and_no_longer() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
 
     let dropped = lease.set_connected(&pid("a"), false, at(1_000));
@@ -571,7 +598,7 @@ fn a_dropped_transport_keeps_the_lease_for_the_grace_and_no_longer() {
 
 #[test]
 fn a_reconnect_inside_the_grace_keeps_the_wheel() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let _ = lease.set_connected(&pid("a"), false, at(1_000));
 
@@ -587,7 +614,7 @@ fn a_reconnect_inside_the_grace_keeps_the_wheel() {
 
 #[test]
 fn a_disconnected_holder_is_taken_over_without_the_polite_grace() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let _ = lease.set_connected(&pid("a"), false, at(1_000));
 
@@ -609,7 +636,7 @@ fn a_disconnected_holder_is_taken_over_without_the_polite_grace() {
 
 #[test]
 fn a_release_from_a_stale_holder_is_a_harmless_no_op() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let stale = lease.holder().expect("held").lease_id;
 
@@ -632,7 +659,7 @@ fn a_release_from_a_stale_holder_is_a_harmless_no_op() {
 
 #[test]
 fn releasing_twice_is_the_same_as_releasing_once() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let lease_id = lease.holder().expect("held").lease_id;
 
@@ -645,7 +672,7 @@ fn releasing_twice_is_the_same_as_releasing_once() {
 
 #[test]
 fn a_renew_keeps_the_lease_id_it_was_granted() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let lease_id = lease.holder().expect("held").lease_id;
 
@@ -667,7 +694,7 @@ fn a_renew_keeps_the_lease_id_it_was_granted() {
 
 #[test]
 fn nobody_dispatches_until_the_release_is_reported_done() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     let granted = lease
         .acquire(AcquireRequest::new(human("h")), at(0))
         .expect("free");
@@ -694,7 +721,7 @@ fn nobody_dispatches_until_the_release_is_reported_done() {
 
 #[test]
 fn the_idle_clock_starts_at_the_flip_and_not_at_the_grant() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     let _ = lease
         .acquire(AcquireRequest::new(agent("a")), at(0))
         .expect("free");
@@ -714,7 +741,7 @@ fn the_idle_clock_starts_at_the_flip_and_not_at_the_grant() {
 
 #[test]
 fn a_third_party_is_fenced_at_all_times() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     assert_eq!(lease.fence(&pid("nobody")), Fencing::ReleaseOnly);
     seat(&mut lease, human("h"), at(0));
     assert_eq!(lease.fence(&pid("nobody")), Fencing::ReleaseOnly);
@@ -728,7 +755,7 @@ fn a_third_party_is_fenced_at_all_times() {
 
 #[test]
 fn a_force_release_takes_the_wheel_from_everyone_and_holds_the_door_shut() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let _ = lease
         .acquire(AcquireRequest::new(agent("b")), at(10_000))
@@ -773,7 +800,7 @@ fn a_force_release_takes_the_wheel_from_everyone_and_holds_the_door_shut() {
 
 #[test]
 fn the_chord_releases_the_limb_even_when_nobody_was_holding_it() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     let forced = lease.force_release(at(0));
     assert!(
         forced.must_release(),
@@ -788,7 +815,7 @@ fn the_chord_releases_the_limb_even_when_nobody_was_holding_it() {
 
 #[test]
 fn the_view_names_the_holder_and_the_recipients_own_position() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     seat(&mut lease, agent("a"), at(0));
     let _ = lease
         .acquire(AcquireRequest::new(human("h")), at(10_000))
@@ -815,7 +842,7 @@ fn the_view_names_the_holder_and_the_recipients_own_position() {
 /// release was just performed.
 #[test]
 fn every_change_of_holder_carries_the_release_obligation() {
-    let mut lease = Lease::exclusive("limb-1");
+    let mut lease = spec_lease();
     let mut previous: Option<PartyId> = None;
 
     let check = |lease: &Lease, transition: &LeaseTransition, previous: &mut Option<PartyId>| {

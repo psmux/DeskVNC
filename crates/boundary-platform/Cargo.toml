@@ -8,8 +8,30 @@ license.workspace = true
 anyhow.workspace = true
 boundary-session.workspace = true
 image.workspace = true
-xcap = "0.9.8"
+fast_image_resize.workspace = true
 enigo = "0.6.1"
+# Software H.264, compiled from source, for machines without a hardware
+# encoder and for Linux.
+openh264 = "0.9.9"
+openh264-sys2 = { version = "0.9.9", default-features = false }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+xcap = "0.9.8"
+
+# X11: shared memory capture, damage to know what changed, RandR for where
+# each monitor is. Wayland: the desktop portal for consent, a PipeWire stream
+# for the pixels and the portal's remote desktop for input. x11rb and ashpd
+# are all Rust; PipeWire was already linked through xcap.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "randr"] }
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "remote_desktop", "screencast"] }
+async-io = "2"
+futures-lite = "2"
+pipewire = "0.10"
+libc = "0.2"
+# Virtual pointer and keyboard on wlroots compositors, which have no remote
+# desktop portal.
+enigo = { version = "0.6.1", features = ["wayland"] }
 
 # Per monitor DPI awareness, so a pointer position and a captured pixel are
 # the same coordinate on a scaled Windows display.
@@ -23,4 +45,35 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Services",
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+# Desktop Duplication and the video processor that shrinks its pictures, in
+# the version xcap already builds, and hardware H.264 through Media
+# Foundation.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+] }
+
+# CPU time in the capture_time example.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-screen-capture-kit = "0.3.2"
+dispatch2 = "0.3"
+block2 = "0.6"
+libc = "0.2"

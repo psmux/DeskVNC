@@ -40,6 +40,7 @@ agent-perception = { path = "../crates/agent-perception" }
 # `Timestamp`, and nothing else. `agent-perception` takes the time as an
 # argument rather than reading a clock, which is what makes an idle timeout
 # testable without a runtime, and the type that time is spelled in lives here.
+agent-lease = { path = "../crates/agent-lease" }
 limb-core = { path = "../crates/limb-core" }
 # `ClientCommand::TerminalInput` carries a `bytes::Bytes`; framing.rs builds
 # one straight from the decoded PTY-input payload, no intermediate Vec copy.
@@ -73,6 +74,10 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 
 # The agent plane's named pipe on Windows, with its owner only ACL (04 §2.1).
+[target.'cfg(unix)'.dependencies]
+# Raising the open file limit at start, see `raise_open_file_limit`.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 local-pipe = { path = "../crates/local-pipe" }
 

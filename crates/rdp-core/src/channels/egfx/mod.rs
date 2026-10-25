@@ -114,6 +114,11 @@ pub struct Egfx {
     frames_decoded: u32,
     /// Rectangles drawn since the last flush, waiting for the frame to end.
     pending: Vec<DecodedRect>,
+    /// Whether H.264 was offered when the channel opened.
+    avc420: bool,
+    /// Surfaces whose H.264 stream has started, so the renderer is told to
+    /// build a decoder for the first rectangle of each and only that one.
+    avc_started: Vec<u16>,
 }
 
 /// Hand written for the same reason [`decode::Decoders`]'s is: the ZGFX
@@ -156,6 +161,8 @@ impl Egfx {
             open_frame: None,
             frames_decoded: 0,
             pending: Vec::new(),
+            avc420: false,
+            avc_started: Vec::new(),
         }
     }
 
@@ -178,12 +185,22 @@ impl Egfx {
     /// [`RdpError::Pdu`] if the advertisement will not encode, which cannot
     /// happen for a fixed two element list and is checked rather than
     /// asserted.
-    pub fn opened(&mut self, replies: &mut ReplyBuf) -> Result<()> {
-        // `Capset` borrows its body, and every set here carries the same
-        // four bytes, so one static is all the borrow needs.
+    pub fn opened(&mut self, avc420: bool, replies: &mut ReplyBuf) -> Result<()> {
+        // `Capset` borrows its body. Every set carries the same four bytes,
+        // except version 8.1 when H.264 is offered, which says so with
+        // `RDPGFX_CAPS_FLAG_AVC420_ENABLED` (MS-RDPEGFX 2.2.3.2).
+        self.avc420 = avc420;
+        static AVC: [u8; 4] = rdp_pdu::vc::egfx::caps_flags::AVC420_ENABLED.to_le_bytes();
         let capsets = ADVERTISED
             .iter()
-            .map(|version| Capset::new(*version, &CAPS_FLAGS_NONE))
+            .map(|version| {
+                let flags = if avc420 && *version == caps_version::V8_1 {
+                    &AVC
+                } else {
+                    &CAPS_FLAGS_NONE
+                };
+                Capset::new(*version, flags)
+            })
             .collect();
         replies.emit(|buf| encode(&EgfxPdu::CapsAdvertise { capsets }, buf))
     }
@@ -337,6 +354,13 @@ impl Egfx {
             }
             EgfxPdu::WireToSurface1 {
                 surface_id,
+                codec_id: rdp_pdu::vc::egfx::codec_id::AVC420,
+                dest_rect,
+                bitmap_data,
+                ..
+            } if self.avc420 => self.avc420(surface_id, dest_rect, bitmap_data.as_slice()),
+            EgfxPdu::WireToSurface1 {
+                surface_id,
                 codec_id,
                 pixel_format,
                 dest_rect,
@@ -364,10 +388,50 @@ impl Egfx {
                 )?;
                 self.damaged(surface_id, dest_rect)
             }
-            // `WIRE_TO_SURFACE_2` carries a persistent codec context, which
-            // only the progressive codec uses (MS-RDPEGFX 2.2.2.2). We never
-            // advertise it, so this is a server drawing with something it was
-            // not offered.
+            // `WIRE_TO_SURFACE_2` is how a server sends progressive RemoteFX
+            // (MS-RDPEGFX 2.2.2.2): no destination rectangle, because every
+            // tile names its own place in the surface. xrdp 0.10 sends its
+            // RemoteFX this way. The codec context is the surface's own tile
+            // store, which is the one context a server keeps per surface.
+            EgfxPdu::WireToSurface2 {
+                surface_id,
+                codec_id: CODEC_CAPROGRESSIVE,
+                bitmap_data,
+                ..
+            } => {
+                let Self {
+                    surfaces, decoders, ..
+                } = self;
+                let surface = surfaces.get_mut(surface_id, "a wire to surface 2 command")?;
+                let whole = RectExclusive {
+                    left: 0,
+                    top: 0,
+                    right: surface.width,
+                    bottom: surface.height,
+                };
+                let (progressive, mut dst) =
+                    surface.progressive_view(whole, "a wire to surface 2 command")?;
+                let wrote = decode::progressive_to_surface(
+                    bitmap_data.as_slice(),
+                    decoders,
+                    progressive,
+                    &mut dst,
+                )?;
+                match wrote {
+                    Some((x, y, w, h)) => self.damaged(
+                        surface_id,
+                        RectExclusive {
+                            left: x,
+                            top: y,
+                            right: x.saturating_add(w),
+                            bottom: y.saturating_add(h),
+                        },
+                    ),
+                    None => Ok(()),
+                }
+            }
+            // Any other codec in `WIRE_TO_SURFACE_2` needs a persistent
+            // context this client has no decoder for.
             EgfxPdu::WireToSurface2 { codec_id, .. } => Err(RdpError::Protocol(format!(
                 "the server sent a wire to surface 2 command in codec 0x{codec_id:04x}, which \
                  needs a persistent codec context this client never created \
@@ -691,6 +755,52 @@ impl Egfx {
         pending.push(DecodedRect {
             rect: Rect::new(x, y, w, h),
             payload: RectPayload::Rgba(pixels),
+        });
+        Ok(())
+    }
+
+    /// One AVC420 rectangle, passed on undecoded as `RectPayload::H264`
+    /// (MS-RDPEGFX 2.2.4.4, `rdp_codecs::avc420`). The viewer's renderer
+    /// decodes it in hardware, as it does VNC's Open H.264.
+    ///
+    /// The picture never reaches the surface's own pixels, so a later
+    /// surface to surface or surface to cache copy out of an H.264 area reads
+    /// what was there before. That is why H.264 is offered only when the
+    /// options ask for it.
+    fn avc420(&mut self, surface_id: u16, dest_rect: RectExclusive, src: &[u8]) -> Result<()> {
+        let stream = rdp_codecs::avc420::parse(src).map_err(|e| {
+            RdpError::Protocol(format!(
+                "the server sent an AVC420 metablock that does not parse: {e} (MS-RDPEGFX 2.2.4.4)"
+            ))
+        })?;
+        tracing::trace!(codec = 0x000bu16, "wire to surface");
+        let surface = self.surfaces.get(surface_id, "an AVC420 rectangle")?;
+        let Some((ox, oy)) = surface.origin else {
+            return Ok(());
+        };
+        let (left, top, w, h) = surface.bounded(dest_rect, "an AVC420 rectangle")?;
+        let (Ok(x), Ok(y)) = (
+            u16::try_from(ox + u32::from(left)),
+            u16::try_from(oy + u32::from(top)),
+        ) else {
+            return Err(RdpError::Protocol(format!(
+                "surface {surface_id} drew H.264 outside the framebuffer coordinate space"
+            )));
+        };
+        let reset = !self.avc_started.contains(&surface_id);
+        if reset {
+            self.avc_started.push(surface_id);
+        }
+        self.pending.push(DecodedRect {
+            rect: Rect::new(x, y, w, h),
+            payload: RectPayload::H264 {
+                data: stream.bitstream.to_vec(),
+                // RDP has no reset bits of its own (PRDRDP/04 §5.2).
+                flags: 0,
+                context_id: u32::from(surface_id),
+                reset,
+                keyframe: rdp_codecs::avc420::contains_idr(stream.bitstream),
+            },
         });
         Ok(())
     }

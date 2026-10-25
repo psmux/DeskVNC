@@ -39,6 +39,9 @@ members = [
     # The named pipe both listeners use on Windows, with its owner only ACL.
     "crates/local-pipe",
     "crates/dvv",
+    # Remote desktop benchmark: the stage window and the measuring client.
+    "crates/bench-stage",
+    "crates/remote-bench",
     "src-tauri",
 ]
 
@@ -51,7 +54,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.31.1"
+version = "0.32.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
