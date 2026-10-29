@@ -1056,6 +1056,8 @@ const MAX_UPDATES_IN_FLIGHT: usize = 12;
 /// twelve held a link with a 300 ms round trip to forty a second. The bytes
 /// in flight are still held to the congestion window.
 const MAX_VIDEO_IN_FLIGHT: usize = 32;
+/// The longest video waits after a picture for the link to carry it.
+const MAX_VIDEO_GAP: Duration = Duration::from_millis(250);
 /// Data allowed on its way before the link has measured itself.
 const MIN_BYTES_IN_FLIGHT: u64 = 128 * 1024;
 
@@ -1582,7 +1584,10 @@ async fn send_updates(
             // Intel i5 did at four times its rate, waits for them to go.
             let interval = Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
             let bytes: usize = update.as_ref().map_or(0, |u| u.iter().map(Vec::len).sum());
-            let spent = Duration::from_secs_f64(bytes as f64 * 8.0 / rate.0.max(1) as f64);
+            // Never more than a quarter second, though: a picture larger than
+            // the rate allows once is better sent late than motion stopping.
+            let spent = Duration::from_secs_f64(bytes as f64 * 8.0 / rate.0.max(1) as f64)
+                .min(MAX_VIDEO_GAP);
             next_video = began + interval.max(spent);
         }
         coder = Some(working);
