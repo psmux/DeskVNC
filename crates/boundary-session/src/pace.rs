@@ -24,9 +24,6 @@ const RATE_WINDOW: Duration = Duration::from_secs(2);
 /// Round trips of data allowed on the way: one fills the link, the half
 /// covers a helper's decoding and acknowledgements that bunch up.
 const IN_FLIGHT_GAIN: f64 = 1.5;
-/// Round trips allowed on the way while nothing queues, to find out
-/// whether the link carries more.
-const PROBE_GAIN: f64 = 2.5;
 /// A sender that has not waited for room for this long has stopped filling
 /// the link.
 const FULL_FOR: Duration = Duration::from_secs(1);
@@ -164,26 +161,26 @@ impl Pace {
     }
 
     /// Bytes that may be on their way, never more than the congestion
-    /// window allows. With no queue, two and a half round trips of what the
-    /// link has carried, so a host that was sending little, a pointer and
-    /// then a scroll, finds the link's speed in a few round trips: at one and
-    /// a half that took ten seconds on the i5. With a little queue, one and a
-    /// half. Once it has queued, one round trip of what arrives now, so a
-    /// link that just got slower is not handed seconds of screens at the old
-    /// rate.
+    /// window allows. With no queue, all of it: a window switch or the
+    /// first screen of a scroll after a quiet spell goes out at once. Held
+    /// to what the link had carried while a pointer moved, 294 kbit/s, a
+    /// window switch on the i5 waited one and two round trips for room, 200
+    /// and 470 ms, which is the freeze a person feels. With a little queue,
+    /// one and a half round trips of what the link carries. Once it has
+    /// queued, one round trip of what arrives now, so a link that just got
+    /// slower is not handed seconds of screens at the old rate. Video's own
+    /// rate ([`Pace::bitrate`]) is what keeps motion from filling the queue.
     pub(crate) fn limit(&self, window: u64, floor: u64) -> u64 {
         match (self.rate(), self.min_rtt(), self.queue()) {
-            (Some(best), Some(rtt), queue) => {
-                let queue = queue.unwrap_or_default();
+            (Some(best), Some(rtt), Some(queue)) if queue > allowed(rtt) / 2 => {
                 let (rate, gain) = match self.recent {
                     Some(recent) if queue > allowed(rtt) => (recent.min(best), 1.0),
-                    _ if queue > allowed(rtt) / 2 => (best, IN_FLIGHT_GAIN),
-                    _ => (best, PROBE_GAIN),
+                    _ => (best, IN_FLIGHT_GAIN),
                 };
                 let bdp = rate / 8.0 * rtt.as_secs_f64() * gain;
                 (bdp as u64).clamp(floor, window.max(floor))
             }
-            _ => window,
+            _ => window.max(floor),
         }
     }
 
