@@ -183,31 +183,6 @@ impl Framebuffer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use remote_core::Rect;
-
-    #[test]
-    fn rects_land_where_they_say() {
-        let mut fb = Framebuffer::new();
-        fb.resize(8, 4);
-        fb.apply(&DecodedRect {
-            rect: Rect::new(2, 1, 2, 2),
-            payload: RectPayload::Rgba(vec![9; 16]),
-        })
-        .unwrap();
-        fb.apply(&DecodedRect {
-            rect: Rect::new(5, 1, 2, 2),
-            payload: RectPayload::CopyRect { src_x: 2, src_y: 1 },
-        })
-        .unwrap();
-        let at = |x: u32, y: u32| fb.rgba[((y * 8 + x) * 4) as usize];
-        assert_eq!((at(2, 1), at(3, 2), at(5, 1), at(6, 2)), (9, 9, 9, 9));
-        assert_eq!((at(1, 1), at(4, 1), at(2, 3)), (0, 0, 0));
-    }
-}
-
 /// Decoded planes to RGBA, BT.709 limited range, as VideoToolbox on the
 /// host tags its pictures.
 #[cfg(target_os = "macos")]
@@ -232,4 +207,29 @@ fn bt709(planes: &boundary_platform::video::Planes, w: u32, h: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remote_core::Rect;
+
+    #[test]
+    fn rects_land_where_they_say() {
+        let mut fb = Framebuffer::new();
+        fb.resize(8, 4);
+        fb.apply(&DecodedRect {
+            rect: Rect::new(2, 1, 2, 2),
+            payload: RectPayload::Rgba(vec![9; 16]),
+        })
+        .unwrap();
+        fb.apply(&DecodedRect {
+            rect: Rect::new(5, 1, 2, 2),
+            payload: RectPayload::CopyRect { src_x: 2, src_y: 1 },
+        })
+        .unwrap();
+        let at = |x: u32, y: u32| fb.rgba[((y * 8 + x) * 4) as usize];
+        assert_eq!((at(2, 1), at(3, 2), at(5, 1), at(6, 2)), (9, 9, 9, 9));
+        assert_eq!((at(1, 1), at(4, 1), at(2, 3)), (0, 0, 0));
+    }
 }
