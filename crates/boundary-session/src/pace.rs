@@ -145,6 +145,11 @@ impl Pace {
         self.sent.len()
     }
 
+    /// Updates of more than `bytes` waiting to be shown.
+    pub(crate) fn count_over(&self, bytes: u64) -> usize {
+        self.sent.iter().filter(|s| s.bytes > bytes).count()
+    }
+
     /// Bytes waiting to be shown.
     pub(crate) fn bytes(&self) -> u64 {
         self.sent.iter().map(|s| s.bytes).sum()

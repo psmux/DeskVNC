@@ -1049,6 +1049,10 @@ async fn send_screens(
 /// task that has them rather than on a blocking thread.
 const SMALL_PIXELS: u64 = 128 * 128;
 const SMALL_BYTES: usize = 32 * 1024;
+/// An update this small does not count against the most in flight.
+const TINY_BYTES: u64 = 8 * 1024;
+/// However small, at most this many updates on their way.
+const MAX_ANY_IN_FLIGHT: usize = 64;
 
 /// At most this many updates wait to be shown, however small they are.
 const MAX_UPDATES_IN_FLIGHT: usize = 12;
@@ -1481,7 +1485,15 @@ async fn send_updates(
                 MAX_UPDATES_IN_FLIGHT
             };
             let limit = pace.limit(window(connection), MIN_BYTES_IN_FLIGHT);
-            if pace.count() == 0 || (pace.count() < most && pace.bytes() < limit) {
+            // A tiny update does not count against the most in flight: a
+            // menu bar indicator macOS animates while the screen is shared
+            // kept six of twelve on their way, 1.8 KB each, and a window
+            // switch on the i5 waited 35 to 57 ms behind them. The bytes
+            // still count.
+            let counted = pace.count_over(TINY_BYTES).min(pace.count());
+            if pace.count() == 0
+                || (counted < most && pace.count() < MAX_ANY_IN_FLIGHT && pace.bytes() < limit)
+            {
                 break;
             }
             pace.on_full(Instant::now());
