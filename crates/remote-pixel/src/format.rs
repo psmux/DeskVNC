@@ -62,6 +62,24 @@ impl PixelFormat {
         }
     }
 
+    /// 16-bit true colour, 5 bits red, 6 green, 5 blue. The smallest format
+    /// macOS Screen Sharing accepts: it closes the connection on any 8-bit
+    /// format, palette or true colour.
+    pub const fn rgb565() -> Self {
+        Self {
+            bits_per_pixel: 16,
+            depth: 16,
+            big_endian: false,
+            true_colour: true,
+            red_max: 31,
+            green_max: 63,
+            blue_max: 31,
+            red_shift: 11,
+            green_shift: 5,
+            blue_shift: 0,
+        }
+    }
+
     /// rgb222-64 colours.
     pub const fn rgb222() -> Self {
         Self {
