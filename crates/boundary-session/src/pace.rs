@@ -29,7 +29,7 @@ const IN_FLIGHT_GAIN: f64 = 1.5;
 const FULL_FOR: Duration = Duration::from_secs(1);
 /// Video bit rate never goes below or above these.
 pub(crate) const MIN_BITRATE: f64 = 300_000.0;
-pub(crate) const MAX_BITRATE: f64 = 6_000_000.0;
+pub(crate) const MAX_BITRATE: f64 = 16_000_000.0;
 
 struct Sent {
     seq: u64,
