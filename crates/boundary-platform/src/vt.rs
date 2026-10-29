@@ -327,17 +327,31 @@ impl VideoToolbox {
         // pictures and dropped pictures to keep its rate, where the ordinary
         // real time mode measured 30 screens a second across the ocean. A
         // Mac without the mode gets the ordinary one too.
-        match Self::create(api, width, height, cfg!(target_arch = "aarch64")) {
+        let hardware = !(cfg!(target_arch = "x86_64") && intra_only(api, width, height));
+        match Self::create(api, width, height, cfg!(target_arch = "aarch64"), hardware) {
             Ok(encoder) => Ok(encoder),
-            Err(_) => Self::create(api, width, height, false),
+            Err(_) => Self::create(api, width, height, false, hardware),
         }
     }
-    fn create(api: &'static Api, width: u32, height: u32, low_latency: bool) -> Result<Self> {
+    fn create(
+        api: &'static Api,
+        width: u32,
+        height: u32,
+        low_latency: bool,
+        hardware: bool,
+    ) -> Result<Self> {
         let k = &api.keys;
         let yes = unsafe { kCFBooleanTrue };
         let mut spec: Vec<(CFStringRef, CFTypeRef)> = Vec::new();
         if let Some(key) = k.enable_hardware {
-            spec.push((key, yes));
+            spec.push((
+                key,
+                if hardware {
+                    yes
+                } else {
+                    unsafe { kCFBooleanFalse }
+                },
+            ));
         }
         if low_latency {
             spec.push((k.low_latency.context("No low latency mode")?, yes));
@@ -570,6 +584,48 @@ impl VideoEncoder for VideoToolbox {
             None => bail!("VideoToolbox dropped a picture"),
         }
     }
+}
+
+/// Whether the hardware encoder makes nothing but keyframes, found once by
+/// encoding three pictures of the screen's size: at 256 by 256 the AMD
+/// encoder below behaved.
+///
+/// The AMD Radeon Pro 5300 of a 2020 Intel iMac does: it hands a picture
+/// over only when the session is told to finish its frames, and each finish
+/// starts it over with an IDR picture. A full screen of motion was 21 to
+/// 29 KB a picture and a scroll of text 57 to 73 KB, where Apple's software
+/// encoder made 7 to 13 KB and 2 to 7 KB in about 30 ms of the i5's CPU. On
+/// a slow link that is the difference between a few screens a second and
+/// thirty, so such a Mac encodes in software.
+fn intra_only(api: &'static Api, width: u32, height: u32) -> bool {
+    static FOUND: OnceLock<bool> = OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let Ok(mut probe) = VideoToolbox::create(api, width, height, false, true) else {
+            return false;
+        };
+        if !probe.hardware {
+            return false;
+        }
+        let mut last = false;
+        for i in 0..3u8 {
+            let rgba = (0..width * height)
+                .flat_map(|p| {
+                    let v = ((p % width) as u8).wrapping_add(i * 16);
+                    [v, v / 2, 255 - v, 255]
+                })
+                .collect();
+            let frame = Frame {
+                width,
+                height,
+                rgba,
+            };
+            match probe.encode(&frame, i == 0) {
+                Ok(encoded) => last = encoded.keyframe,
+                Err(_) => return false,
+            }
+        }
+        last
+    })
 }
 
 /// RGBA to the BGRA VideoToolbox takes.
