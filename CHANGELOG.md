@@ -33,6 +33,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* A Mac sharing its screen over Boundary no longer quits when the helper
+  types. Releasing a letter or digit key asked the keyboard layout for a
+  key code from a worker thread, which macOS 15 answers by stopping the app
+  with an illegal instruction, and the session ended with it. Letters and
+  digits now go by their fixed key codes.
+
+* DeskVNCViewer no longer naps. With its window behind another, macOS slowed
+  it until it read a Boundary session four seconds late; the computer on the
+  other end filled its queue, and the screen froze and then raced to catch up
+  when the window came back to the front.
+
 * A window switch or the first screen of a scroll over Boundary goes out at
   once again. After a quiet spell it waited one or two round trips for room,
   200 to 470 ms on a link to Florida, and then the whole screen was sent
