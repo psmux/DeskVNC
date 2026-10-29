@@ -126,7 +126,9 @@ impl Pace {
             });
             let seen = rtt.saturating_sub(wire);
             self.smoothed = Some(match self.smoothed {
-                Some(old) => (old * 7 + seen) / 8,
+                // Quick to forget: on a slow link a picture is acknowledged
+                // every second or so, and a queue long gone held video down.
+                Some(old) => (old * 3 + seen) / 4,
                 None => seen,
             });
         }
@@ -228,8 +230,13 @@ impl Pace {
             // A queue starting: hold, and come down to what arrives.
             target.min(ceiling * 1.05)
         } else {
-            // Room: climb, though not far past what the link has shown.
-            (target * 1.12).min(ceiling * 1.25)
+            // Room: climb, though not far past what the link has shown. By
+            // the round trips that passed, not once an acknowledgement: at
+            // the floor a picture went every second and a half, and video
+            // stayed there long after the link came back.
+            let trips = now.saturating_duration_since(self.moved).as_secs_f64()
+                / rtt.as_secs_f64().max(0.05);
+            (target * 1.12f64.powf(trips.min(6.0))).min(ceiling * 1.25)
         };
         self.target = Some(next.clamp(MIN_BITRATE, MAX_BITRATE));
         self.moved = now;
