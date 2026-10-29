@@ -24,6 +24,9 @@ const RATE_WINDOW: Duration = Duration::from_secs(2);
 /// Round trips of data allowed on the way: one fills the link, the half
 /// covers a helper's decoding and acknowledgements that bunch up.
 const IN_FLIGHT_GAIN: f64 = 1.5;
+/// A sender that has not waited for room for this long has stopped filling
+/// the link.
+const FULL_FOR: Duration = Duration::from_secs(1);
 /// Video bit rate never goes below or above these.
 pub(crate) const MIN_BITRATE: f64 = 300_000.0;
 pub(crate) const MAX_BITRATE: f64 = 6_000_000.0;
@@ -58,6 +61,11 @@ pub(crate) struct Pace {
     /// What the congestion window said video could have, the start before
     /// the pacer has seen enough.
     fallback: f64,
+    /// Since when, and until when, the sender has had to wait for room.
+    /// Only a couple of round trips into that does what arrives say what
+    /// the link can carry; while a pointer moves, and just after, it says
+    /// only how little was sent.
+    full: Option<(Instant, Instant)>,
 }
 
 impl Pace {
@@ -73,6 +81,7 @@ impl Pace {
             target: None,
             moved: now,
             fallback: MAX_BITRATE,
+            full: None,
         }
     }
 
@@ -119,6 +128,14 @@ impl Pace {
             });
         }
         self.steer(now);
+    }
+
+    /// The sender is waiting for room.
+    pub(crate) fn on_full(&mut self, now: Instant) {
+        self.full = Some(match self.full {
+            Some((since, last)) if now.saturating_duration_since(last) < FULL_FOR => (since, now),
+            _ => (now, now),
+        });
     }
 
     /// Updates waiting to be shown.
@@ -186,6 +203,13 @@ impl Pace {
         if now.saturating_duration_since(self.moved) < rtt.max(Duration::from_millis(50)) {
             return;
         }
+        // What arrives is a ceiling only once the sender has kept the link
+        // full for a couple of round trips.
+        let full = self.full.is_some_and(|(since, last)| {
+            now.saturating_duration_since(last) < FULL_FOR
+                && now.saturating_duration_since(since) > rtt * 2
+        });
+        let ceiling = if full { rate } else { f64::INFINITY };
         // A little queue is normal; past it, back off by how bad it is.
         let allowed = allowed(rtt);
         let next = if queue > allowed * 3 {
@@ -194,10 +218,10 @@ impl Pace {
             target * 0.85
         } else if queue > allowed / 2 {
             // A queue starting: hold, and come down to what arrives.
-            target.min(rate * 1.05)
+            target.min(ceiling * 1.05)
         } else {
             // Room: climb, though not far past what the link has shown.
-            (target * 1.12).min(rate * 1.25)
+            (target * 1.12).min(ceiling * 1.25)
         };
         self.target = Some(next.clamp(MIN_BITRATE, MAX_BITRATE));
         self.moved = now;
@@ -245,6 +269,8 @@ mod tests {
         arrivals: VecDeque<(Instant, u64)>,
         bits: f64,
         base: Duration,
+        /// Sending pictures; when not, a small update a second, as a pointer.
+        busy: bool,
     }
     impl Link {
         fn new() -> Self {
@@ -256,6 +282,7 @@ mod tests {
                 free: now,
                 arrivals: VecDeque::new(),
                 bits: 1e6,
+                busy: true,
                 base: Duration::ZERO,
             }
         }
@@ -272,15 +299,28 @@ mod tests {
                     let (_, seq) = self.arrivals.pop_front().unwrap();
                     self.pace.on_ack(seq, self.now);
                 }
-                if self.pace.count() == 0
-                    || self.pace.bytes() < self.pace.limit(4_000_000, 128 * 1024)
-                {
-                    let bytes = (self.pace.bitrate(6_000_000) as f64 / 8.0 / 60.0) as u64;
+                let room = self.pace.count() == 0
+                    || self.pace.bytes() < self.pace.limit(4_000_000, 128 * 1024);
+                if !room {
+                    self.pace.on_full(self.now);
+                }
+                // Idle, a pointer's update a second.
+                let due = self.busy || self.seq % 60 == 0;
+                if room && due {
+                    let bytes = if self.busy {
+                        (self.pace.bitrate(6_000_000) as f64 / 8.0 / 60.0) as u64
+                    } else {
+                        3000
+                    };
                     self.seq += 1;
                     self.pace.on_send(self.seq, bytes, self.now);
                     self.free = self.free.max(self.now)
                         + Duration::from_secs_f64(bytes as f64 * 8.0 / bits);
                     self.arrivals.push_back((self.free + base, self.seq));
+                } else if !self.busy {
+                    self.seq += 1;
+                    self.pace.on_send(self.seq, 0, self.now);
+                    self.arrivals.push_back((self.now + base, self.seq));
                 }
                 self.now += Duration::from_millis(16);
             }
@@ -338,6 +378,19 @@ mod tests {
         link.run(20e6, Duration::from_millis(100), 15);
         let after = link.pace.bitrate(6_000_000);
         assert!(after > before * 2, "{after} after {before}");
+    }
+
+    #[test]
+    fn a_quiet_spell_does_not_hold_video_down() {
+        let mut link = Link::new();
+        link.run(8e6, Duration::from_millis(300), 5);
+        // A pointer moving for ten seconds sends next to nothing.
+        link.busy = false;
+        link.run(8e6, Duration::from_millis(300), 10);
+        link.busy = true;
+        link.run(8e6, Duration::from_millis(300), 2);
+        let rate = link.pace.bitrate(6_000_000);
+        assert!(rate >= 3_000_000, "video at {rate} two seconds into motion");
     }
 
     #[test]

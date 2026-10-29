@@ -1473,6 +1473,7 @@ async fn send_updates(
             if pace.count() == 0 || (pace.count() < most && pace.bytes() < limit) {
                 break;
             }
+            pace.on_full(Instant::now());
             let waiting = Instant::now();
             if shown.changed().await.is_err() {
                 return std::future::pending().await;
