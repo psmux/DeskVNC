@@ -1117,6 +1117,9 @@ struct Coder {
     framed: bool,
     encoders: Option<VideoEncoders>,
     video: Option<Video>,
+    /// How much less than the link's rate the encoder is asked for. Kept
+    /// across encoders: the next one overshoots as the last did.
+    ask: video::Ask,
     policy: video::Policy,
     /// The capture before this one, to tell how much of the screen moved.
     last: Option<Arc<Frame>>,
@@ -1146,6 +1149,7 @@ impl Coder {
             framed,
             encoders: None,
             video: None,
+            ask: video::Ask::default(),
             policy: video::Policy::default(),
             last: None,
             held: None,
@@ -1335,12 +1339,13 @@ impl Coder {
             }
         };
         let video = self.video.insert(video);
+        let asked = (self.ask.rate(rate.0), rate.1);
         // Small swings in the measured link are left alone: an encoder told
         // a new rate every screen spends its bits unevenly.
-        let swing = (rate.0 as f64 / video.rate.0.max(1) as f64 - 1.0).abs();
-        if video.fresh || swing > 0.15 || rate.1 != video.rate.1 {
-            video.encoder.set_rate(rate.0, rate.1);
-            video.rate = rate;
+        let swing = (asked.0 as f64 / video.rate.0.max(1) as f64 - 1.0).abs();
+        if video.fresh || swing > 0.15 || asked.1 != video.rate.1 {
+            video.encoder.set_rate(asked.0, asked.1);
+            video.rate = asked;
         }
         // Only a new encoder starts with a keyframe. When video starts again
         // after the screen settled, the helper's decoder still holds the
@@ -1370,6 +1375,10 @@ impl Coder {
             video.typical = size;
         } else if !cut {
             video.typical = (video.typical * 7 + size) / 8;
+        }
+        // A keyframe or a cut is big by nature, not by overshooting.
+        if !video.fresh && !cut && !encoded.keyframe {
+            self.ask.made(rate.0, size);
         }
         let fresh = std::mem::replace(&mut video.fresh, false);
         Ok(Some(Unit {
