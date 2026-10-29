@@ -402,14 +402,15 @@ pub(crate) fn damage_share(rects: &[screen::Rect], width: u32, height: u32) -> f
 /// second right now. Video takes about half of that, so the tiles of the
 /// settle refresh and the input still find room, and the queue at the
 /// bottleneck stays short: a frame that waits there is lag the helper feels.
-/// On a fast link 6 Mbit/s is the ceiling, near what video used when it ran
-/// at 33 screens a second. More buys a sharper moving picture, and the
-/// screen is sent sharp anyway once it settles.
+/// On a fast link 16 Mbit/s is the ceiling. It was 6, but VideoToolbox on
+/// an Intel iMac makes a full screen of motion no smaller than 20 to 30 KB a
+/// picture whatever it is asked, so 6 held it to 20 screens a second on a
+/// link that carried 28 Mbit/s. The pacer ([`crate::pace`]) brings the rate
+/// down as soon as the link queues, so a higher ceiling no longer fills a
+/// slow link's queue.
 pub(crate) fn bitrate(cwnd: u64, rtt: Duration) -> u32 {
-    const MIN: u64 = 300_000;
-    const MAX: u64 = 6_000_000;
     let rtt = rtt.max(Duration::from_millis(5)).as_secs_f64();
-    ((cwnd as f64 * 8.0 / rtt * 0.5) as u64).clamp(MIN, MAX) as u32
+    (cwnd as f64 * 8.0 / rtt * 0.5).clamp(crate::pace::MIN_BITRATE, crate::pace::MAX_BITRATE) as u32
 }
 
 /// Screens a second to aim for at a bit rate: fewer on a slow link, so each
@@ -509,7 +510,7 @@ mod tests {
         let cell = bitrate(30_000, Duration::from_millis(200));
         assert!(cell < 1_000_000 && frame_rate(cell) < 30);
         // A LAN is capped.
-        assert_eq!(bitrate(10_000_000, Duration::from_millis(1)), 6_000_000);
+        assert_eq!(bitrate(10_000_000, Duration::from_millis(1)), 16_000_000);
     }
 
     #[test]
