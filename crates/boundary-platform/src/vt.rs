@@ -305,6 +305,11 @@ pub struct VideoToolbox {
     width: u32,
     height: u32,
     started: Instant,
+    /// The last picture's time as VideoToolbox was told it, and the real
+    /// time it came, in microseconds since `started`.
+    stamped: Option<(i64, i64)>,
+    /// One screen's time at the rate last set, in microseconds.
+    step: i64,
     hardware: bool,
     low_latency: bool,
 }
@@ -375,6 +380,8 @@ impl VideoToolbox {
             width,
             height,
             started: Instant::now(),
+            stamped: None,
+            step: 1_000_000 / 60,
             hardware: false,
             low_latency,
         };
@@ -470,6 +477,7 @@ impl VideoEncoder for VideoToolbox {
         if let Some(key) = k.expected_frame_rate {
             let _ = set(key, int(frames_per_second as i32).0);
         }
+        self.step = 1_000_000 / frames_per_second.max(1) as i64;
     }
     fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Encoded> {
         let api = api().context("VideoToolbox is not available")?;
@@ -522,8 +530,19 @@ impl VideoEncoder for VideoToolbox {
         }
         let force =
             keyframe.then(|| dictionary(&[(api.keys.force_key_frame, unsafe { kCFBooleanTrue })]));
+        // VideoToolbox gives a picture the bits of the time since the last
+        // one. A picture that waited for a slow link would get the bits of
+        // the whole wait, 330 KB after half a second at 4.8 Mbit/s on the
+        // Intel i5, which made the next wait longer still. So no picture is
+        // stamped more than one screen's time after the last.
+        let real = self.started.elapsed().as_micros() as i64;
+        let pts = match self.stamped {
+            Some((pts, was)) => pts + (real - was).clamp(1, self.step),
+            None => real,
+        };
+        self.stamped = Some((pts, real));
         let now = CMTime {
-            value: self.started.elapsed().as_micros() as i64,
+            value: pts,
             timescale: 1_000_000,
             flags: 1,
             epoch: 0,
