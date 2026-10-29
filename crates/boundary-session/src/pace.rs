@@ -305,7 +305,7 @@ mod tests {
                     self.pace.on_full(self.now);
                 }
                 // Idle, a pointer's update a second.
-                let due = self.busy || self.seq % 60 == 0;
+                let due = self.busy || self.seq.is_multiple_of(60);
                 if room && due {
                     let bytes = if self.busy {
                         (self.pace.bitrate(6_000_000) as f64 / 8.0 / 60.0) as u64
