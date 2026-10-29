@@ -24,6 +24,9 @@ const RATE_WINDOW: Duration = Duration::from_secs(2);
 /// Round trips of data allowed on the way: one fills the link, the half
 /// covers a helper's decoding and acknowledgements that bunch up.
 const IN_FLIGHT_GAIN: f64 = 1.5;
+/// Round trips allowed on the way while nothing queues, to find out
+/// whether the link carries more.
+const PROBE_GAIN: f64 = 2.5;
 /// A sender that has not waited for room for this long has stopped filling
 /// the link.
 const FULL_FOR: Duration = Duration::from_secs(1);
@@ -158,17 +161,22 @@ impl Pace {
         self.rates.front().map(|(_, rate)| *rate)
     }
 
-    /// Bytes that may be on their way: one and a half round trips of what
-    /// the link carries, never more than the congestion window allows. Once a
-    /// queue shows, one round trip of what arrives now, so a link that just
-    /// got slower is not handed seconds of screens at the old rate.
+    /// Bytes that may be on their way, never more than the congestion
+    /// window allows. With no queue, two and a half round trips of what the
+    /// link has carried, so a host that was sending little, a pointer and
+    /// then a scroll, finds the link's speed in a few round trips: at one and
+    /// a half that took ten seconds on the i5. With a little queue, one and a
+    /// half. Once it has queued, one round trip of what arrives now, so a
+    /// link that just got slower is not handed seconds of screens at the old
+    /// rate.
     pub(crate) fn limit(&self, window: u64, floor: u64) -> u64 {
-        match (self.rate(), self.min_rtt()) {
-            (Some(best), Some(rtt)) => {
-                let queued = self.queue().is_some_and(|q| q > allowed(rtt));
+        match (self.rate(), self.min_rtt(), self.queue()) {
+            (Some(best), Some(rtt), queue) => {
+                let queue = queue.unwrap_or_default();
                 let (rate, gain) = match self.recent {
-                    Some(recent) if queued => (recent.min(best), 1.0),
-                    _ => (best, IN_FLIGHT_GAIN),
+                    Some(recent) if queue > allowed(rtt) => (recent.min(best), 1.0),
+                    _ if queue > allowed(rtt) / 2 => (best, IN_FLIGHT_GAIN),
+                    _ => (best, PROBE_GAIN),
                 };
                 let bdp = rate / 8.0 * rtt.as_secs_f64() * gain;
                 (bdp as u64).clamp(floor, window.max(floor))
