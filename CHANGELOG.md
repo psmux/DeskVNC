@@ -10,6 +10,33 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Changed
+
+* Boundary paces what a computer sends by what the helper's acknowledgements
+  say about the link: the quickest round trip lately and the rate that
+  actually arrives. It used the congestion window before, which on a link
+  that queues deeply (a VPN tunnel, a home router) let seconds of screens wait
+  in the queue. Video now lowers its rate within a round trip of the link
+  slowing and climbs back when it recovers, and its ceiling is 16 Mbit/s
+  rather than 6 now that the pacing keeps the queue short.
+
+* An Intel Mac whose hardware H.264 encoder makes only keyframes, as the AMD
+  encoder of a 2020 iMac does, encodes Boundary's video in software. Each
+  picture was a whole keyframe before, three to twenty five times the size.
+  Across the ocean to such an iMac, scrolling went from 16 to 18 screens a
+  second at 25 to 28 Mbit/s to 20 to 25 at about 3 Mbit/s.
+
+* VNC to a Mac with a screen larger than 4K starts in 16-bit colour under
+  Auto. macOS Screen Sharing offers no JPEG to other clients and cannot
+  change colour depth during a session, and a 5K iMac's whole screen was
+  12.9 MB at 32 bits against 5.0 MB at 16.
+
+### Fixed
+
+* VNC to a Mac on the Low or Black and White preset no longer fails to
+  connect. macOS Screen Sharing closes the connection when asked for any
+  8-bit colour format, so a Mac gets 16-bit colour instead.
+
 ## [0.32.0] (2026-10-25)
 
 ### Added
