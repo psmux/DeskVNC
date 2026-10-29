@@ -413,6 +413,51 @@ pub(crate) fn bitrate(cwnd: u64, rtt: Duration) -> u32 {
     (cwnd as f64 * 8.0 / rtt * 0.5).clamp(crate::pace::MIN_BITRATE, crate::pace::MAX_BITRATE) as u32
 }
 
+/// What to ask an encoder for so its pictures fit the link.
+///
+/// VideoToolbox on an Intel iMac does not keep to the rate it is given: a
+/// scroll of text came out at about 0.13 s of bits a picture, 250 KB at
+/// 16 Mbit/s, so a link that carried the rate got 8 screens a second. Asked
+/// for less it makes smaller pictures, not in proportion but enough. So the
+/// pictures it makes are measured against the size the link's rate allows
+/// at [`goal_rate`] screens a second, and the rate asked is lowered while
+/// they come out bigger and raised again, never past the link's, while they
+/// come out smaller. An encoder that keeps to its rate is asked the link's.
+pub(crate) struct Ask {
+    scale: f64,
+}
+impl Default for Ask {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
+impl Ask {
+    /// The rate to ask for when the link allows `bits`.
+    pub(crate) fn rate(&self, bits: u32) -> u32 {
+        (bits as f64 * self.scale).max(crate::pace::MIN_BITRATE) as u32
+    }
+    /// The encoder made a picture of `bytes` while the link allowed `bits`.
+    pub(crate) fn made(&mut self, bits: u32, bytes: usize) {
+        let want = bits as f64 / 8.0 / goal_rate(bits) as f64;
+        let over = bytes as f64 / want;
+        if over > 1.3 {
+            // Down by the square root of the overshoot, at most a fifth a
+            // picture, as the size does not follow the rate in proportion.
+            self.scale *= over.sqrt().recip().max(0.8);
+        } else if over < 0.7 {
+            self.scale *= 1.05;
+        }
+        self.scale = self.scale.clamp(0.03, 1.0);
+    }
+}
+
+/// Screens a second worth having at a bit rate: a picture gets at least
+/// 250 kbit/s's worth, about 30 KB at 60 a second of 16 Mbit/s, and fewer
+/// than 15 a second do not read as motion.
+pub(crate) fn goal_rate(bits_per_second: u32) -> u32 {
+    (bits_per_second / 250_000).clamp(15, 60)
+}
+
 /// Screens a second to aim for at a bit rate: fewer on a slow link, so each
 /// one keeps enough bits to be readable.
 pub(crate) fn frame_rate(bits_per_second: u32) -> u32 {
@@ -498,6 +543,38 @@ mod tests {
         let mut junk = bytes;
         junk[14] = 9;
         assert!(decode_unit(&junk[1..]).is_err());
+    }
+
+    /// An encoder like VideoToolbox on the Intel i5 with a scroll of text:
+    /// pictures of 0.13 s of the rate asked, never under 20 KB.
+    fn overshooting(asked: u32) -> usize {
+        (asked as f64 / 8.0 * 0.13).max(20_000.0) as usize
+    }
+
+    #[test]
+    fn an_encoder_that_overshoots_is_asked_for_less() {
+        let mut ask = Ask::default();
+        let link = 16_000_000;
+        for _ in 0..60 {
+            let bytes = overshooting(ask.rate(link));
+            ask.made(link, bytes);
+        }
+        let bytes = overshooting(ask.rate(link));
+        let screens = link as f64 / 8.0 / bytes as f64;
+        assert!(
+            screens >= 40.0,
+            "{screens:.1} screens a second at {bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn an_encoder_that_keeps_to_its_rate_is_asked_the_links() {
+        let mut ask = Ask::default();
+        for _ in 0..60 {
+            let asked = ask.rate(8_000_000);
+            ask.made(8_000_000, (asked / 8 / goal_rate(8_000_000)) as usize);
+        }
+        assert_eq!(ask.rate(8_000_000), 8_000_000);
     }
 
     #[test]
