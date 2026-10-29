@@ -1,3 +1,4 @@
+use crate::pace::Pace;
 use crate::{
     Desktop, Frame, Input, Invitation,
     screen::{self, Rect},
@@ -11,7 +12,6 @@ use iroh::{
     endpoint::{Connection, presets},
 };
 use std::{
-    collections::VecDeque,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -1398,8 +1398,10 @@ struct Unit {
     cut: bool,
 }
 
-/// The bit rate and screens a second video should aim at on this link now.
-fn link_rate(connection: &Connection) -> (u32, u32) {
+/// The bit rate and screens a second video should aim at on this link now:
+/// what the congestion window allows, lowered by the pacer while the link
+/// queues.
+fn link_rate(connection: &Connection, pace: &mut Pace) -> (u32, u32) {
     let (cwnd, rtt) = connection
         .paths()
         .iter()
@@ -1407,7 +1409,7 @@ fn link_rate(connection: &Connection) -> (u32, u32) {
         .map_or((MIN_BYTES_IN_FLIGHT, Duration::from_millis(100)), |path| {
             (path.stats().cwnd, path.rtt())
         });
-    let bits = video::bitrate(cwnd.max(MIN_BYTES_IN_FLIGHT), rtt);
+    let bits = pace.bitrate(video::bitrate(cwnd.max(MIN_BYTES_IN_FLIGHT), rtt));
     (bits, video::frame_rate(bits))
 }
 
@@ -1431,10 +1433,10 @@ fn link_fast(connection: &Connection) -> bool {
 /// Updates are not waited on one at a time: that cost a round trip per
 /// screen, which across an ocean was most of a second. Instead about one
 /// round trip of them may be on their way, as the helper's acknowledgements
-/// tell. Past that the sender waits, and only the newest capture is encoded
-/// when it goes on, so a slow link gets fewer updates rather than late ones.
-/// Video follows the same rule, and its bit rate follows the link, so a slow
-/// link gets fewer and smaller pictures rather than a queue.
+/// tell ([`Pace`]). Past that the sender waits, and only the newest capture
+/// is encoded when it goes on, so a slow link gets fewer updates rather than
+/// late ones. Video follows the same rule, and its bit rate follows the
+/// link, so a slow link gets fewer and smaller pictures rather than a queue.
 async fn send_updates(
     connection: &Connection,
     mut screens: watch::Receiver<Option<Arc<Frame>>>,
@@ -1457,21 +1459,18 @@ async fn send_updates(
         .await?;
     let mut coder = Some(Coder::new(framed));
     let mut seq = 0u64;
-    let mut in_flight: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut pace = Pace::new(Instant::now());
     let mut next_video = tokio::time::Instant::now();
     loop {
         loop {
-            let acked = *shown.borrow_and_update();
-            while in_flight.front().is_some_and(|(s, _)| *s <= acked) {
-                in_flight.pop_front();
-            }
-            let bytes: u64 = in_flight.iter().map(|(_, b)| b).sum();
+            pace.on_ack(*shown.borrow_and_update(), Instant::now());
             let most = if coder.as_ref().is_some_and(|c| c.policy.on_video()) {
                 MAX_VIDEO_IN_FLIGHT
             } else {
                 MAX_UPDATES_IN_FLIGHT
             };
-            if in_flight.is_empty() || (in_flight.len() < most && bytes < window(connection)) {
+            let limit = pace.limit(window(connection), MIN_BYTES_IN_FLIGHT);
+            if pace.count() == 0 || (pace.count() < most && pace.bytes() < limit) {
                 break;
             }
             let waiting = Instant::now();
@@ -1539,7 +1538,7 @@ async fn send_updates(
                 }
             }
         };
-        let rate = link_rate(connection);
+        let rate = link_rate(connection, &mut pace);
         let mut working = coder.take().context("Screen encoder lost")?;
         working.fast = link_fast(connection);
         let next = seq + 1;
@@ -1567,7 +1566,14 @@ async fn send_updates(
             // it took 10 to 15 ms. A little under the interval, so that a
             // capture landing just before the deadline is not put off a
             // whole screen.
-            next_video = began + Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
+            //
+            // Nor more bits than the link was given: an encoder that makes
+            // pictures larger than it was asked to, as VideoToolbox on the
+            // Intel i5 did at four times its rate, waits for them to go.
+            let interval = Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
+            let bytes: usize = update.as_ref().map_or(0, |u| u.iter().map(Vec::len).sum());
+            let spent = Duration::from_secs_f64(bytes as f64 * 8.0 / rate.0.max(1) as f64);
+            next_video = began + interval.max(spent);
         }
         coder = Some(working);
         for update in update? {
@@ -1583,8 +1589,22 @@ async fn send_updates(
             .context("The helper stopped taking screens")??;
             crate::stats::sent(writing.elapsed());
             crate::stats::written();
-            crate::stats::each(update[0], update.len(), in_flight.len(), began.elapsed());
-            in_flight.push_back((seq, update.len() as u64));
+            crate::stats::each(
+                update[0],
+                update.len(),
+                pace.count(),
+                began.elapsed(),
+                || {
+                    format!(
+                        "video {} kbit/s, link {:.0} kbit/s, rtt {:?}, queue {:?}",
+                        rate.0 / 1000,
+                        pace.rate().unwrap_or(0.0) / 1000.0,
+                        pace.min_rtt().unwrap_or_default(),
+                        pace.queue().unwrap_or_default()
+                    )
+                },
+            );
+            pace.on_send(seq, update.len() as u64, Instant::now());
         }
     }
 }
