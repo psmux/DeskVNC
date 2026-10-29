@@ -18,6 +18,11 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 /// The best encoder this machine has, made for each size of screen.
+/// VideoToolbox's decoder, as the viewer's webview decodes with on a Mac,
+/// for tools that need the pixels a helper would see.
+#[cfg(target_os = "macos")]
+pub use crate::vt::{Planes, VtDecoder};
+
 pub fn encoders() -> VideoEncoders {
     Arc::new(best)
 }
