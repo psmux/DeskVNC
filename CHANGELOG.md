@@ -33,6 +33,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* A window switch or the first screen of a scroll over Boundary goes out at
+  once again. After a quiet spell it waited one or two round trips for room,
+  200 to 470 ms on a link to Florida, and then the whole screen was sent
+  sharp a second time, 479 KB, because the computer gave up on its own copy
+  of the video after 50 ms. It now waits up to 250 ms for that copy and sends
+  only the tiles that are wrong.
+
+* The screen sharing indicator macOS animates in the menu bar no longer slows
+  Boundary down. Its updates, under 8 KB each, kept half of the allowed
+  updates in flight on their way.
+
 * VNC to a Mac on the Low or Black and White preset no longer fails to
   connect. macOS Screen Sharing closes the connection when asked for any
   8-bit colour format, so a Mac gets 16-bit colour instead.
