@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.33.0] (2026-10-30)
+
 ### Changed
 
 * Boundary paces what a computer sends by what the helper's acknowledgements
