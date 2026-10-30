@@ -163,6 +163,11 @@ impl Desktop for OffscreenDesktop {
         Ok(())
     }
     fn release(&mut self) {}
+    // The app's own desktops offer video, so the stage does too, or a run
+    // would measure a moving screen sent as tiles, which no helper sees.
+    fn video(&self) -> Option<boundary_session::video::VideoEncoders> {
+        Some(boundary_platform::video::encoders())
+    }
 }
 
 /// The stage window on another process or machine, which dialled in.

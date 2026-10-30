@@ -3,9 +3,11 @@
 pub mod direct;
 mod dns;
 pub mod nearby;
+mod pace;
 mod screen;
 mod session;
 mod shared;
+mod sps;
 mod stats;
 pub mod tools;
 pub mod unattended;

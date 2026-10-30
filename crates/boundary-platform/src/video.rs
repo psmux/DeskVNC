@@ -18,6 +18,11 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 /// The best encoder this machine has, made for each size of screen.
+/// VideoToolbox's decoder, as the viewer's webview decodes with on a Mac,
+/// for tools that need the pixels a helper would see.
+#[cfg(target_os = "macos")]
+pub use crate::vt::{Planes, VtDecoder};
+
 pub fn encoders() -> VideoEncoders {
     Arc::new(best)
 }
@@ -42,10 +47,17 @@ fn best(width: u32, height: u32) -> Result<Box<dyn VideoEncoder>> {
 }
 
 /// How long to wait for the shadow decoder to catch up when the screen
-/// settles, before sending the whole screen instead.
-const SHADOW_WAIT: Duration = Duration::from_millis(50);
-/// More pictures than this still to decode, and the decoder is not waited for.
-const SHADOW_BEHIND: u64 = 2;
+/// settles, before sending the whole screen instead. It was 50 ms, and the
+/// i5 decoding a keyframe of the software encoder took longer: every window
+/// switch then sent the whole screen sharp, 479 KB, a second on a slow link,
+/// where the stale tiles were a few. Motion has stopped when this is asked,
+/// so the decoder only has to finish what it has.
+const SHADOW_WAIT: Duration = Duration::from_millis(250);
+/// More pictures than this still to decode, and the decoder is not waited
+/// for: one that far behind, OpenH264 at 60 screens a second on the Intel
+/// i9, is slower than the encoder. It was 2, which a keyframe and the few
+/// pictures after it reach on any decoder.
+const SHADOW_BEHIND: u64 = 8;
 
 /// An encoder with a decoder of its own output beside it, on its own
 /// thread, so that when the screen settles the host knows what the helper's

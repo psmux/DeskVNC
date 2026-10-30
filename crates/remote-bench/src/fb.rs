@@ -12,6 +12,11 @@ pub struct Framebuffer {
     decoders: HashMap<u32, openh264::decoder::Decoder>,
     #[cfg(not(feature = "h264"))]
     decoders: HashMap<u32, ()>,
+    /// On a Mac, VideoToolbox, as the viewer's webview decodes there.
+    /// OpenH264 stops on the High profile pictures with two reference
+    /// frames that Apple's software encoder makes.
+    #[cfg(target_os = "macos")]
+    vt: HashMap<u32, boundary_platform::video::VtDecoder>,
     /// Rectangles seen by kind, for the report.
     pub kinds: HashMap<&'static str, u64>,
 }
@@ -23,6 +28,8 @@ impl Framebuffer {
             height: 0,
             rgba: Vec::new(),
             decoders: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            vt: HashMap::new(),
             kinds: HashMap::new(),
         }
     }
@@ -119,11 +126,30 @@ impl Framebuffer {
         use openh264::formats::YUVSource;
         if flags & 2 != 0 {
             self.decoders.clear();
+            #[cfg(target_os = "macos")]
+            self.vt.clear();
         }
         if reset || flags & 1 != 0 {
             self.decoders.remove(&context);
+            #[cfg(target_os = "macos")]
+            self.vt.remove(&context);
         }
         if data.is_empty() {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(decoder) = match self.vt.entry(context) {
+            std::collections::hash_map::Entry::Occupied(e) => Some(e.into_mut()),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                boundary_platform::video::VtDecoder::new()
+                    .ok()
+                    .map(|d| e.insert(d))
+            }
+        } {
+            if let Some(planes) = decoder.decode(data)? {
+                let rgba = bt709(&planes, w, h);
+                self.blit(x, y, w, h, &rgba, w);
+            }
             return Ok(());
         }
         let decoder = match self.decoders.entry(context) {
@@ -155,6 +181,32 @@ impl Framebuffer {
     ) -> Result<()> {
         anyhow::bail!("H.264 rectangle arrived but this bench was built without the h264 feature")
     }
+}
+
+/// Decoded planes to RGBA, BT.709 limited range, as VideoToolbox on the
+/// host tags its pictures.
+#[cfg(target_os = "macos")]
+fn bt709(planes: &boundary_platform::video::Planes, w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let luma = planes
+                .luma
+                .get(y * planes.stride + x)
+                .copied()
+                .unwrap_or(16) as f32;
+            let c = (y / 2) * planes.chroma_stride + x / 2;
+            let u = planes.u.get(c).copied().unwrap_or(128) as f32 - 128.0;
+            let v = planes.v.get(c).copied().unwrap_or(128) as f32 - 128.0;
+            let l = (luma - 16.0) * 1.164;
+            let i = (y * w as usize + x) * 4;
+            out[i] = (l + 1.793 * v).clamp(0.0, 255.0) as u8;
+            out[i + 1] = (l - 0.213 * u - 0.533 * v).clamp(0.0, 255.0) as u8;
+            out[i + 2] = (l + 2.112 * u).clamp(0.0, 255.0) as u8;
+            out[i + 3] = 255;
+        }
+    }
+    out
 }
 
 #[cfg(test)]

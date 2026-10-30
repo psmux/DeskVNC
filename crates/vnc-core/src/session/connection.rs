@@ -13,7 +13,7 @@ use crate::quality::QualityResolve;
 use crate::security::{CredentialAsk, CredentialSource, MAX_CREDENTIAL_ATTEMPTS};
 use crate::types::{
     ClientCommand, ColorDepth, ConnectOptions, Credentials, PixelFormat, QualityPreset, Rect,
-    SecurityType, SessionEvent, SessionState,
+    SecurityType, ServerCapabilities, SessionEvent, SessionState,
 };
 use vnc_transport::BoxedStream;
 
@@ -82,6 +82,32 @@ pub(crate) fn pixel_format_for(depth: ColorDepth) -> PixelFormat {
         ColorDepth::Full => PixelFormat::bgra8888(),
         ColorDepth::Palette256 | ColorDepth::Grayscale => PixelFormat::palette8(),
         ColorDepth::Rgb222 | ColorDepth::Rgb111 => PixelFormat::rgb222(),
+    }
+}
+
+/// Above this many pixels a Mac's screen starts in 16-bit colour under Auto.
+/// A 5K iMac's whole screen was 12.9 MB in ZRLE at 32 bits and 5.0 MB at 16:
+/// macOS Screen Sharing offers no JPEG and no Tight to a client that is not
+/// Apple's, and without Fence the format cannot change once the session runs,
+/// so Auto has no other way to make a big Mac screen fit a slow link.
+const APPLE_LARGE_SCREEN: u64 = 3840 * 2160;
+
+/// The wire pixel format to ask for. As [`pixel_format_for`], except that
+/// macOS Screen Sharing is never asked for an 8-bit format, which it answers
+/// by closing the connection, and gets 16-bit colour instead; and under Auto
+/// a Mac screen larger than 4K starts in 16-bit colour.
+pub(crate) fn wire_format(
+    depth: ColorDepth,
+    preset: QualityPreset,
+    caps: &ServerCapabilities,
+) -> PixelFormat {
+    if !caps.is_apple_screen_sharing {
+        return pixel_format_for(depth);
+    }
+    let large = caps.width as u64 * caps.height as u64 > APPLE_LARGE_SCREEN;
+    match depth {
+        ColorDepth::Full if !(large && preset == QualityPreset::Auto) => PixelFormat::bgra8888(),
+        _ => PixelFormat::rgb565(),
     }
 }
 
@@ -480,7 +506,7 @@ pub(crate) async fn run_once(
 
     // Negotiate our pixel format and encoding preferences.
     let quality_settings = settings.quality.settings();
-    let pf = pixel_format_for(quality_settings.pixel_format);
+    let pf = wire_format(quality_settings.pixel_format, settings.quality, &caps);
     let encodings = crate::quality::encodings_for(&quality_settings, &caps);
     caps.pixel_format = Some(pf);
 
@@ -523,6 +549,68 @@ pub(crate) async fn run_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caps(apple: bool, width: u16, height: u16) -> ServerCapabilities {
+        ServerCapabilities {
+            is_apple_screen_sharing: apple,
+            width,
+            height,
+            ..Default::default()
+        }
+    }
+
+    /// A Mac closes the connection on any 8-bit format, so it gets 16-bit
+    /// colour where another server gets a palette.
+    #[test]
+    fn a_mac_is_never_asked_for_eight_bits() {
+        let mac = caps(true, 1920, 1080);
+        for depth in [
+            ColorDepth::Palette256,
+            ColorDepth::Grayscale,
+            ColorDepth::Rgb222,
+            ColorDepth::Rgb111,
+        ] {
+            for preset in [QualityPreset::Auto, QualityPreset::Low] {
+                assert_eq!(wire_format(depth, preset, &mac), PixelFormat::rgb565());
+            }
+        }
+        let other = caps(false, 1920, 1080);
+        assert_eq!(
+            wire_format(ColorDepth::Palette256, QualityPreset::Low, &other),
+            PixelFormat::palette8()
+        );
+    }
+
+    /// A 5K iMac starts in 16-bit colour under Auto; a smaller Mac screen,
+    /// a chosen preset or another server keeps full colour.
+    #[test]
+    fn a_large_mac_screen_starts_in_sixteen_bits_under_auto() {
+        let imac = caps(true, 5120, 2880);
+        assert_eq!(
+            wire_format(ColorDepth::Full, QualityPreset::Auto, &imac),
+            PixelFormat::rgb565()
+        );
+        assert_eq!(
+            wire_format(ColorDepth::Full, QualityPreset::High, &imac),
+            PixelFormat::bgra8888()
+        );
+        assert_eq!(
+            wire_format(
+                ColorDepth::Full,
+                QualityPreset::Auto,
+                &caps(true, 2560, 1440)
+            ),
+            PixelFormat::bgra8888()
+        );
+        assert_eq!(
+            wire_format(
+                ColorDepth::Full,
+                QualityPreset::Auto,
+                &caps(false, 5120, 2880)
+            ),
+            PixelFormat::bgra8888()
+        );
+    }
 
     /// REGRESSION: `Grayscale` used to map to full 32bpp true colour, making
     /// the BlackAndWhite preset the single MOST expensive one on the wire

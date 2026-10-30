@@ -1,3 +1,4 @@
+use crate::pace::Pace;
 use crate::{
     Desktop, Frame, Input, Invitation,
     screen::{self, Rect},
@@ -11,7 +12,6 @@ use iroh::{
     endpoint::{Connection, presets},
 };
 use std::{
-    collections::VecDeque,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -1049,6 +1049,10 @@ async fn send_screens(
 /// task that has them rather than on a blocking thread.
 const SMALL_PIXELS: u64 = 128 * 128;
 const SMALL_BYTES: usize = 32 * 1024;
+/// An update this small does not count against the most in flight.
+const TINY_BYTES: u64 = 8 * 1024;
+/// However small, at most this many updates on their way.
+const MAX_ANY_IN_FLIGHT: usize = 64;
 
 /// At most this many updates wait to be shown, however small they are.
 const MAX_UPDATES_IN_FLIGHT: usize = 12;
@@ -1056,6 +1060,8 @@ const MAX_UPDATES_IN_FLIGHT: usize = 12;
 /// twelve held a link with a 300 ms round trip to forty a second. The bytes
 /// in flight are still held to the congestion window.
 const MAX_VIDEO_IN_FLIGHT: usize = 32;
+/// The longest video waits after a picture for the link to carry it.
+const MAX_VIDEO_GAP: Duration = Duration::from_millis(250);
 /// Data allowed on its way before the link has measured itself.
 const MIN_BYTES_IN_FLIGHT: u64 = 128 * 1024;
 
@@ -1117,6 +1123,9 @@ struct Coder {
     framed: bool,
     encoders: Option<VideoEncoders>,
     video: Option<Video>,
+    /// How much less than the link's rate the encoder is asked for. Kept
+    /// across encoders: the next one overshoots as the last did.
+    ask: video::Ask,
     policy: video::Policy,
     /// The capture before this one, to tell how much of the screen moved.
     last: Option<Arc<Frame>>,
@@ -1146,6 +1155,7 @@ impl Coder {
             framed,
             encoders: None,
             video: None,
+            ask: video::Ask::default(),
             policy: video::Policy::default(),
             last: None,
             held: None,
@@ -1335,19 +1345,21 @@ impl Coder {
             }
         };
         let video = self.video.insert(video);
+        let asked = (self.ask.rate(rate.0), rate.1);
         // Small swings in the measured link are left alone: an encoder told
         // a new rate every screen spends its bits unevenly.
-        let swing = (rate.0 as f64 / video.rate.0.max(1) as f64 - 1.0).abs();
-        if video.fresh || swing > 0.15 || rate.1 != video.rate.1 {
-            video.encoder.set_rate(rate.0, rate.1);
-            video.rate = rate;
+        let swing = (asked.0 as f64 / video.rate.0.max(1) as f64 - 1.0).abs();
+        if video.fresh || swing > 0.15 || asked.1 != video.rate.1 {
+            video.encoder.set_rate(asked.0, asked.1);
+            video.rate = asked;
         }
         // Only a new encoder starts with a keyframe. When video starts again
         // after the screen settled, the helper's decoder still holds the
         // picture this encoder last made, so the next one follows on from it:
         // a keyframe there cost a third of a second on a slow link before
         // the first moving picture.
-        let encoded = video.encoder.encode(frame, video.fresh)?;
+        let mut encoded = video.encoder.encode(frame, video.fresh)?;
+        video::shown_at_once(&mut encoded);
         if encoded.data.is_empty() {
             // The encoder skipped this screen to keep to its rate.
             ensure!(!video.fresh, "The video encoder skipped a keyframe");
@@ -1370,6 +1382,10 @@ impl Coder {
             video.typical = size;
         } else if !cut {
             video.typical = (video.typical * 7 + size) / 8;
+        }
+        // A keyframe or a cut is big by nature, not by overshooting.
+        if !video.fresh && !cut && !encoded.keyframe {
+            self.ask.made(rate.0, size);
         }
         let fresh = std::mem::replace(&mut video.fresh, false);
         Ok(Some(Unit {
@@ -1398,8 +1414,10 @@ struct Unit {
     cut: bool,
 }
 
-/// The bit rate and screens a second video should aim at on this link now.
-fn link_rate(connection: &Connection) -> (u32, u32) {
+/// The bit rate and screens a second video should aim at on this link now:
+/// what the congestion window allows, lowered by the pacer while the link
+/// queues.
+fn link_rate(connection: &Connection, pace: &mut Pace) -> (u32, u32) {
     let (cwnd, rtt) = connection
         .paths()
         .iter()
@@ -1407,7 +1425,7 @@ fn link_rate(connection: &Connection) -> (u32, u32) {
         .map_or((MIN_BYTES_IN_FLIGHT, Duration::from_millis(100)), |path| {
             (path.stats().cwnd, path.rtt())
         });
-    let bits = video::bitrate(cwnd.max(MIN_BYTES_IN_FLIGHT), rtt);
+    let bits = pace.bitrate(video::bitrate(cwnd.max(MIN_BYTES_IN_FLIGHT), rtt));
     (bits, video::frame_rate(bits))
 }
 
@@ -1431,10 +1449,10 @@ fn link_fast(connection: &Connection) -> bool {
 /// Updates are not waited on one at a time: that cost a round trip per
 /// screen, which across an ocean was most of a second. Instead about one
 /// round trip of them may be on their way, as the helper's acknowledgements
-/// tell. Past that the sender waits, and only the newest capture is encoded
-/// when it goes on, so a slow link gets fewer updates rather than late ones.
-/// Video follows the same rule, and its bit rate follows the link, so a slow
-/// link gets fewer and smaller pictures rather than a queue.
+/// tell ([`Pace`]). Past that the sender waits, and only the newest capture
+/// is encoded when it goes on, so a slow link gets fewer updates rather than
+/// late ones. Video follows the same rule, and its bit rate follows the
+/// link, so a slow link gets fewer and smaller pictures rather than a queue.
 async fn send_updates(
     connection: &Connection,
     mut screens: watch::Receiver<Option<Arc<Frame>>>,
@@ -1457,23 +1475,29 @@ async fn send_updates(
         .await?;
     let mut coder = Some(Coder::new(framed));
     let mut seq = 0u64;
-    let mut in_flight: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut pace = Pace::new(Instant::now());
     let mut next_video = tokio::time::Instant::now();
     loop {
         loop {
-            let acked = *shown.borrow_and_update();
-            while in_flight.front().is_some_and(|(s, _)| *s <= acked) {
-                in_flight.pop_front();
-            }
-            let bytes: u64 = in_flight.iter().map(|(_, b)| b).sum();
+            pace.on_ack(*shown.borrow_and_update(), Instant::now());
             let most = if coder.as_ref().is_some_and(|c| c.policy.on_video()) {
                 MAX_VIDEO_IN_FLIGHT
             } else {
                 MAX_UPDATES_IN_FLIGHT
             };
-            if in_flight.is_empty() || (in_flight.len() < most && bytes < window(connection)) {
+            let limit = pace.limit(window(connection), MIN_BYTES_IN_FLIGHT);
+            // A tiny update does not count against the most in flight: a
+            // menu bar indicator macOS animates while the screen is shared
+            // kept six of twelve on their way, 1.8 KB each, and a window
+            // switch on the i5 waited 35 to 57 ms behind them. The bytes
+            // still count.
+            let counted = pace.count_over(TINY_BYTES).min(pace.count());
+            if pace.count() == 0
+                || (counted < most && pace.count() < MAX_ANY_IN_FLIGHT && pace.bytes() < limit)
+            {
                 break;
             }
+            pace.on_full(Instant::now());
             let waiting = Instant::now();
             if shown.changed().await.is_err() {
                 return std::future::pending().await;
@@ -1539,7 +1563,7 @@ async fn send_updates(
                 }
             }
         };
-        let rate = link_rate(connection);
+        let rate = link_rate(connection, &mut pace);
         let mut working = coder.take().context("Screen encoder lost")?;
         working.fast = link_fast(connection);
         let next = seq + 1;
@@ -1567,7 +1591,17 @@ async fn send_updates(
             // it took 10 to 15 ms. A little under the interval, so that a
             // capture landing just before the deadline is not put off a
             // whole screen.
-            next_video = began + Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
+            //
+            // Nor more bits than the link was given: an encoder that makes
+            // pictures larger than it was asked to, as VideoToolbox on the
+            // Intel i5 did at four times its rate, waits for them to go.
+            let interval = Duration::from_secs(1) / rate.1.max(1) * 9 / 10;
+            let bytes: usize = update.as_ref().map_or(0, |u| u.iter().map(Vec::len).sum());
+            // Never more than a quarter second, though: a picture larger than
+            // the rate allows once is better sent late than motion stopping.
+            let spent = Duration::from_secs_f64(bytes as f64 * 8.0 / rate.0.max(1) as f64)
+                .min(MAX_VIDEO_GAP);
+            next_video = began + interval.max(spent);
         }
         coder = Some(working);
         for update in update? {
@@ -1583,8 +1617,22 @@ async fn send_updates(
             .context("The helper stopped taking screens")??;
             crate::stats::sent(writing.elapsed());
             crate::stats::written();
-            crate::stats::each(update[0], update.len(), in_flight.len(), began.elapsed());
-            in_flight.push_back((seq, update.len() as u64));
+            crate::stats::each(
+                update[0],
+                update.len(),
+                pace.count(),
+                began.elapsed(),
+                || {
+                    format!(
+                        "video {} kbit/s, link {:.0} kbit/s, rtt {:?}, queue {:?}",
+                        rate.0 / 1000,
+                        pace.rate().unwrap_or(0.0) / 1000.0,
+                        pace.min_rtt().unwrap_or_default(),
+                        pace.queue().unwrap_or_default()
+                    )
+                },
+            );
+            pace.on_send(seq, update.len() as u64, Instant::now());
         }
     }
 }
