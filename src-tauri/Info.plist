@@ -4,6 +4,12 @@
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>DeskVNCViewer finds VNC servers on your local network so you can connect to them.</string>
+	<!-- Never App Nap. A viewer behind another window was throttled until
+	     it read a Boundary stream four seconds late, and the computer it
+	     watched filled its queue; a computer sharing its screen runs in the
+	     background, where App Nap would slow its capture. -->
+	<key>LSAppNapIsDisabled</key>
+	<true/>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_rfb._tcp</string>

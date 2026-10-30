@@ -31,7 +31,7 @@ use crate::types::{
 };
 use vnc_transport::BoxedStream;
 
-use super::connection::{pixel_format_for, RunOutcome, SessionSettings};
+use super::connection::{wire_format, RunOutcome, SessionSettings};
 use super::emit;
 
 /// Declare the peer dead when a fence RTT probe goes unanswered this long
@@ -2278,7 +2278,9 @@ impl RunLoop {
         let msg = messages::set_encodings(&encodings);
         self.send(&msg).await?;
 
-        let new_pf = pixel_format_for(qs.pixel_format);
+        // Through the Mac rule too: a Mac answers an 8-bit format by closing
+        // the connection. Tiers move only under Auto.
+        let new_pf = wire_format(qs.pixel_format, QualityPreset::Auto, &self.caps);
         // Compare against the format the connection is HEADING for, not the
         // one still decoding: with a switch already in flight, self.pf lags
         // until the fence response arrives.

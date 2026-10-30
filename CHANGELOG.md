@@ -10,6 +10,64 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.33.0] (2026-10-30)
+
+### Changed
+
+* Boundary paces what a computer sends by what the helper's acknowledgements
+  say about the link: the quickest round trip lately and the rate that
+  actually arrives. It used the congestion window before, which on a link
+  that queues deeply (a VPN tunnel, a home router) let seconds of screens wait
+  in the queue. Video now lowers its rate within a round trip of the link
+  slowing and climbs back when it recovers, and its ceiling is 16 Mbit/s
+  rather than 6 now that the pacing keeps the queue short.
+
+* An Intel Mac whose hardware H.264 encoder makes only keyframes, as the AMD
+  encoder of a 2020 iMac does, encodes Boundary's video in software. Each
+  picture was a whole keyframe before, three to twenty five times the size.
+  Across the ocean to such an iMac, scrolling went from 16 to 18 screens a
+  second at 25 to 28 Mbit/s to 20 to 25 at about 3 Mbit/s.
+
+* VNC to a Mac with a screen larger than 4K starts in 16-bit colour under
+  Auto. macOS Screen Sharing offers no JPEG to other clients and cannot
+  change colour depth during a session, and a 5K iMac's whole screen was
+  12.9 MB at 32 bits against 5.0 MB at 16.
+
+### Fixed
+
+* The helper's window draws an Intel Mac's Boundary video again. Apple's
+  software encoder writes no count of reordered pictures, so WebKit's
+  decoder held four pictures back, the window waited half a second for each
+  one and drew none, and the screen froze while video piled up behind it.
+  The computer now says in every keyframe that nothing is reordered, and
+  each picture comes out of the decoder in 2 to 9 ms.
+
+* A Mac sharing its screen over Boundary no longer quits when the helper
+  types. Releasing a letter or digit key asked the keyboard layout for a
+  key code from a worker thread, which macOS 15 answers by stopping the app
+  with an illegal instruction, and the session ended with it. Letters and
+  digits now go by their fixed key codes.
+
+* DeskVNCViewer no longer naps. With its window behind another, macOS slowed
+  it until it read a Boundary session four seconds late; the computer on the
+  other end filled its queue, and the screen froze and then raced to catch up
+  when the window came back to the front.
+
+* A window switch or the first screen of a scroll over Boundary goes out at
+  once again. After a quiet spell it waited one or two round trips for room,
+  200 to 470 ms on a link to Florida, and then the whole screen was sent
+  sharp a second time, 479 KB, because the computer gave up on its own copy
+  of the video after 50 ms. It now waits up to 250 ms for that copy and sends
+  only the tiles that are wrong.
+
+* The screen sharing indicator macOS animates in the menu bar no longer slows
+  Boundary down. Its updates, under 8 KB each, kept half of the allowed
+  updates in flight on their way.
+
+* VNC to a Mac on the Low or Black and White preset no longer fails to
+  connect. macOS Screen Sharing closes the connection when asked for any
+  8-bit colour format, so a Mac gets 16-bit colour instead.
+
 ## [0.32.0] (2026-10-25)
 
 ### Added

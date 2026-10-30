@@ -766,8 +766,69 @@ fn native_key(key: Key) -> enigo::Key {
         Key::Alt => E::Alt,
         Key::Meta => E::Meta,
         Key::Space => E::Space,
-        Key::Letter(c) => E::Unicode(c),
+        Key::Letter(c) => letter(c),
     }
+}
+
+/// A letter or digit key. On a Mac it goes by its fixed key code on the US
+/// layout: enigo turns a character into a key code by asking the keyboard
+/// layout, and that call must be made on the main thread. Made on a worker,
+/// macOS 15 stopped DeskVNC on the 2020 iMac with an illegal instruction the
+/// moment a helper let go of a letter key, and the session went with it.
+#[cfg(target_os = "macos")]
+fn letter(c: char) -> enigo::Key {
+    match ansi_key_code(c) {
+        Some(code) => enigo::Key::Other(code),
+        None => enigo::Key::Unicode(c),
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn letter(c: char) -> enigo::Key {
+    enigo::Key::Unicode(c)
+}
+
+/// The `kVK_ANSI_` key code of a letter or digit, from Carbon's Events.h.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn ansi_key_code(c: char) -> Option<u32> {
+    Some(match c.to_ascii_lowercase() {
+        'a' => 0x00,
+        's' => 0x01,
+        'd' => 0x02,
+        'f' => 0x03,
+        'h' => 0x04,
+        'g' => 0x05,
+        'z' => 0x06,
+        'x' => 0x07,
+        'c' => 0x08,
+        'v' => 0x09,
+        'b' => 0x0B,
+        'q' => 0x0C,
+        'w' => 0x0D,
+        'e' => 0x0E,
+        'r' => 0x0F,
+        'y' => 0x10,
+        't' => 0x11,
+        '1' => 0x12,
+        '2' => 0x13,
+        '3' => 0x14,
+        '4' => 0x15,
+        '6' => 0x16,
+        '5' => 0x17,
+        '9' => 0x19,
+        '7' => 0x1A,
+        '8' => 0x1C,
+        '0' => 0x1D,
+        'o' => 0x1F,
+        'u' => 0x20,
+        'i' => 0x22,
+        'p' => 0x23,
+        'l' => 0x25,
+        'j' => 0x26,
+        'k' => 0x28,
+        'n' => 0x2D,
+        'm' => 0x2E,
+        _ => return None,
+    })
 }
 #[cfg(target_os = "macos")]
 mod permissions {
@@ -825,4 +886,23 @@ pub fn open_input_settings() -> Result<()> {
             .spawn()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ansi_key_code;
+
+    #[test]
+    fn every_letter_and_digit_has_its_own_key_code() {
+        let codes: Vec<u32> = ('a'..='z')
+            .chain('0'..='9')
+            .map(|c| ansi_key_code(c).unwrap_or_else(|| panic!("no key code for {c}")))
+            .collect();
+        let mut unique = codes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len());
+        assert_eq!(ansi_key_code('L'), ansi_key_code('l'));
+        assert_eq!(ansi_key_code('é'), None);
+    }
 }
