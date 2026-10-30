@@ -4,24 +4,26 @@ A large model is slow in the loop because every step is a turn of its own,
 seconds each. Here it writes the plan once and leaves. Each step of the plan is
 then carried out by a loop with no large model in it:
 
-    deskvnc-sense table -> one jevos request -> one DeskVNC action -> settle
+    deskvnc-sense table -> find the control by name -> one DeskVNC action -> settle
 
 * The table is the desktop's controls as numbered rows, read by deskvnc-sense
   on the remote computer through UI Automation in tens of milliseconds.
-* jevos (github.com/feder-cr/jev, MIT) is an open decision model in TypeSafe
-  Jev's wire format. One request asks it for the operation and, speculatively,
-  for the target of every operation, so a decision is one round trip.
-* Text to type comes from a small open model behind llama.cpp, asked only when
-  the operation is to type and the plan step does not already say the text.
+* No model is needed. Each step names its control and the runner finds it in
+  the table by name, breaking ties by focus, by being in the window rather
+  than the taskbar, and by the closest name. Unexpected popups are sent away
+  with the safest button by a fixed list of words.
+* jevos (github.com/feder-cr/jev, MIT), an open decision model, is optional.
+  Set FASTLANE_JEV to a running `jev serve` and it breaks the ties instead,
+  and plans may then use goal steps, where it picks the operation too.
 * The wait is deskvnc-sense's settle: it reads the table until it has changed
   and then reads the same twice, so a step waits exactly as long as the screen
-  keeps changing.
+  keeps changing. Steps that expect nothing do not wait; the table is read
+  again only when a later step needs it.
 
 Run:  python3 fastlane.py --plan plan.json
 plan.json: {"host_id": "<DeskVNC saved host>", "steps": [...]}, steps as run() describes.
 Settings come from the environment: FASTLANE_KEY (the shared bearer token),
-FASTLANE_JEV (http://host:8017), FASTLANE_LLM (http://host:8018),
-FASTLANE_DVV (the dvv binary), FASTLANE_SENSE_PORT (5942).
+FASTLANE_JEV (optional, http://host:port of jev serve), FASTLANE_DVV (the dvv binary), FASTLANE_SENSE_PORT (5942).
 """
 
 import argparse
@@ -34,8 +36,7 @@ import time
 import urllib.request
 
 KEY = os.environ.get("FASTLANE_KEY", "")
-JEV = os.environ.get("FASTLANE_JEV", "http://127.0.0.1:8017")
-LLM = os.environ.get("FASTLANE_LLM", "http://127.0.0.1:8018")
+JEV = os.environ.get("FASTLANE_JEV", "")
 DVV = os.environ.get("FASTLANE_DVV", "dvv")
 SENSE_PORT = int(os.environ.get("FASTLANE_SENSE_PORT", "5942"))
 
@@ -237,23 +238,9 @@ def chosen(answer):
     return answer.get("choice") or answer.get("answer") or max(answer.get("probs", {"": 0}), key=answer["probs"].get)
 
 
-def text_for(step, goal, field):
-    started = time.time()
-    r = post(f"{LLM}/v1/chat/completions", {
-        "messages": [
-            {"role": "system", "content": "You fill in one field on a computer screen. Reply with only a JSON object {\"text\": \"...\"} holding the exact text to type."},
-            {"role": "user", "content": f"Overall goal: {goal}\nCurrent step: {step}\nField: {field}"},
-        ],
-        "temperature": 0, "max_tokens": 64,
-    })
-    content = r["choices"][0]["message"]["content"]
-    text = json.loads(content[content.index("{"): content.rindex("}") + 1])["text"]
-    return text, (time.time() - started) * 1000
-
-
 def find(rows, name, roles, step):
-    """The row a plan step names, by its name in code when that is clear and
-    by one jevos choice when it is not."""
+    """The row a plan step names, by its name when that is clear, and by rules
+    (or one jevos choice, when jevos is set) when several share it."""
     candidates = [r for r in rows if r["role"] in roles and not r.get("disabled")]
     want = name.lower()
     for test in (lambda n: n == want, lambda n: n.startswith(want), lambda n: want in n):
@@ -269,8 +256,8 @@ def find(rows, name, roles, step):
     offered = shortlist(candidates, name, roles)
     if not offered:
         return None, 0.0
-    if len(offered) == 1:
-        return next(r for r in rows if str(r["i"]) in offered), 0.0
+    if len(offered) == 1 or not JEV:
+        return closest(candidates, want), 0.0
     started = time.time()
     answer = post(f"{JEV}/v1/systemone", {
         "model": "jev-latest",
@@ -280,6 +267,14 @@ def find(rows, name, roles, step):
         "questions": {"target": {"type": "choice", "instructions": f"Which control is the one called {name!r} in the step?", "criteria": offered}},
     })["answers"]["target"]
     return next(r for r in rows if str(r["i"]) == chosen(answer)), (time.time() - started) * 1000
+
+
+def closest(candidates, want):
+    """Without a model: the focused one, then one in the window over the
+    taskbar, then the name nearest in length to the one asked for, then the
+    one highest on screen."""
+    return min(candidates, key=lambda r: (not r.get("focus"), r["area"] != "window",
+                                          abs(len(r["name"]) - len(want)), r["y"], r["x"]))
 
 
 def table_title(rows):
@@ -292,7 +287,7 @@ def met(expect, table):
     title = (table["window"]["title"] or "").lower()
     if "window" in expect and expect["window"].lower() not in title:
         return False
-    if "shows" in expect and not any(expect["shows"].lower() in r["name"].lower() for r in table["elements"]):
+    if "shows" in expect and not any(expect["shows"].lower() in f"{r['name']} {r.get('value', '')}".lower() for r in table["elements"]):
         return False
     return True
 
@@ -313,7 +308,7 @@ class Runner:
         {"type": "notepad", "into": "Open"}       into omitted: the focused field
         {"click": "Save", "expect": {"shows": "Saved"}}
         {"read": "price|$"}                       copy matching rows into the log
-        {"goal": "free text", "text": "..."}      jevos picks the operation too
+        {"goal": "free text", "text": "..."}      jevos picks the operation (needs FASTLANE_JEV)
 
     when, with the same form as expect, skips the step unless the screen
     matches it first. expect is checked after the screen settles: window is a
@@ -327,8 +322,23 @@ class Runner:
         self.sense = Sense(SENSE_PORT)
         self.dvv = Dvv(DVV, host_id)
         self.t0 = time.time()
-        self.table = self.sense.snapshot()
+        self._table = self.sense.snapshot()
+        self.stale = False
         self.log, self.history = [], []
+
+    @property
+    def table(self):
+        """The screen as it is now. A step that expected nothing left it
+        unread, so it is read here, once something needs it."""
+        if self.stale:
+            self.stale = False
+            self._table = self.sense.settle(self._table["hash"], change_ms=300)
+        return self._table
+
+    @table.setter
+    def table(self, value):
+        self._table = value
+        self.stale = False
 
     def now(self):
         return round((time.time() - self.t0) * 1000)
@@ -339,7 +349,7 @@ class Runner:
 
     def settle(self, expect=None, limit=4000):
         started = time.time()
-        self.table = self.sense.settle(self.table["hash"], change_ms=1000 if expect else 300)
+        self.table = self.sense.settle(self._table["hash"], change_ms=1000 if expect else 300)
         while not met(expect, self.table) and (time.time() - started) * 1000 < limit:
             self.table = self.sense.settle(self.table["hash"], change_ms=limit, max_ms=limit)
         return round((time.time() - started) * 1000)
@@ -369,8 +379,9 @@ class Runner:
             self.note(entry)
             return True, entry
         dvv = self.dvv
+        # No screen read before an action: DeskVNC refuses one after a big
+        # repaint, and key() and type() read and carry on when it does.
         if "key" in step:
-            dvv.fence()
             dvv.key(step["key"])
             entry["did"] = f"pressed {step['key']}"
         elif "type" in step:
@@ -382,7 +393,6 @@ class Runner:
                     return False, entry
                 if not row.get("focus"):
                     dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
-            dvv.fence(row)
             # A named field is set, not added to: a field keeps what it had
             # (the Run box remembers the last command). Text typed where the
             # caret is, in a document, must never select all of it first.
@@ -398,6 +408,12 @@ class Runner:
             dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
             entry["did"] = f"clicked {row['role']} {row['name'][:40]}"
         self.history.append(entry["did"])
+        if not step.get("expect") and not step.get("echo"):
+            # Nothing to check: go straight on. Keys and text reach the app in
+            # order, so the next step needs no wait unless it reads the screen.
+            self.stale = True
+            self.note(entry)
+            return True, entry
         entry["settle_ms"] = self.settle(step.get("expect"), step.get("expect_ms", 4000))
         ok = met(step.get("expect"), self.table)
         if ok and step.get("echo") and "type" in step:
@@ -433,8 +449,12 @@ class Runner:
             self.dvv.key("Escape")
             entry["did"] = "pressed Escape"
         else:
-            pick = candidates[0]
-            if len(candidates) > 1:
+            # The earliest word in DISMISS is the safest way out.
+            def safety(r):
+                n = r["name"].lower().strip()
+                return next((k for k, w in enumerate(DISMISS) if n == w or (len(w) > 3 and n.startswith(w))), len(DISMISS))
+            pick = min(candidates, key=safety)
+            if len(candidates) > 1 and JEV:
                 started = time.time()
                 answer = post(f"{JEV}/v1/systemone", {
                     "model": "jev-latest",
@@ -505,6 +525,8 @@ def run(plan, max_actions=40):
 def goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions):
     """A step the planner could not spell out: jevos picks the operation too."""
     say_text, text = step.get("text"), step["goal"]
+    if not JEV:
+        raise RuntimeError("a goal step needs jevos (FASTLANE_JEV); without it, plan the step as key, type or click")
     for _ in range(max_actions):
         answers, jev_ms, offered = decide(text, goal, table, history)
         op = chosen(answers["op"])
@@ -522,9 +544,8 @@ def goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions):
         elif op == "type" and ("field" in answers or only("field")):
             row = rows[chosen(answers["field"]) if "field" in answers else only("field")]
             if say_text is None:
-                typed, entry["llm_ms"] = text_for(text, goal, f"{row['role']} {row['name']}")
-            else:
-                typed = say_text
+                raise RuntimeError(f"goal step {text!r} wants to type but the plan gave no text")
+            typed = say_text
             if not row.get("focus"):
                 dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
             dvv.fence(row)
