@@ -1,0 +1,16 @@
+[package]
+name = "fastlane-plan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Carries out a plan of steps against a numbered table of the screen's controls, by rules, with no model in the loop. The rules are tools/fastlane/spec."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

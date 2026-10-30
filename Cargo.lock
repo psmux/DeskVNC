@@ -3017,6 +3017,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastlane-plan"
+version = "0.33.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fastlane-sense"
 version = "0.33.0"
 dependencies = [
