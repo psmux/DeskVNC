@@ -31,6 +31,7 @@ pub struct Sense {
     automation: IUIAutomation,
     cache: IUIAutomationCacheRequest,
     condition: IUIAutomationCondition,
+    gave_up: std::cell::RefCell<bool>,
 }
 
 impl Sense {
@@ -75,7 +76,7 @@ impl Sense {
                 .map_err(|e| e.to_string())?;
             let not_cell = automation.CreateNotCondition(&is_cell).map_err(|e| e.to_string())?;
             let condition = automation.CreateAndCondition(&view, &not_cell).map_err(|e| e.to_string())?;
-            Ok(Sense { automation, cache, condition })
+            Ok(Sense { automation, cache, condition, gave_up: std::cell::RefCell::new(false) })
         }
     }
 
@@ -132,10 +133,16 @@ impl Sense {
     /// once the read has used its budget: a slow app makes one read
     /// incomplete, never the fast lane wait.
     unsafe fn walk(&self, parent: &IUIAutomationElement, depth: u32, deadline: Instant, out: &mut Vec<IUIAutomationElement>) {
-        if depth > 60 || out.len() >= MAX_ROWS * 4 || Instant::now() > deadline {
+        if depth > 60 || out.len() >= MAX_ROWS * 4 || Instant::now() > deadline || *self.gave_up.borrow() {
             return;
         }
-        let Ok(children) = parent.FindAllBuildCache(TreeScope_Children, &self.condition, &self.cache) else { return };
+        let Ok(children) = parent.FindAllBuildCache(TreeScope_Children, &self.condition, &self.cache) else {
+            // An app that stopped answering (timed out) will not answer the
+            // next call either: give up on this window now.
+            out.push(parent.clone());
+            *self.gave_up.borrow_mut() = true;
+            return;
+        };
         for i in 0..children.Length().unwrap_or(0) {
             let Ok(el) = children.GetElement(i) else { continue };
             let kind = el.CachedControlType().unwrap_or_default();
@@ -149,6 +156,7 @@ impl Sense {
     unsafe fn read(&self, hwnd: HWND, area: &str, rows: &mut Vec<Value>, key: &mut String) {
         let Ok(root) = self.automation.ElementFromHandle(hwnd) else { return };
         let mut found = Vec::new();
+        *self.gave_up.borrow_mut() = false;
         let deadline = Instant::now() + READ_BUDGET;
         self.walk(&root, 0, deadline, &mut found);
         for el in found {
