@@ -263,6 +263,9 @@ def run(plan, max_actions=40):
         {"click": "Save", "expect": {"shows": "Saved"}}
         {"goal": "free text", "text": "..."}      jevos picks the operation too
 
+    when, with the same form as expect, skips the step unless the screen
+    matches it first.
+
     expect is checked against the table after the screen settles: window is a
     piece of the front window's title, shows a piece of any control's name.
     A step whose expectation is not met within expect_ms stops the run and
@@ -283,6 +286,12 @@ def run(plan, max_actions=40):
                     break
                 continue
             entry = {"t": round((time.time() - t0) * 1000), "step": step}
+            if not met(step.get("when"), table):
+                # A guard, so a plan can say "close it if it is open" without
+                # pressing alt+F4 on a bare desktop, which offers to shut down.
+                entry["skipped"] = True
+                log.append(entry)
+                continue
             rows = table["elements"]
             if "key" in step:
                 dvv.fence()
@@ -318,7 +327,9 @@ def run(plan, max_actions=40):
             # expect_ms, rather than failing on the first still frame.
             settle_started = time.time()
             limit = step.get("expect_ms", 4000)
-            table = sense.settle(table["hash"])
+            # A step that names no result may change nothing at all (Escape
+            # with nothing open), so it waits only briefly for a first change.
+            table = sense.settle(table["hash"], change_ms=1000 if step.get("expect") else 300)
             while not met(step.get("expect"), table) and (time.time() - settle_started) * 1000 < limit:
                 table = sense.settle(table["hash"], change_ms=limit, max_ms=limit)
             entry["settle_ms"] = round((time.time() - settle_started) * 1000)
@@ -332,10 +343,12 @@ def run(plan, max_actions=40):
         dvv.close()
     total = time.time() - t0
     result = {"seconds": round(total, 2), "actions": sum(1 for e in log if "did" in e), "log": log}
+    # The screen as it ended, so the planner can check the outcome or plan
+    # from there without looking at a picture.
+    result["window"] = table["window"]
+    result["controls"] = rows_text(table["elements"])
     if failed is not None:
         result["failed"] = failed
-        result["window"] = table["window"]
-        result["controls"] = rows_text(table["elements"])
     return result
 
 
