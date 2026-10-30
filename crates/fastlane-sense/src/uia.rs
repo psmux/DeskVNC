@@ -1,6 +1,7 @@
 //! UI Automation: the foreground window's controls and the taskbar's.
 
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{
@@ -21,6 +22,9 @@ use crate::{fnv, Table};
 /// text nodes, and a table longer than this costs the model more than the
 /// rows add.
 const MAX_ROWS: usize = 600;
+
+/// The most one read of a window may take before it stops going deeper.
+const READ_BUDGET: Duration = Duration::from_millis(1500);
 
 pub struct Sense {
     automation: IUIAutomation,
@@ -115,18 +119,34 @@ impl Sense {
         }
     }
 
+    /// The window's controls, level by level. Never inside a grid or a table
+    /// (a spreadsheet's cells; `cells` reads those by name), and no deeper
+    /// once the read has used its budget: a slow app makes one read
+    /// incomplete, never the fast lane wait.
+    unsafe fn walk(&self, parent: &IUIAutomationElement, depth: u32, deadline: Instant, out: &mut Vec<IUIAutomationElement>) {
+        if depth > 60 || out.len() >= MAX_ROWS * 4 || Instant::now() > deadline {
+            return;
+        }
+        let Ok(children) = parent.FindAllBuildCache(TreeScope_Children, &self.condition, &self.cache) else { return };
+        for i in 0..children.Length().unwrap_or(0) {
+            let Ok(el) = children.GetElement(i) else { continue };
+            let kind = el.CachedControlType().unwrap_or_default();
+            out.push(el.clone());
+            if kind != UIA_DataGridControlTypeId && kind != UIA_TableControlTypeId {
+                self.walk(&el, depth + 1, deadline, out);
+            }
+        }
+    }
+
     unsafe fn read(&self, hwnd: HWND, area: &str, rows: &mut Vec<Value>, key: &mut String) {
         let Ok(root) = self.automation.ElementFromHandle(hwnd) else { return };
-        let Ok(found) = root.FindAllBuildCache(TreeScope_Descendants, &self.condition, &self.cache)
-        else {
-            return;
-        };
-        let count = found.Length().unwrap_or(0);
-        for i in 0..count {
+        let mut found = Vec::new();
+        let deadline = Instant::now() + READ_BUDGET;
+        self.walk(&root, 0, deadline, &mut found);
+        for el in found {
             if rows.len() >= MAX_ROWS {
                 return;
             }
-            let Ok(el) = found.GetElement(i) else { continue };
             let Some(role) = el.CachedControlType().ok().and_then(role_of) else { continue };
             if el.CachedIsOffscreen().is_ok_and(|b| b.as_bool()) {
                 continue;
