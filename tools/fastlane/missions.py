@@ -138,8 +138,9 @@ def main():
             # Exactly what appeared during the mission, one window per name
             # per copy, and the browser tabs of ours.
             closed, kept = [], []
+            # Our pages open in windows of their own, so they are in extra
+            # too; nobody's tabs are touched.
             tidy.close_windows(runner, closed, kept, names=extra)
-            tidy.close_tabs(runner, closed)
             report["tidied"] = closed
             report["left_for_person"] = kept
             after = windows(runner)

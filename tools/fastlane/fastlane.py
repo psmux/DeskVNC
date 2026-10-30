@@ -259,6 +259,14 @@ def find(rows, name, roles, step):
         if hits:
             candidates = hits
             break
+    else:
+        # Nothing has the name. Without a model, a near miss is only taken
+        # when it shares a word with the name; anything else would be a guess,
+        # and a guess types into the wrong field. jevos may still choose.
+        if not JEV:
+            want_words = words(name)
+            near = [r for r in candidates if want_words & words(r["name"])]
+            return (closest(near, want) if near else None), 0.0
     offered = shortlist(candidates, name, roles)
     if not offered:
         return None, 0.0
@@ -307,9 +315,19 @@ def met(expect, table):
 
 # Words on the buttons that make an unexpected screen go away without
 # agreeing to anything: an extension that wants installing, a sign in offer, a
-# "restore pages" bar, a survey.
+# "restore pages" bar, a survey. Safest first. A button matches when its name
+# is one of these, or starts with one of the phrases of two words or more;
+# "Close tab" and "Close panel" do not match "close", because closing
+# something the person has open is never how to get past a popup.
 DISMISS = ["not now", "no thanks", "no, thanks", "maybe later", "remind me later", "later", "skip", "dismiss",
            "got it", "close", "cancel", "don't allow", "block", "decline", "reject", "no"]
+
+
+def dismisses(name):
+    n = name.lower().strip()
+    if "tab" in n.split():
+        return None
+    return next((k for k, w in enumerate(DISMISS) if n == w or (" " in w and n.startswith(w))), None)
 
 
 class Runner:
@@ -451,9 +469,7 @@ class Runner:
         # the app is never how to get rid of something in front of it.
         caption = {r["y"] for r in rows if r["name"].lower().startswith("minimize")}
         rows = [r for r in rows if not any(abs(r["y"] - y) <= 6 for y in caption)]
-        candidates = [] if typo else [r for r in rows if r["name"].lower().strip() in DISMISS]
-        if not candidates and not typo:
-            candidates = [r for r in rows if any(r["name"].lower().startswith(w) for w in DISMISS if len(w) > 3)]
+        candidates = [] if typo else [r for r in rows if dismisses(r["name"]) is not None]
         entry = {"t": self.now(), "recover": step, "window": self.table["window"]["title"]}
         if not candidates:
             # Nothing to dismiss by name: Escape closes most menus, flyouts
@@ -463,10 +479,7 @@ class Runner:
             entry["did"] = "pressed Escape"
         else:
             # The earliest word in DISMISS is the safest way out.
-            def safety(r):
-                n = r["name"].lower().strip()
-                return next((k for k, w in enumerate(DISMISS) if n == w or (len(w) > 3 and n.startswith(w))), len(DISMISS))
-            pick = min(candidates, key=safety)
+            pick = min(candidates, key=lambda r: dismisses(r["name"]))
             if len(candidates) > 1 and JEV:
                 started = time.time()
                 answer = post(f"{JEV}/v1/systemone", {

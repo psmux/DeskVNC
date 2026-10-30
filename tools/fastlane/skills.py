@@ -62,7 +62,10 @@ class Ctx:
 
     # ------------------------------------------------------------- browsing
     def open_page(self, url, expect, ms=20000):
-        self.do(run_box(f"msedge {url}", expect, ms))
+        # A window of our own: msedge with only a URL puts the tab in
+        # whichever Edge window was used last, which may be the person's, and
+        # closing our tab must never be able to reach theirs.
+        self.do(run_box(f"msedge --new-window {url}", expect, ms))
         title = self.runner.table["window"]["title"].split(" and ")[0].split(" - Personal")[0]
         self.opened("tab", title)
         return title
