@@ -257,8 +257,8 @@ def save_as(ctx, name, dialog="Save As", app_suffix=""):
 
 def answer_dont_save(ctx):
     if fastlane.office_prompt(ctx.runner.table):
-        # N is Don't Save's access key in every Office save prompt.
-        ctx.do([{"key": "n"}])
+        # alt+N is Don't Save's access key in every Office save prompt.
+        ctx.do([{"key": "alt+n"}])
         return
     ctx.do([{"click": "Don't Save", "when": {"shows": "Don't Save"}}])
 
