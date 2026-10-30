@@ -48,6 +48,9 @@ mod uia {
         pub fn snapshot(&mut self) -> Result<super::Table, String> {
             Err("unsupported".into())
         }
+        pub fn cells(&mut self, _names: &[String]) -> Result<serde_json::Value, String> {
+            Err("unsupported".into())
+        }
     }
 }
 
@@ -195,7 +198,14 @@ fn answer(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Re
                 settle(sense, after, number("change_ms", 1000), number("max_ms", 5000))
                     .unwrap_or_else(|e| json!({ "error": e }))
             }
-            _ => json!({ "error": "op is snapshot or settle" }),
+            Some("cells") => {
+                let names: Vec<String> = request["names"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                sense.cells(&names).unwrap_or_else(|e| json!({ "error": e }))
+            }
+            _ => json!({ "error": "op is snapshot, settle or cells" }),
         };
         writeln!(out, "{body}")?;
     }
