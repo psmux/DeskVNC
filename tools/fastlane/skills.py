@@ -188,11 +188,10 @@ def weather(ctx, city):
 @skill("web")
 def wikipedia(ctx, topic):
     """The opening sentences of a Wikipedia article, found through its own search box."""
-    title = ctx.open_page("https://en.wikipedia.org/wiki/Main_Page", {"window": "Wikipedia"})
-    ctx.closed("tab", title)
-    ctx.do([{"type": topic + "\n", "into": "Search Wikipedia", "expect": {"window": topic}, "expect_ms": 10000}])
-    title = ctx.runner.table["window"]["title"].split(" and ")[0].split(" - Personal")[0]
-    ctx.opened("tab", title)
+    # Wikipedia's own search, by its address: the search box folds into an
+    # icon when the window is narrow, and the address works at any width.
+    title = ctx.open_page("https://en.wikipedia.org/wiki/Special:Search?go=Go&search=" + urllib.parse.quote_plus(topic),
+                          {"window": topic.split()[0]})
     lines = [l for l in ctx.page_text(topic.split()[0], 12) if len(l) > 80]
     ctx.close_page(title)
     if not lines:
@@ -426,21 +425,27 @@ def organise(ctx, folder, files):
     New menu's folder sometimes appeared off screen, and clicking a file in a
     list that sorts itself again landed on the wrong one."""
     folder = ctx.name(folder)
-    moves = " && ".join(f'move "{f}" "{folder}\\"' for f in files)
-    command = f'cmd /c cd /d "%USERPROFILE%\\Documents" && mkdir "{folder}" && {moves}'
+    # & rather than &&: one file still held open by the app that saved it
+    # must not stop the others. A second pass picks up any that were held.
+    moves = " & ".join(f'move "{f}" "{folder}\\"' for f in files)
+    command = f'cmd /c cd /d "%USERPROFILE%\\Documents" & mkdir "{folder}" & {moves}'
     if len(command) > 250:
         raise SkillFailed("too many files for one Run box command")
-    ctx.do([{"key": "super+r", "expect": {"window": "Run"}},
-            {"type": command, "into": "Open"},
-            {"key": "Enter"}])
-    # Look, as a person would: open the folder and read what is in it.
-    time.sleep(1.0)
-    ctx.do(run_box(f'explorer "%USERPROFILE%\\Documents\\{folder}"', {"window": folder}, 10000))
-    ctx.opened("window", "File Explorer")
-    inside = " ".join(ctx.page_text("", 60))
-    missing = [f for f in files if f.rsplit(".", 1)[0] not in inside]
-    ctx.do([{"key": "alt+F4", "when": {"window": folder}}])
-    ctx.closed("window", "File Explorer")
+    for attempt in range(2):
+        ctx.do([{"key": "super+r", "expect": {"window": "Run"}},
+                {"type": command, "into": "Open"},
+                {"key": "Enter"}])
+        # Look, as a person would: open the folder and read what is in it.
+        time.sleep(1.0)
+        ctx.do(run_box(f'explorer "%USERPROFILE%\\Documents\\{folder}"', {"window": folder}, 10000))
+        ctx.opened("window", "File Explorer")
+        inside = " ".join(ctx.page_text("", 60))
+        missing = [f for f in files if f.rsplit(".", 1)[0] not in inside]
+        ctx.do([{"key": "alt+F4", "when": {"window": folder}}])
+        ctx.closed("window", "File Explorer")
+        if not missing:
+            break
+        time.sleep(2.0)
     if missing:
         raise SkillFailed(f"not in {folder}: {missing}")
     return {"folder": folder, "files": files}
