@@ -11,6 +11,9 @@ Download the file for your platform from the
 | Debian, Ubuntu | `DeskVNCViewer_<version>_amd64.deb` |
 | Fedora, RHEL | `DeskVNCViewer-<version>-1.x86_64.rpm` |
 | Any x64 Linux | `DeskVNCViewer_<version>_amd64.AppImage` |
+| Raspberry Pi 4 or 5 (64-bit Raspberry Pi OS), ARM64 Debian or Ubuntu | `DeskVNCViewer_<version>_arm64.deb` |
+| ARM64 Fedora, RHEL | `DeskVNCViewer-<version>-1.aarch64.rpm` |
+| Any ARM64 Linux | `DeskVNCViewer_<version>_aarch64.AppImage` |
 
 ## macOS
 
@@ -71,11 +74,16 @@ signed the same way. Releases before 0.27.10 are unsigned.
 
 ```sh
 sudo apt install ./DeskVNCViewer_<version>_amd64.deb      # Debian, Ubuntu
+sudo apt install ./DeskVNCViewer_<version>_arm64.deb      # Raspberry Pi OS 64-bit, ARM64
 sudo dnf install ./DeskVNCViewer-<version>-1.x86_64.rpm   # Fedora, RHEL
 
 chmod +x DeskVNCViewer_<version>_amd64.AppImage           # anywhere else
 ./DeskVNCViewer_<version>_amd64.AppImage
 ```
+
+The ARM64 packages need a 64-bit system. On a Raspberry Pi, `uname -m` prints
+`aarch64` on 64-bit Raspberry Pi OS; the older 32-bit system (`armv7l`) cannot
+run them.
 
 Packages are unsigned and not in any repository, so your package manager may
 warn about an untrusted origin.

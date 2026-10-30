@@ -10,6 +10,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* Linux builds for 64-bit ARM: a deb, an rpm and an AppImage of the viewer,
+  and DeskVNC Support as `DeskVNC-Support-Linux-aarch64.tar.gz`. They run on a
+  Raspberry Pi 4 or 5 with 64-bit Raspberry Pi OS and on other ARM64 Linux.
+
 ## [0.33.0] (2026-10-30)
 
 ### Changed
