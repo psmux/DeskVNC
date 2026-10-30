@@ -48,7 +48,7 @@ jobs:
 
           **macOS** is signed and notarized, so it opens normally.
           **Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.
-          **Linux** packages are unsigned.
+          **Linux** packages are unsigned. There are x64 and ARM64 (Raspberry Pi 4 or 5, 64-bit OS) builds.
 
           **DeskVNC Support** is also attached, for macOS, Windows and Linux,
           for people who need to receive help. Download it on the computer being
@@ -93,6 +93,14 @@ jobs:
             bundle-target: x86_64-unknown-linux-gnu
             toolchain-targets: x86_64-unknown-linux-gnu
             artifact: linux-x64
+          # 64-bit ARM Linux, for a Raspberry Pi 4 or 5 on 64-bit Raspberry Pi
+          # OS and for ARM servers and laptops. GitHub's ARM runner builds it
+          # natively, so nothing here cross compiles.
+          - os: ubuntu-22.04-arm
+            label: Linux ARM64 (deb + AppImage)
+            bundle-target: aarch64-unknown-linux-gnu
+            toolchain-targets: aarch64-unknown-linux-gnu
+            artifact: linux-arm64
           # One universal binary rather than two per-architecture jobs. GitHub
           # retired the Intel macOS image, so a `macos-13` job simply never gets
           # a runner: it sits queued until the 6 hour timeout and then reports
@@ -140,6 +148,8 @@ jobs:
       # keep linking against this runner's 0.3.48 library. The link fails if
       # the app needs anything 0.3.48 lacks, so a build that passes starts on
       # Ubuntu 22.04 and Debian 12 too.
+      # The headers come from the amd64 packages on ARM too, since they are
+      # the same files on every architecture.
       - name: Use PipeWire 1.0 headers against the 22.04 library
         if: runner.os == 'Linux'
         run: |
@@ -327,7 +337,7 @@ jobs:
 
             **macOS** is signed and notarized, so it opens normally.
             ${{ env.CERTUM_CONFIGURED == 'true' && '**Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.' || '**Windows** is unsigned: SmartScreen will say "Windows protected your PC", and you continue with **More info** then **Run anyway**.' }}
-            **Linux** packages are unsigned.
+            **Linux** packages are unsigned. There are x64 and ARM64 (Raspberry Pi 4 or 5, 64-bit OS) builds.
 
             **DeskVNC Support** is also attached, for macOS, Windows and
             Linux, for people who need to receive help. Download it on the computer being
@@ -635,13 +645,26 @@ jobs:
   # accounts with push access. Every earlier tag stopped there, which is why
   # v0.27.3 sat with a support app nobody outside the repo could download.
   #
-  # The support app for Linux: one x86_64 binary in a tarball. Its own job,
-  # on Ubuntu 24.04, because its Wayland screen capture binds PipeWire 1.0 and
-  # the viewer stays on 22.04 for the older glibc its installers promise.
+  # The support app for Linux: one binary in a tarball, for x86_64 and for
+  # ARM64. Its own job, on Ubuntu 24.04, because its Wayland screen capture
+  # binds PipeWire 1.0 and the viewer stays on 22.04 for the older glibc its
+  # installers promise.
   support-linux:
-    name: Linux (DeskVNC Support)
+    name: ${{ matrix.label }}
     needs: draft
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: Linux (DeskVNC Support)
+            arch: x86_64
+            sums: SHA256SUMS-DeskVNC-Support-Linux.txt
+          - os: ubuntu-24.04-arm
+            label: Linux ARM64 (DeskVNC Support)
+            arch: aarch64
+            sums: SHA256SUMS-DeskVNC-Support-Linux-aarch64.txt
     permissions:
       contents: write
     steps:
@@ -660,7 +683,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: support-linux
+          key: support-linux-${{ matrix.arch }}
 
       - name: Build and package the DeskVNC Support recipient app
         shell: bash
@@ -671,22 +694,22 @@ jobs:
           cargo build --locked --release -p boundary
           mkdir -p support
           cp target/release/boundary support/deskvnc-support
-          tar -C support -czf DeskVNC-Support-Linux-x86_64.tar.gz deskvnc-support
-          sha256sum DeskVNC-Support-Linux-x86_64.tar.gz | tee SHA256SUMS-DeskVNC-Support-Linux.txt
+          tar -C support -czf DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz deskvnc-support
+          sha256sum DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz | tee ${{ matrix.sums }}
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-x86_64.tar.gz SHA256SUMS-DeskVNC-Support-Linux.txt --clobber
+            gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz ${{ matrix.sums }} --clobber
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: deskvnc-support-linux
+          name: deskvnc-support-linux-${{ matrix.arch }}
           path: |
-            DeskVNC-Support-Linux-x86_64.tar.gz
-            SHA256SUMS-DeskVNC-Support-Linux.txt
+            DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz
+            ${{ matrix.sums }}
           if-no-files-found: error
           retention-days: 14
 
-  # Publishing is its own job so it waits for all three platforms. Flipping the
+  # Publishing is its own job so it waits for every platform. Flipping the
   # draft from inside the matrix would race: the first job to finish would
   # publish a release the other two were still uploading to.
   publish:
@@ -710,7 +733,7 @@ jobs:
           # Name the platforms rather than counting files, so a partial upload
           # is caught here instead of by whoever downloads the gap.
           missing=0
-          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' 'DeskVNC-Support-Linux-x86_64.tar.gz' '.dmg' '.msi' '-setup.exe' '.deb' '.AppImage'; do
+          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' 'DeskVNC-Support-Linux-x86_64.tar.gz' 'DeskVNC-Support-Linux-aarch64.tar.gz' '.dmg' '.msi' '-setup.exe' '_amd64.deb' '_arm64.deb' '_amd64.AppImage' '_aarch64.AppImage'; do
             if ! grep -qF "$want" /tmp/assets.txt; then
               echo "::error::release $TAG is missing an asset matching '$want'"
               missing=1
