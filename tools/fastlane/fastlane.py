@@ -337,7 +337,7 @@ class Runner:
             ok, entry = self.attempt(step)
             if ok:
                 return True
-            if attempt < retries and self.recover(step):
+            if attempt < retries and self.recover(step, typo=entry.get("echo") is False):
                 continue
             entry["failed"] = True
             self.note(entry)
@@ -400,12 +400,17 @@ class Runner:
             self.note(entry)
         return ok, entry
 
-    def recover(self, step):
+    def recover(self, step, typo=False):
         """Something the plan did not expect may be in front. Find the button
-        that sends it away and press it; True if anything was done."""
+        that sends it away and press it; True if anything was done. After a
+        lost keystroke there is nothing to dismiss, only a field to clear."""
         rows = [r for r in self.table["elements"] if r["area"] == "window" and r["role"] in ("button", "link") and not r.get("disabled")]
-        candidates = [r for r in rows if r["name"].lower().strip() in DISMISS]
-        if not candidates:
+        # A window's own caption buttons sit in a row with Minimize; closing
+        # the app is never how to get rid of something in front of it.
+        caption = {r["y"] for r in rows if r["name"].lower().startswith("minimize")}
+        rows = [r for r in rows if not any(abs(r["y"] - y) <= 6 for y in caption)]
+        candidates = [] if typo else [r for r in rows if r["name"].lower().strip() in DISMISS]
+        if not candidates and not typo:
             candidates = [r for r in rows if any(r["name"].lower().startswith(w) for w in DISMISS if len(w) > 3)]
         entry = {"t": self.now(), "recover": step, "window": self.table["window"]["title"]}
         if not candidates:
