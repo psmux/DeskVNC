@@ -16,7 +16,12 @@
 //!   default), and gives up at `max_ms` (5000).
 //!
 //! Started with the token in `DESKVNC_SENSE_TOKEN` and an optional
-//! `--listen host:port` (`0.0.0.0:5942` by default). It runs as the signed in
+//! `--listen host:port` (`0.0.0.0:5942` by default). With `--connect
+//! host:port` it dials the controller instead and answers over that one
+//! connection, one JSON line per request (`{"op":"snapshot"}` or
+//! `{"op":"settle","after":"<hash>"}`), after sending the token as its first
+//! line. Dialling out needs no inbound firewall rule, so Windows asks nobody
+//! anything, and it saves a TCP handshake on every read. It runs as the signed in
 //! user, in their session, because UI Automation only sees the desktop of the
 //! session it runs in.
 
@@ -74,6 +79,24 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(controller) = args
+        .iter()
+        .position(|a| a == "--connect")
+        .and_then(|i| args.get(i + 1).cloned())
+    {
+        loop {
+            match TcpStream::connect(&controller) {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    if let Err(e) = answer(stream, &token, &mut sense) {
+                        eprintln!("controller connection ended: {e}");
+                    }
+                }
+                Err(e) => eprintln!("cannot reach {controller}: {e}"),
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
     let listener = TcpListener::bind(&listen).unwrap_or_else(|e| {
         eprintln!("cannot listen on {listen}: {e}");
         std::process::exit(1);
@@ -148,6 +171,32 @@ fn serve(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Res
         text.len()
     )?;
     out.flush()
+}
+
+/// The dial out mode: the token, then one JSON line answered per line read.
+fn answer(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Result<()> {
+    let mut out = stream.try_clone()?;
+    writeln!(out, "{}", json!({ "hello": "deskvnc-sense", "token": token }))?;
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let request: Value = serde_json::from_str(&line?).unwrap_or(Value::Null);
+        let number = |key: &str, default: u64| request[key].as_u64().unwrap_or(default);
+        let started = Instant::now();
+        let body = match request["op"].as_str() {
+            Some("snapshot") => sense
+                .snapshot()
+                .map(|t| stamp(t, started, json!({})))
+                .unwrap_or_else(|e| json!({ "error": e })),
+            Some("settle") => {
+                let after = request["after"].as_str().and_then(|h| h.parse().ok());
+                settle(sense, after, number("change_ms", 1000), number("max_ms", 5000))
+                    .unwrap_or_else(|e| json!({ "error": e }))
+            }
+            _ => json!({ "error": "op is snapshot or settle" }),
+        };
+        writeln!(out, "{body}")?;
+    }
+    Ok(())
 }
 
 fn stamp(table: Table, started: Instant, extra: Value) -> Value {
