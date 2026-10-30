@@ -247,8 +247,11 @@ def left_to_right(expr):
 
 # ================================================================= office
 def save_as(ctx, name, dialog="Save As", app_suffix=""):
+    # The file name field has the focus and its text selected when the dialog
+    # opens, so type over it; looking it up would mean reading the dialog,
+    # and Excel does not answer while its own dialog is open.
     ctx.do([{"key": "F12", "expect": {"window": dialog}, "expect_ms": 8000},
-            {"type": name, "into": "File name"},
+            {"key": "ctrl+a"}, {"type": name},
             {"key": "Enter", "expect": {"window": name}, "expect_ms": 10000}])
 
 
