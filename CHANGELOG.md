@@ -10,6 +10,27 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* `dvv_click`, `dvv_type` and `dvv_key` take `look`: the action waits for the
+  screen to change and then settle, and returns the picture in the same call.
+  One call where an agent made three. On a short PowerShell job on a Windows
+  laptop that went from 12 calls and 15.4 s to 4 calls and 11.1 s, and each
+  call saved is one fewer turn of the agent's own model.
+
+* The fast lane, an experiment in `tools/fastlane` with its own reader,
+  `deskvnc-sense`. A large model writes a plan once; a loop carries it out
+  over a table of the screen's controls read through UI Automation, the open
+  jevos decision model for ambiguous targets, and a settle that follows the
+  table instead of a timer. Opening Notepad through the Run box and typing a
+  line took 5.3 s for five actions.
+
+### Fixed
+
+* `screen-stable` and `screen-changed` ignore changes the size of a blinking
+  caret or a ticking clock. A screen with PowerShell open never counted as
+  still before, so every wait ran to its timeout: 91 s of a 157 s install.
+
 ## [0.33.0] (2026-10-30)
 
 ### Changed
