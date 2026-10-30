@@ -95,6 +95,8 @@ class Dvv:
         self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fastlane", "version": "1"}})
         card = self.call("dvv_open", hostId=host_id, perceive=True)
         self.limb = card["structuredContent"]["limb"]["limb_id"]
+        size = card["structuredContent"]["limb"].get("size") or {}
+        self.width, self.height = size.get("width", 1920), size.get("height", 1080)
         self.call("dvv_screen", scale=0.1)
 
     def rpc(self, method, params):
@@ -120,7 +122,12 @@ class Dvv:
     def fence(self, row=None):
         # Typing is refused until the screen has been read since its last big
         # repaint. A tiny crop of the field is the cheapest read that counts.
-        region = {"x": row["x"], "y": row["y"], "w": max(8, row["w"]), "h": max(8, row["h"])} if row else None
+        region = None
+        if row:
+            # Clamped to the framebuffer: a page's search box can report a
+            # rectangle that runs off the screen, and DeskVNC refuses those.
+            x, y = max(0, min(row["x"], self.width - 8)), max(0, min(row["y"], self.height - 8))
+            region = {"x": x, "y": y, "w": max(8, min(row["w"], self.width - x)), "h": max(8, min(row["h"], self.height - y))}
         if region:
             self.call("dvv_screen", form="region", region=region)
         else:
