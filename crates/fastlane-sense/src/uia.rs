@@ -109,6 +109,11 @@ impl Sense {
             if role == "text" && name.is_empty() {
                 continue;
             }
+            // A spreadsheet lists every visible cell and every row and column
+            // header; an empty cell says nothing and would fill the table.
+            if role == "row" && value.is_empty() && is_cell_or_header(&name) {
+                continue;
+            }
             let enabled = el.CachedIsEnabled().is_ok_and(|b| b.as_bool());
             let focus = el.CachedHasKeyboardFocus().is_ok_and(|b| b.as_bool());
             let toggled = el
@@ -162,6 +167,12 @@ unsafe fn text_of(hwnd: HWND, title: bool) -> String {
     let mut buf = [0u16; 256];
     let n = if title { GetWindowTextW(hwnd, &mut buf) } else { GetClassNameW(hwnd, &mut buf) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+fn is_cell_or_header(name: &str) -> bool {
+    let letters = name.chars().take_while(|c| c.is_ascii_uppercase()).count();
+    let rest = &name[letters..];
+    name.len() <= 10 && (letters > 0 || !rest.is_empty()) && rest.chars().all(|c| c.is_ascii_digit())
 }
 
 fn clip(text: &str) -> String {
