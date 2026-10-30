@@ -91,7 +91,7 @@ impl Worker {
 /// The most reader threads at once. A thread stuck in an app that stopped
 /// answering is left to finish on its own while another reads the next
 /// window; past this many, reads answer partial until one is free.
-const WORKERS: usize = 4;
+const WORKERS: usize = 8;
 
 /// The screen reader. UI Automation calls run on worker threads, so a call
 /// that hangs holds up a worker, never the caller: the caller answers with

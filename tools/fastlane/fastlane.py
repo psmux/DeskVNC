@@ -264,8 +264,9 @@ def find(rows, name, roles, step):
         # when it shares a word with the name; anything else would be a guess,
         # and a guess types into the wrong field. jevos may still choose.
         if not JEV:
+            # A whole page is never a near miss for a field.
             want_words = words(name)
-            near = [r for r in candidates if want_words & words(r["name"])]
+            near = [r for r in candidates if r["role"] != "document" and want_words & words(r["name"])]
             return (closest(near, want) if near else None), 0.0
     offered = shortlist(candidates, name, roles)
     if not offered:
@@ -405,6 +406,15 @@ class Runner:
             self.note(entry)
             return True, entry
         rows = self.table["elements"]
+        for _ in range(8):
+            # A partial table is a window that has not answered yet (or a
+            # reader still busy with the last app): look again before
+            # deciding a control is missing.
+            if not self.table.get("partial") or not ("click" in step or step.get("into")):
+                break
+            time.sleep(0.4)
+            self.table = self.sense.snapshot()
+            rows = self.table["elements"]
         if "read" in step:
             entry["read"] = read_rows(rows, step["read"])[: step.get("limit", 15)]
             self.note(entry)
