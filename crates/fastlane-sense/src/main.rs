@@ -52,6 +52,9 @@ mod uia {
             Err("unsupported".into())
         }
     }
+    pub fn clipboard_text() -> Result<String, String> {
+        Err("unsupported".into())
+    }
 }
 
 /// One read of the screen.
@@ -205,7 +208,10 @@ fn answer(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Re
                     .unwrap_or_default();
                 sense.cells(&names).unwrap_or_else(|e| json!({ "error": e }))
             }
-            _ => json!({ "error": "op is snapshot, settle or cells" }),
+            Some("clipboard") => uia::clipboard_text()
+                .map(|text| json!({ "text": text }))
+                .unwrap_or_else(|e| json!({ "error": e })),
+            _ => json!({ "error": "op is snapshot, settle, cells or clipboard" }),
         };
         writeln!(out, "{body}")?;
     }

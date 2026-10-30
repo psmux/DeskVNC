@@ -86,6 +86,9 @@ class Sense:
     def settle(self, after, change_ms=1000, max_ms=5000):
         return self.ask(op="settle", after=after, change_ms=change_ms, max_ms=max_ms)
 
+    def clipboard(self):
+        return self.ask(op="clipboard").get("text")
+
 
 class Dvv:
     """DeskVNC's MCP server over stdio: the hands."""
@@ -119,6 +122,9 @@ class Dvv:
 
     def click(self, x, y):
         self.call("dvv_click", action="click", x=x, y=y)
+
+    def set_clipboard(self, text):
+        self.call("dvv_clipboard", action="set", text=text)
 
     def fence(self, row=None):
         # Typing is refused until the screen has been read since its last big
@@ -279,6 +285,13 @@ def closest(candidates, want):
 
 def table_title(rows):
     return " / ".join(r["name"] for r in rows if r["area"] == "window" and r["role"] == "text")[:200]
+
+
+def office_prompt(table):
+    """An Office dialog (Excel's "Want to save your changes?") in front of an
+    app that has stopped answering UI Automation: the title and class are
+    known, the buttons are not. Its keys still work."""
+    return table.get("partial") and table["window"]["class"] == "NUIDialog"
 
 
 def met(expect, table):

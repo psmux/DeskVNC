@@ -1,6 +1,7 @@
 //! UI Automation: the foreground window's controls and the taskbar's.
 
 use serde_json::{json, Value};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
 use windows::core::Interface;
@@ -27,15 +28,149 @@ const MAX_ROWS: usize = 600;
 /// The most one read of a window may take before it stops going deeper.
 const READ_BUDGET: Duration = Duration::from_millis(1500);
 
+/// How long a snapshot waits for the reader before it answers without the
+/// window's controls. UI Automation's own timeouts do not cover every call:
+/// Excel behind one of its dialogs held a read for nine seconds with them set.
+const READ_DEADLINE: Duration = Duration::from_millis(1800);
+
+enum Ask {
+    Read(isize, &'static str),
+    Cells(isize, Vec<String>),
+}
+
+enum Answer {
+    Rows(Vec<Value>, String),
+    Cells(Result<Value, String>),
+}
+
+/// The screen reader, in front of a worker thread that does the UI
+/// Automation calls. A call that hangs holds up the worker, never the caller:
+/// the caller answers with what it has and marks the table partial, and
+/// further reads skip the window until the worker is free again.
 pub struct Sense {
+    asks: Sender<Ask>,
+    answers: Receiver<Answer>,
+    busy: bool,
+}
+
+impl Sense {
+    pub fn new() -> Result<Sense, String> {
+        let (asks, inbox) = channel::<Ask>();
+        let (outbox, answers) = channel::<Answer>();
+        let (ready_tx, ready) = channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let reader = match Reader::new() {
+                Ok(reader) => {
+                    let _ = ready_tx.send(Ok(()));
+                    reader
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            for ask in inbox {
+                let answer = unsafe {
+                    match ask {
+                        Ask::Read(hwnd, area) => {
+                            let (mut rows, mut key) = (Vec::new(), String::new());
+                            reader.read(HWND(hwnd as *mut _), area, &mut rows, &mut key);
+                            Answer::Rows(rows, key)
+                        }
+                        Ask::Cells(hwnd, names) => Answer::Cells(reader.cells(HWND(hwnd as *mut _), &names)),
+                    }
+                };
+                if outbox.send(answer).is_err() {
+                    return;
+                }
+            }
+        });
+        ready.recv().map_err(|e| e.to_string())??;
+        Ok(Sense { asks, answers, busy: false })
+    }
+
+    /// One answer from the worker within `wait`, dropping a late one left
+    /// from an earlier ask that ran out of time.
+    fn ask(&mut self, ask: Ask, wait: Duration) -> Option<Answer> {
+        if self.busy {
+            match self.answers.try_recv() {
+                Ok(_) => self.busy = false,
+                Err(_) => return None,
+            }
+        }
+        self.asks.send(ask).ok()?;
+        match self.answers.recv_timeout(wait) {
+            Ok(answer) => Some(answer),
+            Err(RecvTimeoutError::Timeout) => {
+                self.busy = true;
+                None
+            }
+            Err(RecvTimeoutError::Disconnected) => None,
+        }
+    }
+
+    pub fn snapshot(&mut self) -> Result<Table, String> {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            let taskbar = FindWindowW(windows::core::w!("Shell_TrayWnd"), None).unwrap_or_default();
+            let mut rows: Vec<Value> = Vec::new();
+            let mut key = String::new();
+            let mut partial = false;
+            for (hwnd, area) in [(foreground, "window"), (taskbar, "taskbar")] {
+                if hwnd.is_invalid() || (area == "taskbar" && hwnd == foreground) {
+                    continue;
+                }
+                match self.ask(Ask::Read(hwnd.0 as isize, area), READ_DEADLINE) {
+                    Some(Answer::Rows(found, k)) => {
+                        for mut row in found {
+                            if rows.len() >= MAX_ROWS {
+                                break;
+                            }
+                            row["i"] = json!(rows.len() + 1);
+                            rows.push(row);
+                        }
+                        key.push_str(&k);
+                    }
+                    _ => partial = true,
+                }
+            }
+            let title = text_of(foreground, true);
+            let class = text_of(foreground, false);
+            key.push_str(&title);
+            key.push_str(&class);
+            let mut body = json!({
+                "screen": { "w": GetSystemMetrics(SM_CXSCREEN), "h": GetSystemMetrics(SM_CYSCREEN) },
+                "window": { "title": title, "class": class },
+                "elements": rows,
+            });
+            if partial {
+                // The window did not answer in time: its title and class are
+                // right, its controls are missing.
+                body["partial"] = json!(true);
+            }
+            Ok(Table { hash: fnv(&key), body })
+        }
+    }
+
+    /// The values of named cells ("C4") in the window in front.
+    pub fn cells(&mut self, names: &[String]) -> Result<Value, String> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        match self.ask(Ask::Cells(hwnd.0 as isize, names.to_vec()), Duration::from_secs(5)) {
+            Some(Answer::Cells(result)) => result,
+            _ => Err("the window did not answer in time".into()),
+        }
+    }
+}
+
+struct Reader {
     automation: IUIAutomation,
     cache: IUIAutomationCacheRequest,
     condition: IUIAutomationCondition,
     gave_up: std::cell::RefCell<bool>,
 }
 
-impl Sense {
-    pub fn new() -> Result<Sense, String> {
+impl Reader {
+    fn new() -> Result<Reader, String> {
         unsafe {
             // Physical pixels, the same ones the VNC or Boundary framebuffer
             // carries, so a rectangle here is a click target there.
@@ -76,40 +211,16 @@ impl Sense {
                 .map_err(|e| e.to_string())?;
             let not_cell = automation.CreateNotCondition(&is_cell).map_err(|e| e.to_string())?;
             let condition = automation.CreateAndCondition(&view, &not_cell).map_err(|e| e.to_string())?;
-            Ok(Sense { automation, cache, condition, gave_up: std::cell::RefCell::new(false) })
-        }
-    }
-
-    pub fn snapshot(&mut self) -> Result<Table, String> {
-        unsafe {
-            let foreground = GetForegroundWindow();
-            let taskbar = FindWindowW(windows::core::w!("Shell_TrayWnd"), None).unwrap_or_default();
-            let mut rows: Vec<Value> = Vec::new();
-            let mut key = String::new();
-            for (hwnd, area) in [(foreground, "window"), (taskbar, "taskbar")] {
-                if hwnd.is_invalid() || (area == "taskbar" && hwnd == foreground) {
-                    continue;
-                }
-                self.read(hwnd, area, &mut rows, &mut key);
-            }
-            let title = text_of(foreground, true);
-            let class = text_of(foreground, false);
-            key.push_str(&title);
-            let body = json!({
-                "screen": { "w": GetSystemMetrics(SM_CXSCREEN), "h": GetSystemMetrics(SM_CYSCREEN) },
-                "window": { "title": title, "class": class },
-                "elements": rows,
-            });
-            Ok(Table { hash: fnv(&key), body })
+            Ok(Reader { automation, cache, condition, gave_up: std::cell::RefCell::new(false) })
         }
     }
 
     /// The values of named cells ("C4") in the window in front.
-    pub fn cells(&mut self, names: &[String]) -> Result<Value, String> {
+    unsafe fn cells(&self, hwnd: HWND, names: &[String]) -> Result<Value, String> {
         unsafe {
             let root = self
                 .automation
-                .ElementFromHandle(GetForegroundWindow())
+                .ElementFromHandle(hwnd)
                 .map_err(|e| e.to_string())?;
             let mut out = serde_json::Map::new();
             for name in names {
@@ -249,6 +360,36 @@ unsafe fn string_of(v: &VARIANT) -> Option<String> {
 unsafe fn int_of(v: &VARIANT) -> Option<i32> {
     let inner = &v.Anonymous.Anonymous;
     (inner.vt == VT_I4).then(|| inner.Anonymous.lVal)
+}
+
+/// The clipboard's text. The fast lane copies a value and reads it here when
+/// an app will not say it through UI Automation (Excel on a bad day), the way
+/// a person pastes a number somewhere to look at it.
+pub fn clipboard_text() -> Result<String, String> {
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows::Win32::Foundation::HGLOBAL;
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        OpenClipboard(None).map_err(|e| format!("clipboard: {e}"))?;
+        let text = (|| {
+            let handle = GetClipboardData(CF_UNICODETEXT).map_err(|e| format!("no text on the clipboard: {e}"))?;
+            let global = HGLOBAL(handle.0);
+            let ptr = GlobalLock(global) as *const u16;
+            if ptr.is_null() {
+                return Err("clipboard text would not lock".to_string());
+            }
+            let mut len = 0;
+            while *ptr.add(len) != 0 && len < 1 << 20 {
+                len += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(global);
+            Ok(text)
+        })();
+        let _ = CloseClipboard();
+        text
+    }
 }
 
 unsafe fn text_of(hwnd: HWND, title: bool) -> String {

@@ -40,6 +40,16 @@ def answer_save_prompt(runner, closed, kept, window):
     Notepad names the tab it asks about ("Do you want to save changes to
     notes.md?"); Word only asks "Save your changes to this file?", about the
     window that was just closed."""
+    if fastlane.office_prompt(runner.table):
+        # Office's prompt in front of an app that is not answering UI
+        # Automation: the window just closed is the subject, N is Don't Save.
+        if MINE_IN_PROMPT.search(window):
+            runner.step({"key": "n"})
+            closed.append(f"discarded unsaved: {window[:70]}")
+            return True
+        runner.step({"key": "Escape"})
+        kept.append(f"left open, not ours: {window[:70]}")
+        return False
     rows = runner.table["elements"]
     if not any(r["role"] == "button" and r["name"].lower() == "don't save" for r in rows):
         return False

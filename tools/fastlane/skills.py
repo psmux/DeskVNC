@@ -256,7 +256,26 @@ def save_as(ctx, name, dialog="Save As", app_suffix=""):
 
 
 def answer_dont_save(ctx):
+    if fastlane.office_prompt(ctx.runner.table):
+        # N is Don't Save's access key in every Office save prompt.
+        ctx.do([{"key": "n"}])
+        return
     ctx.do([{"click": "Don't Save", "when": {"shows": "Don't Save"}}])
+
+
+def copied(ctx, keys):
+    """Press keys that copy something and return the text they put on the
+    clipboard. A marker goes there first, so an old clipboard is never read
+    as the answer."""
+    marker = f"fastlane-{time.time()}"
+    ctx.runner.dvv.set_clipboard(marker)
+    ctx.do([{"key": k} for k in keys])
+    for _ in range(30):
+        text = ctx.runner.sense.clipboard()
+        if text and text != marker:
+            return text.strip()
+        time.sleep(0.1)
+    raise SkillFailed(f"nothing was copied by {keys}")
 
 
 @skill("office")
@@ -265,8 +284,10 @@ def spreadsheet(ctx, name, header, rows, totals, number_format_cols=""):
     number), a total row of SUMs over the given columns. Returns every
     computed cell of the total row, read back from Excel itself."""
     name = ctx.name(name)
-    ctx.do(run_box("excel", {"shows": "Blank workbook"}, 25000))
-    ctx.do([{"click": "Blank workbook", "expect": {"window": "Book"}, "expect_ms": 15000}])
+    # Escape on Excel's start screen opens a blank workbook. Keys and window
+    # titles only: Excel often stops answering UI Automation for seconds.
+    ctx.do(run_box("excel", {"window": "Excel"}, 25000))
+    ctx.do([{"key": "Escape", "expect": {"window": "Book"}, "expect_ms": 15000}])
     ctx.opened("window", "Excel")
     text = "\t".join(header) + "\n"
     for i, row in enumerate(rows, start=2):
@@ -281,8 +302,13 @@ def spreadsheet(ctx, name, header, rows, totals, number_format_cols=""):
     total_r = last + 1
     # Read the totals back from Excel's own cells, and check them against the
     # same sums done here, so a lost keystroke or a wrong formula shows up.
-    cells = ctx.runner.sense.ask(op="cells", names=[f"{c}{total_r}" for c in totals])
-    total = {c: number(cells.get(f"{c}{total_r}") or "") for c in totals}
+    # Go To the cell and copy it: that works when UI Automation does not.
+    total = {}
+    for c in totals:
+        ctx.do([{"key": "ctrl+g", "expect": {"window": "Go To"}, "expect_ms": 5000},
+                {"type": f"{c}{total_r}\n"}])
+        total[c] = number(copied(ctx, ["ctrl+c"]))
+    ctx.do([{"key": "Escape"}, {"key": "ctrl+Home"}])
     for c in totals:
         col = "BCDEFG".index(c) + 1
         want = 0.0
