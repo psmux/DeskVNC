@@ -140,6 +140,20 @@ const ROOM_POLL: Duration = Duration::from_millis(5);
 /// the plane's own bookkeeping and never reaches a limb (`02 §2.4`).
 const WAIT_POLL: Duration = Duration::from_millis(50);
 
+/// The most a change may paint and still count as a blink for screen-stable.
+///
+/// A text caret blinks about every half second and a clock ticks, so a screen
+/// with either never went quiet: on a Windows desktop with PowerShell open
+/// every screen-stable wait ran to its timeout, 91 s of a 157 s install. A
+/// caret is a few hundred pixels and a tray clock a few thousand; a dialog,
+/// a menu or a line of output is far more than this.
+const BLINK_AREA: usize = 64 * 64;
+
+/// Is this change too small to mean the screen is still moving?
+fn is_blink(damage: &crate::perception::Damage) -> bool {
+    damage.rects.iter().map(|r| r.area()).sum::<usize>() <= BLINK_AREA
+}
+
 /// How long the plane waits for a driver's answer to a natively served intent
 /// when the agent named no deadline of its own.
 ///
@@ -1474,8 +1488,11 @@ impl AttachedLimb {
                     }
                 }
                 WaitUntil::ScreenStable | WaitUntil::Idle => {
-                    if let Some(damage) = self.inner.observatory.damage_now() {
+                    let damage = self.inner.observatory.damage_now();
+                    if let Some(damage) = &damage {
                         rects = rects.saturating_add(damage.rects.len() as u32);
+                    }
+                    if damage.as_ref().is_some_and(|d| !is_blink(d)) {
                         last_change = tokio::time::Instant::now();
                     } else if last_change.elapsed() >= quiet {
                         break true;

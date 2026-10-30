@@ -55,6 +55,11 @@ use tokio::io::{AsyncBufRead, AsyncWrite};
 /// handles that correctly with no prompting.
 pub const WAIT_CLAMP_MS: u64 = 25_000;
 
+/// How long the screen must stay still before a look reads it. Shorter than
+/// dvv_wait's default because a look always returns a picture, so reading a
+/// little early costs a glance rather than a wrong answer.
+const LOOK_QUIET_MS: u64 = 400;
+
 /// The MCP adapter over one plane.
 pub struct Server {
     /// `None` before a grant exists. Every tool then answers `POLICY_DENIED`
@@ -293,7 +298,7 @@ impl Server {
                 let settlement = plane
                     .submit_for(&limb, lowered.kind, opt_u32(args, "generation"), opt_str(args, "reason"))
                     .await?;
-                Ok(self.settled(&limb, &settlement, json!({ "resolved": lowered.resolved })))
+                Ok(self.look_after(&limb, &settlement, args, self.settled(&limb, &settlement, json!({ "resolved": lowered.resolved }))).await)
             }
             "dvv_type" => {
                 let text = require_str(args, "text")?;
@@ -309,7 +314,7 @@ impl Server {
                         opt_str(args, "reason"),
                     )
                     .await?;
-                Ok(self.settled(&limb, &settlement, json!({})))
+                Ok(self.look_after(&limb, &settlement, args, self.settled(&limb, &settlement, json!({}))).await)
             }
             "dvv_key" => {
                 let chord = require_str(args, "keys")?;
@@ -318,7 +323,7 @@ impl Server {
                 let settlement = plane
                     .submit_for(&limb, IntentKind::Press { keys }, None, opt_str(args, "reason"))
                     .await?;
-                Ok(self.settled(&limb, &settlement, json!({ "resolved": resolved })))
+                Ok(self.look_after(&limb, &settlement, args, self.settled(&limb, &settlement, json!({ "resolved": resolved }))).await)
             }
             "dvv_screen" => self.screen(args).await,
             "dvv_wait" => self.wait(args).await,
@@ -588,6 +593,66 @@ impl Server {
             )
             .await
             .is_ok_and(|settlement| !settlement.refused())
+    }
+
+    /// The `look` half of an action: wait for the screen to settle, then
+    /// return the picture with the action's own result in front of it.
+    async fn look_after(
+        &self,
+        limb: &agent_plane::AttachedLimb,
+        settlement: &Settlement,
+        args: &Value,
+        acted: Value,
+    ) -> Value {
+        if args.get("look").and_then(Value::as_bool) != Some(true) || settlement.refused() {
+            return acted;
+        }
+        let Ok(plane) = self.plane() else { return acted };
+        let wait = plane
+            .submit(
+                limb,
+                IntentKind::Wait {
+                    until: WaitUntil::ScreenStable,
+                    quiet: Some(Duration::from_millis(LOOK_QUIET_MS)),
+                    timeout: Some(Duration::from_millis(
+                        opt_u64(args, "lookMs").unwrap_or(4_000).min(WAIT_CLAMP_MS),
+                    )),
+                },
+                None,
+            )
+            .await;
+        let settled = wait.as_ref().is_ok_and(|w| {
+            !matches!(w.outcome, limb_core::observation::Outcome::TimedOut { .. })
+        });
+        let mut read = json!({ "limbId": limb.id().to_string() });
+        match args.get("lookRegion") {
+            Some(region) => {
+                read["form"] = json!("region");
+                read["region"] = region.clone();
+            }
+            None => {
+                let scale = args.get("lookScale").and_then(Value::as_f64).unwrap_or(0.5);
+                read["scale"] = json!(scale);
+            }
+        }
+        let mut seen = match self.screen(&read).await {
+            Ok(seen) => seen,
+            Err(error) => format::error(&error),
+        };
+        let mut content = acted["content"].as_array().cloned().unwrap_or_default();
+        content.push(json!({
+            "type": "text",
+            "text": if settled { "The screen settled; this is it now." } else { "The screen was still moving when the look ran out; this is it now." },
+        }));
+        if let Some(items) = seen["content"].as_array() {
+            content.extend(items.iter().cloned());
+        }
+        seen["content"] = json!(content);
+        if let Some(structured) = seen.get_mut("structuredContent").and_then(Value::as_object_mut) {
+            structured.insert("action".into(), acted["structuredContent"].clone());
+            structured.insert("settled".into(), json!(settled));
+        }
+        seen
     }
 
     async fn wait(&self, args: &Value) -> Result<Value, ToolError> {
