@@ -33,6 +33,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* The helper's window draws an Intel Mac's Boundary video again. Apple's
+  software encoder writes no count of reordered pictures, so WebKit's
+  decoder held four pictures back, the window waited half a second for each
+  one and drew none, and the screen froze while video piled up behind it.
+  The computer now says in every keyframe that nothing is reordered, and
+  each picture comes out of the decoder in 2 to 9 ms.
+
 * A Mac sharing its screen over Boundary no longer quits when the helper
   types. Releasing a letter or digit key asked the keyboard layout for a
   key code from a worker thread, which macOS 15 answers by stopping the app
