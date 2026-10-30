@@ -19,11 +19,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   call saved is one fewer turn of the agent's own model.
 
 * The fast lane, an experiment in `tools/fastlane` with its own reader,
-  `deskvnc-sense`. A large model writes a plan once; a loop carries it out
-  over a table of the screen's controls read through UI Automation, the open
-  jevos decision model for ambiguous targets, and a settle that follows the
-  table instead of a timer. Opening Notepad through the Run box and typing a
-  line took 5.3 s for five actions.
+  `deskvnc-sense`. The agent writes a plan once; a loop with no model in it
+  carries the plan out over a table of the screen's controls read through UI
+  Automation, finding each control by name and waiting only when a step says
+  what the screen should show. No model is needed; the open jevos decision
+  model can be set to break ties. Two chained missions on a Windows laptop
+  (web lookups, Calculator, Excel, Word, PowerPoint, Notepad, filing) passed
+  16 skills of 16 in 6.3 minutes and closed every window they opened.
 
 ### Fixed
 

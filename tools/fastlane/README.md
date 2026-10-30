@@ -11,48 +11,53 @@ wait, look, decide. DeskVNC itself answers in tens of milliseconds on a LAN.
 
 ## What the fast lane does instead
 
-The large model writes the plan once. A loop with no large model in it carries
-the plan out:
+The agent (any agent, with whatever model it already uses) writes the plan
+once. A loop with no model in it carries the plan out:
 
 1. `deskvnc-sense` on the remote computer reads the screen's controls through
    UI Automation and serves them as numbered rows, each with its role, name,
-   value and rectangle. One read takes about 40 ms on an MSI laptop.
+   value and rectangle. One read takes about 40 ms on an MSI laptop. Reads run
+   on worker threads with a 1.8 s deadline, so an app that stops answering
+   (Excel does, for seconds at a time) gives a table marked `partial` with the
+   window's title and class, never a stalled step.
 2. Each plan step names its operation and the control by name, for example
    `{"type": "notepad", "into": "Open"}`. Code finds the control in the
-   table. When a name is ambiguous, jevos picks among the best dozen matches
-   in one request.
+   table by its name. Ties go to the focused control, then one in the window
+   over the taskbar, then the closest name. A control that is not there is
+   reported missing; nothing is guessed.
 3. The action goes through DeskVNC (`dvv` over MCP), at the control's own
    rectangle.
-4. The wait is `deskvnc-sense`'s settle: it reads the table until it changes
-   and then reads it until two reads match. No timers; a step waits exactly as
-   long as the screen keeps changing.
-5. Each step can say what the screen should show afterwards (`expect`) and when
-   it applies at all (`when`). A step whose expectation is not met stops the
-   run and returns the table, so the planner sees the real screen and plans
-   again from there.
+4. Steps that say what the screen should show afterwards (`expect`) wait for
+   it with `deskvnc-sense`'s settle: it reads the table until it changes and
+   then until two reads match. Steps that expect nothing do not wait at all;
+   the next step that needs the screen reads it.
+5. Something the plan did not expect in front (a sign in offer, an "install
+   this app" bubble) is sent away with the safest button from a fixed list
+   ("Not now" before "Close"). Tab close buttons never count.
 
-A step the planner cannot spell out can be a free text `goal`. jevos then
-picks the operation too. On the first runs it chose badly at this, so treat it
-as a fallback.
+## Models
 
-## Models, all open source and on our own machines
+None are needed. jevos-v5 ([feder-cr/jev](https://github.com/feder-cr/jev),
+MIT) is optional: set `FASTLANE_JEV` to a running `jev serve` and it breaks
+ties between controls with the same name, picks among several dismiss
+buttons, and allows free text `goal` steps. Without it, `goal` steps are
+refused and the rules above decide.
 
-* **jevos-v5** ([feder-cr/jev](https://github.com/feder-cr/jev), MIT): a
-  decision model in TypeSafe Jev's request format. On its authors' tests it is
-  the closest open model to Jev. On the AM5 it answers a yes/no question in
-  16 ms.
-* **Qwen2.5 3B Instruct** behind llama.cpp, only for text a plan step does
-  not give. About 440 ms for a short answer on the AM5's CPU.
+Measured with no model on the MSI, 2026-10-30: the trip and market missions
+(16 skills: flights, exchange rate, weather, Wikipedia, news, Calculator,
+Excel with totals checked, Word, PowerPoint, Notepad, filing into folders)
+passed 16 of 16 in 6.3 minutes, 211 actions, no recoveries, every window they
+opened closed and nothing of the person's touched.
 
-Laya was considered. Untuned, it scored about half of jevos's accuracy on the
-same tests, so it would need fine tuning on our own cases first.
+## Skills and missions
 
-## Measured on the MSI, 2026-10-30
-
-Escape, open the Run box, type `notepad`, press Enter, type a line into
-Notepad: 5 actions in **5.27 s**, of which Notepad's own start took 2.35 s.
-Closing the windows and answering a save prompt took 0.4 to 0.7 s a step. The
-same kind of job driven by Claude turn by turn took 15 to 160 s.
+`skills.py` holds the tested skills; each checks its own result (Calculator
+answers against the same sum done exactly, Excel totals copied back out of
+Excel, saved files confirmed in Documents) and records what it opened.
+`missions.py` chains skills, passing what one found to the next, and closes
+exactly the windows that appeared during the run. `tidy.py` clears up after
+a run that crashed. Window lists come from the sense, so nothing flashes on
+screen.
 
 ## Running it
 
@@ -69,7 +74,6 @@ On the controller:
 
 ```sh
 FASTLANE_KEY=<shared secret> \
-FASTLANE_JEV=http://<am5>:8017 FASTLANE_LLM=http://<am5>:8018 \
 FASTLANE_DVV=/Applications/DeskVNCViewer.app/Contents/MacOS/dvv \
 python3 tools/fastlane/fastlane.py --plan plan.json
 ```
