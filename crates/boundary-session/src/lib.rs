@@ -7,6 +7,7 @@ mod pace;
 mod screen;
 mod session;
 mod shared;
+mod sps;
 mod stats;
 pub mod tools;
 pub mod unattended;

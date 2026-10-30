@@ -25,6 +25,16 @@ pub struct Encoded {
     pub keyframe: bool,
 }
 
+/// Has a keyframe's parameter set say no picture is reordered, so the
+/// helper's decoder shows each one as it arrives (`crate::sps`).
+pub fn shown_at_once(encoded: &mut Encoded) {
+    if encoded.keyframe
+        && let Some(data) = crate::sps::annex_b_no_reordering(&encoded.data)
+    {
+        encoded.data = data;
+    }
+}
+
 /// A low latency H.264 encoder: no B frames, one picture in and one out, so
 /// what comes out of [`VideoEncoder::encode`] is the picture just given.
 pub trait VideoEncoder: Send {
