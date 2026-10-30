@@ -39,6 +39,8 @@ members = [
     # The named pipe both listeners use on Windows, with its owner only ACL.
     "crates/local-pipe",
     "crates/dvv",
+    # The fast lane's eyes: a desktop's controls as a table, served on the LAN.
+    "crates/fastlane-sense",
     # Remote desktop benchmark: the stage window and the measuring client.
     "crates/bench-stage",
     "crates/remote-bench",
