@@ -91,7 +91,7 @@ def task_calc(n, memory):
         sums.append(rng.choice([f"{a}*{b}", f"{a}/{b}", f"{a}+{b}*{c}", f"{a}-{c}"]))
     steps = run_box("calc", {"window": "Calculator"})
     for expr in sums:
-        steps += [{"key": "Escape"}, {"type": expr + "=", "expect": {"shows": "Display is"}, "echo": True}, {"read": "Display is"}]
+        steps += [{"key": "Escape"}, {"type": expr + "=", "expect": {"shows": "Display is"}}, {"read": "Display is"}]
     steps.append({"key": "alt+F4", "when": {"window": "Calculator"}})
     def check(reads):
         got = [r for r in sum(reads, []) if r.startswith("Display is")]
