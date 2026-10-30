@@ -387,6 +387,15 @@ class Runner:
         self.history.append(entry["did"])
         entry["settle_ms"] = self.settle(step.get("expect"), step.get("expect_ms", 4000))
         ok = met(step.get("expect"), self.table)
+        if ok and step.get("echo") and "type" in step:
+            # Typed text has to show up somewhere on screen, letters and
+            # digits in order, or a key was lost on the way: a calculator that
+            # missed the first digit shows a wrong answer with no error.
+            def plain(t):
+                return "".join(c for c in t.lower() if c.isalnum())
+            typed = plain(step["type"])
+            ok = any(typed in plain(f"{r['name']} {r.get('value', '')}") for r in self.table["elements"])
+            entry["echo"] = ok
         if ok:
             self.note(entry)
         return ok, entry

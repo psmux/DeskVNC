@@ -58,7 +58,8 @@ def task_news(n, memory):
         {"read": "", "limit": 40},
     ]
     def check(reads):
-        heads = [r for r in sum(reads, []) if len(r) > 45 and not r.startswith("More - ") and " - " not in r]
+        # Each story is read as "More - <headline>", the label of its menu.
+        heads = [r[len("More - "):] for r in sum(reads, []) if r.startswith("More - ") and len(r) > 30]
         if heads:
             memory["news"] = (section, heads[:3])
         return len(heads) >= 3, f"{len(heads)} {section} headlines"
@@ -87,7 +88,7 @@ def task_calc(n, memory):
         sums.append(rng.choice([f"{a}*{b}", f"{a}/{b}", f"{a}+{b}*{c}", f"{a}-{c}"]))
     steps = run_box("calc", {"window": "Calculator"})
     for expr in sums:
-        steps += [{"key": "Escape"}, {"type": expr + "=", "expect": {"shows": "Display is"}}, {"read": "Display is"}]
+        steps += [{"key": "Escape"}, {"type": expr + "=", "expect": {"shows": "Display is"}, "echo": True}, {"read": "Display is"}]
     def check(reads):
         got = [r for r in sum(reads, []) if r.startswith("Display is")]
         good = 0
