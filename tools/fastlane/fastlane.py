@@ -284,123 +284,187 @@ def met(expect, table):
     return True
 
 
-def run(plan, max_actions=40):
-    """Carry out a plan. Each step says what to do, so most need no model:
+# Words on the buttons that make an unexpected screen go away without
+# agreeing to anything: an extension that wants installing, a sign in offer, a
+# "restore pages" bar, a survey.
+DISMISS = ["not now", "no thanks", "no, thanks", "maybe later", "remind me later", "later", "skip", "dismiss",
+           "got it", "close", "cancel", "don't allow", "block", "decline", "reject", "no"]
+
+
+class Runner:
+    """One connection to the remote computer, many steps.
+
+    Each step says what to do, so most need no model:
 
         {"key": "super+r", "expect": {"window": "Run"}}
         {"type": "notepad", "into": "Open"}       into omitted: the focused field
         {"click": "Save", "expect": {"shows": "Saved"}}
-        {"goal": "free text", "text": "..."}      jevos picks the operation too
         {"read": "price|$"}                       copy matching rows into the log
+        {"goal": "free text", "text": "..."}      jevos picks the operation too
 
     when, with the same form as expect, skips the step unless the screen
-    matches it first.
-
-    expect is checked against the table after the screen settles: window is a
+    matches it first. expect is checked after the screen settles: window is a
     piece of the front window's title, shows a piece of any control's name.
-    A step whose expectation is not met within expect_ms stops the run and
-    returns the table, so the planner sees what is there instead."""
-    sense = Sense(SENSE_PORT)
-    dvv = Dvv(DVV, plan["host_id"])
-    goal = plan.get("goal", "")
-    history, log = [], []
-    t0 = time.time()
-    table = sense.snapshot()
+
+    A step that cannot find its control or whose expectation is not met is
+    not given up at once: something the plan did not cause may be in front,
+    so the runner looks for a way to dismiss it, and tries the step again."""
+
+    def __init__(self, host_id):
+        self.sense = Sense(SENSE_PORT)
+        self.dvv = Dvv(DVV, host_id)
+        self.t0 = time.time()
+        self.table = self.sense.snapshot()
+        self.log, self.history = [], []
+
+    def now(self):
+        return round((time.time() - self.t0) * 1000)
+
+    def note(self, entry):
+        self.log.append(entry)
+        print(json.dumps(entry), file=sys.stderr, flush=True)
+
+    def settle(self, expect=None, limit=4000):
+        started = time.time()
+        self.table = self.sense.settle(self.table["hash"], change_ms=1000 if expect else 300)
+        while not met(expect, self.table) and (time.time() - started) * 1000 < limit:
+            self.table = self.sense.settle(self.table["hash"], change_ms=limit, max_ms=limit)
+        return round((time.time() - started) * 1000)
+
+    def step(self, step, retries=2):
+        """Do one step; True when it did what it said."""
+        for attempt in range(retries + 1):
+            ok, entry = self.attempt(step)
+            if ok:
+                return True
+            if attempt < retries and self.recover(step):
+                continue
+            entry["failed"] = True
+            self.note(entry)
+            return False
+        return False
+
+    def attempt(self, step):
+        entry = {"t": self.now(), "step": step}
+        if not met(step.get("when"), self.table):
+            entry["skipped"] = True
+            self.note(entry)
+            return True, entry
+        rows = self.table["elements"]
+        if "read" in step:
+            entry["read"] = read_rows(rows, step["read"])[: step.get("limit", 15)]
+            self.note(entry)
+            return True, entry
+        dvv = self.dvv
+        if "key" in step:
+            dvv.fence()
+            dvv.key(step["key"])
+            entry["did"] = f"pressed {step['key']}"
+        elif "type" in step:
+            row = None
+            if step.get("into"):
+                row, entry["jev_ms"] = find(rows, step["into"], EDITABLE, f"type into {step['into']}")
+                if row is None:
+                    entry["missing"] = step["into"]
+                    return False, entry
+                if not row.get("focus"):
+                    dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            dvv.fence(row)
+            # A named field is set, not added to: a field keeps what it had
+            # (the Run box remembers the last command). Text typed where the
+            # caret is, in a document, must never select all of it first.
+            if step.get("replace", bool(step.get("into"))):
+                dvv.key("ctrl+a")
+            dvv.type(step["type"])
+            entry["did"] = f"typed {step['type'][:40]!r}" + (f" into {row['name']}" if row else "")
+        elif "click" in step:
+            row, entry["jev_ms"] = find(rows, step["click"], CLICKABLE, f"click {step['click']}")
+            if row is None:
+                entry["missing"] = step["click"]
+                return False, entry
+            dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            entry["did"] = f"clicked {row['role']} {row['name'][:40]}"
+        self.history.append(entry["did"])
+        entry["settle_ms"] = self.settle(step.get("expect"), step.get("expect_ms", 4000))
+        ok = met(step.get("expect"), self.table)
+        if ok:
+            self.note(entry)
+        return ok, entry
+
+    def recover(self, step):
+        """Something the plan did not expect may be in front. Find the button
+        that sends it away and press it; True if anything was done."""
+        rows = [r for r in self.table["elements"] if r["area"] == "window" and r["role"] in ("button", "link") and not r.get("disabled")]
+        candidates = [r for r in rows if r["name"].lower().strip() in DISMISS]
+        if not candidates:
+            candidates = [r for r in rows if any(r["name"].lower().startswith(w) for w in DISMISS if len(w) > 3)]
+        entry = {"t": self.now(), "recover": step, "window": self.table["window"]["title"]}
+        if not candidates:
+            # Nothing to dismiss by name: Escape closes most menus, flyouts
+            # and dialogs, and does nothing harmful on a page.
+            self.dvv.fence()
+            self.dvv.key("Escape")
+            entry["did"] = "pressed Escape"
+        else:
+            pick = candidates[0]
+            if len(candidates) > 1:
+                started = time.time()
+                answer = post(f"{JEV}/v1/systemone", {
+                    "model": "jev-latest",
+                    "state": {"what_we_were_doing": json.dumps(step), "window_in_front": self.table["window"]["title"], "controls_on_screen": rows_text(self.table["elements"][:120])},
+                    "questions": {"dismiss": {"type": "choice", "instructions": "Something unexpected is in the way of the step. Which button closes or declines it without agreeing to anything or losing work?",
+                                              "criteria": {str(r["i"]): r["name"] for r in candidates[:12]}}},
+                })["answers"]["dismiss"]
+                entry["jev_ms"] = round((time.time() - started) * 1000)
+                pick = next(r for r in candidates if str(r["i"]) == chosen(answer))
+            self.dvv.click(pick["x"] + pick["w"] // 2, pick["y"] + pick["h"] // 2)
+            entry["did"] = f"dismissed with {pick['name']}"
+        entry["settle_ms"] = self.settle()
+        self.note(entry)
+        return True
+
+    def close(self):
+        self.dvv.close()
+
+
+def read_rows(rows, filter_text):
+    """Rows whose text holds any of the |-separated words, or all text when
+    the filter is empty. In a browser only the page, not its toolbar."""
+    want = [w.lower() for w in filter_text.split("|") if w]
+    docs = [r for r in rows if r["role"] == "document" and r["area"] == "window"]
+    page = max(docs, key=lambda r: r["w"] * r["h"]) if docs else None
+    def inside(r):
+        return page is None or (r is not page and page["x"] <= r["x"] < page["x"] + page["w"] and page["y"] <= r["y"] < page["y"] + page["h"])
+    found, seen = [], set()
+    for r in rows:
+        text = r["name"] + (f" · {r['value']}" if r.get("value") and r["role"] != "link" else "")
+        if r["area"] != "window" or not inside(r) or text in seen or not text:
+            continue
+        if not want or any(w in text.lower() for w in want):
+            seen.add(text)
+            found.append(text)
+    return found
+
+
+def run(plan, max_actions=40):
+    """Carry out one plan and return its log and the screen it ended on."""
+    runner = Runner(plan["host_id"])
     failed = None
     try:
         for step in plan["steps"]:
             if "goal" in step:
-                table, ok = goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions)
-                if not ok:
-                    failed = step
-                    break
-                continue
-            entry = {"t": round((time.time() - t0) * 1000), "step": step}
-            if not met(step.get("when"), table):
-                # A guard, so a plan can say "close it if it is open" without
-                # pressing alt+F4 on a bare desktop, which offers to shut down.
-                entry["skipped"] = True
-                log.append(entry)
-                continue
-            rows = table["elements"]
-            if "read" in step:
-                # Copy what the screen says into the result, with no action:
-                # rows whose name or value holds any of the words given, or
-                # every text row when the filter is empty.
-                want = [w.lower() for w in step["read"].split("|") if w]
-                # In a browser, only what is inside the page, not the tabs,
-                # address bar and toolbar around it.
-                docs = [r for r in rows if r["role"] == "document" and r["area"] == "window"]
-                page = max(docs, key=lambda r: r["w"] * r["h"]) if docs else None
-                def inside(r):
-                    return page is None or (r is not page and page["x"] <= r["x"] < page["x"] + page["w"] and page["y"] <= r["y"] < page["y"] + page["h"])
-                found, seen = [], set()
-                for r in rows:
-                    text = r["name"] + (f" · {r['value']}" if r.get("value") and r["role"] != "link" else "")
-                    if r["area"] != "window" or not inside(r) or text in seen or not text:
-                        continue
-                    if not want or any(w in text.lower() for w in want):
-                        seen.add(text)
-                        found.append(text)
-                entry["read"] = found[: step.get("limit", 15)]
-                log.append(entry)
-                print(json.dumps(entry), file=sys.stderr, flush=True)
-                continue
-            if "key" in step:
-                dvv.fence()
-                dvv.key(step["key"])
-                entry["did"] = f"pressed {step['key']}"
-            elif "type" in step:
-                row = None
-                if step.get("into"):
-                    row, entry["jev_ms"] = find(rows, step["into"], EDITABLE, f"type into {step['into']}")
-                    if row is None:
-                        failed = step
-                        break
-                    if not row.get("focus"):
-                        dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
-                dvv.fence(row)
-                # Typing sets the field: a field keeps what it had (the Run box
-                # remembers the last command), and a click lands the caret in
-                # the middle of it.
-                # Only a named field is replaced; text typed where the caret is
-                # (a document) must not select the whole document first.
-                if step.get("replace", bool(step.get("into"))):
-                    dvv.key("ctrl+a")
-                dvv.type(step["type"])
-                entry["did"] = f"typed {step['type']!r}" + (f" into {row['name']}" if row else "")
-            elif "click" in step:
-                row, entry["jev_ms"] = find(rows, step["click"], CLICKABLE, f"click {step['click']}")
-                if row is None:
-                    failed = step
-                    break
-                dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
-                entry["did"] = f"clicked {row['role']} {row['name']}"
-            history.append(entry["did"])
-            # Settle, then check. A screen can settle on a half drawn window,
-            # so an unmet expectation waits for the next change, up to
-            # expect_ms, rather than failing on the first still frame.
-            settle_started = time.time()
-            limit = step.get("expect_ms", 4000)
-            # A step that names no result may change nothing at all (Escape
-            # with nothing open), so it waits only briefly for a first change.
-            table = sense.settle(table["hash"], change_ms=1000 if step.get("expect") else 300)
-            while not met(step.get("expect"), table) and (time.time() - settle_started) * 1000 < limit:
-                table = sense.settle(table["hash"], change_ms=limit, max_ms=limit)
-            entry["settle_ms"] = round((time.time() - settle_started) * 1000)
-            entry["reads"] = table.get("reads")
-            log.append(entry)
-            print(json.dumps(entry), file=sys.stderr, flush=True)
-            if not met(step.get("expect"), table):
+                runner.table, ok = goal_loop(step, plan.get("goal", ""), runner.sense, runner.dvv, runner.table, runner.history, runner.log, runner.t0, max_actions)
+            else:
+                ok = runner.step(step)
+            if not ok:
                 failed = step
                 break
     except RuntimeError as e:
-        # An action DeskVNC refused: stop, and hand back the screen.
         failed = {"error": str(e)}
     finally:
-        dvv.close()
-    total = time.time() - t0
-    result = {"seconds": round(total, 2), "actions": sum(1 for e in log if "did" in e), "log": log}
+        runner.close()
+    log, table = runner.log, runner.table
+    result = {"seconds": round(time.time() - runner.t0, 2), "actions": sum(1 for e in log if "did" in e), "log": log}
     # The screen as it ended, so the planner can check the outcome or plan
     # from there without looking at a picture.
     result["window"] = table["window"]
