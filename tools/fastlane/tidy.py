@@ -42,9 +42,9 @@ def answer_save_prompt(runner, closed, kept, window):
     window that was just closed."""
     if fastlane.office_prompt(runner.table):
         # Office's prompt in front of an app that is not answering UI
-        # Automation: the window just closed is the subject, N is Don't Save.
+        # Automation: the window just closed is the subject, alt+N is Don't Save.
         if MINE_IN_PROMPT.search(window):
-            runner.step({"key": "n"})
+            runner.step({"key": "alt+n"})
             closed.append(f"discarded unsaved: {window[:70]}")
             return True
         runner.step({"key": "Escape"})
@@ -67,7 +67,13 @@ def answer_save_prompt(runner, closed, kept, window):
 
 def task_view(runner):
     runner.step({"key": "super+Tab", "expect": {"window": "Task View"}, "expect_ms": 3000})
-    return [r for r in runner.table["elements"] if r["role"] == "listitem" and r["area"] == "window"]
+    # Task View draws its list a moment after its title appears.
+    for _ in range(10):
+        items = [r for r in runner.table["elements"] if r["role"] == "listitem" and r["area"] == "window"]
+        if items or "task view" not in (runner.table["window"]["title"] or "").lower():
+            return items
+        runner.table = runner.sense.snapshot()
+    return items
 
 
 def close_windows(runner, closed, kept, rounds=60, names=None):

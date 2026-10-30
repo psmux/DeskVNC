@@ -39,22 +39,20 @@ enum Ask {
 }
 
 enum Answer {
-    Rows(Vec<Value>, String),
+    /// The rows, the hash key, and whether the read got the whole window.
+    Rows(Vec<Value>, String, bool),
     Cells(Result<Value, String>),
 }
 
-/// The screen reader, in front of a worker thread that does the UI
-/// Automation calls. A call that hangs holds up the worker, never the caller:
-/// the caller answers with what it has and marks the table partial, and
-/// further reads skip the window until the worker is free again.
-pub struct Sense {
+/// One thread doing UI Automation calls, and the way to it.
+struct Worker {
     asks: Sender<Ask>,
     answers: Receiver<Answer>,
     busy: bool,
 }
 
-impl Sense {
-    pub fn new() -> Result<Sense, String> {
+impl Worker {
+    fn spawn() -> Result<Worker, String> {
         let (asks, inbox) = channel::<Ask>();
         let (outbox, answers) = channel::<Answer>();
         let (ready_tx, ready) = channel::<Result<(), String>>();
@@ -74,8 +72,8 @@ impl Sense {
                     match ask {
                         Ask::Read(hwnd, area) => {
                             let (mut rows, mut key) = (Vec::new(), String::new());
-                            reader.read(HWND(hwnd as *mut _), area, &mut rows, &mut key);
-                            Answer::Rows(rows, key)
+                            let whole = reader.read(HWND(hwnd as *mut _), area, &mut rows, &mut key);
+                            Answer::Rows(rows, key, whole)
                         }
                         Ask::Cells(hwnd, names) => Answer::Cells(reader.cells(HWND(hwnd as *mut _), &names)),
                     }
@@ -86,23 +84,49 @@ impl Sense {
             }
         });
         ready.recv().map_err(|e| e.to_string())??;
-        Ok(Sense { asks, answers, busy: false })
+        Ok(Worker { asks, answers, busy: false })
+    }
+}
+
+/// The most reader threads at once. A thread stuck in an app that stopped
+/// answering is left to finish on its own while another reads the next
+/// window; past this many, reads answer partial until one is free.
+const WORKERS: usize = 4;
+
+/// The screen reader. UI Automation calls run on worker threads, so a call
+/// that hangs holds up a worker, never the caller: the caller answers with
+/// what it has and marks the table partial.
+pub struct Sense {
+    workers: Vec<Worker>,
+}
+
+impl Sense {
+    pub fn new() -> Result<Sense, String> {
+        Ok(Sense { workers: vec![Worker::spawn()?] })
     }
 
-    /// One answer from the worker within `wait`, dropping a late one left
-    /// from an earlier ask that ran out of time.
+    /// One answer within `wait`, from a worker that is not stuck.
     fn ask(&mut self, ask: Ask, wait: Duration) -> Option<Answer> {
-        if self.busy {
-            match self.answers.try_recv() {
-                Ok(_) => self.busy = false,
-                Err(_) => return None,
+        for worker in self.workers.iter_mut().filter(|w| w.busy) {
+            // A late answer to an ask that ran out of time: dropped.
+            if worker.answers.try_recv().is_ok() {
+                worker.busy = false;
             }
         }
-        self.asks.send(ask).ok()?;
-        match self.answers.recv_timeout(wait) {
+        let index = match self.workers.iter().position(|w| !w.busy) {
+            Some(i) => i,
+            None if self.workers.len() < WORKERS => {
+                self.workers.push(Worker::spawn().ok()?);
+                self.workers.len() - 1
+            }
+            None => return None,
+        };
+        let worker = &mut self.workers[index];
+        worker.asks.send(ask).ok()?;
+        match worker.answers.recv_timeout(wait) {
             Ok(answer) => Some(answer),
             Err(RecvTimeoutError::Timeout) => {
-                self.busy = true;
+                worker.busy = true;
                 None
             }
             Err(RecvTimeoutError::Disconnected) => None,
@@ -121,7 +145,8 @@ impl Sense {
                     continue;
                 }
                 match self.ask(Ask::Read(hwnd.0 as isize, area), READ_DEADLINE) {
-                    Some(Answer::Rows(found, k)) => {
+                    Some(Answer::Rows(found, k, whole)) => {
+                        partial |= !whole;
                         for mut row in found {
                             if rows.len() >= MAX_ROWS {
                                 break;
@@ -264,15 +289,17 @@ impl Reader {
         }
     }
 
-    unsafe fn read(&self, hwnd: HWND, area: &str, rows: &mut Vec<Value>, key: &mut String) {
-        let Ok(root) = self.automation.ElementFromHandle(hwnd) else { return };
+    /// False when the window did not answer all of it.
+    unsafe fn read(&self, hwnd: HWND, area: &str, rows: &mut Vec<Value>, key: &mut String) -> bool {
+        let Ok(root) = self.automation.ElementFromHandle(hwnd) else { return false };
         let mut found = Vec::new();
         *self.gave_up.borrow_mut() = false;
         let deadline = Instant::now() + READ_BUDGET;
         self.walk(&root, 0, deadline, &mut found);
+        let whole = !*self.gave_up.borrow() && Instant::now() <= deadline;
         for el in found {
             if rows.len() >= MAX_ROWS {
-                return;
+                return whole;
             }
             let Some(role) = el.CachedControlType().ok().and_then(role_of) else { continue };
             if el.CachedIsOffscreen().is_ok_and(|b| b.as_bool()) {
@@ -321,6 +348,7 @@ impl Reader {
             }
             rows.push(row);
         }
+        whole
     }
 }
 
