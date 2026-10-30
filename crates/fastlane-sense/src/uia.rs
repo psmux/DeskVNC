@@ -1,0 +1,196 @@
+//! UI Automation: the foreground window's controls and the taskbar's.
+
+use serde_json::{json, Value};
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
+use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowTextW,
+    SM_CXSCREEN, SM_CYSCREEN,
+};
+
+use crate::{fnv, Table};
+
+/// The most rows one read returns. A browser page can expose thousands of
+/// text nodes, and a table longer than this costs the model more than the
+/// rows add.
+const MAX_ROWS: usize = 250;
+
+pub struct Sense {
+    automation: IUIAutomation,
+    cache: IUIAutomationCacheRequest,
+    condition: IUIAutomationCondition,
+}
+
+impl Sense {
+    pub fn new() -> Result<Sense, String> {
+        unsafe {
+            // Physical pixels, the same ones the VNC or Boundary framebuffer
+            // carries, so a rectangle here is a click target there.
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .ok()
+                .map_err(|e| format!("COM: {e}"))?;
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("UI Automation: {e}"))?;
+            let cache = automation.CreateCacheRequest().map_err(|e| e.to_string())?;
+            for property in [
+                UIA_NamePropertyId,
+                UIA_ControlTypePropertyId,
+                UIA_BoundingRectanglePropertyId,
+                UIA_IsEnabledPropertyId,
+                UIA_IsOffscreenPropertyId,
+                UIA_HasKeyboardFocusPropertyId,
+                UIA_ValueValuePropertyId,
+                UIA_ToggleToggleStatePropertyId,
+            ] {
+                cache.AddProperty(property).map_err(|e| e.to_string())?;
+            }
+            cache.SetTreeScope(TreeScope_Element).map_err(|e| e.to_string())?;
+            let condition = automation.ControlViewCondition().map_err(|e| e.to_string())?;
+            Ok(Sense { automation, cache, condition })
+        }
+    }
+
+    pub fn snapshot(&mut self) -> Result<Table, String> {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            let taskbar = FindWindowW(windows::core::w!("Shell_TrayWnd"), None).unwrap_or_default();
+            let mut rows: Vec<Value> = Vec::new();
+            let mut key = String::new();
+            for (hwnd, area) in [(foreground, "window"), (taskbar, "taskbar")] {
+                if hwnd.is_invalid() || (area == "taskbar" && hwnd == foreground) {
+                    continue;
+                }
+                self.read(hwnd, area, &mut rows, &mut key);
+            }
+            let title = text_of(foreground, true);
+            let class = text_of(foreground, false);
+            key.push_str(&title);
+            let body = json!({
+                "screen": { "w": GetSystemMetrics(SM_CXSCREEN), "h": GetSystemMetrics(SM_CYSCREEN) },
+                "window": { "title": title, "class": class },
+                "elements": rows,
+            });
+            Ok(Table { hash: fnv(&key), body })
+        }
+    }
+
+    unsafe fn read(&self, hwnd: HWND, area: &str, rows: &mut Vec<Value>, key: &mut String) {
+        let Ok(root) = self.automation.ElementFromHandle(hwnd) else { return };
+        let Ok(found) = root.FindAllBuildCache(TreeScope_Descendants, &self.condition, &self.cache)
+        else {
+            return;
+        };
+        let count = found.Length().unwrap_or(0);
+        for i in 0..count {
+            if rows.len() >= MAX_ROWS {
+                return;
+            }
+            let Ok(el) = found.GetElement(i) else { continue };
+            let Some(role) = el.CachedControlType().ok().and_then(role_of) else { continue };
+            if el.CachedIsOffscreen().is_ok_and(|b| b.as_bool()) {
+                continue;
+            }
+            let r: RECT = el.CachedBoundingRectangle().unwrap_or_default();
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            let name = el.CachedName().map(|b| clip(&b.to_string())).unwrap_or_default();
+            let value = cached_string(&el, UIA_ValueValuePropertyId);
+            if role == "text" && name.is_empty() {
+                continue;
+            }
+            let enabled = el.CachedIsEnabled().is_ok_and(|b| b.as_bool());
+            let focus = el.CachedHasKeyboardFocus().is_ok_and(|b| b.as_bool());
+            let toggled = el
+                .GetCachedPropertyValue(UIA_ToggleToggleStatePropertyId)
+                .ok()
+                .and_then(|v| int_of(&v));
+            key.push_str(&format!("{role}|{name}|{value}|{}|{}|{w}|{h}|{enabled}|{focus}|{toggled:?};", r.left, r.top));
+            let mut row = json!({
+                "i": rows.len() + 1,
+                "area": area,
+                "role": role,
+                "name": name,
+                "x": r.left, "y": r.top, "w": w, "h": h,
+            });
+            if !value.is_empty() {
+                row["value"] = json!(value);
+            }
+            if !enabled {
+                row["disabled"] = json!(true);
+            }
+            if focus {
+                row["focus"] = json!(true);
+            }
+            if let Some(t) = toggled {
+                row["checked"] = json!(t == 1);
+            }
+            rows.push(row);
+        }
+    }
+}
+
+unsafe fn cached_string(el: &IUIAutomationElement, property: UIA_PROPERTY_ID) -> String {
+    el.GetCachedPropertyValue(property)
+        .ok()
+        .and_then(|v| string_of(&v))
+        .map(|s| clip(&s))
+        .unwrap_or_default()
+}
+
+unsafe fn string_of(v: &VARIANT) -> Option<String> {
+    let inner = &v.Anonymous.Anonymous;
+    (inner.vt == VT_BSTR).then(|| inner.Anonymous.bstrVal.to_string())
+}
+
+unsafe fn int_of(v: &VARIANT) -> Option<i32> {
+    let inner = &v.Anonymous.Anonymous;
+    (inner.vt == VT_I4).then(|| inner.Anonymous.lVal)
+}
+
+unsafe fn text_of(hwnd: HWND, title: bool) -> String {
+    let mut buf = [0u16; 256];
+    let n = if title { GetWindowTextW(hwnd, &mut buf) } else { GetClassNameW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+fn clip(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    one_line.chars().take(120).collect()
+}
+
+/// The kinds a person acts on or reads. Panes, groups and windows are left
+/// out: they are containers, and a model offered them clicks the empty
+/// middle of a dialog.
+#[allow(non_upper_case_globals)]
+fn role_of(id: UIA_CONTROLTYPE_ID) -> Option<&'static str> {
+    Some(match id {
+        UIA_ButtonControlTypeId => "button",
+        UIA_SplitButtonControlTypeId => "button",
+        UIA_CheckBoxControlTypeId => "checkbox",
+        UIA_RadioButtonControlTypeId => "radio",
+        UIA_ComboBoxControlTypeId => "combobox",
+        UIA_EditControlTypeId => "textbox",
+        UIA_DocumentControlTypeId => "document",
+        UIA_HyperlinkControlTypeId => "link",
+        UIA_ListItemControlTypeId => "listitem",
+        UIA_MenuItemControlTypeId => "menuitem",
+        UIA_TabItemControlTypeId => "tab",
+        UIA_TreeItemControlTypeId => "treeitem",
+        UIA_DataItemControlTypeId => "row",
+        UIA_HeaderItemControlTypeId => "header",
+        UIA_SliderControlTypeId => "slider",
+        UIA_TextControlTypeId => "text",
+        _ => return None,
+    })
+}
