@@ -415,66 +415,28 @@ def note(ctx, name, text):
 
 
 # ================================================================= files
-def focused(ctx):
-    return next((r for r in ctx.runner.table["elements"] if r.get("focus") and r["area"] == "window"), None)
-
-
-def focus_list(ctx):
-    """Put the keyboard in Explorer's file list; F6 moves between its panes."""
-    for _ in range(5):
-        row = focused(ctx)
-        if row and row["role"] in ("listitem", "list"):
-            return
-        ctx.do([{"key": "F6"}])
-    raise SkillFailed("could not reach the file list")
-
-
-def select(ctx, name):
-    """Select an item by typing its name, as Explorer's type ahead does. Its
-    buffer forgets after about a second, so a miss waits that out and types
-    the name again."""
-    for _ in range(3):
-        ctx.do([{"type": name}])
-        row = focused(ctx)
-        if row and row["name"].startswith(name):
-            return
-        time.sleep(1.2)
-    raise SkillFailed(f"{name} would not select")
-
-
 @skill("files")
 def organise(ctx, folder, files):
-    """Make a folder in Documents and move the files into it, in File Explorer.
+    """Make a folder in Documents, move the files into it, and check in File
+    Explorer that they are there.
 
-    Keyboard only, the way a quick person works Explorer: ctrl+shift+n makes
-    the folder, typing a name in the file list selects that item, ctrl+x and
-    ctrl+v move it. Clicking items is what failed before: a click can land on
-    a different item once the list sorts itself again."""
+    The folder and the move are one command in the Run box, the way a person
+    who knows Windows does it. Explorer's own ways were tried first and were
+    not reliable enough over a remote session: ctrl+shift+n was ignored, the
+    New menu's folder sometimes appeared off screen, and clicking a file in a
+    list that sorts itself again landed on the wrong one."""
     folder = ctx.name(folder)
-    docs = {"window": "Documents"}
-    ctx.do([{"key": "super+e", "expect": {"window": "File Explorer"}, "expect_ms": 8000},
-            {"key": "ctrl+l"},
-            {"type": "%USERPROFILE%\\Documents\n", "expect": docs, "expect_ms": 8000}])
+    moves = " && ".join(f'move "{f}" "{folder}\\"' for f in files)
+    command = f'cmd /c cd /d "%USERPROFILE%\\Documents" && mkdir "{folder}" && {moves}'
+    if len(command) > 250:
+        raise SkillFailed("too many files for one Run box command")
+    ctx.do([{"key": "super+r", "expect": {"window": "Run"}},
+            {"type": command, "into": "Open"},
+            {"key": "Enter"}])
+    # Look, as a person would: open the folder and read what is in it.
+    time.sleep(1.0)
+    ctx.do(run_box(f'explorer "%USERPROFILE%\\Documents\\{folder}"', {"window": folder}, 10000))
     ctx.opened("window", "File Explorer")
-    focus_list(ctx)
-    # The new folder's name box opens with "New folder" selected: type over it.
-    ctx.do([{"key": "ctrl+shift+n", "expect": {"shows": "New folder"}},
-            {"type": folder + "\n", "expect": {"shows": folder}}])
-    for f in files:
-        base = f.rsplit(".", 1)[0]
-        focus_list(ctx)
-        time.sleep(1.2)
-        select(ctx, base)
-        ctx.do([{"key": "ctrl+x"}])
-        time.sleep(1.2)
-        select(ctx, folder)
-        ctx.do([{"key": "Enter", "expect": {"window": folder}, "expect_ms": 6000},
-                {"key": "ctrl+v", "expect": {"shows": base}, "expect_ms": 6000},
-                {"key": "alt+ArrowUp", "expect": docs, "expect_ms": 6000}])
-    focus_list(ctx)
-    time.sleep(1.2)
-    select(ctx, folder)
-    ctx.do([{"key": "Enter", "expect": {"window": folder}, "expect_ms": 6000}])
     inside = " ".join(ctx.page_text("", 60))
     missing = [f for f in files if f.rsplit(".", 1)[0] not in inside]
     ctx.do([{"key": "alt+F4", "when": {"window": folder}}])
