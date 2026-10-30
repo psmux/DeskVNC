@@ -1481,10 +1481,14 @@ impl AttachedLimb {
                         break true;
                     }
                 }
+                // A blink is not the effect of anything the agent did, so it
+                // does not answer "did my click do anything" either.
                 WaitUntil::ScreenChanged => {
                     if let Some(damage) = self.inner.observatory.damage_now() {
                         rects = rects.saturating_add(damage.rects.len() as u32);
-                        break true;
+                        if !is_blink(&damage) {
+                            break true;
+                        }
                     }
                 }
                 WaitUntil::ScreenStable | WaitUntil::Idle => {
