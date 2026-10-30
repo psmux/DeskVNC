@@ -14,6 +14,7 @@
 
 pub mod format;
 pub mod manifest;
+pub mod plan;
 pub mod server;
 
 pub use manifest::{TOOLS_CACHE_SCOPE, TOOLS_TTL_MS, TOOL_COUNT};
