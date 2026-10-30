@@ -42,6 +42,7 @@ def task_flights(n, memory):
         {"read": "₹", "limit": 12},
         {"click": "Cheapest", "expect": {"shows": "Cheapest"}},
         {"read": "₹", "limit": 12},
+        {"key": "ctrl+w", "when": {"window": "Google Flights"}},
     ]
     def check(reads):
         fares = [r for r in sum(reads, []) if "₹" in r and len(r) > 12]
@@ -56,6 +57,7 @@ def task_news(n, memory):
     steps = open_url("https://news.google.com/?hl=en-IN&gl=IN&ceid=IN:en", {"shows": "Top stories"}) + [
         {"click": section, "expect": {"window": section}, "expect_ms": 10000},
         {"read": "", "limit": 40},
+        {"key": "ctrl+w", "when": {"window": "Google News"}},
     ]
     def check(reads):
         # Each story is read as "More - <headline>", the label of its menu.
@@ -71,6 +73,7 @@ def task_wiki(n, memory):
     steps = open_url("https://en.wikipedia.org/wiki/Main_Page", {"window": "Wikipedia"}) + [
         {"type": topic + "\n", "into": "Search Wikipedia", "expect": {"window": topic}, "expect_ms": 10000},
         {"read": topic.split()[0], "limit": 6},
+        {"key": "ctrl+w", "when": {"window": "Wikipedia"}},
     ]
     def check(reads):
         lines = [r for r in sum(reads, []) if len(r) > 60]
@@ -89,6 +92,7 @@ def task_calc(n, memory):
     steps = run_box("calc", {"window": "Calculator"})
     for expr in sums:
         steps += [{"key": "Escape"}, {"type": expr + "=", "expect": {"shows": "Display is"}, "echo": True}, {"read": "Display is"}]
+    steps.append({"key": "alt+F4", "when": {"window": "Calculator"}})
     def check(reads):
         got = [r for r in sum(reads, []) if r.startswith("Display is")]
         good = 0
@@ -179,12 +183,24 @@ def task_explorer(n, memory):
 CYCLE = [task_flights, task_news, task_wiki, task_calc, task_word, task_notepad, task_explorer]
 
 
+def running(table):
+    """Windows open per app, from the taskbar: "Microsoft Edge - 2 running windows"."""
+    import re
+    counts = {}
+    for r in table["elements"]:
+        m = re.match(r"(.+?) - (\d+) running windows?", r["name"]) if r["area"] == "taskbar" else None
+        if m:
+            counts[m.group(1)] = int(m.group(2))
+    return counts
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host-id", required=True)
     ap.add_argument("--minutes", type=float, default=10)
     args = ap.parse_args()
     runner = fastlane.Runner(args.host_id)
+    before = running(runner.table)
     memory, tasks = {}, []
     deadline = time.time() + args.minutes * 60
     n = 0
@@ -216,6 +232,8 @@ def main():
                 runner.dvv.key("Escape")
                 runner.settle()
             n += 1
+        after = running(runner.table)
+        leftovers = {app: after[app] - before.get(app, 0) for app in after if after[app] > before.get(app, 0)}
     finally:
         runner.close()
     total = time.time() - runner.t0
@@ -223,7 +241,7 @@ def main():
     print(json.dumps({
         "minutes": round(total / 60, 2), "tasks": len(tasks), "passed": sum(t["passed"] for t in tasks),
         "actions": actions, "actions_per_minute": round(actions / (total / 60), 1),
-        "recoveries": sum(t["recoveries"] for t in tasks), "task_log": tasks, "memory": memory,
+        "recoveries": sum(t["recoveries"] for t in tasks), "left_open": leftovers, "task_log": tasks, "memory": memory,
     }, indent=1, ensure_ascii=False))
 
 
