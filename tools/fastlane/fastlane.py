@@ -267,10 +267,16 @@ def find(rows, name, roles, step):
     started = time.time()
     answer = post(f"{JEV}/v1/systemone", {
         "model": "jev-latest",
-        "state": {"step": step, "controls_on_screen": rows_text(rows)},
+        # Only the candidates and the window, not the whole screen: the
+        # answer is among them, and a short state keeps a call near 50 ms.
+        "state": {"step": step, "window": rows and table_title(rows), "candidates": "\n".join(f"[{k}] {v}" for k, v in offered.items())},
         "questions": {"target": {"type": "choice", "instructions": f"Which control is the one called {name!r} in the step?", "criteria": offered}},
     })["answers"]["target"]
     return next(r for r in rows if str(r["i"]) == chosen(answer)), (time.time() - started) * 1000
+
+
+def table_title(rows):
+    return " / ".join(r["name"] for r in rows if r["area"] == "window" and r["role"] == "text")[:200]
 
 
 def met(expect, table):
@@ -425,7 +431,8 @@ class Runner:
                 started = time.time()
                 answer = post(f"{JEV}/v1/systemone", {
                     "model": "jev-latest",
-                    "state": {"what_we_were_doing": json.dumps(step), "window_in_front": self.table["window"]["title"], "controls_on_screen": rows_text(self.table["elements"][:120])},
+                    "state": {"what_we_were_doing": json.dumps(step), "window_in_front": self.table["window"]["title"],
+                              "text_on_screen": " / ".join(r["name"] for r in self.table["elements"] if r["area"] == "window" and r["role"] == "text")[:600]},
                     "questions": {"dismiss": {"type": "choice", "instructions": "Something unexpected is in the way of the step. Which button closes or declines it without agreeing to anything or losing work?",
                                               "criteria": {str(r["i"]): r["name"] for r in candidates[:12]}}},
                 })["answers"]["dismiss"]
