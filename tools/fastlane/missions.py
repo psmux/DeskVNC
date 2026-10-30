@@ -7,7 +7,7 @@ A mission is planned once (by a person or a large model) as a sequence of
 skills from skills.py with the data flowing between them in code. The fast
 lane carries it out. Before it starts the mission notes every window open on
 the computer; when it ends it closes what its own ledger says it opened and
-checks Task View against that first list, so anything it left behind, and
+checks the open windows against that first list, so anything it left behind, and
 anything that appeared that nobody opened, is reported.
 """
 
@@ -105,9 +105,7 @@ MISSIONS = {"trip": trip, "market": market,
 
 
 def windows(runner):
-    items = tidy.task_view(runner)
-    runner.step({"key": "Escape"})
-    return sorted(r["name"] for r in items if r["name"] != "Desktop 1")
+    return sorted(w["title"] for w in tidy.open_windows(runner))
 
 
 def main():

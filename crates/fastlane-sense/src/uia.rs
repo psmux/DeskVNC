@@ -390,6 +390,72 @@ unsafe fn int_of(v: &VARIANT) -> Option<i32> {
     (inner.vt == VT_I4).then(|| inner.Anonymous.lVal)
 }
 
+/// The windows a person would see in Alt+Tab, front first: visible, titled,
+/// not owned by another window, not a tool window, not cloaked (a Store app
+/// parked in the background, or a window on another virtual desktop).
+/// Win32 only, so it answers at once even when an app ignores UI Automation,
+/// and nothing on screen moves the way Task View does.
+pub fn windows() -> Value {
+    use windows::Win32::Foundation::{LPARAM, TRUE};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowLongW, IsIconic, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
+        WS_EX_TOOLWINDOW,
+    };
+    unsafe extern "system" fn each(hwnd: HWND, list: LPARAM) -> windows::core::BOOL {
+        unsafe {
+            let list = &mut *(list.0 as *mut Vec<Value>);
+            let title = text_of(hwnd, true);
+            let owned = GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid());
+            let tool = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+            let mut cloaked = 0u32;
+            let _ = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4);
+            if IsWindowVisible(hwnd).as_bool() && !title.is_empty() && !owned && !tool && cloaked == 0 {
+                list.push(json!({
+                    "hwnd": hwnd.0 as i64,
+                    "title": title,
+                    "class": text_of(hwnd, false),
+                    "minimized": IsIconic(hwnd).as_bool(),
+                }));
+            }
+            TRUE
+        }
+    }
+    let mut list: Vec<Value> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut list as *mut Vec<Value> as isize));
+    }
+    Value::Array(list)
+}
+
+/// Bring a window to the front, restoring it if minimized; true when it is
+/// in front afterwards. Windows lets a background process do this only while
+/// it shares input with the window in front, so it attaches to that thread
+/// for the moment it takes.
+pub fn activate(hwnd: i64) -> bool {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow,
+        SW_RESTORE,
+    };
+    unsafe {
+        let target = HWND(hwnd as *mut _);
+        if IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, SW_RESTORE);
+        }
+        let front = GetForegroundWindow();
+        let theirs = GetWindowThreadProcessId(front, None);
+        let ours = GetCurrentThreadId();
+        let attached = theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, true).as_bool();
+        let _ = BringWindowToTop(target);
+        let _ = SetForegroundWindow(target);
+        if attached {
+            let _ = AttachThreadInput(ours, theirs, false);
+        }
+        GetForegroundWindow() == target
+    }
+}
+
 /// The clipboard's text. The fast lane copies a value and reads it here when
 /// an app will not say it through UI Automation (Excel on a bad day), the way
 /// a person pastes a number somewhere to look at it.
