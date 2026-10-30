@@ -362,6 +362,17 @@ pub trait SessionSource: Send + Sync {
         None
     }
 
+    /// What this limb's attachment rests on: the connection to the
+    /// application and the session id behind the limb, as one string.
+    ///
+    /// When it changes the attachment is gone on the far side even though the
+    /// limb here still looks connected, so the plane attaches it again before
+    /// using it. `None` for a source with nothing underneath that can change.
+    fn attachment_basis(&self, limb: &LimbId) -> Option<String> {
+        let _ = limb;
+        None
+    }
+
     /// One operation on this limb's own SFTP sidecar.
     ///
     /// Defaulted to a refusal that NAMES the source, rather than left
@@ -734,8 +745,14 @@ fn call(method: &str, params: serde_json::Value) -> Result<serde_json::Value, To
     }
 }
 
+/// How many connections to the application this process has made. A new
+/// connection is a new attachment identity, and every limb attached under an
+/// older one has to be attached again before the application serves it.
+static LINK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn connect() -> Result<Link, ToolError> {
     use std::io::ErrorKind;
+    LINK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let path = crate::cli::socket_path();
     let stream = open_stream(&path).map_err(|e| match e.kind() {
@@ -964,6 +981,14 @@ fn forget_answerable(limb_id: &str) {
 }
 
 impl SessionSource for ShellSource {
+    fn attachment_basis(&self, limb: &LimbId) -> Option<String> {
+        let session = lock(limb_sessions()).get(limb.as_str()).cloned()?;
+        Some(format!(
+            "{}:{session}",
+            LINK_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+        ))
+    }
+
     fn hosts(&self) -> Result<Vec<HostRecord>, ToolError> {
         if !reachable() {
             return Err(no_socket());
@@ -2831,6 +2856,9 @@ pub struct Plane {
     /// The generation of the last observation this adapter served, per limb.
     /// See the module comment for why this is allowed to live here.
     observed_at: Mutex<BTreeMap<String, GeometryGeneration>>,
+    /// What each limb's attachment rested on when it was made, from
+    /// [`SessionSource::attachment_basis`].
+    attached_on: Mutex<BTreeMap<String, String>>,
     groups: Mutex<BTreeMap<String, Vec<LimbId>>>,
     group_seq: Mutex<u64>,
     /// The size this crate handed to [`Attach`], per limb. See [`Plane::size_of`].
@@ -2880,6 +2908,7 @@ impl Plane {
             inflight: Mutex::new(BTreeMap::new()),
             leases: Mutex::new(BTreeMap::new()),
             observed_at: Mutex::new(BTreeMap::new()),
+            attached_on: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(BTreeMap::new()),
             group_seq: Mutex::new(0),
             sizes: Mutex::new(BTreeMap::new()),
@@ -3063,6 +3092,10 @@ impl Plane {
         // attachment exists at all.
         register_answerable(&attached);
         lock(&self.sizes).insert(attached.id().to_string(), size);
+        match self.source.attachment_basis(attached.id()) {
+            Some(basis) => lock(&self.attached_on).insert(attached.id().to_string(), basis),
+            None => lock(&self.attached_on).remove(attached.id().as_str()),
+        };
         self.refresh(&attached);
         let _ = self.watch.send(WatchEvent::Attached {
             limb_id: attached.id().to_string(),
@@ -3122,6 +3155,40 @@ impl Plane {
         lock(&self.observed_at).remove(id);
     }
 
+    /// Whether what this limb's attachment rested on has changed.
+    fn stale(&self, limb: &AttachedLimb) -> bool {
+        let id = limb.id().as_str();
+        let Some(then) = lock(&self.attached_on).get(id).cloned() else {
+            return false;
+        };
+        // No round trip here: this runs on every call. The session id part
+        // is refreshed whenever the application is asked what it has open.
+        self.source
+            .attachment_basis(limb.id())
+            .is_some_and(|now| now != then)
+    }
+
+    /// Attach a limb again whose attachment the application no longer holds.
+    /// `None` when it cannot be, and the old limb is then used as it was.
+    fn reattach(&self, limb: &AttachedLimb) -> Option<AttachedLimb> {
+        // Only when the application still has the session open: otherwise
+        // there is nothing to attach to, and dropping the limb here would
+        // only turn a refusal the agent can read into a missing limb.
+        if !self
+            .source
+            .live()
+            .iter()
+            .any(|s| s.limb_id == limb.id().as_str())
+        {
+            return None;
+        }
+        tracing::warn!(limb = %limb.id(), "the application no longer holds this attachment, so it is attached again");
+        self.forget_severed(limb);
+        self.registry.detach(&self.grant(), limb.id()).ok()?;
+        lock(&self.attached_on).remove(limb.id().as_str());
+        self.adopt(limb.id())
+    }
+
     /// Which limb a call is aimed at.
     ///
     /// # Errors
@@ -3135,6 +3202,15 @@ impl Plane {
             let limb_id = LimbId::from_caller(id)
                 .map_err(|e| ToolError::new(codes::BAD_REQUEST, e.to_string()))?;
             match self.registry.get(&limb_id) {
+                // The application dropped this attachment (a new connection
+                // to it, or the session behind the limb was replaced after a
+                // drop) while the limb here still reads connected. Every call
+                // would be refused as not attached, so it is attached again.
+                Some(limb) if !limb.is_severed() && self.stale(&limb) => {
+                    if let Some(fresh) = self.reattach(&limb) {
+                        return Ok(fresh);
+                    }
+                }
                 Some(limb) if !limb.is_severed() => return Ok(limb),
                 // The relay that carried this limb's commands has stopped,
                 // which it does when the application refuses one with
