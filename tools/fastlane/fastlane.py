@@ -127,10 +127,33 @@ class Dvv:
             self.call("dvv_screen", scale=0.1)
 
     def type(self, text):
-        self.call("dvv_type", text=text, wpm=1200)
+        # DeskVNC stops typing when the screen repaints a lot, so an agent that
+        # types blind cannot type into a dialog that just opened. Here the
+        # table is the check, and a repaint while typing is usually the field's
+        # own suggestion list, so read the screen and go on from the exact
+        # character DeskVNC stopped at.
+        for _ in range(20):
+            r = self.rpc("tools/call", {"name": "dvv_type", "arguments": {"limbId": self.limb, "text": text, "wpm": 1200}})
+            if not r.get("isError"):
+                return
+            message = r["content"][0]["text"]
+            if not message.startswith("SCREEN_CHANGED"):
+                raise RuntimeError(message[:300])
+            sent = 0
+            if message.startswith("SCREEN_CHANGED: typed "):
+                sent = int(message.split("typed ", 1)[1].split(" ", 1)[0])
+            text = text[sent:]
+            self.fence()
+        raise RuntimeError("the screen kept changing while typing")
 
     def key(self, keys):
-        self.call("dvv_key", keys=keys)
+        try:
+            self.call("dvv_key", keys=keys)
+        except RuntimeError as e:
+            if not str(e).startswith("SCREEN_CHANGED"):
+                raise
+            self.fence()
+            self.call("dvv_key", keys=keys)
 
     def close(self):
         try:
@@ -351,6 +374,9 @@ def run(plan, max_actions=40):
             if not met(step.get("expect"), table):
                 failed = step
                 break
+    except RuntimeError as e:
+        # An action DeskVNC refused: stop, and hand back the screen.
+        failed = {"error": str(e)}
     finally:
         dvv.close()
     total = time.time() - t0
