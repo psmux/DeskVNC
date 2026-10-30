@@ -391,7 +391,9 @@ def organise(ctx, folder, files):
             {"key": "ctrl+l"},
             {"type": "%USERPROFILE%\\Documents\n", "expect": {"window": "Documents"}, "expect_ms": 8000}])
     ctx.opened("window", "File Explorer")
-    ctx.do([{"key": "ctrl+shift+n", "expect": {"shows": "New folder"}},
+    # New, then Folder: the folder appears with its name ready to type over.
+    ctx.do([{"click": "New", "expect": {"shows": "Folder"}},
+            {"click": "Folder", "expect": {"shows": "New folder"}},
             {"type": folder + "\n", "replace": True, "expect": {"shows": folder}}])
     for f in files:
         base = f.rsplit(".", 1)[0]
