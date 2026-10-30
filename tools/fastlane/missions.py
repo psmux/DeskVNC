@@ -81,10 +81,11 @@ def market(ctx):
             level = float(m.group(2).replace(",", ""))
             change = float(m.group(4).replace(",", "").replace("−", "-"))
             indices.append((m.group(1), level, change))
-    if not indices:
-        indices = [("Sensex", 0.0, 0.0)]
-    c = s["calc.compute"](ctx, expressions=[f"{lvl}-{chg}" if chg >= 0 else f"{lvl}+{-chg}" for _, lvl, chg in indices[:3]]) or {}
-    prev = [r["value"] for r in c.get("results", [])]
+    prev = []
+    if indices:
+        # Nothing to work out from figures that were never read.
+        c = s["calc.compute"](ctx, expressions=[f"{lvl}-{chg}" if chg >= 0 else f"{lvl}+{-chg}" for _, lvl, chg in indices[:3]]) or {}
+        prev = [r["value"] for r in c.get("results", [])]
     rows = [[name, lvl, f"=B{{r}}-{chg}", "=(B{r}-C{r})/C{r}*100"] for name, lvl, chg in indices[:4]]
     sheet = s["office.spreadsheet"](ctx, name="Market Table", header=["Index", "Level", "Previous", "Change %"], rows=rows, totals="") or {}
     memo = s["office.document"](ctx, name="Market Brief", title="Market brief", blocks=[

@@ -74,8 +74,17 @@ class Ctx:
         self.do([{"key": "ctrl+w", "when": {"window": title[:40]}}])
         self.closed("tab", title)
 
-    def page_text(self, words, limit=40):
-        return fastlane.read_rows(self.runner.table["elements"], words)[:limit]
+    def page_text(self, words, limit=40, until=None, wait=10.0):
+        """Rows of the page holding any of the words. With until, read again
+        until until(rows) holds or wait runs out: a title often arrives
+        before the page has drawn what is under it."""
+        deadline = time.time() + wait
+        while True:
+            rows = fastlane.read_rows(self.runner.table["elements"], words)[:limit]
+            if until is None or until(rows) or time.time() > deadline:
+                return rows
+            time.sleep(0.3)
+            self.runner.table = self.runner.sense.snapshot()
 
 
 def run_box(command, expect, ms=10000):
@@ -130,7 +139,7 @@ def flights(ctx, origin, destination, date):
     title = ctx.open_page(f"https://www.google.com/travel/flights?q={q}&curr=INR", {"shows": "₹"})
     ctx.do([{"click": "Cheapest", "expect": {"shows": "Cheapest"}}])
     fares = []
-    for line in ctx.page_text("₹"):
+    for line in ctx.page_text("₹", until=lambda rows: any(len(r) > 40 for r in rows)):
         m = re.search(r"(?:AM|PM)(?:\+\d)?\s*(?P<airline>[A-Za-z][A-Za-z ,&.\-]*?)\s*(?P<dur>\d+ hr(?: \d+ min)?)\s*(?P<stops>Nonstop|\d+ stops?).*?₹(?P<inr>[\d,]+)", line)
         if m:
             fares.append({"airline": m["airline"].strip(" ,"), "duration": m["dur"], "stops": m["stops"], "inr": int(m["inr"].replace(",", ""))})
@@ -178,7 +187,7 @@ def exchange_rate(ctx, from_code, to_code):
 def weather(ctx, city):
     """Google's weather card for a city: temperature and conditions."""
     title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(f"weather {city}"), {"shows": "°"})
-    lines = [l for l in ctx.page_text("°|precipitation|humidity|wind", 12)]
+    lines = ctx.page_text("°|precipitation|humidity|wind", 12, until=lambda rows: any("°" in r for r in rows))
     ctx.close_page(title)
     if not lines:
         raise SkillFailed("no weather card")
@@ -192,7 +201,7 @@ def wikipedia(ctx, topic):
     # icon when the window is narrow, and the address works at any width.
     title = ctx.open_page("https://en.wikipedia.org/wiki/Special:Search?go=Go&search=" + urllib.parse.quote_plus(topic),
                           {"window": topic.split()[0]})
-    lines = [l for l in ctx.page_text(topic.split()[0], 12) if len(l) > 80]
+    lines = [l for l in ctx.page_text(topic.split()[0], 12, until=lambda rows: any(len(r) > 80 for r in rows)) if len(l) > 80]
     ctx.close_page(title)
     if not lines:
         raise SkillFailed("no article text")
@@ -207,7 +216,7 @@ def news(ctx, section):
     ctx.do([{"click": section, "expect": {"window": section}, "expect_ms": 10000}])
     title = ctx.runner.table["window"]["title"].split(" and ")[0].split(" - Personal")[0]
     ctx.opened("tab", title)
-    rows = ctx.page_text("", 80)
+    rows = ctx.page_text("", 80, until=lambda rows: sum(r.startswith("More - ") for r in rows) >= 3)
     heads = [r[len("More - "):] for r in rows if r.startswith("More - ")]
     markets = [r for r in rows if re.match(r"^(Sensex|NIFTY 50|Nikkei 225|SSE|Dow Jones|S&P 500|Nasdaq)\b", r)]
     ctx.close_page(title)
@@ -248,36 +257,75 @@ def left_to_right(expr):
 
 
 # ================================================================= office
-def save_as(ctx, name, dialog="Save As", app_suffix=""):
+def save_as(ctx, name, dialog="Save As"):
     # The file name field has the focus and its text selected when the dialog
     # opens, so type over it; looking it up would mean reading the dialog,
-    # and Excel does not answer while its own dialog is open.
+    # and Excel does not answer while its own dialog is open. The whole path:
+    # the dialog opens wherever the app last saved, which is not always
+    # Documents.
     ctx.do([{"key": "F12", "expect": {"window": dialog}, "expect_ms": 8000},
-            {"key": "ctrl+a"}, {"type": name},
+            {"key": "ctrl+a"}, {"type": f"%USERPROFILE%\\Documents\\{name}"},
             {"key": "Enter", "expect": {"window": name}, "expect_ms": 10000}])
 
 
-def answer_dont_save(ctx):
-    if fastlane.office_prompt(ctx.runner.table):
-        # alt+N is Don't Save's access key in every Office save prompt.
-        ctx.do([{"key": "alt+n"}])
-        return
-    ctx.do([{"click": "Don't Save", "when": {"shows": "Don't Save"}}])
+def in_documents(ctx, files):
+    """Which of the files are in Documents, asked of Windows itself."""
+    names = " ".join(f'"{f}"' for f in files)
+    listing = copied_by_command(ctx, f'cmd /c (cd /d "%USERPROFILE%\\Documents" & dir /b {names}) | clip')
+    return [f for f in files if f in listing.splitlines()]
+
+
+def saved(ctx, file):
+    if file not in in_documents(ctx, [file]):
+        raise SkillFailed(f"{file} is not in Documents after saving")
+
+
+def answer_dont_save(ctx, name):
+    """After closing our window: wait for it to go, and if the app asks
+    about saving instead, say Don't Save (the file was saved already)."""
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if not any(name in w["title"] for w in ctx.runner.sense.ask(op="windows")["windows"]):
+            return
+        table = ctx.runner.table
+        if fastlane.office_prompt(table):
+            # alt+N is Don't Save's access key in every Office save prompt.
+            ctx.do([{"key": "alt+n"}])
+        elif any(r["name"] == "Don't Save" for r in table["elements"]):
+            ctx.do([{"click": "Don't Save"}])
+        time.sleep(0.4)
+        ctx.runner.table = ctx.runner.sense.snapshot()
+    raise SkillFailed(f"{name} would not close")
 
 
 def copied(ctx, keys):
     """Press keys that copy something and return the text they put on the
-    clipboard. A marker goes there first, so an old clipboard is never read
-    as the answer."""
+    clipboard."""
+    return on_clipboard(ctx, [{"key": k} for k in keys])
+
+
+def copied_by_command(ctx, command):
+    return on_clipboard(ctx, run_box(command, {})[:2] + [{"key": "Enter"}], wait=8.0)
+
+
+def on_clipboard(ctx, steps, wait=3.0):
+    """Run steps that put text on the clipboard and return that text. A
+    marker goes there first, so an old clipboard is never read as the
+    answer, and whatever the person had there is put back afterwards."""
+    before = ctx.runner.sense.clipboard()
     marker = f"fastlane-{time.time()}"
     ctx.runner.dvv.set_clipboard(marker)
-    ctx.do([{"key": k} for k in keys])
-    for _ in range(30):
-        text = ctx.runner.sense.clipboard()
-        if text and text != marker:
-            return text.strip()
-        time.sleep(0.1)
-    raise SkillFailed(f"nothing was copied by {keys}")
+    try:
+        ctx.do(steps)
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            text = ctx.runner.sense.clipboard()
+            if text and text != marker:
+                return text.strip()
+            time.sleep(0.1)
+        raise SkillFailed("nothing reached the clipboard")
+    finally:
+        ctx.runner.dvv.set_clipboard(before or "")
 
 
 @skill("office")
@@ -325,8 +373,10 @@ def spreadsheet(ctx, name, header, rows, totals, number_format_cols=""):
     save_as(ctx, name)
     ctx.created(f"{name}.xlsx")
     ctx.do([{"key": "alt+F4", "when": {"window": name}}])
-    answer_dont_save(ctx)
+    answer_dont_save(ctx, name)
     ctx.closed("window", "Excel")
+    # Checked once the app has let go of the file and is out of the way.
+    saved(ctx, f"{name}.xlsx")
     if any(v is None for v in total.values()):
         raise SkillFailed(f"total row not readable: {total}")
     return {"file": f"{name}.xlsx", "totals": total}
@@ -359,8 +409,10 @@ def document(ctx, name, title, blocks):
     save_as(ctx, name)
     ctx.created(f"{name}.docx")
     ctx.do([{"key": "alt+F4", "when": {"window": name}}])
-    answer_dont_save(ctx)
+    answer_dont_save(ctx, name)
     ctx.closed("window", "Word")
+    # Checked once the app has let go of the file and is out of the way.
+    saved(ctx, f"{name}.docx")
     return {"file": f"{name}.docx"}
 
 
@@ -389,8 +441,10 @@ def deck(ctx, name, slides):
     save_as(ctx, name)
     ctx.created(f"{name}.pptx")
     ctx.do([{"key": "alt+F4", "when": {"window": name}}])
-    answer_dont_save(ctx)
+    answer_dont_save(ctx, name)
     ctx.closed("window", "PowerPoint")
+    # Checked once the app has let go of the file and is out of the way.
+    saved(ctx, f"{name}.pptx")
     count = sum(reads, [""])[-1]
     if f"of {len(slides)}" not in count:
         raise SkillFailed(f"deck has {count!r}, wanted {len(slides)} slides")
@@ -439,7 +493,7 @@ def organise(ctx, folder, files):
         time.sleep(1.0)
         ctx.do(run_box(f'explorer "%USERPROFILE%\\Documents\\{folder}"', {"window": folder}, 10000))
         ctx.opened("window", "File Explorer")
-        inside = " ".join(ctx.page_text("", 60))
+        inside = " ".join(ctx.page_text("", 60, until=lambda rows: all(any(f.rsplit(".", 1)[0] in r for r in rows) for f in files), wait=4))
         missing = [f for f in files if f.rsplit(".", 1)[0] not in inside]
         ctx.do([{"key": "alt+F4", "when": {"window": folder}}])
         ctx.closed("window", "File Explorer")
