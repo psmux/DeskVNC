@@ -130,14 +130,25 @@ def main():
             print("MISSION " + json.dumps(report["missions"][-1]), file=sys.stderr, flush=True)
         # Leave the computer as it was found.
         after = windows(runner)
-        extra = [w for w in after if w not in before]
+        extra = list(after)
+        for w in before:
+            if w in extra:
+                extra.remove(w)
         if extra:
-            closed, kept = tidy.tidy(runner)
+            # Exactly what appeared during the mission, one window per name
+            # per copy, and the browser tabs of ours.
+            closed, kept = [], []
+            tidy.close_windows(runner, closed, kept, names=extra)
+            tidy.close_tabs(runner, closed)
             report["tidied"] = closed
             report["left_for_person"] = kept
             after = windows(runner)
         report["unclosed_ledger"] = [i for i in ctx.ledger if not i["closed"]]
-        report["new_windows_at_end"] = [w for w in after if w not in before]
+        left = list(after)
+        for w in before:
+            if w in left:
+                left.remove(w)
+        report["new_windows_at_end"] = left
         report["windows_gone_that_were_open"] = [w for w in before if w not in after]
     finally:
         runner.close()

@@ -60,13 +60,18 @@ def task_view(runner):
     return [r for r in runner.table["elements"] if r["role"] == "listitem" and r["area"] == "window"]
 
 
-def close_windows(runner, closed, kept, rounds=60):
+def close_windows(runner, closed, kept, rounds=60, names=None):
     """Bring each window of ours to the front, alt+F4 it, answer its save
-    prompt, and count again to be sure it is gone."""
+    prompt, and count again to be sure it is gone. With names, close just
+    those windows (one each), whatever they are called."""
     skip = set()
+    names = list(names) if names is not None else None
     for _ in range(rounds):
         items = task_view(runner)
-        mine = [r for r in items if ours_window(r["name"]) and r["name"] not in skip]
+        if names is not None:
+            mine = [r for r in items if r["name"] in names and r["name"] not in skip]
+        else:
+            mine = [r for r in items if ours_window(r["name"]) and r["name"] not in skip]
         if not mine:
             runner.step({"key": "Escape"})
             return
@@ -94,6 +99,8 @@ def close_windows(runner, closed, kept, rounds=60):
         runner.step({"key": "Escape"})
         if after < count:
             closed.append(item["name"])
+            if names is not None:
+                names.remove(item["name"])
         elif item["name"] not in skip:
             # It did not go and said nothing we could answer: leave it for a
             # person rather than try forever.
