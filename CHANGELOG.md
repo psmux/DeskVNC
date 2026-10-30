@@ -27,6 +27,10 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   (web lookups, Calculator, Excel, Word, PowerPoint, Notepad, filing) passed
   16 skills of 16 in 6.3 minutes and closed every window they opened.
 
+* Linux builds for 64-bit ARM: a deb, an rpm and an AppImage of the viewer,
+  and DeskVNC Support as `DeskVNC-Support-Linux-aarch64.tar.gz`. They run on a
+  Raspberry Pi 4 or 5 with 64-bit Raspberry Pi OS and on other ARM64 Linux.
+
 ### Fixed
 
 * `screen-stable` and `screen-changed` ignore changes the size of a blinking
