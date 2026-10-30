@@ -2,13 +2,13 @@
 
     python3 tidy.py --host-id <saved host>
 
-A person leaves a computer the way they found it. This opens Task View
-(Win+Tab), which lists every window with its own Close button, and closes the
-windows the fast lane opens: Calculators, its Notepad logs, its Word reports.
-A window that asks to save is answered "Don't save" only when the prompt
-names a file of ours or an untitled one; any other name gets Cancel and the
-window is left for its owner. In the browser it closes the tabs whose titles
-match pages the fast lane loads and leaves every other tab.
+A person leaves a computer the way they found it. This lists the open
+windows through deskvnc-sense, so nothing flashes on screen, brings each one
+the fast lane opens forward and closes it: Calculators, its Notepad logs, its
+Office files. A window that asks to save is answered "Don't save" only when
+the prompt names a file of ours or an untitled one; any other name gets
+Cancel and the window is left for its owner. With --tabs it also closes
+browser tabs whose titles match pages the fast lane loads.
 """
 
 import argparse
@@ -67,36 +67,37 @@ def answer_save_prompt(runner, closed, kept, window):
     return False
 
 
-def task_view(runner):
-    runner.step({"key": "super+Tab", "expect": {"window": "Task View"}, "expect_ms": 3000})
-    # Task View draws its list a moment after its title appears.
-    for _ in range(10):
-        items = [r for r in runner.table["elements"] if r["role"] == "listitem" and r["area"] == "window"]
-        if items or "task view" not in (runner.table["window"]["title"] or "").lower():
-            return items
-        runner.table = runner.sense.snapshot()
-    return items
+def open_windows(runner):
+    """Every window a person could Alt+Tab to, from the sense. Nothing on
+    screen moves to list them."""
+    return runner.sense.ask(op="windows")["windows"]
 
 
-def close_windows(runner, closed, kept, rounds=60, names=None):
-    """Bring each window of ours to the front, alt+F4 it, answer its save
-    prompt, and count again to be sure it is gone. With names, close just
+def bring_forward(runner, hwnd):
+    front = runner.sense.ask(op="activate", hwnd=hwnd).get("front")
+    runner.table = runner.sense.settle(runner.table["hash"], change_ms=600)
+    return front
+
+
+def close_windows(runner, closed, kept, names=None):
+    """Bring each window of ours to the front, close it, answer its save
+    prompt, and check by its handle that it is gone. With names, close just
     those windows (one each), whatever they are called."""
-    skip = set()
     names = list(names) if names is not None else None
-    for _ in range(rounds):
-        items = task_view(runner)
+    tried = set()
+    while True:
+        items = [w for w in open_windows(runner) if w["hwnd"] not in tried]
         if names is not None:
-            mine = [r for r in items if r["name"] in names and r["name"] not in skip]
+            mine = [w for w in items if w["title"] in names]
         else:
-            mine = [r for r in items if ours_window(r["name"]) and r["name"] not in skip]
+            mine = [w for w in items if ours_window(w["title"])]
         if not mine:
-            runner.step({"key": "Escape"})
             return
         item = mine[0]
-        count = sum(1 for r in items if r["name"] == item["name"])
-        runner.dvv.click(item["x"] + item["w"] // 2, item["y"] + item["h"] // 2)
-        runner.settle()
+        tried.add(item["hwnd"])
+        if not bring_forward(runner, item["hwnd"]):
+            kept.append(f"would not come forward: {item['title']}")
+            continue
         # The window's own Close button, beside Minimize; alt+F4 if it has none.
         rows = runner.table["elements"]
         caption = {r["y"] for r in rows if r["area"] == "window" and r["name"].lower().startswith("minimize")}
@@ -109,30 +110,23 @@ def close_windows(runner, closed, kept, rounds=60, names=None):
             runner.step({"key": "alt+F4"})
         # A Notepad window with several tabs asks once per tab.
         for _ in range(10):
-            if not answer_save_prompt(runner, closed, kept, item["name"]):
+            if not answer_save_prompt(runner, closed, kept, item["title"]):
                 break
-        if kept and kept[-1].startswith("left open"):
-            skip.add(item["name"])
-        after = sum(1 for r in task_view(runner) if r["name"] == item["name"])
-        runner.step({"key": "Escape"})
-        if after < count:
-            closed.append(item["name"])
+        if any(w["hwnd"] == item["hwnd"] for w in open_windows(runner)):
+            if not (kept and kept[-1].startswith("left open")):
+                # It did not go and said nothing we could answer: leave it
+                # for a person rather than try forever.
+                kept.append(f"would not close: {item['title']}")
+        else:
+            closed.append(item["title"])
             if names is not None:
-                names.remove(item["name"])
-        elif item["name"] not in skip:
-            # It did not go and said nothing we could answer: leave it for a
-            # person rather than try forever.
-            skip.add(item["name"])
-            kept.append(f"would not close: {item['name']}")
+                names.remove(item["title"])
 
 
 def close_tabs(runner, closed, rounds=80):
-    # Bring the browser to the front through Task View.
-    edge = next((r for r in task_view(runner) if "Edge" in r["name"]), None)
-    if edge is None:
-        runner.step({"key": "Escape"})
+    edge = next((w for w in open_windows(runner) if "Edge" in w["title"]), None)
+    if edge is None or not bring_forward(runner, edge["hwnd"]):
         return
-    runner.step({"click": edge["name"], "expect": {"window": "Edge"}})
     for _ in range(rounds):
         title = runner.table["window"]["title"] or ""
         if "edge" not in title.lower():
