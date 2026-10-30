@@ -1358,7 +1358,8 @@ impl Coder {
         // picture this encoder last made, so the next one follows on from it:
         // a keyframe there cost a third of a second on a slow link before
         // the first moving picture.
-        let encoded = video.encoder.encode(frame, video.fresh)?;
+        let mut encoded = video.encoder.encode(frame, video.fresh)?;
+        video::shown_at_once(&mut encoded);
         if encoded.data.is_empty() {
             // The encoder skipped this screen to keep to its rate.
             ensure!(!video.fresh, "The video encoder skipped a keyframe");
