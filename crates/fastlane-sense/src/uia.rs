@@ -3,6 +3,7 @@
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
+use windows::core::Interface;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -42,8 +43,15 @@ impl Sense {
                 .ok()
                 .map_err(|e| format!("COM: {e}"))?;
             let automation: IUIAutomation =
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
                     .map_err(|e| format!("UI Automation: {e}"))?;
+            // An app that is busy or stuck (Excel behind its own Save As) does
+            // not answer, and UI Automation waits twenty seconds per call by
+            // default. A second is plenty for an app that is answering.
+            if let Ok(timeouts) = automation.cast::<IUIAutomation2>() {
+                let _ = timeouts.SetConnectionTimeout(1000);
+                let _ = timeouts.SetTransactionTimeout(1000);
+            }
             let cache = automation.CreateCacheRequest().map_err(|e| e.to_string())?;
             for property in [
                 UIA_NamePropertyId,
