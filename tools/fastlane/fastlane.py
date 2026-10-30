@@ -152,8 +152,14 @@ class Dvv:
         except RuntimeError as e:
             if not str(e).startswith("SCREEN_CHANGED"):
                 raise
-            self.fence()
-            self.call("dvv_key", keys=keys)
+            for _ in range(5):
+                self.fence()
+                r = self.rpc("tools/call", {"name": "dvv_key", "arguments": {"limbId": self.limb, "keys": keys}})
+                if not r.get("isError"):
+                    return
+                if not r["content"][0]["text"].startswith("SCREEN_CHANGED"):
+                    break
+            raise RuntimeError(r["content"][0]["text"][:300])
 
     def close(self):
         try:
@@ -322,8 +328,20 @@ def run(plan, max_actions=40):
                 # rows whose name or value holds any of the words given, or
                 # every text row when the filter is empty.
                 want = [w.lower() for w in step["read"].split("|") if w]
-                found = [f"{r['name']}" + (f" · {r['value']}" if r.get("value") else "") for r in rows
-                         if r["area"] == "window" and (not want or any(w in f"{r['name']} {r.get('value', '')}".lower() for w in want))]
+                # In a browser, only what is inside the page, not the tabs,
+                # address bar and toolbar around it.
+                docs = [r for r in rows if r["role"] == "document" and r["area"] == "window"]
+                page = max(docs, key=lambda r: r["w"] * r["h"]) if docs else None
+                def inside(r):
+                    return page is None or (r is not page and page["x"] <= r["x"] < page["x"] + page["w"] and page["y"] <= r["y"] < page["y"] + page["h"])
+                found, seen = [], set()
+                for r in rows:
+                    text = r["name"] + (f" · {r['value']}" if r.get("value") and r["role"] != "link" else "")
+                    if r["area"] != "window" or not inside(r) or text in seen or not text:
+                        continue
+                    if not want or any(w in text.lower() for w in want):
+                        seen.add(text)
+                        found.append(text)
                 entry["read"] = found[: step.get("limit", 15)]
                 log.append(entry)
                 print(json.dumps(entry), file=sys.stderr, flush=True)
