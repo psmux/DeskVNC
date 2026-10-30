@@ -25,6 +25,9 @@
 //! user, in their session, because UI Automation only sees the desktop of the
 //! session it runs in.
 
+// No console window: it runs in the background of somebody's desktop.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
