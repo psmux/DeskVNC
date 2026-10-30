@@ -363,7 +363,9 @@ def run(plan, max_actions=40):
                 # Typing sets the field: a field keeps what it had (the Run box
                 # remembers the last command), and a click lands the caret in
                 # the middle of it.
-                if step.get("replace", True):
+                # Only a named field is replaced; text typed where the caret is
+                # (a document) must not select the whole document first.
+                if step.get("replace", bool(step.get("into"))):
                     dvv.key("ctrl+a")
                 dvv.type(step["type"])
                 entry["did"] = f"typed {step['type']!r}" + (f" into {row['name']}" if row else "")
