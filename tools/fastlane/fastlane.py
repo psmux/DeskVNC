@@ -222,8 +222,11 @@ def find(rows, name, roles, step):
     want = name.lower()
     for test in (lambda n: n == want, lambda n: n.startswith(want), lambda n: want in n):
         hits = [r for r in candidates if test(r["name"].lower().rstrip(":"))]
-        if len(hits) == 1:
-            return hits[0], 0.0
+        # A combo box and the edit inside it share a name; the one with the
+        # keyboard focus is the one that takes text.
+        focused = [r for r in hits if r.get("focus")]
+        if len(hits) == 1 or len(focused) == 1:
+            return (focused or hits)[0], 0.0
         if hits:
             candidates = hits
             break
@@ -295,6 +298,11 @@ def run(plan, max_actions=40):
                     if not row.get("focus"):
                         dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
                 dvv.fence(row)
+                # Typing sets the field: a field keeps what it had (the Run box
+                # remembers the last command), and a click lands the caret in
+                # the middle of it.
+                if step.get("replace", True):
+                    dvv.key("ctrl+a")
                 dvv.type(step["type"])
                 entry["did"] = f"typed {step['type']!r}" + (f" into {row['name']}" if row else "")
             elif "click" in step:
