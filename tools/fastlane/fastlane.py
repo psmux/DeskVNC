@@ -262,6 +262,7 @@ def run(plan, max_actions=40):
         {"type": "notepad", "into": "Open"}       into omitted: the focused field
         {"click": "Save", "expect": {"shows": "Saved"}}
         {"goal": "free text", "text": "..."}      jevos picks the operation too
+        {"read": "price|$"}                       copy matching rows into the log
 
     when, with the same form as expect, skips the step unless the screen
     matches it first.
@@ -293,6 +294,17 @@ def run(plan, max_actions=40):
                 log.append(entry)
                 continue
             rows = table["elements"]
+            if "read" in step:
+                # Copy what the screen says into the result, with no action:
+                # rows whose name or value holds any of the words given, or
+                # every text row when the filter is empty.
+                want = [w.lower() for w in step["read"].split("|") if w]
+                found = [f"{r['name']}" + (f" · {r['value']}" if r.get("value") else "") for r in rows
+                         if r["area"] == "window" and (not want or any(w in f"{r['name']} {r.get('value', '')}".lower() for w in want))]
+                entry["read"] = found[: step.get("limit", 15)]
+                log.append(entry)
+                print(json.dumps(entry), file=sys.stderr, flush=True)
+                continue
             if "key" in step:
                 dvv.fence()
                 dvv.key(step["key"])
