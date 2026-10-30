@@ -207,6 +207,9 @@ pub fn hint_for(code: &str) -> &'static str {
         "NO_NATIVE_VARIANT" => {
             "The limb serves this intent itself and the wire variant that would carry it does not exist in this build. Do not retry. Use dvv_term_send, which lowers to bytes that do exist."
         }
+        "SENSE_ABSENT" => {
+            "dvv_plan reads the screen through deskvnc-sense on the remote machine, and none is reachable. Start it there with DESKVNC_SENSE_TOKEN set and --connect pointing at this dvv's DESKVNC_SENSE_LISTEN address, or drive the machine step by step with dvv_key, dvv_type and dvv_click."
+        }
         "BAD_REQUEST" => {
             "The arguments do not describe a call this tool can make. The message says which one is wrong."
         }

@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 /// A constant so that the count `00 R44` fixed is asserted rather than
 /// counted by hand in four documents. A twenty fifth tool is a decision, not
 /// an accident.
-pub const TOOL_COUNT: usize = 25;
+pub const TOOL_COUNT: usize = 26;
 
 /// How long a client may cache `tools/list`, in milliseconds.
 ///
@@ -265,6 +265,17 @@ pub fn tools() -> Vec<Value> {
                 }),
             ),
             &["until"],
+        ),
+        tool(
+            "dvv_plan",
+            "Carries out a whole plan of steps in one call, with no model in the loop, and returns a log and the screen as it ended. Each step does one thing: {\"key\": \"super+r\"}, {\"type\": \"notepad\", \"into\": \"Open\"} (into names the field; without it the text goes where the caret is), {\"click\": \"Save\"}, or {\"read\": \"price|total\"} (the text of controls holding any of the words). Any step may add expect {window: part of the title, shows: part of a control's name or value}, checked once the screen settles, when (the same form) to skip the step unless the screen matches, and echo true on a type step to check the text arrived. Controls are found by name, never guessed: a step whose control is missing or whose expect is not met sends away whatever popup is in front by its safest button (Not now, Cancel, never Close tab) or Escape, and is tried twice more before the plan stops and says where. NEEDS deskvnc-sense ON THAT MACHINE, dialled in with the token in DESKVNC_SENSE_TOKEN: it reads the controls through Windows UI Automation, which no remote desktop protocol carries. Without it this refuses with SENSE_ABSENT and the other tools still work. The rules are tools/fastlane/spec in the DeskVNC repository.",
+            merge(
+                selector(),
+                json!({
+                    "steps": { "type": "array", "items": { "type": "object" }, "description": "The steps, in order. The plan stops at the first that fails." },
+                }),
+            ),
+            &["steps"],
         ),
         tool(
             "dvv_clipboard",
