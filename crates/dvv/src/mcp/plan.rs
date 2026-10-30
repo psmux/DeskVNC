@@ -57,16 +57,24 @@ impl SenseLine {
     async fn ask(&mut self, request: Value) -> Result<Value, String> {
         let mut line = request.to_string();
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).await.map_err(|e| format!("the sense went away: {e}"))?;
+        self.writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("the sense went away: {e}"))?;
         let mut answer = String::new();
-        let read = tokio::time::timeout(Duration::from_millis(ANSWER_MS), self.reader.read_line(&mut answer)).await;
+        let read = tokio::time::timeout(
+            Duration::from_millis(ANSWER_MS),
+            self.reader.read_line(&mut answer),
+        )
+        .await;
         match read {
             Ok(Ok(n)) if n > 0 => {}
             Ok(Ok(_)) => return Err("the sense closed the connection".into()),
             Ok(Err(e)) => return Err(format!("the sense went away: {e}")),
             Err(_) => return Err(format!("the sense did not answer within {ANSWER_MS} ms")),
         }
-        let value: Value = serde_json::from_str(&answer).map_err(|e| format!("the sense sent something unreadable: {e}"))?;
+        let value: Value = serde_json::from_str(&answer)
+            .map_err(|e| format!("the sense sent something unreadable: {e}"))?;
         match value.get("error").and_then(Value::as_str) {
             Some(e) => Err(format!("the sense could not read the screen: {e}")),
             None => Ok(value),
@@ -75,7 +83,8 @@ impl SenseLine {
 
     async fn table(&mut self, request: Value) -> Result<Table, String> {
         let value = self.ask(request).await?;
-        serde_json::from_value(value).map_err(|e| format!("the sense sent a table this runner cannot read: {e}"))
+        serde_json::from_value(value)
+            .map_err(|e| format!("the sense sent a table this runner cannot read: {e}"))
     }
 }
 
@@ -94,7 +103,8 @@ impl Senses {
             return Ok(());
         }
         let token = token()?;
-        let address = std::env::var("DESKVNC_SENSE_LISTEN").unwrap_or_else(|_| "0.0.0.0:5942".into());
+        let address =
+            std::env::var("DESKVNC_SENSE_LISTEN").unwrap_or_else(|_| "0.0.0.0:5942".into());
         let listener = TcpListener::bind(&address).await.map_err(|e| {
             ToolError::new(SENSE_ABSENT, format!("cannot listen for deskvnc-sense on {address}: {e}. Another dvv may hold the port; set DESKVNC_SENSE_LISTEN to another one and start the sense with --connect pointing at it."))
         })?;
@@ -106,7 +116,11 @@ impl Senses {
                 let token = token.clone();
                 tokio::spawn(async move {
                     if let Some(line) = greet(stream, &token).await {
-                        senses.lines.lock().await.insert(peer.ip(), Arc::new(Mutex::new(line)));
+                        senses
+                            .lines
+                            .lock()
+                            .await
+                            .insert(peer.ip(), Arc::new(Mutex::new(line)));
                     }
                 });
             }
@@ -121,7 +135,13 @@ impl Senses {
             .parse::<std::net::SocketAddr>()
             .map(|a| a.ip())
             .ok()
-            .or_else(|| host.rsplit_once(':').map_or(host, |(h, _)| h).trim_matches(['[', ']']).parse().ok());
+            .or_else(|| {
+                host.rsplit_once(':')
+                    .map_or(host, |(h, _)| h)
+                    .trim_matches(['[', ']'])
+                    .parse()
+                    .ok()
+            });
         let deadline = tokio::time::Instant::now() + Duration::from_millis(ARRIVE_MS);
         loop {
             {
@@ -166,7 +186,10 @@ async fn greet(stream: TcpStream, token: &str) -> Option<SenseLine> {
     let (read, writer) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut hello = String::new();
-    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut hello)).await.ok()?.ok()?;
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut hello))
+        .await
+        .ok()?
+        .ok()?;
     let hello: Value = serde_json::from_str(&hello).ok()?;
     let sent = hello.get("token")?.as_str()?;
     use subtle::ConstantTimeEq;
@@ -177,7 +200,12 @@ async fn greet(stream: TcpStream, token: &str) -> Option<SenseLine> {
 }
 
 /// A boxed tool call, so a plan can call the server it runs inside.
-pub type Call<'a> = Box<dyn Fn(&'static str, Value) -> Pin<Box<dyn Future<Output = Value> + Send + 'a>> + Send + Sync + 'a>;
+pub type Call<'a> = Box<
+    dyn Fn(&'static str, Value) -> Pin<Box<dyn Future<Output = Value> + Send + 'a>>
+        + Send
+        + Sync
+        + 'a,
+>;
 
 /// The desk a plan runs on: the sense for eyes, dvv's own tools for hands.
 struct DvvDesk<'a> {
@@ -192,8 +220,14 @@ impl DvvDesk<'_> {
         args["limbId"] = json!(self.limb);
         let result = (self.call)(name, args).await;
         if result["isError"] == json!(true) {
-            let code = result["structuredContent"]["code"].as_str().unwrap_or_default().to_string();
-            let message = result["structuredContent"]["message"].as_str().unwrap_or_default().to_string();
+            let code = result["structuredContent"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let message = result["structuredContent"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             return Err((code, message));
         }
         Ok(())
@@ -209,14 +243,20 @@ impl DvvDesk<'_> {
 
 impl Desk for DvvDesk<'_> {
     async fn snapshot(&mut self) -> Result<Table, String> {
-        self.sense.lock().await.table(json!({ "op": "snapshot" })).await
+        self.sense
+            .lock()
+            .await
+            .table(json!({ "op": "snapshot" }))
+            .await
     }
 
     async fn settle(&mut self, after: &str, change_ms: u64, max_ms: u64) -> Result<Table, String> {
         self.sense
             .lock()
             .await
-            .table(json!({ "op": "settle", "after": after, "change_ms": change_ms, "max_ms": max_ms }))
+            .table(
+                json!({ "op": "settle", "after": after, "change_ms": change_ms, "max_ms": max_ms }),
+            )
             .await
     }
 
@@ -236,7 +276,10 @@ impl Desk for DvvDesk<'_> {
         // go on from the character DeskVNC stopped at.
         let mut rest: String = text.to_string();
         for _ in 0..20 {
-            match self.act("dvv_type", json!({ "text": rest, "wpm": 1200 })).await {
+            match self
+                .act("dvv_type", json!({ "text": rest, "wpm": 1200 }))
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err((code, message)) if code == crate::error::codes::SCREEN_CHANGED => {
                     let sent = message
@@ -265,15 +308,30 @@ impl Desk for DvvDesk<'_> {
 }
 
 /// Run a plan on one limb. The steps are checked before anything is done.
-pub async fn run(senses: &Arc<Senses>, limb: &str, host: &str, steps: &Value, call: Call<'_>) -> Result<Value, ToolError> {
+pub async fn run(
+    senses: &Arc<Senses>,
+    limb: &str,
+    host: &str,
+    steps: &Value,
+    call: Call<'_>,
+) -> Result<Value, ToolError> {
     let steps: Vec<Step> = steps
         .as_array()
-        .ok_or_else(|| ToolError::new(crate::error::codes::BAD_REQUEST, "steps must be an array of steps"))?
+        .ok_or_else(|| {
+            ToolError::new(
+                crate::error::codes::BAD_REQUEST,
+                "steps must be an array of steps",
+            )
+        })?
         .iter()
         .map(|s| Step::parse(s).map_err(|e| ToolError::new(crate::error::codes::BAD_REQUEST, e)))
         .collect::<Result<_, _>>()?;
     let sense = senses.line_for(host).await?;
-    let desk = DvvDesk { sense: Arc::clone(&sense), call, limb: limb.to_string() };
+    let desk = DvvDesk {
+        sense: Arc::clone(&sense),
+        call,
+        limb: limb.to_string(),
+    };
     let runner = match Runner::new(desk).await {
         Ok(runner) => runner,
         Err(e) => {
@@ -282,7 +340,13 @@ pub async fn run(senses: &Arc<Senses>, limb: &str, host: &str, steps: &Value, ca
         }
     };
     let outcome = runner.run(&steps).await;
-    if outcome.failed.as_ref().and_then(|f| f.get("error")).and_then(Value::as_str).is_some_and(|e| e.starts_with("the sense")) {
+    if outcome
+        .failed
+        .as_ref()
+        .and_then(|f| f.get("error"))
+        .and_then(Value::as_str)
+        .is_some_and(|e| e.starts_with("the sense"))
+    {
         senses.drop_line(&sense).await;
     }
     Ok(outcome.to_json())
@@ -297,12 +361,19 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let sense = tokio::spawn(async move {
             let mut stream = TcpStream::connect(address).await.unwrap();
-            stream.write_all(format!("{hello}\n").as_bytes()).await.unwrap();
+            stream
+                .write_all(format!("{hello}\n").as_bytes())
+                .await
+                .unwrap();
             let mut reader = BufReader::new(stream);
             let mut request = String::new();
             reader.read_line(&mut request).await.unwrap();
             let table = json!({"hash": "7", "window": {"title": "Run"}, "elements": [{"i": 1, "area": "window", "role": "button", "name": "OK", "x": 0, "y": 0, "w": 10, "h": 10}]});
-            reader.get_mut().write_all(format!("{table}\n").as_bytes()).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(format!("{table}\n").as_bytes())
+                .await
+                .unwrap();
         });
         let (stream, _) = listener.accept().await.unwrap();
         let line = greet(stream, "a secret of sixteen").await;
@@ -314,11 +385,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_sense_with_the_token_is_read_and_one_without_is_turned_away() {
-        let mut line = dial(json!({"hello": "deskvnc-sense", "token": "a secret of sixteen"})).await.expect("accepted");
+        let mut line = dial(json!({"hello": "deskvnc-sense", "token": "a secret of sixteen"}))
+            .await
+            .expect("accepted");
         let table = line.table(json!({"op": "snapshot"})).await.unwrap();
         assert_eq!(table.window.title, "Run");
         assert_eq!(table.elements[0].name, "OK");
-        assert!(dial(json!({"hello": "deskvnc-sense", "token": "a secret of sixteeN"})).await.is_none());
+        assert!(
+            dial(json!({"hello": "deskvnc-sense", "token": "a secret of sixteeN"}))
+                .await
+                .is_none()
+        );
         assert!(dial(json!({"hello": "deskvnc-sense"})).await.is_none());
     }
 }

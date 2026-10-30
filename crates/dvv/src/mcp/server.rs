@@ -78,12 +78,18 @@ pub struct Server {
 impl Server {
     /// A server over a granted plane.
     pub fn new(plane: Arc<Plane>) -> Server {
-        Server { plane: Some(plane), senses: Arc::default() }
+        Server {
+            plane: Some(plane),
+            senses: Arc::default(),
+        }
     }
 
     /// A server with no grant yet.
     pub fn ungranted() -> Server {
-        Server { plane: None, senses: Arc::default() }
+        Server {
+            plane: None,
+            senses: Arc::default(),
+        }
     }
 
     /// Read messages until the input ends, answering each.
@@ -414,9 +420,21 @@ impl Server {
                 let lowered = actions::lower_pointer(action, &pointer_args(args))?;
                 let limb = plane.resolve(&selector(args))?;
                 let settlement = plane
-                    .submit_for(&limb, lowered.kind, opt_u32(args, "generation"), opt_str(args, "reason"))
+                    .submit_for(
+                        &limb,
+                        lowered.kind,
+                        opt_u32(args, "generation"),
+                        opt_str(args, "reason"),
+                    )
                     .await?;
-                Ok(self.look_after(&limb, &settlement, args, self.settled(&limb, &settlement, json!({ "resolved": lowered.resolved }))).await)
+                Ok(self
+                    .look_after(
+                        &limb,
+                        &settlement,
+                        args,
+                        self.settled(&limb, &settlement, json!({ "resolved": lowered.resolved })),
+                    )
+                    .await)
             }
             "dvv_type" => {
                 let text = require_str(args, "text")?;
@@ -432,19 +450,41 @@ impl Server {
                         opt_str(args, "reason"),
                     )
                     .await?;
-                Ok(self.look_after(&limb, &settlement, args, self.settled(&limb, &settlement, json!({}))).await)
+                Ok(self
+                    .look_after(
+                        &limb,
+                        &settlement,
+                        args,
+                        self.settled(&limb, &settlement, json!({})),
+                    )
+                    .await)
             }
             "dvv_key" => {
                 let chord = require_str(args, "keys")?;
                 let (keys, resolved) = actions::parse_keys(&[chord])?;
                 let limb = plane.resolve(&selector(args))?;
                 let settlement = plane
-                    .submit_for(&limb, IntentKind::Press { keys }, None, opt_str(args, "reason"))
+                    .submit_for(
+                        &limb,
+                        IntentKind::Press { keys },
+                        None,
+                        opt_str(args, "reason"),
+                    )
                     .await?;
-                Ok(self.look_after(&limb, &settlement, args, self.settled(&limb, &settlement, json!({ "resolved": resolved }))).await)
+                Ok(self
+                    .look_after(
+                        &limb,
+                        &settlement,
+                        args,
+                        self.settled(&limb, &settlement, json!({ "resolved": resolved })),
+                    )
+                    .await)
             }
             "dvv_screen" => self.screen(args).await,
-            other => Err(ToolError::new(codes::BAD_REQUEST, format!("{other} is not a hand"))),
+            other => Err(ToolError::new(
+                codes::BAD_REQUEST,
+                format!("{other} is not a hand"),
+            )),
         }
     }
 
@@ -452,14 +492,17 @@ impl Server {
         let plane = self.plane()?;
         let limb = plane.resolve(&selector(args))?;
         let steps = args.get("steps").cloned().unwrap_or(Value::Null);
-        let call: crate::mcp::plan::Call<'_> =
-            Box::new(move |name, args| Box::pin(async move {
+        let call: crate::mcp::plan::Call<'_> = Box::new(move |name, args| {
+            Box::pin(async move {
                 match self.hands(name, &args).await {
                     Ok(value) => value,
                     Err(error) => format::error(&error),
                 }
-            }));
-        let result = crate::mcp::plan::run(&self.senses, limb.id().as_str(), limb.host(), &steps, call).await?;
+            })
+        });
+        let result =
+            crate::mcp::plan::run(&self.senses, limb.id().as_str(), limb.host(), &steps, call)
+                .await?;
         let mut payload = result["controls"].as_str().unwrap_or_default().to_string();
         for entry in result["log"].as_array().into_iter().flatten() {
             if let Some(read) = entry.get("read") {
@@ -663,7 +706,9 @@ impl Server {
         if args.get("look").and_then(Value::as_bool) != Some(true) || settlement.refused() {
             return acted;
         }
-        let Ok(plane) = self.plane() else { return acted };
+        let Ok(plane) = self.plane() else {
+            return acted;
+        };
         // First the action's effect, then its end. Waiting only for stillness
         // read the screen before a Run dialog had even appeared, because the
         // screen was still for the 400 ms before it did. Nothing at all in a
@@ -693,9 +738,9 @@ impl Server {
                 None,
             )
             .await;
-        let settled = wait.as_ref().is_ok_and(|w| {
-            !matches!(w.outcome, limb_core::observation::Outcome::TimedOut { .. })
-        });
+        let settled = wait
+            .as_ref()
+            .is_ok_and(|w| !matches!(w.outcome, limb_core::observation::Outcome::TimedOut { .. }));
         let mut read = json!({ "limbId": limb.id().to_string() });
         match args.get("lookRegion") {
             Some(region) => {
@@ -720,7 +765,10 @@ impl Server {
             content.extend(items.iter().cloned());
         }
         seen["content"] = json!(content);
-        if let Some(structured) = seen.get_mut("structuredContent").and_then(Value::as_object_mut) {
+        if let Some(structured) = seen
+            .get_mut("structuredContent")
+            .and_then(Value::as_object_mut)
+        {
             structured.insert("action".into(), acted["structuredContent"].clone());
             structured.insert("settled".into(), json!(settled));
         }

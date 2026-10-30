@@ -16,7 +16,12 @@ pub trait Desk: Send {
     fn snapshot(&mut self) -> impl Future<Output = Result<Table, String>> + Send;
     /// Read until the table differs from `after` and then holds still, or
     /// until `change_ms` passes with no change, or `max_ms` in all.
-    fn settle(&mut self, after: &str, change_ms: u64, max_ms: u64) -> impl Future<Output = Result<Table, String>> + Send;
+    fn settle(
+        &mut self,
+        after: &str,
+        change_ms: u64,
+        max_ms: u64,
+    ) -> impl Future<Output = Result<Table, String>> + Send;
     fn key(&mut self, keys: &str) -> impl Future<Output = Result<(), String>> + Send;
     fn type_text(&mut self, text: &str) -> impl Future<Output = Result<(), String>> + Send;
     fn click(&mut self, x: i64, y: i64) -> impl Future<Output = Result<(), String>> + Send;
@@ -60,11 +65,19 @@ impl Step {
         if value.get("goal").is_some() {
             return Err("a goal step needs a model to choose the action; write it as key, type, click or read".into());
         }
-        let mut step: Step = serde_json::from_value(value.clone()).map_err(|e| format!("step {value}: {e}"))?;
+        let mut step: Step =
+            serde_json::from_value(value.clone()).map_err(|e| format!("step {value}: {e}"))?;
         step.source = value.clone();
-        let actions = [step.key.is_some(), step.text.is_some(), step.click.is_some(), step.read.is_some()];
+        let actions = [
+            step.key.is_some(),
+            step.text.is_some(),
+            step.click.is_some(),
+            step.read.is_some(),
+        ];
         if actions.iter().filter(|a| **a).count() != 1 {
-            return Err(format!("step {value} must have exactly one of key, type, click or read"));
+            return Err(format!(
+                "step {value} must have exactly one of key, type, click or read"
+            ));
         }
         Ok(step)
     }
@@ -119,7 +132,13 @@ pub struct Runner<D: Desk> {
 impl<D: Desk> Runner<D> {
     pub async fn new(mut desk: D) -> Result<Runner<D>, String> {
         let table = desk.snapshot().await?;
-        Ok(Runner { desk, table, stale: false, started: Instant::now(), log: Vec::new() })
+        Ok(Runner {
+            desk,
+            table,
+            stale: false,
+            started: Instant::now(),
+            log: Vec::new(),
+        })
     }
 
     fn now(&self) -> u64 {
@@ -144,7 +163,8 @@ impl<D: Desk> Runner<D> {
         // Bounded by count as well as time, so a desk that answers at once
         // cannot spin here.
         for _ in 0..20 {
-            if rules::met(expect, &self.table) || started.elapsed() >= Duration::from_millis(limit) {
+            if rules::met(expect, &self.table) || started.elapsed() >= Duration::from_millis(limit)
+            {
                 break;
             }
             self.table = self.desk.settle(&self.table.hash, limit, limit).await?;
@@ -257,7 +277,11 @@ impl<D: Desk> Runner<D> {
                 return Ok(entry);
             };
             let (x, y) = row.middle();
-            let did = format!("clicked {} {}", row.role, row.name.chars().take(40).collect::<String>());
+            let did = format!(
+                "clicked {} {}",
+                row.role,
+                row.name.chars().take(40).collect::<String>()
+            );
             self.desk.click(x, y).await?;
             entry["did"] = json!(did);
         }
@@ -269,7 +293,10 @@ impl<D: Desk> Runner<D> {
             entry["ok"] = json!(true);
             return Ok(entry);
         }
-        entry["settle_ms"] = json!(self.settle(expect.as_ref(), step.expect_ms.unwrap_or(EXPECT_MS)).await?);
+        entry["settle_ms"] = json!(
+            self.settle(expect.as_ref(), step.expect_ms.unwrap_or(EXPECT_MS))
+                .await?
+        );
         let mut ok = expect.as_ref().is_none_or(|e| rules::met(e, &self.table));
         if ok && step.echo {
             if let Some(text) = &step.text {
@@ -288,7 +315,13 @@ impl<D: Desk> Runner<D> {
     async fn recover(&mut self, typo: bool) -> Result<(), String> {
         let t = self.now();
         let table = self.table().await?;
-        let pick = if typo { None } else { rules::dismissers(table).first().map(|r| (r.name.clone(), r.middle())) };
+        let pick = if typo {
+            None
+        } else {
+            rules::dismissers(table)
+                .first()
+                .map(|r| (r.name.clone(), r.middle()))
+        };
         let mut entry = json!({ "t": t, "recover": true, "front": table.window.title });
         match pick {
             Some((name, (x, y))) => {

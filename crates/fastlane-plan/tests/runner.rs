@@ -38,7 +38,12 @@ impl Desk for Pretend {
     async fn snapshot(&mut self) -> Result<Table, String> {
         Ok(screen(self.screen))
     }
-    async fn settle(&mut self, _after: &str, _change_ms: u64, _max_ms: u64) -> Result<Table, String> {
+    async fn settle(
+        &mut self,
+        _after: &str,
+        _change_ms: u64,
+        _max_ms: u64,
+    ) -> Result<Table, String> {
         Ok(screen(self.screen))
     }
     async fn key(&mut self, keys: &str) -> Result<(), String> {
@@ -69,12 +74,20 @@ impl Desk for Pretend {
 }
 
 fn steps(plan: Value) -> Vec<Step> {
-    plan.as_array().unwrap().iter().map(|s| Step::parse(s).unwrap()).collect()
+    plan.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| Step::parse(s).unwrap())
+        .collect()
 }
 
 #[tokio::test]
 async fn a_plan_runs_and_sends_a_popup_away_by_its_safest_button() {
-    let desk = Pretend { screen: "desktop", done: Vec::new(), popup_once: true };
+    let desk = Pretend {
+        screen: "desktop",
+        done: Vec::new(),
+        popup_once: true,
+    };
     let plan = steps(json!([
         {"key": "super+r", "expect": {"window": "Run"}},
         {"type": "notepad", "into": "Open"},
@@ -85,24 +98,38 @@ async fn a_plan_runs_and_sends_a_popup_away_by_its_safest_button() {
     let result = outcome.to_json();
     assert!(result.get("failed").is_none(), "{result:#}");
     assert_eq!(result["front"]["title"], "Untitled - Notepad");
-    let did: Vec<&str> = outcome.log.iter().filter_map(|e| e["did"].as_str()).collect();
-    assert_eq!(did, [
-        "pressed super+r",
-        "typed \"notepad\" into Open:",
-        "dismissed with Not now",
-        "pressed Enter",
-    ]);
+    let did: Vec<&str> = outcome
+        .log
+        .iter()
+        .filter_map(|e| e["did"].as_str())
+        .collect();
+    assert_eq!(
+        did,
+        [
+            "pressed super+r",
+            "typed \"notepad\" into Open:",
+            "dismissed with Not now",
+            "pressed Enter",
+        ]
+    );
     assert_eq!(outcome.log.last().unwrap()["read"], json!(["Hello"]));
 }
 
 #[tokio::test]
 async fn a_missing_control_fails_the_plan_after_two_recoveries() {
-    let desk = Pretend { screen: "notepad", done: Vec::new(), popup_once: false };
+    let desk = Pretend {
+        screen: "notepad",
+        done: Vec::new(),
+        popup_once: false,
+    };
     let plan = steps(json!([{"click": "Save"}, {"key": "Enter"}]));
     let result = Runner::new(desk).await.unwrap().run(&plan).await.to_json();
     assert_eq!(result["failed"], json!({"click": "Save"}));
     let log = result["log"].as_array().unwrap();
-    assert_eq!(log.iter().filter(|e| e["did"] == "pressed Escape").count(), 2);
+    assert_eq!(
+        log.iter().filter(|e| e["did"] == "pressed Escape").count(),
+        2
+    );
     assert_eq!(log.last().unwrap()["missing"], "Save");
 }
 

@@ -82,8 +82,8 @@ impl Row {
 
 /// What a `click` step may land on.
 pub const CLICKABLE: &[&str] = &[
-    "button", "checkbox", "radio", "combobox", "link", "listitem", "menuitem", "tab", "treeitem", "row", "header",
-    "textbox", "document",
+    "button", "checkbox", "radio", "combobox", "link", "listitem", "menuitem", "tab", "treeitem",
+    "row", "header", "textbox", "document",
 ];
 
 /// What an `into` field may be.
@@ -92,8 +92,22 @@ pub const EDITABLE: &[&str] = &["textbox", "combobox", "document"];
 /// Words on buttons that make an unexpected screen go away without agreeing
 /// to anything. Safest first.
 pub const DISMISS: &[&str] = &[
-    "not now", "no thanks", "no, thanks", "maybe later", "remind me later", "later", "skip", "dismiss", "got it",
-    "close", "cancel", "don't allow", "block", "decline", "reject", "no",
+    "not now",
+    "no thanks",
+    "no, thanks",
+    "maybe later",
+    "remind me later",
+    "later",
+    "skip",
+    "dismiss",
+    "got it",
+    "close",
+    "cancel",
+    "don't allow",
+    "block",
+    "decline",
+    "reject",
+    "no",
 ];
 
 /// Runs of letters and digits, lower case, two characters or longer.
@@ -113,9 +127,15 @@ pub fn find<'a>(rows: &'a [Row], name: &str, roles: &[&str]) -> Option<&'a Row> 
         .collect();
     let want = name.to_lowercase();
     let named = |r: &Row| r.name.to_lowercase().trim_end_matches(':').to_string();
-    let tests: [&dyn Fn(&str) -> bool; 3] = [&|n| n == want, &|n| n.starts_with(&want), &|n| n.contains(&want)];
+    let tests: [&dyn Fn(&str) -> bool; 3] = [&|n| n == want, &|n| n.starts_with(&want), &|n| {
+        n.contains(&want)
+    }];
     for test in tests {
-        let hits: Vec<&Row> = candidates.iter().copied().filter(|r| test(&named(r))).collect();
+        let hits: Vec<&Row> = candidates
+            .iter()
+            .copied()
+            .filter(|r| test(&named(r)))
+            .collect();
         if hits.is_empty() {
             continue;
         }
@@ -142,7 +162,15 @@ pub fn find<'a>(rows: &'a [Row], name: &str, roles: &[&str]) -> Option<&'a Row> 
 fn closest<'a>(rows: &[&'a Row], want: &str) -> Option<&'a Row> {
     let length = want.chars().count() as i64;
     rows.iter()
-        .min_by_key(|r| (!r.focus, !r.in_window(), (r.name.chars().count() as i64 - length).abs(), r.y, r.x))
+        .min_by_key(|r| {
+            (
+                !r.focus,
+                !r.in_window(),
+                (r.name.chars().count() as i64 - length).abs(),
+                r.y,
+                r.x,
+            )
+        })
         .copied()
 }
 
@@ -153,7 +181,9 @@ pub fn dismisses(name: &str) -> Option<usize> {
     if n.split_whitespace().any(|w| w == "tab") {
         return None;
     }
-    DISMISS.iter().position(|w| n == *w || (w.contains(' ') && n.starts_with(w)))
+    DISMISS
+        .iter()
+        .position(|w| n == *w || (w.contains(' ') && n.starts_with(w)))
 }
 
 /// The buttons that would send away what is in front, safest first.
@@ -196,13 +226,22 @@ impl Expect {
 /// Whether the screen meets a condition.
 pub fn met(expect: &Expect, table: &Table) -> bool {
     if let Some(window) = &expect.window {
-        if !table.window.title.to_lowercase().contains(&window.to_lowercase()) {
+        if !table
+            .window
+            .title
+            .to_lowercase()
+            .contains(&window.to_lowercase())
+        {
             return false;
         }
     }
     if let Some(shows) = &expect.shows {
         let shows = shows.to_lowercase();
-        if !table.elements.iter().any(|r| r.said().to_lowercase().contains(&shows)) {
+        if !table
+            .elements
+            .iter()
+            .any(|r| r.said().to_lowercase().contains(&shows))
+        {
             return false;
         }
     }
@@ -211,15 +250,27 @@ pub fn met(expect: &Expect, table: &Table) -> bool {
 
 /// Whether typed text shows up on screen, letters and digits in order.
 pub fn echoed(text: &str, table: &Table) -> bool {
-    let plain = |t: &str| t.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let plain = |t: &str| {
+        t.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
     let typed = plain(text);
-    table.elements.iter().any(|r| plain(&r.said()).contains(&typed))
+    table
+        .elements
+        .iter()
+        .any(|r| plain(&r.said()).contains(&typed))
 }
 
 /// The text of rows holding any of the `|` separated words, or all of them.
 /// In a browser only the page counts, not the toolbar around it.
 pub fn read(table: &Table, filter: &str, limit: usize) -> Vec<String> {
-    let want: Vec<String> = filter.split('|').filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let want: Vec<String> = filter
+        .split('|')
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
     let page = table
         .elements
         .iter()
@@ -261,7 +312,11 @@ pub fn rows_text(table: &Table) -> String {
             if !r.value.is_empty() {
                 line.push_str(&format!(" · {}", r.value));
             }
-            for (on, word) in [(r.focus, " (focused)"), (r.disabled, " (disabled)"), (r.checked, " (checked)")] {
+            for (on, word) in [
+                (r.focus, " (focused)"),
+                (r.disabled, " (disabled)"),
+                (r.checked, " (checked)"),
+            ] {
                 if on {
                     line.push_str(word);
                 }
