@@ -18,7 +18,7 @@ then carried out by a loop with no large model in it:
   keeps changing.
 
 Run:  python3 fastlane.py --plan plan.json
-plan.json: {"host_id": "<DeskVNC saved host>", "steps": ["Open the Run box", ...]}
+plan.json: {"host_id": "<DeskVNC saved host>", "steps": [...]}, steps as run() describes.
 Settings come from the environment: FASTLANE_KEY (the shared bearer token),
 FASTLANE_JEV (http://host:8017), FASTLANE_LLM (http://host:8018),
 FASTLANE_DVV (the dvv binary), FASTLANE_SENSE_PORT (5942).
@@ -215,63 +215,163 @@ def text_for(step, goal, field):
     return text, (time.time() - started) * 1000
 
 
+def find(rows, name, roles, step):
+    """The row a plan step names, by its name in code when that is clear and
+    by one jevos choice when it is not."""
+    candidates = [r for r in rows if r["role"] in roles and not r.get("disabled")]
+    want = name.lower()
+    for test in (lambda n: n == want, lambda n: n.startswith(want), lambda n: want in n):
+        hits = [r for r in candidates if test(r["name"].lower().rstrip(":"))]
+        if len(hits) == 1:
+            return hits[0], 0.0
+        if hits:
+            candidates = hits
+            break
+    offered = shortlist(candidates, name, roles)
+    if not offered:
+        return None, 0.0
+    if len(offered) == 1:
+        return next(r for r in rows if str(r["i"]) in offered), 0.0
+    started = time.time()
+    answer = post(f"{JEV}/v1/systemone", {
+        "model": "jev-latest",
+        "state": {"step": step, "controls_on_screen": rows_text(rows)},
+        "questions": {"target": {"type": "choice", "instructions": f"Which control is the one called {name!r} in the step?", "criteria": offered}},
+    })["answers"]["target"]
+    return next(r for r in rows if str(r["i"]) == chosen(answer)), (time.time() - started) * 1000
+
+
+def met(expect, table):
+    if not expect:
+        return True
+    title = (table["window"]["title"] or "").lower()
+    if "window" in expect and expect["window"].lower() not in title:
+        return False
+    if "shows" in expect and not any(expect["shows"].lower() in r["name"].lower() for r in table["elements"]):
+        return False
+    return True
+
+
 def run(plan, max_actions=40):
+    """Carry out a plan. Each step says what to do, so most need no model:
+
+        {"key": "super+r", "expect": {"window": "Run"}}
+        {"type": "notepad", "into": "Open"}       into omitted: the focused field
+        {"click": "Save", "expect": {"shows": "Saved"}}
+        {"goal": "free text", "text": "..."}      jevos picks the operation too
+
+    expect is checked against the table after the screen settles: window is a
+    piece of the front window's title, shows a piece of any control's name.
+    A step whose expectation is not met within expect_ms stops the run and
+    returns the table, so the planner sees what is there instead."""
     sense = Sense(SENSE_PORT)
     dvv = Dvv(DVV, plan["host_id"])
-    goal = plan.get("goal", " then ".join(plan["steps"]))
+    goal = plan.get("goal", "")
     history, log = [], []
     t0 = time.time()
     table = sense.snapshot()
+    failed = None
     try:
         for step in plan["steps"]:
-            say_text = None
-            if isinstance(step, dict):
-                say_text, step = step.get("text"), step["step"]
-            for _ in range(max_actions):
-                answers, jev_ms, offered = decide(step, goal, table, history)
-                op = chosen(answers["op"])
-                entry = {"t": round((time.time() - t0) * 1000), "step": step, "op": op, "jev_ms": round(jev_ms), "rows": len(table["elements"])}
-                rows = {str(r["i"]): r for r in table["elements"]}
-                if op == "done":
-                    log.append(entry)
-                    history.append(f"finished: {step}")
+            if "goal" in step:
+                table, ok = goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions)
+                if not ok:
+                    failed = step
                     break
-                only = lambda kind: next(iter(offered[kind]), None)
-                if op == "click" and ("click" in answers or only("click")):
-                    row = rows[chosen(answers["click"]) if "click" in answers else only("click")]
-                    dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
-                    did = f"clicked {row['role']} {row['name']}"
-                elif op == "type" and ("field" in answers or only("field")):
-                    row = rows[chosen(answers["field"]) if "field" in answers else only("field")]
-                    if say_text is None:
-                        text, entry["llm_ms"] = text_for(step, goal, f"{row['role']} {row['name']}")
-                    else:
-                        text = say_text
+                continue
+            entry = {"t": round((time.time() - t0) * 1000), "step": step}
+            rows = table["elements"]
+            if "key" in step:
+                dvv.fence()
+                dvv.key(step["key"])
+                entry["did"] = f"pressed {step['key']}"
+            elif "type" in step:
+                row = None
+                if step.get("into"):
+                    row, entry["jev_ms"] = find(rows, step["into"], EDITABLE, f"type into {step['into']}")
+                    if row is None:
+                        failed = step
+                        break
                     if not row.get("focus"):
                         dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
-                    dvv.fence(row)
-                    dvv.type(text)
-                    did = f"typed {text!r} into {row['name']}"
-                else:
-                    keys = chosen(answers["key"])
-                    dvv.fence()
-                    dvv.key(keys)
-                    did = f"pressed {keys}"
-                entry["did"] = did
-                history.append(did)
-                settle_started = time.time()
-                table = sense.settle(table["hash"])
-                entry["settle_ms"] = round((time.time() - settle_started) * 1000)
-                entry["settle"] = table.get("outcome")
-                log.append(entry)
-                print(json.dumps(entry), file=sys.stderr, flush=True)
-            else:
-                log.append({"step": step, "gave_up": True})
+                dvv.fence(row)
+                dvv.type(step["type"])
+                entry["did"] = f"typed {step['type']!r}" + (f" into {row['name']}" if row else "")
+            elif "click" in step:
+                row, entry["jev_ms"] = find(rows, step["click"], CLICKABLE, f"click {step['click']}")
+                if row is None:
+                    failed = step
+                    break
+                dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+                entry["did"] = f"clicked {row['role']} {row['name']}"
+            history.append(entry["did"])
+            # Settle, then check. A screen can settle on a half drawn window,
+            # so an unmet expectation waits for the next change, up to
+            # expect_ms, rather than failing on the first still frame.
+            settle_started = time.time()
+            limit = step.get("expect_ms", 4000)
+            table = sense.settle(table["hash"])
+            while not met(step.get("expect"), table) and (time.time() - settle_started) * 1000 < limit:
+                table = sense.settle(table["hash"], change_ms=limit, max_ms=limit)
+            entry["settle_ms"] = round((time.time() - settle_started) * 1000)
+            entry["reads"] = table.get("reads")
+            log.append(entry)
+            print(json.dumps(entry), file=sys.stderr, flush=True)
+            if not met(step.get("expect"), table):
+                failed = step
                 break
     finally:
         dvv.close()
     total = time.time() - t0
-    return {"seconds": round(total, 2), "actions": sum(1 for e in log if "did" in e), "log": log}
+    result = {"seconds": round(total, 2), "actions": sum(1 for e in log if "did" in e), "log": log}
+    if failed is not None:
+        result["failed"] = failed
+        result["window"] = table["window"]
+        result["controls"] = rows_text(table["elements"])
+    return result
+
+
+def goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions):
+    """A step the planner could not spell out: jevos picks the operation too."""
+    say_text, text = step.get("text"), step["goal"]
+    for _ in range(max_actions):
+        answers, jev_ms, offered = decide(text, goal, table, history)
+        op = chosen(answers["op"])
+        entry = {"t": round((time.time() - t0) * 1000), "step": text, "op": op, "jev_ms": round(jev_ms), "rows": len(table["elements"])}
+        rows = {str(r["i"]): r for r in table["elements"]}
+        if op == "done":
+            log.append(entry)
+            history.append(f"finished: {text}")
+            return table, True
+        only = lambda kind: next(iter(offered[kind]), None)
+        if op == "click" and ("click" in answers or only("click")):
+            row = rows[chosen(answers["click"]) if "click" in answers else only("click")]
+            dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            did = f"clicked {row['role']} {row['name']}"
+        elif op == "type" and ("field" in answers or only("field")):
+            row = rows[chosen(answers["field"]) if "field" in answers else only("field")]
+            if say_text is None:
+                typed, entry["llm_ms"] = text_for(text, goal, f"{row['role']} {row['name']}")
+            else:
+                typed = say_text
+            if not row.get("focus"):
+                dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            dvv.fence(row)
+            dvv.type(typed)
+            did = f"typed {typed!r} into {row['name']}"
+        else:
+            keys = chosen(answers["key"])
+            dvv.fence()
+            dvv.key(keys)
+            did = f"pressed {keys}"
+        entry["did"] = did
+        history.append(did)
+        settle_started = time.time()
+        table = sense.settle(table["hash"])
+        entry["settle_ms"] = round((time.time() - settle_started) * 1000)
+        log.append(entry)
+        print(json.dumps(entry), file=sys.stderr, flush=True)
+    return table, False
 
 
 if __name__ == "__main__":
