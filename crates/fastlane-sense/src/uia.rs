@@ -54,7 +54,15 @@ impl Sense {
                 cache.AddProperty(property).map_err(|e| e.to_string())?;
             }
             cache.SetTreeScope(TreeScope_Element).map_err(|e| e.to_string())?;
-            let condition = automation.ControlViewCondition().map_err(|e| e.to_string())?;
+            // Spreadsheet cells are left out of the table: Excel exposes every
+            // visible cell, and walking a thousand of them made one read take
+            // minutes. `cells` reads the ones a caller names.
+            let view = automation.ControlViewCondition().map_err(|e| e.to_string())?;
+            let is_cell = automation
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &variant_i4(UIA_DataItemControlTypeId.0))
+                .map_err(|e| e.to_string())?;
+            let not_cell = automation.CreateNotCondition(&is_cell).map_err(|e| e.to_string())?;
+            let condition = automation.CreateAndCondition(&view, &not_cell).map_err(|e| e.to_string())?;
             Ok(Sense { automation, cache, condition })
         }
     }
@@ -80,6 +88,30 @@ impl Sense {
                 "elements": rows,
             });
             Ok(Table { hash: fnv(&key), body })
+        }
+    }
+
+    /// The values of named cells ("C4") in the window in front.
+    pub fn cells(&mut self, names: &[String]) -> Result<Value, String> {
+        unsafe {
+            let root = self
+                .automation
+                .ElementFromHandle(GetForegroundWindow())
+                .map_err(|e| e.to_string())?;
+            let mut out = serde_json::Map::new();
+            for name in names {
+                let by_name = self
+                    .automation
+                    .CreatePropertyCondition(UIA_NamePropertyId, &variant_bstr(name))
+                    .map_err(|e| e.to_string())?;
+                let value = root
+                    .FindFirst(TreeScope_Descendants, &by_name)
+                    .ok()
+                    .and_then(|el| el.GetCurrentPropertyValue(UIA_ValueValuePropertyId).ok())
+                    .and_then(|v| string_of(&v));
+                out.insert(name.clone(), value.map(Value::from).unwrap_or(Value::Null));
+            }
+            Ok(Value::Object(out))
         }
     }
 
@@ -151,6 +183,26 @@ unsafe fn cached_string(el: &IUIAutomationElement, property: UIA_PROPERTY_ID) ->
         .and_then(|v| string_of(&v))
         .map(|s| clip(&s))
         .unwrap_or_default()
+}
+
+fn variant_i4(value: i32) -> VARIANT {
+    let mut v = VARIANT::default();
+    unsafe {
+        let inner = &mut *v.Anonymous.Anonymous;
+        inner.vt = VT_I4;
+        inner.Anonymous.lVal = value;
+    }
+    v
+}
+
+fn variant_bstr(text: &str) -> VARIANT {
+    let mut v = VARIANT::default();
+    unsafe {
+        let inner = &mut *v.Anonymous.Anonymous;
+        inner.vt = VT_BSTR;
+        inner.Anonymous.bstrVal = std::mem::ManuallyDrop::new(windows::core::BSTR::from(text));
+    }
+    v
 }
 
 unsafe fn string_of(v: &VARIANT) -> Option<String> {

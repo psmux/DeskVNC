@@ -276,8 +276,21 @@ def spreadsheet(ctx, name, header, rows, totals, number_format_cols=""):
             {"key": "ctrl+Home"}] + [{"key": "shift+ArrowRight"}] * (len(header) - 1) + [{"key": "ctrl+b"},
             {"key": "ctrl+Home"}])
     total_r = last + 1
-    cells = {r["name"]: r.get("value", "") for r in ctx.runner.table["elements"] if r["role"] == "row"}
-    total = {c: number(cells.get(f"{c}{total_r}", "")) for c in totals}
+    # Read the totals back from Excel's own cells, and check them against the
+    # same sums done here, so a lost keystroke or a wrong formula shows up.
+    cells = ctx.runner.sense.ask(op="cells", names=[f"{c}{total_r}" for c in totals])
+    total = {c: number(cells.get(f"{c}{total_r}") or "") for c in totals}
+    for c in totals:
+        col = "BCDEFG".index(c) + 1
+        want = 0.0
+        for i, row in enumerate(rows, start=2):
+            v = row[col]
+            if isinstance(v, (int, float)):
+                want += v
+            elif isinstance(v, str) and re.fullmatch(r"=B\{r\}\*[\d.]+", v):
+                want += row[1] * float(v.split("*")[1])
+        if total[c] is not None and abs(total[c] - want) > 0.01 * max(1, abs(want)):
+            raise SkillFailed(f"{c}{total_r} shows {total[c]}, should be {want}")
     save_as(ctx, name)
     ctx.created(f"{name}.xlsx")
     ctx.do([{"key": "alt+F4", "when": {"window": name}}])

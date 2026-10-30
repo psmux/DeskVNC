@@ -18,10 +18,11 @@ import re
 import fastlane
 
 WINDOWS = [r"^Calculator$", r"^Untitled - Notepad$", r"fast ?lane", r"^Document\d+ - Word$", r"^Fast Lane Report",
+           r"^Book\d+ - Excel$", r"^Presentation\d+ - PowerPoint$", r"^Watchlist",
            r"^Trip ", r"^Market "]
 TABS = ["google flights", "google news", "wikipedia", "new tab", "- search", "google search", "inr to", "weather",
         "fast lane", "trip budget", "market"]
-MINE_IN_PROMPT = re.compile(r"untitled|fast ?lane|document\d|trip |market ", re.I)
+MINE_IN_PROMPT = re.compile(r"untitled|fast ?lane|document\d|book\d|presentation\d|trip |market |watchlist", re.I)
 
 
 def ours_window(title):
