@@ -70,6 +70,29 @@ Start-Process deskvnc-sense.exe '--connect <controller ip>:5942'
 
 It dials the controller, so Windows asks for no inbound firewall rule.
 
+### From any agent, through dvv_plan
+
+`dvv` has a `dvv_plan` tool that takes the steps in one call and runs them
+with the Rust runner in `crates/fastlane-plan`. Start `dvv` with the same
+secret in `DESKVNC_SENSE_TOKEN` (and `DESKVNC_SENSE_LISTEN` if 5942 is taken).
+It listens for the sense on its first `dvv_plan` call. Without a sense it
+answers `SENSE_ABSENT` and every other tool works as before.
+
+```json
+{"limbId": "<limb>", "steps": [
+  {"key": "super+r", "expect": {"window": "Run"}},
+  {"type": "calc", "into": "Open"},
+  {"key": "Enter", "expect": {"window": "Calculator"}, "expect_ms": 8000},
+  {"type": "12+7=", "echo": true},
+  {"click": "Clear", "expect": {"shows": "Display is 0"}},
+  {"key": "alt+F4", "when": {"window": "Calculator"}}
+]}
+```
+
+On the MSI that plan ran its 7 actions in 5.9 s.
+
+### The Python prototype
+
 On the controller:
 
 ```sh
@@ -87,6 +110,15 @@ python3 tools/fastlane/fastlane.py --plan plan.json
   {"type": "hello", "into": "Text editor"}
  ]}
 ```
+
+## The spec
+
+`spec/README.md` is the table format, the step format and the rules for
+finding a control, recovering and reading. `spec/cases.json` holds the cases
+every runner must pass: `python3 spec/check.py` checks the Python prototype,
+`cargo test -p fastlane-plan` the Rust runner. BrowserGlass can map its
+`pageMap()` into the same table and run the same cases. The spec moves to a
+repo of its own once a second product uses it.
 
 ## Limits
 
