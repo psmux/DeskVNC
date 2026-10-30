@@ -331,6 +331,26 @@ def dismisses(name):
     return next((k for k, w in enumerate(DISMISS) if n == w or (" " in w and n.startswith(w))), None)
 
 
+def dismissers(table):
+    """The buttons that would send away what is in front, safest first."""
+    rows = [r for r in table["elements"] if r["area"] == "window" and r["role"] in ("button", "link") and not r.get("disabled")]
+    # A window's own caption buttons sit in a row with Minimize; closing
+    # the app is never how to get rid of something in front of it.
+    caption = {r["y"] for r in rows if r["name"].lower().startswith("minimize")}
+    rows = [r for r in rows if not any(abs(r["y"] - y) <= 6 for y in caption)]
+    return sorted((r for r in rows if dismisses(r["name"]) is not None), key=lambda r: dismisses(r["name"]))
+
+
+def echoed(text, table):
+    """Typed text shows up somewhere on screen, letters and digits in order:
+    a calculator that missed the first digit shows a wrong answer with no
+    error."""
+    def plain(t):
+        return "".join(c for c in t.lower() if c.isalnum())
+    typed = plain(text)
+    return any(typed in plain(f"{r['name']} {r.get('value', '')}") for r in table["elements"])
+
+
 class Runner:
     """One connection to the remote computer, many steps.
 
@@ -458,13 +478,7 @@ class Runner:
         entry["settle_ms"] = self.settle(step.get("expect"), step.get("expect_ms", 4000))
         ok = met(step.get("expect"), self.table)
         if ok and step.get("echo") and "type" in step:
-            # Typed text has to show up somewhere on screen, letters and
-            # digits in order, or a key was lost on the way: a calculator that
-            # missed the first digit shows a wrong answer with no error.
-            def plain(t):
-                return "".join(c for c in t.lower() if c.isalnum())
-            typed = plain(step["type"])
-            ok = any(typed in plain(f"{r['name']} {r.get('value', '')}") for r in self.table["elements"])
+            ok = echoed(step["type"], self.table)
             entry["echo"] = ok
         if ok:
             self.note(entry)
@@ -474,12 +488,7 @@ class Runner:
         """Something the plan did not expect may be in front. Find the button
         that sends it away and press it; True if anything was done. After a
         lost keystroke there is nothing to dismiss, only a field to clear."""
-        rows = [r for r in self.table["elements"] if r["area"] == "window" and r["role"] in ("button", "link") and not r.get("disabled")]
-        # A window's own caption buttons sit in a row with Minimize; closing
-        # the app is never how to get rid of something in front of it.
-        caption = {r["y"] for r in rows if r["name"].lower().startswith("minimize")}
-        rows = [r for r in rows if not any(abs(r["y"] - y) <= 6 for y in caption)]
-        candidates = [] if typo else [r for r in rows if dismisses(r["name"]) is not None]
+        candidates = [] if typo else dismissers(self.table)
         entry = {"t": self.now(), "recover": step, "window": self.table["window"]["title"]}
         if not candidates:
             # Nothing to dismiss by name: Escape closes most menus, flyouts
@@ -489,7 +498,7 @@ class Runner:
             entry["did"] = "pressed Escape"
         else:
             # The earliest word in DISMISS is the safest way out.
-            pick = min(candidates, key=lambda r: dismisses(r["name"]))
+            pick = candidates[0]
             if len(candidates) > 1 and JEV:
                 started = time.time()
                 answer = post(f"{JEV}/v1/systemone", {
