@@ -1,0 +1,217 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "exact name wins over a longer one",
+      "table": {"window": {"title": "Save As", "class": "#32770"}, "elements": [
+        {"role": "button", "name": "Save as type"},
+        {"role": "button", "name": "Save"}
+      ]},
+      "check": "find", "click": "Save", "want": 2
+    },
+    {
+      "name": "names are compared case blind with the trailing colon dropped",
+      "table": {"window": {"title": "Run", "class": "#32770"}, "elements": [
+        {"role": "text", "name": "Open:"},
+        {"role": "combobox", "name": "Open:"}
+      ]},
+      "check": "find", "into": "open", "want": 2
+    },
+    {
+      "name": "a combo box and its edit share a name: the focused one takes text",
+      "table": {"window": {"title": "Run", "class": "#32770"}, "elements": [
+        {"role": "combobox", "name": "Open"},
+        {"role": "textbox", "name": "Open", "focus": true}
+      ]},
+      "check": "find", "into": "Open", "want": 2
+    },
+    {
+      "name": "starts with is tried before contains",
+      "table": {"window": {"title": "Edge", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "link", "name": "Open the search settings"},
+        {"role": "button", "name": "Search the web"}
+      ]},
+      "check": "find", "click": "Search", "want": 2
+    },
+    {
+      "name": "several hits: the one in the window beats the taskbar",
+      "table": {"window": {"title": "Notepad", "class": "Notepad"}, "elements": [
+        {"area": "taskbar", "role": "button", "name": "Notepad", "y": 1040},
+        {"role": "menuitem", "name": "Notepad", "y": 40}
+      ]},
+      "check": "find", "click": "Notepad", "want": 2
+    },
+    {
+      "name": "several hits in the window: nearest length, then highest",
+      "table": {"window": {"title": "Settings", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "link", "name": "Display settings and more", "y": 100},
+        {"role": "link", "name": "Display settings", "y": 300},
+        {"role": "link", "name": "Display settings", "y": 200}
+      ]},
+      "check": "find", "click": "display", "want": 3
+    },
+    {
+      "name": "disabled controls are never picked",
+      "table": {"window": {"title": "Setup", "class": "#32770"}, "elements": [
+        {"role": "button", "name": "Next", "disabled": true}
+      ]},
+      "check": "find", "click": "Next", "want": null
+    },
+    {
+      "name": "into only looks at fields",
+      "table": {"window": {"title": "Find", "class": "#32770"}, "elements": [
+        {"role": "button", "name": "Find what"},
+        {"role": "textbox", "name": "Find what"}
+      ]},
+      "check": "find", "into": "Find what", "want": 2
+    },
+    {
+      "name": "a near miss sharing a word is taken",
+      "table": {"window": {"title": "Wikipedia", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "combobox", "name": "Search Wikipedia"}
+      ]},
+      "check": "find", "into": "search box", "want": 1
+    },
+    {
+      "name": "a page is never a near miss for a field",
+      "table": {"window": {"title": "Search results", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "document", "name": "Search results", "w": 1600, "h": 900}
+      ]},
+      "check": "find", "into": "search box", "want": null
+    },
+    {
+      "name": "nothing sharing a word is missing, never a guess",
+      "table": {"window": {"title": "Untitled - Notepad", "class": "Notepad"}, "elements": [
+        {"role": "button", "name": "Minimize"},
+        {"role": "document", "name": "Text editor", "focus": true}
+      ]},
+      "check": "find", "click": "Save", "want": null
+    },
+    {
+      "name": "words shorter than two characters do not make a near miss",
+      "table": {"window": {"title": "Calculator", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "button", "name": "Memory add M+"}
+      ]},
+      "check": "find", "click": "a b", "want": null
+    },
+    {
+      "name": "recovery takes the safest word",
+      "table": {"window": {"title": "Edge", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "button", "name": "Accept", "y": 500},
+        {"role": "button", "name": "Close", "y": 500},
+        {"role": "button", "name": "Not now", "y": 500}
+      ]},
+      "check": "recover", "want": 3
+    },
+    {
+      "name": "a phrase of two words matches by its start",
+      "table": {"window": {"title": "Edge", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "button", "name": "Cancel", "y": 500},
+        {"role": "link", "name": "Maybe later, remind me tomorrow", "y": 520}
+      ]},
+      "check": "recover", "want": 2
+    },
+    {
+      "name": "a one word entry does not match by its start",
+      "table": {"window": {"title": "Edge", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "button", "name": "Close all windows", "y": 500},
+        {"role": "button", "name": "Notifications", "y": 500}
+      ]},
+      "check": "recover", "want": "Escape"
+    },
+    {
+      "name": "closing a tab is never a way past a popup",
+      "table": {"window": {"title": "GitHub", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "button", "name": "Close tab", "y": 10},
+        {"role": "button", "name": "close tab", "y": 10}
+      ]},
+      "check": "recover", "want": "Escape"
+    },
+    {
+      "name": "the window's own close button is never a way past a popup",
+      "table": {"window": {"title": "Untitled - Notepad", "class": "Notepad"}, "elements": [
+        {"role": "button", "name": "Minimize", "y": 0},
+        {"role": "button", "name": "Maximize", "y": 0},
+        {"role": "button", "name": "Close", "y": 3},
+        {"role": "button", "name": "Cancel", "y": 400}
+      ]},
+      "check": "recover", "want": 4
+    },
+    {
+      "name": "the taskbar and disabled buttons are left alone",
+      "table": {"window": {"title": "Edge", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"area": "taskbar", "role": "button", "name": "Close", "y": 1040},
+        {"role": "button", "name": "Dismiss", "y": 300, "disabled": true}
+      ]},
+      "check": "recover", "want": "Escape"
+    },
+    {
+      "name": "after a lost keystroke there is nothing to dismiss",
+      "table": {"window": {"title": "Calculator", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "button", "name": "Close", "y": 400}
+      ]},
+      "check": "recover", "typo": true, "want": "Escape"
+    },
+    {
+      "name": "expect window is a piece of the title, case blind",
+      "table": {"window": {"title": "Untitled - Notepad", "class": "Notepad"}, "elements": []},
+      "check": "met", "expect": {"window": "notepad"}, "want": true
+    },
+    {
+      "name": "expect shows looks at values as well as names",
+      "table": {"window": {"title": "Calculator", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "text", "name": "Display is", "value": "19"}
+      ]},
+      "check": "met", "expect": {"shows": "19"}, "want": true
+    },
+    {
+      "name": "every part of expect must hold",
+      "table": {"window": {"title": "Calculator", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "text", "name": "Display is 19"}
+      ]},
+      "check": "met", "expect": {"window": "Calculator", "shows": "20"}, "want": false
+    },
+    {
+      "name": "an empty expect is met",
+      "table": {"window": {"title": "", "class": ""}, "elements": []},
+      "check": "met", "expect": {}, "want": true
+    },
+    {
+      "name": "read takes the page and skips the browser around it",
+      "table": {"window": {"title": "Prices", "class": "Chrome_WidgetWin_1"}, "elements": [
+        {"role": "textbox", "name": "Address and search bar", "value": "shop.example/prices", "x": 100, "y": 10},
+        {"role": "document", "name": "Prices", "x": 0, "y": 80, "w": 1600, "h": 900},
+        {"role": "text", "name": "Tea $4", "x": 20, "y": 200},
+        {"role": "text", "name": "Coffee $5", "x": 20, "y": 240},
+        {"role": "text", "name": "Tea $4", "x": 20, "y": 280},
+        {"role": "link", "name": "Basket", "value": "https://shop.example/basket", "x": 20, "y": 320},
+        {"role": "text", "name": "Opening hours", "x": 20, "y": 360},
+        {"area": "taskbar", "role": "button", "name": "Edge $", "x": 20, "y": 1040}
+      ]},
+      "check": "read", "read": "$|basket", "want": ["Tea $4", "Coffee $5", "Basket"]
+    },
+    {
+      "name": "read with no filter takes everything, up to the limit, values after a dot",
+      "table": {"window": {"title": "Run", "class": "#32770"}, "elements": [
+        {"role": "text", "name": "Type the name of a program"},
+        {"role": "combobox", "name": "Open:", "value": "notepad"},
+        {"role": "button", "name": "OK"}
+      ]},
+      "check": "read", "read": "", "limit": 2, "want": ["Type the name of a program", "Open: · notepad"]
+    },
+    {
+      "name": "echo finds typed digits through punctuation",
+      "table": {"window": {"title": "Calculator", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "text", "name": "Expression is", "value": "12 + 7 ="}
+      ]},
+      "check": "echo", "type": "12+7=", "want": true
+    },
+    {
+      "name": "echo notices a lost digit",
+      "table": {"window": {"title": "Calculator", "class": "ApplicationFrameWindow"}, "elements": [
+        {"role": "text", "name": "Expression is", "value": "2 + 7 ="}
+      ]},
+      "check": "echo", "type": "12+7=", "want": false
+    }
+  ]
+}
