@@ -58,7 +58,11 @@ pub const WAIT_CLAMP_MS: u64 = 25_000;
 /// How long the screen must stay still before a look reads it. Shorter than
 /// dvv_wait's default because a look always returns a picture, so reading a
 /// little early costs a glance rather than a wrong answer.
-const LOOK_QUIET_MS: u64 = 400;
+const LOOK_QUIET_MS: u64 = 700;
+
+/// How long a look waits for the action to change anything before it waits
+/// for the screen to settle.
+const LOOK_CHANGE_MS: u64 = 1_000;
 
 /// The MCP adapter over one plane.
 pub struct Server {
@@ -608,6 +612,22 @@ impl Server {
             return acted;
         }
         let Ok(plane) = self.plane() else { return acted };
+        // First the action's effect, then its end. Waiting only for stillness
+        // read the screen before a Run dialog had even appeared, because the
+        // screen was still for the 400 ms before it did. Nothing at all in a
+        // second means the action changed nothing visible, which is an answer
+        // too, so the look goes on to read the screen.
+        let _ = plane
+            .submit(
+                limb,
+                IntentKind::Wait {
+                    until: WaitUntil::ScreenChanged,
+                    quiet: None,
+                    timeout: Some(Duration::from_millis(LOOK_CHANGE_MS)),
+                },
+                None,
+            )
+            .await;
         let wait = plane
             .submit(
                 limb,
