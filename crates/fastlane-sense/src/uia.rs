@@ -20,7 +20,7 @@ use crate::{fnv, Table};
 /// The most rows one read returns. A browser page can expose thousands of
 /// text nodes, and a table longer than this costs the model more than the
 /// rows add.
-const MAX_ROWS: usize = 250;
+const MAX_ROWS: usize = 600;
 
 pub struct Sense {
     automation: IUIAutomation,
