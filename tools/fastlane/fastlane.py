@@ -149,10 +149,30 @@ def rows_text(rows):
     return "\n".join(lines)
 
 
+# jevos asks one yes/no pass per option and takes at most 26, so the controls
+# are ranked against the step in code and the best few are offered.
+OFFER = 12
+
+
+def words(text):
+    return {w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if len(w) > 1}
+
+
+def shortlist(rows, step, roles):
+    want = words(step)
+    def score(r):
+        name = words(f"{r['name']} {r.get('value', '')}")
+        overlap = len(want & name)
+        return (overlap, r.get("focus", False), r["area"] == "window")
+    picked = [r for r in rows if r["role"] in roles and not r.get("disabled") and (r["name"] or r["role"] in EDITABLE)]
+    picked.sort(key=score, reverse=True)
+    return {str(r["i"]): f"{r['role']} {r['name']}".strip() for r in picked[:OFFER]}
+
+
 def decide(step, goal, table, history):
     rows = table["elements"]
-    clickable = {str(r["i"]): f"{r['role']} {r['name']}" for r in rows if r["role"] in CLICKABLE and not r.get("disabled") and r["name"]}
-    editable = {str(r["i"]): f"{r['role']} {r['name']}" for r in rows if r["role"] in EDITABLE and not r.get("disabled")}
+    clickable = shortlist(rows, step, CLICKABLE)
+    editable = shortlist(rows, step, EDITABLE)
     state = {
         "overall_goal": goal,
         "current_step": step,
@@ -167,9 +187,9 @@ def decide(step, goal, table, history):
         "done": "the current step is already complete, as the screen shows",
     }
     questions = {"op": {"type": "choice", "instructions": "What should be done next to complete the current step? Choose done only if the screen already shows the step is complete.", "criteria": ops}}
-    if clickable:
+    if len(clickable) >= 2:
         questions["click"] = {"type": "choice", "instructions": "If clicking, which control should be clicked to complete the current step?", "criteria": clickable}
-    if editable:
+    if len(editable) >= 2:
         questions["field"] = {"type": "choice", "instructions": "If typing, which text box should receive the text?", "criteria": editable}
     questions["key"] = {"type": "choice", "instructions": "If pressing a key, which one completes the current step?", "criteria": KEYS}
     started = time.time()
@@ -216,12 +236,13 @@ def run(plan, max_actions=40):
                     log.append(entry)
                     history.append(f"finished: {step}")
                     break
-                if op == "click" and "click" in answers:
-                    row = rows[chosen(answers["click"])]
+                only = lambda kind: next(iter(offered[kind]), None)
+                if op == "click" and ("click" in answers or only("click")):
+                    row = rows[chosen(answers["click"]) if "click" in answers else only("click")]
                     dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
                     did = f"clicked {row['role']} {row['name']}"
-                elif op == "type" and "field" in answers:
-                    row = rows[chosen(answers["field"])]
+                elif op == "type" and ("field" in answers or only("field")):
+                    row = rows[chosen(answers["field"]) if "field" in answers else only("field")]
                     if say_text is None:
                         text, entry["llm_ms"] = text_for(step, goal, f"{row['role']} {row['name']}")
                     else:
