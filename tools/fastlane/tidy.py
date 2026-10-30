@@ -20,8 +20,10 @@ import fastlane
 WINDOWS = [r"^Calculator$", r"^Untitled - Notepad$", r"fast ?lane", r"^Document\d+ - Word$", r"^Fast Lane Report",
            r"^Book\d+ - Excel$", r"^Presentation\d+ - PowerPoint$", r"^Watchlist",
            r"^Trip ", r"^Market "]
-TABS = ["google flights", "google news", "wikipedia", "new tab", "- search", "google search", "inr to", "weather",
-        "fast lane", "trip budget", "market"]
+# Only with --tabs: pages the fast lane loads. A person may have the same
+# pages open, so this is for clearing up after a run that crashed before it
+# could close its own windows, on a computer nobody else is using.
+TABS = ["google flights", "google news", "wikipedia, the free", "inr to", "weather "]
 MINE_IN_PROMPT = re.compile(r"untitled|fast ?lane|document\d|book\d|presentation\d|trip |market |watchlist", re.I)
 
 
@@ -146,20 +148,22 @@ def close_tabs(runner, closed, rounds=80):
         runner.settle()
 
 
-def tidy(runner):
+def tidy(runner, tabs=False):
     closed, kept = [], []
     close_windows(runner, closed, kept)
-    close_tabs(runner, closed)
+    if tabs:
+        close_tabs(runner, closed)
     return closed, kept
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host-id", required=True)
+    ap.add_argument("--tabs", action="store_true", help="also close browser tabs that look like fast lane pages")
     args = ap.parse_args()
     runner = fastlane.Runner(args.host_id)
     try:
-        closed, kept = tidy(runner)
+        closed, kept = tidy(runner, args.tabs)
     finally:
         runner.close()
     print(json.dumps({"seconds": round(fastlane.time.time() - runner.t0, 1), "closed": closed, "kept": kept,
