@@ -93,7 +93,7 @@ def skill(category):
             try:
                 record["output"] = fn(ctx, **args)
                 record["passed"] = True
-            except (SkillFailed, RuntimeError) as e:
+            except Exception as e:  # a skill never takes the mission down with it
                 record["passed"] = False
                 record["error"] = str(e)[:300]
                 # Leave the screen as clean as a person would before going on.
@@ -141,7 +141,7 @@ def flights(ctx, origin, destination, date):
 @skill("web")
 def search(ctx, query, words):
     """Google a question and read the lines of the answer holding any of the |-separated words."""
-    title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(query), {"window": "Google Search"})
+    title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(query), {"shows": words.split("|")[0]})
     lines = [l for l in ctx.page_text(words, 25) if len(l) < 300]
     ctx.close_page(title)
     if not lines:
@@ -152,7 +152,7 @@ def search(ctx, query, words):
 @skill("web")
 def exchange_rate(ctx, from_code, to_code):
     """How many of to_code one from_code buys, from Google's converter."""
-    title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(f"1 {from_code} to {to_code}"), {"window": "Google Search"})
+    title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(f"1 {from_code} to {to_code}"), {"shows": "equals"})
     rate = None
     for line in ctx.page_text("equals|=|" + to_code, 30):
         m = re.search(r"1 [A-Za-z ]+? equals\s*([\d.]+)", line) or re.search(r"^([\d]+\.\d+)$", line.strip())
@@ -174,7 +174,7 @@ def exchange_rate(ctx, from_code, to_code):
 @skill("web")
 def weather(ctx, city):
     """Google's weather card for a city: temperature and conditions."""
-    title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(f"weather {city}"), {"window": "Google Search"})
+    title = ctx.open_page("https://www.google.com/search?q=" + urllib.parse.quote_plus(f"weather {city}"), {"shows": "°"})
     lines = [l for l in ctx.page_text("°|precipitation|humidity|wind", 12)]
     ctx.close_page(title)
     if not lines:
