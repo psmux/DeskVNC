@@ -940,7 +940,10 @@ fn limb_detach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
     // session is still reading the mirror.
     let last = !ctx.plane.attached_ids().contains_key(&session_id);
     let restored = match last
-        .then(|| ctx.plane.mirrors.detach(&session_id))
+        .then(|| {
+            ctx.plane.video.forget(&session_id);
+            ctx.plane.mirrors.detach(&session_id)
+        })
         .flatten()
     {
         Some(preset) => {
@@ -1058,6 +1061,7 @@ fn screen_read(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError
     }
 
     let request = read_request(ctx, &session_id, params)?;
+    ctx.plane.video.caught_up(&session_id);
     let read = ctx
         .plane
         .mirrors
@@ -1490,6 +1494,8 @@ fn needs_wheel(command: &ClientCommand) -> bool {
 ///
 /// An [`RpcError`] tagged `SCREEN_CHANGED`, and nothing was sent.
 fn admit_typing(ctx: &Ctx, session_id: &str, attachment_id: &str) -> Result<(), RpcError> {
+    // A repaint still waiting on the video decoder must trip the fence.
+    ctx.plane.video.caught_up(session_id);
     let observed = ctx.plane.observed_content(session_id, attachment_id);
     ctx.plane
         .mirrors
