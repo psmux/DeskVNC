@@ -806,7 +806,18 @@ where
                             // The next move supersedes this one; dropping it
                             // while the screen is busy beats ending the session.
                             Err(mpsc::error::TrySendError::Full((_, Input::Move { .. }))) => {}
-                            Err(_) => bail!("Input rate exceeded. Session stopped"),
+                            // A computer too busy to keep up, say while a
+                            // malware scan holds every core, is waited for.
+                            // Not reading meanwhile slows the helper down
+                            // through the link. Ending the session here cut
+                            // people off mid sentence on a loaded Mac.
+                            Err(mpsc::error::TrySendError::Full(event)) => {
+                                tokio::time::timeout(INPUT_STALL, input_tx.send(event))
+                                    .await
+                                    .context("This computer stopped taking input. Session stopped")?
+                                    .map_err(|_| anyhow!("Session ended"))?;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => bail!("Session ended"),
                         }
                     }
                 }
@@ -879,6 +890,10 @@ where
     };
     result
 }
+
+/// How long input may wait for a computer that has fallen behind before the
+/// session is given up as stuck.
+const INPUT_STALL: Duration = Duration::from_secs(20);
 
 /// How soon to capture again while the screen is changing or someone is
 /// using it: sixty screens a second, as often as a display draws.
@@ -1792,10 +1807,16 @@ pub(crate) fn link_lost(error: anyhow::Error) -> anyhow::Error {
 }
 
 /// Did the other side close this connection on purpose?
+///
+/// A close with no reason is not a decision. It is what QUIC sends when the
+/// computer dropped the connection without a word, such as a knock it gave
+/// up reading while it was starting, or its whole endpoint shutting down as
+/// DeskVNC Support quit for an update. Taking those as the person ending the
+/// session left the helper with a dead window instead of connecting again.
 fn closed_by_peer(connection: &Connection) -> bool {
     matches!(
         connection.close_reason(),
-        Some(iroh::endpoint::ConnectionError::ApplicationClosed(_))
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) if !close.reason.is_empty()
     )
 }
 
@@ -2178,5 +2199,59 @@ mod relay_tests {
         })
         .await
         .context("Public relay test timed out")?
+    }
+
+    /// A computer that drops a knock without a word, as one still starting
+    /// up does when the knock takes too long to read, left the helper a dead
+    /// window, because QUIC closes such a connection with code 0 just as a
+    /// person ending the session does. Only a close that says why is one.
+    #[tokio::test]
+    async fn a_connection_dropped_without_a_reason_is_a_lost_link() -> Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let host = endpoint(&HostOptions {
+                relay: false,
+                relay_url: None,
+                bind_ip: Some("127.0.0.1".parse()?),
+            })
+            .await?;
+            let _guard = EndpointGuard(host.clone());
+            let address = host.addr();
+            let silent = tokio::spawn(async move {
+                let connection = host.accept().await.context("Listener closed")?.await?;
+                let (_send, mut recv) = connection.accept_bi().await?;
+                let _knock: Message = wire::read(&mut recv).await?;
+                drop(connection);
+                // Keep the endpoint up, so only the connection goes.
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok::<_, anyhow::Error>(())
+            });
+            let mut visit = crate::unattended::connect_to(
+                Ok(address),
+                "Helper".into(),
+                None,
+                iroh::SecretKey::generate(),
+                HostOptions {
+                    relay: false,
+                    relay_url: None,
+                    bind_ip: None,
+                },
+            );
+            let ended = loop {
+                match visit.events.recv().await {
+                    Some(Event::Finished(result)) => break result,
+                    Some(_) => {}
+                    None => bail!("the helper's session went quiet"),
+                }
+            };
+            silent.abort();
+            let ended = ended.err().context("the session should have failed")?;
+            ensure!(LinkLost::is(&ended), "{ended:#}");
+            Ok(())
+        })
+        .await
+        .context("timed out")?
     }
 }
