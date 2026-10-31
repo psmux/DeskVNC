@@ -1033,6 +1033,7 @@ dependencies = [
  "remote-core",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
 ]
 

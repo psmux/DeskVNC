@@ -448,7 +448,10 @@ where
         tokio::spawn(async move {
             let _seat = seat;
             let result = tokio::select! {
-                _ = stop.cancelled() => Ok(()),
+                // The app stopping, for an update or a restart, ends nothing
+                // the person decided, so the helper is told the link went
+                // and connects again once the computer is back.
+                _ = stop.cancelled() => Err(session::link_lost(anyhow!("DeskVNC Support on that computer stopped"))),
                 _ = ended.cancelled() => Ok(()),
                 result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
             };
@@ -799,7 +802,11 @@ async fn run_connect(
         .map_err(session::link_lost)?
         .context("Cannot reach the computer")
         .map_err(session::link_lost)?;
-    let (mut send, recv) = connection.open_bi().await?;
+    // Nothing has been asked yet, so failing here is the link failing.
+    let (mut send, recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| session::link_lost(e.into()))?;
     wire::write(
         &mut send,
         &Message::Knock {
@@ -812,7 +819,8 @@ async fn run_connect(
             video: abilities.codecs(),
         },
     )
-    .await?;
+    .await
+    .map_err(session::link_lost)?;
     let result = session::watch_session(worker, &connection, send, recv).await;
     connection.close(0u8.into(), b"Session ended");
     result
