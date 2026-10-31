@@ -648,6 +648,16 @@ impl Mirrors {
             .sum()
     }
 
+    /// Whether this session has a mirror holding pixels, which is what
+    /// decoding its video is for. A session that only watches damage, or
+    /// whose mirror the idle reaper freed, has none.
+    pub fn wants_pixels(&self, session_id: &str) -> bool {
+        self.inner
+            .lock()
+            .get(session_id)
+            .is_some_and(|held| held.slot.get().is_some())
+    }
+
     /// Forget a session that has ended.
     pub fn forget(&self, session_id: &str) {
         self.inner.lock().remove(session_id);

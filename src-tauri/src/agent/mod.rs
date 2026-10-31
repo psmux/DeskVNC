@@ -46,6 +46,7 @@ pub mod control;
 pub mod mirror;
 pub mod requests;
 pub mod server;
+pub mod video;
 pub mod wire;
 
 use std::collections::HashMap;
@@ -663,7 +664,9 @@ pub struct AgentPlane {
     /// Public because the shell's own event pump feeds it: see
     /// [`AgentPlane::feed`], which is the seam `00 R22` puts in the plane
     /// rather than behind the webview bridge.
-    pub mirrors: mirror::Mirrors,
+    pub mirrors: Arc<mirror::Mirrors>,
+    /// H.264 decoded for the mirrors, off the event pump.
+    pub video: video::Video,
 }
 
 /// What [`AgentPlane::announce`] needs to say anything at all.
@@ -1073,6 +1076,7 @@ impl AgentPlane {
         self.attachments.lock().remove(session_id);
         self.board.lock().remove(session_id);
         self.mirrors.forget(session_id);
+        self.video.forget(session_id);
         // The live total just fell, and the driven one may have with it. This
         // is the only session lifecycle edge the plane is told about: a
         // session being OPENED reaches nothing here, so a bar seeds from
@@ -1098,7 +1102,15 @@ impl AgentPlane {
     /// webview. This is also where the content fence is fed, so it is the
     /// place to start when an agent is refused with SCREEN_CHANGED.
     pub fn feed(&self, session_id: &str, rects: &[vnc_core::DecodedRect]) {
-        self.mirrors.feed(session_id, rects, now());
+        // Video goes to a thread that decodes it, and once a session's video
+        // has, everything after it does too, so the mirror sees it in order.
+        if self.video.carries(session_id)
+            || (video::has_video(rects) && self.mirrors.wants_pixels(session_id))
+        {
+            self.video.feed(&self.mirrors, session_id, rects.to_vec());
+        } else {
+            self.mirrors.feed(session_id, rects, now());
+        }
     }
 
     /// The remote desktop resized. Bumps the geometry generation a read is
@@ -1107,7 +1119,9 @@ impl AgentPlane {
     /// Called from the `DesktopResize` arm of
     /// `commands::session::forward_events`.
     pub fn note_resize(&self, session_id: &str, width: u16, height: u16) {
-        self.mirrors.resize(session_id, width, height);
+        if !self.video.resize(session_id, width, height) {
+            self.mirrors.resize(session_id, width, height);
+        }
     }
 }
 
@@ -1387,6 +1401,7 @@ pub fn stop(plane: &Arc<AgentPlane>) {
     // quality preset back, because the session does not end when the plane
     // does. `AGENT_BRIEF` D2: the interactive product must not be left
     // degraded by a feature somebody switched off.
+    plane.video.forget_all();
     for (session_id, preset) in plane.mirrors.detach_all() {
         let handle = running
             .sessions

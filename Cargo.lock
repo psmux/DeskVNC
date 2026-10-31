@@ -2227,6 +2227,7 @@ dependencies = [
  "libc",
  "limb-core",
  "local-pipe",
+ "openh264",
  "os_info",
  "parking_lot",
  "rdp-core",
