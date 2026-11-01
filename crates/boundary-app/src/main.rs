@@ -65,6 +65,10 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     );
+    // The window closing dropped the listener, which tells each helper still
+    // connected that this computer went away. Those close frames go out from
+    // the runtime's tasks, so they get a moment before the runtime stops.
+    runtime.block_on(tokio::time::sleep(Duration::from_millis(500)));
     runtime.shutdown_timeout(Duration::from_secs(3));
     // A display with no graphics driver behind it, as in a virtual machine,
     // a Remote Desktop session or a virtual monitor, offers OpenGL 1.1 and
@@ -251,6 +255,18 @@ impl App {
         if std::env::args().any(|a| a == "--background") && !TRAY {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        // launchd stops the app with SIGTERM to restart or update it. Left to
+        // the default, that kills the process before a connected helper is
+        // told, and the helper waits out a timeout before connecting again.
+        #[cfg(unix)]
+        if let Ok(mut term) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::spawn(async move {
+                term.recv().await;
+                TERMINATED.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
         }
         let context = cc.egui_ctx.clone();
         tokio::spawn(async move {
@@ -1069,8 +1085,15 @@ fn show(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
+/// Set when the system asked the app to stop, so the next frame quits.
+static TERMINATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if TERMINATED.load(std::sync::atomic::Ordering::Relaxed) && !self.quitting {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         // With unattended access on, the window closing must not take the
         // listener with it: that left a computer unreachable until somebody
         // opened the app again by hand. It goes to the Dock instead.
