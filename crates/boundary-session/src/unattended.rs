@@ -448,12 +448,19 @@ where
         tokio::spawn(async move {
             let _seat = seat;
             let result = tokio::select! {
-                // The app stopping, for an update or a restart, ends nothing
-                // the person decided, so the helper is told the link went
-                // and connects again once the computer is back.
-                _ = stop.cancelled() => Err(session::link_lost(anyhow!("DeskVNC Support on that computer stopped"))),
+                _ = stop.cancelled() => Ok(()),
                 _ = ended.cancelled() => Ok(()),
                 result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
+            };
+            // The app stopping, for an update or a restart, ends nothing the
+            // person decided, so the helper is told the link went and
+            // connects again once the computer is back. Quitting also drops
+            // whoever holds the session, so the session may have ended as
+            // closed a moment before this saw the stop: the stop still wins.
+            let result = if stop.is_cancelled() {
+                Err(session::link_lost(anyhow!("DeskVNC Support on that computer stopped")))
+            } else {
+                result
             };
             session::close_served(&connection, &result);
             // Whoever holds the session hears that it ended, so a banner
@@ -796,6 +803,29 @@ async fn run_connect(
         .await?;
     let target = target.resolve().await?;
     let endpoint = crate::shared::helper(&options, key).await?;
+    let result = visit(worker, &endpoint, target, name, password, abilities).await;
+    // A lost link is dialled again in a moment. Binding a new endpoint for
+    // that and finding the relay again cost 1 to 3 seconds of the 4 to 7 it
+    // took to get back to a restarted computer, so this one is kept a while.
+    if result.as_ref().is_err_and(session::LinkLost::is) {
+        let kept = endpoint.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(KEEP_ENDPOINT).await;
+            drop(kept);
+        });
+    }
+    result
+}
+/// How long a helper's endpoint outlives a session whose link was lost.
+const KEEP_ENDPOINT: Duration = Duration::from_secs(30);
+async fn visit(
+    worker: &mut session::Worker,
+    endpoint: &iroh::Endpoint,
+    target: EndpointAddr,
+    name: String,
+    password: Option<String>,
+    abilities: Abilities,
+) -> Result<()> {
     let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(target, wire::ALPN))
         .await
         .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
