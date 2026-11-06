@@ -821,6 +821,60 @@ async fn a_bitmap_update_is_decoded_and_emitted_as_a_dirty_rect() {
     );
 }
 
+/// Forwarded text arrives a character at a time with room between them.
+/// Windows reads a run of unicode keystrokes that queue up behind a busy
+/// window as the last of them ("abc 1122" typed as "abc 2222"), so the
+/// characters must not reach the server back to back. Scancode typing is
+/// left alone.
+#[tokio::test]
+async fn forwarded_text_reaches_the_server_spaced_out() {
+    use rdp_pdu::input::fastpath::{keyboard_flags, FastPathInputEvent};
+
+    let text = |cp: u32, down: bool| ClientCommand::Key {
+        keysym: 0x0100_0000 + cp,
+        keycode: None,
+        down,
+    };
+    let (server, _, outcome) = run_session(vec![
+        text(0x31, true),
+        text(0x31, false),
+        text(0x32, true),
+        text(0x32, false),
+        text(0x32, true),
+        text(0x32, false),
+        ClientCommand::Disconnect,
+    ])
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    let recorded = server.wait_until(|r| r.client_disconnect.is_some()).await;
+    let presses: Vec<(u16, std::time::Instant)> = recorded
+        .input_events
+        .iter()
+        .zip(&recorded.input_times)
+        .filter_map(|(e, at)| match e {
+            FastPathInputEvent::Unicode { flags, code } if flags & keyboard_flags::RELEASE == 0 => {
+                Some((*code, *at))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        presses.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+        vec![0x31, 0x32, 0x32],
+        "every character, in order"
+    );
+    for pair in presses.windows(2) {
+        let gap = pair[1].1.duration_since(pair[0].1);
+        // A little under the gap: the clock that stamps arrivals is not the
+        // one that timed the send.
+        assert!(
+            gap >= std::time::Duration::from_millis(6),
+            "characters arrived {gap:?} apart"
+        );
+    }
+}
+
 /// The input path, round trip. A pointer command and a key command become fast
 /// path input events on the wire, in the order and with the flags
 /// MS-RDPBCGR 2.2.8.1.2.2 defines, and the disconnect releases the key that

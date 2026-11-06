@@ -367,6 +367,8 @@ pub struct Recorded {
     pub monitor_layouts: Vec<MonitorLayoutRecord>,
     /// Every fast path input event the client sent, in order.
     pub input_events: Vec<rdp_pdu::input::fastpath::FastPathInputEvent>,
+    /// When each of input_events arrived, one entry per event.
+    pub input_times: Vec<std::time::Instant>,
 
     // -- The virtual channels (MS-RDPEDYC, MS-RDPEGFX, MS-RDPECLIP) -------
     /// The `Version` in the client's drdynvc Capabilities Response
@@ -1051,11 +1053,12 @@ async fn drain(
         stream.read_exact(&mut frame[header_len..]).await?;
         let pdu =
             FastPathInputPdu::decode(&mut Reader::new(&frame)).map_err(std::io::Error::other)?;
+        let arrived = std::time::Instant::now();
+        let mut recorded = recorded.lock().expect("not poisoned");
         recorded
-            .lock()
-            .expect("not poisoned")
-            .input_events
-            .extend(pdu.events);
+            .input_times
+            .extend(std::iter::repeat_n(arrived, pdu.events.len()));
+        recorded.input_events.extend(pdu.events);
     }
 }
 
