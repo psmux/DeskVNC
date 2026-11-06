@@ -25,6 +25,7 @@
 //! | `self.framer.read()` | select arm | ours; see [`crate::transport::framer`], whose only await is `read_buf` into a buffer the framer owns |
 //! | `commands.recv()` | select arm | `mpsc::Receiver::recv` never consumes a message from a dropped future |
 //! | `stats_tick.tick()` | select arm | `Interval::tick` with `MissedTickBehavior::Skip`: a dropped tick is simply not observed |
+//! | `sleep_until(text_hold)` | select arm | a fresh `Sleep` each pass that holds nothing; the held commands stay in the channel |
 //! | `self.send(..)` | branch body | `mpsc::Sender::send` either delivered the message or did not, never half of one |
 //! | `emit(events, ..)` | branch body | the same, and it can block for a long time, which is intended backpressure |
 //!
@@ -84,6 +85,8 @@ enum Step {
     Command(Option<ClientCommand>),
     Tick,
     Cancelled,
+    /// The pause after a character of forwarded text is over.
+    TextGap,
 }
 
 /// The connected state pump.
@@ -117,6 +120,9 @@ pub struct RunLoop<R> {
     graphics: Graphics,
     /// The keyboard and pointer state the input path needs between commands.
     input: Input,
+    /// Spaces out forwarded text so Windows reads every character
+    /// ([`input::TEXT_GAP`]). Server PDUs keep being read while it holds.
+    text_pacer: input::TextPacer,
     /// Fast path fragment reassembly (MS-RDPBCGR 2.2.9.1.2.1). The only piece
     /// of cross PDU state `rdp-pdu` owns, driven from here.
     reassembler: FastPathReassembler,
@@ -173,6 +179,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             channels,
             graphics: Graphics::new(activated.desktop),
             input: Input::new(activated.desktop, activated.server_input_flags, view_only),
+            text_pacer: input::TextPacer::default(),
             reassembler: FastPathReassembler::new(),
             error_info: None,
             cookie: None,
@@ -282,11 +289,17 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             // what the graphics channel reports back as `queueDepth`.
             self.event_backlog = backlog(events);
 
+            // While forwarded text is being spaced out, commands wait and
+            // everything else carries on. The commands stay queued in order,
+            // so a key that follows the text still follows it.
+            let text_hold = self.text_pacer.hold_until(tokio::time::Instant::now());
             let step = tokio::select! {
                 biased;
                 () = cancel.cancelled() => Step::Cancelled,
                 framed = self.framer.read() => Step::Pdu(framed),
-                cmd = commands.recv() => Step::Command(cmd),
+                () = tokio::time::sleep_until(text_hold.unwrap_or_else(tokio::time::Instant::now)),
+                    if text_hold.is_some() => Step::TextGap,
+                cmd = commands.recv(), if text_hold.is_none() => Step::Command(cmd),
                 _ = stats_tick.tick() => Step::Tick,
             };
 
@@ -322,6 +335,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                     }
                 }
                 Step::Tick => self.tick(events).await?,
+                Step::TextGap => {}
             }
         }
     }
@@ -877,7 +891,11 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                 down,
             } => {
                 let events = self.input.key(keysym, keycode, down);
+                let paced = input::is_text(keycode, down) && !events.is_empty();
                 self.send_input(events).await?;
+                if paced {
+                    self.text_pacer.sent_text(tokio::time::Instant::now());
+                }
                 Ok(None)
             }
             ClientCommand::ReleaseAllKeys => {
