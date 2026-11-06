@@ -224,6 +224,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 .build(app)?,
         )
         .item(
+            &MenuItemBuilder::with_id("menu:import-rdp", "Import Remote Desktop File…")
+                .build(app)?,
+        )
+        .item(
             &MenuItemBuilder::with_id("menu:quick-connect", "Connect to…")
                 .accelerator("CmdOrCtrl+T")
                 .build(app)?,
@@ -772,7 +776,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             let payload = serde_json::json!({ "id": id });
             let _ = app.emit_to("main", "menu://action", payload);
         }
-        "menu:new-host" | "menu:quick-connect" => {
+        "menu:new-host" | "menu:import-rdp" | "menu:quick-connect" => {
             // Library concerns, not session ones. Sent to the library window
             // wherever the focus happens to be, because the alternative is
             // that Cmd+T does nothing at all whenever a session is in front,

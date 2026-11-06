@@ -1,0 +1,3 @@
+# Remote Desktop files are kept byte for byte: mstsc writes UTF-16 LE with
+# a BOM and CRLF, and line ending conversion would corrupt them.
+*.rdp binary

@@ -93,6 +93,9 @@ export interface RdpSettings {
   microphone: boolean;
   consoleSession: boolean;
   restrictedAdmin: boolean;
+  /** Open the session full screen when it first connects. A `.rdp` file says
+   *  this with `screen mode id:i:2`. */
+  fullscreen: boolean;
 
   serverName: string | null;
   domain: string | null;
@@ -156,6 +159,7 @@ export function blankRdpSettings(): RdpSettings {
     microphone: false,
     consoleSession: false,
     restrictedAdmin: false,
+    fullscreen: false,
     serverName: null,
     domain: null,
     nla: "required",
@@ -179,7 +183,7 @@ export function blankRdpSettings(): RdpSettings {
 
 /** Every key this module owns, so anything else can be set aside verbatim. */
 const KNOWN_KEYS: readonly string[] = [
-  "v", "clipboard", "microphone", "consoleSession", "restrictedAdmin",
+  "v", "clipboard", "microphone", "consoleSession", "restrictedAdmin", "fullscreen",
   "serverName", "domain", "nla", "legacyTls", "colorDepth", "codecs", "audio",
   "monitors", "resolution", "dynamicResolution", "keyboardLayout", "clientName",
   "performance", "gateway", "autologon", "kdcProxyUrl", "sendMstshashCookie",
@@ -308,6 +312,7 @@ export function parseRdpSettings(raw: string | null | undefined): RdpSettings | 
     microphone: bool(o.microphone, blank.microphone),
     consoleSession: bool(o.consoleSession, blank.consoleSession),
     restrictedAdmin: bool(o.restrictedAdmin, blank.restrictedAdmin),
+    fullscreen: bool(o.fullscreen, blank.fullscreen),
     serverName: nullableStr(o.serverName),
     domain: nullableStr(o.domain),
     // An unrecognised value reads as "required". This one is security

@@ -89,6 +89,12 @@ pub struct RdpSettings {
     #[serde(default)]
     pub restricted_admin: bool,
 
+    /// Open the session full screen rather than in a window. A `.rdp` file
+    /// says this with `screen mode id:i:2`. A window setting, so the driver
+    /// never reads it; the session view does, once, when it first connects.
+    #[serde(default)]
+    pub fullscreen: bool,
+
     /// Everything else: the connect options the driver reads.
     #[serde(flatten)]
     pub options: RdpOptions,
@@ -107,6 +113,7 @@ impl Default for RdpSettings {
             microphone: false,
             console_session: false,
             restricted_admin: false,
+            fullscreen: false,
             options: RdpOptions::default(),
         }
     }

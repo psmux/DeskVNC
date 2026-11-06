@@ -76,6 +76,12 @@ export interface HostDraft {
    * auto-filled value is never applied out of sight. Never persisted.
    */
   macFromDiscovery?: boolean;
+  /**
+   * UI-only: what importing a `.rdp` file could not carry across, in
+   * sentences, shown above the form so the person reads them before saving.
+   * Never persisted.
+   */
+  importNotes?: string[];
 
   /** Parsed `rdpSettings` blob; `null` for a VNC host. */
   rdp: RdpSettings | null;
@@ -144,6 +150,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     // the draft, both for a brand-new host and for a saved one that has none.
     wolMac: h?.wolMac ?? prefill?.wolMac ?? null,
     macFromDiscovery: !h?.wolMac && Boolean(prefill?.wolMac),
+    importNotes: prefill?.importNotes,
     // A new host starts from the Preferences defaults; a saved one is read
     // back verbatim, because its own settings are the answer.
     rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? newRdpSettings()) : null,
@@ -154,6 +161,15 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     vncUser: "",
     portTouched: portWasTouched(h),
   };
+}
+
+/** A note from the importer, which writes them in lower case for joining,
+ *  as a sentence on its own line. */
+function sentence(note: string): string {
+  const s = note.trim();
+  if (!s) return s;
+  const capital = s[0].toUpperCase() + s.slice(1);
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 /** A blank set of RDP settings with the Preferences defaults applied. */
@@ -249,6 +265,8 @@ export function HostDialog({
   const [advanced, setAdvanced] = useState(
     () =>
       Boolean(initial.macFromDiscovery) ||
+      // An import with notes: the settings the notes talk about are in here.
+      Boolean(initial.importNotes?.length) ||
       Boolean(initial.sshTunnel?.enabled) ||
       securityIsOn(initial),
   );
@@ -358,6 +376,20 @@ export function HostDialog({
           submit();
         }}
       >
+        {d.importNotes && d.importNotes.length > 0 ? (
+          <div
+            role="note"
+            aria-label="About this import"
+            className="rounded-md border border-warning bg-warning-subtle px-3 py-2 text-sm"
+          >
+            <p className="font-medium text-warning">Imported from a Remote Desktop file</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-secondary">
+              {d.importNotes.map((note) => (
+                <li key={note}>{sentence(note)}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <Field label="Friendly name" hint="How this computer appears in your library">
           <input
             data-autofocus
@@ -939,6 +971,11 @@ function RdpOptionsSection({
         hint="Makes the Displays menu list the remote monitors instead of just the one."
       />
       <ResolutionField value={rdp.resolution} onChange={(resolution) => onChange({ resolution })} />
+      <Check
+        checked={rdp.fullscreen}
+        onChange={(fullscreen) => onChange({ fullscreen })}
+        label="Open full screen"
+      />
       <Check
         checked={rdp.clipboard}
         onChange={(clipboard) => onChange({ clipboard })}

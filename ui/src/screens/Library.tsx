@@ -27,7 +27,9 @@ import {
 } from "../lib/types";
 import {
   allowsMultipleSessions,
+  importRdpFile,
   inTauri,
+  pickRdpFile,
   openSessionWindow,
   safeInvoke,
   safeListen,
@@ -51,6 +53,7 @@ import { HostTile, DiscoveredTile, addressLabel, osLabel } from "../components/H
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
 import { loadRdpDefaults } from "../lib/rdpDefaults";
+import { draftFromRdpImport } from "../lib/rdpImport";
 import { QuickConnect } from "../components/QuickConnect";
 import { ContextMenu, Dialog, EmptyState, Select, TileSkeleton, type MenuItem } from "../components/primitives";
 import {
@@ -718,6 +721,21 @@ export function Library({
     );
   }, []);
 
+  /**
+   * Import a `.rdp` file: the person picks it, the shell reads it, and the
+   * editor opens on the draft with whatever did not come across written above
+   * the form. Nothing is saved until they press Save.
+   */
+  const importRdp = useCallback(async (): Promise<void> => {
+    const path = await pickRdpFile();
+    if (!path) return;
+    try {
+      setHostDialog(draftFromRdpImport(await importRdpFile(path)));
+    } catch (err: unknown) {
+      push("danger", `Could not import that Remote Desktop file: ${String(err)}`);
+    }
+  }, [push]);
+
   /** The MAC discovery is currently reporting for this endpoint, if any. */
   const discoveredMacFor = useCallback(
     (address: string, port: number): string | null => {
@@ -898,6 +916,7 @@ export function Library({
         run: () => selectTab(t.id),
       })),
       { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
+      { id: "import-rdp", label: "Import Remote Desktop file…", hint: "", run: () => void importRdp() },
       { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
       { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
       {
@@ -910,7 +929,7 @@ export function Library({
       { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
       { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
     ];
-  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
+  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, importRdp]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -980,19 +999,20 @@ export function Library({
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
-      if (id !== "menu:quick-connect" && id !== "menu:new-host") return;
+      if (id !== "menu:quick-connect" && id !== "menu:new-host" && id !== "menu:import-rdp") return;
       selectTab(null);
       // Focus cannot land on an element that is still hidden, so let the pane
       // swap paint first.
       requestAnimationFrame(() => {
         if (id === "menu:quick-connect") focusQuickConnect();
+        else if (id === "menu:import-rdp") void importRdp();
         else setHostDialog(draftFromHost(null));
       });
     }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, [focusQuickConnect, selectTab]);
+  }, [focusQuickConnect, selectTab, importRdp]);
 
   // ------------------------------------------------------------ context menu
 
@@ -1239,6 +1259,14 @@ export function Library({
           ) : null}
           <IconZap size={14} />
           {scan.running ? "Scanning…" : "Scan network"}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          title="Import a Remote Desktop (.rdp) file"
+          onClick={() => void importRdp()}
+        >
+          Import .rdp
         </button>
         <button type="button" className="btn-primary" onClick={() => setHostDialog(draftFromHost(null))}>
           <IconPlus size={14} /> New Host

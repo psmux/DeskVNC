@@ -329,6 +329,10 @@ function SessionView({
   // whose remote size is driven by the scaling mode). Changing it here lasts
   // for this session; the profile stays the answer for the next connect.
   const [resolution, setResolution] = useState<RdpResolution | null>(null);
+  // The profile's "Open full screen" (`screen mode id:i:2` in an imported
+  // `.rdp` file). Applied once, the first time the session connects; after
+  // that the window is the person's to put back.
+  const [openFullscreen, setOpenFullscreen] = useState(false);
   const resolutionRef = useRef<RdpResolution | null>(null);
   resolutionRef.current = resolution;
   const [zoom, setZoomState] = useState(stored.zoom);
@@ -897,9 +901,11 @@ function SessionView({
     void safeInvoke<{ rdpSettings?: string | null } | null>("get_host", { hostId: id }, null).then(
       (host) => {
         if (cancelled) return;
-        setResolution(parseRdpSettings(host?.rdpSettings ?? null)?.resolution ?? {
+        const settings = parseRdpSettings(host?.rdpSettings ?? null);
+        setResolution(settings?.resolution ?? {
           mode: "window-at-connect",
         });
+        setOpenFullscreen(settings?.fullscreen === true);
       },
     );
     return () => {
@@ -1554,6 +1560,28 @@ function SessionView({
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen();
   }, [params.sessionId]);
+
+  // A profile that opens full screen does so once, on the first connect. A
+  // reconnect leaves the window as the person last put it.
+  const openedFullscreen = useRef(false);
+  const connectedNow = session.state.state === "connected";
+  useEffect(() => {
+    if (!openFullscreen || !connectedNow || openedFullscreen.current) return;
+    openedFullscreen.current = true;
+    void (async () => {
+      if (inTauri()) {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          if (await getCurrentWindow().isFullscreen()) return;
+        } catch {
+          /* ask anyway */
+        }
+      } else if (document.fullscreenElement) {
+        return;
+      }
+      await toggleFullscreen();
+    })();
+  }, [openFullscreen, connectedNow, toggleFullscreen]);
 
   /**
    * Native menu items that act on the session.

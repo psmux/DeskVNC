@@ -342,7 +342,13 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
                     out.profile.scaling_mode = "aspect-fit".into();
                     out.mapped.push(key.into());
                 }
-                Some(false) => out.mapped.push(key.into()),
+                // Off in mstsc is the desktop at its own size, with scroll
+                // bars when the window is smaller. Left alone, the profile's
+                // default would shrink it to fit.
+                Some(false) => {
+                    out.profile.scaling_mode = "actual".into();
+                    out.mapped.push(key.into());
+                }
                 None => out.ignored.push(key.into()),
             },
             "connection type" => match int(kind, value) {
@@ -412,13 +418,11 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
                 );
                 out.ignored.push(key.into());
             }
+            // 1 windowed, 2 full screen. mstsc treats anything else as
+            // windowed, and so does this.
             "screen mode id" => {
-                out.warnings.push(
-                    "whether the session opens windowed or full screen is a window \
-                     setting rather than part of the profile, so it was not imported"
-                        .into(),
-                );
-                out.ignored.push(key.into());
+                rdp.fullscreen = int(kind, value) == Some(2);
+                out.mapped.push(key.into());
             }
             "password 51" => {
                 // Never read, never decoded, never logged. Only the key name
