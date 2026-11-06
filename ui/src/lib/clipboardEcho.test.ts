@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { ClipboardEcho } from "./clipboardEcho";
+import { ClipboardEcho, nextRemoteClipboard } from "./clipboardEcho";
+
+describe("nextRemoteClipboard", () => {
+  // Copy X on the remote, copy something else locally, copy X on the remote
+  // again: the second X has to be a new state value, or React drops it as
+  // unchanged and the local clipboard keeps the local text.
+  it("makes a repeat of the same remote text a new value", () => {
+    const first = nextRemoteClipboard(null, "same text");
+    const again = nextRemoteClipboard(first, "same text");
+    expect(again.text).toBe("same text");
+    expect(Object.is(again, first)).toBe(false);
+    expect(again).not.toEqual(first);
+  });
+});
 
 describe("ClipboardEcho", () => {
   it("does not push back what it just moved", () => {

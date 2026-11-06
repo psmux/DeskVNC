@@ -1135,8 +1135,8 @@ function SessionView({
   // Remote clipboard -> local (text only). The write is native: the webview's
   // own clipboard API is gesture-gated and this text arrives from the socket.
   useEffect(() => {
-    const text = session.remoteClipboard;
-    if (text === null) return;
+    const text = session.remoteClipboard?.text;
+    if (text === undefined) return;
     clipboardEcho.moved(text);
     void writeClipboard(text);
   }, [session.remoteClipboard, clipboardEcho]);
