@@ -712,14 +712,7 @@ impl App {
             ui.horizontal(|ui| {
                 theme::caption(ui, "Unattended access");
                 if self.unattended.enabled() {
-                    ui.colored_label(
-                        theme::pal(ui.ctx()).success,
-                        if self.unattended.reachable() {
-                            "On"
-                        } else {
-                            "Starting"
-                        },
-                    );
+                    ui.colored_label(theme::pal(ui.ctx()).success, self.unattended.label());
                 } else {
                     theme::muted(ui, "Off");
                 }
