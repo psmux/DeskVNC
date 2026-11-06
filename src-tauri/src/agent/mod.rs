@@ -1580,7 +1580,9 @@ mod tests {
     /// Every test in this file is about the listener, the switch and the
     /// counts, and none of them touches a file. The refusal is real rather
     /// than a panic so that a test which grew a file call by accident would
-    /// read a sentence instead of losing the socket task.
+    /// read a sentence instead of losing the socket task. Only the unix
+    /// socket tests build a context, so it is unix only like them.
+    #[cfg(unix)]
     fn no_sidecar() -> server::Filer {
         Arc::new(|_session, _ask, tell| {
             let _ = tell.send(Err(server::FileRefusal::unavailable(

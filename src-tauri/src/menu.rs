@@ -162,7 +162,7 @@ pub struct MenuSync {
 }
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let mut builder = MenuBuilder::new(app);
+    let builder = MenuBuilder::new(app);
     let mut checks: HashMap<&'static str, CheckMenuItem<Wry>> = HashMap::new();
     let mut gated_items: Vec<MenuItem<Wry>> = Vec::new();
     let mut gated_menus: Vec<Submenu<Wry>> = Vec::new();
@@ -191,7 +191,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     }
 
     #[cfg(target_os = "macos")]
-    {
+    let builder = {
         // A custom About item routed to the in-app dialog, NOT the native
         // AboutMetadata panel: two About surfaces drift (the native one was
         // showing the version three different ways), and only the in-app
@@ -214,8 +214,8 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             .separator()
             .quit()
             .build()?;
-        builder = builder.item(&app_menu);
-    }
+        builder.item(&app_menu)
+    };
 
     let file = SubmenuBuilder::new(app, "File")
         .item(
