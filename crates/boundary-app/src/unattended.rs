@@ -227,9 +227,9 @@ impl Unattended {
     pub fn machine_id(&self) -> &str {
         &self.machine
     }
-    /// Whether the listener has confirmed it can be found by that ID.
-    pub fn reachable(&self) -> bool {
-        self.reachable
+    /// The word beside "Unattended access" on the home screen.
+    pub fn label(&self) -> &'static str {
+        label(self.access.enabled, self.reachable, self.handed_over)
     }
     /// Drain the listener. `true` when a helper has just come in, so the
     /// caller brings the window forward.
@@ -696,6 +696,20 @@ fn log(access_path: &std::path::Path, line: &str) {
     }
 }
 
+/// The state of unattended access in a word or two.
+///
+/// When DeskVNC, or the copy at the sign in or lock screen, holds the claim,
+/// this app does not listen and never becomes reachable itself, but helpers
+/// still get in through that copy, so it is on.
+fn label(enabled: bool, reachable: bool, handed_over: bool) -> &'static str {
+    match (enabled, reachable, handed_over) {
+        (false, _, _) => "Off",
+        (true, true, _) => "On",
+        (true, false, true) => "On, answered by DeskVNC",
+        (true, false, false) => "Starting",
+    }
+}
+
 /// An ID shortened for display; the Copy button gives the whole one.
 pub fn short(id: &str) -> String {
     if id.len() > 16 {
@@ -731,5 +745,21 @@ pub mod autostart {
             "Move DeskVNC Support to Applications first, so it can start when you sign in"
         );
         autostart::set(ENTRY, on)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::label;
+
+    #[test]
+    fn another_copy_answering_is_not_shown_as_starting() {
+        // DeskVNC, or the copy at the sign in screen, holds the claim, so
+        // this app never listens. It used to say Starting for as long as
+        // that copy ran, which read as stuck.
+        assert_eq!(label(true, false, true), "On, answered by DeskVNC");
+        assert_eq!(label(true, false, false), "Starting");
+        assert_eq!(label(true, true, false), "On");
+        assert_eq!(label(false, false, false), "Off");
     }
 }
