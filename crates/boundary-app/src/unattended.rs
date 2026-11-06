@@ -205,11 +205,15 @@ impl Unattended {
             return;
         }
         self.access.allow_tools(peer, tools);
+        let was_enabled = self.access.enabled;
         self.access.enabled = true;
         if !self.save() {
             return;
         }
         self.start();
+        if !was_enabled {
+            self.reachable_before_sign_in();
+        }
         match session.offer_pairing(self.machine.clone(), computer_name()) {
             Ok(()) => self.say(format!(
                 "{name} can now connect to this computer any time. Remove them under Unattended access to stop it"
@@ -496,6 +500,7 @@ impl Unattended {
             if self.save() {
                 if enabled {
                     self.start();
+                    self.reachable_before_sign_in();
                 } else {
                     self.halt();
                     self.say("Unattended access is off. Nobody can connect without your approval");
@@ -662,18 +667,33 @@ impl Unattended {
             .on_hover_text("Asks for an administrator. At the sign in screen only paired helpers and the unattended password get in, and helpers' tools cannot run commands.")
             .changed();
         if changed {
-            // The app in the tray takes over once somebody signs in.
-            if login && !self.autostart && autostart::set(true).is_ok() {
-                self.autostart = true;
-            }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let _ = tx.send((login, crate::login::set(login)));
-                ctx.request_repaint();
-            });
-            self.login_change = Some(rx);
-            self.say("Waiting for an administrator to allow it");
+            self.set_login(login);
+        }
+    }
+    /// Set the copy at the sign in screen up, or take it away, on a thread,
+    /// since it waits for an administrator.
+    fn set_login(&mut self, on: bool) {
+        if !crate::login::SUPPORTED || self.login_change.is_some() {
+            return;
+        }
+        // The app in the tray takes over once somebody signs in.
+        if on && !self.autostart && autostart::set(true).is_ok() {
+            self.autostart = true;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((on, crate::login::set(on)));
+        });
+        self.login_change = Some(rx);
+        self.say("Waiting for an administrator to allow it");
+    }
+    /// Unattended access that stops at a restart until somebody signs in is
+    /// not what anyone switching it on expects, so switching it on sets up
+    /// the copy at the sign in screen too. The checkbox below still turns
+    /// that part off.
+    fn reachable_before_sign_in(&mut self) {
+        if !self.login {
+            self.set_login(true);
         }
     }
 }
