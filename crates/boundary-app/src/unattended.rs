@@ -66,6 +66,10 @@ pub struct Unattended {
     handed_over: bool,
     checked: std::time::Instant,
 }
+    /// Whether a helper who is not paired is waiting for an answer.
+    pub fn asking(&self) -> bool {
+        self.ask.is_some()
+    }
 
 impl Unattended {
     pub fn new() -> Self {
