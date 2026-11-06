@@ -301,6 +301,14 @@ pub trait SessionSource: Send + Sync {
     /// A [`ToolError`] when the library is not reachable.
     fn hosts(&self) -> Result<Vec<HostRecord>, ToolError>;
 
+    /// The saved machines when the library is already there to ask, and
+    /// nothing otherwise. What the grant is built from when a process starts:
+    /// an MCP client starts `dvv` when it starts, before any agent asked for a
+    /// machine, and that is no reason to open a window on the person's screen.
+    fn hosts_if_running(&self) -> Vec<HostRecord> {
+        self.hosts().unwrap_or_default()
+    }
+
     /// Everything needed to bring one machine under the plane.
     ///
     /// # Errors
@@ -654,22 +662,70 @@ pub fn alive() -> bool {
     }
 }
 
-/// Is the plane there, starting DeskVNCViewer first when it is not running?
+/// What a call needs from DeskVNCViewer when it is not running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// Only an application that is already running. A call that reads what
+    /// is open, or acts on a session, has nothing to gain from starting one:
+    /// a fresh application has no sessions, so the answer is the same and a
+    /// window appeared on the person's screen for nothing.
+    Running,
+    /// The application, started when it is not running. Only for what an
+    /// agent asked for that the application alone can give: the saved
+    /// machines, and opening one.
+    Start,
+}
+
+/// Does this call start DeskVNCViewer? Only one that needs it started, and
+/// only the first time in this process: an application running with its plane
+/// switched off would otherwise be started again on every call, and one a
+/// person quit stays quit until an agent asks for something only it has.
+pub fn starts_app(need: Need, alive: bool, tried_before: bool) -> bool {
+    need == Need::Start && !alive && !tried_before
+}
+
+/// How many times this process tried to start DeskVNCViewer. Counted before
+/// [`NO_START_ENV`] is looked at, so a test can see the attempt without a
+/// window appearing.
+static START_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times this process tried to start DeskVNCViewer.
+pub fn start_attempts() -> usize {
+    START_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Set to `1` and `dvv` never starts DeskVNCViewer: a call that needs it
+/// fails with the sentence saying it is not running, and the person opens it
+/// when they choose to.
+pub const NO_START_ENV: &str = "DVV_NO_START";
+
+fn start_disabled() -> bool {
+    std::env::var(NO_START_ENV).is_ok_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && v != "0"
+    })
+}
+
+/// Is the plane there, starting DeskVNCViewer first when the call needs it?
 ///
 /// An agent should not need the person to open the app before asking for a
 /// machine, and a person should not need to know the app has to be open. So
-/// when no socket is there, the app is started, once per process, and this
-/// waits for its plane to come up. Once only, because an app that is running
-/// with its plane switched off would otherwise be started again on every call.
-fn reachable() -> bool {
-    if alive() {
-        return true;
-    }
+/// when a call that needs the app ([`Need::Start`]) finds no socket, the app
+/// is started in the background, once per process, and this waits for its
+/// plane to come up. Nothing else starts it: not the process starting, not
+/// `initialize` or `tools/list`, not listing limbs.
+fn reachable(need: Need) -> bool {
+    let running = alive();
     static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let tried_before = TRIED.load(std::sync::atomic::Ordering::SeqCst);
+    if !starts_app(need, running, tried_before) {
+        return running;
+    }
     if TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-    if !crate::launch::start_app() {
+    START_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if start_disabled() || !crate::launch::start_app() {
         return false;
     }
     // A minute: the first start of a desktop app after login can take tens
@@ -990,34 +1046,21 @@ impl SessionSource for ShellSource {
     }
 
     fn hosts(&self) -> Result<Vec<HostRecord>, ToolError> {
-        if !reachable() {
+        if !reachable(Need::Start) {
             return Err(no_socket());
         }
-        let answer = call("hosts.list", serde_json::json!({}))?;
-        let rows = answer
-            .get("hosts")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Ok(rows
-            .iter()
-            .map(|row| HostRecord {
-                host_id: string(row, "hostId"),
-                label: string(row, "label"),
-                address: string(row, "address"),
-                port: row
-                    .get("port")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as u16,
-                protocol: string(row, "protocol"),
-                credential_stored: boolean(row, "credentialStored"),
-                discovered: boolean(row, "discovered"),
-            })
-            .collect())
+        hosts_list()
+    }
+
+    fn hosts_if_running(&self) -> Vec<HostRecord> {
+        if !reachable(Need::Running) {
+            return Vec::new();
+        }
+        hosts_list().unwrap_or_default()
     }
 
     fn open(&self, request: &OpenRequest) -> Result<Attach, ToolError> {
-        if !reachable() {
+        if !reachable(Need::Start) {
             return Err(no_socket());
         }
         let mut params = serde_json::json!({
@@ -1088,7 +1131,9 @@ impl SessionSource for ShellSource {
     /// assembled from a half decoded window is corrupt in a way nothing
     /// downstream can detect.
     fn files(&self, limb: &LimbId, op: &FileOp) -> Result<FileOutcome, ToolError> {
-        if !reachable() {
+        // A limb's session lives in the application: one started now has
+        // none, so starting it would only put a window on the screen.
+        if !reachable(Need::Running) {
             return Err(no_socket());
         }
         let session_id = lock(limb_sessions())
@@ -1195,7 +1240,10 @@ impl SessionSource for ShellSource {
     }
 
     fn live(&self) -> Vec<LiveSession> {
-        if !reachable() {
+        // Listing what is open never starts the application: one that is not
+        // running has nothing open, and an agent asking `dvv_limbs` is not
+        // asking for a window.
+        if !reachable(Need::Running) {
             return Vec::new();
         }
         let Ok(answer) = call("limb.list", serde_json::json!({})) else {
@@ -1264,6 +1312,31 @@ impl SessionSource for ShellSource {
             "the shell, over the dvvp.v1 local socket (no socket at that path yet: DeskVNCViewer is started on the first call that needs it)"
         }
     }
+}
+
+/// The saved machines, asked of an application this process already reached.
+fn hosts_list() -> Result<Vec<HostRecord>, ToolError> {
+    let answer = call("hosts.list", serde_json::json!({}))?;
+    let rows = answer
+        .get("hosts")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(rows
+        .iter()
+        .map(|row| HostRecord {
+            host_id: string(row, "hostId"),
+            label: string(row, "label"),
+            address: string(row, "address"),
+            port: row
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u16,
+            protocol: string(row, "protocol"),
+            credential_stored: boolean(row, "credentialStored"),
+            discovered: boolean(row, "discovered"),
+        })
+        .collect())
 }
 
 /// How long this client waits for a machine it asked the shell to open to turn
@@ -2871,13 +2944,16 @@ pub struct Plane {
 
 /// The grant [`Plane::local`] issues: Operator plus Exec, over every machine
 /// the source has saved, read now.
-fn local_grant(source: &dyn SessionSource) -> Result<Grant, ToolError> {
-    let hosts: Vec<String> = source
-        .hosts()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|host| host.address)
-        .collect();
+///
+/// `need` says whether reading the saved machines may start DeskVNCViewer.
+/// When the process starts it may not ([`Plane::local`]), and an open that
+/// names a host the grant lacks may, since that agent asked for a machine.
+fn local_grant(source: &dyn SessionSource, need: Need) -> Result<Grant, ToolError> {
+    let hosts = match need {
+        Need::Start => source.hosts().unwrap_or_default(),
+        Need::Running => source.hosts_if_running(),
+    };
+    let hosts: Vec<String> = hosts.into_iter().map(|host| host.address).collect();
     let hosts = if hosts.is_empty() {
         // `Grant::issue` refuses a grant over no machines, and correctly: a
         // grant that can do nothing, issued silently, presents later as
@@ -2948,7 +3024,11 @@ impl Plane {
     ///
     /// A [`ToolError`] when the grant cannot be issued.
     pub fn local(source: Arc<dyn SessionSource>) -> Result<Plane, ToolError> {
-        let grant = local_grant(source.as_ref())?;
+        // Never starts DeskVNCViewer: an MCP client starts this process when
+        // it starts, and `initialize` waited on the application coming up
+        // while a window opened that nobody asked for. A grant read before
+        // the application runs is widened on the first open.
+        let grant = local_grant(source.as_ref(), Need::Running)?;
         let mut plane = Plane::new(grant, source, PlaneConfig::default());
         plane.local = true;
         Ok(plane)
@@ -2967,7 +3047,7 @@ impl Plane {
         if !self.local || self.grant().allows_host(host) {
             return;
         }
-        if let Ok(fresh) = local_grant(self.source.as_ref()) {
+        if let Ok(fresh) = local_grant(self.source.as_ref(), Need::Start) {
             *lock(&self.grant) = Arc::new(fresh);
         }
     }
