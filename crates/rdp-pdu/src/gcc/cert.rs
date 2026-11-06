@@ -116,6 +116,61 @@ impl ServerCertificate<'_> {
             Self::X509Chain(_) => None,
         }
     }
+
+    /// The RSA public key, which the licensing exchange encrypts its
+    /// premaster secret under (MS-RDPELE 5.1.1.1). For a chain it is the
+    /// last certificate's, the licence server's own (MS-RDPBCGR
+    /// 2.2.1.4.3.1.2).
+    ///
+    /// # Errors
+    ///
+    /// [`PduError::InvalidField`] for an empty chain or a last certificate
+    /// whose key is not an RSA `SEQUENCE` of two integers.
+    pub fn rsa_public_key(&self) -> PduResult<RsaKeyBytes<'_>> {
+        match self {
+            Self::Proprietary(c) => {
+                // `keylen` counts eight bytes of padding past the modulus,
+                // and `bitlen` is the size that is real.
+                let modulus = c.public_key.modulus;
+                let len = (c.public_key.bitlen as usize / 8).min(modulus.len());
+                Ok(RsaKeyBytes::LittleEndian {
+                    modulus: modulus.get(..len).unwrap_or(modulus),
+                    exponent: c.public_key.pub_exp.to_le_bytes(),
+                })
+            }
+            Self::X509Chain(chain) => chain
+                .certificates
+                .last()
+                .and_then(|cert| crate::asn1::der::rsa_public_key(cert))
+                .map(|(modulus, exponent)| RsaKeyBytes::BigEndian { modulus, exponent })
+                .ok_or(PduError::InvalidField {
+                    context: NAME,
+                    field: "subjectPublicKey",
+                    value: chain.certificates.len() as u64,
+                    offset: 0,
+                }),
+        }
+    }
+}
+
+/// An RSA public key as the certificate carried it, in whichever byte order
+/// that was. Converting is the caller's: this crate does no arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RsaKeyBytes<'a> {
+    /// A proprietary certificate's `RSA_PUBLIC_KEY`, little endian.
+    LittleEndian {
+        /// `modulus` without its padding.
+        modulus: &'a [u8],
+        /// `pubExp`.
+        exponent: [u8; 4],
+    },
+    /// An X.509 `RSAPublicKey`, big endian, DER sign bytes included.
+    BigEndian {
+        /// `modulus`.
+        modulus: &'a [u8],
+        /// `publicExponent`.
+        exponent: &'a [u8],
+    },
 }
 
 /// Parse `TS_UD_SC_SEC1.serverCertificate`.

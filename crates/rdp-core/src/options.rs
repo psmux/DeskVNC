@@ -152,6 +152,9 @@ pub struct ResolvedOptions {
     /// [`ResolvedOptions::resolve`] always sets it to `None`. The session
     /// fills it in afterwards, which is the only way in.
     pub routing_token: Option<Vec<u8>>,
+    /// Where issued client access licences are kept, see
+    /// `remote_core::RdpOptions::license_dir`.
+    pub license_dir: Option<std::path::PathBuf>,
 }
 
 /// `cliprdr`, the clipboard channel (MS-RDPECLIP). Seven significant
@@ -317,6 +320,7 @@ impl ResolvedOptions {
             // A redirection is the only thing that puts a token here, and it
             // does it after this function has run.
             routing_token: None,
+            license_dir: rdp.license_dir.clone(),
         })
     }
 

@@ -58,6 +58,9 @@ audio = []
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 hex = { workspace = true }
+# The licensing tests play the licence server, which needs the private half
+# of a test RSA key. Already in Cargo.lock.
+num-bigint-dig = { workspace = true }
 # The interop probe example prints the diagnostic frame dumps, which is the
 # whole reason to run it against a real server.
 tracing-subscriber = { workspace = true }
