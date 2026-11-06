@@ -6,6 +6,7 @@
 //! to TLS.
 
 pub mod framer;
+pub mod gateway;
 pub mod writer;
 
 use std::time::Duration;

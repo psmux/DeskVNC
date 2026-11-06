@@ -290,6 +290,13 @@ pub struct StoredCredentials {
     /// SSH password, for a host that allows password authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_password: Option<String>,
+
+    /// The RD Gateway account's password, when the host's gateway signs in
+    /// with an account of its own (`GatewayOptions::separate_credentials`).
+    /// The user name is not a secret and lives in the profile beside the
+    /// gateway's address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rdg_password: Option<String>,
 }
 
 impl StoredCredentials {
@@ -421,6 +428,7 @@ impl zeroize::Zeroize for StoredCredentials {
             &mut self.rdp_password,
             &mut self.ssh_user,
             &mut self.ssh_password,
+            &mut self.rdg_password,
         ] {
             if let Some(value) = field.as_mut() {
                 value.zeroize();
@@ -451,6 +459,7 @@ impl std::fmt::Debug for StoredCredentials {
             .field("rdp_user", &redact(&self.rdp_user))
             .field("rdp_domain", &redact(&self.rdp_domain))
             .field("rdp_password", &redact(&self.rdp_password))
+            .field("rdg_password", &redact(&self.rdg_password))
             .finish()
     }
 }
@@ -542,6 +551,7 @@ mod tests {
             rdp_password: Some("leak-7".into()),
             ssh_user: None,
             ssh_password: None,
+            rdg_password: None,
         };
         let rendered = format!("{creds:?}");
         for i in 1..=7 {
@@ -653,6 +663,7 @@ mod tests {
             rdp_password: Some("leak-7".into()),
             ssh_user: None,
             ssh_password: None,
+            rdg_password: None,
         };
         creds.zeroize();
         assert_eq!(
@@ -681,6 +692,7 @@ mod tests {
             rdp_password: Some("w".repeat(127)),
             ssh_user: None,
             ssh_password: None,
+            rdg_password: None,
         };
         let len = serde_json::to_string(&creds).unwrap().len();
         assert!(

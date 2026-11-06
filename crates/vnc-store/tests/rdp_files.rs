@@ -87,20 +87,15 @@ fn a_file_saved_by_mstsc_becomes_a_host() {
 }
 
 #[test]
-fn a_gateway_is_kept_and_said_to_be_unsupported() {
+fn a_gateway_is_kept_and_survives_a_save() {
     let import = import("mstsc-gateway-utf16le.rdp");
     let (_, settings) = saved_and_read_back(&import);
     let gateway = settings.options.gateway.expect("the gateway is recorded");
     assert_eq!(gateway.host, "gw.example.net");
     assert_eq!(gateway.port, 443);
-    // Recorded, so the connect path refuses the profile instead of dialling
-    // the server directly (`src-tauri/src/commands/session.rs` and
-    // `rdp-core/src/options.rs`), and the person is told now.
+    // The connection now goes through it, so there is nothing to warn about.
     assert!(
-        import
-            .warnings
-            .iter()
-            .any(|w| w.contains("RD Gateway") && w.contains("not supported yet")),
+        !import.warnings.iter().any(|w| w.contains("RD Gateway")),
         "{:?}",
         import.warnings
     );

@@ -57,8 +57,16 @@ describe("draftFromRdpImport", () => {
     expect(d.rdp?.resolution).toEqual({ mode: "fixed", width: 1920, height: 1080 });
     const saved = JSON.parse(serializeRdpSettings(d.rdp) ?? "{}");
     expect(saved.fullscreen).toBe(true);
-    // Saved, so connecting refuses rather than going straight to the server.
-    expect(saved.gateway).toEqual({ host: "gw.example.net", port: 443, separateCredentials: false });
+    // Saved, so the connection goes through the gateway rather than straight
+    // to the server, with every field the editor shows filled in.
+    expect(saved.gateway).toEqual({
+      host: "gw.example.net",
+      port: 443,
+      separateCredentials: false,
+      username: null,
+      transport: "auto",
+      accessToken: null,
+    });
   });
 
   it("fills the account but never a password", () => {

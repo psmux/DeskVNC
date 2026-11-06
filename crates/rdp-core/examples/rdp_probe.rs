@@ -55,6 +55,22 @@ async fn main() {
             height: h,
         };
     }
+    // `RDP_GATEWAY=gateway.example:443` sends the connection through an RD
+    // Gateway, signing in to it with the same account. `RDP_GATEWAY_TRANSPORT=http`
+    // skips the WebSocket upgrade and uses the two channel form.
+    if let Ok(gateway) = std::env::var("RDP_GATEWAY") {
+        let (gw_host, gw_port) = match gateway.rsplit_once(':') {
+            Some((h, p)) => (h.to_owned(), p.parse().unwrap_or(443)),
+            None => (gateway.clone(), 443),
+        };
+        let mut gw = remote_core::GatewayOptions::new(gw_host);
+        gw.port = gw_port;
+        if std::env::var("RDP_GATEWAY_TRANSPORT").as_deref() == Ok("http") {
+            gw.transport = remote_core::GatewayTransport::Http;
+        }
+        println!("through the RD Gateway at {gateway}");
+        options.rdp_mut().gateway = Some(gw);
+    }
     options.credentials = match &domain {
         Some(d) => Credentials::domain_user_pass(d, &user, &pass),
         None => Credentials::user_pass(&user, &pass),

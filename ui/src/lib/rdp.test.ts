@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { blankRdpSettings, parseRdpSettings, serializeRdpSettings } from "./rdp";
+import { blankGateway, blankRdpSettings, parseRdpSettings, serializeRdpSettings } from "./rdp";
 import { diagnose, isAuthFailure, opensSecuritySettings } from "./diagnose";
 
 describe("parseRdpSettings", () => {
@@ -152,5 +152,34 @@ describe("opensSecuritySettings", () => {
     // The build is the fix here, not a setting, and the copy says so.
     expect(opensSecuritySettings("legacy-tls-unavailable")).toBe(false);
     expect(opensSecuritySettings("authentication failed")).toBe(false);
+  });
+});
+
+describe("the RD Gateway block", () => {
+  it("round trips, and reads a bad transport as automatic", () => {
+    const gateway = {
+      host: "gw.example",
+      port: 8443,
+      separateCredentials: true,
+      username: "CORP\ops",
+      transport: "http",
+      accessToken: null,
+    };
+    const parsed = parseRdpSettings(JSON.stringify({ gateway }));
+    expect(parsed?.gateway).toEqual(gateway);
+    const again = parseRdpSettings(serializeRdpSettings(parsed));
+    expect(again?.gateway).toEqual(gateway);
+
+    const odd = parseRdpSettings(JSON.stringify({ gateway: { host: "gw", transport: "rpc" } }));
+    expect(odd?.gateway).toEqual({ ...blankGateway("gw") });
+  });
+
+  it("reads anything without a host as no gateway, and never invents a password", () => {
+    expect(parseRdpSettings(JSON.stringify({ gateway: "gw" }))?.gateway).toBeNull();
+    expect(parseRdpSettings(JSON.stringify({ gateway: {} }))?.gateway).toBeNull();
+    const withPassword = parseRdpSettings(
+      JSON.stringify({ gateway: { host: "gw", password: "secret" } }),
+    );
+    expect(JSON.stringify(withPassword)).not.toContain("secret");
   });
 });

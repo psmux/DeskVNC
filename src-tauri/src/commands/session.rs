@@ -1252,11 +1252,6 @@ pub async fn connect_session(
             )
             .map_err(|e| format!("This computer's Remote Desktop settings could not be read: {e}"))?
             .unwrap_or_default();
-            if settings.options.gateway.is_some() {
-                return Err("This computer is set up to connect through an RD Gateway, \
-                            which this version of the app cannot use yet."
-                    .into());
-            }
             let mut rdp = settings.options;
             // The host's "Share my clipboard" box. It lives on the settings
             // envelope rather than in `RdpOptions`, so it is carried across
@@ -1314,6 +1309,17 @@ pub async fn connect_session(
                     .filter(|d| !d.is_empty());
                 let vnc_password_only =
                     profile.as_ref().and_then(|p| p.security_pref.as_deref()) == Some("vncauth");
+                // An RD Gateway with an account of its own takes its password
+                // from the same blob. It is never in the profile, which is
+                // stored in clear, and like the computer's it is left out when
+                // the caller asked to be prompted.
+                if let remote_core::ProtocolOptions::Rdp(rdp) = &mut options.protocol {
+                    if let Some(gateway) = rdp.gateway.as_mut() {
+                        if gateway.separate_credentials && with_password {
+                            gateway.password = stored.rdg_password.clone();
+                        }
+                    }
+                }
                 options.credentials = credentials_from_store(
                     kind,
                     stored,

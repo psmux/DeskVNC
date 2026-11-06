@@ -79,6 +79,7 @@ pub mod input;
 pub mod io;
 pub mod mcs;
 pub mod rdp;
+pub mod tsgu;
 pub mod update;
 pub mod vc;
 pub mod x224;

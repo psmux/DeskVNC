@@ -76,7 +76,7 @@ interface HostsContextValue {
    */
   saveRdpCredentials: (
     hostId: string,
-    creds: { user: string; domain: string; password: string },
+    creds: { user: string; domain: string; password: string; gatewayPassword?: string },
   ) => Promise<void>;
   deletePassword: (hostId: string) => Promise<void>;
   wakeHost: (hostId: string) => Promise<void>;
@@ -482,7 +482,7 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
   const saveRdpCredentials = useCallback(
     async (
       hostId: string,
-      creds: { user: string; domain: string; password: string },
+      creds: { user: string; domain: string; password: string; gatewayPassword?: string },
     ): Promise<void> => {
       // Only non-empty fields are sent: `save_password` fills in rather than
       // overwrites, so an empty box in the editor means "keep what is
@@ -491,6 +491,7 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
       if (creds.user.trim()) payload.rdpUser = creds.user.trim();
       if (creds.domain.trim()) payload.rdpDomain = creds.domain.trim();
       if (creds.password) payload.rdpPassword = creds.password;
+      if (creds.gatewayPassword) payload.rdgPassword = creds.gatewayPassword;
       if (Object.keys(payload).length === 0) return;
       await safeInvoke("save_password", { hostId, creds: payload }, null);
       if (payload.rdpPassword) {

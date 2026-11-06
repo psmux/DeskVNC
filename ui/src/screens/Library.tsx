@@ -846,6 +846,7 @@ export function Library({
             user: draft.rdpUser,
             domain: draft.rdpDomain,
             password: draft.password,
+            gatewayPassword: draft.rdgPassword,
           });
         } else if (draft.protocol === "ssh") {
           // `save_password` (Rust) already carries `sshUser` / `sshPassword`
