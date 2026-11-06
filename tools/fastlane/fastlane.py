@@ -94,7 +94,7 @@ class Dvv:
     """DeskVNC's MCP server over stdio: the hands."""
 
     def __init__(self, binary, host_id):
-        self.p = subprocess.Popen([binary, "mcp", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.p = subprocess.Popen([binary, "mcp", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
         self.n = 0
         self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fastlane", "version": "1"}})
         card = self.call("dvv_open", hostId=host_id, perceive=True)
@@ -614,5 +614,5 @@ def goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True)
-    plan = json.load(open(ap.parse_args().plan))
+    plan = json.load(open(ap.parse_args().plan, encoding="utf-8"))
     print(json.dumps(run(plan), indent=1))
