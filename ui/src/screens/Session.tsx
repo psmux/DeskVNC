@@ -39,7 +39,8 @@ import { emit } from "@tauri-apps/api/event";
 import { EDIT_HOST_EVENT } from "../lib/editHost";
 import { Dialog } from "../components/primitives";
 import { candidateSeams, detectVerticalSeam } from "../render/seams";
-import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import type { QualityPreset, ScalingMode, SessionState, SshTunnelSettings } from "../lib/types";
+import { parseSshTunnel, sideChannelLogin } from "../lib/types";
 import {
   buildDisplayOptions,
   displayLabel,
@@ -1371,19 +1372,44 @@ function SessionView({
   const filesRef = useRef(files);
   filesRef.current = files;
 
+  // The SSH identity saved on the profile (its tunnel settings), which the
+  // Files panel and the terminal sign in with. `undefined` while it loads.
+  const [tunnel, setTunnel] = useState<SshTunnelSettings | null | undefined>(
+    params.profileId ? undefined : null,
+  );
+  useEffect(() => {
+    const id = params.profileId;
+    if (!id || params.protocol === "ssh") {
+      setTunnel(null);
+      return;
+    }
+    let cancelled = false;
+    void safeInvoke<{ sshTunnel?: string | null } | null>("get_host", { hostId: id }, null).then(
+      (host) => {
+        if (!cancelled) setTunnel(parseSshTunnel(host?.sshTunnel ?? null));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [params.profileId, params.protocol]);
+  const login = useMemo(
+    () => (tunnel === undefined ? null : sideChannelLogin(params.address ?? "", tunnel)),
+    [params.address, tunnel],
+  );
+
   // Capability probe (PRD/08 §2.1), quiet: a closed port is the normal case
   // for a Windows box without OpenSSH Server, not an error worth a toast.
   useEffect(() => {
-    if (!params.address || session.state.state !== "connected") return;
+    if (!login?.host || session.state.state !== "connected") return;
     let cancelled = false;
-    void filesProbe(params.address, 22).then((ok) => {
+    void filesProbe(login.host, login.port).then((ok) => {
       if (!cancelled) setSshAvailable(ok);
     });
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.address, session.state.state]);
+  }, [login, session.state.state]);
 
   /** Where a drop lands: whatever the remote pane shows, else the remote home. */
   const dropDir = useCallback((): string => {
@@ -1396,18 +1422,19 @@ function SessionView({
   /** Open the sidecar on demand; safe to call repeatedly. */
   const ensureFilesConnected = useCallback((): void => {
     const api = filesRef.current;
-    if (!params.address) return;
+    if (!login?.host) return;
     if (api.conn.state !== "idle" && api.conn.state !== "error") return;
     void api.connect({
-      host: params.address,
-      port: 22,
+      host: login.host,
+      port: login.port,
       // Empty means "the same user as here"; Rust fills it in and loads any
       // stored passphrase from the keychain. Secrets never travel through JS.
-      username: "",
-      auth: "stored",
+      username: login.username,
+      auth: login.auth,
+      keyPath: login.keyPath,
       profileId: params.profileId,
     });
-  }, [params.address, params.profileId]);
+  }, [login, params.profileId]);
 
   useEffect(() => {
     if (filesOpen) ensureFilesConnected();
@@ -1424,14 +1451,15 @@ function SessionView({
    */
   const sshTerminalConfig = useMemo<SshConnectConfig>(
     () => ({
-      host: params.address ?? "",
-      port: 22,
-      username: "",
-      auth: "stored",
+      host: login?.host ?? params.address ?? "",
+      port: login?.port ?? 22,
+      username: login?.username ?? "",
+      auth: login?.auth ?? "stored",
+      keyPath: login?.keyPath ?? null,
       profileId: params.profileId,
       multiplexer: { kind: "tmux", sessionName: "deskvnc", fallbackToShell: true },
     }),
-    [params.address, params.profileId],
+    [login, params.address, params.profileId],
   );
 
   /**
