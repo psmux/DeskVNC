@@ -27,6 +27,12 @@ impl Desktop for Fake {
     fn release(&mut self) {}
 }
 
+/// iroh on Windows does not complete a loopback path, as the unattended
+/// tests say, so there these run only when asked for.
+fn skipped() -> bool {
+    cfg!(windows) && std::env::var_os("BOUNDARY_LAN_TESTS").is_none()
+}
+
 /// Loopback only: nothing listens on the network, so no firewall asks.
 fn loopback() -> HostOptions {
     HostOptions {
@@ -77,6 +83,9 @@ fn helper(ticket: &str, name: &str) -> Session {
 /// prompt and did not take the second knock until it was answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_helper_hears_while_the_first_waits_for_approval() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
         let ticket = invitation(&mut host).await;
@@ -110,6 +119,9 @@ async fn a_second_helper_hears_while_the_first_waits_for_approval() {
 /// five seconds the host waited on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_knock_that_never_says_hello_does_not_hold_up_the_next() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
         let ticket = invitation(&mut host).await;
@@ -154,6 +166,9 @@ async fn a_knock_that_never_says_hello_does_not_hold_up_the_next() {
 /// it, and the next helper gets a prompt of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prompt_goes_away_with_its_helper_and_the_next_gets_its_own() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
         let ticket = invitation(&mut host).await;
@@ -183,6 +198,9 @@ async fn a_prompt_goes_away_with_its_helper_and_the_next_gets_its_own() {
 /// connection in the same breath, and the close won.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_helper_nobody_answers_hears_why() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(120), async {
         let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
         let ticket = invitation(&mut host).await;
@@ -204,6 +222,9 @@ async fn a_helper_nobody_answers_hears_why() {
 /// A helper the person turns down hears that they did, every time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_helper_the_person_declines_hears_so() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
         let ticket = invitation(&mut host).await;
@@ -224,6 +245,9 @@ async fn a_helper_the_person_declines_hears_so() {
 /// then used to wait with no answer until the session ended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_helper_who_knocks_during_a_session_hears_it_is_in_use() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
         let ticket = invitation(&mut host).await;
@@ -331,6 +355,9 @@ impl Drop for Unattended {
 /// had nothing to do with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unattended_computer_lets_a_paired_helper_in_while_it_asks_about_another() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = listening("asking").await;
         let mut stranger = host.stranger("Stranger");
@@ -370,6 +397,9 @@ async fn an_unattended_computer_lets_a_paired_helper_in_while_it_asks_about_anot
 /// question standing for a minute, with nobody behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unattended_question_goes_away_with_its_helper() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = listening("leaving").await;
         let stranger = host.stranger("Stranger");
@@ -393,6 +423,9 @@ async fn an_unattended_question_goes_away_with_its_helper() {
 /// A connection that never knocks held up the paired helper behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unattended_knock_that_says_nothing_does_not_hold_up_the_next() {
+    if skipped() {
+        return;
+    }
     timeout(Duration::from_secs(60), async {
         let mut host = listening("silent").await;
         let silent = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
