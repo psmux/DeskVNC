@@ -216,13 +216,18 @@ impl StaticChannels {
     /// by reactivating, while a server that never reactivates kept working
     /// (issue #9). Should a server restart its clipboard anyway, its new
     /// Monitor Ready is answered as the first one was.
+    ///
+    /// The `drdynvc` multiplexer is kept for the same reason (issue #26): the
+    /// negotiated version and every open dynamic channel belong to the MCS
+    /// channel, not to the share. Windows does not repeat the drdynvc
+    /// capability exchange after a reactivation and does not open its
+    /// channels again, so a multiplexer that forgot them refused the next
+    /// Create Request as a protocol violation and held every later resize
+    /// for a display control channel the server still thought was open.
     pub fn reset(&mut self) {
         for entry in &mut self.entries {
             match &mut entry.handler {
-                Handler::Dvc(mux) => {
-                    entry.reassembler.reset();
-                    mux.reset();
-                }
+                Handler::Dvc(_) => entry.reassembler.reset(),
                 Handler::Cliprdr(_) => {}
             }
         }
@@ -639,6 +644,128 @@ mod tests {
             .clipboard_text("after", ctx(), &mut out)
             .expect("offer");
         assert_eq!(clip_types(&out), [msg_type::FORMAT_LIST]);
+    }
+
+    /// One drdynvc PDU from the server as a single static channel chunk.
+    fn dvc_chunk(pdu: &rdp_pdu::vc::dvc::DvcPdu<'_>) -> Vec<u8> {
+        use rdp_pdu::vc::static_vc::channel_flags;
+
+        let mut body = Vec::new();
+        pdu.encode_checked(&mut Writer::new(&mut body))
+            .expect("encodes");
+        let mut out = Vec::new();
+        ChannelPduHeader {
+            length: u32::try_from(body.len()).expect("small"),
+            flags: channel_flags::FIRST | channel_flags::LAST,
+        }
+        .encode(&mut Writer::new(&mut out))
+        .expect("encodes");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// The drdynvc capability exchange, then the display control channel
+    /// opened as `channel_id` and its capabilities, the way Windows Server
+    /// 2025 opens it a second or so into the session.
+    fn with_display_channel(channel_id: u32) -> StaticChannels {
+        use crate::channels::display::DISPLAY_CHANNEL_NAME;
+        use rdp_pdu::io::Payload;
+        use rdp_pdu::vc::dvc::{dvc_version, DvcPdu};
+
+        let mut channels = StaticChannels::new(&map());
+        let mut out = Outbox::new();
+        for pdu in [
+            DvcPdu::Capabilities {
+                version: dvc_version::V3,
+                priority_charges: Some([0, 0, 0, 0]),
+            },
+            DvcPdu::CreateRequest {
+                channel_id,
+                channel_name: DISPLAY_CHANNEL_NAME.to_owned(),
+            },
+        ] {
+            channels
+                .deliver(1004, &dvc_chunk(&pdu), ctx(), &mut out)
+                .expect("opened");
+        }
+        // DISPLAYCONTROL_CAPS_PDU: 16 monitors of 8192 by 8192, the numbers
+        // Windows Server 2025 sends (MS-RDPEDISP 2.2.2.1).
+        let mut caps = Vec::new();
+        let mut w = Writer::new(&mut caps);
+        for v in [0x0000_0005_u32, 20, 16, 8192, 8192] {
+            w.u32(v);
+        }
+        let data = DvcPdu::Data {
+            channel_id,
+            data: Payload::new(&caps),
+            compressed: false,
+        };
+        channels
+            .deliver(1004, &dvc_chunk(&data), ctx(), &mut out)
+            .expect("capabilities");
+        channels
+    }
+
+    /// The `cmd` nibble of every drdynvc frame queued.
+    fn dvc_cmds(out: &Outbox) -> Vec<u8> {
+        out.frames
+            .iter()
+            .map(|f| crate::channels::dvc::unwrap_channel_frame(f)[0] >> 4)
+            .collect()
+    }
+
+    /// A dynamic channel the server opens after a reactivation is answered,
+    /// not treated as a protocol violation (issue #26).
+    ///
+    /// Windows Server 2025 answers a display control layout with a
+    /// Deactivation Reactivation Sequence. The drdynvc static channel is an
+    /// MCS channel and lives through it (MS-RDPBCGR 1.3.1.3), so the server
+    /// does not repeat the drdynvc capability exchange: measured against a
+    /// build 26100 server, nothing at all arrives on drdynvc between the
+    /// Deactivate All and the next Create Request. Forgetting the version at
+    /// the deactivation turned that Create Request into "opened a dynamic
+    /// channel before the drdynvc capability exchange" and ended the session.
+    #[test]
+    fn a_reset_keeps_the_drdynvc_version() {
+        use rdp_pdu::vc::dvc::{cmd, DvcPdu};
+
+        let mut channels = with_display_channel(10);
+        channels.reset();
+
+        let mut out = Outbox::new();
+        channels
+            .deliver(
+                1004,
+                &dvc_chunk(&DvcPdu::CreateRequest {
+                    channel_id: 11,
+                    channel_name: "Microsoft::Windows::RDS::Geometry::v08.01".to_owned(),
+                }),
+                ctx(),
+                &mut out,
+            )
+            .expect("a channel opened after the reactivation is answered");
+        assert_eq!(dvc_cmds(&out), [cmd::CREATE], "a creation status");
+    }
+
+    /// The display control channel stays open through a reactivation, so a
+    /// size asked for afterwards goes out on it at once (issue #26).
+    ///
+    /// The server keeps the channel and does not open it again, so a
+    /// multiplexer that forgot it held every later resize for a channel that
+    /// was never coming, and the session stayed at whatever size the
+    /// reactivation left it.
+    #[test]
+    fn a_reset_keeps_the_display_channel_open() {
+        use rdp_pdu::vc::dvc::cmd;
+
+        let mut channels = with_display_channel(10);
+        channels.reset();
+
+        let mut out = Outbox::new();
+        channels
+            .resize(1920, 1080, 100, ctx(), &mut out)
+            .expect("resize");
+        assert_eq!(dvc_cmds(&out), [cmd::DATA], "the layout went out");
     }
 
     /// A clipboard payload larger than one chunk, split the way Windows
