@@ -2,7 +2,11 @@
 //!
 //! The application holds the sessions and the passwords, so an agent can do
 //! nothing without it. Asking the person to open it first was one more step
-//! between installing an agent and using it, so `dvv` opens it instead.
+//! between installing an agent and using it, so `dvv` opens it instead, but
+//! only when an agent asks for something the app alone has: the saved
+//! machines (`dvv_hosts`) or a machine opened (`dvv_open`, `dvv_group_open`).
+//! Starting `dvv mcp`, `initialize`, `tools/list` and listing limbs never start
+//! it (`plane::Need`), and `DVV_NO_START=1` turns starting it off altogether.
 //!
 //! Where it looks, in order: the path the app recorded the last time it ran;
 //! beside this `dvv`, which is where every installer
@@ -30,14 +34,20 @@ const APP_FILE: &str = if cfg!(windows) {
     "deskvncviewer"
 };
 
-/// Start DeskVNCViewer. `true` when something was started; whether its plane
-/// comes up is the caller's to wait for.
+/// What the app is started with: its window comes up minimised and does not
+/// take focus from what the person is doing (`src-tauri/src/lib.rs`, the same
+/// flag sign in autostart uses). An agent asked for a machine, not for the
+/// person to look at the library.
+const BACKGROUND: &str = "--background";
+
+/// Start DeskVNCViewer in the background. `true` when something was started;
+/// whether its plane comes up is the caller's to wait for.
 pub fn start_app() -> bool {
     #[cfg(target_os = "macos")]
     {
         detached(
             Command::new("open")
-                .args(["-g", "-b", BUNDLE_ID])
+                .args(["-g", "-b", BUNDLE_ID, "--args", BACKGROUND])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
         )
@@ -48,6 +58,7 @@ pub fn start_app() -> bool {
             return false;
         };
         let mut command = Command::new(app);
+        command.arg(BACKGROUND);
         // What the app says while starting goes to a file rather than
         // nowhere: an app that will not start is otherwise a thirty second
         // wait and a sentence with no reason in it.
