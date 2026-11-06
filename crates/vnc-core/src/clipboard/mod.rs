@@ -10,12 +10,11 @@
 //! The length field is a SIGNED i32: positive = legacy Latin-1 text,
 //! negative = an extended-clipboard message of `abs(length)` bytes.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
+use flate2::{Compress, Compression, FlushCompress};
 
 // ---------------------------------------------------------------------------
 // Flag constants (extended clipboard, PRD/07 §1.2)
@@ -243,6 +242,12 @@ pub fn encode_request(formats: u32) -> Vec<u8> {
 /// Build an extended-clipboard `provide` carrying text. The payload is a
 /// zlib stream of `u32 size + data` per format in flag order; text data is
 /// UTF-8 with CRLF line endings and a trailing NUL.
+///
+/// The stream is sync flushed and never finished, the way TigerVNC's own
+/// client writes it. libvncserver (x11vnc, krfb and others) inflates each
+/// format expecting `Z_OK` and treats `Z_STREAM_END` as an error, so a
+/// finished stream made it drop the connection on the first clipboard push,
+/// and since every reconnect pushes the clipboard again it never stayed up.
 pub fn encode_provide_text(text: &str) -> Vec<u8> {
     let mut data = lf_to_crlf(&crlf_to_lf(text)).into_bytes();
     data.push(0);
@@ -251,12 +256,23 @@ pub fn encode_provide_text(text: &str) -> Vec<u8> {
     raw.extend_from_slice(&(data.len() as u32).to_be_bytes());
     raw.extend_from_slice(&data);
 
-    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-    // Writing to a Vec cannot fail.
-    let _ = enc.write_all(&raw);
-    let compressed = enc.finish().unwrap_or_default();
+    frame_extended(ACTION_PROVIDE | FORMAT_TEXT, &zlib_sync_flushed(&raw))
+}
 
-    frame_extended(ACTION_PROVIDE | FORMAT_TEXT, &compressed)
+/// One zlib stream holding `raw`, ended with a sync flush and no trailer.
+fn zlib_sync_flushed(raw: &[u8]) -> Vec<u8> {
+    let mut z = Compress::new(Compression::default(), true);
+    let mut out = Vec::with_capacity(raw.len() + 64);
+    loop {
+        let consumed = z.total_in() as usize;
+        // Compressing into a Vec cannot fail; the room left over is how a
+        // finished flush is told apart from one that ran out of space.
+        let _ = z.compress_vec(&raw[consumed..], &mut out, FlushCompress::Sync);
+        if z.total_in() as usize == raw.len() && out.len() < out.capacity() {
+            return out;
+        }
+        out.reserve(out.capacity().max(64));
+    }
 }
 
 /// Our capabilities announcement: text + rtf + html accepted, with every
@@ -317,6 +333,8 @@ fn to_latin1(s: &str) -> (Vec<u8>, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
 
     fn legacy_server_msg(text: &[u8]) -> Vec<u8> {
         let mut v = vec![0, 0, 0];
@@ -370,6 +388,48 @@ mod tests {
         let got = handle_server_cut_text(&mut state, &msg);
         assert_eq!(got.as_deref(), Some("héllo 😀\nsecond line"));
         assert!(state.extended_supported());
+    }
+
+    #[test]
+    fn provide_inflates_the_way_libvncserver_reads_it() {
+        // libvncserver 0.9.14, rfbProcessExtendedServerCutTextData: inflate
+        // four bytes of size, then `size` bytes of data, and anything but
+        // Z_OK from either call closes the client.
+        use flate2::{Decompress, FlushDecompress, Status};
+        for text in [
+            "a",
+            "push-to-x11vnc-1794007296",
+            &"long line
+"
+            .repeat(5000),
+        ] {
+            let msg = encode_provide_text(text);
+            let compressed = &msg[11..];
+            let mut z = Decompress::new(true);
+            let mut size = [0u8; 4];
+            let status = z
+                .decompress(compressed, &mut size, FlushDecompress::None)
+                .unwrap();
+            assert_eq!(status, Status::Ok, "size read for {} bytes", text.len());
+            let size = u32::from_be_bytes(size) as usize;
+            let mut data = vec![0u8; size];
+            let mut got = 0;
+            while got < size {
+                let before_out = z.total_out();
+                let before_in = z.total_in() as usize;
+                let status = z
+                    .decompress(
+                        &compressed[before_in..],
+                        &mut data[got..],
+                        FlushDecompress::None,
+                    )
+                    .unwrap();
+                assert_eq!(status, Status::Ok, "data read for {} bytes", text.len());
+                got += (z.total_out() - before_out) as usize;
+            }
+            assert_eq!(&data[..size - 1], lf_to_crlf(text).as_bytes());
+            assert_eq!(data[size - 1], 0);
+        }
     }
 
     #[test]
