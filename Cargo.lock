@@ -7769,6 +7769,7 @@ dependencies = [
 name = "rdp-core"
 version = "0.33.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "futures",
  "hex",
@@ -7777,11 +7778,13 @@ dependencies = [
  "md-5",
  "num-bigint-dig",
  "parking_lot",
+ "rand 0.10.2",
  "rdp-auth",
  "rdp-codecs",
  "rdp-pdu",
  "remote-core",
  "serde",
+ "sha1 0.10.7",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",

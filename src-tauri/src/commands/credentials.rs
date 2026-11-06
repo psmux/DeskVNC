@@ -140,6 +140,7 @@ fn merge_dialog_write(creds: StoredCredentials, existing: StoredCredentials) -> 
         rdp_password: creds.rdp_password.or(existing.rdp_password),
         ssh_user: creds.ssh_user.or(existing.ssh_user),
         ssh_password: creds.ssh_password.or(existing.ssh_password),
+        rdg_password: creds.rdg_password.or(existing.rdg_password),
     }
 }
 

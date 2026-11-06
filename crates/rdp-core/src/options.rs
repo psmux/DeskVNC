@@ -54,9 +54,15 @@ pub enum OptionsError {
     #[error("no host name")]
     NoHost,
 
+    /// The profile asks for an RD Gateway and does not say where it is.
+    /// Refused rather than dialling the server directly, which is the
+    /// connection the gateway setting exists to prevent.
+    #[error("the RD Gateway has no host name")]
+    NoGatewayHost,
+
     /// A phase 3 feature the profile asked for. Rejecting it with a message
     /// is the alternative to silently making a direct connection the user did
-    /// not ask for ([`RdpOptions::gateway`] says so on the field).
+    /// not ask for.
     #[error("{0} is not implemented yet")]
     NotImplemented(&'static str),
 }
@@ -186,8 +192,12 @@ impl ResolvedOptions {
         if host.is_empty() {
             return Err(OptionsError::NoHost);
         }
-        if rdp.gateway.is_some() {
-            return Err(OptionsError::NotImplemented("RD Gateway (MS-TSGU)"));
+        if rdp
+            .gateway
+            .as_ref()
+            .is_some_and(|g| g.host.trim().is_empty())
+        {
+            return Err(OptionsError::NoGatewayHost);
         }
         if rdp.kdc_proxy_url.is_some() {
             return Err(OptionsError::NotImplemented("the KDC proxy (MS-KKDCP)"));
@@ -552,14 +562,18 @@ mod tests {
         assert!(off.channels.contains(&CHANNEL_DRDYNVC));
     }
 
-    /// A phase 3 feature the profile asked for fails with a message rather
-    /// than silently making a direct connection.
+    /// A gateway profile resolves now that the transport exists, and one
+    /// with no gateway host fails with a message rather than silently making
+    /// the direct connection the setting exists to prevent.
     #[test]
-    fn a_gateway_profile_is_refused_rather_than_ignored() {
+    fn a_gateway_profile_resolves_and_one_without_a_host_is_refused() {
         let (opts, mut rdp) = options();
-        rdp.gateway = Some(remote_core::GatewayOptions::default());
+        rdp.gateway = Some(remote_core::GatewayOptions::new("gw.example"));
         let mut warnings = Vec::new();
-        let err = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect_err("phase 3");
+        assert!(ResolvedOptions::resolve(&opts, &rdp, &mut warnings).is_ok());
+
+        rdp.gateway = Some(remote_core::GatewayOptions::default());
+        let err = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect_err("no host");
         assert!(err.to_string().contains("Gateway"), "{err}");
     }
 

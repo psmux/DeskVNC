@@ -46,6 +46,9 @@ pub enum ConnectStage {
     Resolving,
     /// TCP connect, or the injected connector's dial.
     Dialling,
+    /// Signing in to an RD Gateway and opening the tunnel through it
+    /// (MS-TSGU 3.3.5.1 and 3.7.5).
+    Gateway,
     /// X.224 Connection Request with `RDP_NEG_REQ` (MS-RDPBCGR 2.2.1.1,
     /// 2.2.1.1.1).
     SendConnectionRequest,
@@ -95,6 +98,7 @@ impl ConnectStage {
     pub const ALL: &'static [ConnectStage] = &[
         ConnectStage::Resolving,
         ConnectStage::Dialling,
+        ConnectStage::Gateway,
         ConnectStage::SendConnectionRequest,
         ConnectStage::AwaitConnectionConfirm,
         ConnectStage::SecurityUpgrade,
@@ -119,6 +123,7 @@ impl ConnectStage {
         match self {
             ConnectStage::Resolving => "resolving",
             ConnectStage::Dialling => "dialling",
+            ConnectStage::Gateway => "rd-gateway",
             ConnectStage::SendConnectionRequest => "x224-connection-request",
             ConnectStage::AwaitConnectionConfirm => "x224-connection-confirm",
             ConnectStage::SecurityUpgrade => "security-upgrade",
@@ -144,6 +149,7 @@ impl ConnectStage {
     pub const fn spec(self) -> &'static str {
         match self {
             ConnectStage::Resolving | ConnectStage::Dialling => "MS-RDPBCGR 2.2.1.1 (TCP 3389)",
+            ConnectStage::Gateway => "MS-TSGU 3.3.5.1",
             ConnectStage::SendConnectionRequest => "MS-RDPBCGR 2.2.1.1",
             ConnectStage::AwaitConnectionConfirm => "MS-RDPBCGR 2.2.1.2",
             ConnectStage::SecurityUpgrade => "MS-RDPBCGR 5.4.5.1",
@@ -175,6 +181,7 @@ impl ConnectStage {
         match self {
             ConnectStage::Resolving => SessionState::Resolving,
             ConnectStage::Dialling
+            | ConnectStage::Gateway
             | ConnectStage::SendConnectionRequest
             | ConnectStage::AwaitConnectionConfirm
             | ConnectStage::SecurityUpgrade => SessionState::Connecting,
@@ -401,6 +408,13 @@ pub enum RdpError {
     /// than looping.
     #[error("{0}")]
     Redirected(Box<crate::session::redirect::Redirection>),
+
+    /// The RD Gateway refused to carry the connection, or ended it. The
+    /// message names what it refused and, when it sent one, the MS-TSGU
+    /// error code. Never retried on its own: a resource authorization policy
+    /// that said no will say no again.
+    #[error("the RD Gateway {0}")]
+    Gateway(String),
 
     /// The session was cancelled, or the shell dropped the event sink.
     #[error("session cancelled by user")]

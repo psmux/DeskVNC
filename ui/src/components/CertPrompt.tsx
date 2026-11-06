@@ -98,7 +98,11 @@ export function CertPrompt({
 
   return (
     <Dialog
-      title={`Verify ${data.hostName}`}
+      title={
+        data.scheme === "rdg-tls"
+          ? `Verify the RD Gateway for ${data.hostName}`
+          : `Verify ${data.hostName}`
+      }
       onClose={onCancel}
       width={560}
       initialFocusSelector="[data-cancel]"
@@ -109,7 +113,14 @@ export function CertPrompt({
             <IconLock size={20} />
           </span>
           <p className="text-sm text-secondary">
-            {data.scheme === "rdp-tls" ? (
+            {data.scheme === "rdg-tls" ? (
+              <>
+                This connection goes through an RD Gateway, and this is the
+                certificate the gateway presented. Your password is sent to the
+                gateway once you trust it, so check the fingerprint with whoever
+                runs the gateway if it is not signed by an authority you know.
+              </>
+            ) : data.scheme === "rdp-tls" ? (
               <>
                 Windows Remote Desktop normally identifies itself with a certificate
                 it generated for itself, so on a fresh machine there is nothing to

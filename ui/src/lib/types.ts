@@ -366,6 +366,9 @@ export interface StoredCredentials {
   rdpUser?: string | null;
   rdpDomain?: string | null;
   rdpPassword?: string | null;
+  /** The RD Gateway account's password, for a gateway that signs in with an
+   *  account of its own. */
+  rdgPassword?: string | null;
 }
 
 /** Where secrets live; mirrors `vnc_store::CredentialBackend`. */
@@ -522,7 +525,7 @@ export function hostMac(host: { mac?: string | null } | null | undefined): strin
  * answer must carry the same value back untouched. This never reaches the
  * user; it is routing, not copy.
  */
-export type PinScheme = "tls" | "ra2" | "rdp-tls";
+export type PinScheme = "tls" | "ra2" | "rdp-tls" | "rdg-tls";
 
 /** SessionState mirrors the serde repr: tag = "state", kebab-case. */
 export type SessionState =
