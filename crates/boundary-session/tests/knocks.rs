@@ -3,7 +3,11 @@
 //! something, nobody waits behind another's knock, and a prompt goes away
 //! when its helper does.
 
-use boundary_session::{Approval, Desktop, Event, Frame, HostOptions, Input, Invitation, Session};
+use boundary_session::{
+    Approval, Desktop, Event, Frame, HostOptions, Input, Invitation, Session,
+    unattended::{self, Access, Asked, Notice},
+};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -59,18 +63,6 @@ async fn outcome(helper: &mut Session) -> Result<(), String> {
             Some(Event::Connected { .. }) => return Ok(()),
             Some(Event::Finished(Err(error))) => return Err(format!("{error:#}")),
             Some(Event::Finished(Ok(()))) | None => return Err("ended without a word".into()),
-            _ => {}
-        }
-    }
-}
-
-/// Until it is waiting to be approved, which means its hello is sent.
-async fn waiting(helper: &mut Session) {
-    loop {
-        match helper.events.recv().await {
-            Some(Event::Status(status)) if status.contains("approve") => return,
-            Some(Event::Finished(result)) => panic!("the helper stopped: {result:?}"),
-            None => panic!("the helper went quiet"),
             _ => {}
         }
     }
@@ -181,6 +173,255 @@ async fn a_prompt_goes_away_with_its_helper_and_the_next_gets_its_own() {
         let _ = answer.send(Approval::View);
         assert_eq!(outcome(&mut second).await, Ok(()));
         host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// Nobody answering used to end with the helper reading "Session ended
+/// (code 0)" after a minute: the host wrote its refusal and closed the
+/// connection in the same breath, and the close won.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_nobody_answers_hears_why() {
+    timeout(Duration::from_secs(120), async {
+        let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
+        let ticket = invitation(&mut host).await;
+        let mut first = helper(&ticket, "First");
+        let (_, answer) = prompt(&mut host).await;
+        let heard = outcome(&mut first).await;
+        let refusal = heard.expect_err("let in with nobody asked");
+        assert!(
+            refusal.contains("Nobody answered"),
+            "the helper should hear that nobody answered: {refusal}"
+        );
+        drop(answer);
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A helper the person turns down hears that they did, every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_the_person_declines_hears_so() {
+    timeout(Duration::from_secs(60), async {
+        let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
+        let ticket = invitation(&mut host).await;
+        for _ in 0..5 {
+            let mut first = helper(&ticket, "First");
+            let (_, answer) = prompt(&mut host).await;
+            let _ = answer.send(Approval::Deny);
+            let refusal = outcome(&mut first).await.expect_err("let in when declined");
+            assert!(refusal.contains("declined"), "{refusal}");
+        }
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// Once a helper is in, the invitation is spent. A helper who knocks with it
+/// then used to wait with no answer until the session ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_who_knocks_during_a_session_hears_it_is_in_use() {
+    timeout(Duration::from_secs(60), async {
+        let mut host = boundary_session::host(loopback(), || Ok(Box::new(Fake)));
+        let ticket = invitation(&mut host).await;
+        let mut first = helper(&ticket, "First");
+        let (_, answer) = prompt(&mut host).await;
+        let _ = answer.send(Approval::View);
+        assert_eq!(outcome(&mut first).await, Ok(()));
+
+        let mut late = helper(&ticket, "Late");
+        let heard = timeout(Duration::from_secs(10), outcome(&mut late))
+            .await
+            .expect("the late helper heard nothing for ten seconds");
+        let refusal = heard.expect_err("a second helper got into a spent invitation");
+        assert!(refusal.contains("already in use"), "{refusal}");
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+// Unattended: the same, for a computer listening for paired helpers.
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "boundary-knocks-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+struct Unattended {
+    listener: unattended::Listener,
+    address: iroh::EndpointAddr,
+    paired: iroh::SecretKey,
+    dir: PathBuf,
+}
+async fn listening(name: &str) -> Unattended {
+    let dir = scratch(name);
+    let machine = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+    let paired = unattended::load_or_create_key(&dir.join("paired.key")).unwrap();
+    let access_path = dir.join("access.json");
+    let mut access = Access::default();
+    access.enabled = true;
+    access
+        .trust(&paired.public().to_string(), "Paired", true)
+        .unwrap();
+    access.save(&access_path).unwrap();
+    let mut listener = unattended::listen(loopback(), machine, access_path, || Ok(Box::new(Fake)));
+    let address = loop {
+        match listener.notices.recv().await {
+            Some(Notice::Ready { address, .. }) => break address,
+            Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+            _ => {}
+        }
+    };
+    Unattended {
+        listener,
+        address,
+        paired,
+        dir,
+    }
+}
+impl Unattended {
+    fn visit(&self, name: &str, key: iroh::SecretKey) -> Session {
+        unattended::connect_to(Ok(self.address.clone()), name.into(), None, key, loopback())
+    }
+    fn stranger(&self, name: &str) -> Session {
+        self.visit(name, iroh::SecretKey::generate())
+    }
+    async fn asked(&mut self) -> (String, oneshot::Sender<Asked>) {
+        loop {
+            match self.listener.notices.recv().await {
+                Some(Notice::Ask { name, answer, .. }) => return (name, answer),
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                None => panic!("the listener went quiet"),
+                _ => {}
+            }
+        }
+    }
+    async fn connected(&mut self) -> (String, Session) {
+        loop {
+            match self.listener.notices.recv().await {
+                Some(Notice::Connected { name, session, .. }) => return (name, session),
+                Some(Notice::Refused { name, reason, .. }) => panic!("{name} refused: {reason}"),
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                None => panic!("the listener went quiet"),
+                _ => {}
+            }
+        }
+    }
+}
+impl Drop for Unattended {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// While the person was asked about a stranger, the computer took no other
+/// knock, so even a paired helper waited up to a minute for an answer that
+/// had nothing to do with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unattended_computer_lets_a_paired_helper_in_while_it_asks_about_another() {
+    timeout(Duration::from_secs(60), async {
+        let mut host = listening("asking").await;
+        let mut stranger = host.stranger("Stranger");
+        let (name, answer) = host.asked().await;
+        assert_eq!(name, "Stranger");
+
+        let start = Instant::now();
+        let mut paired = host.visit("Paired", host.paired.clone());
+        let (name, _held) = timeout(Duration::from_secs(10), host.connected())
+            .await
+            .expect("the paired helper waited behind the question");
+        assert_eq!(name, "Paired");
+        assert_eq!(outcome(&mut paired).await, Ok(()));
+        assert!(start.elapsed() < Duration::from_secs(5));
+
+        // A second stranger is told plainly that the person is busy.
+        let mut second = host.stranger("Second");
+        let heard = timeout(Duration::from_secs(10), outcome(&mut second))
+            .await
+            .expect("the second stranger heard nothing for ten seconds");
+        let refusal = heard.expect_err("let in with nobody asked");
+        assert!(refusal.contains("already"), "{refusal}");
+        assert!(!answer.is_closed(), "the first question still stands");
+
+        let _ = answer.send(Asked {
+            approval: Approval::View,
+            tools: false,
+            pair: false,
+        });
+        assert_eq!(outcome(&mut stranger).await, Ok(()));
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A stranger who left while the person was being asked about them left the
+/// question standing for a minute, with nobody behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unattended_question_goes_away_with_its_helper() {
+    timeout(Duration::from_secs(60), async {
+        let mut host = listening("leaving").await;
+        let stranger = host.stranger("Stranger");
+        let (_, mut answer) = host.asked().await;
+        stranger.stop();
+        drop(stranger);
+        timeout(Duration::from_secs(5), answer.closed())
+            .await
+            .expect("the question stayed after its helper left");
+
+        let _next = host.stranger("Next");
+        let (name, _answer) = timeout(Duration::from_secs(10), host.asked())
+            .await
+            .expect("no question about the next helper");
+        assert_eq!(name, "Next");
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A connection that never knocks held up the paired helper behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unattended_knock_that_says_nothing_does_not_hold_up_the_next() {
+    timeout(Duration::from_secs(60), async {
+        let mut host = listening("silent").await;
+        let silent = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_ip_transports()
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let quiet = silent
+            .connect(host.address.clone(), b"boundary/support-experimental/1")
+            .await
+            .expect("the silent helper connects");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let start = Instant::now();
+        let mut paired = host.visit("Paired", host.paired.clone());
+        let (_, _held) = timeout(Duration::from_secs(15), host.connected())
+            .await
+            .expect("the paired helper never got in");
+        let waited = start.elapsed();
+        assert!(
+            waited < Duration::from_secs(3),
+            "the paired helper waited {waited:?} behind a knock that said nothing"
+        );
+        assert_eq!(outcome(&mut paired).await, Ok(()));
+        drop(quiet);
+        silent.close().await;
     })
     .await
     .expect("timed out");
