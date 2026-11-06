@@ -142,7 +142,15 @@ export function CertPrompt({
   );
 }
 
-function FingerprintBlock({
+/**
+ * What the hex string is. Every pin in this app is the SHA-256 of the
+ * server's public key (the certificate's SubjectPublicKeyInfo), not of the
+ * whole certificate, so somebody comparing it against a certificate
+ * thumbprint has to be told which digest to compute or the two never match.
+ */
+export const FINGERPRINT_LABEL = "SHA-256 of the server's public key";
+
+export function FingerprintBlock({
   fingerprint,
   mnemonic,
   subject,
@@ -154,7 +162,8 @@ function FingerprintBlock({
   return (
     <div className="space-y-2 rounded-md bg-inset p-3.5">
       {subject ? <div className="text-xs text-secondary">{subject}</div> : null}
-      <div className="mono break-all text-xs leading-relaxed text-primary" aria-label="SHA-256 certificate fingerprint">
+      <div className="text-2xs text-tertiary">{FINGERPRINT_LABEL}</div>
+      <div className="mono break-all text-xs leading-relaxed text-primary" aria-label={FINGERPRINT_LABEL}>
         {formatFingerprint(fingerprint)}
       </div>
       {mnemonic ? (
