@@ -361,7 +361,7 @@ mod tests {
                 ip("fe80::14e0:7472:a527:8ab"),
                 ip("2001:db8:77::135"),
             ],
-            [Subnet::new(Ipv4Addr::new(192, 168, 77, 0), 24)],
+            [Subnet::new(Ipv4Addr::new(192, 168, 50, 0), 24)],
         )
     }
 
