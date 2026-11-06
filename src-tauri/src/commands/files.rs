@@ -1314,7 +1314,23 @@ mod tests {
     fn local_mutations_refuse_roots_and_relative_paths() {
         assert!(guard_local_path("relative/path").is_err());
         assert!(guard_local_path("/").is_err());
+        #[cfg(unix)]
         assert!(guard_local_path("/tmp/thing").is_ok());
+    }
+
+    /// On Windows a path is absolute only with a drive or a UNC share.
+    /// "\tmp\thing" and "C:thing" depend on the current drive or its current
+    /// directory, so a remove or rename must refuse them.
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_mutations_need_a_drive_or_share() {
+        assert!(guard_local_path(r"C:\tmp\thing").is_ok());
+        assert!(guard_local_path(r"\\server\share\thing").is_ok());
+        assert!(guard_local_path(r"\tmp\thing").is_err());
+        assert!(guard_local_path("/tmp/thing").is_err());
+        assert!(guard_local_path("C:thing").is_err());
+        assert!(guard_local_path(r"C:\").is_err());
+        assert!(guard_local_path(r"\\server\share\").is_err());
     }
 
     #[test]
