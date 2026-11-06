@@ -12,6 +12,22 @@
  * like a repeat, so it was skipped, and pasting on the remote gave nothing
  * until the user copied something new locally (issue #9).
  */
+/**
+ * One piece of text the remote put on its clipboard. Each arrival is a new
+ * value even when the text repeats: copying the same thing again on the
+ * remote, after copying something else locally, has to reach the local
+ * clipboard again, and a plain string state would compare equal and never
+ * re-run the effect that writes it.
+ */
+export interface RemoteClipboard {
+  text: string;
+  seq: number;
+}
+
+export function nextRemoteClipboard(prev: RemoteClipboard | null, text: string): RemoteClipboard {
+  return { text, seq: (prev?.seq ?? 0) + 1 };
+}
+
 export class ClipboardEcho {
   private last: string | null = null;
 
