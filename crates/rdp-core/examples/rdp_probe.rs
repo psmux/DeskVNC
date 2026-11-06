@@ -43,6 +43,12 @@ async fn main() {
     println!("connecting to {host}:{port} as {user}");
 
     let mut options = ConnectOptions::rdp(&host, port);
+    // `RDP_LICENSE_DIR=some/folder` keeps the client access licences an RD
+    // licence server issues there, the way the viewer keeps them in its data
+    // folder, so a second run presents the licence the first one was given.
+    if let Some(dir) = std::env::var_os("RDP_LICENSE_DIR").filter(|d| !d.is_empty()) {
+        options.rdp_mut().license_dir = Some(dir.into());
+    }
     // `RDP_SIZE=1920x1080` asks for a desktop of that size, the way a host
     // profile with a fixed resolution does. Without it the probe measures no
     // window, so the resolver falls back to the specification's own default.

@@ -354,6 +354,17 @@ pub struct RdpOptions {
     /// turns it on, and a host setting can follow once it has been.
     #[serde(skip)]
     pub graphics_pipeline: bool,
+
+    /// The folder the client access licences an RD licence server issues
+    /// are kept in, one file per server, with this installation's hardware
+    /// id beside them (MS-RDPELE 2.2.2.2, 2.2.2.3.1). The viewer points it at
+    /// its own data folder. `None` still completes the licensing exchange,
+    /// but the licence is asked for again on every connection.
+    ///
+    /// Not stored with the host: it is where this installation keeps its
+    /// files, not a setting of the remote computer.
+    #[serde(skip)]
+    pub license_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for RdpOptions {
@@ -381,6 +392,7 @@ impl Default for RdpOptions {
             desktop_scale_factor: 100,
             redirect_clipboard: true,
             graphics_pipeline: false,
+            license_dir: None,
         }
     }
 }

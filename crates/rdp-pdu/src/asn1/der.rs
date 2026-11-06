@@ -252,6 +252,22 @@ pub fn signature_algorithm_oid(cert: &[u8]) -> Option<&[u8]> {
     Some(oid)
 }
 
+/// The modulus and public exponent of an RSA `subjectPublicKey`, as the big
+/// endian content octets of their two `INTEGER`s (RFC 8017 A.1.1), sign byte
+/// included.
+///
+/// The algorithm OID is not checked. A Windows licence server's certificate
+/// names its key with OID 1.3.14.3.2.15 rather than rsaEncryption
+/// (MS-RDPELE 4.1), and what the key is for is decided by the protocol that
+/// asked for it, not by the label.
+#[must_use]
+pub fn rsa_public_key(cert: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (seq, _) = expect_tag(subject_public_key(cert)?, tag::SEQUENCE)?;
+    let (modulus, rest) = expect_tag(seq, tag::INTEGER)?;
+    let (exponent, _) = expect_tag(rest, tag::INTEGER)?;
+    Some((modulus, exponent))
+}
+
 /// The subject `CN=` value, for display in the trust prompt. Untrusted text:
 /// the caller must render it as plain text, never as markup.
 #[must_use]

@@ -28,7 +28,8 @@ use std::sync::Arc;
 use common::mock_rdp_server::{
     McsBehaviour, MockConfig, MockRdpServer, Negotiation, SessionBehaviour, BITMAP_AT,
     CF_UNICODETEXT, DISPLAY_DVC_CHANNEL_ID, EGFX_DRAW_AT, EGFX_DVC_CHANNEL_ID, EGFX_FRAME_ID,
-    EGFX_SURFACE_AT, IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, SERVER_DESKTOP, SHARE_ID, USER_CHANNEL_ID,
+    EGFX_SURFACE_AT, IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, MOCK_LICENCE, SERVER_DESKTOP, SHARE_ID,
+    USER_CHANNEL_ID,
 };
 use common::{options_for, rdp_half, DEFAULT_TIMEOUT};
 use rdp_core::connection::{self, Connected, SecurityProtocol};
@@ -55,9 +56,23 @@ async fn run_sequence(
     Vec<SessionEvent>,
     Result<Connected, RdpError>,
 ) {
-    let server = MockRdpServer::start(config).await;
+    run_sequence_against(MockRdpServer::start(config).await, creds, None).await
+}
+
+/// [`run_sequence`] against a server that is already up, with licences kept
+/// in `license_dir`, so two runs can be two connections to one server.
+async fn run_sequence_against(
+    server: MockRdpServer,
+    creds: Credentials,
+    license_dir: Option<&std::path::Path>,
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<Connected, RdpError>,
+) {
     let mut options = options_for(server.addr);
     options.credentials = creds;
+    options.rdp_mut().license_dir = license_dir.map(std::path::Path::to_path_buf);
     let rdp = rdp_half(&options);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
@@ -273,6 +288,63 @@ async fn a_refused_licence_stops_with_a_sentence() {
         }
         other => panic!("expected a licensing refusal, got {other:?}"),
     }
+}
+
+/// Issue #25: an RD Session Host with a licence server sends a
+/// `LICENSE_REQUEST`, and the client used to decline it, which a Per Device
+/// host lets through with no licence and a sixty minute warning. The client
+/// now completes the exchange: a `NEW_LICENSE_REQUEST` and a challenge
+/// response on the first connection, the licence stored, and that licence
+/// presented in a `LICENSE_INFO` on the second.
+#[tokio::test]
+async fn a_licence_server_issues_a_licence_that_is_presented_next_time() {
+    use rdp_pdu::rdp::license::message_type;
+
+    let dir = std::env::temp_dir().join(format!("rdp-core-licence-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = || MockConfig {
+        session: SessionBehaviour::IssueLicence,
+        ..MockConfig::default()
+    };
+
+    let (server, _, result) = run_sequence_against(
+        MockRdpServer::start(config()).await,
+        Credentials::user_pass("alice", "pw"),
+        Some(&dir),
+    )
+    .await;
+    let connected = result.expect("the licensing exchange completed");
+    assert_eq!(connected.activation.share_id, SHARE_ID);
+    assert_eq!(
+        server.recorded().licensing,
+        [
+            message_type::NEW_LICENSE_REQUEST,
+            message_type::PLATFORM_CHALLENGE_RESPONSE
+        ]
+    );
+    let stored: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the licence folder exists")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(stored.iter().any(|n| n.ends_with(".licence")), "{stored:?}");
+
+    let (server, _, result) = run_sequence_against(
+        MockRdpServer::start(config()).await,
+        Credentials::user_pass("alice", "pw"),
+        Some(&dir),
+    )
+    .await;
+    result.expect("the second connection completed");
+    let recorded = server.recorded();
+    assert_eq!(
+        recorded.licensing,
+        [
+            message_type::LICENSE_INFO,
+            message_type::PLATFORM_CHALLENGE_RESPONSE
+        ]
+    );
+    assert_eq!(recorded.presented_licences, [MOCK_LICENCE.to_vec()]);
+    std::fs::remove_dir_all(&dir).expect("scratch folder removed");
 }
 
 /// The joins are pipelined and the confirms come back in any order, which is

@@ -46,6 +46,10 @@ aes = { workspace = true }      # Kerberos AES128 and AES256, phase 3
 cbc = { workspace = true }      # the CBC half of AES-CTS
 cipher = { workspace = true }
 subtle = { workspace = true }   # constant time compares (PRDRDP/12 §9.8)
+# The modular exponentiation of the licensing premaster secret (MS-RDPELE
+# 5.1.1.1), which is raw RSA with no padding scheme and so is not an
+# operation any RSA crate exposes. Already in Cargo.lock under vnc-core.
+num-bigint-dig = { workspace = true }
 
 # Kerberos, phase 3, behind the `kerberos` feature. Neither is a workspace
 # dependency: `[workspace.dependencies]` in the root manifest has no `cts` and

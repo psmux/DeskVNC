@@ -1269,6 +1269,14 @@ pub async fn connect_session(
             // on one pin key.
             rdp.server_name.get_or_insert_with(|| options.host.clone());
             rdp.window_size = viewport(&window, viewport_width, viewport_height);
+            // Client access licences from an RD licence server live beside the
+            // rest of this installation's data, never with the host profile:
+            // a licence belongs to this device (issue #25).
+            rdp.license_dir = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|dir| dir.join("rdp-licences"));
             *options.rdp_mut() = rdp;
         }
         _ => {

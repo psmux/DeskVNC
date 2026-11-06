@@ -53,7 +53,7 @@ pub mod cert;
 pub mod client;
 pub mod server;
 
-pub use cert::{parse_server_certificate, ServerCertificate};
+pub use cert::{parse_server_certificate, RsaKeyBytes, ServerCertificate};
 pub use client::ClientGccBlocks;
 pub use server::ServerGccBlocks;
 

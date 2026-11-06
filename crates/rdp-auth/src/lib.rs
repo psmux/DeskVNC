@@ -72,6 +72,7 @@ pub mod error;
 pub mod gss;
 pub mod identity;
 pub mod kerberos;
+pub mod licensing;
 pub mod ntlm;
 pub mod spnego;
 
