@@ -122,7 +122,7 @@ jobs:
           echo "::error::Windows signing is not configured, and a release must be signed."
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -175,15 +175,17 @@ jobs:
           echo "PKG_CONFIG_PATH=$headers/pkgconfig" >> "$GITHUB_ENV"
           echo "linking against $(readlink -f "$system/libpipewire-0.3.so")"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned by hash, so the toolchain is named here rather than by the ref.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
         with:
+          toolchain: stable
           targets: ${{ matrix.toolchain-targets }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.bundle-target }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -315,7 +317,7 @@ jobs:
       # Windows is signed by the two steps above when the Certum secrets are
       # set, and Linux is unsigned. The macOS secrets come from
       # scripts/setup-github-signing-secrets.sh.
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           DESKVNC_REQUIRE_CLEAN: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -437,7 +439,7 @@ jobs:
 
       - name: Upload the DeskVNC Support recipient app artifact
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvnc-support-macos
           path: |
@@ -477,7 +479,7 @@ jobs:
 
       - name: Upload the Windows DeskVNC Support artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvnc-support-windows
           path: |
@@ -634,7 +636,7 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum ./*; else shasum -a 256 ./*; fi \
             | tee "SHA256SUMS-${{ matrix.artifact }}.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvncviewer-${{ matrix.artifact }}
           path: dist/*
@@ -668,7 +670,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Linux system dependencies
         run: |
@@ -679,9 +681,11 @@ jobs:
           # bindings at build time.
           sudo apt-get install -y             libssl-dev libdbus-1-dev pkg-config             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev             clang libclang-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: support-linux-${{ matrix.arch }}
 
@@ -700,7 +704,7 @@ jobs:
             gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz ${{ matrix.sums }} --clobber
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvnc-support-linux-${{ matrix.arch }}
           path: |
