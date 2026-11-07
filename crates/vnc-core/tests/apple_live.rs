@@ -27,18 +27,14 @@
 //!   sends its SRP challenge, reads the proof, and reaches the point where it
 //!   checks the client's evidence (its log: `SRP received 21 bytes` then
 //!   `SRP received 682 bytes`, `srp_server_mech_step: 1` then the result).
-//! * The proof is rejected: `client evidence does not match what we
-//!   calculated` (`srp_server_mech_step: -13`). `x` is not the problem: it was
-//!   confirmed offline against the account's stored SRP verifier (see the
-//!   module doc of `apple_srp`), and the challenge carries the same salt and
-//!   iteration count that verifier was built with. With `x` right the shared
-//!   secret is right, so the mismatch is in `K` or `M1` only. That last piece
-//!   needs Apple's own `A` and `M1` for a known password, captured by pointing
-//!   Apple's client at a fake server, and is not settled here. The session,
-//!   input and clipboard steps, and the stage two 0x1c offer, all sit behind a
-//!   completed login and so are still unreached.
-//! * Type 30 (Apple DH) cannot log in against this macOS either: see the note
-//!   in `apple_dh`. That is a separate finding about the shipped viewer.
+//! * The SRP proof is accepted. `x` was confirmed against the account's
+//!   stored verifier, and `M1` once `g` is hashed padded to 512 bytes (found
+//!   by solving against Apple's own client); the Mac then answers with its
+//!   proof (`srp_server_mech_step: 0 92`) and ours verifies it.
+//! * Every login on that Mac, by types 30, 33 and 36 and by Apple's client,
+//!   then fails at a privilege check (`lg level 0`, authresult 1): Remote
+//!   Management is on and the test account has no Remote Management
+//!   privileges. A session needs that changed on the Mac first.
 //!
 //! Each test prints what it saw with `LIVE` in front, so a run with
 //! `--nocapture` doubles as a capture of the facts still marked unconfirmed

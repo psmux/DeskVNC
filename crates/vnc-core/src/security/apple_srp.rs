@@ -36,7 +36,7 @@
 //! After a successful login the first 16 bytes of `SHA-256(K)` are the key
 //! that unwraps the server's first session rekey (see [`crate::apple`]).
 //!
-//! ## What is confirmed, and what is not
+//! ## What a real Mac confirmed
 //!
 //! `x` is confirmed. On macOS 26 the account keeps an SRP verifier with its
 //! own 32 byte salt and iteration count, separate from the login password
@@ -46,15 +46,10 @@
 //! exactly. The challenge on the wire carries the same salt and iteration
 //! count. So `srp_x`, the PBKDF2 and the empty identity are right.
 //!
-//! `K` or `M1` is still wrong. With `x` correct the shared secret is correct,
-//! yet a real macOS 26 Mac rejects the proof (`client evidence does not match
-//! what we calculated`). So the session key `K` or the proof `M1` differs
-//! from the RFC 2945 forms used here (for example whether `K` hashes the
-//! padded or the minimal secret, or the exact bytes hashed into `M1`). This
-//! cannot be read from the stored verifier. The way to settle it without
-//! guessing at the live login is to point Apple's own client at a fake server
-//! that sends a challenge built from a known password, and read back the `A`
-//! and `M1` Apple computes; then the formula is solved offline. Each
+//! `M1` hashes `g` padded to the group width, as `k` does. Found by pointing
+//! Apple's own client at a server we control and solving for the form that
+//! reproduces its `M1`; a real Mac accepts that proof and our check of its
+//! `M2 = H(PAD(A), M1, K)` passes. `K = H(PAD(S))`. Each
 //! assumption is pinned by a test in `tests/apple_screen_sharing.rs`; the live
 //! run is `tests/apple_live.rs`.
 
@@ -223,18 +218,19 @@ pub fn srp_client_premaster(
     base.modpow(&exp, n)
 }
 
-/// `K = H(PAD(S))`.
-///
-/// Whether the server hashes `S` padded or as its minimal bytes is one of the
-/// open points; the two only differ when `S` has a leading zero byte, about
-/// once in 256 logins, which is what a live test with many logins would see.
+/// `K = H(PAD(S))`, the premaster secret padded to the group width, the
+/// same width every other group element is hashed at here.
 pub fn srp_session_key<D: Digest>(group: &SrpGroup, s: &BigUint) -> Vec<u8> {
     hash::<D>(&[&group.pad(s)])
 }
 
-/// `M1 = H((H(N) xor H(g)) || H(I) || salt || A || B || K)`, with `A` and `B`
-/// as they travel on the wire (padded to the group width) and `g` hashed as
-/// its minimal bytes.
+/// `M1 = H((H(N) xor H(PAD(g))) || H(I) || salt || PAD(A) || PAD(B) || K)`.
+///
+/// `g` is hashed padded to the group width, 512 bytes, as it is in `k`; a
+/// single byte 5 is what an earlier reading assumed, and a macOS 26 Mac
+/// rejects that proof. Settled by having Apple's own client answer a
+/// challenge from a server we control and solving for the form that
+/// reproduces its `M1`; the padded form was then accepted by a real Mac.
 pub fn srp_client_proof<D: Digest>(
     group: &SrpGroup,
     identity: &[u8],
@@ -244,7 +240,7 @@ pub fn srp_client_proof<D: Digest>(
     key: &[u8],
 ) -> Vec<u8> {
     let hn = hash::<D>(&[&group.n.to_bytes_be()]);
-    let hg = hash::<D>(&[&group.g.to_bytes_be()]);
+    let hg = hash::<D>(&[&group.pad(&group.g)]);
     let xor: Vec<u8> = hn.iter().zip(&hg).map(|(a, b)| a ^ b).collect();
     let hi = hash::<D>(&[identity]);
     hash::<D>(&[&xor, &hi, salt, &group.pad(a_pub), &group.pad(b_pub), key])
@@ -769,6 +765,9 @@ async fn check_server_proof(
 ) -> Result<()> {
     let payload = read_server_message(stream, framing, "SRP server proof").await?;
     let server = parse_server_proof(&payload)?;
+    if server.m2 == proof.expected_m2 {
+        tracing::info!("the Mac's SRP proof verified");
+    }
     if server.m2 != proof.expected_m2 {
         // Either the server does not know the verifier (wrong password on its
         // side gives no M2 at all, so this is unusual) or our M2 formula is

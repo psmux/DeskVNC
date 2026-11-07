@@ -129,7 +129,7 @@ impl ServerSrp {
         let s = (a * self.v.modpow(&u, &self.n)).modpow(&self.b, &self.n);
         let key = h512(&[&pad512(&s)]);
         let hn = h512(&[&self.n.to_bytes_be()]);
-        let hg = h512(&[&self.g.to_bytes_be()]);
+        let hg = h512(&[&pad512(&self.g)]);
         let xor: Vec<u8> = hn.iter().zip(&hg).map(|(x, y)| x ^ y).collect();
         let expected = h512(&[
             &xor,
@@ -1040,19 +1040,25 @@ mod live_must_confirm {
         assert_ne!(srp_session_key::<Sha512>(&g, &s), h512(&[&s.to_bytes_be()]));
     }
 
-    /// `M1` hashes A and B as sent (512 bytes each) and g as one byte.
+    /// `M1` hashes A and B as sent (512 bytes each) and g padded to 512
+    /// bytes. Confirmed against Apple's own client and a real Mac; the one
+    /// byte form is refused.
     #[test]
-    fn m1_uses_wire_a_b_and_minimal_g() {
+    fn m1_uses_wire_a_b_and_padded_g() {
         let g = SrpGroup::apple();
         let a = BigUint::from(7u32);
         let b = BigUint::from(9u32);
         let k = [3u8; 64];
         let m1 = srp_client_proof::<Sha512>(&g, b"", &[2; 32], &a, &b, &k);
         let hn = h512(&[&g.n.to_bytes_be()]);
-        let hg = h512(&[&[5u8]]);
+        let hg = h512(&[&pad512(&BigUint::from(5u32))]);
         let xor: Vec<u8> = hn.iter().zip(&hg).map(|(x, y)| x ^ y).collect();
         let want = h512(&[&xor, &h512(&[b""]), &[2; 32], &pad512(&a), &pad512(&b), &k]);
         assert_eq!(m1, want);
+        let one_byte_g = h512(&[&[5u8]]);
+        let old: Vec<u8> = hn.iter().zip(&one_byte_g).map(|(x, y)| x ^ y).collect();
+        let refused = h512(&[&old, &h512(&[b""]), &[2; 32], &pad512(&a), &pad512(&b), &k]);
+        assert_ne!(m1, refused, "the one byte g form is the one a Mac refuses");
     }
 
     /// The type 33 proof carries 384 trailing bytes after its inner block.
