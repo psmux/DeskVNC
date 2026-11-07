@@ -1209,39 +1209,38 @@ impl App {
     /// The bar every remote support tool has at the bottom: a dot, and what
     /// is going on.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let color = if self.error {
-                theme::pal(ui.ctx()).danger
-            } else if self.connected || self.session.is_none() {
-                theme::pal(ui.ctx()).success
-            } else {
-                theme::pal(ui.ctx()).warning
+        let color = if self.error {
+            theme::pal(ui.ctx()).danger
+        } else if self.connected || self.session.is_none() {
+            theme::pal(ui.ctx()).success
+        } else {
+            theme::pal(ui.ctx()).warning
+        };
+        let session = self.session.as_ref();
+        let connected = self.connected;
+        status_line(ui, color, &self.status, &self.network.label(), |ui| {
+            let Some(session) = session else {
+                return;
             };
-            theme::dot(ui, color);
-            ui.label(RichText::new(&self.status).color(theme::pal(ui.ctx()).text));
-            if let Some(session) = &self.session {
-                let connectivity = session.connectivity.borrow();
-                if let Some(warning) = &connectivity.warning {
-                    ui.colored_label(theme::pal(ui.ctx()).warning, warning);
-                }
-                if self.connected
-                    && let Some(route) = connectivity.route
-                {
-                    let label = match route {
-                        boundary_session::Route::Direct => "Direct connection",
-                        boundary_session::Route::Relay => "Relayed connection",
-                        boundary_session::Route::Unknown => "Checking connection path",
-                    };
-                    let timing = connectivity
-                        .rtt
-                        .map(|rtt| format!(", round trip {} ms", rtt.as_millis()))
-                        .unwrap_or_default();
-                    theme::small(ui, format!("{label}{timing}"));
-                }
+            let connectivity = session.connectivity.borrow();
+            if let Some(warning) = &connectivity.warning {
+                ui.add(
+                    egui::Label::new(RichText::new(warning).color(theme::pal(ui.ctx()).warning))
+                        .wrap(),
+                );
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::small(ui, self.network.label());
-            });
+            if connected && let Some(route) = connectivity.route {
+                let label = match route {
+                    boundary_session::Route::Direct => "Direct connection",
+                    boundary_session::Route::Relay => "Relayed connection",
+                    boundary_session::Route::Unknown => "Checking connection path",
+                };
+                let timing = connectivity
+                    .rtt
+                    .map(|rtt| format!(", round trip {} ms", rtt.as_millis()))
+                    .unwrap_or_default();
+                theme::small(ui, format!("{label}{timing}"));
+            }
         });
     }
     fn content(&mut self, ui: &mut egui::Ui) {
@@ -1353,6 +1352,49 @@ impl App {
         }
     }
 }
+/// The status line: a dot, what is going on, then `more`, with the network
+/// setting at the right. The setting is laid out first and the rest wraps in
+/// the space left of it, so a long error goes onto more lines instead of
+/// running over the setting and out of the window. Returns where the status
+/// and the setting were drawn.
+fn status_line(
+    ui: &mut egui::Ui,
+    color: egui::Color32,
+    status: &str,
+    setting: &str,
+    more: impl FnOnce(&mut egui::Ui),
+) -> (egui::Rect, egui::Rect) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        let setting = ui
+            .label(
+                RichText::new(setting)
+                    .size(12.0)
+                    .color(theme::pal(ui.ctx()).text_tertiary),
+            )
+            .rect;
+        ui.add_space(16.0);
+        let status = ui
+            .with_layout(
+                egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+                |ui| {
+                    theme::dot(ui, color);
+                    let status = ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(status).color(theme::pal(ui.ctx()).text),
+                            )
+                            .wrap(),
+                        )
+                        .rect;
+                    more(ui);
+                    status
+                },
+            )
+            .inner;
+        (status, setting)
+    })
+    .inner
+}
 /// What a helper's tools did, newest last, so the person at the computer
 /// can see it.
 pub(crate) fn activity(ui: &mut egui::Ui, lines: &[String]) {
@@ -1399,6 +1441,51 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_status_wraps_beside_the_network_setting_instead_of_over_it() {
+        // The error a helper saw for a computer that could not be found.
+        let status = "Cannot reach the computer: No addressing information available: \
+            All address lookup services failed or produced no results. \
+            Service 'pkarr' failed: Error resolving http request. \
+            Service 'dns' failed: no calls succeeded: Failed to resolve TXT record";
+        let ctx = egui::Context::default();
+        let mut drawn = None;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(820.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::Panel::bottom("status").show(ui, |ui| {
+                    drawn = Some(status_line(
+                        ui,
+                        egui::Color32::RED,
+                        status,
+                        "Automatic connection with relay fallback",
+                        |_| {},
+                    ));
+                });
+            });
+            // No renderer here to upload the font atlas to.
+            output.textures_delta.clear();
+        }
+        let (status, setting) = drawn.expect("the status line was drawn");
+        assert!(
+            !status.intersects(setting),
+            "status {status:?} runs into the setting {setting:?}"
+        );
+        assert!(status.max.x <= 820.0, "status {status:?} leaves the window");
+        assert!(
+            setting.max.x <= 820.0,
+            "setting {setting:?} leaves the window"
+        );
+        // All of it is there, on more than one line.
+        assert!(status.height() > 30.0, "status {status:?} was cut short");
+    }
 
     #[test]
     fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
