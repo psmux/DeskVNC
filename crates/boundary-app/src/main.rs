@@ -1364,7 +1364,7 @@ fn status_line(
     setting: &str,
     more: impl FnOnce(&mut egui::Ui),
 ) -> (egui::Rect, egui::Rect) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let setting = ui
             .label(
                 RichText::new(setting)
@@ -1375,7 +1375,7 @@ fn status_line(
         ui.add_space(16.0);
         let status = ui
             .with_layout(
-                egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
                 |ui| {
                     theme::dot(ui, color);
                     let status = ui
