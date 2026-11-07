@@ -280,6 +280,12 @@ pub fn check_clipboard(text: &str) -> Result<()> {
 /// whoever handles it, so text that is too long is refused without ending
 /// the session.
 pub async fn read_message(stream: &mut RecvStream) -> Result<Message> {
+    let length = read_length(stream).await?;
+    read_body(stream, length).await
+}
+/// The length of the next session message, which is what a reader waits on
+/// while the other side has nothing to say.
+pub async fn read_length(stream: &mut RecvStream) -> Result<usize> {
     let mut length = [0; 4];
     stream.read_exact(&mut length).await?;
     let length = u32::from_be_bytes(length) as usize;
@@ -287,6 +293,11 @@ pub async fn read_message(stream: &mut RecvStream) -> Result<Message> {
         length > 0 && length <= MAX_CLIPBOARD_FRAME,
         "Invalid control message length"
     );
+    Ok(length)
+}
+/// The session message of `length` bytes that [`read_length`] announced.
+/// Only a clipboard message may be longer than [`MAX_CONTROL`].
+pub async fn read_body(stream: &mut RecvStream, length: usize) -> Result<Message> {
     let mut bytes = vec![0; length];
     stream.read_exact(&mut bytes).await?;
     let message: Message = serde_json::from_slice(&bytes)?;
@@ -505,6 +516,156 @@ mod tests {
             Screens::from_hello(true, true, &[H264.into()]),
             Screens::Video
         );
+    }
+
+    /// The grant as 0.34.1 wrote and read it, before clipboard.
+    mod before_clipboard {
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub enum Message {
+            Granted {
+                control: bool,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                tools: Option<bool>,
+            },
+        }
+    }
+
+    #[test]
+    fn clipboard_messages_round_trip() {
+        for message in [
+            Message::Clipboard("line one\nline two \u{1F600} \u{0001}".into()),
+            Message::ClipboardRights(ClipboardRights {
+                write: true,
+                read: false,
+            }),
+            Message::Granted {
+                control: true,
+                tools: None,
+                clipboard: Some(ClipboardRights {
+                    write: true,
+                    read: true,
+                }),
+            },
+        ] {
+            let bytes = serde_json::to_vec(&message).unwrap();
+            let back: Message = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(serde_json::to_vec(&back).unwrap(), bytes);
+        }
+        let hello = serde_json::to_vec(&Message::Hello {
+            version: 1,
+            secret: [1; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: Vec::new(),
+            clipboard: true,
+        })
+        .unwrap();
+        let Message::Hello { clipboard, .. } = serde_json::from_slice(&hello).unwrap() else {
+            panic!("not a hello");
+        };
+        assert!(clipboard);
+    }
+
+    #[test]
+    fn older_peers_read_and_write_what_they_always_did() {
+        // A hello and a knock from before clipboard say nothing about it.
+        let old = serde_json::to_vec(&before_video::Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: true,
+            jpeg: true,
+            tiles: true,
+        })
+        .unwrap();
+        let Message::Hello { clipboard, .. } = serde_json::from_slice(&old).unwrap() else {
+            panic!("not a hello");
+        };
+        assert!(!clipboard);
+        let old = serde_json::to_vec(&before_video::Message::Knock {
+            version: 2,
+            name: "Helper".into(),
+            password: None,
+            tools: false,
+            jpeg: true,
+            tiles: true,
+        })
+        .unwrap();
+        let Message::Knock { clipboard, .. } = serde_json::from_slice(&old).unwrap() else {
+            panic!("not a knock");
+        };
+        assert!(!clipboard);
+        // A helper that takes clipboard is still read by an older host.
+        let knock = serde_json::to_vec(&Message::Knock {
+            version: 2,
+            name: "Helper".into(),
+            password: None,
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: Vec::new(),
+            clipboard: true,
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&knock).unwrap(),
+            before_video::Message::Knock { tiles: true, .. }
+        ));
+        // A grant from an older host has no clipboard rights.
+        let old = serde_json::to_vec(&before_clipboard::Message::Granted {
+            control: true,
+            tools: Some(false),
+        })
+        .unwrap();
+        let Message::Granted {
+            control,
+            tools,
+            clipboard,
+        } = serde_json::from_slice(&old).unwrap()
+        else {
+            panic!("not a grant");
+        };
+        assert_eq!((control, tools, clipboard), (true, Some(false), None));
+        // A grant to a helper that did not ask about clipboard is written
+        // exactly as an older host wrote it, and one with rights is still
+        // read by an older helper.
+        let plain = serde_json::to_vec(&Message::Granted {
+            control: true,
+            tools: Some(false),
+            clipboard: None,
+        })
+        .unwrap();
+        assert_eq!(plain, old);
+        let rich = serde_json::to_vec(&Message::Granted {
+            control: false,
+            tools: None,
+            clipboard: Some(ClipboardRights {
+                write: false,
+                read: true,
+            }),
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice(&rich).unwrap(),
+            before_clipboard::Message::Granted {
+                control: false,
+                tools: None
+            }
+        ));
+    }
+
+    #[test]
+    fn clipboard_text_has_its_own_limit() {
+        assert!(check_clipboard(&"a".repeat(MAX_CLIPBOARD)).is_ok());
+        let error = check_clipboard(&"a".repeat(MAX_CLIPBOARD + 1)).unwrap_err();
+        assert!(error.to_string().contains("too large"), "{error}");
+        // The worst case of JSON escaping still fits a frame.
+        let worst =
+            serde_json::to_vec(&Message::Clipboard("\u{0001}".repeat(MAX_CLIPBOARD))).unwrap();
+        assert!(worst.len() <= MAX_CLIPBOARD_FRAME, "{}", worst.len());
     }
 
     #[test]
