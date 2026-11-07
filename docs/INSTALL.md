@@ -99,6 +99,19 @@ Credentials go to the Secret Service (GNOME Keyring, KWallet). On a headless or
 minimal system with no Secret Service running, the app falls back to an
 encrypted file protected by a master password you choose.
 
+DeskVNC Support for Linux is a tarball with the program, its app menu entry and
+its icon. It runs from wherever you unpack it:
+
+```sh
+tar -xzf DeskVNC-Support-Linux-x86_64.tar.gz      # or -aarch64 on ARM64
+./deskvnc-support --install    # once: adds it to your app menu with its icon
+./deskvnc-support
+```
+
+`--install` writes `deskvnc-support.desktop` and the icon under
+`~/.local/share`, needs no administrator, and points the entry at the copy you
+ran it from. Run it again if you move the program.
+
 ## Verifying a download
 
 Every release lists SHA-256 checksums.

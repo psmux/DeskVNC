@@ -52,7 +52,9 @@ jobs:
 
           **DeskVNC Support** is also attached, for macOS, Windows and Linux,
           for people who need to receive help. Download it on the computer being
-          supported, press Get a code, and share the code or invitation.
+          supported, press Get a code, and share the code or invitation. On
+          Linux, run `./deskvnc-support --install` once after unpacking to add
+          it to the app menu with its icon.
 
           Full changes in [CHANGELOG.md](https://github.com/psmux/DeskVNC/blob/main/CHANGELOG.md).
           NOTES
@@ -724,7 +726,10 @@ jobs:
           cargo build --locked --release -p boundary
           mkdir -p support
           cp target/release/boundary support/deskvnc-support
-          tar -C support -czf DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz deskvnc-support
+          # The app menu entry and icon, so the dock shows the real icon.
+          # ./deskvnc-support --install puts both in the person's own folders.
+          cp crates/boundary-app/linux/deskvnc-support.desktop crates/boundary-app/linux/deskvnc-support.png support/
+          tar -C support -czf DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz deskvnc-support deskvnc-support.desktop deskvnc-support.png
           sha256sum DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz | tee ${{ matrix.sums }}
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz ${{ matrix.sums }} --clobber

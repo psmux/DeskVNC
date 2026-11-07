@@ -6,6 +6,7 @@ mod attention;
 mod codes;
 mod install;
 mod journal;
+mod launcher;
 mod login;
 mod network;
 mod theme;
@@ -49,14 +50,9 @@ fn main() -> eframe::Result {
     let _guard = runtime.enter();
     let fallback = std::env::var_os(FALLBACK_RENDERER).is_some();
     let result = eframe::run_native(
-        "Boundary",
+        APP_NAME,
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([980.0, 660.0])
-                .with_min_inner_size([820.0, 600.0])
-                // Started at sign in, the window waits hidden behind the tray
-                // icon. Where there is no tray it is minimized instead.
-                .with_visible(!background || !TRAY),
+            viewport: viewport(background),
             event_loop_builder: background_policy(background),
             renderer: if fallback {
                 eframe::Renderer::Wgpu
@@ -93,12 +89,27 @@ fn main() -> eframe::Result {
     result
 }
 /// The name a person sees, in the title bar, the dock and notifications.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const APP_NAME: &str = "DeskVNC Support";
 /// The Wayland app ID and X11 class, which match `deskvnc-support.desktop`,
 /// so the dock finds that file and shows the app's name and icon.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const APP_ID: &str = "deskvnc-support";
+
+/// The window as the system sees it: its title, the app ID the dock pairs
+/// with the .desktop file, and its icon where a window can carry one.
+fn viewport(background: bool) -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
+        .with_title(APP_NAME)
+        .with_app_id(APP_ID)
+        .with_inner_size([980.0, 660.0])
+        .with_min_inner_size([820.0, 600.0])
+        // Started at sign in, the window waits hidden behind the tray
+        // icon. Where there is no tray it is minimized instead.
+        .with_visible(!background || !TRAY);
+    match eframe::icon_data::from_png_bytes(launcher::ICON) {
+        Ok(icon) => builder.with_icon(icon),
+        Err(_) => builder,
+    }
+}
 /// Set for a copy that draws with wgpu because OpenGL was too old.
 const FALLBACK_RENDERER: &str = "DESKVNC_SUPPORT_WGPU";
 /// Whether this platform has a tray icon to hide the window behind.
@@ -146,6 +157,10 @@ fn other_mode(args: &[String]) -> Option<i32> {
             Ok(())
         };
         result
+    } else if cfg!(target_os = "linux") && args.iter().any(|a| a == "--install") {
+        // Put the app in the menu and give the dock its icon, for this
+        // person only: `./deskvnc-support --install` after unpacking.
+        launcher::install().map(|path| println!("Installed {}", path.display()))
     } else if args.iter().any(|a| a == "--uninstall-service") {
         #[cfg(windows)]
         let result = login::uninstall();
@@ -416,7 +431,7 @@ impl App {
             ));
         } else if boundary_session::unattended::validate_machine_id(&target).is_ok() {
             let Some(key) = self.helper_key.clone() else {
-                self.status = "This copy of Boundary has no helper identity, so it cannot connect to an unattended computer".into();
+                self.status = "This copy of DeskVNC Support has no helper identity, so it cannot connect to an unattended computer".into();
                 self.error = true;
                 return;
             };
@@ -630,7 +645,7 @@ impl App {
                     }
                     theme::small(
                         ui,
-                        "After granting it, quit and reopen Boundary if sharing still fails.",
+                        "After granting it, quit and reopen DeskVNC Support if sharing still fails.",
                     );
                 } else if self.displays.is_empty() {
                     ui.colored_label(theme::pal(ui.ctx()).danger, "No display found to share.");
@@ -900,7 +915,7 @@ impl App {
             theme::small(
                 ui,
                 format!(
-                    "Boundary {} · Attended and unattended support · No DeskVNC installation required",
+                    "DeskVNC Support {} · Attended and unattended support · No DeskVNC installation required",
                     env!("CARGO_PKG_VERSION")
                 ),
             );
@@ -969,7 +984,7 @@ impl App {
             ui.add_space(14.0);
             theme::small(
                 ui,
-                "Use End session above to disconnect. Closing Boundary also ends sharing.",
+                "Use End session above to disconnect. Closing DeskVNC Support also ends sharing.",
             );
         });
     }
@@ -1236,7 +1251,7 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Boundary")
+                RichText::new(APP_NAME)
                     .font(egui::FontId::new(
                         20.0,
                         egui::FontFamily::Name("system-bold".into()),
@@ -1375,4 +1390,19 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
+        let window = viewport(false);
+        assert_eq!(window.title.as_deref(), Some("DeskVNC Support"));
+        // The dock matches this to deskvnc-support.desktop for the icon.
+        assert_eq!(window.app_id.as_deref(), Some("deskvnc-support"));
+        let icon = window.icon.expect("the window carries the app's icon");
+        assert_eq!((icon.width, icon.height), (256, 256));
+    }
 }

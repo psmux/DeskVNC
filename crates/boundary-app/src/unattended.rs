@@ -547,7 +547,7 @@ impl Unattended {
         if ui
             .checkbox(
                 &mut autostart,
-                "Start Boundary when I sign in, so it is ready",
+                "Start DeskVNC Support when I sign in, so it is ready",
             )
             .changed()
         {

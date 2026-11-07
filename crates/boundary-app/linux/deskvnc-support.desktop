@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DeskVNC Support
+GenericName=Remote support
+Comment=Let someone you trust see this computer and help you
+Exec=deskvnc-support
+Icon=deskvnc-support
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;support;help;screen;share;
+StartupWMClass=deskvnc-support
