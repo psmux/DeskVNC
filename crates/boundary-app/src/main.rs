@@ -92,6 +92,13 @@ fn main() -> eframe::Result {
     }
     result
 }
+/// The name a person sees, in the title bar, the dock and notifications.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const APP_NAME: &str = "DeskVNC Support";
+/// The Wayland app ID and X11 class, which match `deskvnc-support.desktop`,
+/// so the dock finds that file and shows the app's name and icon.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const APP_ID: &str = "deskvnc-support";
 /// Set for a copy that draws with wgpu because OpenGL was too old.
 const FALLBACK_RENDERER: &str = "DESKVNC_SUPPORT_WGPU";
 /// Whether this platform has a tray icon to hide the window behind.

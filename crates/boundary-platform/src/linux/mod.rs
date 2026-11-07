@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use boundary_session::Rect;
 use std::sync::Arc;
 
+pub(crate) mod notify;
 pub(crate) mod portal;
 pub(crate) mod x11;
 

@@ -9,6 +9,8 @@ mod damage;
 mod dxgi;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::notify::{Notification, notify};
 #[cfg(windows)]
 mod mf;
 #[cfg(target_os = "macos")]
