@@ -672,6 +672,11 @@ pub struct AgentPlane {
     pub mirrors: Arc<mirror::Mirrors>,
     /// H.264 decoded for the mirrors, off the event pump.
     pub video: video::Video,
+    /// Sessions an agent's `limb.open` dialled, as opposed to sessions a
+    /// person opened and an agent attached to. `limb.close` disconnects the
+    /// first kind and only detaches from the second: an agent closing a
+    /// machine it was handed must not log the person out of it.
+    agent_opened: Mutex<std::collections::HashSet<String>>,
 }
 
 /// What [`AgentPlane::announce`] needs to say anything at all.
@@ -736,6 +741,35 @@ impl AgentPlane {
             board: Mutex::new(agent_lease::Board::new(policy)),
             ..AgentPlane::default()
         }
+    }
+
+    /// Remember that an agent's open dialled this session.
+    pub fn note_agent_opened(&self, session_id: &str) {
+        self.agent_opened.lock().insert(session_id.to_string());
+    }
+
+    /// Did an agent's open dial this session?
+    pub fn agent_opened(&self, session_id: &str) -> bool {
+        self.agent_opened.lock().contains(session_id)
+    }
+
+    /// Forget a session an agent opened, once it has been closed.
+    pub fn forget_agent_opened(&self, session_id: &str) {
+        self.agent_opened.lock().remove(session_id);
+    }
+
+    /// The attachments on one session other than `attachment_id`.
+    pub fn other_attachments(&self, session_id: &str, attachment_id: &str) -> Vec<String> {
+        self.attachments
+            .lock()
+            .get(session_id)
+            .map(|rows| {
+                rows.keys()
+                    .filter(|id| id.as_str() != attachment_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// A fresh attachment id, unique within this process run.

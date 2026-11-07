@@ -23,8 +23,8 @@
 
 use crate::error::{codes, ToolError};
 use crate::plane::{
-    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, LeaseAsk, OpenRequest, SessionSource,
-    TypingRefused,
+    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, LeaseAsk, LiveSession, OpenRequest,
+    SessionClosed, SessionSource, TypingRefused,
 };
 use agent_plane::{Attach, Damage, Frame, FrameSource, LimbRegistry, PerceptionUnavailable};
 use limb_core::capability::Capability;
@@ -398,6 +398,12 @@ pub struct FakeSource {
     channels: Mutex<BTreeMap<String, mpsc::Sender<ClientCommand>>>,
     mirrors: Mutex<BTreeMap<String, Arc<FakeFrames>>>,
     states: Mutex<BTreeMap<String, SessionState>>,
+    /// Sessions "the application" has open, by limb id, whether or not this
+    /// plane attached them: what `live` lists and `close` ends. Empty until a
+    /// test opens one with [`FakeSource::open_in_app`] or the plane opens one.
+    live: Mutex<BTreeMap<String, FakeHost>>,
+    /// Every session `close` ended, in order.
+    closed: Mutex<Vec<String>>,
     /// The SFTP sidecar every fake machine shares: a map from an absolute
     /// path to the bytes at it.
     ///
@@ -448,6 +454,8 @@ impl FakeSource {
             channels: Mutex::new(BTreeMap::new()),
             mirrors: Mutex::new(BTreeMap::new()),
             states: Mutex::new(BTreeMap::new()),
+            live: Mutex::new(BTreeMap::new()),
+            closed: Mutex::new(Vec::new()),
             disk: Mutex::new(BTreeMap::new()),
             typing_refusals: Mutex::new(BTreeMap::new()),
             press_refusals: Mutex::new(BTreeMap::new()),
@@ -472,6 +480,27 @@ impl FakeSource {
             FakeHost::desktop("h_lab01", "10.0.0.5"),
             FakeHost::terminal("h_lab02", "10.0.0.6"),
         ])
+    }
+
+    /// A saved machine opened in "the application" by somebody else, so it is
+    /// live and not attached by this plane. Returns the limb id `dvv_limbs`
+    /// would list it under.
+    pub fn open_in_app(&self, host_id: &str) -> String {
+        let host = self
+            .hosts
+            .iter()
+            .find(|h| h.host_id == host_id)
+            .expect("a machine this source publishes")
+            .clone();
+        let id = LimbRegistry::resolve(host.protocol, &MachineKey::profile(host_id), Slot(0));
+        lock(&self.states).insert(id.to_string(), SessionState::Connected);
+        lock(&self.live).insert(id.to_string(), host);
+        id.to_string()
+    }
+
+    /// Every session `close` ended, in order.
+    pub fn closed_sessions(&self) -> Vec<String> {
+        lock(&self.closed).clone()
     }
 
     /// What the plane put on this limb's wire.
@@ -674,6 +703,7 @@ impl SessionSource for FakeSource {
         // spawned and an agent polls `dvv_status` or calls `dvv_wait` with
         // until connected.
         lock(&self.states).insert(id.to_string(), SessionState::Connected);
+        lock(&self.live).insert(id.to_string(), host.clone());
 
         let driver: Arc<dyn Limb> = match host.protocol {
             ProtocolKind::Ssh => Arc::new(FakeLimb::terminal()),
@@ -697,6 +727,37 @@ impl SessionSource for FakeSource {
 
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
         lock(&self.states).get(limb.as_str()).cloned()
+    }
+
+    fn live(&self) -> Vec<LiveSession> {
+        lock(&self.live)
+            .iter()
+            .map(|(id, host)| LiveSession {
+                limb_id: id.clone(),
+                host: host.address.clone(),
+                host_id: Some(host.host_id.clone()),
+                port: host.port,
+                protocol: host.protocol.to_string(),
+                slot: 0,
+                state: serde_json::json!({ "state": "connected" }),
+                attached_elsewhere: false,
+            })
+            .collect()
+    }
+
+    /// Every session here is one "an agent opened", so a close ends it. The
+    /// person's own sessions are the application's rule to keep, and that
+    /// rule is tested where it lives, in the shell.
+    fn close(&self, limb: &LimbId) -> Result<Option<SessionClosed>, ToolError> {
+        if lock(&self.live).remove(limb.as_str()).is_none() {
+            return Ok(None);
+        }
+        lock(&self.states).remove(limb.as_str());
+        lock(&self.closed).push(limb.to_string());
+        Ok(Some(SessionClosed {
+            closed: true,
+            why: None,
+        }))
     }
 
     fn typing_fence(&self, limb: &LimbId) -> Option<TypingRefused> {

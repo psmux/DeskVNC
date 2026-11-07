@@ -36,7 +36,9 @@ use crate::actions::{self, PointerAction, PointerArgs};
 use crate::error::{codes, ToolError};
 use crate::jsonrpc::{self, Connection, Request};
 use crate::mcp::{format, manifest};
-use crate::plane::{outcome_word, FileOp, FileOutcome, Nudge, OpenRequest, Plane, Selector};
+use crate::plane::{
+    outcome_word, FileOp, FileOutcome, Nudge, OpenRequest, Plane, Selector, SessionClosed,
+};
 use agent_plane::Settlement;
 use base64::Engine as _;
 use limb_core::identity::Slot;
@@ -283,10 +285,35 @@ impl Server {
             }
             "dvv_close" => {
                 let id = require_str(args, "limbId")?;
-                plane.close(&id)?;
+                let session = plane.close(&id)?;
+                // `closed` is about this agent's hold on the limb, which is
+                // always let go. `sessionClosed` is whether the machine was
+                // disconnected in DeskVNCViewer, and the sentence says which,
+                // because "closed" over a session that stays connected is the
+                // answer that sent agents looking for an orphan.
+                let (text, session_closed, why) = match &session {
+                    Some(SessionClosed { closed: true, .. }) => (
+                        format!("{id} is closed: anything it held is released and its session in DeskVNCViewer is disconnected."),
+                        Some(true),
+                        None,
+                    ),
+                    Some(SessionClosed { closed: false, why }) => (
+                        format!(
+                            "{id} is released here and its session stays open in DeskVNCViewer: {}.",
+                            why.as_deref().unwrap_or("DeskVNCViewer kept it")
+                        ),
+                        Some(false),
+                        why.clone(),
+                    ),
+                    None => (
+                        format!("{id} is closed and anything it held is released. It had no session open in DeskVNCViewer."),
+                        None,
+                        None,
+                    ),
+                };
                 Ok(format::ok(
-                    format!("{id} is closed and anything it held is released."),
-                    json!({ "limbId": id, "closed": true }),
+                    text,
+                    json!({ "limbId": id, "closed": true, "sessionClosed": session_closed, "why": why }),
                 ))
             }
             "dvv_status" => {

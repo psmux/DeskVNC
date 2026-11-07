@@ -173,7 +173,10 @@ async fn a_short_wait_reports_its_own_timeout_and_a_structured_observation() {
     assert_eq!(body["askedMs"], 300);
     assert_eq!(body["clampedMs"], 300, "{body}");
     assert_eq!(body["limitMs"], dvv::mcp::WAIT_CLAMP_MS);
-    assert!(body["waitedMs"].as_u64().expect("measured") >= 250, "{body}");
+    assert!(
+        body["waitedMs"].as_u64().expect("measured") >= 250,
+        "{body}"
+    );
     assert_eq!(body["observed"]["outcome"], "timed-out", "{body}");
     assert!(body["observed"]["quietMs"].is_u64(), "{body}");
 
@@ -189,7 +192,10 @@ async fn a_short_wait_reports_its_own_timeout_and_a_structured_observation() {
     assert_eq!(body["clampedMs"], 3000);
     assert_eq!(body["observed"]["outcome"], "delivered", "{body}");
     assert_eq!(body["observed"]["delivered"], true);
-    assert!(body["waitedMs"].as_u64().expect("measured") < 3000, "{body}");
+    assert!(
+        body["waitedMs"].as_u64().expect("measured") < 3000,
+        "{body}"
+    );
 }
 
 #[tokio::test]

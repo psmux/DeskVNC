@@ -251,6 +251,7 @@ pub async fn dispatch(
         "limb.open" => limb_open(ctx, peer, params).await,
         "limb.attach" => limb_attach(ctx, peer, params),
         "limb.detach" => limb_detach(ctx, peer, params),
+        "limb.close" => limb_close(ctx, peer, params),
         "limb.status" => limb_status(ctx, peer, params),
         "limb.command" => limb_command(ctx, peer, params),
         // `00 R28`, `00 R51b`. An intent the driver serves natively gets a
@@ -790,6 +791,18 @@ fn perceive(ctx: &Ctx, peer: &Peer, session_id: &str, want: Perceive) -> Result<
         let size = entry.facts.lock().size;
         (entry.protocol(), size, entry.profile_id.clone())
     };
+    // A terminal has no framebuffer and never will, so there is nothing to
+    // mirror and nothing to wait for. Refusing here used to read, to dvv, as a
+    // desktop still connecting: it waited 20 seconds for a size that never
+    // comes and answered LIMB_GONE for a shell that was connected. The limb is
+    // attached as what it is, and the reply says why there are no frames.
+    if kind == ProtocolKind::Ssh {
+        return Ok(json!({
+            "mirror": false,
+            "frames": false,
+            "why": "a terminal session has no framebuffer, so no mirror was attached; perceive does not apply to it",
+        }));
+    }
     let restore = connected_preset(ctx, profile_id.as_deref());
 
     let attached = ctx
@@ -923,6 +936,72 @@ fn send_now(ctx: &Ctx, session_id: &str, command: ClientCommand) -> Result<(), R
             format!("{session_id} did not take that command: {e}"),
         )
     })
+}
+
+/// Close a limb: detach from its session, and end the session when an agent
+/// opened it and nobody else is on it.
+///
+/// `limb.detach` lets go and leaves the session exactly as it was, which is
+/// right for a machine the person had open. A session an agent's `limb.open`
+/// dialled is the agent's to end, and before this verb existed `dvv_close`
+/// answered "closed" while the viewer stayed connected to it. The session
+/// ends the way the person's own Disconnect ends it.
+///
+/// Closing something that is already gone is an ordinary success.
+fn limb_close(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    require(peer, Capability::Close)?;
+    let session_id = session_id_of(params)?;
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    let others = ctx.plane.other_attachments(&session_id, &attachment_id);
+    let opened_by_agent = ctx.plane.agent_opened(&session_id);
+    // Detach first, through the same path as `limb.detach`, so the mirror is
+    // dropped and the person's quality preset is put back either way.
+    limb_detach(ctx, peer, params)?;
+
+    let handle = {
+        let sessions = ctx.sessions.lock();
+        sessions
+            .get(&session_id)
+            .filter(|entry| entry.is_live())
+            .map(|entry| entry.handle.clone())
+    };
+    let Some(handle) = handle else {
+        ctx.plane.forget_agent_opened(&session_id);
+        return Ok(json!({
+            "sessionId": session_id,
+            "closed": true,
+            "why": "that session had already ended",
+        }));
+    };
+    if !opened_by_agent {
+        return Ok(json!({
+            "sessionId": session_id,
+            "closed": false,
+            "why": "a person opened this machine in DeskVNCViewer, so it stays open for them. This agent is detached from it",
+        }));
+    }
+    if !others.is_empty() {
+        return Ok(json!({
+            "sessionId": session_id,
+            "closed": false,
+            "why": format!(
+                "another agent is still attached to this session ({}), so it stays open. This agent is detached from it",
+                others.join(", ")
+            ),
+        }));
+    }
+    // What the person's Disconnect does (`disconnect_session`): ask the
+    // session to stop, and cancel it if its command loop is already gone.
+    if handle.try_send(ClientCommand::Disconnect).is_err() {
+        handle.shutdown();
+    }
+    ctx.plane.forget_agent_opened(&session_id);
+    (ctx.emit)(json!({
+        "type": "closed",
+        "sessionId": session_id,
+        "attachmentId": peer.attachment_id,
+    }));
+    Ok(json!({ "sessionId": session_id, "closed": true }))
 }
 
 fn limb_detach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
@@ -1895,6 +1974,12 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
             ))
         }
     };
+
+    // An agent dialled this one, so an agent may end it (`limb.close`). A
+    // session the opener found already open was the person's, and is not.
+    if !opened.reused {
+        ctx.plane.note_agent_opened(&opened.session_id);
+    }
 
     // Registered is not connected, and the reply says so rather than implying
     // it. `04 §4.3`: an agent told a machine is ready when it is negotiating
@@ -3478,6 +3563,106 @@ mod tests {
         .await;
         assert_eq!(again["qualityRestored"], Value::Null);
         assert!(fixture.commands.try_recv().is_err());
+    }
+
+    /// `limb.close` ends a session an agent opened, and only detaches from one
+    /// a person opened. Before it, `dvv_close` said "closed" and the viewer
+    /// kept the session connected.
+    #[tokio::test]
+    async fn closing_a_session_an_agent_opened_ends_it_and_one_a_person_opened_stays() {
+        let mut fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        let attach = json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 });
+
+        // The person's session: detached, left running.
+        call(&fixture.ctx, &mut peer, "limb.attach", attach.clone()).await;
+        let kept = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.close",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(kept["closed"], false, "{kept}");
+        assert!(
+            kept["why"].as_str().unwrap_or("").contains("person"),
+            "{kept}"
+        );
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert!(
+                !matches!(command, ClientCommand::Disconnect),
+                "a person's session is never disconnected by an agent's close"
+            );
+        }
+        assert!(
+            fixture.ctx.plane.other_attachments("s1", "").is_empty(),
+            "detached"
+        );
+
+        // The same session, as if an agent's open had dialled it.
+        fixture.ctx.plane.note_agent_opened("s1");
+        call(&fixture.ctx, &mut peer, "limb.attach", attach.clone()).await;
+        let closed = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.close",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(closed["closed"], true, "{closed}");
+        let mut disconnected = false;
+        while let Ok(command) = fixture.commands.try_recv() {
+            disconnected |= matches!(command, ClientCommand::Disconnect);
+        }
+        assert!(disconnected, "the session was asked to stop");
+        assert!(!fixture.ctx.plane.agent_opened("s1"));
+    }
+
+    /// A session an agent opened that another agent is still on stays open.
+    #[tokio::test]
+    async fn closing_a_session_another_agent_is_on_only_detaches() {
+        let mut fixture = fixture();
+        let attach = json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 });
+        let mut first = greeted(&fixture.ctx).await;
+        let mut second = greeted(&fixture.ctx).await;
+        call(&fixture.ctx, &mut first, "limb.attach", attach.clone()).await;
+        call(&fixture.ctx, &mut second, "limb.attach", attach.clone()).await;
+        fixture.ctx.plane.note_agent_opened("s1");
+        let kept = call(
+            &fixture.ctx,
+            &mut first,
+            "limb.close",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(kept["closed"], false, "{kept}");
+        while let Ok(command) = fixture.commands.try_recv() {
+            assert!(!matches!(command, ClientCommand::Disconnect));
+        }
+    }
+
+    /// A terminal asked for with perceive set is attached without a mirror.
+    /// It used to be refused for having no framebuffer size, which dvv read
+    /// as a desktop still connecting and waited 20 seconds on.
+    #[tokio::test]
+    async fn a_terminal_attached_with_perceive_is_attached_without_a_mirror() {
+        let mut fixture = fixture();
+        {
+            let mut sessions = fixture.ctx.sessions.lock();
+            let entry = sessions.get_mut("s1").expect("the fixture session");
+            entry.handle.kind = ProtocolKind::Ssh;
+            entry.port = 22;
+            entry.facts.lock().size = None;
+        }
+        let mut peer = greeted(&fixture.ctx).await;
+        let attached = call(&fixture.ctx, &mut peer, "limb.attach", json!({ "address": "10.0.0.5", "protocol": "ssh", "port": 22, "slot": 0, "perceive": true })).await;
+        assert_eq!(attached["perception"]["mirror"], false, "{attached}");
+        assert_eq!(attached["perception"]["frames"], false, "{attached}");
+        assert_eq!(fixture.ctx.plane.mirrors.bytes_in_use(), 0);
+        assert!(
+            fixture.commands.try_recv().is_err(),
+            "nothing is put on a terminal's wire for a mirror it does not get"
+        );
     }
 
     /// A session that has never reported a framebuffer size cannot be
