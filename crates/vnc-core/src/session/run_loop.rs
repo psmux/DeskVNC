@@ -2480,6 +2480,15 @@ impl RunLoop {
             return Ok(());
         }
         self.applied_quality = qs;
+        // A Mac's encrypted session keeps the encodings it opened with. They
+        // are lossless already (no JPEG, no H.264 on that path), so a quality
+        // preset has nothing to change there, and a Mac sent a different
+        // SetEncodings mid session goes silent: after the High preset an
+        // agent's mirror asks for, a 4K Mac sent three small updates and then
+        // nothing for 40 s, so the refresh the mirror waited for never came.
+        if self.apple.is_some() {
+            return Ok(());
+        }
         let encodings = crate::quality::encodings_for(&qs, &self.caps);
         let msg = messages::set_encodings(&encodings);
         self.send(&msg).await?;

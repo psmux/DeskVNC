@@ -1283,6 +1283,33 @@ async fn a_refresh_on_a_busy_mac_gets_the_whole_picture() {
     send(&handle, ClientCommand::Disconnect).await;
 }
 
+/// A quality change on a Mac sends no new SetEncodings: the encrypted
+/// session keeps the encodings it opened with, and a Mac sent another list
+/// mid session stopped sending updates, so an agent's mirror never filled.
+#[tokio::test]
+async fn a_quality_change_on_a_mac_keeps_its_encodings() {
+    let mac = FakeMac::start(Login::Srp36, PASSWORD).await;
+    let mut o = session_options(mac.port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    send(
+        &handle,
+        ClientCommand::SetQuality(vnc_core::types::QualityPreset::High),
+    )
+    .await;
+    send(&handle, ClientCommand::Refresh).await;
+    wait_record(&mac.seen, "the refresh", |r| {
+        r.len() == 10 && r[0] == 3 && r[1] == 0
+    })
+    .await;
+    events.drain_for(Duration::from_millis(300)).await;
+    let set_encodings = mac.seen.lock().records.iter().filter(|r| r[0] == 2).count();
+    assert_eq!(set_encodings, 1, "a second SetEncodings went to the Mac");
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
 /// A wrong password: the fake Mac refuses M1 with an ordinary failure result,
 /// and the client reports it as rejected credentials, not a protocol error.
 #[tokio::test]
