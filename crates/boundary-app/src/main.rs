@@ -24,6 +24,12 @@ use tokio::sync::oneshot;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|a| a == name);
+    // Answered before anything else: these never open a window, so they
+    // work in a terminal with no display, as they do for any other program.
+    if let Some(text) = information(&args) {
+        print!("{text}");
+        return Ok(());
+    }
     if let Some(code) = other_mode(&args) {
         std::process::exit(code);
     }
@@ -180,6 +186,36 @@ fn other_mode(args: &[String]) -> Option<i32> {
     })
 }
 
+/// What `--help` and `--version` print, or `None` for a run that opens the
+/// app. Only the first argument counts, so a flag meant for another mode is
+/// never read as one of these.
+fn information(args: &[String]) -> Option<String> {
+    match args.get(1).map(String::as_str)? {
+        "--version" | "-V" => Some(format!("{APP_NAME} {}\n", env!("CARGO_PKG_VERSION"))),
+        "--help" | "-h" => Some(format!(
+            "{APP_NAME} {}\n\
+             Let someone you trust see this computer and help you, or help someone else.\n\
+             \n\
+             Usage: deskvnc-support [OPTION]\n\
+             \n\
+             With no option, the app opens its window.\n\
+             \n\
+             Options:\n\
+             {INSTALL_HELP}\
+             \x20 --background   Start out of the way, as at sign in, for unattended access\n\
+             \x20 -h, --help     Print this help and exit\n\
+             \x20 -V, --version  Print the version and exit\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        _ => None,
+    }
+}
+/// The line about `--install` in the help, on Linux where it exists.
+const INSTALL_HELP: &str = if cfg!(target_os = "linux") {
+    "  --install      Add DeskVNC Support to your app menu, for you only\n"
+} else {
+    ""
+};
 /// A lock held for as long as this copy runs, or `None` when another copy
 /// holds it already.
 fn only_instance() -> Option<std::fs::File> {
@@ -1399,6 +1435,36 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        std::iter::once("deskvnc-support")
+            .chain(list.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn help_and_version_print_instead_of_opening_the_window() {
+        let version = format!("DeskVNC Support {}\n", env!("CARGO_PKG_VERSION"));
+        assert_eq!(information(&args(&["--version"])), Some(version.clone()));
+        assert_eq!(information(&args(&["-V"])), Some(version.clone()));
+        for flag in ["--help", "-h"] {
+            let help = information(&args(&[flag])).expect("help is printed");
+            assert!(help.starts_with(&version), "{help}");
+            assert!(help.contains("--version"));
+            assert!(help.contains("--background"));
+            assert_eq!(help.contains("--install"), cfg!(target_os = "linux"));
+        }
+    }
+
+    #[test]
+    fn other_runs_still_open_the_app() {
+        assert_eq!(information(&args(&[])), None);
+        assert_eq!(information(&args(&["--background"])), None);
+        assert_eq!(information(&args(&["--install"])), None);
+        // Only the first argument counts.
+        assert_eq!(information(&args(&["--background", "--help"])), None);
+    }
 
     #[test]
     fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
