@@ -1514,11 +1514,21 @@ fn clipboard_read(pending: &Pending, decision: &Approval) -> bool {
 /// The line over the remote screen: what this helper may do there.
 fn remote_hint(control: bool, rights: ClipboardRights) -> &'static str {
     match (control, rights.write, rights.read) {
-        (true, true, true) => "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard, and what they copy comes to you.",
-        (true, true, false) => "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard.",
-        (true, false, true) => "Control allowed. Click the remote screen to send input. Click outside it to release input. What they copy comes to you.",
-        (true, false, false) => "Control allowed. Click the remote screen to send input. Click outside it to release input.",
-        (false, _, true) => "View only. The person sharing can allow control from their window. What they copy comes to you.",
+        (true, true, true) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard, and what they copy comes to you."
+        }
+        (true, true, false) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard."
+        }
+        (true, false, true) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input. What they copy comes to you."
+        }
+        (true, false, false) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input."
+        }
+        (false, _, true) => {
+            "View only. The person sharing can allow control from their window. What they copy comes to you."
+        }
         (false, _, false) => "View only. The person sharing can allow control from their window.",
     }
 }

@@ -193,6 +193,7 @@ mod tests {
             name: name.into(),
             peer: "peer".into(),
             tools: false,
+            clipboard: false,
             answer,
         };
         (event, decision)

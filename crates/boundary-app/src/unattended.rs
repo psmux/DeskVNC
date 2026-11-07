@@ -221,7 +221,14 @@ impl Unattended {
     /// them this computer's ID so they can save it.
     /// What they may do later starts as what they may do now, so `tools`
     /// and `clipboard` are what the person allows in this session.
-    pub fn pair(&mut self, session: &Session, peer: &str, name: &str, tools: bool, clipboard: bool) {
+    pub fn pair(
+        &mut self,
+        session: &Session,
+        peer: &str,
+        name: &str,
+        tools: bool,
+        clipboard: bool,
+    ) {
         if let Err(error) = self.access.trust(peer, name, true) {
             self.fail(format!("{error:#}"));
             return;
@@ -570,7 +577,9 @@ impl Unattended {
             active.session.set_clipboard_read(false);
             active.clipboard = false;
             let name = active.name.clone();
-            self.say(format!("{name} no longer sees what you copy in this session"));
+            self.say(format!(
+                "{name} no longer sees what you copy in this session"
+            ));
         }
         if let Some(index) = end.filter(|&i| i < self.active.len()) {
             let active = self.active.remove(index);
