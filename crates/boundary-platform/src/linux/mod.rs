@@ -95,7 +95,7 @@ fn refused(error: &str, asleep: bool) -> String {
 
 pub(crate) enum Screen {
     X11(Box<x11::Screen>),
-    Portal(portal::Screen),
+    Portal(Box<portal::Screen>),
 }
 impl Screen {
     /// The display `id` (a RandR output on X11; on Wayland the person or a
@@ -106,7 +106,7 @@ impl Screen {
         match kind() {
             Kind::X11 => Ok(Self::X11(Box::new(x11::Screen::open(id, accelerated)?))),
             Kind::Wayland => match portal::Screen::open() {
-                Ok(screen) => Ok(Self::Portal(screen)),
+                Ok(screen) => Ok(Self::Portal(Box::new(screen))),
                 Err(e) => bail!(refused(&format!("{e:#}"), portal::screen_asleep())),
             },
         }
