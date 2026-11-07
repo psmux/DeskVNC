@@ -506,3 +506,403 @@ async fn live_clipboard_both_ways() {
     );
     assert!(got, "the viewer never got the Mac's pasteboard text");
 }
+
+/// Seconds since the Mac last had keyboard or pointer input from anyone.
+fn mac_idle_seconds() -> f64 {
+    let out = std::process::Command::new("ioreg")
+        .args(["-c", "IOHIDSystem"])
+        .output()
+        .expect("ioreg runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find(|l| l.contains("\"HIDIdleTime\""))
+        .and_then(|l| l.rsplit('=').next())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|ns| ns / 1e9)
+        .unwrap_or(0.0)
+}
+
+/// The display name of the frontmost app, from `lsappinfo`, which asks the
+/// Mac nothing that could put a permission dialog on its screen.
+fn mac_front_app() -> String {
+    let front = std::process::Command::new("lsappinfo")
+        .arg("front")
+        .output()
+        .expect("lsappinfo runs");
+    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
+    let info = std::process::Command::new("lsappinfo")
+        .args(["info", "-only", "name", &asn])
+        .output()
+        .expect("lsappinfo runs");
+    let text = String::from_utf8_lossy(&info.stdout);
+    text.rsplit('=')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('"')
+        .to_string()
+}
+
+/// Press and release one keysym, with modifiers held around it.
+async fn tap(handle: &vnc_core::SessionHandle, mods: &[u32], keysym: u32) {
+    for m in mods {
+        send(
+            handle,
+            ClientCommand::Key {
+                keysym: *m,
+                keycode: None,
+                down: true,
+            },
+        )
+        .await;
+    }
+    send(
+        handle,
+        ClientCommand::Key {
+            keysym,
+            keycode: None,
+            down: true,
+        },
+    )
+    .await;
+    send(
+        handle,
+        ClientCommand::Key {
+            keysym,
+            keycode: None,
+            down: false,
+        },
+    )
+    .await;
+    for m in mods.iter().rev() {
+        send(
+            handle,
+            ClientCommand::Key {
+                keysym: *m,
+                keycode: None,
+                down: false,
+            },
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+}
+
+/// Type text one character at a time. Shifted symbols go as their own
+/// keysyms with no explicit Shift, which is what the viewer sends.
+async fn type_text(handle: &vnc_core::SessionHandle, text: &str) {
+    for c in text.chars() {
+        let keysym = match c {
+            '\n' => 0xff0d,
+            c if (c as u32) < 0x100 => c as u32,
+            c => 0x0100_0000 | c as u32,
+        };
+        tap(handle, &[], keysym).await;
+    }
+}
+
+/// Rebuild the session's picture from its events and save a 1024 pixel wide
+/// thumbnail as a PNG. Returns the framebuffer and the thumbnail size.
+fn save_picture(
+    events: &Events,
+    png: &std::path::Path,
+) -> (vnc_core::pixel::framebuffer::Framebuffer, u32, u32) {
+    let mut fb: Option<vnc_core::pixel::framebuffer::Framebuffer> = None;
+    for e in &events.seen {
+        match e {
+            SessionEvent::DesktopResize { width, height, .. } => {
+                fb = Some(vnc_core::pixel::framebuffer::Framebuffer::new(
+                    *width, *height,
+                ))
+            }
+            SessionEvent::FramebufferUpdate { rects, .. } => {
+                if let Some(f) = fb.as_mut() {
+                    for r in rects {
+                        f.apply(r);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let fb = fb.expect("a desktop size");
+    let (w, h, rgba) = fb.thumbnail_rgba(1024);
+    image::save_buffer(png, &rgba, w, h, image::ExtendedColorType::Rgba8).unwrap();
+    (fb, w, h)
+}
+
+/// Look only: connect, save the picture to , hang up.
+/// Sends no input, so it is safe to run while someone uses the Mac.
+#[tokio::test]
+async fn live_picture() {
+    let what = "live_picture";
+    let Ok(path) = std::env::var("DVV_LIVE_APPLE_PICTURE") else {
+        eprintln!("SKIP {what}: DVV_LIVE_APPLE_PICTURE is not set");
+        return;
+    };
+    let Some(t) = target(what) else { return };
+    let mut o = live_options(&t, "auto");
+    o.vnc_mut().security_pref = None;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(Duration::from_secs(40)).await;
+    events.drain_for(Duration::from_secs(4)).await;
+    save_picture(&events, std::path::Path::new(&path));
+    send(&handle, ClientCommand::Disconnect).await;
+    eprintln!("LIVE {what}: saved {path}");
+}
+
+/// Stop before sending anything if this test's TextEdit window is no longer
+/// in front, so no input can land in another app (another agent may raise
+/// its own window at any moment).
+async fn still_front(handle: &vnc_core::SessionHandle, what: &str) {
+    let front = mac_front_app();
+    if front != "TextEdit" {
+        send(handle, ClientCommand::Disconnect).await;
+        panic!("{what}: stopped: {front:?} came to the front");
+    }
+}
+
+/// Input into a TextEdit document this test opens itself, then the saved file
+/// is read back. Needs `DVV_LIVE_APPLE_LOCAL=1` and `DVV_LIVE_APPLE_INPUT=1`.
+///
+/// Two phases, so a person checks the picture before anything is sent:
+/// the test opens its own file in TextEdit, connects, saves the session's
+/// picture to `$HOME/work/dvv-input-frame.png`, and waits for
+/// `$HOME/work/dvv-input-go` to hold `x y`, a point inside that window in
+/// framebuffer pixels. It sends nothing unless TextEdit is frontmost and the
+/// Mac has had no input for two minutes.
+#[tokio::test]
+async fn live_input_into_own_textedit() {
+    init_tracing();
+    let what = "live_input_into_own_textedit";
+    if std::env::var("DVV_LIVE_APPLE_LOCAL").is_err()
+        || std::env::var("DVV_LIVE_APPLE_INPUT").is_err()
+    {
+        eprintln!("SKIP {what}: needs DVV_LIVE_APPLE_LOCAL and DVV_LIVE_APPLE_INPUT");
+        return;
+    }
+    let Some(t) = target(what) else { return };
+    let idle = mac_idle_seconds();
+    assert!(
+        idle > 120.0,
+        "{what}: someone used the Mac {idle:.0} s ago; not sending input"
+    );
+
+    let work = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("work");
+    let file = work.join("dvv-input-test.txt");
+    let go = work.join("dvv-input-go");
+    let _ = std::fs::remove_file(&go);
+    std::fs::write(&file, "").unwrap();
+    std::process::Command::new("open")
+        .args(["-a", "TextEdit"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    eprintln!("LIVE {what}: front app after open: {}", mac_front_app());
+
+    let mut o = live_options(&t, "auto");
+    o.vnc_mut().security_pref = None;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(Duration::from_secs(40)).await;
+    events.drain_for(Duration::from_secs(4)).await;
+
+    let png = work.join("dvv-input-frame.png");
+    let (fb, w, h) = save_picture(&events, &png);
+    eprintln!(
+        "LIVE {what}: picture {}x{} saved as a {w}x{h} thumbnail; waiting for {}",
+        fb.width(),
+        fb.height(),
+        go.display()
+    );
+
+    let mut point = None;
+    for _ in 0..360 {
+        if let Ok(s) = std::fs::read_to_string(&go) {
+            let v: Vec<u16> = s
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            if v.len() == 2 {
+                point = Some((v[0], v[1]));
+                break;
+            }
+        }
+        events.drain_for(Duration::from_millis(500)).await;
+    }
+    let _ = std::fs::remove_file(&go);
+    let (x, y) = point.expect("no go file within three minutes");
+
+    let front = mac_front_app();
+    let idle = mac_idle_seconds();
+    if front != "TextEdit" || idle < 120.0 {
+        send(&handle, ClientCommand::Disconnect).await;
+        panic!("{what}: not sending input: front app {front:?}, idle {idle:.0} s");
+    }
+
+    // Click inside the document to place the caret there.
+    still_front(&handle, what).await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x,
+            y,
+            button_mask: 0,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x,
+            y,
+            button_mask: 1,
+        },
+    )
+    .await;
+    still_front(&handle, what).await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x,
+            y,
+            button_mask: 0,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    const SUPER: u32 = 0xffeb;
+    still_front(&handle, what).await;
+    type_text(&handle, "Hello DeskVNC 123\n").await;
+    still_front(&handle, what).await;
+    type_text(&handle, "!@#$%^&*()_+{}|:\"<>?~\n").await;
+    still_front(&handle, what).await;
+    type_text(&handle, "caf\u{e9} \u{fc}ber ma\u{f1}ana\n").await;
+    // Backspace: "xyz" then one BackSpace leaves "xy".
+    still_front(&handle, what).await;
+    type_text(&handle, "xyz").await;
+    still_front(&handle, what).await;
+    tap(&handle, &[], 0xff08).await;
+    still_front(&handle, what).await;
+    tap(&handle, &[], 0xff0d).await;
+    // Arrows: "AC", Left, "B" gives "ABC".
+    still_front(&handle, what).await;
+    type_text(&handle, "AC").await;
+    still_front(&handle, what).await;
+    tap(&handle, &[], 0xff51).await;
+    still_front(&handle, what).await;
+    type_text(&handle, "B").await;
+    still_front(&handle, what).await;
+    tap(&handle, &[], 0xff53).await;
+    still_front(&handle, what).await;
+    tap(&handle, &[], 0xff0d).await;
+    // Each shortcut is proven by what it leaves in the saved file. TextEdit
+    // capitalises the start of a line on its own, so compare ignoring case.
+    let read = || {
+        std::fs::read_to_string(&file)
+            .unwrap_or_default()
+            .to_lowercase()
+    };
+    let want =
+        "hello deskvnc 123\n!@#$%^&*()_+{}|:\"<>?~\ncaf\u{e9} \u{fc}ber ma\u{f1}ana\nxy\nabc\n";
+    still_front(&handle, what).await;
+    tap(&handle, &[SUPER], 's' as u32).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let typed = read();
+    eprintln!("LIVE {what}: after typing and cmd+s the file holds {typed:?}");
+    // cmd+a selects everything, so one typed letter replaces it all.
+    still_front(&handle, what).await;
+    tap(&handle, &[SUPER], 'a' as u32).await;
+    type_text(&handle, "Z").await;
+    still_front(&handle, what).await;
+    tap(&handle, &[SUPER], 's' as u32).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let replaced = read();
+    eprintln!("LIVE {what}: after cmd+a, Z and cmd+s: {replaced:?}");
+    // cmd+z undoes the replacement.
+    still_front(&handle, what).await;
+    tap(&handle, &[SUPER], 'z' as u32).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    still_front(&handle, what).await;
+    tap(&handle, &[SUPER], 's' as u32).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let undone = read();
+    eprintln!("LIVE {what}: after cmd+z and cmd+s: {undone:?}");
+    // cmd+w closes the saved document, nothing else.
+    still_front(&handle, what).await;
+    tap(&handle, &[SUPER], 'w' as u32).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    send(&handle, ClientCommand::Disconnect).await;
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&png);
+    assert_eq!(typed, want, "typing");
+    assert_eq!(replaced, "z", "cmd+a then Z");
+    assert_eq!(undone, want, "cmd+z");
+}
+
+/// One click at `DVV_LIVE_APPLE_CLICK` ("x y", framebuffer pixels), and then
+/// cmd+w if `DVV_LIVE_APPLE_THEN_CLOSE` is set, only while TextEdit is in
+/// front. For finishing what `live_input_into_own_textedit` left open in its
+/// own window (a save sheet, the document itself).
+#[tokio::test]
+async fn live_click_in_own_textedit() {
+    let what = "live_click_in_own_textedit";
+    let Ok(at) = std::env::var("DVV_LIVE_APPLE_CLICK") else {
+        eprintln!("SKIP {what}: DVV_LIVE_APPLE_CLICK is not set");
+        return;
+    };
+    if std::env::var("DVV_LIVE_APPLE_LOCAL").is_err() {
+        eprintln!("SKIP {what}: needs DVV_LIVE_APPLE_LOCAL");
+        return;
+    }
+    let v: Vec<u16> = at
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    let (x, y) = (v[0], v[1]);
+    let Some(t) = target(what) else { return };
+    let mut o = live_options(&t, "auto");
+    o.vnc_mut().security_pref = None;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(Duration::from_secs(40)).await;
+    events.drain_for(Duration::from_secs(2)).await;
+    still_front(&handle, what).await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x,
+            y,
+            button_mask: 0,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x,
+            y,
+            button_mask: 1,
+        },
+    )
+    .await;
+    send(
+        &handle,
+        ClientCommand::Pointer {
+            x,
+            y,
+            button_mask: 0,
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    if std::env::var("DVV_LIVE_APPLE_THEN_CLOSE").is_ok() {
+        still_front(&handle, what).await;
+        tap(&handle, &[0xffeb], 'w' as u32).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    send(&handle, ClientCommand::Disconnect).await;
+    eprintln!("LIVE {what}: clicked at {x},{y}");
+}

@@ -10798,6 +10798,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "image",
  "md-5",
  "num-bigint-dig",
  "parking_lot",

@@ -16,6 +16,8 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 flate2 = { workspace = true }
+# The live input test saves the session's picture as a PNG for a person to check.
+image = { workspace = true }
 zune-jpeg = { workspace = true }
 des = { workspace = true }
 cipher = { workspace = true }
@@ -46,6 +48,8 @@ tracing-subscriber = { workspace = true }
 tokio = { version = "1", features = ["full", "test-util"] }
 # Integration tests build real zlib/Tight/ZRLE wire data in the mock RFB server.
 flate2 = { workspace = true }
+# The live input test saves the session's picture as a PNG for a person to check.
+image = { workspace = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
