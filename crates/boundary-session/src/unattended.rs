@@ -92,6 +92,12 @@ pub struct Helper {
     /// before it existed.
     #[serde(default)]
     pub tools: bool,
+    /// Whether they see what the person copies while they are connected.
+    /// Off unless the person turned it on for this helper, including for
+    /// every helper paired before it existed, and always off at the sign in
+    /// screen.
+    #[serde(default)]
+    pub clipboard: bool,
     /// Unix seconds.
     pub added: u64,
 }
@@ -127,6 +133,7 @@ impl Access {
             name: name.trim().to_string(),
             control,
             tools: false,
+            clipboard: false,
             added: wire::now(),
         });
         Ok(())
@@ -137,6 +144,17 @@ impl Access {
         match self.helpers.iter_mut().find(|h| h.id == id.trim()) {
             Some(helper) => {
                 helper.tools = allowed;
+                true
+            }
+            None => false,
+        }
+    }
+    /// Let a paired helper see what the person copies, or stop it. `false`
+    /// when no helper has that ID.
+    pub fn allow_clipboard(&mut self, id: &str, allowed: bool) -> bool {
+        match self.helpers.iter_mut().find(|h| h.id == id.trim()) {
+            Some(helper) => {
+                helper.clipboard = allowed;
                 true
             }
             None => false,
@@ -198,6 +216,8 @@ pub struct Asked {
     pub approval: Approval,
     /// Let their tools run commands and copy files.
     pub tools: bool,
+    /// Let them see what the person copies.
+    pub clipboard: bool,
     /// Pair them, so they come in later without asking.
     pub pair: bool,
 }
@@ -228,6 +248,9 @@ pub enum Notice {
         peer: String,
         /// The helper can send commands and file requests.
         tools: bool,
+        /// The helper can carry clipboard text, so the person can be asked
+        /// whether it may see what they copy.
+        clipboard: bool,
         answer: tokio::sync::oneshot::Sender<Asked>,
     },
     /// A helper was turned away, and why.
@@ -442,6 +465,7 @@ where
         jpeg,
         tiles,
         video,
+        clipboard: _,
     } = message
     else {
         refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -596,6 +620,7 @@ async fn ask(
             name: name.to_string(),
             peer: peer.to_string(),
             tools,
+            clipboard: false,
             answer,
         })
         .await
@@ -749,6 +774,7 @@ pub fn connect_with_tools(
         Abilities {
             tools: true,
             video: false,
+            clipboard: false,
         },
     )
 }
@@ -826,6 +852,7 @@ pub fn connect_to_with_tools(
         Abilities {
             tools: true,
             video: false,
+            clipboard: false,
         },
     )
 }
@@ -923,6 +950,7 @@ async fn visit(
             jpeg: true,
             tiles: true,
             video: abilities.codecs(),
+            clipboard: abilities.clipboard,
         },
     )
     .await
