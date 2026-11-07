@@ -877,6 +877,7 @@ impl RunLoop {
                 && bytes[1] == 0
             {
                 a.full_request_pending = true;
+                a.full_request_at = Some(Instant::now());
             }
         }
         self.writer
@@ -1323,10 +1324,26 @@ impl RunLoop {
         }
 
         // A Mac's answer to a full request: only now may the incremental
-        // requests start, or they would have cancelled it.
-        if !rects.is_empty() {
+        // requests start, or they would have cancelled it. The answer is the
+        // update that covers the screen, not merely the next one with pixels
+        // in it: on a busy screen over a slow link the answer to the previous
+        // incremental request is usually still on its way when a refresh goes
+        // out, and taking that small update for the answer sent an
+        // incremental request that cancelled the refresh. An agent's first
+        // screen read on a 4K Mac then waited out its own reconnect, 22 s.
+        let full_answer = answers_full_refresh(damage, self.full_rect());
+        let overdue = self
+            .apple
+            .as_ref()
+            .and_then(|a| a.full_request_at)
+            .is_some_and(|at| at.elapsed() >= crate::apple::FULL_REQUEST_PATIENCE);
+        if !rects.is_empty() && (full_answer || overdue) {
             if let Some(a) = self.apple.as_mut().filter(|a| a.full_request_pending) {
+                if !full_answer {
+                    tracing::debug!("a full update request went unanswered; pulling changes again");
+                }
                 a.full_request_pending = false;
+                a.full_request_at = None;
                 let msg = messages::framebuffer_update_request(true, self.full_rect());
                 self.send(&msg).await?;
                 self.arm_pipelined_request(Instant::now());

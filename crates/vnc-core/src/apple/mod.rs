@@ -182,7 +182,15 @@ pub struct AppleSession {
     /// holds them back while a full request waits for its picture. Starts
     /// true because the opening sends one.
     pub full_request_pending: bool,
+    /// When the pending full request went out. A full request still
+    /// unanswered after [`FULL_REQUEST_PATIENCE`] stops holding back the
+    /// incremental ones, so a Mac that never answers it cannot freeze the
+    /// picture.
+    pub full_request_at: Option<std::time::Instant>,
 }
+
+/// How long a full update request may hold back incremental ones.
+pub const FULL_REQUEST_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl AppleSession {
     pub fn new(rekey: RekeyHandle) -> Self {
@@ -191,6 +199,7 @@ impl AppleSession {
             rearmed_after_announce: false,
             logical: None,
             full_request_pending: true,
+            full_request_at: Some(std::time::Instant::now()),
         }
     }
 
