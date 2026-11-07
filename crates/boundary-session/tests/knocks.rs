@@ -566,6 +566,7 @@ async fn an_unattended_computer_lets_a_paired_helper_in_while_it_asks_about_anot
         let _ = answer.send(Asked {
             approval: Approval::View,
             tools: false,
+            clipboard: false,
             pair: false,
         });
         assert_eq!(outcome(&mut stranger).await, Ok(()));

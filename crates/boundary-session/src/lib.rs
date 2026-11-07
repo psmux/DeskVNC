@@ -26,7 +26,7 @@ use std::io::Cursor;
 const JPEG_QUALITY: u8 = 70;
 pub use screen::Rect;
 pub use video::{Update, VideoUnit};
-pub use wire::{Button, Input, Invitation, Key};
+pub use wire::{Button, ClipboardRights, Input, Invitation, Key, MAX_CLIPBOARD};
 
 /// Implemented by a local platform backend, created only after consent.
 pub trait Desktop {

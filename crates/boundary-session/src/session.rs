@@ -1,6 +1,6 @@
 use crate::pace::Pace;
 use crate::{
-    Desktop, Frame, Input, Invitation,
+    ClipboardRights, Desktop, Frame, Input, Invitation,
     screen::{self, Rect},
     tools,
     video::{self, Update, VideoEncoder, VideoEncoders, VideoUnit},
@@ -37,6 +37,11 @@ pub enum Event {
         name: String,
         peer: String,
         tools: bool,
+        /// The helper can carry clipboard text. To let it see what the
+        /// person copies, call [`Session::set_clipboard_read`] before
+        /// answering. Putting text on the person's clipboard follows control
+        /// and needs no question of its own.
+        clipboard: bool,
         answer: oneshot::Sender<Approval>,
     },
     Connected {
@@ -47,8 +52,15 @@ pub enum Event {
     /// On the helper's side: the person changed whether commands and files
     /// are allowed.
     Tools(bool),
+    /// On the helper's side: what the host lets this helper do with the
+    /// person's clipboard. Sent after it is let in, only by a host that
+    /// serves clipboard, and again whenever either right changes.
+    ClipboardRights(ClipboardRights),
+    /// On the helper's side: text the person copied.
+    ClipboardText(String),
     /// On the host's side: one line for each command or file request the
-    /// helper ran, so the person can see what was done.
+    /// helper ran, and for each clipboard text that went either way (its
+    /// length, never the text), so the person can see what was done.
     Activity(String),
     /// On the helper's side: the person helped chose to let this helper in
     /// any time. `machine` is the ID to save and connect to later.
@@ -109,6 +121,13 @@ pub struct Session {
     pairing: mpsc::Sender<(String, String)>,
     /// Bumped to ask the host for the whole screen again.
     refresh: watch::Sender<u64>,
+    /// On the host's side, whether the person lets the helper see what they
+    /// copy.
+    clipboard_read: watch::Sender<bool>,
+    /// On the helper's side, what the host last said about the clipboard.
+    clipboard_rights: watch::Receiver<ClipboardRights>,
+    /// On the helper's side, text for the person's clipboard.
+    clipboard_out: mpsc::Sender<String>,
     cancel: CancellationToken,
 }
 /// What a helper can do beyond drawing screens, said in its first message.
@@ -120,6 +139,10 @@ pub struct Abilities {
     /// caller that reads updates that way may say so: [`Session::screen`]
     /// has nowhere to put a picture of video.
     pub video: bool,
+    /// Carry clipboard text both ways: [`Session::send_clipboard`], and
+    /// [`Event::ClipboardText`] and [`Event::ClipboardRights`]. Only a
+    /// caller that reads those events may say so.
+    pub clipboard: bool,
 }
 impl Abilities {
     /// The video codecs to name in the first message.
@@ -243,6 +266,41 @@ impl Session {
     pub fn tools_allowed(&self) -> bool {
         *self.tools.borrow()
     }
+    /// On the host's side: let the helper see what the person copies, or
+    /// stop it. Off unless the person turns it on. Call it before answering
+    /// the approval, as with [`Session::set_tools`]; changed during the
+    /// session, the helper is told and copies stop or start at once.
+    pub fn set_clipboard_read(&self, allowed: bool) {
+        self.clipboard_read.send_replace(allowed);
+    }
+    /// On the host's side, whether the helper sees what the person copies.
+    pub fn clipboard_read_allowed(&self) -> bool {
+        *self.clipboard_read.borrow()
+    }
+    /// On the helper's side: put text on the person's clipboard. Refused
+    /// while the host does not take it (it takes it only while this helper
+    /// has control, and only a host that serves clipboard does at all), and
+    /// for text over [`crate::MAX_CLIPBOARD`] bytes. A refusal ends nothing.
+    pub fn send_clipboard(&self, text: String) -> Result<()> {
+        ensure!(
+            self.clipboard_rights.borrow().write,
+            "That computer does not take clipboard text from you right now. It takes it only while you have control"
+        );
+        wire::check_clipboard(&text)?;
+        self.clipboard_out
+            .try_send(text)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    anyhow!("Still sending the last clipboard text. Try again in a moment")
+                }
+                mpsc::error::TrySendError::Closed(_) => anyhow!("The session has ended"),
+            })
+    }
+    /// On the helper's side, what the host lets this helper do with the
+    /// person's clipboard now. Nothing until it says so.
+    pub fn clipboard_rights(&self) -> ClipboardRights {
+        *self.clipboard_rights.borrow()
+    }
     /// On the helper's side: how to send commands and file requests, once the
     /// host has let this helper in and said it serves them. `None` before
     /// that, after the session ends, and with a host too old to serve them.
@@ -302,6 +360,9 @@ pub(crate) struct Worker {
     client: watch::Sender<Option<tools::Client>>,
     pairing: mpsc::Receiver<(String, String)>,
     refresh: watch::Receiver<u64>,
+    pub(crate) clipboard_read: watch::Sender<bool>,
+    clipboard_rights: watch::Sender<ClipboardRights>,
+    clipboard_out: mpsc::Receiver<String>,
     cancel: CancellationToken,
 }
 pub(crate) fn channels() -> (Session, Worker) {
@@ -318,6 +379,9 @@ pub(crate) fn channels() -> (Session, Worker) {
     // Off until somebody says otherwise, on both sides.
     let (tools_tx, _) = watch::channel(false);
     let (client_tx, client) = watch::channel(None);
+    let (clipboard_read, _) = watch::channel(false);
+    let (clipboard_rights_tx, clipboard_rights) = watch::channel(ClipboardRights::default());
+    let (clipboard_out, clipboard_out_rx) = mpsc::channel(2);
     let cancel = CancellationToken::new();
     let damage = Arc::new(Mutex::new(Damage::default()));
     let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -334,6 +398,9 @@ pub(crate) fn channels() -> (Session, Worker) {
             client,
             pairing,
             refresh,
+            clipboard_read: clipboard_read.clone(),
+            clipboard_rights,
+            clipboard_out,
             cancel: cancel.clone(),
         },
         Worker {
@@ -349,6 +416,9 @@ pub(crate) fn channels() -> (Session, Worker) {
             client: client_tx,
             pairing: pairing_rx,
             refresh: refresh_rx,
+            clipboard_read,
+            clipboard_rights: clipboard_rights_tx,
+            clipboard_out: clipboard_out_rx,
             cancel,
         },
     )
@@ -412,6 +482,7 @@ pub fn viewer_with_tools(
         Abilities {
             tools: true,
             video: false,
+            clipboard: false,
         },
     )
 }
@@ -692,6 +763,7 @@ where
                         name: knock.name.clone(),
                         peer: peer.clone(),
                         tools: knock.tools,
+                        clipboard: knock.clipboard,
                         answer,
                     })
                     .await?;
@@ -774,6 +846,7 @@ struct Knock {
     name: String,
     tools: bool,
     screens: Screens,
+    clipboard: bool,
 }
 /// A knock the person is being asked about.
 struct Asking {
@@ -814,8 +887,12 @@ async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::S
                 let connection = incoming.await?;
                 let guard = Close(connection.clone());
                 let (send, mut recv) = connection.accept_bi().await?;
-                let (name, tools, screens) =
-                    wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
+                let wire::Hello {
+                    name,
+                    tools,
+                    screens,
+                    clipboard,
+                } = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
                 Ok::<_, anyhow::Error>(Knock {
                     guard,
                     send,
@@ -823,6 +900,7 @@ async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::S
                     name,
                     tools,
                     screens,
+                    clipboard,
                 })
             };
             if let Ok(Ok(knock)) = tokio::time::timeout(HELLO_WAIT, handshake).await {
@@ -921,6 +999,7 @@ where
         &Message::Granted {
             control: allowed,
             tools: tools.then_some(tools_now),
+            clipboard: None,
         },
     )
     .await?;
@@ -1918,6 +1997,7 @@ async fn run_viewer(
             jpeg: true,
             tiles: true,
             video: abilities.codecs(),
+            clipboard: abilities.clipboard,
         },
     )
     .await?;
@@ -2046,7 +2126,7 @@ async fn watch(
     )
     .await??;
     let (control, tools) = match grant {
-        Message::Granted { control, tools } => (control, tools),
+        Message::Granted { control, tools, .. } => (control, tools),
         Message::Refused(reason) => return Err(Refusal(reason).into()),
         _ => return Err(Refusal("The person declined this connection".into()).into()),
     };
