@@ -1238,6 +1238,7 @@ impl App {
         });
         ui.add_space(10.0);
         self.move_banner(ui);
+        self.unattended.login_notice(ui);
         self.unattended.banner(ui);
         self.unattended.prompt(ui.ctx(), self.input_permission);
         if self.connected && self.hosting {
