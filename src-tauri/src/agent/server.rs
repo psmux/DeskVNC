@@ -1998,7 +1998,7 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
         return Err(RpcError::tagged(
             "SLOT_REFUSED",
             format!(
-                "{address} has {} live session(s), so the next one opened is slot {}, and slot {slot} cannot be opened yet. Nothing was dialled. Open slot {} first, or use slot 0 for the session that is already there",
+                "{address} has {} live session(s), so the next one opened is slot {}, and slot {slot} cannot be opened yet. Nothing was dialled. Slots open in order: open slot {} first, then ask for the next",
                 live.len(),
                 live.len(),
                 live.len(),
@@ -4902,7 +4902,8 @@ mod tests {
         .expect_err("slot 1 needs slot 0 first");
         assert_eq!(refused.tag, Some("SLOT_REFUSED"));
         assert!(
-            refused.message.contains("slot 0") && refused.message.contains("Nothing was dialled"),
+            refused.message.contains("open slot 0 first")
+                && refused.message.contains("Nothing was dialled"),
             "{}",
             refused.message
         );
