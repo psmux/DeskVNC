@@ -648,9 +648,10 @@ jobs:
   # v0.27.3 sat with a support app nobody outside the repo could download.
   #
   # The support app for Linux: one binary in a tarball, for x86_64 and for
-  # ARM64. Its own job, on Ubuntu 24.04, because its Wayland screen capture
-  # binds PipeWire 1.0 and the viewer stays on 22.04 for the older glibc its
-  # installers promise.
+  # ARM64. Built on Ubuntu 22.04 like the viewer, with the same PipeWire 1.0
+  # headers over 22.04's library, so it starts on glibc 2.35 and later. On
+  # 24.04 it needed glibc 2.39 and would not start on Debian 12 or on
+  # Raspberry Pi OS.
   support-linux:
     name: ${{ matrix.label }}
     needs: draft
@@ -659,11 +660,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             label: Linux (DeskVNC Support)
             arch: x86_64
             sums: SHA256SUMS-DeskVNC-Support-Linux.txt
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             label: Linux ARM64 (DeskVNC Support)
             arch: aarch64
             sums: SHA256SUMS-DeskVNC-Support-Linux-aarch64.txt
@@ -680,6 +681,31 @@ jobs:
           # xkbcommon for input, and clang because pipewire-sys generates its
           # bindings at build time.
           sudo apt-get install -y             libssl-dev libdbus-1-dev pkg-config             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev             clang libclang-dev
+
+      - name: Use PipeWire 1.0 headers against the 22.04 library
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          pool=http://archive.ubuntu.com/ubuntu/pool/main/p/pipewire
+          headers=$RUNNER_TEMP/pipewire-headers
+          mkdir -p "$RUNNER_TEMP/pw" "$headers/pkgconfig"
+          cd "$RUNNER_TEMP/pw"
+          while read -r sum deb; do
+            curl -fsSLO "$pool/$deb"
+            echo "$sum  $deb" | sha256sum -c -
+            ar p "$deb" data.tar.zst | zstd -dc | tar -x -C "$headers" ./usr/include
+          done <<'DEBS'
+          1a0267989f02a8729cdb4df36d9acf3a5ac1a525200d428baffe8961ccb0e0ba libpipewire-0.3-dev_1.0.5-1ubuntu3.3_amd64.deb
+          93a60e7656fb35c97a78159fd0556842c62c2d8b9aff096009f9a20c64c1f272 libspa-0.2-dev_1.0.5-1ubuntu3.3_amd64.deb
+          DEBS
+          system=$(pkg-config --variable=libdir libpipewire-0.3)
+          printf '%s\n' "Name: libspa" "Description: SPA 1.0.5 headers" "Version: 1.0.5" \
+            "Cflags: -I$headers/usr/include/spa-0.2 -D_REENTRANT" > "$headers/pkgconfig/libspa-0.2.pc"
+          printf '%s\n' "Name: libpipewire" "Description: PipeWire 1.0.5 headers, system library" "Version: 1.0.5" \
+            "Requires: libspa-0.2" "Libs: -L$system -lpipewire-0.3" \
+            "Cflags: -I$headers/usr/include/pipewire-0.3 -D_REENTRANT" > "$headers/pkgconfig/libpipewire-0.3.pc"
+          echo "PKG_CONFIG_PATH=$headers/pkgconfig" >> "$GITHUB_ENV"
+          echo "linking against $(readlink -f "$system/libpipewire-0.3.so")"
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
         with:
