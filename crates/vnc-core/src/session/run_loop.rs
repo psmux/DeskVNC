@@ -2232,6 +2232,14 @@ impl RunLoop {
                 msg.extend_from_slice(&body);
                 self.send(&msg).await?;
             }
+            ClientCommand::ClipboardRequest { .. } if self.apple.is_some() => {
+                // A Mac hands its pasteboard over when asked with
+                // ClipboardFetch, the same message the run loop sends when the
+                // Mac says its pasteboard changed. Without this an agent's
+                // clipboard read on a Mac sent nothing and could only be
+                // answered from whatever the Mac had last reported.
+                self.send(&crate::apple::wire::clipboard_fetch()).await?;
+            }
             ClientCommand::ClipboardRequest { formats } => {
                 if self.caps.supports_extended_clipboard {
                     let msg = messages::extended_clipboard_request(formats);

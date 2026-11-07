@@ -1159,6 +1159,23 @@ async fn an_accepted_host_key_is_not_asked_about_again_after_a_reconnect() {
     let _ = mac.seen;
 }
 
+/// An agent's clipboard read on a Mac asks the Mac for its pasteboard.
+#[tokio::test]
+async fn a_clipboard_request_on_a_mac_fetches_the_pasteboard() {
+    let mac = FakeMac::start(Login::Srp36, PASSWORD).await;
+    let mut o = session_options(mac.port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    send(&handle, ClientCommand::ClipboardRequest { formats: 1 }).await;
+    wait_record(&mac.seen, "a ClipboardFetch", |r| {
+        r[..] == apple_wire::clipboard_fetch()[..]
+    })
+    .await;
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
 /// A wrong password: the fake Mac refuses M1 with an ordinary failure result,
 /// and the client reports it as rejected credentials, not a protocol error.
 #[tokio::test]
