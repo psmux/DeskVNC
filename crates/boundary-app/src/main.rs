@@ -1332,6 +1332,8 @@ impl App {
                     });
                     if !self.input_permission {
                         theme::small(ui, "Accessibility permission is needed for control. You can allow viewing now.");
+                    } else if let Some(hint) = boundary_platform::control_hint() {
+                        theme::small(ui, hint);
                     }
                 });
             if let Some(decision) = decision

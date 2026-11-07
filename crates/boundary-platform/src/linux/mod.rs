@@ -59,6 +59,26 @@ pub(crate) struct Area {
     pub height: u32,
 }
 
+/// What to tell the person before they allow control, or `None` when
+/// allowing it here is the whole answer. On Wayland the desktop asks again
+/// in its own sharing dialog, and GNOME shows its Allow Remote Interaction
+/// switch off whatever was chosen here; the portal cannot turn it on, and
+/// with it off the helper can only watch.
+pub(crate) fn control_hint() -> Option<&'static str> {
+    control_hint_for(kind(), std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref())
+}
+fn control_hint_for(kind: Kind, desktop: Option<&str>) -> Option<&'static str> {
+    if kind != Kind::Wayland {
+        return None;
+    }
+    let gnome = desktop.is_some_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("gnome")));
+    Some(if gnome {
+        "For control, switch on Allow Remote Interaction when your desktop asks which screen to share. It starts off, and left off they can only watch."
+    } else {
+        "For control, allow remote input too when your desktop asks which screen to share. Left off, they can only watch."
+    })
+}
+
 /// Why a Wayland desktop did not share its screen, for the helper and for
 /// the person at the computer. The portal gives no reason when GNOME refuses
 /// a session because the screen is locked or blank, so `asleep` comes from
@@ -198,6 +218,16 @@ mod tests {
         let said = refused("Portal request didn't succeed with no information", false);
         assert!(said.contains("ScreenCast service"), "{said}");
         assert!(said.contains("no information"), "{said}");
+    }
+
+    #[test]
+    fn control_on_gnome_wayland_names_the_switch() {
+        let gnome = control_hint_for(Kind::Wayland, Some("ubuntu:GNOME")).unwrap();
+        assert!(gnome.contains("Allow Remote Interaction"), "{gnome}");
+        let other = control_hint_for(Kind::Wayland, Some("KDE")).unwrap();
+        assert!(!other.contains("Allow Remote Interaction"), "{other}");
+        // X11 asks nothing more, so there is nothing to say.
+        assert_eq!(control_hint_for(Kind::X11, Some("GNOME")), None);
     }
 
     #[test]

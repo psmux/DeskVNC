@@ -414,6 +414,8 @@ impl Unattended {
                 });
                 if !control_ok {
                     theme::small(ui, "Accessibility permission is needed for control. You can allow viewing now.");
+                } else if let Some(hint) = boundary_platform::control_hint() {
+                    theme::small(ui, hint);
                 }
             });
         if let Some(approval) = decision
