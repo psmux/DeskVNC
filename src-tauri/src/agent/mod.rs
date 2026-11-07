@@ -130,8 +130,13 @@ pub fn socket_path() -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
+        // Named for this user and this Windows session: see
+        // `local_pipe::plane_pipe_name` for why the session is in it.
         let user = std::env::var("USERNAME").unwrap_or_default();
-        PathBuf::from(format!("\\\\.\\pipe\\deskvncviewer-agent-{user}"))
+        PathBuf::from(local_pipe::plane_pipe_name(
+            &user,
+            local_pipe::current_session(),
+        ))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

@@ -1113,10 +1113,13 @@ pub fn socket_path() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        // The pipe carries the user's SID so two users on one machine cannot
-        // reach each other's plane, and the ACL grants only the creating user.
+        // Named for the user and the Windows session, so a viewer in another
+        // session of the same user (an RDP login) serves its own agents and
+        // not this one's. The ACL grants only the creating user. From session
+        // 0, where no viewer can run, this is the console's plane. See
+        // `local_pipe::plane_pipe_name`.
         let user = std::env::var("USERNAME").unwrap_or_default();
-        format!("\\\\.\\pipe\\deskvncviewer-agent-{user}")
+        local_pipe::plane_pipe_name(&user, local_pipe::plane_session())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

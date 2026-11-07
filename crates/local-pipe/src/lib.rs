@@ -19,4 +19,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{connect, create, exists, keep_std_handles_private};
+pub use windows::{
+    connect, create, current_session, exists, keep_std_handles_private, plane_pipe_name,
+    plane_session,
+};
