@@ -84,14 +84,12 @@ export function QuickConnect({
   const [open, setOpen] = useState(false);
   /**
    * The row picked with the arrow keys. -1 is "nothing picked yet", so Enter
-   * uses the field. Only the keys set it: a row the mouse merely passed over
-   * on its way to Connect is not a choice, and letting it count made Enter
-   * open `rdp://` for a bare address typed with the pointer resting on an
-   * RDP recent.
+   * uses the field. Only the keys set it: a row the pointer merely passed
+   * over is not a choice, and letting it count made Enter open `rdp://` for
+   * a bare address typed while the pointer rested on an RDP recent. A row
+   * under the pointer still lights up its own way, for the click.
    */
   const [selected, setSelected] = useState(-1);
-  /** The row under the pointer, lit up so a click on it reads as one. */
-  const [hovered, setHovered] = useState(-1);
   /** Only red after the user actually tried to connect; typing is not an error. */
   const [attempted, setAttempted] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -292,7 +290,6 @@ export function QuickConnect({
 
   useEffect(() => {
     setSelected(-1);
-    setHovered(-1);
     // The override is for one typed address, not a mode.
     setFlipped(null);
   }, [value]);
@@ -309,8 +306,6 @@ export function QuickConnect({
   }, [selected]);
 
   const showList = open && suggestions.length > 0;
-  /** The row drawn as chosen: the one picked with the keys, else the one under the pointer. */
-  const lit = selected >= 0 ? selected : hovered;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === "ArrowDown") {
@@ -377,7 +372,6 @@ export function QuickConnect({
             role="listbox"
             aria-label="Connection suggestions"
             className="fade-in absolute left-0 right-0 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-md border border-subtle bg-raised p-1.5 shadow-(--shadow-pop)"
-            onPointerLeave={() => setHovered(-1)}
           >
             {suggestions.map((s, i) => (
               <button
@@ -388,9 +382,8 @@ export function QuickConnect({
                 aria-selected={i === selected}
                 className={classNames(
                   "flex w-full items-center gap-3 rounded-md px-3 py-2 text-left",
-                  i === lit ? "bg-accent text-accent-fg" : "text-primary hover:bg-inset",
+                  i === selected ? "bg-accent text-accent-fg" : "text-primary hover:bg-inset",
                 )}
-                onPointerMove={() => setHovered(i)}
                 // Keeping focus in the field means the blur that closes this
                 // list cannot land before the click that uses it, which would
                 // unmount this button mid-gesture and swallow the click.
@@ -400,14 +393,14 @@ export function QuickConnect({
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={s.run}
               >
-                <span className={i === lit ? "opacity-90" : "text-tertiary"}>
+                <span className={i === selected ? "opacity-90" : "text-tertiary"}>
                   <SuggestionIcon kind={s.kind} />
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{s.label}</span>
                 <span
                   className={classNames(
                     "mono shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold tracking-wide",
-                    i === lit ? "bg-black/15" : "bg-inset text-tertiary",
+                    i === selected ? "bg-black/15" : "bg-inset text-tertiary",
                   )}
                 >
                   {protocolLabel(s.protocol)}
@@ -416,7 +409,7 @@ export function QuickConnect({
                   <span
                     className={classNames(
                       "mono truncate text-xs",
-                      i === lit ? "opacity-75" : "text-tertiary",
+                      i === selected ? "opacity-75" : "text-tertiary",
                     )}
                   >
                     {s.sub}
