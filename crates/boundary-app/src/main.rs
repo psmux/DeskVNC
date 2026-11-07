@@ -15,7 +15,8 @@ mod unattended;
 mod wake;
 
 use boundary_session::{
-    Approval, Button, Event, HostOptions, Input, Key, Session, unattended::SecretKey,
+    Abilities, Approval, Button, ClipboardRights, Event, HostOptions, Input, Key, Session,
+    unattended::SecretKey,
 };
 use eframe::egui::{self, Margin, RichText};
 use std::time::{Duration, Instant};
@@ -250,6 +251,11 @@ struct Pending {
     tools: bool,
     /// What the person ticked for them. Off until they tick it.
     allow_tools: bool,
+    /// The helper can take text this computer copies, and this computer can
+    /// give it, so the person is asked whether it may.
+    clipboard: bool,
+    /// Off until they tick it: whatever they copy may be a password.
+    allow_clipboard: bool,
     answer: oneshot::Sender<Approval>,
 }
 /// How many lines of what a helper's tools did the sharing screen keeps.
@@ -270,6 +276,15 @@ struct App {
     tools_offered: bool,
     /// Whether the person allows them now.
     tools: bool,
+    /// Whether this helper can be shown what the person copies at all.
+    clipboard_offered: bool,
+    /// Whether the person lets them see it now.
+    clipboard: bool,
+    /// On the helper's side: what the host lets this copy do with clipboards.
+    rights: ClipboardRights,
+    /// On the helper's side: the last text the person at the other computer
+    /// copied, kept until this helper chooses to copy it.
+    copied: Option<String>,
     /// What they did, newest last.
     activity: Vec<String>,
     invitation: String,
@@ -366,6 +381,10 @@ impl App {
             control: false,
             tools_offered: false,
             tools: false,
+            clipboard_offered: false,
+            clipboard: false,
+            rights: ClipboardRights::default(),
+            copied: None,
             activity: Vec::new(),
             invitation: String::new(),
             expires: None,
@@ -421,6 +440,10 @@ impl App {
         self.control = false;
         self.tools_offered = false;
         self.tools = false;
+        self.clipboard_offered = false;
+        self.clipboard = false;
+        self.rights = ClipboardRights::default();
+        self.copied = None;
         self.activity.clear();
         self.invitation.clear();
         self.expires = None;
@@ -438,6 +461,27 @@ impl App {
             self.status = error.to_string();
             self.error = true;
         }
+    }
+    /// Put text on the other computer's clipboard and paste it there with
+    /// V under the modifier the helper is holding, which reached it already,
+    /// so the paste lands where it would have been typed.
+    fn paste_there(&mut self, text: String) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Err(error) = session.send_clipboard(text) {
+            self.status = format!("{error:#}");
+            self.error = true;
+            return;
+        }
+        self.send(Input::Key {
+            key: Key::Letter('v'),
+            down: true,
+        });
+        self.send(Input::Key {
+            key: Key::Letter('v'),
+            down: false,
+        });
     }
     /// Share this computer: a host session whose invitation becomes the code
     /// on the home screen.
@@ -469,11 +513,12 @@ impl App {
         self.hosting = false;
         self.error = false;
         if target.starts_with("boundary1:") {
-            self.session = Some(boundary_session::viewer_as(
+            self.session = Some(boundary_session::viewer_with(
                 target,
                 name,
                 self.network_options(),
                 self.helper_key.clone(),
+                abilities(),
             ));
         } else if boundary_session::unattended::validate_machine_id(&target).is_ok() {
             let Some(key) = self.helper_key.clone() else {
@@ -483,12 +528,13 @@ impl App {
             };
             let password = Some(self.password.clone()).filter(|p| !p.is_empty());
             self.status = "Connecting to the computer".into();
-            self.session = Some(boundary_session::unattended::connect(
+            self.session = Some(boundary_session::unattended::connect_with(
                 target,
                 name,
                 password,
                 key,
                 self.network_options(),
+                abilities(),
             ));
         } else {
             self.codes.resolve(target);
@@ -519,11 +565,12 @@ impl App {
         if let Some(ticket) = self.codes.poll() {
             self.hosting = false;
             self.error = false;
-            self.session = Some(boundary_session::viewer_as(
+            self.session = Some(boundary_session::viewer_with(
                 ticket,
                 self.name.trim().to_owned(),
                 self.network_options(),
                 self.helper_key.clone(),
+                abilities(),
             ));
         }
         if self.permission_check.elapsed() > Duration::from_secs(1) {
@@ -559,6 +606,7 @@ impl App {
                         name,
                         peer,
                         tools,
+                        clipboard,
                         answer,
                     } => {
                         self.approved_name = name.clone();
@@ -567,6 +615,8 @@ impl App {
                             peer,
                             tools,
                             allow_tools: false,
+                            clipboard,
+                            allow_clipboard: false,
                             answer,
                         });
                         attention::raise(ctx);
@@ -587,6 +637,11 @@ impl App {
                     // On the helper's side. This app sends no commands of its
                     // own, so there is nothing to show.
                     Event::Tools(_) => {}
+                    Event::ClipboardRights(rights) => self.rights = rights,
+                    // Kept for a button, never put on this computer's
+                    // clipboard unasked: that would replace what the helper
+                    // copied themselves.
+                    Event::ClipboardText(text) => self.copied = Some(text),
                     Event::Activity(line) => {
                         self.activity.push(line);
                         let excess = self.activity.len().saturating_sub(ACTIVITY_LINES);
@@ -1019,6 +1074,17 @@ impl App {
                 {
                     session.set_tools(self.tools);
                 }
+            }
+            if self.clipboard_offered {
+                let before = self.clipboard;
+                ui.checkbox(&mut self.clipboard, SEE_WHAT_I_COPY);
+                if before != self.clipboard
+                    && let Some(session) = &self.session
+                {
+                    session.set_clipboard_read(self.clipboard);
+                }
+            }
+            if self.tools_offered || self.clipboard_offered {
                 activity(ui, &self.activity);
             }
             ui.add_space(14.0);
@@ -1033,7 +1099,8 @@ impl App {
                     .clicked()
                 {
                     // What they may do later starts as what they may do now.
-                    self.unattended.pair(session, &peer, &name, self.tools);
+                    self.unattended
+                        .pair(session, &peer, &name, self.tools, self.clipboard);
                 }
             }
             ui.add_space(14.0);
@@ -1044,14 +1111,23 @@ impl App {
         });
     }
     fn remote(&mut self, ui: &mut egui::Ui) {
-        theme::small(
-            ui,
-            if self.control {
-                "Control allowed. Click the remote screen to send input. Click outside it to release input."
-            } else {
-                "View only. The person sharing can allow control from their window."
-            },
-        );
+        ui.horizontal_wrapped(|ui| {
+            theme::small(ui, remote_hint(self.control, self.rights));
+            if let Some(text) = self.copied.as_ref() {
+                let count = text.chars().count();
+                if ui
+                    .button("Copy what they copied")
+                    .on_hover_text(format!(
+                        "{count} characters. Puts them on your clipboard, replacing what is there."
+                    ))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(text.clone());
+                    self.status = format!("Copied {count} characters they copied");
+                    self.error = false;
+                }
+            }
+        });
         let Some(texture) = self.texture.as_ref() else {
             ui.spinner();
             ui.label("Waiting for the first screen");
@@ -1144,11 +1220,14 @@ impl App {
                 egui::Event::Text(text) if !modifiers.ctrl && !modifiers.mac_cmd => {
                     self.send(Input::Text(text));
                 }
-                egui::Event::Paste(text) => {
-                    for chunk in text.chars().collect::<Vec<_>>().chunks(200) {
-                        self.send(Input::Text(chunk.iter().collect()));
+                egui::Event::Paste(text) => match paste(text, self.rights) {
+                    Paste::Clipboard(text) => self.paste_there(text),
+                    Paste::Typed(chunks) => {
+                        for chunk in chunks {
+                            self.send(Input::Text(chunk));
+                        }
                     }
-                }
+                },
                 egui::Event::Key {
                     key,
                     pressed,
@@ -1366,6 +1445,11 @@ impl App {
                         );
                         theme::small(ui, "Their tools act as you, outside what the screen shows. Leave this off unless you asked for it. You can turn it off at any time, and each command shows here as it runs.");
                     }
+                    if pending.clipboard {
+                        ui.add_space(10.0);
+                        ui.checkbox(&mut pending.allow_clipboard, SEE_WHAT_I_COPY);
+                        theme::small(ui, SEE_WHAT_I_COPY_NOTE);
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -1394,16 +1478,71 @@ impl App {
                 && let Some(pending) = self.pending.take()
             {
                 let allow = pending.allow_tools && !matches!(decision, Approval::Deny);
+                let read = clipboard_read(&pending, &decision);
                 if let Some(session) = &self.session {
                     // Set before the answer, so the grant the helper reads
                     // already says it.
                     session.set_tools(allow);
+                    session.set_clipboard_read(read);
                 }
                 self.tools_offered = pending.tools;
                 self.tools = allow;
+                self.clipboard_offered = pending.clipboard;
+                self.clipboard = read;
                 let _ = pending.answer.send(decision);
             }
         }
+    }
+}
+/// The tick that lets a helper see what the person copies, in the approval
+/// prompt and on the sharing screen.
+pub(crate) const SEE_WHAT_I_COPY: &str = "Also let them see what I copy";
+pub(crate) const SEE_WHAT_I_COPY_NOTE: &str = "Text you copy while they are connected goes to them, and that is sometimes a password. Leave this off unless you need it. You can turn it off at any time.";
+/// What this copy of Support says it can do when it connects as a helper:
+/// take and give clipboard text, which the person there still has to allow.
+fn abilities() -> Abilities {
+    Abilities {
+        clipboard: true,
+        ..Abilities::default()
+    }
+}
+/// Whether the person's answer lets the helper see what they copy: only
+/// when the helper can take it, the person ticked it, and they let them in.
+fn clipboard_read(pending: &Pending, decision: &Approval) -> bool {
+    pending.clipboard && pending.allow_clipboard && !matches!(decision, Approval::Deny)
+}
+/// The line over the remote screen: what this helper may do there.
+fn remote_hint(control: bool, rights: ClipboardRights) -> &'static str {
+    match (control, rights.write, rights.read) {
+        (true, true, true) => "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard, and what they copy comes to you.",
+        (true, true, false) => "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard.",
+        (true, false, true) => "Control allowed. Click the remote screen to send input. Click outside it to release input. What they copy comes to you.",
+        (true, false, false) => "Control allowed. Click the remote screen to send input. Click outside it to release input.",
+        (false, _, true) => "View only. The person sharing can allow control from their window. What they copy comes to you.",
+        (false, _, false) => "View only. The person sharing can allow control from their window.",
+    }
+}
+/// What a paste into the remote screen becomes.
+#[derive(Debug, PartialEq, Eq)]
+enum Paste {
+    /// Put on their clipboard, then pasted there with the keys the helper
+    /// pressed. Only while they let this helper write their clipboard.
+    Clipboard(String),
+    /// Typed into whatever has focus there, in pieces, as before clipboards
+    /// were shared.
+    Typed(Vec<String>),
+}
+fn paste(text: String, rights: ClipboardRights) -> Paste {
+    if rights.write {
+        Paste::Clipboard(text)
+    } else {
+        Paste::Typed(
+            text.chars()
+                .collect::<Vec<_>>()
+                .chunks(200)
+                .map(|chunk| chunk.iter().collect())
+                .collect(),
+        )
     }
 }
 /// What the sharing card says about what the person gives their helper.
@@ -1488,14 +1627,14 @@ fn status_line(
     })
     .inner
 }
-/// What a helper's tools did, newest last, so the person at the computer
-/// can see it.
+/// What a helper's tools did, and the clipboard text that went either way
+/// (its length only), newest last, so the person at the computer can see it.
 pub(crate) fn activity(ui: &mut egui::Ui, lines: &[String]) {
     if lines.is_empty() {
         return;
     }
     ui.add_space(6.0);
-    theme::caption(ui, "What their tools did");
+    theme::caption(ui, "What they did");
     for line in lines {
         theme::small(ui, line);
     }
@@ -1659,5 +1798,85 @@ mod tests {
         assert_eq!(window.app_id.as_deref(), Some("deskvnc-support"));
         let icon = window.icon.expect("the window carries the app's icon");
         assert_eq!((icon.width, icon.height), (256, 256));
+    }
+
+    fn asked(clipboard: bool) -> Pending {
+        Pending {
+            name: "Sam".into(),
+            peer: "peer".into(),
+            tools: false,
+            allow_tools: false,
+            clipboard,
+            allow_clipboard: false,
+            answer: oneshot::channel().0,
+        }
+    }
+
+    #[test]
+    fn what_i_copy_stays_private_until_the_person_ticks_it() {
+        // The prompt opens with the tick off, so letting a helper in, even
+        // with control, does not hand them what the person copies.
+        let mut pending = asked(true);
+        assert!(!pending.allow_clipboard);
+        assert!(!clipboard_read(&pending, &Approval::Control));
+        assert!(!clipboard_read(&pending, &Approval::View));
+        pending.allow_clipboard = true;
+        assert!(clipboard_read(&pending, &Approval::Control));
+        assert!(clipboard_read(&pending, &Approval::View));
+        // Declining lets nothing through, whatever was ticked.
+        assert!(!clipboard_read(&pending, &Approval::Deny));
+        // A helper that cannot take clipboard text is never offered it.
+        let mut old = asked(false);
+        old.allow_clipboard = true;
+        assert!(!clipboard_read(&old, &Approval::Control));
+    }
+
+    #[test]
+    fn a_paste_goes_as_clipboard_only_while_they_let_this_helper_write() {
+        let text = "x".repeat(450);
+        let write = ClipboardRights {
+            write: true,
+            read: false,
+        };
+        assert_eq!(paste(text.clone(), write), Paste::Clipboard(text.clone()));
+        // Being shown what they copy is not leave to change their clipboard.
+        for rights in [
+            ClipboardRights::default(),
+            ClipboardRights {
+                write: false,
+                read: true,
+            },
+        ] {
+            let Paste::Typed(chunks) = paste(text.clone(), rights) else {
+                panic!("without write the paste is typed, as before");
+            };
+            assert_eq!(
+                chunks.iter().map(|c| c.chars().count()).collect::<Vec<_>>(),
+                [200, 200, 50]
+            );
+            assert_eq!(chunks.concat(), text);
+        }
+    }
+
+    #[test]
+    fn support_as_a_helper_says_it_can_carry_clipboard_text() {
+        let abilities = abilities();
+        assert!(abilities.clipboard);
+        // Nothing else it does not do: it sends no commands and draws no video.
+        assert!(!abilities.tools);
+        assert!(!abilities.video);
+    }
+
+    #[test]
+    fn the_helper_is_told_what_happens_to_a_paste() {
+        let none = ClipboardRights::default();
+        let write = ClipboardRights {
+            write: true,
+            read: false,
+        };
+        assert!(!remote_hint(true, none).contains("clipboard"));
+        assert!(remote_hint(true, write).contains("Pasting puts your text on their clipboard"));
+        assert!(remote_hint(false, write).starts_with("View only"));
+        assert!(!remote_hint(false, write).contains("Pasting"));
     }
 }

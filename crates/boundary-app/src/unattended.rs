@@ -24,7 +24,10 @@ pub struct Active {
     pub control: bool,
     /// Whether their tools may run commands and copy files.
     pub tools: bool,
-    /// What their tools did, newest last.
+    /// Whether they are shown what the person here copies.
+    pub clipboard: bool,
+    /// What their tools did, and clipboard text that went either way, newest
+    /// last.
     pub activity: Vec<String>,
     pub session: Session,
 }
@@ -216,12 +219,17 @@ impl Unattended {
     }
     /// Let the helper of the current attended session in any time, and tell
     /// them this computer's ID so they can save it.
-    pub fn pair(&mut self, session: &Session, peer: &str, name: &str, tools: bool) {
+    /// What they may do later starts as what they may do now, so `tools`
+    /// and `clipboard` are what the person allows in this session.
+    pub fn pair(&mut self, session: &Session, peer: &str, name: &str, tools: bool, clipboard: bool) {
         if let Err(error) = self.access.trust(peer, name, true) {
             self.fail(format!("{error:#}"));
             return;
         }
         self.access.allow_tools(peer, tools);
+        if let Some(helper) = self.access.helpers.iter_mut().find(|h| h.id == peer) {
+            helper.clipboard = clipboard;
+        }
         let was_enabled = self.access.enabled;
         self.access.enabled = true;
         if !self.save() {
@@ -295,6 +303,7 @@ impl Unattended {
                             name,
                             control,
                             tools: session.tools_allowed(),
+                            clipboard: session.clipboard_read_allowed(),
                             activity: Vec::new(),
                             session,
                         });
@@ -490,9 +499,11 @@ impl Unattended {
     pub fn banner(&mut self, ui: &mut egui::Ui) {
         let mut end = None;
         let mut stop_tools = None;
+        let mut stop_clipboard = None;
         for (index, active) in self.active.iter().enumerate() {
             let name = &active.name;
             let tools = active.tools;
+            let clipboard = active.clipboard;
             egui::Frame::new()
                 .fill(theme::pal(ui.ctx()).danger)
                 .inner_margin(14.0)
@@ -518,6 +529,9 @@ impl Unattended {
                             if tools && ui.button("Stop their commands").clicked() {
                                 stop_tools = Some(index);
                             }
+                            if clipboard && ui.button("Stop showing what I copy").clicked() {
+                                stop_clipboard = Some(index);
+                            }
                         });
                     });
                     if tools {
@@ -526,6 +540,12 @@ impl Unattended {
                                 "Their tools can run commands and copy files on this computer.",
                             )
                             .color(egui::Color32::WHITE),
+                        );
+                    }
+                    if clipboard {
+                        ui.label(
+                            egui::RichText::new("They see the text you copy on this computer.")
+                                .color(egui::Color32::WHITE),
                         );
                     }
                     for line in &active.activity {
@@ -545,6 +565,12 @@ impl Unattended {
             self.say(format!(
                 "{name}'s tools can no longer run commands in this session"
             ));
+        }
+        if let Some(active) = stop_clipboard.and_then(|i| self.active.get_mut(i)) {
+            active.session.set_clipboard_read(false);
+            active.clipboard = false;
+            let name = active.name.clone();
+            self.say(format!("{name} no longer sees what you copy in this session"));
         }
         if let Some(index) = end.filter(|&i| i < self.active.len()) {
             let active = self.active.remove(index);
@@ -628,6 +654,10 @@ impl Unattended {
                 changed |= ui
                     .checkbox(&mut helper.tools, "may run commands and copy files")
                     .on_hover_text("For a helper whose tools, such as DeskVNC's agents, work on this computer while you are away. Commands run as you.")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut helper.clipboard, "may see what I copy")
+                    .on_hover_text("Text copied on this computer while they are connected goes to them, and that is sometimes a password. Never at the sign in screen.")
                     .changed();
                 if ui.button("Remove").clicked() {
                     remove = Some(index);
