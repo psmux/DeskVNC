@@ -406,6 +406,21 @@ pub trait SessionSource: Send + Sync {
         )))
     }
 
+    /// The text the remote machine last put on its clipboard, as the
+    /// application received it. `Ok(None)` when none has arrived since it
+    /// connected, which is not an empty clipboard.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] when this source cannot read it.
+    fn remote_clipboard(&self, limb: &LimbId) -> Result<Option<RemoteClip>, ToolError> {
+        let _ = limb;
+        Err(ToolError::not_implemented(format!(
+            "{} keeps no remote clipboard to read",
+            self.describe()
+        )))
+    }
+
     /// End the session under this limb in the application, where that is
     /// this agent's to end.
     ///
@@ -545,6 +560,17 @@ pub struct LiveSession {
     /// without closing. Adopting it is still allowed, and the lease decides
     /// who drives.
     pub attached_elsewhere: bool,
+}
+
+/// Text a remote machine put on its clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteClip {
+    pub text: String,
+    /// Counts arrivals on the session, so text that came after a request can
+    /// be told from text that was already there.
+    pub seq: u64,
+    /// How long ago it arrived, when the source knows.
+    pub age_ms: Option<u64>,
 }
 
 /// What the application did with a session when its limb was closed.
@@ -1262,6 +1288,44 @@ impl SessionSource for ShellSource {
         let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
         let ledger = lock(ledgers()).get(&session_id).cloned()?;
         ledger.settle(RELAY_SETTLE_PATIENCE)
+    }
+
+    fn remote_clipboard(&self, limb: &LimbId) -> Result<Option<RemoteClip>, ToolError> {
+        if !reachable(Need::Running) {
+            return Err(no_socket());
+        }
+        let session_id = lock(limb_sessions())
+            .get(limb.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ToolError::new(
+                    codes::LIMB_GONE,
+                    format!("{limb} has no session in DeskVNCViewer to read a clipboard from; call dvv_limbs"),
+                )
+            })?;
+        let answer = match call(
+            "clipboard.read",
+            serde_json::json!({ "sessionId": session_id }),
+        ) {
+            Ok(answer) => answer,
+            Err(error) if error.code == codes::NOT_IMPLEMENTED => {
+                return Err(ToolError::not_implemented(
+                    "this DeskVNCViewer is older than this dvv and does not hand the remote clipboard to agents. Update DeskVNCViewer, or ask the user to read it there",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(text) = answer.get("text").and_then(serde_json::Value::as_str) else {
+            return Ok(None);
+        };
+        Ok(Some(RemoteClip {
+            text: text.to_string(),
+            seq: answer
+                .get("seq")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            age_ms: answer.get("ageMs").and_then(serde_json::Value::as_u64),
+        }))
     }
 
     fn close(&self, limb: &LimbId) -> Result<Option<SessionClosed>, ToolError> {
@@ -3508,6 +3572,17 @@ impl Plane {
             .into_iter()
             .filter(|session| !mine.contains(&session.limb_id))
             .collect()
+    }
+
+    /// The text the remote machine behind this limb last copied.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] when the grant does not carry `clipboard.read`, or
+    /// from the source.
+    pub fn remote_clipboard(&self, limb: &AttachedLimb) -> Result<Option<RemoteClip>, ToolError> {
+        self.require(Capability::ClipboardRead, "reading the remote clipboard")?;
+        self.source.remote_clipboard(limb.id())
     }
 
     /// Ask this limb's session to repaint or reconnect.

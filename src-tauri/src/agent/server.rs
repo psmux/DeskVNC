@@ -252,6 +252,10 @@ pub async fn dispatch(
         "limb.attach" => limb_attach(ctx, peer, params),
         "limb.detach" => limb_detach(ctx, peer, params),
         "limb.close" => limb_close(ctx, peer, params),
+        // The remote clipboard, as the session last reported it. Its own verb
+        // and its own capability: reading what a person copied is a power that
+        // writing to the clipboard does not imply (`00 R5`).
+        "clipboard.read" => clipboard_read(ctx, peer, params),
         "limb.status" => limb_status(ctx, peer, params),
         "limb.command" => limb_command(ctx, peer, params),
         // `00 R28`, `00 R51b`. An intent the driver serves natively gets a
@@ -1002,6 +1006,39 @@ fn limb_close(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError>
         "attachmentId": peer.attachment_id,
     }));
     Ok(json!({ "sessionId": session_id, "closed": true }))
+}
+
+/// The text the remote machine last put on its clipboard.
+///
+/// The session already receives it: VNC's ServerCutText, and RDP's clipboard
+/// channel when the host shares its clipboard, both arrive as
+/// `SessionEvent::ClipboardText`, which the event pump keeps on the session's
+/// facts. `null` text means none has arrived since DeskVNCViewer connected,
+/// which is not the same as an empty clipboard and is not reported as one.
+fn clipboard_read(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+    require(peer, Capability::ClipboardRead)?;
+    let session_id = session_id_of(params)?;
+    let attachment_id = peer.attachment_id.clone().unwrap_or_default();
+    ctx.plane.check_allowed(&session_id, &attachment_id)?;
+    let sessions = ctx.sessions.lock();
+    let entry = sessions
+        .get(&session_id)
+        .filter(|entry| entry.is_live())
+        .ok_or_else(|| {
+            RpcError::tagged(
+                "LIMB_GONE",
+                format!("no live session is registered as {session_id}"),
+            )
+        })?;
+    let facts = entry.facts.lock();
+    Ok(match &facts.remote_clipboard {
+        Some(clip) => json!({
+            "text": clip.text,
+            "seq": clip.seq,
+            "ageMs": clip.at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        }),
+        None => json!({ "text": null, "seq": 0 }),
+    })
 }
 
 fn limb_detach(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
@@ -3639,6 +3676,36 @@ mod tests {
         while let Ok(command) = fixture.commands.try_recv() {
             assert!(!matches!(command, ClientCommand::Disconnect));
         }
+    }
+
+    /// The remote clipboard reaches an attached agent as the session last
+    /// reported it, numbered so a reader can tell new text from old.
+    #[tokio::test]
+    async fn clipboard_read_answers_with_what_the_machine_last_copied() {
+        let fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.attach",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 }),
+        )
+        .await;
+        let empty = call(&fixture.ctx, &mut peer, "clipboard.read", json!({ "sessionId": "s1" })).await;
+        assert_eq!(empty["text"], Value::Null, "nothing has arrived yet: {empty}");
+
+        {
+            let sessions = fixture.ctx.sessions.lock();
+            let mut facts = sessions.get("s1").expect("the fixture session").facts.lock();
+            facts.remote_clipboard = Some(crate::state::RemoteClipboard {
+                text: "copied on the far side".into(),
+                seq: 1,
+                at: Instant::now(),
+            });
+        }
+        let read = call(&fixture.ctx, &mut peer, "clipboard.read", json!({ "sessionId": "s1" })).await;
+        assert_eq!(read["text"], "copied on the far side", "{read}");
+        assert_eq!(read["seq"], 1);
     }
 
     /// A terminal asked for with perceive set is attached without a mirror.

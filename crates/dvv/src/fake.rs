@@ -24,7 +24,7 @@
 use crate::error::{codes, ToolError};
 use crate::plane::{
     FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, LeaseAsk, LiveSession, OpenRequest,
-    SessionClosed, SessionSource, TypingRefused,
+    RemoteClip, SessionClosed, SessionSource, TypingRefused,
 };
 use agent_plane::{Attach, Damage, Frame, FrameSource, LimbRegistry, PerceptionUnavailable};
 use limb_core::capability::Capability;
@@ -404,6 +404,8 @@ pub struct FakeSource {
     live: Mutex<BTreeMap<String, FakeHost>>,
     /// Every session `close` ended, in order.
     closed: Mutex<Vec<String>>,
+    /// What each machine last copied, as the application would hold it.
+    clipboards: Mutex<BTreeMap<String, RemoteClip>>,
     /// The SFTP sidecar every fake machine shares: a map from an absolute
     /// path to the bytes at it.
     ///
@@ -456,6 +458,7 @@ impl FakeSource {
             states: Mutex::new(BTreeMap::new()),
             live: Mutex::new(BTreeMap::new()),
             closed: Mutex::new(Vec::new()),
+            clipboards: Mutex::new(BTreeMap::new()),
             disk: Mutex::new(BTreeMap::new()),
             typing_refusals: Mutex::new(BTreeMap::new()),
             press_refusals: Mutex::new(BTreeMap::new()),
@@ -496,6 +499,20 @@ impl FakeSource {
         lock(&self.states).insert(id.to_string(), SessionState::Connected);
         lock(&self.live).insert(id.to_string(), host);
         id.to_string()
+    }
+
+    /// The machine behind this limb copied `text`, and the application got it.
+    pub fn copy_on_far_side(&self, limb: &str, text: &str) {
+        let mut clipboards = lock(&self.clipboards);
+        let seq = clipboards.get(limb).map_or(1, |clip| clip.seq + 1);
+        clipboards.insert(
+            limb.to_string(),
+            RemoteClip {
+                text: text.to_string(),
+                seq,
+                age_ms: Some(0),
+            },
+        );
     }
 
     /// Every session `close` ended, in order.
@@ -727,6 +744,10 @@ impl SessionSource for FakeSource {
 
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
         lock(&self.states).get(limb.as_str()).cloned()
+    }
+
+    fn remote_clipboard(&self, limb: &LimbId) -> Result<Option<RemoteClip>, ToolError> {
+        Ok(lock(&self.clipboards).get(limb.as_str()).cloned())
     }
 
     fn live(&self) -> Vec<LiveSession> {
