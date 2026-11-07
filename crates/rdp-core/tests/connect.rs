@@ -78,9 +78,7 @@ async fn run_sequence_against(
 
     let (events, mut event_rx) = mpsc::channel(256);
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
 
         let selected =
@@ -444,9 +442,7 @@ async fn run_mcs(config: MockConfig) -> connection::McsConnected {
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
     tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected = connection::negotiate_security(&mut framer, &opts, &options.credentials)
             .await
@@ -644,9 +640,7 @@ async fn credssp_without_a_certificate_is_refused_rather_than_started() {
 
     let (events, _rx) = mpsc::channel(256);
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected =
             connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
@@ -774,9 +768,7 @@ async fn run_session_steps(
     });
 
     let outcome = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected = connection::negotiate_security(&mut framer, &opts, &options.credentials)
             .await
@@ -836,6 +828,20 @@ async fn run_session_steps(
     drop(events);
     let drained = collector.await.expect("the collector finished");
     (server, drained, outcome)
+}
+
+/// Connect to the mock the way the product connects to a server.
+///
+/// The product dials through `vnc_transport::tcp::connect`, which sets
+/// TCP_NODELAY. A bare `TcpStream::connect` leaves Nagle on, and on Linux
+/// loopback Nagle holds a small write back until the previous one is acked,
+/// which a delayed ack puts tens of milliseconds out. Paced input written
+/// 8 ms apart then reaches the mock in one lump, and a timing test measures
+/// the harness rather than the client.
+async fn dial(addr: std::net::SocketAddr) -> TcpStream {
+    vnc_transport::tcp::connect(&addr.ip().to_string(), addr.port(), DEFAULT_TIMEOUT)
+        .await
+        .expect("the mock is up")
 }
 
 /// The legacy shape: one batch of commands, sent once the picture has
@@ -1118,9 +1124,7 @@ async fn run_sequence_with_trust(
 
     let gated = decision.clone();
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected =
             connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
@@ -1676,9 +1680,7 @@ async fn run_sequence_with_credentials(
     });
 
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected =
             connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
