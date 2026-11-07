@@ -1375,6 +1375,60 @@ mod tests {
         assert_eq!(text_type(Some(&latin)), Some("STRING"));
     }
 
+    /// Against the real portal of the desktop this runs in, with another
+    /// program reading and setting the clipboard:
+    /// `DESKVNC_CLIPBOARD_PEER="<get command>|<set command taking the text last>"
+    /// cargo test -p boundary-platform real_portal -- --ignored`.
+    /// Asks the person to share unless a grant was remembered.
+    #[test]
+    #[ignore]
+    fn a_real_portal_carries_the_clipboard_both_ways() {
+        let peer = std::env::var("DESKVNC_CLIPBOARD_PEER").expect("DESKVNC_CLIPBOARD_PEER");
+        let (get, set) = peer.split_once('|').unwrap();
+        let run = |cmd: &str, arg: Option<&str>| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(match arg {
+                Some(_) => format!("{cmd} \"$1\""),
+                None => cmd.to_owned(),
+            });
+            c.arg("sh");
+            if let Some(a) = arg {
+                c.arg(a);
+            }
+            String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
+        };
+        let screen = Screen::open().unwrap();
+        let remote = screen.remote().expect("a remote desktop session");
+        assert!(remote.has_clipboard(), "Allow Clipboard Access was off");
+        assert_eq!(remote.clipboard_changed().unwrap(), None, "first look");
+        assert_eq!(remote.clipboard_changed().unwrap(), None);
+
+        let from_helper = format!("from the helper é {}", std::process::id());
+        remote.set_clipboard(&from_helper).unwrap();
+        let pasted = run(get, None);
+        assert!(pasted.contains(&from_helper), "pasted {pasted:?}");
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(remote.clipboard_changed().unwrap(), None, "no echo");
+
+        let copied = format!("the person copied ✓ {}", std::process::id());
+        run(set, Some(&copied));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let seen = loop {
+            if let Some(text) = remote.clipboard_changed().unwrap() {
+                break text;
+            }
+            assert!(Instant::now() < deadline, "the copy was never seen");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!(seen, copied);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(remote.clipboard_changed().unwrap(), None, "seen once");
+        drop(remote);
+        drop(screen);
+        // GNOME keeps the text after the session ends.
+        assert!(run(get, None).contains(&copied));
+    }
+
     #[test]
     fn a_clipboard_owner_that_stalls_is_given_up_on() {
         let (read, write) = std::io::pipe().unwrap();
