@@ -233,6 +233,9 @@ struct App {
     /// What they did, newest last.
     activity: Vec<String>,
     invitation: String,
+    /// When this computer's invitation stops working, while it waits for a
+    /// helper, so the status line can count down to it.
+    expires: Option<Instant>,
     ticket: String,
     password: String,
     name: String,
@@ -325,6 +328,7 @@ impl App {
             tools: false,
             activity: Vec::new(),
             invitation: String::new(),
+            expires: None,
             ticket: String::new(),
             password: String::new(),
             name,
@@ -379,6 +383,7 @@ impl App {
         self.tools = false;
         self.activity.clear();
         self.invitation.clear();
+        self.expires = None;
         self.texture = None;
         self.remote_focus = false;
         self.modifiers = egui::Modifiers::default();
@@ -501,12 +506,11 @@ impl App {
                         if self.codes.available() {
                             self.codes.publish(ticket.clone());
                         }
+                        let left = boundary_session::Invitation::decode(&ticket)
+                            .map(|invite| invite.expires.saturating_sub(unix_now()))
+                            .unwrap_or(0);
+                        self.expires = Some(Instant::now() + Duration::from_secs(left));
                         self.invitation = ticket;
-                        self.status = if self.codes.available() {
-                            "Waiting for your helper. The code expires in 10 minutes".into()
-                        } else {
-                            "Waiting for your helper. The invitation expires in 10 minutes".into()
-                        };
                     }
                     Event::Approval {
                         name,
@@ -525,6 +529,7 @@ impl App {
                         attention::raise(ctx);
                     }
                     Event::Connected { peer, control } => {
+                        self.expires = None;
                         self.codes.clear();
                         self.pending = None;
                         self.connected = true;
@@ -575,6 +580,15 @@ impl App {
         }
         if self.pending.as_ref().is_some_and(|p| p.answer.is_closed()) {
             self.pending = None;
+        }
+        // Said again on every frame, which is once a second while waiting,
+        // so the minutes left go down instead of staying at ten.
+        if let Some(expires) = self.expires {
+            self.status = waiting(
+                self.codes.available(),
+                expires.saturating_duration_since(Instant::now()),
+            );
+            self.error = false;
         }
         if let Some(result) = finished {
             self.stop();
@@ -1353,6 +1367,22 @@ impl App {
         }
     }
 }
+/// The status line while this computer waits for a helper, with `left`
+/// until its code or invitation expires.
+fn waiting(code: bool, left: Duration) -> String {
+    let what = if code { "code" } else { "invitation" };
+    // Rounded up: "1 minute" lasts until it has gone, never "0 minutes".
+    match left.as_secs().div_ceil(60) {
+        0 => format!("Waiting for your helper. The {what} has expired"),
+        1 => format!("Waiting for your helper. The {what} expires in less than a minute"),
+        minutes => format!("Waiting for your helper. The {what} expires in {minutes} minutes"),
+    }
+}
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 /// What a helper's tools did, newest last, so the person at the computer
 /// can see it.
 pub(crate) fn activity(ui: &mut egui::Ui, lines: &[String]) {
@@ -1399,6 +1429,33 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_waiting_line_counts_down_to_expiry() {
+        let at = |seconds| waiting(false, Duration::from_secs(seconds));
+        assert_eq!(
+            at(600),
+            "Waiting for your helper. The invitation expires in 10 minutes"
+        );
+        // Eight minutes in, as the person saw it still saying ten.
+        assert_eq!(
+            at(120),
+            "Waiting for your helper. The invitation expires in 2 minutes"
+        );
+        assert_eq!(
+            at(61),
+            "Waiting for your helper. The invitation expires in 2 minutes"
+        );
+        assert_eq!(
+            at(60),
+            "Waiting for your helper. The invitation expires in less than a minute"
+        );
+        assert_eq!(at(0), "Waiting for your helper. The invitation has expired");
+        assert_eq!(
+            waiting(true, Duration::from_secs(300)),
+            "Waiting for your helper. The code expires in 5 minutes"
+        );
+    }
 
     #[test]
     fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
