@@ -2758,6 +2758,10 @@ impl limb_core::limb::Limb for RemoteLimb {
     /// A Boundary desktop is the one framebuffer that does offer it. Its
     /// session carries a command stream beside the screen, and the person at
     /// that computer has to allow it before an agent can attach at all.
+    ///
+    /// A Boundary desktop offers no clipboard. Its session protocol has no
+    /// clipboard message either way, so a set went nowhere while the agent
+    /// was told it worked, and a get always found nothing.
     fn capabilities(&self) -> &'static [Capability] {
         match self.grounding {
             Grounding::Pixels if self.kind == ProtocolKind::Boundary && self.has_mirror => &[
@@ -2766,8 +2770,6 @@ impl limb_core::limb::Limb for RemoteLimb {
                 Capability::Control,
                 Capability::Close,
                 Capability::HostsRead,
-                Capability::ClipboardRead,
-                Capability::ClipboardWrite,
                 Capability::Exec,
             ],
             Grounding::Pixels if self.kind == ProtocolKind::Boundary => &[
@@ -2775,8 +2777,6 @@ impl limb_core::limb::Limb for RemoteLimb {
                 Capability::Control,
                 Capability::Close,
                 Capability::HostsRead,
-                Capability::ClipboardRead,
-                Capability::ClipboardWrite,
                 Capability::Exec,
             ],
             Grounding::Cells => &[
@@ -2816,6 +2816,9 @@ impl limb_core::limb::Limb for RemoteLimb {
             ClipboardGet | ClipboardSet => match self.grounding {
                 Grounding::Cells => Support::Unsupported {
                     because: "a PTY has no clipboard of its own; paste into it with send bytes instead",
+                },
+                _ if self.kind == ProtocolKind::Boundary => Support::Unsupported {
+                    because: "a Boundary session carries no clipboard in this build, in either direction. Type the text instead, or, where the person allowed the helper's tools, write it to a file with exec",
                 },
                 _ => Support::Lowered,
             },
@@ -4804,6 +4807,36 @@ mod tests {
             panic!("no mirror, no pixels");
         };
         assert!(because.contains("perceive"), "{because}");
+    }
+
+    /// A Boundary session has no clipboard message, so its card offered a
+    /// clipboard that a set silently dropped and a get never filled.
+    #[test]
+    fn a_boundary_limb_offers_no_clipboard_it_cannot_carry() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        for mirror in [false, true] {
+            let boundary = RemoteLimb::new(ProtocolKind::Boundary, mirror);
+            let offered = boundary.capabilities();
+            assert!(!offered.contains(&Capability::ClipboardRead));
+            assert!(!offered.contains(&Capability::ClipboardWrite));
+            // What it does carry stays on the card.
+            assert!(offered.contains(&Capability::Exec));
+            assert!(offered.contains(&Capability::Control));
+            for intent in [IntentName::ClipboardGet, IntentName::ClipboardSet] {
+                let Support::Unsupported { because } = boundary.supports(intent) else {
+                    panic!("a Boundary limb has no clipboard");
+                };
+                assert!(because.contains("Boundary"), "{because}");
+            }
+        }
+        // VNC carries one, and keeps offering it.
+        let vnc = RemoteLimb::new(ProtocolKind::Vnc, true);
+        assert!(vnc.capabilities().contains(&Capability::ClipboardRead));
+        assert!(matches!(
+            vnc.supports(IntentName::ClipboardSet),
+            Support::Lowered
+        ));
     }
 
     /// The ledger's whole contract, without a socket: a refused press trips
