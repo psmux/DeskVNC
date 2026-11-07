@@ -156,7 +156,7 @@ impl Wizard {
     }
     fn provider_form(&mut self, ui: &mut egui::Ui) {
         let cloudflare = self.choice == Choice::Cloudflare;
-        ui.label("Boundary installs the official client if missing, then enrolls this device. Complete the provider login and operating system prompts when they appear. Windows setup adds a UDP firewall rule limited to this app and the private provider network. Run setup on the helper device too.");
+        ui.label("DeskVNC Support installs the official client if missing, then enrolls this device. Complete the provider login and operating system prompts when they appear. Windows setup adds a UDP firewall rule limited to this app and the private provider network. Run setup on the helper device too.");
         if cloudflare {
             ui.label("Cloudflare team name");
             ui.text_edit_singleline(&mut self.team);
@@ -213,7 +213,7 @@ impl Wizard {
             if ui
                 .add_enabled(
                     self.remove,
-                    egui::Button::new("Remove Boundary account resources"),
+                    egui::Button::new("Remove the provider resources this app set up"),
                 )
                 .clicked()
             {

@@ -446,7 +446,10 @@ pub async fn scan_network(
 ///
 /// For VNC: complete the RFB version handshake and read the offered
 /// security-type list, closing before authenticating (PRD/04 §5). Returns
-/// `{ "protocol": "vnc", "securityTypes": [u8...] }`.
+/// `{ "protocol": "vnc", "securityTypes": [u8...] }`. A server that refuses
+/// the connection is an error whose text carries the server's own reason,
+/// e.g. "192.0.2.10:5900 refused the connection: Sorry, loopback connections
+/// are not enabled", so the UI can show why instead of an empty offer.
 ///
 /// For RDP: a second X.224 negotiation advertising `PROTOCOL_SSL` alone,
 /// which is the only way to learn whether NLA is *required* rather than

@@ -61,10 +61,15 @@ pub struct Unattended {
     login: bool,
     /// Setting that up or taking it away, which waits on an administrator.
     login_change: Option<std::sync::mpsc::Receiver<(bool, Result<()>)>>,
+    /// The person said no to the notice offering the copy at the sign in
+    /// screen, or took that copy away themselves.
+    login_notice_dismissed: bool,
     /// Not listening for now, because another copy is: the one at the sign
     /// in or lock screen. Picked up again when it hands over.
     handed_over: bool,
     checked: std::time::Instant,
+    /// The window, woken when the listener has something to say.
+    ctx: egui::Context,
 }
 
 impl Unattended {
@@ -72,7 +77,7 @@ impl Unattended {
     pub fn asking(&self) -> bool {
         self.ask.is_some()
     }
-    pub fn new() -> Self {
+    pub fn new(ctx: &egui::Context) -> Self {
         let mut this = Self {
             access_path: PathBuf::new(),
             machine: String::new(),
@@ -90,8 +95,10 @@ impl Unattended {
             autostart: autostart::enabled(),
             login: crate::login::enabled(),
             login_change: None,
+            login_notice_dismissed: notice_dismissed(),
             handed_over: false,
             checked: std::time::Instant::now(),
+            ctx: ctx.clone(),
         };
         // Rewrite an existing sign in entry, so one written by an older copy
         // picks up what this one adds (a restart after a crash on macOS) and
@@ -164,14 +171,20 @@ impl Unattended {
                 return;
             }
         }
-        self.listener = Some(unattended::listen(
+        let mut listener = unattended::listen(
             boundary_session::HostOptions::default(),
             key,
             self.access_path.clone(),
             // The primary display, found when a helper arrives: nobody is
             // there to pick another, and a sleeping screen lists none now.
             boundary_platform::open_primary,
-        ));
+        );
+        // A helper asking to come in wakes the window, which otherwise draws
+        // nothing while it waits.
+        let (_, stand_in) = tokio::sync::mpsc::channel(1);
+        let notices = std::mem::replace(&mut listener.notices, stand_in);
+        listener.notices = crate::wake::relay(notices, self.ctx.clone());
+        self.listener = Some(listener);
         self.say("Starting unattended access");
     }
     fn halt(&mut self) {
@@ -230,6 +243,11 @@ impl Unattended {
     }
     pub fn enabled(&self) -> bool {
         self.access.enabled
+    }
+    /// Whether the window has to look once a second for the lock screen
+    /// copy to hand the ID back, which sends no event.
+    pub fn needs_checks(&self) -> bool {
+        self.access.enabled && (self.login || self.handed_over)
     }
     /// This computer's lasting ID, the one a helper saves.
     pub fn machine_id(&self) -> &str {
@@ -400,6 +418,8 @@ impl Unattended {
                 });
                 if !control_ok {
                     theme::small(ui, "Accessibility permission is needed for control. You can allow viewing now.");
+                } else if let Some(hint) = boundary_platform::control_hint() {
+                    theme::small(ui, hint);
                 }
             });
         if let Some(approval) = decision
@@ -422,6 +442,47 @@ impl Unattended {
     /// A banner for each helper connected unattended, shown on top of
     /// everything. The person at the computer always sees who is in and can
     /// end any of them with one click.
+    /// Offer the copy at the sign in screen when unattended access is on and
+    /// that copy is missing, which is how a computer that switched unattended
+    /// access on before it was set up automatically finds itself after an
+    /// upgrade. Only the button asks for an administrator: Support never
+    /// raises an administrator prompt on its own when it starts.
+    pub fn login_notice(&mut self, ui: &mut egui::Ui) {
+        if !show_login_notice(
+            crate::login::SUPPORTED,
+            self.access.enabled,
+            self.login,
+            self.login_notice_dismissed,
+            self.login_change.is_some(),
+        ) {
+            return;
+        }
+        theme::card(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Unattended access stops when this computer restarts").strong(),
+            );
+            theme::muted(
+                ui,
+                "Until somebody signs in, paired helpers cannot reach it. Setting that up asks for an administrator once.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Set it up").clicked() {
+                    self.set_login(true);
+                }
+                if ui.button("Not now").clicked() {
+                    self.dismiss_login_notice();
+                }
+            });
+        });
+        ui.add_space(10.0);
+    }
+    fn dismiss_login_notice(&mut self) {
+        self.login_notice_dismissed = true;
+        if let Some(path) = notice_path() {
+            let _ = std::fs::write(path, b"");
+        }
+    }
     pub fn banner(&mut self, ui: &mut egui::Ui) {
         let mut end = None;
         let mut stop_tools = None;
@@ -533,7 +594,7 @@ impl Unattended {
         if ui
             .checkbox(
                 &mut autostart,
-                "Start Boundary when I sign in, so it is ready",
+                "Start DeskVNC Support when I sign in, so it is ready",
             )
             .changed()
         {
@@ -642,6 +703,10 @@ impl Unattended {
                 Ok((on, Ok(()))) => {
                     self.login = on;
                     self.login_change = None;
+                    // Taken away on purpose: the notice would only ask again.
+                    if !on {
+                        self.dismiss_login_notice();
+                    }
                     self.say(if on {
                         "Paired helpers can now connect at the sign in screen too"
                     } else {
@@ -700,6 +765,29 @@ impl Unattended {
             self.set_login(true);
         }
     }
+}
+
+/// Whether to offer setting up the copy at the sign in screen.
+fn show_login_notice(
+    supported: bool,
+    unattended_on: bool,
+    copy_present: bool,
+    dismissed: bool,
+    changing: bool,
+) -> bool {
+    supported && unattended_on && !copy_present && !dismissed && !changing
+}
+
+/// The empty file that remembers the notice was answered with Not now. It
+/// sits beside the machine ID and is never part of `access.json`.
+fn notice_path() -> Option<PathBuf> {
+    boundary_provision::platform::data_dir()
+        .ok()
+        .map(|dir| dir.join("sign-in-screen-notice-dismissed"))
+}
+
+fn notice_dismissed() -> bool {
+    notice_path().is_some_and(|path| path.exists())
 }
 
 /// Whether this session is on the physical screen and locked.
@@ -774,7 +862,21 @@ pub mod autostart {
 
 #[cfg(test)]
 mod tests {
-    use super::label;
+    use super::{label, show_login_notice};
+
+    #[test]
+    fn the_sign_in_screen_notice_shows_only_while_the_copy_is_missing() {
+        // Unattended on and no copy at the sign in screen: offer it.
+        assert!(show_login_notice(true, true, false, false, false));
+        // The copy is there, or the person said Not now: say nothing.
+        assert!(!show_login_notice(true, true, true, false, false));
+        assert!(!show_login_notice(true, true, false, true, false));
+        // Unattended off, a platform with no sign in screen copy, or the
+        // administrator prompt already open: nothing to offer.
+        assert!(!show_login_notice(true, false, false, false, false));
+        assert!(!show_login_notice(false, true, false, false, false));
+        assert!(!show_login_notice(true, true, false, false, true));
+    }
 
     #[test]
     fn another_copy_answering_is_not_shown_as_starting() {

@@ -160,12 +160,12 @@ async fn ask_one(addr: SocketAddr) -> Result<EndpointId> {
         }
         line.push(byte[0]);
     }
-    let line = String::from_utf8(line).map_err(|_| anyhow!("not a Boundary computer"))?;
+    let line = String::from_utf8(line).map_err(|_| anyhow!("not a DeskVNC computer"))?;
     let id = line
         .trim()
         .strip_prefix(GREETING)
-        .ok_or_else(|| anyhow!("not a Boundary computer"))?;
-    EndpointId::from_str(id.trim()).map_err(|_| anyhow!("not a Boundary computer"))
+        .ok_or_else(|| anyhow!("not a DeskVNC computer"))?;
+    EndpointId::from_str(id.trim()).map_err(|_| anyhow!("not a DeskVNC computer"))
 }
 
 /// Answer "which computer are you" on TCP at each of these UDP sockets'

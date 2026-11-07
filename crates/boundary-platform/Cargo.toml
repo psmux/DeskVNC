@@ -24,7 +24,8 @@ xcap = "0.9.8"
 # are all Rust; PipeWire was already linked through xcap.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "randr"] }
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "remote_desktop", "screencast"] }
+# inhibit keeps the screen from blanking while a helper watches it.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "inhibit", "remote_desktop", "screencast"] }
 async-io = "2"
 futures-lite = "2"
 pipewire = "0.10"

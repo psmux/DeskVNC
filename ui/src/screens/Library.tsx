@@ -72,6 +72,7 @@ import {
 import { emit, listen } from "@tauri-apps/api/event";
 import {
   AGENT_OPEN_EVENT,
+  agentOpenOptions,
   type AgentOpenRequest,
   EDIT_HOST_EVENT,
   type EditHostRequest,
@@ -802,11 +803,7 @@ export function Library({
       const ask = e.payload;
       if (!ask) return;
       const host = ask.hostId ? hostsRef.current.find((h) => h.id === ask.hostId) : undefined;
-      const background = ask.background === true;
-      const options: OpenSessionOptions = host
-        ? { profileId: host.id, background }
-        : { address: ask.address, port: ask.port, protocol: ask.protocol, background };
-      void openSession(options, host?.friendlyName || ask.address);
+      void openSession(agentOpenOptions(ask), host?.friendlyName || ask.address);
     }).then((un) => {
       stop = un;
     });

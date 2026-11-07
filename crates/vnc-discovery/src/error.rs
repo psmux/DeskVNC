@@ -39,6 +39,20 @@ pub enum Error {
         reason: String,
     },
 
+    /// The server answered the deep probe with a refusal instead of a
+    /// security-type list: an RFB 3.7+ count of 0, or an RFB 3.3 type of 0,
+    /// each followed by the server's reason. This is the server's policy
+    /// speaking (TightVNC with loopback disabled says "Sorry, loopback
+    /// connections are not enabled"), so it is kept apart from
+    /// [`Error::Probe`], which means the exchange itself went wrong.
+    #[error("{addr} refused the connection: {reason}")]
+    Refused {
+        /// Address that was probed.
+        addr: SocketAddr,
+        /// The reason the server gave, as it sent it.
+        reason: String,
+    },
+
     /// Wrapped I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

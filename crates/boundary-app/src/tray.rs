@@ -25,12 +25,14 @@ mod imp {
         show: MenuItem,
         quit: MenuItem,
         said: String,
+        /// Menu picks, passed here by the handler that also wakes the window.
+        picks: std::sync::mpsc::Receiver<MenuEvent>,
     }
 
     impl Tray {
         /// `None` when the system would not take an icon; the window is then
         /// the only way in, as it was before there was a tray.
-        pub fn new() -> Option<Self> {
+        pub fn new(ctx: &eframe::egui::Context) -> Option<Self> {
             let status = MenuItem::new("DeskVNC Support", false, None);
             let show = MenuItem::new("Show DeskVNC Support", true, None);
             let quit = MenuItem::new("Quit DeskVNC Support", true, None);
@@ -45,12 +47,21 @@ mod imp {
                 .with_icon_as_template(cfg!(target_os = "macos"))
                 .build()
                 .ok()?;
+            // The window draws only when something happens, so a pick from
+            // the menu has to wake it as well as be passed on.
+            let (send, picks) = std::sync::mpsc::channel();
+            let ctx = ctx.clone();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let _ = send.send(event);
+                ctx.request_repaint();
+            }));
             Some(Self {
                 icon,
                 status,
                 show,
                 quit,
                 said: String::new(),
+                picks,
             })
         }
 
@@ -67,7 +78,7 @@ mod imp {
         }
 
         pub fn poll(&self) -> Option<Action> {
-            while let Ok(event) = MenuEvent::receiver().try_recv() {
+            while let Ok(event) = self.picks.try_recv() {
                 if event.id == *self.show.id() {
                     return Some(Action::Show);
                 }
@@ -117,7 +128,7 @@ mod imp {
     pub struct Tray;
 
     impl Tray {
-        pub fn new() -> Option<Self> {
+        pub fn new(_: &eframe::egui::Context) -> Option<Self> {
             None
         }
         pub fn say(&mut self, _: &str) {}
