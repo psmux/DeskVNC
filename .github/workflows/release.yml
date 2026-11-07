@@ -745,5 +745,13 @@ jobs:
           done
           [ "$missing" = 0 ] || exit 1
 
+          # One checksum file for every installer, taken from the files as
+          # they sit on the release, so it matches what people download. The
+          # per platform files only covered DeskVNC Support.
+          mkdir -p /tmp/assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir /tmp/assets
+          (cd /tmp/assets && rm -f SHA256SUMS* && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          gh release upload "$TAG" /tmp/assets/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           echo "Published $TAG"
