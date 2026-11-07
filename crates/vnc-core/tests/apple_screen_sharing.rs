@@ -389,6 +389,9 @@ struct Seen {
     proof_trailer: usize,
     host_key_spki: Vec<u8>,
     auth_failed: bool,
+    /// Act like a Mac whose account lacks Remote Management privileges:
+    /// verify the password, send the server proof, then refuse the login.
+    refuse_after_proof: bool,
 }
 
 struct FakeMac {
@@ -413,9 +416,16 @@ async fn read_record(s: &mut TcpStream) -> Option<Vec<u8>> {
 
 impl FakeMac {
     async fn start(login: Login, password: &'static str) -> Self {
+        Self::start_with(login, password, false).await
+    }
+
+    async fn start_with(login: Login, password: &'static str, refuse_after_proof: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let seen = Arc::new(Mutex::new(Seen::default()));
+        let seen = Arc::new(Mutex::new(Seen {
+            refuse_after_proof,
+            ..Seen::default()
+        }));
         let s2 = seen.clone();
         let key = if login == Login::Rsa33 {
             Some(
@@ -550,6 +560,12 @@ async fn serve(
     s.write_all(&server_frame(login, &server_proof_payload(&m2)))
         .await
         .unwrap();
+    if seen.lock().refuse_after_proof {
+        // The password was right (the proof above verifies), but the account
+        // is not allowed in: SecurityResult 1, no reason string.
+        s.write_all(&1u32.to_be_bytes()).await.unwrap();
+        return;
+    }
     s.write_all(&0u32.to_be_bytes()).await.unwrap();
 
     // --- ClientInit and ServerInit ------------------------------------------
@@ -1005,6 +1021,38 @@ async fn wrong_password_with(login: Login) {
         "{:?}",
         events.summary()
     );
+}
+
+/// A Mac that verifies the password and then refuses the account (on macOS
+/// 26, an account without Remote Management privileges) is reported as that,
+/// not as a wrong password, and the password is not asked for again.
+#[tokio::test]
+async fn refused_after_a_good_password_says_why() {
+    for login in [Login::Rsa33, Login::Srp36] {
+        let mac = FakeMac::start_with(login, PASSWORD, true).await;
+        let mut o = session_options(mac.port, PASSWORD);
+        if login == Login::Srp36 {
+            o.vnc_mut().security_pref = Some("apple-srp".into());
+        }
+        let (_handle, mut events) = spawn_session(o);
+        let (reason, can_retry) = events
+            .wait(DEFAULT_TIMEOUT, "a refused login", |e| match e {
+                SessionEvent::StateChanged(vnc_core::types::SessionState::Disconnected {
+                    reason,
+                    can_retry,
+                    ..
+                }) => Some((reason.clone(), *can_retry)),
+                _ => None,
+            })
+            .await;
+        assert_eq!(reason, vnc_core::security::APPLE_ACCESS_DENIED, "{login:?}");
+        assert!(!can_retry, "{login:?}");
+        assert!(!mac.seen.lock().auth_failed, "the password itself was right");
+        assert!(
+            !events.any(|e| matches!(e, SessionEvent::CredentialsRequired(_))),
+            "{login:?}: asked for the password again"
+        );
+    }
 }
 
 /// A host key that differs from the pinned one stops the login before the
