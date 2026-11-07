@@ -130,6 +130,10 @@ pub enum SessionEvent {
         subject: String,
         is_change: bool,
         scheme: PinScheme,
+        /// The whole certificate's thumbprint and SHA-256, for a key that
+        /// came in an X.509 certificate (TLS, RDP, RD Gateway). Display only:
+        /// `fingerprint` is still what is pinned. `None` for a bare key (RA2).
+        certificate: Option<vnc_transport::CertificateDigests>,
     },
     /// The handshake needs credentials from the user. The session is PAUSED
     /// mid-authentication until `ProvideCredentials` or `CancelCredentials`

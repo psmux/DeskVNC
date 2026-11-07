@@ -32,6 +32,7 @@ import type { PromptAnswer } from "../lib/credentials";
 import { nextRemoteClipboard, type RemoteClipboard } from "../lib/clipboardEcho";
 import { initTrace, traceMark } from "../render/trace";
 import type {
+  CertificateDigests,
   CredentialRequest,
   PinScheme,
   ProtocolKind,
@@ -83,6 +84,8 @@ export interface CertPromptState {
    * against the key the user actually verified. Never displayed.
    */
   scheme: PinScheme;
+  /** The certificate's thumbprint and SHA-256, for display only. */
+  certificate: CertificateDigests | null;
 }
 
 export interface SessionParams {
@@ -509,6 +512,8 @@ export function useSession(
             subject: ev.subject,
             isChange: ev.isChange,
             scheme: ev.scheme,
+            // An older shell sends no field at all; treat that as no digests.
+            certificate: ev.certificate ?? null,
           });
           break;
         case "credentials-required":

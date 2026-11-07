@@ -10876,6 +10876,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "serde",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "socket2 0.5.10",
  "thiserror 2.0.19",

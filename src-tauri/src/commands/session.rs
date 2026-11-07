@@ -101,11 +101,16 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
             subject,
             is_change,
             scheme,
+            certificate,
         } => json!({
             "type": "certificate-prompt",
             "fingerprint": fingerprint,
             "subject": subject,
             "isChange": is_change,
+            // `{ thumbprint, sha256 }` of the whole certificate, or null for a
+            // bare key. Shown beside the pin so it can be matched against
+            // what Windows shows; never pinned.
+            "certificate": certificate,
             // Plumbing, not copy: the UI never shows this, it just hands it
             // back to `trust_certificate` so the pin lands under the right key.
             "scheme": scheme,
