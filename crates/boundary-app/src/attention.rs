@@ -69,6 +69,7 @@ pub fn forward(
 
 /// The notification's text. The name comes from the helper, and some
 /// notification servers read markup, so it is escaped.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 pub fn message(name: &str) -> String {
     let mut safe = String::with_capacity(name.len());
     for c in name.chars() {
@@ -215,11 +216,12 @@ mod tests {
         };
         assert_eq!(name, "Sam");
         // The forwarded answer still reaches the session.
-        answer.send(Approval::View).unwrap();
+        assert!(answer.send(Approval::View).is_ok());
         assert!(matches!(decision.try_recv(), Ok(Approval::View)));
         finish(tx, rx).await;
         assert_eq!(*seen.names.lock().unwrap(), vec!["Sam".to_owned()]);
-        assert!(seen.repaints.load(Ordering::Relaxed) >= 2);
+        // egui passes on one request until a pass consumes it, and no pass runs here.
+        assert!(seen.repaints.load(Ordering::Relaxed) >= 1);
     }
 
     #[tokio::test]

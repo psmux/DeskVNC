@@ -385,12 +385,11 @@ impl App {
         self.hosting = true;
         self.error = false;
         self.status = "Creating your code".into();
-        let mut session = boundary_session::host(self.network_options(), move || {
-            boundary_platform::open(id)
-        });
+        let mut session =
+            boundary_session::host(self.network_options(), move || boundary_platform::open(id));
         // Read off the window's thread, so a question gets to the person
         // even while the window draws nothing.
-        let (stand_in, _) = tokio::sync::mpsc::channel(1);
+        let (_, stand_in) = tokio::sync::mpsc::channel(1);
         let events = std::mem::replace(&mut session.events, stand_in);
         session.events =
             attention::forward(events, ctx.clone(), self.focused.clone(), attention::notify);
