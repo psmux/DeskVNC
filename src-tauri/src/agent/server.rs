@@ -555,6 +555,10 @@ fn record(id: &str, entry: &SessionEntry, slot: u16, attachment: Option<String>)
         "slot": slot,
         "state": facts.state,
         "size": facts.size.map(|(w, h)| json!({ "width": w, "height": h })),
+        // A Boundary session only: what its computer lets this helper do
+        // with its clipboard. Null from one that never said, and for every
+        // other protocol, whose clipboard is its own.
+        "clipboard": facts.clipboard.map(|c| json!({ "write": c.write, "read": c.read })),
         "attachmentId": attachment,
         "machine": machine_json(&entry.machine_key()),
     })
@@ -1008,6 +1012,13 @@ fn limb_close(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError>
     Ok(json!({ "sessionId": session_id, "closed": true }))
 }
 
+/// Said when a Boundary computer does not take clipboard text from this
+/// helper right now.
+const BOUNDARY_NO_CLIPBOARD_WRITE: &str = "that Boundary computer does not take clipboard text from this helper right now. It takes it only while the helper has control, and only from a DeskVNC Support new enough to carry a clipboard. Nothing was put on its clipboard; type the text instead, or ask the person to give control";
+
+/// Said when a Boundary computer does not send what its person copies.
+const BOUNDARY_NO_CLIPBOARD_READ: &str = "the person at that Boundary computer has not let this helper see what they copy, or their DeskVNC Support is too old to carry a clipboard. Nothing was read. They can tick Also let them see what I copy in DeskVNC Support, or allow it for this helper under unattended access";
+
 /// The text the remote machine last put on its clipboard.
 ///
 /// The session already receives it: VNC's ServerCutText, and RDP's clipboard
@@ -1031,6 +1042,9 @@ fn clipboard_read(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcEr
             )
         })?;
     let facts = entry.facts.lock();
+    if !facts.clipboard_readable(entry.handle.kind) {
+        return Err(RpcError::tagged("UNSUPPORTED", BOUNDARY_NO_CLIPBOARD_READ));
+    }
     Ok(match &facts.remote_clipboard {
         Some(clip) => json!({
             "text": clip.text,
@@ -1482,7 +1496,14 @@ fn limb_command(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcErro
         // the right test for the content fence below: a PTY has nothing to
         // observe, echoes what it is sent into a stream the agent reads back,
         // and fencing it would refuse every SSH session forever.
-        let has_screen = entry.facts.lock().size.is_some();
+        let facts = entry.facts.lock();
+        let has_screen = facts.size.is_some();
+        if matches!(command, ClientCommand::ClipboardText(_))
+            && !facts.clipboard_writable(entry.handle.kind)
+        {
+            return Err(RpcError::tagged("UNSUPPORTED", BOUNDARY_NO_CLIPBOARD_WRITE));
+        }
+        drop(facts);
         (entry.handle.clone(), has_screen)
     };
 

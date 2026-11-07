@@ -14,3 +14,7 @@ anyhow.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+iroh = "1.2"
+serde_json.workspace = true

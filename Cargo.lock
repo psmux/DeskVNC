@@ -1035,8 +1035,10 @@ version = "0.34.1"
 dependencies = [
  "anyhow",
  "boundary-session",
+ "iroh",
  "parking_lot",
  "remote-core",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

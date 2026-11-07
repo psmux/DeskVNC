@@ -4,7 +4,8 @@ use anyhow::{anyhow, bail, ensure, Result};
 use boundary_session::{
     tools::{Client, Reply, Request},
     unattended::{self, SecretKey},
-    Abilities, Button, Event, HostOptions, Input, Invitation, Key, LinkLost, Session, Update,
+    Abilities, Button, ClipboardRights, Event, HostOptions, Input, Invitation, Key, LinkLost,
+    Session, Update,
 };
 use parking_lot::Mutex;
 use remote_core::{
@@ -20,10 +21,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// What this helper says it can do: send commands and files for the agent
-/// plane, and draw H.264, which the window decodes with WebCodecs.
+/// plane, draw H.264, which the window decodes with WebCodecs, and carry
+/// clipboard text both ways, which the window and the agent plane use as
+/// they do a VNC server's cut text.
 const ABILITIES: Abilities = Abilities {
     tools: true,
     video: true,
+    clipboard: true,
 };
 struct Pending {
     ticket: String,
@@ -209,6 +213,9 @@ impl ProtocolDriver for BoundaryDriver {
                     other => break other,
                 };
                 tracing::info!(session = %session_id, attempt = attempts + 1, error = %format!("{error:#}"), "boundary link lost, connecting again");
+                // The rights went with the link. The computer says them again
+                // once it is back, and one that comes back older never does.
+                let _ = clipboard_rights(&events, ClipboardRights::default()).await;
                 attempts += 1;
                 if policy.max_attempts.is_some_and(|max| attempts > max) {
                     break Err(error);
@@ -295,6 +302,21 @@ async fn emit(events: &mpsc::Sender<SessionEvent>, event: SessionEvent) -> Resul
         .send(event)
         .await
         .map_err(|_| anyhow!("Session window closed"))
+}
+/// Tell the window and the agent plane what the computer lets this helper
+/// do with its clipboard.
+async fn clipboard_rights(
+    events: &mpsc::Sender<SessionEvent>,
+    rights: ClipboardRights,
+) -> Result<()> {
+    emit(
+        events,
+        SessionEvent::Protocol(remote_core::ProtocolEvent::BoundaryClipboard {
+            write: rights.write,
+            read: rights.read,
+        }),
+    )
+    .await
 }
 async fn permission(events: &mpsc::Sender<SessionEvent>, allowed: bool, tools: bool) -> Result<()> {
     emit(
@@ -478,6 +500,9 @@ async fn drive(
     let mut input = InputState::default();
     let mut allowed = false;
     let mut tools_allowed = false;
+    // Off until the computer says otherwise. One older than clipboard over
+    // Boundary never does, and nothing is ever sent to it.
+    let mut clipboard = ClipboardRights::default();
     emit(events, SessionEvent::StateChanged(SessionState::Connecting)).await?;
     loop {
         tokio::select! {
@@ -504,6 +529,14 @@ async fn drive(
                     tools_allowed = value;
                     permission(events, allowed, tools_allowed).await?;
                 }
+                Some(Event::ClipboardRights(rights)) => {
+                    clipboard = rights;
+                    clipboard_rights(events, clipboard).await?;
+                }
+                // What the person there copied. The window offers it as a VNC
+                // server's cut text, and the agent plane keeps it for
+                // clipboard.read.
+                Some(Event::ClipboardText(text)) => emit(events, SessionEvent::ClipboardText(text)).await?,
                 Some(Event::Paired { machine, name }) => {
                     if let Some(paired) = paired.as_ref() { paired(machine, name); }
                 }
@@ -589,6 +622,17 @@ async fn drive(
                     }
                 }
                 Some(ClientCommand::ReleaseAllKeys) => { input = InputState::default(); session.input(Input::Release)?; }
+                // Put text on the computer's clipboard, only while it takes
+                // it. A refusal or a text too large is logged and the session
+                // goes on: nothing here may end a support session over a paste.
+                Some(ClientCommand::ClipboardText(text)) if clipboard.write && !view_only => {
+                    if let Err(error) = session.send_clipboard(text) {
+                        tracing::info!(error = %format!("{error:#}"), "boundary clipboard text not sent");
+                    }
+                }
+                Some(ClientCommand::ClipboardText(text)) => {
+                    tracing::info!(characters = text.chars().count(), view_only, "boundary clipboard text dropped: the computer does not take it from this helper right now");
+                }
                 Some(command @ (ClientCommand::Pointer { .. } | ClientCommand::Key { .. })) if allowed && !view_only => {
                     for event in input.translate(command, size) { session.input(event)?; }
                 }

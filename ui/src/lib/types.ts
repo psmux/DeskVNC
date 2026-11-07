@@ -665,6 +665,7 @@ export interface DisplayOption extends RemoteScreen {
  */
 export type SessionEvent =
   | { type: "boundary-control"; control: boolean }
+  | { type: "boundary-clipboard"; write: boolean; read: boolean }
   | { type: "state-changed"; state: SessionState }
   | { type: "desktop-resize"; width: number; height: number }
   | { type: "desktop-name"; name: string }

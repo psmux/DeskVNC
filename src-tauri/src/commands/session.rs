@@ -145,6 +145,9 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         SessionEvent::Protocol(ProtocolEvent::Boundary { control, tools }) => {
             json!({ "type": "boundary-control", "control": control, "tools": tools })
         }
+        SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard { write, read }) => {
+            json!({ "type": "boundary-clipboard", "write": write, "read": read })
+        }
         // Terminal bytes never become JSON. They go out on the binary channel
         // (`framing::encode_pty`) for the same reason framebuffer rectangles
         // do: base64 in a JSON envelope costs a third more bytes plus escaping
@@ -700,6 +703,18 @@ fn forward_events(
                         .and_then(|state| state.agent.restore_consent(&session_id));
                     if let Some(event) = restored {
                         let _ = app.emit(crate::agent::AGENT_EVENT, event);
+                    }
+                }
+                // What a Boundary computer lets this helper do with its
+                // clipboard. Kept for the agent plane, which offers
+                // clipboard.read and clipboard.write on the limb only while
+                // these say so, and refuses them otherwise.
+                SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard { write, read }) => {
+                    if let Some(entry) = sessions.lock().get(&session_id) {
+                        entry.facts.lock().clipboard = Some(crate::state::ClipboardRights {
+                            write: *write,
+                            read: *read,
+                        });
                     }
                 }
                 SessionEvent::ClipboardText(text) => {
@@ -2220,7 +2235,9 @@ pub fn pending_credential_request(
     state.pending_prompts.lock().get(&session_id).cloned()
 }
 
-/// What the person at a Boundary computer last allowed: `{ control, tools }`,
+/// What the person at a Boundary computer last allowed: `{ control, tools,
+/// clipboard }`, where `clipboard` is `{ write, read }` or null from a
+/// computer that predates clipboard over Boundary,
 /// or `None` before the computer has answered or for another protocol.
 ///
 /// The window is told with a `boundary-control` event, once, when it changes.
@@ -2234,7 +2251,11 @@ pub fn boundary_permission(
     let sessions = state.sessions.lock();
     let facts = sessions.get(&session_id)?.facts.lock();
     let control = facts.control?;
-    Some(serde_json::json!({ "control": control, "tools": facts.tools }))
+    Some(serde_json::json!({
+        "control": control,
+        "tools": facts.tools,
+        "clipboard": facts.clipboard.map(|c| serde_json::json!({ "write": c.write, "read": c.read })),
+    }))
 }
 
 /// One row of [`list_active_sessions`], the same identity every
