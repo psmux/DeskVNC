@@ -1857,23 +1857,32 @@ async fn run_viewer(
         },
     )
     .await?;
-    let result = watch_session(worker, &connection, send, recv).await;
+    let result = watch_session(worker, &connection, send, recv, ATTENDED_WAIT).await;
     drop(guard);
     if matches!(_endpoint_guard, Held::Own(_)) {
         endpoint.close().await;
     }
     result
 }
+/// What a helper reads while the person they invited decides.
+pub(crate) const ATTENDED_WAIT: &str = "Waiting for the person to approve sharing";
+/// What a helper reads while an unattended computer checks it. A paired
+/// helper or the right password is let straight in, and only an unknown
+/// helper is put to whoever is at the computer, so this does not say a
+/// person has to approve.
+pub(crate) const UNATTENDED_WAIT: &str = "Waiting for the computer to let you in";
+
 /// The helper's side of a session once its request is on the wire: wait to
-/// be let in, then show screens, send input and keep the session alive.
-/// Shared by invitations and unattended connections.
+/// be let in, saying `waiting` meanwhile, then show screens, send input and
+/// keep the session alive. Shared by invitations and unattended connections.
 pub(crate) async fn watch_session(
     worker: &mut Worker,
     connection: &Connection,
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
+    waiting: &str,
 ) -> Result<()> {
-    let result = watch(worker, connection, send, recv).await;
+    let result = watch(worker, connection, send, recv, waiting).await;
     if result.is_err() && connection.close_reason().is_none() {
         // A stream can end a moment before the close that explains it, so
         // give the reason a moment to land rather than report the symptom.
@@ -1963,12 +1972,9 @@ async fn watch(
     connection: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
+    waiting: &str,
 ) -> Result<()> {
-    worker
-        .emit(Event::Status(
-            "Waiting for the person to approve sharing".into(),
-        ))
-        .await?;
+    worker.emit(Event::Status(waiting.into())).await?;
     let grant: Message = tokio::time::timeout(Duration::from_secs(65), wire::read(&mut recv))
         .await
         .context("Approval timed out")??;
