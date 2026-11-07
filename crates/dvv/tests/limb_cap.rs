@@ -39,9 +39,15 @@ async fn limbs_only_looked_at_do_not_keep_an_agent_from_opening_the_one_it_needs
         let status = client.tool("dvv_status", json!({ "limbId": limb })).await;
         assert_eq!(error_code(&status), None, "{status}");
     }
-    assert_eq!(plane.limbs().len(), 4, "naming an available limb attaches it");
+    assert_eq!(
+        plane.limbs().len(),
+        4,
+        "naming an available limb attaches it"
+    );
 
-    let opened = client.tool("dvv_open", json!({ "hostId": "h_lab05" })).await;
+    let opened = client
+        .tool("dvv_open", json!({ "hostId": "h_lab05" }))
+        .await;
     assert_eq!(error_code(&opened), None, "{opened}");
     assert_eq!(plane.limbs().len(), 4);
 
@@ -67,7 +73,9 @@ async fn a_full_cap_of_limbs_the_agent_opened_says_how_to_free_one() {
     }
     let mut client = Client::connect(plane.clone());
 
-    let refused = client.tool("dvv_open", json!({ "hostId": "h_lab05" })).await;
+    let refused = client
+        .tool("dvv_open", json!({ "hostId": "h_lab05" }))
+        .await;
     assert_eq!(error_code(&refused), Some("TOO_MANY_LIMBS"), "{refused}");
     let message = structured(&refused)["message"].as_str().unwrap_or_default();
     assert!(
