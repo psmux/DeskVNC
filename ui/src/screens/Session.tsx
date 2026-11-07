@@ -1138,7 +1138,13 @@ function SessionView({
     const text = session.remoteClipboard?.text;
     if (text === undefined) return;
     clipboardEcho.moved(text);
-    void writeClipboard(text);
+    // Text the local clipboard already holds is not written again. A write
+    // is a new copy as far as the system is concerned, so a Boundary host on
+    // this same machine (one clipboard for both) would see it, send it back,
+    // and the two would pass the same text to each other twice a second.
+    void readClipboard().then((current) => {
+      if (current !== text) void writeClipboard(text);
+    });
   }, [session.remoteClipboard, clipboardEcho]);
 
   /**
