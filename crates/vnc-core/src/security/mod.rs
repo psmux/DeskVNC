@@ -424,8 +424,19 @@ pub async fn authenticate_full<S: vnc_transport::Stream + 'static>(
     let mut stream: BoxedStream = Box::pin(stream);
 
     // RFB 3.7+: echo the chosen type back. 3.3: the server already decided.
+    //
+    // macOS reads the type byte of its SRP logins in one read together with
+    // the client's first message, and closes the connection when the byte
+    // arrives alone. Those two handshakes put the byte in front of their
+    // first write instead.
+    let joins_first_message = matches!(chosen, SecurityType::AppleRsaSrp | SecurityType::AppleSrp);
+    let mut type_prefix = Vec::new();
     if version.client_selects_security() {
-        write_all(&mut stream, &[chosen.to_wire()]).await?;
+        if joins_first_message {
+            type_prefix.push(chosen.to_wire());
+        } else {
+            write_all(&mut stream, &[chosen.to_wire()]).await?;
+        }
     }
 
     let outcome = match chosen {
@@ -438,8 +449,12 @@ pub async fn authenticate_full<S: vnc_transport::Stream + 'static>(
         | SecurityType::Ra2_256
         | SecurityType::Ra2ne256 => ra2::handshake(stream, chosen, opts, creds).await?,
         SecurityType::AppleDh => apple_dh::handshake(stream, opts, creds).await?,
-        SecurityType::AppleRsaSrp => apple_srp::handshake_33(stream, opts, creds).await?,
-        SecurityType::AppleSrp => apple_srp::handshake_36(stream, opts, creds).await?,
+        SecurityType::AppleRsaSrp => {
+            apple_srp::handshake_33(stream, &type_prefix, opts, creds).await?
+        }
+        SecurityType::AppleSrp => {
+            apple_srp::handshake_36(stream, &type_prefix, opts, creds).await?
+        }
         SecurityType::MsLogonII => mslogon::handshake(stream, opts, creds).await?,
         SecurityType::Unknown(v) => return Err(VncError::UnsupportedSecurityType(v)),
     };

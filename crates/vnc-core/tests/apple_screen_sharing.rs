@@ -147,16 +147,39 @@ impl ServerSrp {
     }
 }
 
-/// A server SRP frame: `u32 total, u8 step, u32 payload_len + 4, u32
-/// payload_len, payload`, `total` counting what follows it.
-fn server_frame(step: u8, payload: &[u8]) -> Vec<u8> {
+/// A server SRP message as a Mac sends it. Inside is always `u32 len,
+/// payload`; type 33 puts `u32 total, u16 0, u16 2, u16 len` in front of
+/// that, type 36 only `u32 len`. Both shapes were read off a real Mac.
+fn server_frame(login: Login, payload: &[u8]) -> Vec<u8> {
+    let mut buffer = (payload.len() as u32).to_be_bytes().to_vec();
+    buffer.extend_from_slice(payload);
     let mut f = Vec::new();
-    f.extend_from_slice(&((9 + payload.len()) as u32).to_be_bytes());
-    f.push(step);
-    f.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
-    f.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    f.extend_from_slice(payload);
+    match login {
+        Login::Rsa33 => {
+            f.extend_from_slice(&((6 + buffer.len()) as u32).to_be_bytes());
+            f.extend_from_slice(&[0, 0, 0, 2]);
+            f.extend_from_slice(&(buffer.len() as u16).to_be_bytes());
+        }
+        Login::Srp36 => f.extend_from_slice(&(buffer.len() as u32).to_be_bytes()),
+    }
+    f.extend_from_slice(&buffer);
     f
+}
+
+/// `n` bytes that must already be waiting. A Mac takes the type byte of its
+/// SRP logins and the first message from one read, and drops a client whose
+/// first message is not there yet.
+fn read_waiting(s: &mut TcpStream, n: usize) -> Vec<u8> {
+    let mut b = vec![0u8; n];
+    let mut got = 0;
+    while got < n {
+        match s.try_read(&mut b[got..]) {
+            Ok(0) => panic!("client closed"),
+            Ok(k) => got += k,
+            Err(e) => panic!("the first message did not travel with the type byte: {e}"),
+        }
+    }
+    b
 }
 
 fn server_proof_payload(m2: &[u8]) -> Vec<u8> {
@@ -424,7 +447,7 @@ async fn serve(
             assert_eq!(selected, 0x21);
             let key = key.unwrap();
             // Host key request: an RSA1 envelope, authtype 0.
-            let req = read_n(s, 14).await;
+            let req = read_waiting(s, 14);
             assert_eq!(&req[4..10], &[1, 0, b'R', b'S', b'A', b'1']);
             assert_eq!(&req[10..12], &[0, 0], "authtype 0");
             let spki = key.to_public_key().to_public_key_der().unwrap();
@@ -448,16 +471,22 @@ async fn serve(
         }
         Login::Srp36 => {
             assert_eq!(selected, 0x24);
-            let head = read_n(s, 4).await;
-            let rest = u32::from_be_bytes(head[..4].try_into().unwrap()) as usize;
-            let mut identity = head;
-            identity.extend_from_slice(&read_n(s, rest).await);
+            // The identity record inside one more length word.
+            let outer = read_waiting(s, 4);
+            let outer = u32::from_be_bytes(outer[..4].try_into().unwrap()) as usize;
+            let identity = read_waiting(s, outer);
+            let rest = u32::from_be_bytes(identity[..4].try_into().unwrap()) as usize;
+            assert_eq!(
+                rest + 4,
+                outer,
+                "the identity record fills its outer length"
+            );
             seen.lock().identity = Some(identity);
         }
     }
 
     // --- challenge -----------------------------------------------------------
-    s.write_all(&server_frame(1, &srp.challenge()))
+    s.write_all(&server_frame(login, &srp.challenge()))
         .await
         .unwrap();
 
@@ -496,16 +525,19 @@ async fn serve(
     assert_eq!(inner.len(), 581 + olen + 17);
 
     let Some((m2, session_key)) = srp.verify(&a_pub, &m1) else {
-        // Wrong password: refuse with the ordinary failure result.
+        // Wrong password, refused the way a real Mac does it: type 33 sends
+        // an RSA1 frame with an empty message and then SecurityResult 1, type
+        // 36 the SecurityResult alone. No reason string in either.
         seen.lock().auth_failed = true;
-        let reason = b"Authentication failed";
-        let mut r = 1u32.to_be_bytes().to_vec();
-        r.extend_from_slice(&(reason.len() as u32).to_be_bytes());
-        r.extend_from_slice(reason);
+        let mut r = Vec::new();
+        if login == Login::Rsa33 {
+            r.extend_from_slice(&[0, 0, 0, 6, 0, 0, 0, 2, 0, 0]);
+        }
+        r.extend_from_slice(&1u32.to_be_bytes());
         s.write_all(&r).await.unwrap();
         return;
     };
-    s.write_all(&server_frame(2, &server_proof_payload(&m2)))
+    s.write_all(&server_frame(login, &server_proof_payload(&m2)))
         .await
         .unwrap();
     s.write_all(&0u32.to_be_bytes()).await.unwrap();
@@ -871,8 +903,21 @@ async fn type_36_session_end_to_end() {
 /// and the client reports it as rejected credentials, not a protocol error.
 #[tokio::test]
 async fn wrong_password_is_an_auth_failure() {
-    let mac = FakeMac::start(Login::Rsa33, PASSWORD).await;
-    let (_handle, mut events) = spawn_session(session_options(mac.port, "not the password"));
+    wrong_password_with(Login::Rsa33).await;
+}
+
+#[tokio::test]
+async fn wrong_password_is_an_auth_failure_36() {
+    wrong_password_with(Login::Srp36).await;
+}
+
+async fn wrong_password_with(login: Login) {
+    let mac = FakeMac::start(login, PASSWORD).await;
+    let mut o = session_options(mac.port, "not the password");
+    if login == Login::Srp36 {
+        o.vnc_mut().security_pref = Some("apple-srp".into());
+    }
+    let (_handle, mut events) = spawn_session(o);
     let reason = events
         .wait(DEFAULT_TIMEOUT, "an authentication failure", |e| match e {
             SessionEvent::StateChanged(vnc_core::types::SessionState::Disconnected {
@@ -884,6 +929,7 @@ async fn wrong_password_is_an_auth_failure() {
         })
         .await;
     assert!(!reason.1, "a rejected password is not retried: {reason:?}");
+    assert!(reason.0.contains("password was not accepted"), "{reason:?}");
     assert!(mac.seen.lock().auth_failed);
     assert!(
         !events.any(|e| matches!(
@@ -951,7 +997,8 @@ mod live_must_confirm {
     use vnc_core::security::apple_srp::*;
 
     /// The host key request is an RSA1 envelope with authtype 0 and no body,
-    /// sent right after the type byte. Nothing describes its body.
+    /// in the same write as the type byte. Confirmed on a real Mac: it logs
+    /// "RSA received 10 bytes" and answers with its key.
     #[test]
     fn host_key_request_has_an_empty_body() {
         assert_eq!(
@@ -960,7 +1007,8 @@ mod live_must_confirm {
         );
     }
 
-    /// The host key reply starts with 0x100 written little endian.
+    /// The host key reply: `u32 len, 00 01 00 00, u16 n, SPKI, 00`.
+    /// Confirmed on a real Mac (`00 00 01 2d 00 01 00 00 01 26 30 82 ...`).
     #[test]
     fn host_key_reply_tag_is_little_endian() {
         let key = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
@@ -1008,21 +1056,26 @@ mod live_must_confirm {
     }
 
     /// The type 33 proof carries 384 trailing bytes after its inner block.
+    /// A real Mac logs "RSA received 1076 bytes" for it and goes on to check
+    /// the proof, so the framing is right; whether it needs the trailer at
+    /// all is untested.
     #[test]
     fn proof_33_has_a_384_byte_trailer() {
         let p = proof_packet_33(&[0u8; 10]);
         assert_eq!(p.len(), 4 + 10 + 4 + 10 + 384);
     }
 
-    /// Type 36: the identity record goes in clear with no envelope, and the
-    /// proof goes as `u32 len, u16 0, u16 inner_len, inner`.
+    /// Type 36: the identity record goes in clear inside one more length
+    /// word, and so does the proof. Confirmed on a real Mac for the identity
+    /// (without the outer word it logs "SRP Buffer isn't of the right
+    /// length"); the proof follows the same shape.
     #[test]
     fn type_36_framing() {
-        let p = proof_packet_36(&[9u8; 3], ProofFraming36::Bare);
+        let p = proof_packet_36(&[9u8; 3]);
         assert_eq!(p, [0, 0, 0, 7, 0, 0, 0, 3, 9, 9, 9]);
         assert_eq!(
-            identity_record("a").unwrap(),
-            [0, 0, 0, 8, 0, 0, 0, 1, b'a', 0, 0, 0]
+            identity_packet_36(&identity_record("a").unwrap()),
+            [0, 0, 0, 12, 0, 0, 0, 8, 0, 0, 0, 1, b'a', 0, 0, 0]
         );
     }
 
@@ -1034,7 +1087,9 @@ mod live_must_confirm {
     }
 
     /// The version reply stays `RFB 003.008` (the existing type 30 behaviour)
-    /// rather than echoing `RFB 003.889` as the native viewer does.
+    /// rather than echoing `RFB 003.889` as the native viewer does. A real Mac
+    /// offers the same `30, 33, 36, 35` after either reply (and after
+    /// `003.007`), and refuses `003.003` with "Incompatible Version.".
     #[test]
     fn version_reply_is_3_8() {
         let parsed = vnc_core::proto::version::parse_server_banner(b"RFB 003.889\n").unwrap();

@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! S->C  u16 generator
-//! S->C  u16 key_length            (bytes, 128 on macOS => the 1024-bit group)
+//! S->C  u16 key_length            (bytes: 128 on older macOS, 512 on macOS 26)
 //! S->C  prime[key_length]
 //! S->C  server_public[key_length]
 //! C->S  credentials[128]          AES-128-ECB( MD5(shared secret) )
@@ -17,9 +17,10 @@
 //!
 //! ## Security note
 //!
-//! The group is the fixed 1024-bit one of RFC 2409, which is within reach of
-//! precomputation by a well funded attacker, and the *session* that follows
-//! is entirely unencrypted regardless. This protects the password from
+//! Older Macs use the fixed 1024-bit group of RFC 2409, which is within
+//! reach of precomputation by a well funded attacker. macOS 26 sends the
+//! 4096-bit group of RFC 3526 with generator 5 instead. Either way the
+//! *session* that follows is entirely unencrypted. This protects the password from
 //! casual capture and nothing more, which is why a Mac that also offers type
 //! 33 is logged into with that instead (see `apple_srp`), and why PRD/10 §5
 //! recommends an SSH tunnel to a Mac whose only login is this one.
@@ -45,7 +46,8 @@ const FIELD_LEN: usize = 64;
 /// Username field + password field.
 const CREDENTIALS_LEN: usize = FIELD_LEN * 2;
 
-/// Smallest DH modulus we will talk to. macOS sends 128 (1024-bit).
+/// Smallest DH modulus we will talk to. Older macOS sends 128 (1024-bit),
+/// macOS 26 sends 512 (4096-bit).
 const MIN_KEY_BYTES: usize = 32;
 /// 8192-bit, anything larger is a denial-of-service attempt, not a server.
 const MAX_KEY_BYTES: usize = 1024;
