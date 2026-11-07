@@ -24,6 +24,9 @@ use tokio::time::timeout;
 const BANNER_READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// Timeout for reads during a deep probe.
 const PROBE_READ_TIMEOUT: Duration = Duration::from_millis(800);
+/// Longest refusal reason a deep probe reads. The length on the wire is a
+/// u32, and a probe has no reason to allocate whatever a server claims.
+const MAX_REASON: usize = 8192;
 
 /// Connect to `addr`, read the RFB banner, and return it if valid.
 ///
@@ -51,6 +54,10 @@ pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<
 /// (the same version the server offered, which is always a valid client reply)
 /// and reads the security types, then drops the connection before any
 /// challenge/response, so it never trips fail2ban/UseBlacklist on the server.
+///
+/// A server that refuses the connection instead of offering types gives
+/// [`Error::Refused`] with the reason it sent, so the caller can show why
+/// rather than an empty list that reads as "offers nothing".
 pub async fn deep_probe(addr: SocketAddr) -> Result<Vec<u8>> {
     let connect_to = Duration::from_millis(1500);
     let mut stream = timeout(connect_to, TcpStream::connect(addr))
@@ -91,25 +98,28 @@ pub async fn deep_probe(addr: SocketAddr) -> Result<Vec<u8>> {
         })?;
 
     // RFB 3.3: server sends a single 4-byte (u32) security type.
-    // RFB 3.7+: server sends u8 count, then `count` type bytes (0 => failure,
-    // followed by a reason string we ignore).
+    // RFB 3.7+: server sends u8 count, then `count` type bytes.
+    // In both a 0 is a refusal, followed by a u32 length and a reason string
+    // (RFC 6143 7.1.2, and 3.3's ConnFailed has the same shape).
     let is_legacy_33 = parsed.major == 3 && parsed.minor < 7;
     let types = if is_legacy_33 {
         let mut b = [0u8; 4];
         read_exact_to(&mut stream, &mut b, addr).await?;
         let sec = u32::from_be_bytes(b);
-        // 0 means the connection failed; otherwise it's the single chosen type.
-        if sec == 0 || sec > u32::from(u8::MAX) {
-            Vec::new()
-        } else {
-            vec![sec as u8]
+        if sec == 0 {
+            return Err(refusal(&mut stream, addr).await);
         }
+        let sec = u8::try_from(sec).map_err(|_| Error::Probe {
+            addr,
+            reason: format!("RFB 3.3 security type {sec} is out of range"),
+        })?;
+        vec![sec]
     } else {
         let mut count_buf = [0u8; 1];
         read_exact_to(&mut stream, &mut count_buf, addr).await?;
         let count = count_buf[0] as usize;
         if count == 0 {
-            Vec::new()
+            return Err(refusal(&mut stream, addr).await);
         } else {
             // Guard against absurd counts (max is 255 anyway, so this is safe).
             let mut list = vec![0u8; count];
@@ -169,6 +179,35 @@ pub async fn rdp_deep_probe(addr: SocketAddr) -> Result<RdpCaps> {
 }
 
 /// Read exactly `buf.len()` bytes with the probe timeout, mapping errors.
+/// Read the reason that follows a refusal and turn it into [`Error::Refused`].
+///
+/// The refusal is the answer that matters, so a reason that fails to arrive
+/// still yields `Refused`, with a note saying the server sent none, rather
+/// than hiding the refusal behind a read error.
+async fn refusal(stream: &mut TcpStream, addr: SocketAddr) -> Error {
+    let mut len = [0u8; 4];
+    let reason = match read_exact_to(stream, &mut len, addr).await {
+        Ok(()) => {
+            let len = (u32::from_be_bytes(len) as usize).min(MAX_REASON);
+            let mut text = vec![0u8; len];
+            match read_exact_to(stream, &mut text, addr).await {
+                Ok(()) => String::from_utf8_lossy(&text).trim().to_string(),
+                Err(_) => String::new(),
+            }
+        }
+        Err(_) => String::new(),
+    };
+    let _ = stream.shutdown().await;
+    Error::Refused {
+        addr,
+        reason: if reason.is_empty() {
+            "the server gave no reason".into()
+        } else {
+            reason
+        },
+    }
+}
+
 async fn read_exact_to(stream: &mut TcpStream, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
     timeout(PROBE_READ_TIMEOUT, stream.read_exact(buf))
         .await

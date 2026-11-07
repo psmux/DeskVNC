@@ -702,6 +702,17 @@ fn forward_events(
                         let _ = app.emit(crate::agent::AGENT_EVENT, event);
                     }
                 }
+                SessionEvent::ClipboardText(text) => {
+                    if let Some(entry) = sessions.lock().get(&session_id) {
+                        let mut facts = entry.facts.lock();
+                        let seq = facts.remote_clipboard.as_ref().map_or(1, |c| c.seq + 1);
+                        facts.remote_clipboard = Some(crate::state::RemoteClipboard {
+                            text: text.clone(),
+                            seq,
+                            at: std::time::Instant::now(),
+                        });
+                    }
+                }
                 SessionEvent::DesktopResize { width, height } => {
                     if let Some(entry) = sessions.lock().get(&session_id) {
                         entry.facts.lock().size = Some((*width, *height));

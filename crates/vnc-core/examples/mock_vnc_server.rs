@@ -15,6 +15,11 @@
 //! It serves a 640x480 desktop with four coloured quadrants so a connected
 //! viewer visibly renders something, and keeps accepting connections until
 //! interrupted.
+//!
+//! With `DESKVNC_MOCK_CLIPBOARD` set, it also "copies" that text: each time a
+//! client finishes its handshake (its SetEncodings arrives) the text goes out
+//! as a ServerCutText, which is how a real server reports its clipboard. That
+//! is what an end to end check of `dvv_clipboard` with `get` reads back.
 
 #[path = "../tests/common/mock_server.rs"]
 mod mock_server;
@@ -68,6 +73,7 @@ async fn main() {
     // keyboard pass-through can be checked end to end: a shortcut the local
     // OS or this application's own menu bar took never shows up here.
     let mut seen = 0usize;
+    let clipboard = std::env::var("DESKVNC_MOCK_CLIPBOARD").ok();
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
@@ -87,6 +93,12 @@ async fn main() {
                             "key {} keysym 0x{keysym:04x} scancode 0x{keycode:02x} (qemu)",
                             if *down { "down" } else { "up  " }
                         ),
+                        mock_server::ClientMessage::SetEncodings { .. } => {
+                            if let Some(text) = &clipboard {
+                                server.send_server_cut_text(text);
+                                println!("clipboard sent: {} byte(s)", text.len());
+                            }
+                        }
                         _ => {}
                     }
                 }

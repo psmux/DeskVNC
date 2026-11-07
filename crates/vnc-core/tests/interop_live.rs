@@ -73,23 +73,53 @@ async fn connect_live(what: &str) -> Option<(TcpStream, [u8; 12])> {
     Some((stream, banner))
 }
 
+/// Longest refusal reason we will read. RFB gives it a u32 length, and a test
+/// has no business allocating whatever a server claims.
+const MAX_REASON: usize = 8192;
+
 /// Read the server's security-type offer (RFB 3.7+ form: `u8 count` then that
-/// many type bytes). Panics only on a genuine protocol violation.
-async fn read_security_offer(stream: &mut TcpStream) -> Vec<u8> {
+/// many type bytes).
+///
+/// A count of 0 is the server refusing the connection, and RFC 6143 7.1.2 has
+/// it followed by a u32 length and a reason string. The reason comes back as
+/// `Err`, because a refusal is the server's policy (TightVNC sends "Sorry,
+/// loopback connections are not enabled" when loopback is off) and the test
+/// should print it and skip. Panics only on a genuine protocol violation.
+async fn read_security_offer<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<Vec<u8>, String> {
     let count = timeout(IO_TIMEOUT, stream.read_u8())
         .await
         .expect("security-type count must arrive")
         .expect("security-type count must read") as usize;
-    assert!(
-        count > 0,
-        "a count of 0 means the server refused the connection outright"
-    );
+    if count == 0 {
+        let len = timeout(IO_TIMEOUT, stream.read_u32())
+            .await
+            .expect("a refusal's reason length must arrive")
+            .expect("a refusal's reason length must read") as usize;
+        let mut reason = vec![0u8; len.min(MAX_REASON)];
+        timeout(IO_TIMEOUT, stream.read_exact(&mut reason))
+            .await
+            .expect("a refusal's reason must arrive")
+            .expect("a refusal's reason must read");
+        return Err(String::from_utf8_lossy(&reason).into_owned());
+    }
     let mut types = vec![0u8; count];
     timeout(IO_TIMEOUT, stream.read_exact(&mut types))
         .await
         .expect("security-type list must arrive")
         .expect("security-type list must read");
-    types
+    Ok(types)
+}
+
+/// [`read_security_offer`], printing a skip line with the server's reason and
+/// returning `None` when the server refused the connection.
+async fn offer_or_skip(what: &str, stream: &mut TcpStream) -> Option<Vec<u8>> {
+    match read_security_offer(stream).await {
+        Ok(types) => Some(types),
+        Err(reason) => {
+            eprintln!("SKIP {what}: {} refused the connection: {reason}", target());
+            None
+        }
+    }
 }
 
 /// Close the connection without ever having authenticated.
@@ -174,7 +204,10 @@ async fn live_version_negotiation_is_accepted() {
     );
 
     // The server accepted our version if it now sends a security offer.
-    let offered = read_security_offer(&mut stream).await;
+    let Some(offered) = offer_or_skip("live_version_negotiation_is_accepted", &mut stream).await
+    else {
+        return;
+    };
     eprintln!(
         "LIVE {addr}: negotiated {} (server said {}.{}), server offered security types {offered:?}",
         negotiated.version, negotiated.server_major, negotiated.server_minor
@@ -206,7 +239,10 @@ async fn live_security_offer_and_selection() {
         .expect("flush must not time out")
         .expect("flush must succeed");
 
-    let offered = read_security_offer(&mut stream).await;
+    let Some(offered) = offer_or_skip("live_security_offer_and_selection", &mut stream).await
+    else {
+        return;
+    };
     let named: Vec<String> = offered
         .iter()
         .map(|&b| format!("{b} ({:?})", SecurityType::from_wire(b)))
@@ -258,7 +294,9 @@ async fn live_connection_closes_cleanly_without_authenticating() {
         .await
         .expect("version reply must not time out")
         .expect("version reply must write");
-    let offered = read_security_offer(&mut stream).await;
+    let Some(offered) = offer_or_skip(what, &mut stream).await else {
+        return;
+    };
     assert!(!offered.is_empty());
 
     // The only bytes we ever sent are the 12-byte version reply.
@@ -314,4 +352,25 @@ fn apple_offer_selection_is_pinned() {
             "type {t} is an Apple extension we deliberately do not implement"
         );
     }
+}
+
+/// A refusal reads as the server's reason, not a panic. This is the answer
+/// TightVNC gives a loopback client when AllowLoopback is off: a count of 0,
+/// then a u32 length and the reason. Runs everywhere, no server required.
+#[tokio::test]
+async fn a_refusal_yields_the_servers_reason() {
+    let reason = b"Sorry, loopback connections are not enabled";
+    let mut wire = vec![0u8];
+    wire.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+    wire.extend_from_slice(reason);
+    let (mut client, mut server) = tokio::io::duplex(256);
+    server.write_all(&wire).await.unwrap();
+    assert_eq!(
+        read_security_offer(&mut client).await,
+        Err("Sorry, loopback connections are not enabled".to_string())
+    );
+
+    // An ordinary offer still reads as the list.
+    server.write_all(&[2, 16, 2]).await.unwrap();
+    assert_eq!(read_security_offer(&mut client).await, Ok(vec![16, 2]));
 }

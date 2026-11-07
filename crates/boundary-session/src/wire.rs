@@ -31,7 +31,7 @@ impl Invitation {
     pub fn decode(text: &str) -> Result<Self> {
         ensure!(text.len() <= MAX_CONTROL * 2, "Invitation is too large");
         let text = text.trim().strip_prefix("boundary1:").ok_or_else(|| {
-            anyhow::anyhow!("Paste a Boundary invitation beginning with boundary1:")
+            anyhow::anyhow!("Paste a DeskVNC invitation beginning with boundary1:")
         })?;
         let result: Self = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(text)?)?;
         ensure!(result.version == 1, "Unsupported invitation version");

@@ -16,7 +16,12 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
+};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, OpenProcessToken,
+};
 
 /// How long a client waits for a free instance before giving up.
 ///
@@ -24,6 +29,50 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 /// is a gap of microseconds between two accepts. Two seconds is a listener
 /// that has stopped accepting, which is worth an error rather than a hang.
 const BUSY_WAIT: Duration = Duration::from_secs(2);
+
+/// The agent plane's pipe for `user` in Windows session `session`.
+///
+/// Pipe names are global to the machine while DeskVNCViewer's single
+/// instance rule is per session, so a name keyed only on the user let a
+/// viewer in a second session of the same user (an RDP login beside the
+/// console) own the plane every session's agents reach: whichever started
+/// first served them all, and the other answered "already serving". With the
+/// session in the name each session's viewer serves its own agents.
+///
+/// The application and `dvv` both build the name here, so they cannot drift.
+pub fn plane_pipe_name(user: &str, session: u32) -> String {
+    format!(r"\\.\pipe\deskvncviewer-agent-{user}-s{session}")
+}
+
+/// The Windows session this process runs in, or 0 if Windows will not say.
+pub fn current_session() -> u32 {
+    let mut session = 0u32;
+    // SAFETY: a plain out parameter for this process's own id.
+    if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) } == 0 {
+        return 0;
+    }
+    session
+}
+
+/// The session whose plane a client in this process should reach.
+///
+/// Its own, with one exception. Session 0 holds services and every OpenSSH
+/// login, and has no desktop: DeskVNCViewer cannot create its window there
+/// (WebView2 fails with an invalid window handle), so no plane ever listens in
+/// it. An agent that reached this machine over SSH means the viewer on the
+/// console, which is the active console session. The pipe's ACL still admits
+/// only the user who started that viewer.
+pub fn plane_session() -> u32 {
+    let own = current_session();
+    if own != 0 {
+        return own;
+    }
+    // SAFETY: no arguments; 0xFFFFFFFF means no session is on the console.
+    match unsafe { WTSGetActiveConsoleSessionId() } {
+        u32::MAX => 0,
+        console => console,
+    }
+}
 
 /// Create one listening instance of the pipe at `name`.
 ///
@@ -215,6 +264,47 @@ fn token_user_sid(token: HANDLE) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_sessions_of_one_user_get_two_plane_pipes() {
+        assert_eq!(
+            plane_pipe_name("ada", 2),
+            r"\\.\pipe\deskvncviewer-agent-ada-s2"
+        );
+        assert_ne!(plane_pipe_name("ada", 2), plane_pipe_name("ada", 3));
+    }
+
+    #[test]
+    fn this_process_is_in_a_session_and_a_client_never_aims_at_session_0_when_a_console_exists() {
+        let own = current_session();
+        let target = plane_session();
+        if own != 0 {
+            assert_eq!(target, own);
+        }
+        // Session 0 has no desktop, so a viewer never listens there; a client
+        // in it is pointed at the console instead whenever one is attached.
+        // SAFETY: no arguments.
+        let console = unsafe { WTSGetActiveConsoleSessionId() };
+        if own == 0 && console != u32::MAX {
+            assert_eq!(target, console);
+        }
+    }
+
+    /// The bug this naming fixes, as the kernel sees it: with one name per
+    /// user, a viewer in a second session asking to be the first instance is
+    /// refused, so one session's viewer served every session's agents. With
+    /// the session in the name both are the first instance of their own pipe.
+    #[tokio::test]
+    async fn a_viewer_in_another_session_of_the_same_user_gets_its_own_plane() {
+        let user = format!("local-pipe-test-{}", std::process::id());
+        let console = plane_pipe_name(&user, 1);
+        let remote = plane_pipe_name(&user, 2);
+        let first = create(&console, true).unwrap();
+        let second = create(&remote, true).expect("a second session's plane must not collide");
+        // The same session twice is still the second application refused.
+        assert!(create(&console, true).is_err());
+        drop((first, second));
+    }
 
     #[test]
     fn the_sid_is_a_user_sid() {

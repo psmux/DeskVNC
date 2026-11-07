@@ -406,6 +406,37 @@ pub trait SessionSource: Send + Sync {
         )))
     }
 
+    /// The text the remote machine last put on its clipboard, as the
+    /// application received it. `Ok(None)` when none has arrived since it
+    /// connected, which is not an empty clipboard.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] when this source cannot read it.
+    fn remote_clipboard(&self, limb: &LimbId) -> Result<Option<RemoteClip>, ToolError> {
+        let _ = limb;
+        Err(ToolError::not_implemented(format!(
+            "{} keeps no remote clipboard to read",
+            self.describe()
+        )))
+    }
+
+    /// End the session under this limb in the application, where that is
+    /// this agent's to end.
+    ///
+    /// The application decides: a session an agent's open dialled is
+    /// disconnected, one a person opened is only let go of. `Ok(None)` means
+    /// the source has no session for this limb (it is already gone, or this
+    /// source keeps none of its own).
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] from the source.
+    fn close(&self, limb: &LimbId) -> Result<Option<SessionClosed>, ToolError> {
+        let _ = limb;
+        Ok(None)
+    }
+
     /// Every session the source has open, attached here or not.
     ///
     /// What lets an agent find a machine that is already open without being
@@ -529,6 +560,26 @@ pub struct LiveSession {
     /// without closing. Adopting it is still allowed, and the lease decides
     /// who drives.
     pub attached_elsewhere: bool,
+}
+
+/// Text a remote machine put on its clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteClip {
+    pub text: String,
+    /// Counts arrivals on the session, so text that came after a request can
+    /// be told from text that was already there.
+    pub seq: u64,
+    /// How long ago it arrived, when the source knows.
+    pub age_ms: Option<u64>,
+}
+
+/// What the application did with a session when its limb was closed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionClosed {
+    /// The session was ended, or had already ended.
+    pub closed: bool,
+    /// Why it was left open, or anything else the application said.
+    pub why: Option<String>,
 }
 
 /// What [`SessionSource::nudge`] asks for.
@@ -1237,6 +1288,94 @@ impl SessionSource for ShellSource {
         let session_id = lock(limb_sessions()).get(limb.as_str()).cloned()?;
         let ledger = lock(ledgers()).get(&session_id).cloned()?;
         ledger.settle(RELAY_SETTLE_PATIENCE)
+    }
+
+    fn remote_clipboard(&self, limb: &LimbId) -> Result<Option<RemoteClip>, ToolError> {
+        if !reachable(Need::Running) {
+            return Err(no_socket());
+        }
+        let session_id = lock(limb_sessions())
+            .get(limb.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ToolError::new(
+                    codes::LIMB_GONE,
+                    format!("{limb} has no session in DeskVNCViewer to read a clipboard from; call dvv_limbs"),
+                )
+            })?;
+        let answer = match call(
+            "clipboard.read",
+            serde_json::json!({ "sessionId": session_id }),
+        ) {
+            Ok(answer) => answer,
+            Err(error) if error.code == codes::NOT_IMPLEMENTED => {
+                return Err(ToolError::not_implemented(
+                    "this DeskVNCViewer is older than this dvv and does not hand the remote clipboard to agents. Update DeskVNCViewer, or ask the user to read it there",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(text) = answer.get("text").and_then(serde_json::Value::as_str) else {
+            return Ok(None);
+        };
+        Ok(Some(RemoteClip {
+            text: text.to_string(),
+            seq: answer
+                .get("seq")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            age_ms: answer.get("ageMs").and_then(serde_json::Value::as_u64),
+        }))
+    }
+
+    fn close(&self, limb: &LimbId) -> Result<Option<SessionClosed>, ToolError> {
+        // Closing never starts the application: one that is not running has
+        // nothing open.
+        if !reachable(Need::Running) {
+            return Ok(None);
+        }
+        // A limb listed as available has a session id from the last listing;
+        // one nobody has listed in this process is looked up now.
+        let known = lock(limb_sessions()).get(limb.as_str()).cloned();
+        let session_id = match known {
+            Some(id) => id,
+            None => {
+                let _ = self.live();
+                match lock(limb_sessions()).get(limb.as_str()).cloned() {
+                    Some(id) => id,
+                    None => return Ok(None),
+                }
+            }
+        };
+        match call(
+            "limb.close",
+            serde_json::json!({ "sessionId": session_id }),
+        ) {
+            Ok(answer) => {
+                let closed = boolean(&answer, "closed");
+                if closed {
+                    lock(limb_sessions()).remove(limb.as_str());
+                }
+                Ok(Some(SessionClosed {
+                    closed,
+                    why: answer
+                        .get("why")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                }))
+            }
+            // A DeskVNCViewer from before `limb.close` cannot be asked, and
+            // saying "closed" over a session it keeps is the bug this verb
+            // fixes, so the answer says it stays open.
+            Err(error) if error.code == codes::NOT_IMPLEMENTED => Ok(Some(SessionClosed {
+                closed: false,
+                why: Some(
+                    "this DeskVNCViewer is older than this dvv and cannot be asked to close a session, so it stays open there"
+                        .to_string(),
+                ),
+            })),
+            Err(error) => Err(error),
+        }
     }
 
     fn live(&self) -> Vec<LiveSession> {
@@ -2693,6 +2832,14 @@ impl limb_core::limb::Limb for RemoteLimb {
                 },
             },
             Wait | Cancel => Support::Observed,
+            // A terminal has no framebuffer to mirror, so the desktop sentence
+            // below ("open it again with perceive set") was advice that could
+            // never work here.
+            ReadScreen | Capture if matches!(self.grounding, Grounding::Cells) => {
+                Support::Unsupported {
+                    because: "this is a terminal limb: it has no framebuffer, and its output is drawn in DeskVNCViewer's window and not handed to agents in this build, so there is no screen or text here to read. Run the command with dvv_run instead, which returns the whole output with the far side's exit status. dvv_term_send still types into this terminal",
+                }
+            }
             ReadScreen | Capture if self.has_mirror => Support::Observed,
             ReadScreen | Capture => Support::Unsupported {
                 because: "this limb was opened without a framebuffer mirror, so there are no pixels behind it to read. Open the machine again with perceive set, ask the user to look at the window, or read the machine over SSH if it answers there",
@@ -3185,17 +3332,46 @@ impl Plane {
         Ok(self.card(&attached))
     }
 
-    /// Take a limb out of the registry.
+    /// Close a limb: let go of it here, and end its session in the
+    /// application where that session is this agent's to end.
+    ///
+    /// Works on a limb `dvv_limbs` lists as available as well as on one that
+    /// is attached, because the listing says an available limb can be passed
+    /// to any tool. Closing a limb that is already gone is an ordinary
+    /// success, as the manifest says.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] when the grant does not carry `close`, or from the
+    /// application.
+    pub fn close(&self, id: &str) -> Result<Option<SessionClosed>, ToolError> {
+        let limb_id = LimbId::from_caller(id)
+            .map_err(|e| ToolError::new(codes::BAD_REQUEST, e.to_string()))?;
+        self.require(Capability::Close, "closing a limb")?;
+        if let Some(limb) = self.registry.get(&limb_id) {
+            for intent in self.inflight_ids(limb.id().as_str()) {
+                limb.cancel_running(limb_core::intent::IntentId(intent));
+            }
+        }
+        let session = self.source.close(&limb_id)?;
+        if self.registry.get(&limb_id).is_some() {
+            self.let_go(id)?;
+        }
+        Ok(session)
+    }
+
+    /// Take a limb out of the registry and leave its session as it is.
     ///
     /// Every outstanding intent is withdrawn first, because `02 §6.2` owes a
     /// settlement on a close and an intent that ends silently forces every
-    /// agent to carry its own timeout for every call.
+    /// agent to carry its own timeout for every call. What a holder that is
+    /// going away does with the limbs it held: the person keeps the sessions.
     ///
     /// # Errors
     ///
     /// A [`ToolError`] when nothing is attached under that id, or when the
     /// grant does not carry `close`.
-    pub fn close(&self, id: &str) -> Result<(), ToolError> {
+    pub fn let_go(&self, id: &str) -> Result<(), ToolError> {
         let limb_id = LimbId::from_caller(id)
             .map_err(|e| ToolError::new(codes::BAD_REQUEST, e.to_string()))?;
         if let Some(limb) = self.registry.get(&limb_id) {
@@ -3301,7 +3477,12 @@ impl Plane {
                 Some(limb) => self.forget_severed(&limb),
                 None => {}
             }
-            return self.adopt(&limb_id).ok_or_else(|| {
+            // The application's own refusal, when it gave one: a Boundary
+            // computer whose person has not allowed the helper's tools, or a
+            // session still connecting, is not the same as a machine that is
+            // not open, and saying LIMB_GONE for all three sent agents to
+            // reopen a machine that was there.
+            return self.adopt_or_why(&limb_id)?.ok_or_else(|| {
                 ToolError::new(
                     codes::LIMB_GONE,
                     format!("{id} is not open in DeskVNCViewer. Call dvv_limbs for what is open, or dvv_open with a hostId from dvv_hosts to open it again"),
@@ -3337,17 +3518,31 @@ impl Plane {
     /// without the person doing anything. The attachment is new, so the
     /// typing fence still wants one screen read before the first keystroke.
     fn adopt(&self, id: &LimbId) -> Option<AttachedLimb> {
-        let live = self
+        self.adopt_or_why(id).ok().flatten()
+    }
+
+    /// [`Plane::adopt`], with the application's reason when it refused.
+    ///
+    /// `Ok(None)` when the application does not have this limb open.
+    fn adopt_or_why(&self, id: &LimbId) -> Result<Option<AttachedLimb>, ToolError> {
+        let Some(live) = self
             .source
             .live()
             .into_iter()
-            .find(|session| session.limb_id == id.as_str())?;
-        let protocol = ProtocolKind::parse(&live.protocol)?;
+            .find(|session| session.limb_id == id.as_str())
+        else {
+            return Ok(None);
+        };
+        let Some(protocol) = ProtocolKind::parse(&live.protocol) else {
+            return Ok(None);
+        };
+        // A terminal has no framebuffer to mirror, so it is not asked for one.
+        let perceive = protocol != ProtocolKind::Ssh;
         let request = match live.host_id {
             Some(host_id) => OpenRequest {
                 host_id: Some(host_id),
                 slot: Slot(live.slot),
-                perceive: true,
+                perceive,
                 ..OpenRequest::default()
             },
             None => OpenRequest {
@@ -3355,12 +3550,12 @@ impl Plane {
                 port: Some(live.port),
                 protocol: Some(protocol),
                 slot: Slot(live.slot),
-                perceive: true,
+                perceive,
                 ..OpenRequest::default()
             },
         };
-        self.open(&request).ok()?;
-        self.registry.get(id)
+        self.open(&request)?;
+        Ok(self.registry.get(id))
     }
 
     /// Sessions the application has open that this attachment has not
@@ -3377,6 +3572,17 @@ impl Plane {
             .into_iter()
             .filter(|session| !mine.contains(&session.limb_id))
             .collect()
+    }
+
+    /// The text the remote machine behind this limb last copied.
+    ///
+    /// # Errors
+    ///
+    /// A [`ToolError`] when the grant does not carry `clipboard.read`, or
+    /// from the source.
+    pub fn remote_clipboard(&self, limb: &AttachedLimb) -> Result<Option<RemoteClip>, ToolError> {
+        self.require(Capability::ClipboardRead, "reading the remote clipboard")?;
+        self.source.remote_clipboard(limb.id())
     }
 
     /// Ask this limb's session to repaint or reconnect.
@@ -4575,6 +4781,30 @@ pub fn state_json(state: &SessionState) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A terminal limb asked for its screen used to be told to open the
+    /// machine again with perceive set, which a terminal can never satisfy.
+    #[test]
+    fn a_terminal_limb_refuses_a_screen_read_in_terminal_words() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        let shell = RemoteLimb::new(ProtocolKind::Ssh, false);
+        for intent in [IntentName::ReadScreen, IntentName::Capture] {
+            let Support::Unsupported { because } = shell.supports(intent) else {
+                panic!("a terminal has no screen to read");
+            };
+            assert!(because.contains("terminal limb"), "{because}");
+            assert!(because.contains("dvv_run"), "{because}");
+            assert!(!because.contains("perceive"), "{because}");
+            assert!(!because.contains("framebuffer mirror"), "{because}");
+        }
+        // A desktop without a mirror keeps the advice that does work there.
+        let desk = RemoteLimb::new(ProtocolKind::Vnc, false);
+        let Support::Unsupported { because } = desk.supports(IntentName::ReadScreen) else {
+            panic!("no mirror, no pixels");
+        };
+        assert!(because.contains("perceive"), "{because}");
+    }
 
     /// The ledger's whole contract, without a socket: a refused press trips
     /// it, later presses are counted as held back, a settle hands back the

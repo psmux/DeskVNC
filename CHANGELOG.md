@@ -8,6 +8,54 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.34.1] (2026-11-07)
+
+### Added
+
+* Releases carry one SHA256SUMS.txt covering every file, the viewer installers
+  included.
+* DeskVNC Support on Linux ships a .desktop file and icon. Run
+  `./deskvnc-support --install` once after unpacking and the dock shows the
+  DeskVNC icon. It writes only under your own home folder.
+* On GNOME Wayland, Support reminds the person to switch on Allow Remote
+  Interaction when they allow control, since GNOME's dialog starts with it off.
+
+### Changed
+
+* Support calls itself DeskVNC Support in its window, header, notifications and
+  messages.
+* The Windows agent pipe is named per user and per login session, so a viewer
+  in a second session (an RDP login, say) no longer takes the plane from the
+  console's agents. Update DeskVNCViewer and dvv together.
+* `dvv_wait` reports `clampedMs`, `limitMs`, a measured `waitedMs` and its
+  outcome as JSON fields.
+
+### Fixed
+
+* DeskVNC Support for Linux is built on Ubuntu 22.04 again, so it starts on
+  Debian 12 and Raspberry Pi OS. The 0.34.0 build needed glibc 2.39.
+* Support no longer redraws ten times a second while idle. On a machine with no
+  graphics driver that kept a quarter of a core busy.
+* The Approve this helper notification goes away once the question is answered
+  or withdrawn.
+* A helper is told the screen is locked or asleep when GNOME refuses to share
+  it for that reason, instead of being told a portal service is missing.
+* Support keeps the desktop from going idle while a helper is connected, so a
+  view only session no longer ends when GNOME blanks the screen.
+* On Wayland a session ends with a reason when GNOME takes the shared screen
+  away on lock, blanking or a display change, instead of freezing.
+* VNC clipboard text reaches apps behind libvncserver 0.9.14 servers such as
+  x11vnc, which announce extended clipboard without notify and drop provided
+  text.
+* `dvv_close` ends a session an agent opened and works on an available limb.
+* A machine saved after dvv started opens once instead of being dialled twice.
+* `dvv_clipboard get` returns the text the machine last copied.
+* Terminal limbs refuse screen reads and text waits in terminal terms and point
+  at `dvv_run`, and an SSH limb attaches without a mirror.
+* An agent's file sidecar signs in to an SSH host the way the host was saved.
+* A deep probe returns the server's refusal and reason instead of an empty
+  list.
+
 ## [0.34.0] (2026-11-07)
 
 ### Added
