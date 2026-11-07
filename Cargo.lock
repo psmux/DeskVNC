@@ -1069,6 +1069,7 @@ dependencies = [
  "openh264",
  "openh264-sys2",
  "pipewire",
+ "tokio",
  "windows 0.62.2",
  "windows-sys 0.59.0",
  "x11rb",

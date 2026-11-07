@@ -68,6 +68,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
 ] }
 
+# The runtime for the clip_host example, which hosts a session.
+[dev-dependencies]
+tokio.workspace = true
+
 # CPU time in the capture_time example.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

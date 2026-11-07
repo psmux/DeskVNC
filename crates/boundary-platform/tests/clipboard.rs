@@ -162,3 +162,33 @@ fn first_look_on_a_fresh_backend_ignores_what_was_there() {
         "a change made by another clipboard user in this process is still a change"
     );
 }
+
+/// The desktop a host session gets carries the same clipboard, so a helper
+/// can use it through the three Desktop calls.
+#[test]
+#[ignore = "changes this computer's clipboard"]
+fn the_shared_desktop_carries_the_clipboard() {
+    let mut desktop = boundary_platform::open_primary().expect("open the screen");
+    assert!(desktop.has_clipboard(), "the desktop offers no clipboard");
+    copy_elsewhere("copied before the helper came");
+    assert_eq!(desktop.clipboard_changed().unwrap(), None, "first look");
+
+    let set = "put there by the helper, ✓";
+    desktop.set_clipboard(set).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(paste_elsewhere(), set);
+    assert_eq!(
+        desktop.clipboard_changed().unwrap(),
+        None,
+        "own text is not echoed"
+    );
+
+    copy_elsewhere("the person copied this");
+    let start = Instant::now();
+    let mut seen = None;
+    while seen.is_none() && start.elapsed() < Duration::from_secs(3) {
+        seen = desktop.clipboard_changed().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(seen.as_deref(), Some("the person copied this"));
+}
