@@ -927,7 +927,8 @@ async fn visit(
     )
     .await
     .map_err(session::link_lost)?;
-    let result = session::watch_session(worker, &connection, send, recv).await;
+    let result =
+        session::watch_session(worker, &connection, send, recv, session::UNATTENDED_WAIT).await;
     connection.close(0u8.into(), b"Session ended");
     result
 }
