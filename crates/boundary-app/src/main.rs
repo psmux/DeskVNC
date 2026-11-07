@@ -161,7 +161,11 @@ fn other_mode(args: &[String]) -> Option<i32> {
     } else if cfg!(target_os = "linux") && args.iter().any(|a| a == "--install") {
         // Put the app in the menu and give the dock its icon, for this
         // person only: `./deskvnc-support --install` after unpacking.
-        launcher::install().map(|path| println!("Installed {}", path.display()))
+        launcher::install().map(|(entry, program)| {
+            println!("Installed {}", program.display());
+            println!("Added {} to the app menu", entry.display());
+            println!("The folder you unpacked it from can be deleted.");
+        })
     } else if args.iter().any(|a| a == "--uninstall-service") {
         #[cfg(windows)]
         let result = login::uninstall();

@@ -108,9 +108,11 @@ tar -xzf DeskVNC-Support-Linux-x86_64.tar.gz      # or -aarch64 on ARM64
 ./deskvnc-support
 ```
 
-`--install` writes `deskvnc-support.desktop` and the icon under
-`~/.local/share`, needs no administrator, and points the entry at the copy you
-ran it from. Run it again if you move the program.
+`--install` copies the program to `~/.local/share/deskvnc-support/`, writes
+`deskvnc-support.desktop` and the icon under `~/.local/share`, and points the
+menu entry at that copy. It needs no administrator, and the folder you unpacked
+the tarball into can be deleted afterwards. Run it again from a newer tarball to
+update the installed copy.
 
 ## Verifying a download
 
