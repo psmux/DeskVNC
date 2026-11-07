@@ -1714,6 +1714,35 @@ fn files_outcome(op: &FileOp, answer: &serde_json::Value) -> Result<FileOutcome,
 /// plane above it sends into an ordinary channel and knows nothing about a
 /// socket, which is `04 §1.1`'s ruling holding: the lowering, the lease and
 /// the fencing are all unchanged by where the session actually lives.
+/// Whether an open asks for the machine this key names.
+///
+/// By saved host id, or by protocol, address and port, never by address alone:
+/// two VNC servers on one address and different ports are two machines. When
+/// it cannot tell (an address with no port, or an address for a machine saved
+/// in the library) it says no, which at worst lets go of a limb that did not
+/// need to be let go, and never skips making room that was needed.
+fn names_machine(request: &OpenRequest, machine: &MachineKey) -> bool {
+    match (machine, &request.host_id) {
+        (MachineKey::Profile(held), Some(asked)) => held == asked,
+        (
+            MachineKey::Endpoint {
+                protocol,
+                address,
+                port,
+            },
+            None,
+        ) => {
+            request.protocol == Some(*protocol)
+                && request.port == Some(*port)
+                && request
+                    .address
+                    .as_deref()
+                    .is_some_and(|asked| asked.eq_ignore_ascii_case(address))
+        }
+        _ => false,
+    }
+}
+
 fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, ToolError> {
     let session_id = string(attached, "sessionId");
     let protocol = ProtocolKind::parse(&string(attached, "protocol")).ok_or_else(|| {
@@ -3083,6 +3112,9 @@ pub struct Plane {
     group_seq: Mutex<u64>,
     /// The size this crate handed to [`Attach`], per limb. See [`Plane::size_of`].
     sizes: Mutex<BTreeMap<String, (u16, u16)>>,
+    /// Limbs attached only because a call named an available one, oldest
+    /// first. A limb `dvv_open` asked for is not here. See [`Plane::make_room`].
+    adopted: Mutex<Vec<String>>,
     /// The label everyone else is shown when this attachment holds a lease.
     /// `08 §5.5` makes it a safety property rather than a nicety: a pane whose
     /// limb is held by an agent says so, visibly, always.
@@ -3135,6 +3167,7 @@ impl Plane {
             groups: Mutex::new(BTreeMap::new()),
             group_seq: Mutex::new(0),
             sizes: Mutex::new(BTreeMap::new()),
+            adopted: Mutex::new(Vec::new()),
             label,
         }
     }
@@ -3287,6 +3320,26 @@ impl Plane {
     /// control, the host check and the slot check, each naming what the caller
     /// can do about it.
     pub fn open(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
+        let card = self.attach_limb(request)?;
+        // Asked for by name, so it is this agent's now even if it was adopted
+        // first, and it is never let go to make room for another.
+        lock(&self.adopted).retain(|id| *id != card.limb_id);
+        Ok(card)
+    }
+
+    /// [`Plane::open`], for a call that names an available limb rather than
+    /// asking for one. The limb is remembered as adopted, so it can be let go
+    /// again when the agent needs the room for a machine it asked for.
+    fn adopt_limb(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
+        let card = self.attach_limb(request)?;
+        let mut adopted = lock(&self.adopted);
+        if !adopted.contains(&card.limb_id) {
+            adopted.push(card.limb_id.clone());
+        }
+        Ok(card)
+    }
+
+    fn attach_limb(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
         let named = self.by_label(request)?;
         let request = named.as_ref().unwrap_or(request);
         if request.host_id.is_some() && request.protocol.is_some() {
@@ -3308,6 +3361,10 @@ impl Plane {
             let refusal = grant.host_refusal(&host);
             return Err(ToolError::new(codes::POLICY_DENIED, refusal.to_string()));
         }
+        // Before the source is asked too, for the same reason: the source can
+        // dial, and an open that is refused for room after it dialled leaves a
+        // session behind that nothing here is attached to.
+        self.make_room(request)?;
         let attach = self.source.open(request)?;
         let host = attach.host.clone();
         let size = attach.size;
@@ -3330,6 +3387,65 @@ impl Plane {
             host,
         });
         Ok(self.card(&attached))
+    }
+
+    /// Make sure one more limb fits under `max_driven_limbs`.
+    ///
+    /// The cap counts every limb attached here, and a limb gets attached just
+    /// by a call naming one `dvv_limbs` listed as available: a status read to
+    /// learn which window is which is enough. So an agent that looked at four
+    /// sessions the person had open could not open the one machine it was
+    /// asked to work on. Such a limb is the person's session, it stays open
+    /// in their pane whatever happens here, and naming it again attaches it
+    /// again. So when there is no room, the oldest one this agent adopted and
+    /// is not driving (no wheel held, nothing in flight) is let go to make
+    /// room. A limb the agent opened, or is driving, is never let go here.
+    ///
+    /// # Errors
+    ///
+    /// `TOO_MANY_LIMBS` when every attached limb is one the agent opened or is
+    /// driving, naming them and how to free one.
+    fn make_room(&self, request: &OpenRequest) -> Result<(), ToolError> {
+        let limit = self.registry.config().max_driven_limbs;
+        let limbs = self.registry.list();
+        // A limb already attached for this machine and slot is handed back by
+        // the registry and costs no room.
+        if limbs.len() < limit
+            || limbs
+                .iter()
+                .any(|limb| limb.slot() == request.slot && names_machine(request, limb.machine()))
+        {
+            return Ok(());
+        }
+        let spare = lock(&self.adopted)
+            .iter()
+            .find(|id| self.not_driving(id))
+            .cloned();
+        if let Some(id) = spare {
+            tracing::info!(limb = %id, "let go of an adopted limb nothing was driving, to make room");
+            return self.let_go(&id);
+        }
+        let held: Vec<String> = limbs
+            .iter()
+            .map(|limb| format!("{} ({})", limb.id(), limb.host()))
+            .collect();
+        Err(ToolError::new(
+            codes::TOO_MANY_LIMBS,
+            format!(
+                "this agent drives at most {limit} limbs at once and has {} attached: {}. Nothing was dialled. Free one with dvv_close on a limbId you are finished with; on a limb the person opened that only detaches it and their session stays open in DeskVNCViewer. Then call dvv_open again",
+                limbs.len(),
+                held.join(", ")
+            ),
+        ))
+    }
+
+    /// Whether this agent is doing nothing with a limb: no wheel held and no
+    /// intent in flight.
+    fn not_driving(&self, id: &str) -> bool {
+        !lock(&self.leases).contains_key(id)
+            && lock(&self.inflight)
+                .get(id)
+                .is_none_or(|intents| intents.is_empty())
     }
 
     /// Close a limb: let go of it here, and end its session in the
@@ -3381,6 +3497,7 @@ impl Plane {
         }
         self.registry.detach(&self.grant(), &limb_id)?;
         forget_answerable(id);
+        lock(&self.adopted).retain(|adopted| adopted != id);
         lock(&self.leases).remove(id);
         lock(&self.inflight).remove(id);
         lock(&self.observed_at).remove(id);
@@ -3554,7 +3671,7 @@ impl Plane {
                 ..OpenRequest::default()
             },
         };
-        self.open(&request)?;
+        self.adopt_limb(&request)?;
         Ok(self.registry.get(id))
     }
 
