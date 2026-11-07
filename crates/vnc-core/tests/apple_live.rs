@@ -31,10 +31,30 @@
 //!   stored verifier, and `M1` once `g` is hashed padded to 512 bytes (found
 //!   by solving against Apple's own client); the Mac then answers with its
 //!   proof (`srp_server_mech_step: 0 92`) and ours verifies it.
-//! * Every login on that Mac, by types 30, 33 and 36 and by Apple's client,
-//!   then fails at a privilege check (`lg level 0`, authresult 1): Remote
-//!   Management is on and the test account has no Remote Management
-//!   privileges. A session needs that changed on the Mac first.
+//! * With Remote Management on, a login also needs the account to hold
+//!   Remote Management privileges (Observe and Control); without them every
+//!   login, by any type and by Apple's own client, is refused after the
+//!   password is accepted (`lg level 0`, authresult 1).
+//! * After login the Mac stalls on the ViewerInfo message this client used to
+//!   send, and adds a virtual display for a SetDisplayConfiguration; both are
+//!   left out now. It drops the opening's full update request while it sets
+//!   up screen capture, so the client asks again after the first desktop
+//!   size announcement. With that, types 30, 33 and 36 all give the full
+//!   picture, and a disconnect closes cleanly on both sides.
+//! * Apple's own client, against a server we control, opens with SetMode(1),
+//!   SetEncodings `[1011, 1002, 6, 16, -239, 1104, 1100, -223, 1101, 1105,
+//!   1107, 1109, 1110]`, a 32 bpp SetPixelFormat, AutoPasteboard(1), a full
+//!   request and AutoFrameBufferUpdate (screen word 0). It sent no ViewerInfo
+//!   and no SetEncryption to that server, so the native encrypted prelude
+//!   has not been seen yet.
+//! * Clipboard sync does not work yet in either direction: the Mac sends no
+//!   pasteboard or heartbeat messages to this client, and ignores a standard
+//!   ClientCutText, with this client's encodings and with the native list.
+//!   `live_clipboard_both_ways` shows it.
+//! * 0x1c (media) on an Intel Mac: the Mac announces media (a 1010 rectangle)
+//!   when 1010 is listed, and answers an offer by loading its video encoder,
+//!   then logging `udpVideoStreamWasInitialized 0` and `unable to init media
+//!   stream`; it sends no answer message. The offer sent had empty blobs.
 //!
 //! Each test prints what it saw with `LIVE` in front, so a run with
 //! `--nocapture` doubles as a capture of the facts still marked unconfirmed
@@ -401,4 +421,88 @@ async fn live_auto_selects_33() {
             .unwrap();
     eprintln!("LIVE auto selection for {offer:?}: {chosen:?}");
     assert_eq!(chosen, vnc_core::types::SecurityType::AppleRsaSrp);
+}
+
+/// The Mac's pasteboard as text, through its own `pbpaste`.
+fn mac_clipboard() -> String {
+    let out = std::process::Command::new("pbpaste")
+        .output()
+        .expect("pbpaste runs");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Set the Mac's pasteboard text through its own `pbcopy`.
+fn set_mac_clipboard(text: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("pbcopy runs");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    child.wait().unwrap();
+}
+
+/// Puts the Mac's pasteboard text back when dropped, so a failing assertion
+/// does not leave a test marker where the owner would paste it.
+struct RestoreClipboard(String);
+
+impl Drop for RestoreClipboard {
+    fn drop(&mut self) {
+        set_mac_clipboard(&self.0);
+    }
+}
+
+/// Clipboard both ways over the encrypted session (type 33, auto selected).
+/// Runs only with `DVV_LIVE_APPLE_LOCAL=1`, meaning the Mac under test is
+/// this machine, so its pasteboard can be read and set with `pbpaste` and
+/// `pbcopy`. The pasteboard text there before the test is put back after.
+#[tokio::test]
+async fn live_clipboard_both_ways() {
+    init_tracing();
+    let what = "live_clipboard_both_ways";
+    if std::env::var("DVV_LIVE_APPLE_LOCAL").is_err() {
+        eprintln!("SKIP {what}: DVV_LIVE_APPLE_LOCAL is not set");
+        return;
+    }
+    let Some(t) = target(what) else { return };
+    let _restore = RestoreClipboard(mac_clipboard());
+    let mut o = live_options(&t, "auto");
+    o.vnc_mut().security_pref = None;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(Duration::from_secs(40)).await;
+    events.drain_for(Duration::from_secs(2)).await;
+
+    // Viewer to Mac.
+    let to_mac = format!("dvv clipboard to the Mac {}", std::process::id());
+    send(&handle, ClientCommand::ClipboardText(to_mac.clone())).await;
+    let mut seen = String::new();
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        seen = mac_clipboard();
+        if seen == to_mac {
+            break;
+        }
+    }
+    // Mac to viewer.
+    let from_mac = format!("dvv clipboard from the Mac {}", std::process::id());
+    set_mac_clipboard(&from_mac);
+    events.drain_for(Duration::from_secs(6)).await;
+    let got = events.any(|e| matches!(e, SessionEvent::ClipboardText(t) if t.contains(&from_mac)));
+    eprintln!("LIVE {what}: viewer got the Mac's text: {got}");
+
+    send(&handle, ClientCommand::Disconnect).await;
+    eprintln!(
+        "LIVE {what}: Mac pasteboard took the viewer's text: {}",
+        seen == to_mac
+    );
+    assert_eq!(
+        seen, to_mac,
+        "the Mac's pasteboard did not take the viewer's text"
+    );
+    assert!(got, "the viewer never got the Mac's pasteboard text");
 }
