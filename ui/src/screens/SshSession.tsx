@@ -34,6 +34,7 @@ import { ToastShelf } from "../components/primitives";
 import { useToasts } from "../state/ToastContext";
 import { classNames } from "../lib/util";
 import { inTauri, safeInvoke } from "../lib/tauri";
+import { useTerminalMenu } from "../lib/menuSync";
 import type { SessionState } from "../lib/types";
 
 /**
@@ -130,6 +131,7 @@ export function SshSession({
    * the focused flag and nothing else.
    */
   const owns = !embedded || focusedProp;
+  useTerminalMenu(owns);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);

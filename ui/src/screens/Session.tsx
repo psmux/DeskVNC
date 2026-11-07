@@ -2188,6 +2188,7 @@ function SessionView({
             isChange: session.certPrompt.isChange,
             hostName: session.desktopName,
             scheme: session.certPrompt.scheme,
+            certificate: session.certPrompt.certificate,
           }}
           onTrust={() => session.trustCertificate(true)}
           onConnectOnce={() => session.trustCertificate(false)}

@@ -278,6 +278,7 @@ async fn establish(
             vnc_transport::TrustDecision::Unknown {
                 fingerprint,
                 subject,
+                certificate,
             },
     }) = trust
     {
@@ -288,6 +289,7 @@ async fn establish(
                 subject,
                 is_change: false,
                 scheme,
+                certificate,
             },
         )
         .await?;

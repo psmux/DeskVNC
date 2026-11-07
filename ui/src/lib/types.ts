@@ -527,6 +527,17 @@ export function hostMac(host: { mac?: string | null } | null | undefined): strin
  */
 export type PinScheme = "tls" | "ra2" | "rdp-tls" | "rdg-tls";
 
+/**
+ * Digests of the whole certificate a server key came in, colon separated
+ * hex. `thumbprint` is the SHA-1 Windows shows as Thumbprint, `sha256` the
+ * certificate's SHA-256. Shown beside the pin for matching by eye; the pin
+ * itself is the SHA-256 of the public key and nothing here is pinned.
+ */
+export interface CertificateDigests {
+  thumbprint: string;
+  sha256: string;
+}
+
 /** SessionState mirrors the serde repr: tag = "state", kebab-case. */
 export type SessionState =
   | { state: "idle" }
@@ -667,6 +678,8 @@ export type SessionEvent =
       subject: string;
       isChange: boolean;
       scheme: PinScheme;
+      /** Null for a key that came without a certificate (RA2). */
+      certificate: CertificateDigests | null;
     }
   | { type: "credentials-required"; request: CredentialRequest }
   | { type: "stats"; stats: SessionStats }

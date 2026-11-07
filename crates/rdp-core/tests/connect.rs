@@ -1161,6 +1161,7 @@ fn unknown_key() -> TrustDecision {
     TrustDecision::Unknown {
         fingerprint: "AA:BB:CC:DD".into(),
         subject: "CN=win-host".into(),
+        certificate: None,
     }
 }
 
@@ -1197,6 +1198,7 @@ async fn a_trust_prompt_is_answered_and_the_sequence_continues_from_where_it_par
                 subject,
                 is_change,
                 scheme,
+                ..
             } => Some((fingerprint, subject, *is_change, *scheme)),
             _ => None,
         })

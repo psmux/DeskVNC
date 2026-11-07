@@ -101,11 +101,16 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
             subject,
             is_change,
             scheme,
+            certificate,
         } => json!({
             "type": "certificate-prompt",
             "fingerprint": fingerprint,
             "subject": subject,
             "isChange": is_change,
+            // `{ thumbprint, sha256 }` of the whole certificate, or null for a
+            // bare key. Shown beside the pin so it can be matched against
+            // what Windows shows; never pinned.
+            "certificate": certificate,
             // Plumbing, not copy: the UI never shows this, it just hands it
             // back to `trust_certificate` so the pin lands under the right key.
             "scheme": scheme,
@@ -303,9 +308,18 @@ fn write_credentials(
         }
     };
     let merged = pending.merge_into(existing);
-    if let Err(e) = credentials.save(profile_id, &merged) {
-        tracing::warn!(profile = %profile_id, "failed to save credentials: {e}");
-        return;
+    match credentials.save(profile_id, &merged) {
+        Ok(()) => {}
+        // The store kept it and told the windows, which ask for the master
+        // password; the unlock writes it and sets the key icon.
+        Err(vnc_store::Error::Locked) => {
+            tracing::info!(profile = %profile_id, "credentials wait for the credential file to be unlocked");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(profile = %profile_id, "failed to save credentials: {e}");
+            return;
+        }
     }
     // Mirror the flag the library uses to draw the key icon. A failure
     // here is cosmetic, the secret itself is already stored.

@@ -98,13 +98,22 @@ pub async fn approve_as(
         TrustDecision::Unknown {
             fingerprint,
             subject,
+            certificate,
         } => {
             let Some(prompt) = prompt else {
                 return Err(RdpError::CertificateUntrusted(format!(
                     "{fingerprint} has not been approved and there is nobody to ask"
                 )));
             };
-            ask(fingerprint, subject, scheme, events, prompt).await
+            ask(
+                fingerprint,
+                subject,
+                certificate.as_ref(),
+                scheme,
+                events,
+                prompt,
+            )
+            .await
         }
     }
 }
@@ -120,6 +129,7 @@ pub async fn approve_as(
 async fn ask(
     fingerprint: &str,
     subject: &str,
+    certificate: Option<&vnc_transport::CertificateDigests>,
     asked_scheme: PinScheme,
     events: &mpsc::Sender<SessionEvent>,
     prompt: Prompt<'_>,
@@ -137,6 +147,7 @@ async fn ask(
             // The changed case never reaches here: it is a hard stop above.
             is_change: false,
             scheme: asked_scheme,
+            certificate: certificate.cloned(),
         },
     )
     .await?;
@@ -238,6 +249,7 @@ mod tests {
         TrustDecision::Unknown {
             fingerprint: "AA:BB:CC".into(),
             subject: "CN=host".into(),
+            certificate: None,
         }
     }
 
@@ -297,6 +309,7 @@ mod tests {
                     subject,
                     is_change,
                     scheme,
+                    ..
                 } => {
                     assert_eq!(fingerprint, "AA:BB:CC");
                     assert_eq!(subject, "CN=host");

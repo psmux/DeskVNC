@@ -12,6 +12,7 @@ import { useHosts } from "../state/HostsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
+import { saveCredentials } from "../lib/credentialStore";
 import type { DiscoveredHost, HostGroup, HostProfile, ProtocolKind } from "../lib/types";
 import { serializeRdpSettings } from "../lib/rdp";
 import { discoveredEndpoint } from "../lib/address";
@@ -838,7 +839,11 @@ export function Library({
         sshSettings: draft.protocol === "ssh" ? serializeSshSettings(draft.ssh) : null,
       });
       const id = saved?.id ?? draft.id;
+      let credentialError: unknown = null;
       if (id) {
+        // The host is saved by now. A password that could not be stored is
+        // said out loud: it used to vanish and come back as a prompt.
+        try {
         // An RDP password belongs with its user name and domain, which are
         // three fields of one credential rather than a password on its own.
         if (draft.protocol === "rdp") {
@@ -866,7 +871,7 @@ export function Library({
           if (draft.sshUser.trim()) payload.sshUser = draft.sshUser.trim();
           if (draft.password) payload.sshPassword = draft.password;
           if (Object.keys(payload).length > 0) {
-            await safeInvoke("save_password", { hostId: id, creds: payload }, null);
+            await saveCredentials(id, payload);
             // `saveRdpCredentials` flips `hasPassword` in local state itself
             // after a write like this one, which needs `setHosts` and so
             // lives in HostsContext.tsx, outside this change's scope. A
@@ -888,7 +893,7 @@ export function Library({
           if (payload?.vncPassword && !payload.vencryptUser && !payload.vencryptPass) {
             await savePassword(id, payload.vncPassword);
           } else if (payload) {
-            await safeInvoke("save_password", { hostId: id, creds: payload }, null);
+            await saveCredentials(id, payload);
             // Same reason as the SSH branch: the key icon is re-read rather
             // than flipped here.
             if (payload.vencryptPass) await refresh();
@@ -897,10 +902,20 @@ export function Library({
           await savePassword(id, draft.password);
         }
         if (draft.sshPassphrase) await saveSshPassphrase(id, draft.sshPassphrase);
+        } catch (err) {
+          credentialError = err;
+        }
         await setHostTags(id, draft.tagIds);
       }
       setHostDialog(null);
-      push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
+      if (credentialError) {
+        push(
+          "danger",
+          `${draft.id ? "Host updated" : `Added ${draft.friendlyName}`}, but its password was not saved: ${String(credentialError)}`,
+        );
+      } else {
+        push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
+      }
     },
     [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push],
   );

@@ -198,15 +198,59 @@ pub async fn credential_backend(
         .map_err(|e| e.to_string())
 }
 
-/// Unlock the encrypted-file fallback store with the master password.
-/// The master password flows JS → Rust only; nothing is returned.
+/// The event a window hears when a save has to wait for the master password
+/// of the encrypted credential file. Payload: `{ "hostId": "..." }`.
+pub const CREDENTIAL_STORE_LOCKED: &str = "credential-store-locked";
+
+/// Where secrets live and what the Security preferences and the unlock
+/// dialog need to say about it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatus {
+    pub backend: vnc_store::CredentialBackend,
+    /// The encrypted file exists, so unlocking asks for the master password
+    /// chosen before rather than for a new one.
+    pub vault_exists: bool,
+    /// Saves waiting for the unlock.
+    pub parked_saves: usize,
+}
+
+#[tauri::command]
+pub async fn credential_status(state: State<'_, AppState>) -> Result<CredentialStatus, String> {
+    let credentials = state.credentials.clone();
+    tokio::task::spawn_blocking(move || CredentialStatus {
+        backend: credentials.backend(),
+        vault_exists: credentials.vault_exists(),
+        parked_saves: credentials.parked_saves(),
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Unlock the encrypted-file fallback store with the master password, which
+/// creates the file the first time. Saves that were waiting for it are
+/// written now, and their library rows get the key icon they would have got
+/// had the store been open. Returns the host ids written.
+/// The master password flows JS → Rust only; nothing secret is returned.
 #[tauri::command]
 pub async fn unlock_credentials(
     state: State<'_, AppState>,
     master_password: String,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let credentials = state.credentials.clone();
-    super::blocking(move || credentials.unlock(&master_password)).await
+    let store = state.store.clone();
+    super::blocking(move || {
+        let written = credentials.unlock_writing_parked(&master_password)?;
+        for host_id in &written {
+            if let Ok(Some(creds)) = credentials.load(host_id) {
+                if holds_password(&creds) {
+                    mark_saved(&store, host_id, true);
+                }
+            }
+        }
+        Ok::<Vec<String>, vnc_store::Error>(written)
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -26,6 +26,10 @@ tokio-rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 webpki-roots = { workspace = true }
 sha2 = { workspace = true }
+# The certificate thumbprint Windows shows (certlm.msc, the RDP and RD
+# Gateway certificate dialogs) is SHA-1 over the DER certificate. It is shown
+# next to the pin so it can be checked by eye, never used to pin anything.
+sha1 = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 socket2 = { workspace = true }
