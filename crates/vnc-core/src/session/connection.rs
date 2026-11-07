@@ -578,7 +578,9 @@ pub(crate) async fn run_once(
             link_peak,
         );
         run_loop.set_apple_session(crate::apple::AppleSession::new(rekey));
-        return run_loop.run(settings, events, commands, cancel).await;
+        let outcome = run_loop.run(settings, events, commands, cancel).await;
+        remember_trust(options, run_loop.take_trusted());
+        return outcome;
     }
 
     let pf = wire_format(quality_settings.pixel_format, settings.quality, &caps);
@@ -617,7 +619,33 @@ pub(crate) async fn run_once(
         sent_counter,
         link_peak,
     );
-    run_loop.run(settings, events, commands, cancel).await
+    let outcome = run_loop.run(settings, events, commands, cancel).await;
+    remember_trust(options, run_loop.take_trusted());
+    outcome
+}
+
+/// Keep a key the person accepted at the trust prompt for the rest of this
+/// session.
+///
+/// The prompt is raised after the handshake, while the connection goes on,
+/// and the answer used to change nothing in the core: the options the
+/// supervisor dials again with still held no pin, so every automatic
+/// reconnect saw an unknown key and raised the prompt again over a live
+/// session. "Connect once" means this session, reconnects included, and
+/// "Trust" is persisted by the shell for the next session; either way the
+/// key goes into this session's pins. Only an empty slot is filled: a pin
+/// already there is never replaced from here, and a reconnect that meets a
+/// different key still stops as a changed identity.
+fn remember_trust(
+    options: &mut ConnectOptions,
+    trusted: Option<(crate::types::PinScheme, String)>,
+) {
+    if let Some((scheme, fingerprint)) = trusted {
+        if options.cert_pins.for_scheme(scheme).is_none() {
+            tracing::info!(?scheme, "keeping the accepted server key for this session");
+            options.cert_pins.set(scheme, Some(fingerprint));
+        }
+    }
 }
 
 #[cfg(test)]
