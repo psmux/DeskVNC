@@ -1052,6 +1052,11 @@ async fn agent_sidecar(app: &AppHandle, session_id: &str) -> Result<Arc<FilesEnt
     }
 }
 
+/// How an agent's sidecar signs in, read from the saved SSH host's settings.
+fn sidecar_sign_in(_ssh_settings: Option<&str>) -> (AuthKind, Option<String>) {
+    (AuthKind::Stored, None)
+}
+
 /// The sidecar answered and refused. Its own sentence, unedited: it is the
 /// party that knows whether that was a missing file, a permission or a full
 /// disk, and rewriting it here would lose the only detail worth having.
@@ -1252,6 +1257,35 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_sidecar_signs_in_the_way_the_ssh_host_was_saved() {
+        let key = r#"{ "v": 1, "auth": "key-file", "keyPath": "C:\\keys\\id_test" }"#;
+        assert_eq!(
+            sidecar_sign_in(Some(key)),
+            (AuthKind::KeyFile, Some(r"C:\keys\id_test".to_string()))
+        );
+        assert_eq!(
+            sidecar_sign_in(Some(r#"{ "v": 1, "auth": "agent" }"#)),
+            (AuthKind::Agent, None)
+        );
+        assert_eq!(
+            sidecar_sign_in(Some(r#"{ "v": 1, "auth": "password" }"#)),
+            (AuthKind::Stored, None)
+        );
+    }
+
+    #[test]
+    fn an_agent_sidecar_without_ssh_settings_keeps_the_stored_secret() {
+        // A VNC host has no SSH settings, and a key file with no path cannot
+        // be opened: both use the stored secret, then the agent, as before.
+        assert_eq!(sidecar_sign_in(None), (AuthKind::Stored, None));
+        assert_eq!(
+            sidecar_sign_in(Some(r#"{ "v": 1, "auth": "key-file" }"#)),
+            (AuthKind::Stored, None)
+        );
+        assert_eq!(sidecar_sign_in(Some("{not json")), (AuthKind::Stored, None));
+    }
 
     #[test]
     fn connect_outcome_uses_the_ipc_casing() {
