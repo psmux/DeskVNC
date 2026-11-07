@@ -237,7 +237,8 @@ direction, but it still fails.
 | `saved_user_names` | `invoke("saved_user_names", { hostId })` | `{ vncUser, rdpUser, rdpDomain, sshUser }`, each `string \| null` |
 | `delete_password` | `invoke("delete_password", { hostId })` | `void` |
 | `credential_backend` | `invoke("credential_backend")` | `"OsKeychain" \| "EncryptedFile" \| "Locked"` |
-| `unlock_credentials` | `invoke("unlock_credentials", { masterPassword })` | `void` |
+| `unlock_credentials` | `invoke("unlock_credentials", { masterPassword })` | `string[]`: host ids whose saves waited for the unlock and are now written. Creates the encrypted file the first time. |
+| `credential_status` | `invoke("credential_status")` | `{ backend, vaultExists, parkedSaves }` |
 
 `creds` is a `StoredCredentials`:
 `{ vncPassword? vencryptUser? vencryptPass? sshPassphrase? rdpUser? rdpDomain?
@@ -641,6 +642,13 @@ launch.
 ---
 
 ## Events
+
+### `credential-store-locked`, a save waiting for the master password
+
+Emitted to every window when a save reached the encrypted credential file
+while it was locked. The shell keeps the credential in memory and writes it
+when `unlock_credentials` succeeds; the main window asks for the master
+password. Payload: `{ "hostId": "…" }`.
 
 ### `session://event`, per-session control (JSON)
 

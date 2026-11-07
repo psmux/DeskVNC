@@ -4,6 +4,12 @@ import { useSettings, type LocalCursor, type ThemeChoice } from "../state/Settin
 import { useSessions } from "../state/SessionsContext";
 import { ALLOW_MULTIPLE_SESSIONS_KEY, safeInvoke } from "../lib/tauri";
 import {
+  credentialStatus,
+  describeCredentialStore,
+  type CredentialStatus,
+} from "../lib/credentialStore";
+import { CREDENTIALS_UNLOCKED, OPEN_CREDENTIAL_UNLOCK } from "../components/CredentialUnlock";
+import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_FOCUS,
   PREF_CLIPBOARD_ON_PASTE,
@@ -151,7 +157,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   // The same toggle as the Library header, one source of truth, and flipping
   // it here broadcasts to session windows exactly the same way.
   const { livePreviews, setLivePreviews } = useSessions();
-  const [credBackend, setCredBackend] = useState<string | null>(null);
+  const [credStatus, setCredStatus] = useState<CredentialStatus | null>(null);
 
   const [confirmDisconnect, setConfirmDisconnect] = usePref("confirmDisconnect", true);
   const [reconnectForever, setReconnectForever] = usePref("reconnectForever", true);
@@ -190,7 +196,10 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const tabs = tabsFor(plane.on);
 
   useEffect(() => {
-    void safeInvoke<string | null>("credential_backend", undefined, null).then(setCredBackend);
+    const read = (): void => void credentialStatus().then(setCredStatus);
+    read();
+    window.addEventListener(CREDENTIALS_UNLOCKED, read);
+    return () => window.removeEventListener(CREDENTIALS_UNLOCKED, read);
   }, []);
 
   // Somebody reading this tab while the plane is switched off from elsewhere
@@ -582,11 +591,18 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
               <>
                 <div>
                   <p className="text-sm font-medium text-primary">Credential storage</p>
-                  <p className="text-xs text-tertiary">
-                    {credBackend
-                      ? `Passwords are stored in: ${credBackend}`
-                      : "Passwords are stored in your operating system keychain, never in a file."}
+                  <p className="text-xs text-tertiary" data-testid="credential-store-line">
+                    {describeCredentialStore(credStatus)}
                   </p>
+                  {credStatus?.backend === "Locked" ? (
+                    <button
+                      type="button"
+                      className="btn-secondary mt-2"
+                      onClick={() => window.dispatchEvent(new Event(OPEN_CREDENTIAL_UNLOCK))}
+                    >
+                      {credStatus.vaultExists ? "Unlock saved passwords" : "Choose a master password"}
+                    </button>
+                  ) : null}
                 </div>
                 <Toggle
                   label="Strict certificate pinning"

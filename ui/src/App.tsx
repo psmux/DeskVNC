@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { SettingsProvider, useSettings } from "./state/SettingsContext";
 import { ToastProvider } from "./state/ToastContext";
+import { CredentialUnlockHost } from "./components/CredentialUnlock";
 import { HostsProvider } from "./state/HostsContext";
 import { DiscoveryProvider } from "./state/DiscoveryContext";
 import { SessionsProvider } from "./state/SessionsContext";
@@ -100,6 +101,7 @@ export default function App(): ReactNode {
                 <AgentActivityProvider>
                   <TabsProvider>
                     <MainShell />
+                    <CredentialUnlockHost />
                     <ToastShelf />
                   </TabsProvider>
                 </AgentActivityProvider>

@@ -32,7 +32,9 @@ mod ssh;
 mod store;
 mod thumbs;
 
-pub use creds::{CredentialBackend, CredentialStore, KEYRING_SERVICE, MAX_CREDENTIAL_BLOB};
+pub use creds::{
+    CredentialBackend, CredentialStore, LockedSaveListener, KEYRING_SERVICE, MAX_CREDENTIAL_BLOB,
+};
 pub use error::{Error, Result};
 pub use models::{CertPin, Group, HistoryEntry, HostProfile, StoredCredentials, Tag};
 pub use rdp::RdpSettings;
