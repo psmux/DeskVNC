@@ -1053,10 +1053,20 @@ mod tests {
         if cfg!(windows) && std::env::var_os("BOUNDARY_LAN_TESTS").is_none() {
             return;
         }
-        let seen = tokio::time::timeout(std::time::Duration::from_secs(60), sees_copies(true))
+        let wait = std::time::Duration::from_secs(60);
+        // The same helper, with the same saved setting, sees copies once
+        // somebody has signed in, so the check below is not empty.
+        let signed_in = tokio::time::timeout(wait, sees_copies(false))
             .await
             .expect("timed out");
-        assert!(!seen, "nobody signed in is there to copy anything for them");
+        assert!(signed_in, "the person allowed it for this helper");
+        let at_login = tokio::time::timeout(wait, sees_copies(true))
+            .await
+            .expect("timed out");
+        assert!(
+            !at_login,
+            "nobody signed in is there to copy anything for them"
+        );
     }
 
     #[test]

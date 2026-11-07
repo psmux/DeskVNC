@@ -1123,7 +1123,8 @@ impl App {
                     .clicked()
                 {
                     ui.ctx().copy_text(text.clone());
-                    self.status = format!("Copied {count} characters they copied");
+                    self.status =
+                        format!("Your clipboard now has the {count} characters they copied");
                     self.error = false;
                 }
             }
@@ -1223,6 +1224,17 @@ impl App {
                 egui::Event::Paste(text) => match paste(text, self.rights) {
                     Paste::Clipboard(text) => self.paste_there(text),
                     Paste::Typed(chunks) => {
+                        // The Control or Command of the paste reached the
+                        // other computer already. Typing under it turns the
+                        // text into shortcuts there (an "a" selects all), so
+                        // it is let go first. Still held here, it goes down
+                        // again on the next frame.
+                        for key in held_for_shortcuts(self.modifiers) {
+                            self.send(Input::Key { key, down: false });
+                        }
+                        self.modifiers.ctrl = false;
+                        self.modifiers.alt = false;
+                        self.modifiers.mac_cmd = false;
                         for chunk in chunks {
                             self.send(Input::Text(chunk));
                         }
@@ -1554,6 +1566,18 @@ fn paste(text: String, rights: ClipboardRights) -> Paste {
                 .collect(),
         )
     }
+}
+/// The modifiers the other computer holds down for this helper that turn
+/// typed letters into shortcuts.
+fn held_for_shortcuts(modifiers: egui::Modifiers) -> Vec<Key> {
+    [
+        (modifiers.ctrl, Key::Control),
+        (modifiers.alt, Key::Alt),
+        (modifiers.mac_cmd, Key::Meta),
+    ]
+    .into_iter()
+    .filter_map(|(held, key)| held.then_some(key))
+    .collect()
 }
 /// What the sharing card says about what the person gives their helper.
 struct ShareWords {
@@ -1888,5 +1912,25 @@ mod tests {
         assert!(remote_hint(true, write).contains("Pasting puts your text on their clipboard"));
         assert!(remote_hint(false, write).starts_with("View only"));
         assert!(!remote_hint(false, write).contains("Pasting"));
+    }
+
+    #[test]
+    fn a_typed_paste_lets_go_of_control_first_so_letters_stay_letters() {
+        // Ctrl+V on Linux and Windows, Cmd+V on a Mac: either is down on the
+        // other computer when the paste arrives.
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        assert_eq!(held_for_shortcuts(ctrl), [Key::Control]);
+        let cmd = egui::Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Default::default()
+        };
+        assert_eq!(held_for_shortcuts(cmd), [Key::Meta]);
+        // Shift changes no letter into a shortcut, so it stays down.
+        assert!(held_for_shortcuts(egui::Modifiers::SHIFT).is_empty());
     }
 }
