@@ -23,7 +23,8 @@ async fn get_returns_what_the_machine_last_copied() {
     assert_eq!(error_code(&got), None, "{got}");
     assert_eq!(structured(&got)["text"], "copied on the far side", "{got}");
     assert_eq!(
-        structured(&got)["fresh"], false,
+        structured(&got)["fresh"],
+        false,
         "nothing newer arrived in answer, and the result says so"
     );
     let text = got["content"][0]["text"].as_str().expect("a text block");

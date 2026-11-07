@@ -3691,19 +3691,39 @@ mod tests {
             json!({ "address": "10.0.0.5", "protocol": "vnc", "slot": 0 }),
         )
         .await;
-        let empty = call(&fixture.ctx, &mut peer, "clipboard.read", json!({ "sessionId": "s1" })).await;
-        assert_eq!(empty["text"], Value::Null, "nothing has arrived yet: {empty}");
+        let empty = call(
+            &fixture.ctx,
+            &mut peer,
+            "clipboard.read",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
+        assert_eq!(
+            empty["text"],
+            Value::Null,
+            "nothing has arrived yet: {empty}"
+        );
 
         {
             let sessions = fixture.ctx.sessions.lock();
-            let mut facts = sessions.get("s1").expect("the fixture session").facts.lock();
+            let mut facts = sessions
+                .get("s1")
+                .expect("the fixture session")
+                .facts
+                .lock();
             facts.remote_clipboard = Some(crate::state::RemoteClipboard {
                 text: "copied on the far side".into(),
                 seq: 1,
                 at: Instant::now(),
             });
         }
-        let read = call(&fixture.ctx, &mut peer, "clipboard.read", json!({ "sessionId": "s1" })).await;
+        let read = call(
+            &fixture.ctx,
+            &mut peer,
+            "clipboard.read",
+            json!({ "sessionId": "s1" }),
+        )
+        .await;
         assert_eq!(read["text"], "copied on the far side", "{read}");
         assert_eq!(read["seq"], 1);
     }
