@@ -29,7 +29,7 @@ use common::mock_rdp_server::{
     MockConfig, MockRdpServer, SessionBehaviour, COOKIE_LOGON_ID, COOKIE_RANDOM_BITS,
     REDIRECT_ROUTING_TOKEN, REDIRECT_SESSION_ID, REDIRECT_USERNAME,
 };
-use common::{options_for, rdp_half, DEFAULT_TIMEOUT};
+use common::{dial_host, options_for, rdp_half, DEFAULT_TIMEOUT};
 use rdp_core::error::RdpError;
 use rdp_core::options::ResolvedOptions;
 use rdp_core::session::cookie::{security_verifier, CLIENT_RANDOM_ZEROS};
@@ -42,7 +42,6 @@ use remote_core::{
     ClientCommand, ConnectOptions, ProtocolEvent, RdpEvent, ReconnectPolicy, SessionEvent,
     SessionState,
 };
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use vnc_transport::TrustDecision;
@@ -100,8 +99,7 @@ impl ConnectOnce for MockConnect {
                 .filter(|c| !c.is_stale(Instant::now()))
                 .map(|c| c.client_packet());
 
-            let addr = format!("{}:{}", self.options.host, self.options.port);
-            let stream = TcpStream::connect(&addr).await?;
+            let stream = dial_host(&self.options.host, self.options.port).await?;
             let mut framer =
                 rdp_core::transport::framer::Framer::new(stream, Arc::new(AtomicU64::new(0)));
             let selected =

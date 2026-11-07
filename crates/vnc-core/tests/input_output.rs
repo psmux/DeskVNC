@@ -804,6 +804,108 @@ async fn a_server_request_is_answered_with_the_text_on_offer() {
     handle.shutdown();
 }
 
+/// Announce caps exactly as a libvncserver server does. The word is fixed in
+/// its `rfbSendExtendedClipboardCapability`: text, with caps, request, peek
+/// and provide, and no notify, and a 1 MiB limit. x11vnc 0.9.16 on
+/// libvncserver 0.9.14 sends it on every connection.
+async fn negotiate_libvncserver_clipboard(
+    handle: &vnc_core::SessionHandle,
+    server: &MockServer,
+    flushes: &mut usize,
+) {
+    let mut body = vec![0u8, 0, 0];
+    body.extend_from_slice(&(-8i32).to_be_bytes());
+    body.extend_from_slice(&0x1700_0001u32.to_be_bytes());
+    body.extend_from_slice(&0x0010_0000u32.to_be_bytes());
+    server.send_cut_text_body(body);
+    *flushes += 1;
+    flush(handle, server, *flushes).await;
+}
+
+/// The legacy (positive length) ClientCutText bodies in `bodies`, as bytes.
+fn legacy_texts(bodies: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    bodies
+        .iter()
+        .filter_map(|b| {
+            let len = i32::from_be_bytes([b[3], b[4], b[5], b[6]]);
+            (len >= 0).then(|| b[7..7 + len as usize].to_vec())
+        })
+        .collect()
+}
+
+/// REGRESSION: x11vnc negotiated Extended Clipboard and then dropped every
+/// provide. libvncserver 0.9.14 announces the extension to every client and
+/// hands provided text to a `setXCutTextUTF8` hook that x11vnc never sets, so
+/// nothing copied in the viewer reached it. Those servers still apply a legacy
+/// ClientCutText, so they get one, ahead of the provide: a libvncserver
+/// application that does take UTF-8 then ends on the lossless copy.
+#[tokio::test]
+async fn a_libvncserver_peer_gets_a_legacy_copy_before_the_provide() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let mut flushes = 1;
+
+    negotiate_libvncserver_clipboard(&handle, &server, &mut flushes).await;
+    let before = server.cut_text_bodies().len();
+
+    send(&handle, ClientCommand::ClipboardText("Grüße 你好".into())).await;
+    flushes += 1;
+    flush(&handle, &server, flushes).await;
+
+    let bodies = server.cut_text_bodies()[before..].to_vec();
+    assert_eq!(
+        legacy_texts(&bodies),
+        vec![b"Gr\xfc\xdfe ??".to_vec()],
+        "one Latin-1 copy for a server that ignores provide: {bodies:?}"
+    );
+    let legacy_at = bodies
+        .iter()
+        .position(|b| ext_flags(b).is_none())
+        .expect("legacy copy sent");
+    let provide_at = bodies
+        .iter()
+        .position(|b| ext_flags(b).is_some_and(|f| f & vnc_core::clipboard::ACTION_PROVIDE != 0))
+        .expect("the provide still goes out");
+    assert!(
+        legacy_at < provide_at,
+        "the lossless copy has to land last: {bodies:?}"
+    );
+    assert!(
+        bodies
+            .iter()
+            .filter_map(|b| ext_flags(b))
+            .all(|f| f & vnc_core::clipboard::ACTION_NOTIFY == 0),
+        "no notify to a server whose caps leave it out: {bodies:?}"
+    );
+    handle.shutdown();
+}
+
+/// TigerVNC announces notify and takes a provide, and it also takes ownership
+/// of the selection on a legacy message. A Latin-1 copy sent to it would
+/// replace good UTF-8 text with a lossy one, so it never gets one.
+#[tokio::test]
+async fn a_server_that_announces_notify_gets_no_legacy_copy() {
+    let server = MockServer::start(MockConfig::new()).await;
+    let (handle, mut events) = spawn_session(options(server.port()));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let mut flushes = 1;
+
+    negotiate_extended_clipboard(&handle, &server, &mut flushes).await;
+    let before = server.cut_text_bodies().len();
+
+    send(&handle, ClientCommand::ClipboardText("Grüße 你好".into())).await;
+    flushes += 1;
+    flush(&handle, &server, flushes).await;
+
+    let bodies = server.cut_text_bodies()[before..].to_vec();
+    assert!(
+        legacy_texts(&bodies).is_empty(),
+        "no legacy copy for a server that takes provide: {bodies:?}"
+    );
+    handle.shutdown();
+}
+
 /// The announcement is the only thing a strict server acts on, so it goes out
 /// with the data rather than only when the server happens to ask first.
 #[tokio::test]
