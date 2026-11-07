@@ -249,7 +249,7 @@ const TEXT_TYPES: &[&str] = &[
 ];
 /// How much of the clipboard is read at most: one byte past the largest text
 /// a session carries, so a larger one is seen as too large and refused there.
-const READ_LIMIT: u64 = 1024 * 1024 + 1;
+const READ_LIMIT: u64 = boundary_session::MAX_CLIPBOARD as u64 + 1;
 /// How long a program that owns the clipboard has to hand its text over.
 const READ_WAIT: Duration = Duration::from_secs(3);
 
