@@ -14,11 +14,14 @@ use dvv::plane::{OpenRequest, Plane, SessionSource};
 use serde_json::json;
 use std::sync::Arc;
 
-/// Five desktops, one more than an agent may drive at once.
+/// Five desktops, one more than an agent may drive at once, all on one
+/// address the way five VNC servers on different ports of one box are. An
+/// address is not a machine, and telling them apart by it is a bug this
+/// shape catches.
 fn five_machines() -> (Arc<FakeSource>, Arc<Plane>) {
     let source = Arc::new(FakeSource::new(
         (1..=5)
-            .map(|n| FakeHost::desktop(&format!("h_lab0{n}"), &format!("10.0.0.{n}")))
+            .map(|n| FakeHost::desktop(&format!("h_lab0{n}"), "10.0.0.5"))
             .collect(),
     ));
     let plane = Plane::local(source.clone() as Arc<dyn SessionSource>)
@@ -88,7 +91,10 @@ async fn a_full_cap_of_limbs_the_agent_opened_says_how_to_free_one() {
     );
     // Refused before anything was dialled.
     assert!(
-        source.live().iter().all(|s| s.host != "10.0.0.5"),
+        source
+            .live()
+            .iter()
+            .all(|s| s.host_id.as_deref() != Some("h_lab05")),
         "the fifth machine was opened although it could not be attached"
     );
 }

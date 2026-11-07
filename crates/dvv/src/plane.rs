@@ -1714,6 +1714,35 @@ fn files_outcome(op: &FileOp, answer: &serde_json::Value) -> Result<FileOutcome,
 /// plane above it sends into an ordinary channel and knows nothing about a
 /// socket, which is `04 §1.1`'s ruling holding: the lowering, the lease and
 /// the fencing are all unchanged by where the session actually lives.
+/// Whether an open asks for the machine this key names.
+///
+/// By saved host id, or by protocol, address and port, never by address alone:
+/// two VNC servers on one address and different ports are two machines. When
+/// it cannot tell (an address with no port, or an address for a machine saved
+/// in the library) it says no, which at worst lets go of a limb that did not
+/// need to be let go, and never skips making room that was needed.
+fn names_machine(request: &OpenRequest, machine: &MachineKey) -> bool {
+    match (machine, &request.host_id) {
+        (MachineKey::Profile(held), Some(asked)) => held == asked,
+        (
+            MachineKey::Endpoint {
+                protocol,
+                address,
+                port,
+            },
+            None,
+        ) => {
+            request.protocol == Some(*protocol)
+                && request.port == Some(*port)
+                && request
+                    .address
+                    .as_deref()
+                    .is_some_and(|asked| asked.eq_ignore_ascii_case(address))
+        }
+        _ => false,
+    }
+}
+
 fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, ToolError> {
     let session_id = string(attached, "sessionId");
     let protocol = ProtocolKind::parse(&string(attached, "protocol")).ok_or_else(|| {
@@ -3335,7 +3364,7 @@ impl Plane {
         // Before the source is asked too, for the same reason: the source can
         // dial, and an open that is refused for room after it dialled leaves a
         // session behind that nothing here is attached to.
-        self.make_room(&host, request.slot)?;
+        self.make_room(request)?;
         let attach = self.source.open(request)?;
         let host = attach.host.clone();
         let size = attach.size;
@@ -3376,7 +3405,7 @@ impl Plane {
     ///
     /// `TOO_MANY_LIMBS` when every attached limb is one the agent opened or is
     /// driving, naming them and how to free one.
-    fn make_room(&self, host: &str, slot: Slot) -> Result<(), ToolError> {
+    fn make_room(&self, request: &OpenRequest) -> Result<(), ToolError> {
         let limit = self.registry.config().max_driven_limbs;
         let limbs = self.registry.list();
         // A limb already attached for this machine and slot is handed back by
@@ -3384,7 +3413,7 @@ impl Plane {
         if limbs.len() < limit
             || limbs
                 .iter()
-                .any(|limb| limb.host() == host && limb.slot() == slot)
+                .any(|limb| limb.slot() == request.slot && names_machine(request, limb.machine()))
         {
             return Ok(());
         }
