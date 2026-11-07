@@ -2110,7 +2110,27 @@ fn relay(
         // never dropping something silently, and this drops nothing: what is
         // coalesced is the NOTICE, and the commands themselves all go.
         let mut reported: Option<&'static str> = None;
-        while let Some(command) = receiver.blocking_recv() {
+        loop {
+            // Nothing queued: whatever was reported as in flight has gone out,
+            // so the pane is told before this thread waits for the next
+            // command. Without it the last command's name stayed "in flight"
+            // in the person's pane after it had long been carried, because a
+            // report was only ever sent when a NEW kind of command started; a
+            // `dvv clip get` that sends one clipboard request and nothing else
+            // showed as in flight until the lease timed out.
+            let command = match receiver.try_recv() {
+                Ok(command) => command,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    if reported.take().is_some() {
+                        report_inflight(&session_id, &[]);
+                    }
+                    match receiver.blocking_recv() {
+                        Some(command) => command,
+                        None => break,
+                    }
+                }
+            };
             ledger.took();
             let _finished = Finished(&ledger);
             // `00 R28`. An intent the driver serves natively is the one thing
@@ -2140,18 +2160,7 @@ fn relay(
             };
             if reported != Some(name) {
                 reported = Some(name);
-                let _ = call(
-                    "control.report",
-                    serde_json::json!({
-                        "sessionId": session_id,
-                        "held": true,
-                        "phase": "held",
-                        "holderKind": "agent",
-                        "holderLabel": "dvv",
-                        "humanTookOver": false,
-                        "inflight": [name],
-                    }),
-                );
+                report_inflight(&session_id, &[name]);
             }
             let press = matches!(command, ClientCommand::Key { down: true, .. });
             if press && ledger.tripped() {
@@ -2182,6 +2191,23 @@ fn relay(
             }
         }
     });
+}
+
+/// Tell the application what this limb's relay is carrying right now, for the
+/// person's pane. An empty list says it has carried everything it was given.
+fn report_inflight(session_id: &str, inflight: &[&str]) {
+    let _ = call(
+        "control.report",
+        serde_json::json!({
+            "sessionId": session_id,
+            "held": true,
+            "phase": "held",
+            "holderKind": "agent",
+            "holderLabel": "dvv",
+            "humanTookOver": false,
+            "inflight": inflight,
+        }),
+    );
 }
 
 /// Counts one command as carried when it goes out of scope, so every path
