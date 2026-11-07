@@ -140,6 +140,7 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         enigo: None,
         buttons: Vec::new(),
         keys: Vec::new(),
+        clipboard: clipboard::Clipboard::new(),
         _awake: awake,
     }))
 }
@@ -541,6 +542,9 @@ struct NativeDesktop {
     /// screen.
     #[cfg(target_os = "linux")]
     remote: Option<std::sync::Arc<linux::portal::Remote>>,
+    /// The person's clipboard on Windows, macOS and X11. Wayland goes
+    /// through the portal instead.
+    clipboard: clipboard::Clipboard,
     _awake: Awake,
 }
 
@@ -750,14 +754,17 @@ impl Desktop for NativeDesktop {
         if let Some(portal) = self.portal_clipboard() {
             return portal.is_some();
         }
-        false
+        clipboard::Clipboard::available()
     }
     fn clipboard_changed(&mut self) -> Result<Option<String>> {
         #[cfg(target_os = "linux")]
         if let Some(portal) = self.portal_clipboard() {
             return portal.map_or(Ok(None), |remote| remote.clipboard_changed());
         }
-        Ok(None)
+        if !clipboard::Clipboard::available() {
+            return Ok(None);
+        }
+        self.clipboard.changed()
     }
     fn set_clipboard(&mut self, text: &str) -> Result<()> {
         #[cfg(target_os = "linux")]
@@ -769,8 +776,11 @@ impl Desktop for NativeDesktop {
                 ),
             };
         }
-        let _ = text;
-        anyhow::bail!("This computer's clipboard is not available to helpers")
+        ensure!(
+            clipboard::Clipboard::available(),
+            "This computer's clipboard is not available to helpers"
+        );
+        self.clipboard.set(text)
     }
     fn release(&mut self) {
         #[cfg(target_os = "linux")]
