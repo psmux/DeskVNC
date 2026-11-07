@@ -665,13 +665,13 @@ impl Server {
             if !refreshed && waited >= Duration::from_secs(2) {
                 refreshed = true;
                 let _ = plane.nudge(&limb, Nudge::Refresh);
-            } else if !reconnected && waited >= Duration::from_secs(6) {
+            } else if !reconnected && waited >= SCREEN_RECONNECT_AFTER {
                 reconnected = true;
                 if plane.nudge(&limb, Nudge::Reconnect).is_ok() {
                     self.until_connected(&limb, 15_000).await;
                     let _ = plane.nudge(&limb, Nudge::Refresh);
                 }
-            } else if waited >= Duration::from_secs(if reconnected { 30 } else { 8 }) {
+            } else if waited >= Duration::from_secs(if reconnected { 40 } else { 16 }) {
                 let mut out = refused;
                 out["content"][0]["text"] = json!(format!(
                     "No picture yet. dvv waited {}s, asked the server for a full refresh{}, and the screen never filled. Call dvv_reconnect, then dvv_screen again. If that fails too, the machine itself is not sending frames.",
@@ -712,17 +712,8 @@ impl Server {
         // wait sees the old state and returns at once.
         tokio::time::sleep(Duration::from_millis(500)).await;
         plane
-            .submit(
-                limb,
-                IntentKind::Wait {
-                    until: WaitUntil::Connected,
-                    quiet: None,
-                    timeout: Some(Duration::from_millis(timeout_ms.min(WAIT_CLAMP_MS))),
-                },
-                None,
-            )
+            .until_connected(limb, Duration::from_millis(timeout_ms.min(WAIT_CLAMP_MS)))
             .await
-            .is_ok_and(|settlement| !settlement.refused())
     }
 
     /// The `look` half of an action: wait for the screen to settle, then
@@ -1562,6 +1553,16 @@ async fn futures_join<F: std::future::Future<Output = Value>>(futures: Vec<F>) -
 }
 
 /// Is this refusal a mirror that has not been painted yet?
+/// How long a screen read waits for a priming mirror before it reconnects
+/// the session.
+///
+/// Six seconds used to be enough. It is not for a 4K Mac over a slow link:
+/// the full refresh a new mirror waits for is one 4096x2304 picture, and on a
+/// 10 Mb/s link it measured 10.9 s, so the reconnect at six seconds threw
+/// away a refresh that was arriving and started another. Fifteen still
+/// recovers a session that has gone silent, a little later.
+const SCREEN_RECONNECT_AFTER: Duration = Duration::from_secs(15);
+
 fn is_priming(refused: &Value) -> bool {
     refused["structuredContent"]["message"]
         .as_str()

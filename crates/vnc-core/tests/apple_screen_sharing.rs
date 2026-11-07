@@ -392,6 +392,13 @@ struct Seen {
     /// Act like a Mac whose account lacks Remote Management privileges:
     /// verify the password, send the server proof, then refuse the login.
     refuse_after_proof: bool,
+    /// Act like a busy Mac over a slow link: a full request is answered
+    /// only after the update already in flight, and only if no incremental
+    /// request replaces it first.
+    busy: bool,
+    /// The client replaced a full request with an incremental one before the
+    /// full picture could go out.
+    full_cancelled: bool,
     /// Run the short session (desktop size, full picture, then answer
     /// requests) after a type 33 login too, not only after type 36.
     short_session: bool,
@@ -420,6 +427,12 @@ async fn read_record(s: &mut TcpStream) -> Option<Vec<u8>> {
 impl FakeMac {
     async fn start(login: Login, password: &'static str) -> Self {
         Self::start_with(login, password, false).await
+    }
+
+    async fn start_busy() -> Self {
+        let mac = Self::start_with(Login::Srp36, PASSWORD, false).await;
+        mac.seen.lock().busy = true;
+        mac
     }
 
     async fn start_with(login: Login, password: &'static str, refuse_after_proof: bool) -> Self {
@@ -490,6 +503,58 @@ impl RedialMac {
             seen,
             drop,
             connections,
+        }
+    }
+}
+
+/// The busy Mac's loop after the first picture. Every request gets one
+/// update. A full request is answered first with the small update that was
+/// already in flight, then, if no other request replaced it within a moment,
+/// with the whole screen.
+async fn serve_busy(s: &mut TcpStream, tx: &mut Dir, rx: &mut Dir, seen: &Arc<Mutex<Seen>>) {
+    let corner = || fbu(&[(0, 0, 3, 3, 0, raw_pixels(3, 3, [0, 0, 255, 0]))]);
+    let mut next: Option<Vec<u8>> = None;
+    loop {
+        let body = match next.take() {
+            Some(b) => b,
+            None => {
+                let Some(c) = read_record(s).await else {
+                    return;
+                };
+                let Some(b) = rx.open(&c) else { return };
+                seen.lock().records.push(b.clone());
+                b
+            }
+        };
+        if !(body.len() == 10 && body[0] == 3) {
+            continue;
+        }
+        let full = body[1] == 0;
+        s.write_all(&tx.seal(&corner())).await.unwrap();
+        if !full {
+            continue;
+        }
+        match tokio::time::timeout(Duration::from_millis(300), read_record(s)).await {
+            Ok(Some(c)) => {
+                let Some(b) = rx.open(&c) else { return };
+                seen.lock().records.push(b.clone());
+                if b.len() == 10 && b[0] == 3 {
+                    seen.lock().full_cancelled = true;
+                }
+                next = Some(b);
+            }
+            Ok(None) => return,
+            Err(_) => {
+                let m = fbu(&[(
+                    0,
+                    0,
+                    WIDTH,
+                    HEIGHT,
+                    0,
+                    raw_pixels(WIDTH, HEIGHT, [255, 255, 255, 0]),
+                )]);
+                s.write_all(&tx.seal(&m)).await.unwrap();
+            }
         }
     }
 }
@@ -699,8 +764,21 @@ async fn serve(
                 break;
             }
         }
-        let m = fbu(&[(0, 0, 4, 4, 0, raw_pixels(4, 4, [0, 0, 255, 0]))]);
+        // Like a real Mac, the whole screen in one rectangle.
+        let m = fbu(&[(
+            0,
+            0,
+            WIDTH,
+            HEIGHT,
+            0,
+            raw_pixels(WIDTH, HEIGHT, [0, 0, 255, 0]),
+        )]);
         s.write_all(&tx.seal(&m)).await.unwrap();
+
+        if seen.lock().busy {
+            serve_busy(s, &mut tx, &mut rx, &seen).await;
+            return;
+        }
 
         // Then the screen changes at (8, 8). Like a real Mac this server
         // pushes nothing on its own and keeps only the last update request:
@@ -793,8 +871,16 @@ async fn serve(
         .unwrap();
     s.write_all(&tx.seal(&[0x7e, 1, 2, 3, 4, 5])).await.unwrap();
 
-    // A red picture whose message runs across two records.
-    let m = fbu(&[(0, 0, 4, 4, 0, raw_pixels(4, 4, [0, 0, 255, 0]))]);
+    // A red picture of the whole screen, whose message runs across two
+    // records.
+    let m = fbu(&[(
+        0,
+        0,
+        WIDTH,
+        HEIGHT,
+        0,
+        raw_pixels(WIDTH, HEIGHT, [0, 0, 255, 0]),
+    )]);
     let (a, b) = m.split_at(20);
     s.write_all(&tx.seal(a)).await.unwrap();
     s.write_all(&tx.seal(b)).await.unwrap();
@@ -908,7 +994,9 @@ async fn type_33_session_end_to_end() {
     // arrives under the second key.
     let red = events
         .wait(DEFAULT_TIMEOUT, "red update", |e| match e {
-            SessionEvent::FramebufferUpdate { damage, .. } if damage.width == 4 => Some(*damage),
+            SessionEvent::FramebufferUpdate { damage, .. } if damage.width == WIDTH => {
+                Some(*damage)
+            }
             _ => None,
         })
         .await;
@@ -1173,6 +1261,69 @@ async fn a_clipboard_request_on_a_mac_fetches_the_pasteboard() {
         r[..] == apple_wire::clipboard_fetch()[..]
     })
     .await;
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
+/// A refresh on a busy Mac over a slow link gets the whole picture. The
+/// small update already in flight when the refresh went out is not its
+/// answer, and treating it as one sent an incremental request that cancelled
+/// the refresh, so an agent's first screen read waited for a reconnect.
+#[tokio::test]
+async fn a_refresh_on_a_busy_mac_gets_the_whole_picture() {
+    let mac = FakeMac::start_busy().await;
+    let mut o = session_options(mac.port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events
+        .wait(DEFAULT_TIMEOUT, "the first picture", |e| match e {
+            SessionEvent::FramebufferUpdate { damage, .. } if damage.width == WIDTH => Some(()),
+            _ => None,
+        })
+        .await;
+    events.drain_for(Duration::from_millis(400)).await;
+    send(&handle, ClientCommand::Refresh).await;
+    events
+        .wait(
+            Duration::from_secs(5),
+            "the refreshed picture",
+            |e| match e {
+                SessionEvent::FramebufferUpdate { damage, .. } if damage.width == WIDTH => Some(()),
+                _ => None,
+            },
+        )
+        .await;
+    assert!(
+        !mac.seen.lock().full_cancelled,
+        "an incremental request replaced the refresh"
+    );
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
+/// A quality change on a Mac sends no new SetEncodings: the encrypted
+/// session keeps the encodings it opened with, and a Mac sent another list
+/// mid session stopped sending updates, so an agent's mirror never filled.
+#[tokio::test]
+async fn a_quality_change_on_a_mac_keeps_its_encodings() {
+    let mac = FakeMac::start(Login::Srp36, PASSWORD).await;
+    let mut o = session_options(mac.port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    send(
+        &handle,
+        ClientCommand::SetQuality(vnc_core::types::QualityPreset::High),
+    )
+    .await;
+    send(&handle, ClientCommand::Refresh).await;
+    wait_record(&mac.seen, "the refresh", |r| {
+        r.len() == 10 && r[0] == 3 && r[1] == 0
+    })
+    .await;
+    events.drain_for(Duration::from_millis(300)).await;
+    let set_encodings = mac.seen.lock().records.iter().filter(|r| r[0] == 2).count();
+    assert_eq!(set_encodings, 1, "a second SetEncodings went to the Mac");
     send(&handle, ClientCommand::Disconnect).await;
 }
 

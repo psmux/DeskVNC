@@ -3773,6 +3773,29 @@ impl Plane {
         }
     }
 
+    /// Wait until the limb reports connected, true when it did.
+    ///
+    /// Asks the source each time round. The limb's copy of its state is only
+    /// refreshed when something asks for it, and a connected wait inside the
+    /// plane reads that copy: after a reconnect it read the reconnecting
+    /// state for its whole timeout, so a screen read that had to reconnect a
+    /// 4K Mac sat 15 s after the session was back. A wait that ran out also
+    /// came back as connected, because a timeout is not a refusal; this says
+    /// false then.
+    pub async fn until_connected(&self, limb: &AttachedLimb, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            self.refresh(limb);
+            if matches!(limb.state(), SessionState::Connected) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     /// One limb, as a card.
     pub fn card(&self, limb: &AttachedLimb) -> LimbCard {
         self.refresh(limb);
