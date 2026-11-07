@@ -320,7 +320,10 @@ where
 {
     let machine = machine_id(&key);
     let endpoint = session::endpoint_with(&options, Some(key), Lookup::Publish).await?;
-    let _close = Closing(endpoint.clone());
+    // A helper being served holds a seat until it has been told how its
+    // session ended, so the endpoint closes only after that.
+    let seats = Arc::new(tokio::sync::Semaphore::new(MAX_HELPERS));
+    let _close = Closing(endpoint.clone(), seats.clone());
     // Say which computer this is to a helper that dialled the address. On
     // the random port of a machine that could not have the usual one this
     // costs nothing and still serves a helper told the port.
@@ -369,7 +372,7 @@ where
         login,
         desktop,
         throttle: tokio::sync::Mutex::new(Throttle::default()),
-        seats: Arc::new(tokio::sync::Semaphore::new(MAX_HELPERS)),
+        seats,
         asking: Arc::new(tokio::sync::Mutex::new(())),
     });
     loop {
@@ -929,11 +932,22 @@ async fn visit(
     result
 }
 
-struct Closing(iroh::Endpoint);
+struct Closing(iroh::Endpoint, Arc<tokio::sync::Semaphore>);
 impl Drop for Closing {
     fn drop(&mut self) {
         let endpoint = self.0.clone();
-        tokio::spawn(async move { endpoint.close().await });
+        let seats = self.1.clone();
+        tokio::spawn(async move {
+            // Closing the endpoint closes every connection as a plain end,
+            // which would beat the sessions telling their helpers the
+            // computer went away. Wait for them, but not forever.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                seats.acquire_many(MAX_HELPERS as u32),
+            )
+            .await;
+            endpoint.close().await
+        });
     }
 }
 
