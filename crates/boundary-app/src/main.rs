@@ -667,10 +667,7 @@ impl App {
                     {
                         self.share(ui.ctx());
                     }
-                    theme::small(
-                        ui,
-                        "One code per session. It expires after 10 minutes if nobody connects.",
-                    );
+                    theme::small(ui, share_words(with_codes).expiry);
                 }
             } else if self.invitation.is_empty() || self.codes.publishing() {
                 ui.horizontal(|ui| {
@@ -678,7 +675,7 @@ impl App {
                     theme::muted(
                         ui,
                         if self.invitation.is_empty() {
-                            "Creating your code"
+                            share_words(with_codes).creating
                         } else {
                             "Getting your code"
                         },
@@ -1353,6 +1350,28 @@ impl App {
         }
     }
 }
+/// What the sharing card says about what the person gives their helper.
+struct ShareWords {
+    creating: &'static str,
+    expiry: &'static str,
+}
+/// The words for a short code when a code service is set, and for the full
+/// invitation otherwise. No release build names a shared code service, so
+/// without one set in Settings the person gets an invitation, and the card
+/// said "Creating your code" and "One code per session" over it.
+fn share_words(code: bool) -> ShareWords {
+    if code {
+        ShareWords {
+            creating: "Creating your code",
+            expiry: "One code per session. It expires after 10 minutes if nobody connects.",
+        }
+    } else {
+        ShareWords {
+            creating: "Creating your invitation",
+            expiry: "One invitation per session. It expires after 10 minutes if nobody connects.",
+        }
+    }
+}
 /// What a helper's tools did, newest last, so the person at the computer
 /// can see it.
 pub(crate) fn activity(ui: &mut egui::Ui, lines: &[String]) {
@@ -1399,6 +1418,19 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_invitation_is_never_called_a_code() {
+        let invitation = share_words(false);
+        for line in [invitation.creating, invitation.expiry] {
+            assert!(!line.contains("code"), "{line}");
+            assert!(line.contains("invitation"), "{line}");
+        }
+        let code = share_words(true);
+        for line in [code.creating, code.expiry] {
+            assert!(line.contains("code"), "{line}");
+        }
+    }
 
     #[test]
     fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
