@@ -287,6 +287,10 @@ impl Unattended {
                         ..
                     } => {
                         log(&self.access_path, &format!("{name} connected"));
+                        if let Some(message) = after_connect(&self.message, &name) {
+                            self.message = message;
+                            self.error = false;
+                        }
                         self.active.push(Active {
                             name,
                             control,
@@ -813,6 +817,16 @@ fn log(access_path: &std::path::Path, line: &str) {
 /// When DeskVNC, or the copy at the sign in or lock screen, holds the claim,
 /// this app does not listen and never becomes reachable itself, but helpers
 /// still get in through that copy, so it is on.
+/// What the unattended status says once `name` connects, when what it said
+/// before is about their last session ending. A helper whose link dropped
+/// comes straight back, and "Helper stopped responding" stayed under their
+/// banner for as long as the new session ran. `None` keeps what it says.
+fn after_connect(message: &str, name: &str) -> Option<String> {
+    message
+        .starts_with(&format!("{name}'s session ended"))
+        .then(|| format!("{name} connected again"))
+}
+
 fn label(enabled: bool, reachable: bool, handed_over: bool) -> &'static str {
     match (enabled, reachable, handed_over) {
         (false, _, _) => "Off",
@@ -862,7 +876,27 @@ pub mod autostart {
 
 #[cfg(test)]
 mod tests {
-    use super::{label, show_login_notice};
+    use super::{after_connect, label, show_login_notice};
+
+    #[test]
+    fn a_helper_coming_back_clears_the_news_of_their_last_session_ending() {
+        // What the listener said when the helper's link went quiet.
+        let ended = "Drive helper's session ended: Helper stopped responding: deadline has elapsed";
+        assert_eq!(
+            after_connect(ended, "Drive helper").as_deref(),
+            Some("Drive helper connected again")
+        );
+        // Anything else, or another helper's session, stays as it was.
+        assert_eq!(after_connect(ended, "Sam"), None);
+        assert_eq!(
+            after_connect(
+                "Port 5940 is taken, so helpers must connect by machine ID",
+                "Drive helper"
+            ),
+            None
+        );
+        assert_eq!(after_connect("", "Drive helper"), None);
+    }
 
     #[test]
     fn the_sign_in_screen_notice_shows_only_while_the_copy_is_missing() {
