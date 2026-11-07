@@ -12,6 +12,8 @@
  * the connection is made is never reachable only by people who remember it
  * exists.
  */
+import type { OpenSessionOptions } from "./tauri";
+
 export const EDIT_HOST_EVENT = "library://edit-host";
 
 /**
@@ -35,6 +37,23 @@ export interface AgentOpenRequest {
   protocol: "vnc" | "rdp" | "ssh";
   /** Open behind what the person is looking at, without selecting it. */
   background?: boolean;
+}
+
+/**
+ * What the library opens for an agent's request.
+ *
+ * A saved machine is opened by its id whether or not this window's host list
+ * has it yet. The list is read when the window loads, so a machine saved
+ * after that is missing from it. Opening that one by address registered the
+ * session under its endpoint, the shell waiting for it under the profile id
+ * never saw it claimed, and it opened a second connection to the same machine
+ * that nothing ever closed.
+ */
+export function agentOpenOptions(ask: AgentOpenRequest): OpenSessionOptions {
+  const background = ask.background === true;
+  return ask.hostId
+    ? { profileId: ask.hostId, background }
+    : { address: ask.address, port: ask.port, protocol: ask.protocol, background };
 }
 
 export interface EditHostRequest {
