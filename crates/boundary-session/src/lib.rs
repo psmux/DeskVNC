@@ -59,6 +59,22 @@ pub trait Desktop {
     fn controllable(&self) -> bool {
         true
     }
+    /// Whether this desktop can read and write the person's clipboard at all.
+    fn has_clipboard(&self) -> bool {
+        false
+    }
+    /// Text the person copied since the last call, or None if nothing changed.
+    /// The first call only records where the clipboard stands and returns None,
+    /// so what was copied before the session is never sent.
+    fn clipboard_changed(&mut self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// Put text on the person's clipboard. It must stay pasteable after the call
+    /// returns (X11 and Wayland need an owner that keeps serving it).
+    fn set_clipboard(&mut self, text: &str) -> Result<()> {
+        let _ = text;
+        anyhow::bail!("This computer's clipboard is not available to helpers")
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
