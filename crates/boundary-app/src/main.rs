@@ -496,6 +496,9 @@ impl App {
             while let Ok(event) = session.events.try_recv() {
                 match event {
                     Event::Status(status) => {
+                        // Something newer than the countdown, such as the
+                        // screen starting to be shared once a helper is let in.
+                        self.expires = None;
                         self.status = status;
                         self.error = false;
                     }
