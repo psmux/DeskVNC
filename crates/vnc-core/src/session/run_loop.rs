@@ -2033,8 +2033,22 @@ impl RunLoop {
                 // told there is something to ask for; a notify costs four
                 // bytes and is what makes those servers request the text
                 // (answered in `handle_server_cut_text`).
+                //
+                // A libvncserver peer drops the provide and applies only a
+                // legacy message, so it gets one first (see
+                // `ClipboardState::wants_legacy_copy`). It announced no
+                // notify, so it is not sent one.
+                if self.clipboard.wants_legacy_copy() {
+                    let body = crate::clipboard::encode_legacy_text(&self.clipboard, &text);
+                    let mut msg = Vec::with_capacity(1 + body.len());
+                    msg.push(messages::client_msg::CLIENT_CUT_TEXT);
+                    msg.extend_from_slice(&body);
+                    self.send(&msg).await?;
+                }
                 if self.clipboard.extended_supported() {
                     self.clipboard_offered = Some(text.clone());
+                }
+                if self.clipboard.extended_supported() && self.clipboard.peer_takes_notify() {
                     let body = crate::clipboard::encode_notify(
                         &self.clipboard,
                         crate::clipboard::FORMAT_TEXT,
