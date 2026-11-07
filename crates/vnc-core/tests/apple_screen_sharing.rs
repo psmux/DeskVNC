@@ -554,16 +554,17 @@ async fn serve(
     s.write_all(&si).await.unwrap();
 
     // --- cleartext prelude ----------------------------------------------------
-    // ViewerInfo, SetEncryption(1), SetMode(1), SetEncryption(2).
-    let vi_head = read_n(s, 4).await;
-    assert_eq!(&vi_head[..2], &[0x21, 0]);
-    let vi_len = u16::from_be_bytes([vi_head[2], vi_head[3]]) as usize;
-    let mut vi = vi_head;
-    vi.extend_from_slice(&read_n(s, vi_len).await);
+    // SetEncryption(1), SetMode(1), SetEncryption(2). A real macOS 26 Mac
+    // stalls on the ViewerInfo this client used to send first, never sending
+    // the rekey, so this server does the same: a ViewerInfo here ends it.
     let se1 = read_n(s, 12).await;
+    if se1[0] == apple_wire::client_msg::VIEWER_INFO {
+        seen.lock().prelude = vec![se1.clone()];
+        std::future::pending::<()>().await;
+    }
     let mode = read_n(s, 4).await;
     let se2 = read_n(s, 8).await;
-    seen.lock().prelude = vec![vi, se1, mode, se2];
+    seen.lock().prelude = vec![se1, mode, se2];
 
     let wrap: [u8; 16] = Sha256::digest(&session_key)[..16].try_into().unwrap();
     let mut key1 = [0u8; 16];
@@ -843,10 +844,9 @@ async fn type_33_session_end_to_end() {
     );
     assert_eq!(seen.proof_trailer, 384);
     assert_eq!(seen.client_init, Some(0xC1));
-    assert_eq!(seen.prelude[0], apple_wire::viewer_info());
-    assert_eq!(seen.prelude[1], apple_wire::set_encryption_start());
-    assert_eq!(seen.prelude[2], apple_wire::set_mode(true));
-    assert_eq!(seen.prelude[3], apple_wire::set_encryption_finish());
+    assert_eq!(seen.prelude[0], apple_wire::set_encryption_start());
+    assert_eq!(seen.prelude[1], apple_wire::set_mode(true));
+    assert_eq!(seen.prelude[2], apple_wire::set_encryption_finish());
 
     // Opening records, in the native order.
     let r = &seen.records;
@@ -1102,12 +1102,13 @@ mod live_must_confirm {
         assert_eq!(&parsed.client_reply(), b"RFB 003.008\n");
     }
 
-    /// ClientInit is 0xC1; ViewerInfo has no version strings; SetEncryption
-    /// uses the native bytes; SetMode(1) is sent.
+    /// ClientInit is 0xC1; ViewerInfo is not sent (a real Mac stalls on it);
+    /// SetEncryption uses the native bytes; SetMode(1) is sent. All confirmed
+    /// by a full session against a macOS 26 Mac.
     #[test]
     fn prelude_bytes() {
         assert_eq!(apple_wire::CLIENT_INIT_SHARED, 0xC1);
-        assert_eq!(apple_wire::viewer_info().len(), 4 + 2 + 2 + 32);
+        assert!(!vnc_core::apple::PreludeOptions::default().viewer_info);
         assert_eq!(
             apple_wire::set_encryption_start()[8..],
             [0, 0, 0, 1],

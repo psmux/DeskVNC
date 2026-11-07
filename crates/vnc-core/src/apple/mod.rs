@@ -31,8 +31,14 @@ use crate::types::{encoding as std_enc, Rect};
 
 pub use record::{ContentKeys, RecordStream, RekeyHandle};
 
-/// Which optional parts of the prelude to send. The defaults mirror the
-/// native viewer; the live test turns pieces off to find what a Mac needs.
+/// Which optional parts of the prelude to send.
+///
+/// ViewerInfo is off by default. A macOS 26 Mac that receives the ViewerInfo
+/// this code builds goes on reading, takes the SetEncryption after it as part
+/// of it, never sends the rekey, and the session times out. Without it the
+/// Mac answers SetEncryption(1) with the rekey at once and the session runs.
+/// The native layout of ViewerInfo is not known yet; until it is, leaving it
+/// out costs nothing the session needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreludeOptions {
     pub viewer_info: bool,
@@ -42,7 +48,7 @@ pub struct PreludeOptions {
 impl Default for PreludeOptions {
     fn default() -> Self {
         Self {
-            viewer_info: true,
+            viewer_info: false,
             set_mode: true,
         }
     }
@@ -211,7 +217,7 @@ mod tests {
         };
         let wrapped = record::wrap_rekey(&wrap, &keys);
         let task = tokio::spawn(async move {
-            let mut got = vec![0u8; wire::viewer_info().len() + 12 + 4 + 8];
+            let mut got = vec![0u8; 12 + 4 + 8];
             server.read_exact(&mut got).await.unwrap();
             server
                 .write_all(&[0x14, 0, 0, 4, 0, 1, 0, 12])
@@ -228,14 +234,9 @@ mod tests {
             .unwrap();
         assert_eq!(handle.generation(), 1);
         let (sent, _server) = task.await.unwrap();
-        let vi = wire::viewer_info();
-        assert_eq!(&sent[..vi.len()], &vi[..]);
-        assert_eq!(
-            &sent[vi.len()..vi.len() + 12],
-            &wire::set_encryption_start()
-        );
-        assert_eq!(&sent[vi.len() + 12..vi.len() + 16], &wire::set_mode(true));
-        assert_eq!(&sent[vi.len() + 16..], &wire::set_encryption_finish());
+        assert_eq!(&sent[..12], &wire::set_encryption_start());
+        assert_eq!(&sent[12..16], &wire::set_mode(true));
+        assert_eq!(&sent[16..], &wire::set_encryption_finish());
     }
 
     #[tokio::test]
