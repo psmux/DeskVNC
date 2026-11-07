@@ -38,7 +38,24 @@ const PRIME: Duration = Duration::from_millis(300);
 const SHIFT: i32 = 0xffe1;
 
 fn block_on<T>(future: impl Future<Output = Result<T, ashpd::Error>>) -> Result<T> {
-    async_io::block_on(future).map_err(|e| anyhow!("{e}"))
+    async_io::block_on(future).map_err(portal_error)
+}
+/// The person chose Cancel in the desktop's sharing prompt.
+#[derive(Debug)]
+pub(crate) struct Declined;
+impl std::fmt::Display for Declined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The sharing prompt was cancelled")
+    }
+}
+impl std::error::Error for Declined {}
+/// A portal error, with a cancelled prompt kept apart from a portal that
+/// failed, so the two are not explained the same way.
+pub(crate) fn portal_error(e: ashpd::Error) -> anyhow::Error {
+    match e {
+        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => Declined.into(),
+        e => anyhow!("{e}"),
+    }
 }
 async fn within<T>(
     limit: Duration,
