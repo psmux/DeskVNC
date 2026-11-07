@@ -458,7 +458,9 @@ where
             // whoever holds the session, so the session may have ended as
             // closed a moment before this saw the stop: the stop still wins.
             let result = if stop.is_cancelled() {
-                Err(session::link_lost(anyhow!("DeskVNC Support on that computer stopped")))
+                Err(session::link_lost(anyhow!(
+                    "DeskVNC Support on that computer stopped"
+                )))
             } else {
                 result
             };

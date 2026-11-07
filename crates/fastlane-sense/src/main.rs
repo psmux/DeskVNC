@@ -71,8 +71,9 @@ pub struct Table {
 
 /// FNV-1a, enough to tell two tables apart.
 pub fn fnv(text: &str) -> u64 {
-    text.bytes()
-        .fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
+    text.bytes().fold(0xcbf29ce484222325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+    })
 }
 
 fn main() {
@@ -141,7 +142,10 @@ fn serve(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Res
         }
         if let Some((name, value)) = header.split_once(':') {
             if name.eq_ignore_ascii_case("authorization")
-                && value.trim().strip_prefix("Bearer ").is_some_and(|t| t == token)
+                && value
+                    .trim()
+                    .strip_prefix("Bearer ")
+                    .is_some_and(|t| t == token)
             {
                 authorised = true;
             }
@@ -168,7 +172,9 @@ fn serve(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Res
             }
             "/settle" => {
                 let after = param("after").and_then(|h| h.parse::<u64>().ok());
-                let change = param("change_ms").and_then(|v| v.parse().ok()).unwrap_or(1000);
+                let change = param("change_ms")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1000);
                 let max = param("max_ms").and_then(|v| v.parse().ok()).unwrap_or(5000);
                 match settle(sense, after, change, max) {
                     Ok(body) => (200, body),
@@ -191,7 +197,11 @@ fn serve(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Res
 /// The dial out mode: the token, then one JSON line answered per line read.
 fn answer(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Result<()> {
     let mut out = stream.try_clone()?;
-    writeln!(out, "{}", json!({ "hello": "deskvnc-sense", "token": token }))?;
+    writeln!(
+        out,
+        "{}",
+        json!({ "hello": "deskvnc-sense", "token": token })
+    )?;
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let request: Value = serde_json::from_str(&line?).unwrap_or(Value::Null);
@@ -204,22 +214,37 @@ fn answer(stream: TcpStream, token: &str, sense: &mut uia::Sense) -> std::io::Re
                 .unwrap_or_else(|e| json!({ "error": e })),
             Some("settle") => {
                 let after = request["after"].as_str().and_then(|h| h.parse().ok());
-                settle(sense, after, number("change_ms", 1000), number("max_ms", 5000))
-                    .unwrap_or_else(|e| json!({ "error": e }))
+                settle(
+                    sense,
+                    after,
+                    number("change_ms", 1000),
+                    number("max_ms", 5000),
+                )
+                .unwrap_or_else(|e| json!({ "error": e }))
             }
             Some("cells") => {
                 let names: Vec<String> = request["names"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|n| n.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                sense.cells(&names).unwrap_or_else(|e| json!({ "error": e }))
+                sense
+                    .cells(&names)
+                    .unwrap_or_else(|e| json!({ "error": e }))
             }
             Some("clipboard") => uia::clipboard_text()
                 .map(|text| json!({ "text": text }))
                 .unwrap_or_else(|e| json!({ "error": e })),
             Some("windows") => json!({ "windows": uia::windows() }),
-            Some("activate") => json!({ "front": uia::activate(request["hwnd"].as_i64().unwrap_or(0)) }),
-            _ => json!({ "error": "op is snapshot, settle, cells, clipboard, windows or activate" }),
+            Some("activate") => {
+                json!({ "front": uia::activate(request["hwnd"].as_i64().unwrap_or(0)) })
+            }
+            _ => {
+                json!({ "error": "op is snapshot, settle, cells, clipboard, windows or activate" })
+            }
         };
         writeln!(out, "{body}")?;
     }
@@ -243,7 +268,12 @@ fn stamp(table: Table, started: Instant, extra: Value) -> Value {
 /// No sleeps: the pace is the read itself, so on a quick window this answers
 /// within two reads of the screen going still, and a slow one gets as long as
 /// it keeps changing, up to `max_ms`.
-fn settle(sense: &mut uia::Sense, after: Option<u64>, change_ms: u64, max_ms: u64) -> Result<Value, String> {
+fn settle(
+    sense: &mut uia::Sense,
+    after: Option<u64>,
+    change_ms: u64,
+    max_ms: u64,
+) -> Result<Value, String> {
     let started = Instant::now();
     let mut reads = 0u32;
     let mut changed_at: Option<u128> = None;
@@ -262,7 +292,11 @@ fn settle(sense: &mut uia::Sense, after: Option<u64>, change_ms: u64, max_ms: u6
             None
         };
         if let Some(outcome) = outcome {
-            return Ok(stamp(last, started, json!({ "outcome": outcome, "reads": reads })));
+            return Ok(stamp(
+                last,
+                started,
+                json!({ "outcome": outcome, "reads": reads }),
+            ));
         }
         let next = sense.snapshot()?;
         reads += 1;
