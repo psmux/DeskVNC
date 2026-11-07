@@ -712,17 +712,8 @@ impl Server {
         // wait sees the old state and returns at once.
         tokio::time::sleep(Duration::from_millis(500)).await;
         plane
-            .submit(
-                limb,
-                IntentKind::Wait {
-                    until: WaitUntil::Connected,
-                    quiet: None,
-                    timeout: Some(Duration::from_millis(timeout_ms.min(WAIT_CLAMP_MS))),
-                },
-                None,
-            )
+            .until_connected(limb, Duration::from_millis(timeout_ms.min(WAIT_CLAMP_MS)))
             .await
-            .is_ok_and(|settlement| !settlement.refused())
     }
 
     /// The `look` half of an action: wait for the screen to settle, then
