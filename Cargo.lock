@@ -1048,6 +1048,7 @@ name = "boundary-platform"
 version = "0.34.1"
 dependencies = [
  "anyhow",
+ "arboard",
  "ashpd",
  "async-io",
  "block2 0.6.2",

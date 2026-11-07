@@ -4,6 +4,7 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 #[cfg(not(target_os = "linux"))]
 use xcap::Monitor;
 
+pub mod clipboard;
 mod damage;
 #[cfg(windows)]
 mod dxgi;
