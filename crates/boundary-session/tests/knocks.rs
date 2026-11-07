@@ -268,6 +268,187 @@ async fn a_helper_who_knocks_during_a_session_hears_it_is_in_use() {
     .expect("timed out");
 }
 
+/// On Wayland the desktop opens only once the person answers the desktop's
+/// own sharing prompt. The window said "Your screen is being shared" while
+/// that prompt was still open, because the host said the helper was in as
+/// soon as the person approved them, before the desktop was open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_screen_is_not_called_shared_until_the_desktop_opens() {
+    if skipped() {
+        return;
+    }
+    timeout(Duration::from_secs(60), async {
+        // The desktop's sharing prompt, answered when the test says so.
+        let (answered, prompt_open) = std::sync::mpsc::channel::<bool>();
+        let mut host = boundary_session::host(loopback(), move || match prompt_open.recv() {
+            Ok(true) => Ok(Box::new(Fake) as Box<dyn Desktop>),
+            _ => anyhow::bail!("The screen was not shared because Cancel was chosen"),
+        });
+        let ticket = invitation(&mut host).await;
+        let mut first = helper(&ticket, "Sam");
+        let (_, answer) = prompt(&mut host).await;
+        let _ = answer.send(Approval::Control);
+        // The helper is let in at once, so it stops waiting.
+        assert_eq!(outcome(&mut first).await, Ok(()));
+        // The person is still looking at the desktop's prompt.
+        let early = timeout(Duration::from_millis(1500), async {
+            loop {
+                match host.events.recv().await {
+                    Some(Event::Connected { .. }) => return,
+                    None => std::future::pending::<()>().await,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert!(
+            early.is_err(),
+            "connected while the sharing prompt was open"
+        );
+        // They choose Share.
+        answered.send(true).unwrap();
+        let control = loop {
+            match host.events.recv().await {
+                Some(Event::Connected { control, .. }) => break control,
+                Some(Event::Finished(result)) => panic!("the host stopped: {result:?}"),
+                None => panic!("the host went quiet"),
+                _ => {}
+            }
+        };
+        assert!(control);
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// Cancel in the desktop's prompt ends the session with the reason, and the
+/// window never says the screen was shared.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_in_the_sharing_prompt_never_says_shared() {
+    if skipped() {
+        return;
+    }
+    timeout(Duration::from_secs(60), async {
+        let (answered, prompt_open) = std::sync::mpsc::channel::<bool>();
+        let mut host = boundary_session::host(loopback(), move || match prompt_open.recv() {
+            Ok(true) => Ok(Box::new(Fake) as Box<dyn Desktop>),
+            _ => anyhow::bail!("The screen was not shared because Cancel was chosen"),
+        });
+        let ticket = invitation(&mut host).await;
+        let _first = helper(&ticket, "Sam");
+        let (_, answer) = prompt(&mut host).await;
+        let _ = answer.send(Approval::Control);
+        answered.send(false).unwrap();
+        loop {
+            match host.events.recv().await {
+                Some(Event::Connected { .. }) => panic!("called shared after Cancel"),
+                Some(Event::Finished(result)) => {
+                    let error = format!("{:#}", result.expect_err("Cancel is not a clean end"));
+                    assert!(error.contains("Cancel"), "{error}");
+                    break;
+                }
+                None => panic!("the host went quiet"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A desktop that shares the screen alone, as GNOME does when Allow Remote
+/// Interaction is left off in its prompt: every event sent to it fails.
+struct Watched;
+impl Desktop for Watched {
+    fn capture(&mut self) -> anyhow::Result<Frame> {
+        Fake.capture()
+    }
+    fn input(&mut self, _: Input) -> anyhow::Result<()> {
+        anyhow::bail!("Control was not allowed")
+    }
+    fn release(&mut self) {}
+    fn controllable(&self) -> bool {
+        false
+    }
+}
+
+/// Approved for control on a desktop that takes no input, the helper was
+/// told it had control and its first click ended the whole session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_on_a_screen_shared_alone_is_told_it_can_only_watch() {
+    if skipped() {
+        return;
+    }
+    timeout(Duration::from_secs(60), async {
+        let mut host = boundary_session::host(loopback(), || Ok(Box::new(Watched)));
+        let ticket = invitation(&mut host).await;
+        let mut first = helper(&ticket, "Sam");
+        let (_, answer) = prompt(&mut host).await;
+        let _ = answer.send(Approval::Control);
+        let control = loop {
+            match host.events.recv().await {
+                Some(Event::Connected { control, .. }) => break control,
+                Some(Event::Finished(result)) => panic!("the host stopped: {result:?}"),
+                None => panic!("the host went quiet"),
+                _ => {}
+            }
+        };
+        assert!(!control, "the person's window said control");
+        // The helper hears it is a viewer.
+        loop {
+            match first.events.recv().await {
+                Some(Event::Control(false)) => break,
+                Some(Event::Finished(result)) => panic!("the helper stopped: {result:?}"),
+                None => panic!("the helper went quiet"),
+                _ => {}
+            }
+        }
+        // Its input is refused, and the session goes on.
+        first.input(Input::Move { x: 0.5, y: 0.5 }).unwrap();
+        first
+            .input(Input::Button {
+                button: boundary_session::Button::Left,
+                down: true,
+            })
+            .unwrap();
+        first
+            .input(Input::Button {
+                button: boundary_session::Button::Left,
+                down: false,
+            })
+            .unwrap();
+        // Ticking control on the person's side cannot give what the desktop
+        // did not: it goes back off, with the reason.
+        host.set_control(true);
+        let quiet = timeout(Duration::from_secs(2), async {
+            loop {
+                match host.events.recv().await {
+                    Some(Event::Control(false)) => return "unticked",
+                    Some(Event::Finished(_)) | None => return "ended",
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert_eq!(quiet, Ok("unticked"));
+        let helper_heard = timeout(Duration::from_secs(2), async {
+            loop {
+                match first.events.recv().await {
+                    Some(Event::Control(true)) => return "control",
+                    Some(Event::Finished(_)) | None => return "ended",
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert!(helper_heard.is_err(), "the helper heard {helper_heard:?}");
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
 // Unattended: the same, for a computer listening for paired helpers.
 
 fn scratch(name: &str) -> PathBuf {
