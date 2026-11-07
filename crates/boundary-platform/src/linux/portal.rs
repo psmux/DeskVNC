@@ -223,7 +223,15 @@ impl Screen {
             .size()
             .map(|(w, h)| (w as f64, h as f64))
             .filter(|(w, h)| *w > 0.0 && *h > 0.0);
-        let video = Video::start(fd, stream.pipe_wire_node_id())?;
+        let video = match Video::start(fd, stream.pipe_wire_node_id()) {
+            Ok(video) => video,
+            Err(e) => {
+                // Dropping the session does not end it, and GNOME kept its
+                // sharing indicator on until Support quit.
+                close(&held);
+                return Err(e);
+            }
+        };
         if let Held::Remote(remote) = &held {
             let mut known = remote.size.lock().unwrap_or_else(|e| e.into_inner());
             *known = size.or_else(|| video.size().map(|(w, h)| (w as f64, h as f64)));
@@ -248,10 +256,41 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         self.video.stop();
-        let _ = match &self.held {
-            Held::Remote(r) => async_io::block_on(r.session.close()),
-            Held::Cast(_, session) => async_io::block_on(session.close()),
-        };
+        close(&self.held);
+    }
+}
+/// Ends the portal session, which takes GNOME's sharing indicator away.
+fn close(held: &Held) {
+    let _ = match held {
+        Held::Remote(r) => async_io::block_on(r.session.close()),
+        Held::Cast(_, session) => async_io::block_on(session.close()),
+    };
+}
+
+/// Something the PipeWire stream was told that may mean the screen is gone.
+#[derive(Debug)]
+enum Seen<'a> {
+    /// The stream moved to this state.
+    State(&'a pipewire::stream::StreamState),
+    /// The object with this id left the PipeWire graph.
+    Removed(u32),
+}
+/// Why the shared screen is gone, or `None` while it may still send
+/// pictures. GNOME removes the compositor's node, and leaves this stream
+/// paused with nothing linked to it, when the screen locks, when the portal
+/// session is closed and when the display changes mode. Waiting on it then
+/// left the helper looking at the last picture for as long as the session
+/// lasted.
+fn gone(node: u32, seen: Seen) -> Option<String> {
+    use pipewire::stream::StreamState;
+    match seen {
+        Seen::Removed(id) if id == node => Some(
+            "The shared screen went away: the desktop locked, turned the screen off or changed the display. Share it again to go on".into(),
+        ),
+        Seen::Removed(_) => None,
+        Seen::State(StreamState::Error(e)) => Some(format!("Screen sharing failed: {e}")),
+        Seen::State(StreamState::Unconnected) => Some("Screen sharing stopped".into()),
+        Seen::State(_) => None,
     }
 }
 
@@ -459,6 +498,15 @@ impl Drop for Video {
     }
 }
 
+/// Records the first reason the screen stopped and wakes whoever waits for
+/// a picture, so the session ends with that reason.
+fn stop(shared: &Shared, why: Option<String>) {
+    let Some(why) = why else { return };
+    let mut latest = shared.latest.lock().unwrap_or_else(|e| e.into_inner());
+    latest.stopped.get_or_insert(why);
+    shared.ready.notify_all();
+}
+
 fn run(
     fd: OwnedFd,
     node: u32,
@@ -489,15 +537,15 @@ fn run(
     )?;
     let on_frame = shared.clone();
     let on_state = shared.clone();
+    let on_remove = shared.clone();
+    let registry = core.get_registry_rc()?;
+    let _registry = registry
+        .add_listener_local()
+        .global_remove(move |id| stop(&on_remove, gone(node, Seen::Removed(id))))
+        .register();
     let _listener = stream
         .add_local_listener_with_user_data(VideoInfoRaw::new())
-        .state_changed(move |_, _, _, new| {
-            if let pipewire::stream::StreamState::Error(e) = new {
-                let mut latest = on_state.latest.lock().unwrap_or_else(|e| e.into_inner());
-                latest.stopped = Some(format!("Screen sharing failed: {e}"));
-                on_state.ready.notify_all();
-            }
-        })
+        .state_changed(move |_, _, _, new| stop(&on_state, gone(node, Seen::State(&new))))
         .param_changed(|_, info, id, param| {
             let Some(param) = param else { return };
             if id != ParamType::Format.as_raw() {
@@ -636,4 +684,46 @@ fn run(
     main_loop.run();
     let _ = stream.disconnect();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipewire::stream::StreamState;
+
+    #[test]
+    fn the_screen_is_gone_when_the_compositor_node_leaves() {
+        // What GNOME 46 did on lock and on a mode change: node 54 left the
+        // graph and this stream was only paused.
+        assert!(gone(54, Seen::Removed(54)).is_some());
+        assert!(gone(54, Seen::State(&StreamState::Paused)).is_none());
+        let shared = Shared::default();
+        stop(&shared, gone(54, Seen::Removed(54)));
+        let why = shared.latest.lock().unwrap().stopped.clone().unwrap();
+        assert!(why.contains("went away"), "{why}");
+    }
+
+    #[test]
+    fn other_objects_leaving_and_renegotiating_keep_the_screen() {
+        assert!(gone(54, Seen::Removed(60)).is_none());
+        assert!(gone(54, Seen::State(&StreamState::Connecting)).is_none());
+        assert!(gone(54, Seen::State(&StreamState::Streaming)).is_none());
+    }
+
+    #[test]
+    fn a_failed_or_unconnected_stream_stops_with_its_reason() {
+        let failed = gone(54, Seen::State(&StreamState::Error("no memory".into())));
+        assert_eq!(failed.as_deref(), Some("Screen sharing failed: no memory"));
+        assert!(gone(54, Seen::State(&StreamState::Unconnected)).is_some());
+    }
+
+    #[test]
+    fn the_first_reason_is_kept() {
+        let shared = Shared::default();
+        stop(&shared, gone(54, Seen::Removed(54)));
+        stop(&shared, gone(54, Seen::State(&StreamState::Unconnected)));
+        stop(&shared, None);
+        let why = shared.latest.lock().unwrap().stopped.clone().unwrap();
+        assert!(why.contains("went away"), "{why}");
+    }
 }
