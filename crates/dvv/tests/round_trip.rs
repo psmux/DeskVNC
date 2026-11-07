@@ -155,6 +155,49 @@ async fn a_ten_minute_wait_comes_back_inside_the_clamp() {
     );
 }
 
+/// A short wait reports the timeout it ran with, not the clamp, and what it
+/// observed as JSON fields rather than as Rust's Debug text.
+#[tokio::test]
+async fn a_short_wait_reports_its_own_timeout_and_a_structured_observation() {
+    let (_source, plane) = fake_plane();
+    let limb = open(&plane, "h_lab01", true);
+    let mut client = Client::connect(plane);
+
+    let waited = client
+        .tool(
+            "dvv_wait",
+            json!({ "limbId": limb, "until": "screen-changed", "timeoutMs": 300 }),
+        )
+        .await;
+    let body = structured(&waited);
+    assert_eq!(body["askedMs"], 300);
+    assert_eq!(body["clampedMs"], 300, "{body}");
+    assert_eq!(body["limitMs"], dvv::mcp::WAIT_CLAMP_MS);
+    assert!(
+        body["waitedMs"].as_u64().expect("measured") >= 250,
+        "{body}"
+    );
+    assert_eq!(body["observed"]["outcome"], "timed-out", "{body}");
+    assert!(body["observed"]["quietMs"].is_u64(), "{body}");
+
+    // A condition that already holds settles at once and says so.
+    let connected = client
+        .tool(
+            "dvv_wait",
+            json!({ "limbId": limb, "until": "connected", "timeoutMs": 3000 }),
+        )
+        .await;
+    let body = structured(&connected);
+    assert_eq!(body["settled"], true, "{body}");
+    assert_eq!(body["clampedMs"], 3000);
+    assert_eq!(body["observed"]["outcome"], "delivered", "{body}");
+    assert_eq!(body["observed"]["delivered"], true);
+    assert!(
+        body["waitedMs"].as_u64().expect("measured") < 3000,
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_method_is_a_protocol_error_and_a_refusal_is_not() {
     let (_source, plane) = fake_plane();

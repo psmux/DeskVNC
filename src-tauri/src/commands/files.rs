@@ -916,7 +916,7 @@ async fn agent_sidecar(app: &AppHandle, session_id: &str) -> Result<Arc<FilesEnt
     // `00 R19` on this path: an agent names a machine it is already attached
     // to and the shell decides which address, which port and which credential
     // that means, exactly as `limb.open` refuses an arbitrary address.
-    let (address, port, profile_id, window_label) = {
+    let (address, port, profile_id, window_label, ssh_settings) = {
         let app_state = app
             .try_state::<crate::state::AppState>()
             .ok_or_else(|| FileRefusal::unavailable("this build has no session registry"))?;
@@ -954,35 +954,50 @@ async fn agent_sidecar(app: &AppHandle, session_id: &str) -> Result<Arc<FilesEnt
                 })
             })
         };
-        let (port, profile_id) =
+        // The saved SSH host also says how it signs in: its terminal may use
+        // a key file, which the sidecar has to use too.
+        let (port, profile_id, ssh_settings) =
             match (entry.protocol() == vnc_core::ProtocolKind::Ssh, ssh_profile) {
-                (true, _) => (entry.port, entry.profile_id.clone()),
+                (true, _) => (
+                    entry.port,
+                    entry.profile_id.clone(),
+                    entry
+                        .profile_id
+                        .as_deref()
+                        .and_then(|id| app_state.store.get_host(id).ok().flatten())
+                        .and_then(|host| host.ssh_settings),
+                ),
                 // The saved SSH host carries both halves: the port it listens on
                 // and the credential recorded against it. Taking the port without
                 // the profile would authenticate the wrong machine's password at
                 // the right door.
-                (false, Some(ssh)) => (ssh.port, Some(ssh.id)),
-                (false, None) => (AGENT_SSH_PORT, entry.profile_id.clone()),
+                (false, Some(ssh)) => (ssh.port, Some(ssh.id), ssh.ssh_settings),
+                (false, None) => (AGENT_SSH_PORT, entry.profile_id.clone(), None),
             };
         (
             entry.address.clone(),
             port,
             profile_id,
             entry.window_label.clone(),
+            ssh_settings,
         )
     };
 
-    let auth = build_auth(app, AuthKind::Stored, None, profile_id.as_deref())
+    let (auth_kind, key_path) = sidecar_sign_in(ssh_settings.as_deref());
+    let auth = build_auth(app, auth_kind, key_path.as_deref(), profile_id.as_deref())
         .await
         .map_err(FileRefusal::unavailable)?;
+    // The user saved on the host, as its terminal signs in, and otherwise
+    // the same user as here.
+    let username = match stored_ssh_user(app, profile_id.as_deref()).await {
+        Some(user) => user,
+        None => local_username().map_err(FileRefusal::unavailable)?,
+    };
     let cfg = FileTransferConfig {
         ssh: SshConfig {
             host: address.clone(),
             port,
-            // The same "the same user as here" the Files panel uses, which is
-            // right for a personal machine and is the only guess available
-            // when nobody typed a user name.
-            username: local_username().map_err(FileRefusal::unavailable)?,
+            username,
             auth,
             connect_timeout_ms: 15_000,
         },
@@ -1049,6 +1064,39 @@ async fn agent_sidecar(app: &AppHandle, session_id: &str) -> Result<Arc<FilesEnt
             tracing::info!(session = %session_id, endpoint = %format!("{address}:{port}"), "sftp sidecar opened for an agent");
             Ok(entry)
         }
+    }
+}
+
+/// How an agent's sidecar signs in, read from the saved SSH host's settings,
+/// so it makes the same first choice the terminal on that host does
+/// (`ssh-core`'s options): the key file when one is set, the agent when the
+/// host says agent. A host with no SSH settings, which is every VNC host, or
+/// settings that will not parse, keeps the stored secret and then the agent.
+fn sidecar_sign_in(ssh_settings: Option<&str>) -> (AuthKind, Option<String>) {
+    use remote_core::options::SshAuthKind;
+    let Ok(Some(settings)) = vnc_store::SshSettings::parse(ssh_settings) else {
+        return (AuthKind::Stored, None);
+    };
+    let key_path = settings
+        .options
+        .key_path
+        .filter(|path| !path.trim().is_empty());
+    match (settings.options.auth, key_path) {
+        (SshAuthKind::Password, _) => (AuthKind::Stored, None),
+        (SshAuthKind::KeyFile, Some(path)) => (AuthKind::KeyFile, Some(path)),
+        _ => (AuthKind::Agent, None),
+    }
+}
+
+/// The SSH user saved for a host profile, when somebody typed one.
+async fn stored_ssh_user(app: &AppHandle, profile_id: Option<&str>) -> Option<String> {
+    let profile_id = profile_id?;
+    let state = app.try_state::<crate::state::AppState>()?;
+    let credentials = state.credentials.clone();
+    let lookup = profile_id.to_string();
+    match super::blocking(move || credentials.load(&lookup)).await {
+        Ok(Some(stored)) => stored.ssh_user.filter(|user| !user.trim().is_empty()),
+        _ => None,
     }
 }
 
@@ -1252,6 +1300,36 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_sidecar_signs_in_the_way_the_ssh_host_was_saved() {
+        let key = r#"{ "v": 1, "auth": "key-file", "keyPath": "C:\\keys\\id_test" }"#;
+        assert_eq!(
+            sidecar_sign_in(Some(key)),
+            (AuthKind::KeyFile, Some(r"C:\keys\id_test".to_string()))
+        );
+        assert_eq!(
+            sidecar_sign_in(Some(r#"{ "v": 1, "auth": "agent" }"#)),
+            (AuthKind::Agent, None)
+        );
+        assert_eq!(
+            sidecar_sign_in(Some(r#"{ "v": 1, "auth": "password" }"#)),
+            (AuthKind::Stored, None)
+        );
+    }
+
+    #[test]
+    fn an_agent_sidecar_without_ssh_settings_keeps_the_stored_secret() {
+        // A VNC host has no SSH settings: the stored secret, then the agent,
+        // as before. A key file with no path falls to the agent, which is
+        // what the terminal on that host tries next.
+        assert_eq!(sidecar_sign_in(None), (AuthKind::Stored, None));
+        assert_eq!(
+            sidecar_sign_in(Some(r#"{ "v": 1, "auth": "key-file" }"#)),
+            (AuthKind::Agent, None)
+        );
+        assert_eq!(sidecar_sign_in(Some("{not json")), (AuthKind::Stored, None));
+    }
 
     #[test]
     fn connect_outcome_uses_the_ipc_casing() {

@@ -31,7 +31,7 @@ use common::mock_rdp_server::{
     EGFX_SURFACE_AT, IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, MOCK_LICENCE, SERVER_DESKTOP, SHARE_ID,
     USER_CHANNEL_ID,
 };
-use common::{options_for, rdp_half, DEFAULT_TIMEOUT};
+use common::{dial, options_for, rdp_half, DEFAULT_TIMEOUT};
 use rdp_core::connection::{self, Connected, SecurityProtocol};
 use rdp_core::options::ResolvedOptions;
 use rdp_core::session::run_loop::{RunLoop, RunOutcome};
@@ -39,7 +39,6 @@ use rdp_core::transport::framer::Framer;
 use rdp_core::transport::writer::{self, WRITER_QUEUE};
 use rdp_core::RdpError;
 use remote_core::{ClientCommand, Credentials, RectPayload, SessionEvent};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use vnc_transport::TrustDecision;
@@ -828,20 +827,6 @@ async fn run_session_steps(
     drop(events);
     let drained = collector.await.expect("the collector finished");
     (server, drained, outcome)
-}
-
-/// Connect to the mock the way the product connects to a server.
-///
-/// The product dials through `vnc_transport::tcp::connect`, which sets
-/// TCP_NODELAY. A bare `TcpStream::connect` leaves Nagle on, and on Linux
-/// loopback Nagle holds a small write back until the previous one is acked,
-/// which a delayed ack puts tens of milliseconds out. Paced input written
-/// 8 ms apart then reaches the mock in one lump, and a timing test measures
-/// the harness rather than the client.
-async fn dial(addr: std::net::SocketAddr) -> TcpStream {
-    vnc_transport::tcp::connect(&addr.ip().to_string(), addr.port(), DEFAULT_TIMEOUT)
-        .await
-        .expect("the mock is up")
 }
 
 /// The legacy shape: one batch of commands, sent once the picture has

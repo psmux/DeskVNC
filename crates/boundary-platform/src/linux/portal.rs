@@ -9,6 +9,7 @@
 //! desktop allows that (GNOME and KDE do; wlroots chooses by its own config).
 use super::{Raw, keysym};
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use ashpd::desktop::inhibit::{InhibitFlags, InhibitOptions, InhibitProxy};
 use ashpd::desktop::remote_desktop::{
     Axis, DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions, StartOptions,
 };
@@ -16,7 +17,7 @@ use ashpd::desktop::screencast::{
     CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
     StartCastOptions, Stream as PortalStream,
 };
-use ashpd::desktop::{PersistMode, Session};
+use ashpd::desktop::{PersistMode, Request, Session};
 use ashpd::enumflags2::BitFlags;
 use boundary_session::Button;
 use std::future::Future;
@@ -50,6 +51,52 @@ async fn within<T>(
         )))
     })
     .await
+}
+
+/// Whether the screen is locked or blanked. GNOME refuses to start a remote
+/// desktop or screen cast session then ("Session creation inhibited"), and
+/// the portal passes that on as a bare failure with no reason, so this is
+/// asked after the portal fails. GNOME's own screensaver reports a blank
+/// screen as well as a locked one; logind's hint covers other desktops,
+/// which set it on lock.
+pub(crate) fn screen_asleep() -> bool {
+    async_io::block_on(async {
+        let Ok(session) = ashpd::zbus::Connection::session().await else {
+            return false;
+        };
+        let gnome = session
+            .call_method(
+                Some("org.gnome.ScreenSaver"),
+                "/org/gnome/ScreenSaver",
+                Some("org.gnome.ScreenSaver"),
+                "GetActive",
+                &(),
+            )
+            .await
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<bool>().ok());
+        if gnome == Some(true) {
+            return true;
+        }
+        let Ok(system) = ashpd::zbus::Connection::system().await else {
+            return false;
+        };
+        system
+            .call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1/session/auto",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.login1.Session", "LockedHint"),
+            )
+            .await
+            .ok()
+            .and_then(|reply| {
+                let value: ashpd::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+                bool::try_from(value).ok()
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Where the portal's restore token is kept between runs.
@@ -206,6 +253,8 @@ enum Held {
 pub(crate) struct Screen {
     held: Held,
     video: Video,
+    /// Holds the screen awake while it is shared; see [`keep_awake`].
+    _awake: Awake,
 }
 impl Screen {
     /// Ask the portal for the screen, and for input where it offers that.
@@ -223,12 +272,24 @@ impl Screen {
             .size()
             .map(|(w, h)| (w as f64, h as f64))
             .filter(|(w, h)| *w > 0.0 && *h > 0.0);
-        let video = Video::start(fd, stream.pipe_wire_node_id())?;
+        let video = match Video::start(fd, stream.pipe_wire_node_id()) {
+            Ok(video) => video,
+            Err(e) => {
+                // Dropping the session does not end it, and GNOME kept its
+                // sharing indicator on until Support quit.
+                close(&held);
+                return Err(e);
+            }
+        };
         if let Held::Remote(remote) = &held {
             let mut known = remote.size.lock().unwrap_or_else(|e| e.into_inner());
             *known = size.or_else(|| video.size().map(|(w, h)| (w as f64, h as f64)));
         }
-        Ok(Self { held, video })
+        Ok(Self {
+            held,
+            video,
+            _awake: keep_awake(),
+        })
     }
     pub fn remote(&self) -> Option<Arc<Remote>> {
         match &self.held {
@@ -248,10 +309,132 @@ impl Screen {
 impl Drop for Screen {
     fn drop(&mut self) {
         self.video.stop();
-        let _ = match &self.held {
-            Held::Remote(r) => async_io::block_on(r.session.close()),
-            Held::Cast(_, session) => async_io::block_on(session.close()),
-        };
+        close(&self.held);
+    }
+}
+
+/// What the inhibit asks the desktop to hold off: going idle, which blanks
+/// the screen and on GNOME takes the shared screen away from the helper.
+fn awake_flags() -> BitFlags<InhibitFlags> {
+    BitFlags::from_flag(InhibitFlags::Idle)
+}
+/// gnome-session's flag for the same thing.
+const GNOME_IDLE: u32 = 8;
+const REASON: &str = "A helper is connected to this screen";
+
+/// The app ID inhibits are held under. The portal works out the caller's ID
+/// from its systemd scope, which an app started from a terminal, a file
+/// manager or a service does not have, and then passes an empty one on.
+/// gnome-session refuses that ("Application ID not specified") while the
+/// portal still reports success, so the screen blanked anyway.
+static APP_ID: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+/// Name the app for the desktop, once, before any screen is shared.
+pub fn set_app_id(id: &'static str) {
+    let _ = APP_ID.set(id);
+}
+fn app_id() -> &'static str {
+    APP_ID.get().copied().unwrap_or("deskvnc")
+}
+
+/// The screen kept awake, until dropped.
+struct Awake {
+    portal: Option<Request<()>>,
+    gnome: Option<(ashpd::zbus::Connection, u32)>,
+}
+impl Drop for Awake {
+    fn drop(&mut self) {
+        async_io::block_on(async {
+            if let Some(request) = self.portal.take() {
+                let _ = request.close().await;
+            }
+            if let Some((bus, cookie)) = self.gnome.take() {
+                let _ = bus
+                    .call_method(
+                        Some("org.gnome.SessionManager"),
+                        "/org/gnome/SessionManager",
+                        Some("org.gnome.SessionManager"),
+                        "Uninhibit",
+                        &cookie,
+                    )
+                    .await;
+            }
+        });
+    }
+}
+
+/// Ask the desktop not to go idle while a helper is connected. Input from a
+/// helper with control counts as activity, but a helper who only watches
+/// sends none, so a view only session ended once the person at the computer
+/// stopped touching it and the screen blanked. Through the portal, and on
+/// GNOME also with gnome-session directly under this app's ID, since the
+/// portal's own request does nothing there when it cannot name the app.
+fn keep_awake() -> Awake {
+    async_io::block_on(async {
+        let portal = async {
+            InhibitProxy::new()
+                .await?
+                .inhibit(
+                    None,
+                    awake_flags(),
+                    InhibitOptions::default().set_reason(REASON),
+                )
+                .await
+        }
+        .await
+        .ok();
+        // gnome-session lets the inhibit go when this connection closes, so
+        // it is a connection of its own, held for as long as the inhibit.
+        let gnome = async {
+            let bus = ashpd::zbus::Connection::session().await.ok()?;
+            let reply = bus
+                .call_method(
+                    Some("org.gnome.SessionManager"),
+                    "/org/gnome/SessionManager",
+                    Some("org.gnome.SessionManager"),
+                    "Inhibit",
+                    &(app_id(), 0u32, REASON, GNOME_IDLE),
+                )
+                .await
+                .ok()?;
+            let cookie: u32 = reply.body().deserialize().ok()?;
+            Some((bus, cookie))
+        }
+        .await;
+        Awake { portal, gnome }
+    })
+}
+/// Ends the portal session, which takes GNOME's sharing indicator away.
+fn close(held: &Held) {
+    let _ = match held {
+        Held::Remote(r) => async_io::block_on(r.session.close()),
+        Held::Cast(_, session) => async_io::block_on(session.close()),
+    };
+}
+
+/// Something the PipeWire stream was told that may mean the screen is gone.
+#[derive(Debug)]
+enum Seen<'a> {
+    /// The stream moved to this state.
+    State(&'a pipewire::stream::StreamState),
+    /// The object with this id left the PipeWire graph.
+    Removed(u32),
+}
+/// Why the shared screen is gone, or `None` while it may still send
+/// pictures. GNOME removes the compositor's node, and leaves this stream
+/// paused with nothing linked to it, when the screen locks, when the portal
+/// session is closed and when the display changes mode. Waiting on it then
+/// left the helper looking at the last picture for as long as the session
+/// lasted.
+fn gone(node: u32, seen: Seen) -> Option<String> {
+    use pipewire::stream::StreamState;
+    match seen {
+        Seen::Removed(id) if id == node => Some(
+            "The shared screen went away: the desktop locked, turned the screen off or changed the display. Share it again to go on".into(),
+        ),
+        Seen::Removed(_) => None,
+        Seen::State(StreamState::Error(e)) => Some(format!("Screen sharing failed: {e}")),
+        Seen::State(StreamState::Unconnected) => Some("Screen sharing stopped".into()),
+        Seen::State(_) => None,
     }
 }
 
@@ -459,6 +642,15 @@ impl Drop for Video {
     }
 }
 
+/// Records the first reason the screen stopped and wakes whoever waits for
+/// a picture, so the session ends with that reason.
+fn stop(shared: &Shared, why: Option<String>) {
+    let Some(why) = why else { return };
+    let mut latest = shared.latest.lock().unwrap_or_else(|e| e.into_inner());
+    latest.stopped.get_or_insert(why);
+    shared.ready.notify_all();
+}
+
 fn run(
     fd: OwnedFd,
     node: u32,
@@ -489,15 +681,15 @@ fn run(
     )?;
     let on_frame = shared.clone();
     let on_state = shared.clone();
+    let on_remove = shared.clone();
+    let registry = core.get_registry_rc()?;
+    let _registry = registry
+        .add_listener_local()
+        .global_remove(move |id| stop(&on_remove, gone(node, Seen::Removed(id))))
+        .register();
     let _listener = stream
         .add_local_listener_with_user_data(VideoInfoRaw::new())
-        .state_changed(move |_, _, _, new| {
-            if let pipewire::stream::StreamState::Error(e) = new {
-                let mut latest = on_state.latest.lock().unwrap_or_else(|e| e.into_inner());
-                latest.stopped = Some(format!("Screen sharing failed: {e}"));
-                on_state.ready.notify_all();
-            }
-        })
+        .state_changed(move |_, _, _, new| stop(&on_state, gone(node, Seen::State(&new))))
         .param_changed(|_, info, id, param| {
             let Some(param) = param else { return };
             if id != ParamType::Format.as_raw() {
@@ -636,4 +828,62 @@ fn run(
     main_loop.run();
     let _ = stream.disconnect();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipewire::stream::StreamState;
+
+    #[test]
+    fn a_shared_screen_holds_off_idle_and_nothing_else() {
+        // Idle blanking took the screen away from a helper who only watched.
+        // Suspend and logout stay the person's own business.
+        assert_eq!(awake_flags(), BitFlags::from_flag(InhibitFlags::Idle));
+        assert_eq!(GNOME_IDLE, InhibitFlags::Idle as u32);
+    }
+
+    #[test]
+    fn the_inhibit_always_names_an_app() {
+        // gnome-session refuses an inhibit with an empty app ID.
+        assert!(!app_id().is_empty());
+        set_app_id("deskvnc-support");
+        assert_eq!(app_id(), "deskvnc-support");
+    }
+
+    #[test]
+    fn the_screen_is_gone_when_the_compositor_node_leaves() {
+        // What GNOME 46 did on lock and on a mode change: node 54 left the
+        // graph and this stream was only paused.
+        assert!(gone(54, Seen::Removed(54)).is_some());
+        assert!(gone(54, Seen::State(&StreamState::Paused)).is_none());
+        let shared = Shared::default();
+        stop(&shared, gone(54, Seen::Removed(54)));
+        let why = shared.latest.lock().unwrap().stopped.clone().unwrap();
+        assert!(why.contains("went away"), "{why}");
+    }
+
+    #[test]
+    fn other_objects_leaving_and_renegotiating_keep_the_screen() {
+        assert!(gone(54, Seen::Removed(60)).is_none());
+        assert!(gone(54, Seen::State(&StreamState::Connecting)).is_none());
+        assert!(gone(54, Seen::State(&StreamState::Streaming)).is_none());
+    }
+
+    #[test]
+    fn a_failed_or_unconnected_stream_stops_with_its_reason() {
+        let failed = gone(54, Seen::State(&StreamState::Error("no memory".into())));
+        assert_eq!(failed.as_deref(), Some("Screen sharing failed: no memory"));
+        assert!(gone(54, Seen::State(&StreamState::Unconnected)).is_some());
+    }
+
+    #[test]
+    fn the_first_reason_is_kept() {
+        let shared = Shared::default();
+        stop(&shared, gone(54, Seen::Removed(54)));
+        stop(&shared, gone(54, Seen::State(&StreamState::Unconnected)));
+        stop(&shared, None);
+        let why = shared.latest.lock().unwrap().stopped.clone().unwrap();
+        assert!(why.contains("went away"), "{why}");
+    }
 }

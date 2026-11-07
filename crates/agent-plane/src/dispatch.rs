@@ -1410,10 +1410,7 @@ impl AttachedLimb {
                 // which would be the plane inventing a value.
                 _ => Settlement::refuse(
                     id,
-                    Refusal::limb(
-                        RefusalCode::NotSupported,
-                        "this build's plane reads pixels and damage and is not handed a character grid; a text or cells read is owed by the terminal limb's own output path",
-                    ),
+                    Refusal::limb(RefusalCode::NotSupported, self.no_text_here()),
                 ),
             },
             IntentKind::Wait {
@@ -1449,6 +1446,22 @@ impl AttachedLimb {
                     ),
                 ),
             ),
+        }
+    }
+
+    /// Why a text read, or a text or exit condition, cannot be answered on
+    /// this limb, in the words that are true for what this limb is.
+    ///
+    /// A terminal limb used to be told it had "no character grid" and sent to
+    /// "the terminal limb on the same machine", which is itself. The grid a
+    /// terminal has lives in the window that draws it, and its output does not
+    /// reach this plane, so the sentence says that and names the tool that
+    /// does return a command's output.
+    fn no_text_here(&self) -> &'static str {
+        if self.inner.driver.perception().cells {
+            "this is a terminal limb, and its output is drawn in DeskVNCViewer's window and not handed to the agent plane in this build, so there is no text here to read or to wait for. Run the command with dvv_run instead: it opens a channel of its own and returns the whole output with the far side's exit status. dvv_term_send still types into this terminal"
+        } else {
+            "this limb is a desktop: it has no character grid and this build does no OCR, so a text read or a text or exit condition has no honest answer here. Look with dvv_screen, or run the command with dvv_run on an SSH limb for the same machine, which returns its output and its exit status"
         }
     }
 
@@ -1518,10 +1531,7 @@ impl AttachedLimb {
                 WaitUntil::Text(_) | WaitUntil::TextGone(_) | WaitUntil::Exit | _ => {
                     return Settlement::refuse(
                         id,
-                        Refusal::limb(
-                            RefusalCode::NotSupported,
-                            "this limb has no character grid and this build does no OCR, so there is no honest way to answer a text or exit condition here; ask the terminal limb on the same machine",
-                        ),
+                        Refusal::limb(RefusalCode::NotSupported, self.no_text_here()),
                     )
                 }
             }

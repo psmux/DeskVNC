@@ -6,11 +6,13 @@ mod attention;
 mod codes;
 mod install;
 mod journal;
+mod launcher;
 mod login;
 mod network;
 mod theme;
 mod tray;
 mod unattended;
+mod wake;
 
 use boundary_session::{
     Approval, Button, Event, HostOptions, Input, Key, Session, unattended::SecretKey,
@@ -26,6 +28,7 @@ fn main() -> eframe::Result {
         std::process::exit(code);
     }
     let background = flag("--background");
+    boundary_platform::set_app_id(APP_ID);
     // A copy started at sign in steps aside for one already running. Two
     // copies would listen as the same machine ID and keep pushing each other
     // off the relay, so neither could be reached. A copy that is quitting
@@ -48,14 +51,9 @@ fn main() -> eframe::Result {
     let _guard = runtime.enter();
     let fallback = std::env::var_os(FALLBACK_RENDERER).is_some();
     let result = eframe::run_native(
-        "Boundary",
+        APP_NAME,
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([980.0, 660.0])
-                .with_min_inner_size([820.0, 600.0])
-                // Started at sign in, the window waits hidden behind the tray
-                // icon. Where there is no tray it is minimized instead.
-                .with_visible(!background || !TRAY),
+            viewport: viewport(background),
             event_loop_builder: background_policy(background),
             renderer: if fallback {
                 eframe::Renderer::Wgpu
@@ -90,6 +88,28 @@ fn main() -> eframe::Result {
         }
     }
     result
+}
+/// The name a person sees, in the title bar, the dock and notifications.
+const APP_NAME: &str = "DeskVNC Support";
+/// The Wayland app ID and X11 class, which match `deskvnc-support.desktop`,
+/// so the dock finds that file and shows the app's name and icon.
+const APP_ID: &str = "deskvnc-support";
+
+/// The window as the system sees it: its title, the app ID the dock pairs
+/// with the .desktop file, and its icon where a window can carry one.
+fn viewport(background: bool) -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
+        .with_title(APP_NAME)
+        .with_app_id(APP_ID)
+        .with_inner_size([980.0, 660.0])
+        .with_min_inner_size([820.0, 600.0])
+        // Started at sign in, the window waits hidden behind the tray
+        // icon. Where there is no tray it is minimized instead.
+        .with_visible(!background || !TRAY);
+    match eframe::icon_data::from_png_bytes(launcher::ICON) {
+        Ok(icon) => builder.with_icon(icon),
+        Err(_) => builder,
+    }
 }
 /// Set for a copy that draws with wgpu because OpenGL was too old.
 const FALLBACK_RENDERER: &str = "DESKVNC_SUPPORT_WGPU";
@@ -138,6 +158,10 @@ fn other_mode(args: &[String]) -> Option<i32> {
             Ok(())
         };
         result
+    } else if cfg!(target_os = "linux") && args.iter().any(|a| a == "--install") {
+        // Put the app in the menu and give the dock its icon, for this
+        // person only: `./deskvnc-support --install` after unpacking.
+        launcher::install().map(|path| println!("Installed {}", path.display()))
     } else if args.iter().any(|a| a == "--uninstall-service") {
         #[cfg(windows)]
         let result = login::uninstall();
@@ -267,18 +291,13 @@ impl App {
         if let Ok(mut term) =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         {
+            let ctx = cc.egui_ctx.clone();
             tokio::spawn(async move {
                 term.recv().await;
                 TERMINATED.store(true, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
             });
         }
-        let context = cc.egui_ctx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                context.request_repaint();
-            }
-        });
         let (displays, status, error) = match boundary_platform::displays() {
             Ok(displays) => (displays, "Ready to connect".into(), false),
             Err(error) => (vec![], format!("Could not list displays: {error:#}"), true),
@@ -325,13 +344,13 @@ impl App {
             permission_check: Instant::now(),
             remote_focus: false,
             modifiers: egui::Modifiers::default(),
-            unattended: unattended::Unattended::new(),
+            unattended: unattended::Unattended::new(&cc.egui_ctx),
             helper_key,
             helper: None,
             approved_name: String::new(),
             paired: None,
             quitting: false,
-            tray: tray::Tray::new(),
+            tray: tray::Tray::new(&cc.egui_ctx),
             hide_frames: if std::env::args().any(|a| a == "--background") && TRAY {
                 3
             } else {
@@ -393,6 +412,7 @@ impl App {
         let events = std::mem::replace(&mut session.events, stand_in);
         session.events =
             attention::forward(events, ctx.clone(), self.focused.clone(), attention::notify);
+        wake::on_change(session.connectivity.clone(), ctx.clone());
         self.session = Some(session);
     }
     /// Connect to whatever is in the partner field: a short code, a full
@@ -412,7 +432,7 @@ impl App {
             ));
         } else if boundary_session::unattended::validate_machine_id(&target).is_ok() {
             let Some(key) = self.helper_key.clone() else {
-                self.status = "This copy of Boundary has no helper identity, so it cannot connect to an unattended computer".into();
+                self.status = "This copy of DeskVNC Support has no helper identity, so it cannot connect to an unattended computer".into();
                 self.error = true;
                 return;
             };
@@ -430,6 +450,21 @@ impl App {
         }
         self.ticket.clear();
         self.password.clear();
+    }
+    /// What the window has going on, for how often it draws.
+    fn load(&self) -> wake::Load {
+        let session = self.session.is_some() && !self.connected;
+        wake::Load {
+            connected: self.connected,
+            connecting: session && !self.hosting,
+            waiting: session && self.hosting,
+            codes: self.codes.busy(),
+            helpers: !self.unattended.active.is_empty(),
+            // macOS has no event for a permission being granted in System
+            // Settings, and the lock screen has none for handing back the ID.
+            checks: !(self.screen_permission && self.input_permission)
+                || self.unattended.needs_checks(),
+        }
     }
     fn poll(&mut self, ctx: &egui::Context) {
         if self.unattended.poll() {
@@ -611,7 +646,7 @@ impl App {
                     }
                     theme::small(
                         ui,
-                        "After granting it, quit and reopen Boundary if sharing still fails.",
+                        "After granting it, quit and reopen DeskVNC Support if sharing still fails.",
                     );
                 } else if self.displays.is_empty() {
                     ui.colored_label(theme::pal(ui.ctx()).danger, "No display found to share.");
@@ -881,7 +916,7 @@ impl App {
             theme::small(
                 ui,
                 format!(
-                    "Boundary {} · Attended and unattended support · No DeskVNC installation required",
+                    "DeskVNC Support {} · Attended and unattended support · No DeskVNC installation required",
                     env!("CARGO_PKG_VERSION")
                 ),
             );
@@ -950,7 +985,7 @@ impl App {
             ui.add_space(14.0);
             theme::small(
                 ui,
-                "Use End session above to disconnect. Closing Boundary also ends sharing.",
+                "Use End session above to disconnect. Closing DeskVNC Support also ends sharing.",
             );
         });
     }
@@ -1148,6 +1183,10 @@ impl eframe::App for App {
             tray.say(&line);
         }
         self.poll(ctx);
+        if self.hide_frames > 0 {
+            ctx.request_repaint();
+        }
+        wake::schedule(ctx, self.load());
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         egui::Panel::bottom("status")
@@ -1213,7 +1252,7 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Boundary")
+                RichText::new(APP_NAME)
                     .font(egui::FontId::new(
                         20.0,
                         egui::FontFamily::Name("system-bold".into()),
@@ -1238,6 +1277,7 @@ impl App {
         });
         ui.add_space(10.0);
         self.move_banner(ui);
+        self.unattended.login_notice(ui);
         self.unattended.banner(ui);
         self.unattended.prompt(ui.ctx(), self.input_permission);
         if self.connected && self.hosting {
@@ -1293,6 +1333,8 @@ impl App {
                     });
                     if !self.input_permission {
                         theme::small(ui, "Accessibility permission is needed for control. You can allow viewing now.");
+                    } else if let Some(hint) = boundary_platform::control_hint() {
+                        theme::small(ui, hint);
                     }
                 });
             if let Some(decision) = decision
@@ -1352,4 +1394,19 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
+        let window = viewport(false);
+        assert_eq!(window.title.as_deref(), Some("DeskVNC Support"));
+        // The dock matches this to deskvnc-support.desktop for the icon.
+        assert_eq!(window.app_id.as_deref(), Some("deskvnc-support"));
+        let icon = window.icon.expect("the window carries the app's icon");
+        assert_eq!((icon.width, icon.height), (256, 256));
+    }
 }

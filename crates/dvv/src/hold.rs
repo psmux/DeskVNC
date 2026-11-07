@@ -265,7 +265,7 @@ pub async fn run(plane: Arc<Plane>, idle: Duration) -> i32 {
     // Close what is still open, so the application sees the attachment let go
     // rather than an agent that hung up holding the wheel.
     for limb in plane.limbs() {
-        let _ = plane.close(&limb.limb_id);
+        let _ = plane.let_go(&limb.limb_id);
     }
     let _ = std::fs::remove_file(&path);
     0
@@ -332,7 +332,7 @@ pub async fn run(plane: Arc<Plane>, idle: Duration) -> i32 {
         }
     }
     for limb in plane.limbs() {
-        let _ = plane.close(&limb.limb_id);
+        let _ = plane.let_go(&limb.limb_id);
     }
     0
 }

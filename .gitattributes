@@ -1,3 +1,6 @@
 # Tauri rewrites Cargo manifests with LF. Keep Windows checkouts consistent so
 # preparing a release does not produce a false dirty source stamp.
 *.toml text eol=lf
+# Shipped as is in the Linux tarball, where a carriage return would end up
+# inside every value.
+*.desktop text eol=lf

@@ -317,6 +317,10 @@ async fn live_scan_of_the_local_subnet_lists_neighbours_only() {
 /// The on-demand deep probe against a genuine server: it completes the version
 /// handshake, reads the security-type list, and closes **without**
 /// authenticating.
+///
+/// A server that refuses this client (TightVNC with loopback disabled, probed
+/// on 127.0.0.1) is reported as a skip with the server's reason. That is the
+/// server's policy, and the probe has done its job by bringing the reason back.
 #[tokio::test]
 async fn live_deep_probe_reads_security_types_without_authenticating() {
     let what = "live_deep_probe_reads_security_types_without_authenticating";
@@ -325,9 +329,15 @@ async fn live_deep_probe_reads_security_types_without_authenticating() {
     };
     let addr = target();
 
-    let types = Discovery::deep_probe(addr)
-        .await
-        .expect("deep probe must succeed against a live server");
+    let types = match Discovery::deep_probe(addr).await {
+        Ok(types) => types,
+        Err(vnc_discovery::Error::Refused { reason, .. }) => {
+            assert!(!reason.is_empty(), "a refusal must carry a reason");
+            eprintln!("SKIP {what}: {addr} refused the connection: {reason}");
+            return;
+        }
+        Err(e) => panic!("deep probe must succeed against a live server: {e}"),
+    };
     eprintln!("LIVE deep_probe {addr}: security types {types:?}");
     assert!(!types.is_empty(), "a live server must offer something");
 
@@ -426,26 +436,50 @@ async fn live_mdns_browse_runs_end_to_end() {
         }
     }
 
-    // One machine, one row: a single instance resolving to v4 + v6 +
+    // One service, one row: a single instance resolving to v4 + v6 +
     // link-local must not produce several entries. Before the fix this Mac
     // alone produced eight. Checked on the rows the app shows, because the
     // raw stream legitimately repeats an instance that resolved twice.
+    //
+    // A service is a name on a port, not a name. One machine can advertise
+    // two `_rfb._tcp` services under the same name (Screen Sharing on 5900
+    // and Boundary on 5940), and those are two rows in the app, keyed by
+    // address and port, so they must stay two rows here.
     eprintln!(
         "LIVE mDNS: {} raw sighting(s), {} row(s) after the registry",
         hosts.len(),
         rows.len()
     );
-    let mut names: Vec<String> = rows.iter().filter_map(|h| h.hostname.clone()).collect();
-    names.sort();
+    let mut services: Vec<(String, u16)> = rows
+        .iter()
+        .filter_map(|h| Some((h.hostname.as_ref()?.to_lowercase(), h.port)))
+        .collect();
+    services.sort();
     let unique = {
-        let mut n = names.clone();
-        n.dedup();
-        n
+        let mut s = services.clone();
+        s.dedup();
+        s
     };
     assert_eq!(
-        names, unique,
-        "each mDNS instance must appear at most once per browse: {names:?}"
+        services, unique,
+        "each mDNS service must appear at most once per browse: {services:?}"
     );
+    // And the registry must not fold one name's second service into its
+    // first: for every name the app lists, each port the raw stream saw under
+    // that name is a row of its own. (Names the registry drops outright, such
+    // as this machine's own, are out of scope here.)
+    for h in &hosts {
+        let Some(name) = h.hostname.as_ref().map(|n| n.to_lowercase()) else {
+            continue;
+        };
+        if unique.iter().any(|(n, _)| *n == name) {
+            assert!(
+                unique.contains(&(name.clone(), h.port)),
+                "{name} on port {} was advertised but has no row of its own: {unique:?}",
+                h.port
+            );
+        }
+    }
 
     // Cancellation must actually stop the browse: nothing new after a beat.
     tokio::time::sleep(Duration::from_millis(300)).await;
