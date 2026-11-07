@@ -305,6 +305,21 @@ pub struct SessionFacts {
     /// helper use the mouse and keyboard. `None` until the computer has said.
     /// Kept so a window that started listening after it was said can ask.
     pub control: Option<bool>,
+    /// The last text the remote machine put on its clipboard, as the session
+    /// reported it (`SessionEvent::ClipboardText`), and when. `None` until the
+    /// machine has sent one. Kept for the agent plane's `clipboard.read`: the
+    /// webview gets the same event, and an agent has no webview.
+    pub remote_clipboard: Option<RemoteClipboard>,
+}
+
+/// Text that came from a remote machine's clipboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteClipboard {
+    pub text: String,
+    /// Counts every arrival on this session, so a reader can tell text that
+    /// came after it asked from text that was already there.
+    pub seq: u64,
+    pub at: std::time::Instant,
 }
 
 impl Default for SessionFacts {
@@ -317,6 +332,7 @@ impl Default for SessionFacts {
             size: None,
             tools: false,
             control: None,
+            remote_clipboard: None,
         }
     }
 }

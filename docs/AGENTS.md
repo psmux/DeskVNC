@@ -36,8 +36,11 @@ Three properties separate it from the version a person writes in an afternoon:
 
 - **stdio**, for agents that spawn a subprocess. This is the default. `dvv`
   reaches the application over a unix socket on macOS and Linux, and over a
-  named pipe on Windows (`\\.\pipe\deskvncviewer-agent-<user>`) whose ACL
-  admits only the user who started DeskVNCViewer.
+  named pipe on Windows (`\\.\pipe\deskvncviewer-agent-<user>-s<session>`)
+  whose ACL admits only the user who started DeskVNCViewer. There is one per
+  Windows session, so a viewer in an RDP login serves that login's agents and
+  the console's viewer serves the console's. A `dvv` started over SSH (session
+  0, where no viewer can run) reaches the console's.
 - **HTTP**, for agents that cannot. It is off by default, binds to loopback,
   always requires a bearer token, checks `Origin`, and refuses to start rather
   than start without a token.
