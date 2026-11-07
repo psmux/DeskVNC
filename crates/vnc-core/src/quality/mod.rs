@@ -528,6 +528,12 @@ pub fn settings_for(preset: QualityPreset) -> QualitySettings {
 /// in preference order, followed by the pseudo-encodings the client always
 /// wants, plus the JPEG-quality and compression-level pseudo-encodings.
 pub fn encodings_for(settings: &QualitySettings, caps: &ServerCapabilities) -> Vec<i32> {
+    // An Apple encrypted session gets its own short list whatever the
+    // quality: it must never advertise an encoding the client cannot decode,
+    // and the quality pseudo-encodings mean nothing to a Mac.
+    if caps.apple_session {
+        return crate::apple::session_encodings();
+    }
     let mut v = Vec::with_capacity(24);
 
     // Real encodings, most preferred first.

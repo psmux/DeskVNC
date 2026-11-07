@@ -13,7 +13,8 @@
 //! | [`error`]    | Error taxonomy + transient/fatal classification             |
 //! | [`pixel`]    | Framebuffer and damage tracking, plus a re-export of `remote-pixel` |
 //! | [`proto`]    | RFB handshake, message framing, read/write loops            |
-//! | [`security`] | Authentication: VncAuth, VeNCrypt, RA2, Apple DH, MSLogonII |
+//! | [`security`] | Authentication: VncAuth, VeNCrypt, RA2, Apple DH and SRP, MSLogonII |
+//! | [`apple`]    | macOS Screen Sharing's encrypted session and messages       |
 //! | [`encodings`]| Rect decoders: Raw, CopyRect, Hextile, zlib, Tight, ZRLE    |
 //! | [`input`]    | Keysym mapping, scancodes, pointer encoding                 |
 //! | [`clipboard`]| Legacy + Extended Clipboard state machine                   |
@@ -35,6 +36,7 @@
 // enforced by the compiler rather than by review.
 #![forbid(unsafe_code)]
 
+pub mod apple;
 pub mod clipboard;
 pub mod encodings;
 pub mod error;

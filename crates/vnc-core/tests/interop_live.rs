@@ -31,6 +31,8 @@ use vnc_core::types::{ConnectOptions, SecurityType};
 
 /// Apple Remote Desktop / Screen Sharing Diffie-Hellman authentication.
 const SEC_APPLE_DH: u8 = 30;
+/// macOS Screen Sharing SRP with the user name RSA encrypted.
+const SEC_APPLE_RSA_SRP: u8 = 33;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -189,7 +191,7 @@ async fn live_version_negotiation_is_accepted() {
 // ---------------------------------------------------------------------------
 
 /// The security-type list is read successfully; on macOS it contains Apple's
-/// type 30, and our selector picks `AppleDh` for that offer.
+/// types 30 and 33, and our selector picks type 33 for that offer.
 #[tokio::test]
 async fn live_security_offer_and_selection() {
     let Some((mut stream, banner)) = connect_live("live_security_offer_and_selection").await else {
@@ -224,11 +226,12 @@ async fn live_security_offer_and_selection() {
             offered.contains(&SEC_APPLE_DH),
             "macOS Screen Sharing must offer Apple DH (30); got {offered:?}"
         );
-        assert_eq!(
-            chosen,
-            SecurityType::AppleDh,
-            "Apple DH must win this offer: {offered:?}"
-        );
+        let expected = if offered.contains(&SEC_APPLE_RSA_SRP) {
+            SecurityType::AppleRsaSrp
+        } else {
+            SecurityType::AppleDh
+        };
+        assert_eq!(chosen, expected, "selection for {offered:?}");
         // VncAuth is commonly offered alongside; it must lose, and must stay
         // gated behind the insecure opt-in.
         if offered.contains(&2) {
@@ -279,39 +282,38 @@ async fn live_connection_closes_cleanly_without_authenticating() {
 // ---------------------------------------------------------------------------
 
 /// A regression pin for the offer observed from macOS Screen Sharing
-/// (`[30, 33, 36, 2, 35]`): types 33/35/36 are Apple extensions we do not
-/// implement and must be ignored, 30 must beat 2, and the choice must not need
-/// the insecure opt-in. Runs everywhere, no server required.
+/// (`[30, 33, 36, 2, 35]`): 33 wins, 30 comes next and 36 after it, 35
+/// (Kerberos) is not implemented and is ignored, and the choice needs no
+/// insecure opt-in. Runs everywhere, no server required.
 #[test]
 fn apple_offer_selection_is_pinned() {
     let offered = [30u8, 33, 36, 2, 35];
     let opts = ConnectOptions::vnc("mac.local", 5900);
     assert!(!opts.vnc_options().unwrap().allow_insecure);
     assert_eq!(
-        select_security_type(&offered, &opts).expect("Apple DH is usable"),
-        SecurityType::AppleDh
+        select_security_type(&offered, &opts).expect("Apple SRP is usable"),
+        SecurityType::AppleRsaSrp
     );
 
     // Order must not matter.
     let shuffled = [2u8, 35, 36, 33, 30];
     assert_eq!(
         select_security_type(&shuffled, &opts).unwrap(),
+        SecurityType::AppleRsaSrp
+    );
+
+    // Without 33, type 30 is preferred to 36, and 36 to VncAuth.
+    assert_eq!(
+        select_security_type(&[30u8, 36, 2, 35], &opts).unwrap(),
         SecurityType::AppleDh
     );
-
-    // Without type 30 the same offer falls back to VncAuth, which now connects
-    // without any opt-in (only `None` is gated), the client has to work
-    // against servers that offer nothing better.
-    let no_apple = [33u8, 36, 2, 35];
     assert_eq!(
-        select_security_type(&no_apple, &opts).unwrap(),
-        SecurityType::VncAuth
+        select_security_type(&[36u8, 2, 35], &opts).unwrap(),
+        SecurityType::AppleSrp
     );
 
-    for t in [33u8, 35, 36] {
-        assert!(
-            !vnc_core::security::is_supported(SecurityType::from_wire(t)),
-            "type {t} is an Apple extension we deliberately do not implement"
-        );
-    }
+    assert!(
+        !vnc_core::security::is_supported(SecurityType::from_wire(35)),
+        "type 35 (Kerberos) is not implemented"
+    );
 }

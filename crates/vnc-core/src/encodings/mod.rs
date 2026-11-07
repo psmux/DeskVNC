@@ -182,6 +182,9 @@ pub struct DecoderState {
     colour_map: Option<ColourMap>,
     /// H.264 decoder contexts, keyed by rect geometry (PRD/02 §2.3).
     h264: h264::H264Contexts,
+    /// Cursor shapes and the inflater for macOS Screen Sharing's cursor
+    /// rectangles.
+    apple_cursor: crate::apple::wire::CursorCache,
 }
 
 impl DecoderState {
@@ -198,7 +201,13 @@ impl DecoderState {
             zlib_stream: ZlibStream::new(),
             colour_map: None,
             h264: h264::H264Contexts::new(),
+            apple_cursor: Default::default(),
         }
+    }
+
+    /// The Apple cursor cache, for the pseudo rect reader.
+    pub fn apple_cursor_mut(&mut self) -> &mut crate::apple::wire::CursorCache {
+        &mut self.apple_cursor
     }
 
     /// Mid-session SetPixelFormat. Deliberately does NOT touch the zlib

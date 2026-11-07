@@ -513,6 +513,9 @@ pub(crate) struct RunLoop {
     /// it, so a button held at the moment focus went away stayed held with no
     /// state anywhere to release it from.
     last_mask: u16,
+    /// macOS Screen Sharing's encrypted session, when this is one. The server
+    /// pushes updates on its own there, so no requests are pipelined.
+    apple: Option<crate::apple::AppleSession>,
     /// Continuous updates negotiated and switched on.
     cu_active: bool,
     /// An EnableContinuousUpdates(false) of ours is unacknowledged, sent at
@@ -745,6 +748,7 @@ impl RunLoop {
             pressed: HashMap::new(),
             last_pos: None,
             last_mask: 0,
+            apple: None,
             cu_active: false,
             cu_disable_pending: None,
             cu_off_for_pacing: false,
@@ -793,6 +797,58 @@ impl RunLoop {
 
     fn full_rect(&self) -> Rect {
         Rect::new(0, 0, self.fb_width, self.fb_height)
+    }
+
+    /// Run this loop as a macOS Screen Sharing encrypted session.
+    pub(crate) fn set_apple_session(&mut self, session: crate::apple::AppleSession) {
+        self.apple = Some(session);
+    }
+
+    /// The pointer position to put on the wire for a framebuffer position.
+    fn wire_pointer(&self, x: u16, y: u16) -> (u16, u16) {
+        match &self.apple {
+            Some(a) => a.map_pointer(x, y, (self.fb_width, self.fb_height)),
+            None => (x, y),
+        }
+    }
+
+    /// Throw away the rest of the current record. Inside Apple's record layer
+    /// a record never holds two messages, and the reader never holds more
+    /// than one record, so this skips a message we cannot parse without
+    /// losing our place in the stream.
+    fn skip_apple_record(&mut self, msg_type: u8) {
+        use tokio::io::AsyncBufRead;
+        let n = self.reader.buffer().len();
+        Pin::new(&mut self.reader).consume(n);
+        tracing::debug!(msg_type, skipped = n, "skipped an unknown Apple message");
+    }
+
+    /// AppleDisplayLayout: follow the new geometry, then ask for the picture
+    /// again and re-arm server pushed updates, which the Mac needs after
+    /// every layout message, changed or not.
+    async fn handle_apple_layout(
+        &mut self,
+        layout: crate::apple::wire::DisplayLayout,
+        events: &mpsc::Sender<SessionEvent>,
+    ) -> Result<()> {
+        if let Some((backing, logical)) = layout.sizes() {
+            tracing::info!(
+                ?backing,
+                ?logical,
+                displays = layout.displays.len(),
+                "Mac display layout"
+            );
+            self.apply_resize(backing.0, backing.1, events).await?;
+            if let Some(a) = self.apple.as_mut() {
+                a.logical = Some(logical);
+            }
+        }
+        let full = self.full_rect();
+        let msg = messages::framebuffer_update_request(false, full);
+        self.send(&msg).await?;
+        let msg = crate::apple::wire::auto_framebuffer_update(full);
+        self.send(&msg).await?;
+        Ok(())
     }
 
     async fn send(&mut self, bytes: &[u8]) -> Result<()> {
@@ -968,6 +1024,27 @@ impl RunLoop {
                 Ok(())
             }
             server_msg::SERVER_FENCE => self.handle_server_fence().await,
+            crate::apple::wire::server_msg::MISC_STATUS if self.apple.is_some() => {
+                let cmd = crate::apple::wire::read_misc_status(&mut self.reader).await?;
+                match cmd {
+                    crate::apple::wire::misc::HEARTBEAT => {}
+                    crate::apple::wire::misc::CLIPBOARD_CHANGED => {
+                        tracing::debug!("the clipboard on the Mac changed")
+                    }
+                    other => tracing::debug!(cmd = other, "Mac status message"),
+                }
+                Ok(())
+            }
+            crate::apple::wire::server_msg::CLIPBOARD_SEND if self.apple.is_some() => {
+                if let Some(text) = crate::apple::wire::read_clipboard(&mut self.reader).await? {
+                    emit(events, SessionEvent::ClipboardText(text)).await?;
+                }
+                Ok(())
+            }
+            other if self.apple.is_some() => {
+                self.skip_apple_record(other);
+                Ok(())
+            }
             other => Err(VncError::Protocol(format!(
                 "unknown server message type {other}"
             ))),
@@ -1445,6 +1522,25 @@ impl RunLoop {
             PseudoRect::ExtendedMouseButtonsCapable => {
                 self.caps.supports_extended_mouse_buttons = true;
             }
+            PseudoRect::AppleRekey(payload) => match &self.apple {
+                Some(a) => {
+                    a.rekey.rekey(&payload)?;
+                }
+                None => {
+                    return Err(VncError::Protocol(
+                        "rekey outside an Apple encrypted session".into(),
+                    ))
+                }
+            },
+            PseudoRect::AppleLayout(layout) => self.handle_apple_layout(layout, events).await?,
+            PseudoRect::AppleInputSource(source) => {
+                tracing::info!(
+                    layout = %source.id,
+                    secure = source.secure,
+                    "Mac keyboard input source"
+                );
+            }
+            PseudoRect::AppleIgnored => {}
         }
         Ok(false)
     }
@@ -1781,7 +1877,8 @@ impl RunLoop {
                     // told about.
                     self.last_mask = 0;
                 } else {
-                    let msg = crate::input::encode_pointer_event(x, y, button_mask);
+                    let (wx, wy) = self.wire_pointer(x, y);
+                    let msg = crate::input::encode_pointer_event(wx, wy, button_mask);
                     self.send(&msg).await?;
                     // Recorded AFTER the send, so a write that failed does not
                     // leave us believing the server knows about a button it
@@ -2232,6 +2329,7 @@ impl RunLoop {
             // socket is going away, and we must not be left believing a
             // button is still held on a server we can no longer talk to.
             self.last_mask = 0;
+            let (x, y) = self.wire_pointer(x, y);
             let msg = crate::input::encode_pointer_event(x, y, 0);
             self.send(&msg).await?;
         }
@@ -2425,7 +2523,7 @@ impl RunLoop {
     /// server saw the message, and letting each of them pipeline a request is
     /// how one outstanding request becomes five.
     fn pacing_requests(&self) -> bool {
-        !self.cu_active && self.cu_disable_pending.is_none()
+        !self.cu_active && self.cu_disable_pending.is_none() && self.apple.is_none()
     }
 
     /// Restart the one-outstanding-incremental-request pipeline after a
