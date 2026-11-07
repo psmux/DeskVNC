@@ -53,6 +53,13 @@
 //!   screen capture, so the client asks again after the first desktop size
 //!   announcement. Types 30, 33 and 36 all give the full picture, and a
 //!   disconnect closes cleanly on both sides.
+//! * After the first picture a macOS 26 Mac sharing its real displays
+//!   pushes nothing on its own, AutoFrameBufferUpdate or not: its clock and
+//!   windows changed for minutes and no update came. It answers update
+//!   requests, but keeps only the last one, so a one pixel request narrowed
+//!   every later answer to a 3x3 corner and an incremental request sent
+//!   behind a full one cancelled the full picture. The session now pulls,
+//!   one incremental request at a time, after the full picture is in.
 //! * Clipboard, as Apple's client does it: the Mac sends MiscStatus 2 when
 //!   its pasteboard changes, the viewer answers with ClipboardFetch
 //!   (`0b 00 00 00 00 00 00 00`), and the Mac sends a ClipboardSend with the

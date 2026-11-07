@@ -651,9 +651,31 @@ async fn serve(
         }
         let m = fbu(&[(0, 0, 4, 4, 0, raw_pixels(4, 4, [0, 0, 255, 0]))]);
         s.write_all(&tx.seal(&m)).await.unwrap();
+
+        // Then the screen changes at (8, 8). Like a real Mac this server
+        // pushes nothing on its own and keeps only the last update request:
+        // the change goes out in answer to a request that covers it, and a
+        // request for a few pixels in the corner gets just that corner.
+        let mut change_sent = false;
         while let Some(c) = read_record(s).await {
             let Some(body) = rx.open(&c) else { break };
-            seen.lock().records.push(body);
+            let request = body.len() == 10 && body[0] == 3;
+            seen.lock().records.push(body.clone());
+            if !request {
+                continue;
+            }
+            let word = |i: usize| u16::from_be_bytes([body[i], body[i + 1]]);
+            let (x, y, w, h) = (word(2), word(4), word(6), word(8));
+            let covers = x <= 8 && y <= 8 && x + w >= 10 && y + h >= 10;
+            let m = if covers && !change_sent {
+                change_sent = true;
+                fbu(&[(8, 8, 2, 2, 0, raw_pixels(2, 2, [0, 255, 0, 0]))])
+            } else if !covers {
+                fbu(&[(0, 0, 3, 3, 0, raw_pixels(3, 3, [0, 0, 255, 0]))])
+            } else {
+                continue;
+            };
+            s.write_all(&tx.seal(&m)).await.unwrap();
         }
         return;
     }
@@ -944,11 +966,17 @@ async fn type_33_session_end_to_end() {
     assert_eq!(&r[1][..2], &[3, 0], "a non-incremental request");
     assert_eq!(r[2][0], 0x09, "AutoFrameBufferUpdate");
     assert_eq!(r[3], apple_wire::auto_pasteboard(true));
-    // Server pushed updates: the client never polls with an incremental
-    // request.
+    // A Mac sharing its real displays does not push changes, so the client
+    // pulls with incremental requests once a picture is in, and never sends
+    // the one pixel probe that would narrow the Mac's updates.
     assert!(
-        !r.iter().any(|m| m.len() == 10 && m[0] == 3 && m[1] == 1),
-        "incremental FramebufferUpdateRequest sent in an auto update session"
+        r.iter().any(|m| m.len() == 10 && m[0] == 3 && m[1] == 1),
+        "no incremental FramebufferUpdateRequest; the picture would freeze"
+    );
+    assert!(
+        !r.iter()
+            .any(|m| m.len() == 10 && m[0] == 3 && m[6..10] == [0, 1, 0, 1]),
+        "a one pixel probe went to the Mac"
     );
     // SetEncodings lists only what the client decodes, zlib first.
     let encs: Vec<i32> = r[0][4..]
@@ -984,6 +1012,44 @@ async fn type_36_session_end_to_end() {
     );
     assert_eq!(seen.records[0][0], 2, "SetEncodings opens the record layer");
     assert!(!seen.records.iter().any(|m| m[0] == 0x1d));
+}
+
+/// The picture keeps changing after the first frame. A Mac pushes nothing
+/// on its own and keeps only the last update request, so the viewer must
+/// pull with incremental requests once the full picture is in, and must not
+/// send the one pixel round trip probe that narrowed a real Mac's updates to
+/// a corner and froze the picture.
+#[tokio::test]
+async fn the_picture_keeps_updating_after_the_first_frame() {
+    let mac = FakeMac::start(Login::Srp36, PASSWORD).await;
+    let mut o = session_options(mac.port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let changed = events
+        .wait(
+            Duration::from_secs(5),
+            "the change at (8, 8)",
+            |e| match e {
+                SessionEvent::FramebufferUpdate { damage, .. }
+                    if damage.x == 8 && damage.y == 8 =>
+                {
+                    Some(*damage)
+                }
+                _ => None,
+            },
+        )
+        .await;
+    assert_eq!((changed.width, changed.height), (2, 2));
+    send(&handle, ClientCommand::Disconnect).await;
+    let seen = mac.seen.lock();
+    assert!(
+        !seen
+            .records
+            .iter()
+            .any(|m| m.len() == 10 && m[0] == 3 && m[6..10] == [0, 1, 0, 1]),
+        "a one pixel probe went to the Mac"
+    );
 }
 
 /// A wrong password: the fake Mac refuses M1 with an ordinary failure result,

@@ -4,9 +4,11 @@
 //! the client sends a short cleartext prelude, the server answers it with a
 //! rekey that carries the session's AES key, and from then on every message
 //! in both directions travels inside the record layer in [`record`]. Inside
-//! it the client describes its display, picks encodings and asks the server
-//! to push updates on its own, and the server sends Apple's metadata
-//! rectangles and messages, parsed in [`wire`], alongside ordinary RFB.
+//! it the client picks encodings, asks for the whole picture and then pulls
+//! changes with ordinary incremental update requests (see
+//! [`AppleSession::full_request_pending`] for why it does not rely on server
+//! pushed updates), and the server sends Apple's metadata rectangles and
+//! messages, parsed in [`wire`], alongside ordinary RFB.
 //!
 //! ```text
 //! C->S ClientInit 0xC1            S->C ServerInit
@@ -166,6 +168,20 @@ pub struct AppleSession {
     /// The logical size pointer positions are given in, when the layout says
     /// it differs from the framebuffer.
     pub logical: Option<(u16, u16)>,
+    /// A full (non incremental) update request is out and its picture has
+    /// not arrived yet.
+    ///
+    /// A Mac keeps one update request, the last one it was sent, rather than
+    /// the union of all of them: an incremental request sent behind a full
+    /// one cancels the full picture, and a one pixel request narrows every
+    /// later update to that pixel. Nor does it push changes on its own after
+    /// AutoFrameBufferUpdate when the viewer shares its real displays (no
+    /// SetDisplayConfiguration): a macOS 26 Mac sent nothing after the first
+    /// picture for minutes while its clock and windows changed. So the
+    /// session pulls with ordinary incremental requests, one at a time, and
+    /// holds them back while a full request waits for its picture. Starts
+    /// true because the opening sends one.
+    pub full_request_pending: bool,
 }
 
 impl AppleSession {
@@ -174,6 +190,7 @@ impl AppleSession {
             rekey,
             rearmed_after_announce: false,
             logical: None,
+            full_request_pending: true,
         }
     }
 
