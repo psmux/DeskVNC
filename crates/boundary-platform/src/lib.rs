@@ -11,6 +11,14 @@ mod dxgi;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::notify::{Notification, notify};
+/// Name the app to the desktop, for what it holds while a screen is
+/// shared. Linux only; elsewhere there is nothing to name.
+pub fn set_app_id(id: &'static str) {
+    #[cfg(target_os = "linux")]
+    linux::portal::set_app_id(id);
+    #[cfg(not(target_os = "linux"))]
+    let _ = id;
+}
 #[cfg(windows)]
 mod mf;
 #[cfg(target_os = "macos")]

@@ -28,6 +28,7 @@ fn main() -> eframe::Result {
         std::process::exit(code);
     }
     let background = flag("--background");
+    boundary_platform::set_app_id(APP_ID);
     // A copy started at sign in steps aside for one already running. Two
     // copies would listen as the same machine ID and keep pushing each other
     // off the relay, so neither could be reached. A copy that is quitting
