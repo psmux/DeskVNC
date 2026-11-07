@@ -139,13 +139,18 @@ pub fn session_encodings() -> Vec<i32> {
     v
 }
 
-/// The messages that open the record layer, in the order the native viewer
-/// sends them: display configuration, encodings, a full update request, and
-/// the switch to server pushed updates. Each element is one message.
+/// The messages that open the record layer: encodings, a full update
+/// request, the switch to server pushed updates, and clipboard sync. Each
+/// element is one message.
+///
+/// No SetDisplayConfiguration. A macOS 26 Mac answers one by adding a virtual
+/// display for the session (its log: `set virtual display count to 1`),
+/// which widens the desktop beside the real screens and can move the user's
+/// windows. Without it the Mac shares its real displays at their own size.
+/// The builder stays for a virtual display mode.
 pub fn opening_messages(width: u16, height: u16) -> Vec<Vec<u8>> {
     let full = Rect::new(0, 0, width, height);
     vec![
-        wire::set_display_configuration(width, height, 0),
         crate::proto::messages::set_encodings(&session_encodings()),
         crate::proto::messages::framebuffer_update_request(false, full).to_vec(),
         wire::auto_framebuffer_update(full).to_vec(),
@@ -157,6 +162,9 @@ pub fn opening_messages(width: u16, height: u16) -> Vec<Vec<u8>> {
 #[derive(Debug, Clone)]
 pub struct AppleSession {
     pub rekey: RekeyHandle,
+    /// Whether the full picture has been asked for again after the Mac
+    /// announced its desktop. See the run loop's DesktopSize handling.
+    pub rearmed_after_announce: bool,
     /// The logical size pointer positions are given in, when the layout says
     /// it differs from the framebuffer.
     pub logical: Option<(u16, u16)>,
@@ -166,6 +174,7 @@ impl AppleSession {
     pub fn new(rekey: RekeyHandle) -> Self {
         Self {
             rekey,
+            rearmed_after_announce: false,
             logical: None,
         }
     }

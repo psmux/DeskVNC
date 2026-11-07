@@ -586,14 +586,32 @@ async fn serve(
     let mut tx = Dir::new(key1, iv1, 0);
     let mut rx = Dir::new(key1, iv1, 0);
 
-    // --- encrypted opening: five records ---------------------------------------
-    for _ in 0..5 {
+    // --- encrypted opening: four records ---------------------------------------
+    for _ in 0..4 {
         let c = read_record(s).await.unwrap();
         let body = rx.open(&c).expect("client record verifies");
         seen.lock().records.push(body);
     }
 
     if login == Login::Srp36 {
+        // Like a real Mac: the opening's full request is dropped while the
+        // display is set up. The Mac announces the desktop size, and only a
+        // full non-incremental request that comes after that gets the
+        // picture.
+        let m = fbu(&[(0, 0, WIDTH, HEIGHT, -223, Vec::new())]);
+        s.write_all(&tx.seal(&m)).await.unwrap();
+        loop {
+            let c = read_record(s).await.unwrap();
+            let body = rx.open(&c).expect("client record verifies");
+            let full_request = body.len() == 10
+                && body[0] == 3
+                && body[1] == 0
+                && body[6..10] == [WIDTH.to_be_bytes(), HEIGHT.to_be_bytes()].concat()[..];
+            seen.lock().records.push(body);
+            if full_request {
+                break;
+            }
+        }
         let m = fbu(&[(0, 0, 4, 4, 0, raw_pixels(4, 4, [0, 0, 255, 0]))]);
         s.write_all(&tx.seal(&m)).await.unwrap();
         while let Some(c) = read_record(s).await {
@@ -850,14 +868,15 @@ async fn type_33_session_end_to_end() {
 
     // Opening records, in the native order.
     let r = &seen.records;
-    assert_eq!(
-        r[0],
-        apple_wire::set_display_configuration(WIDTH, HEIGHT, 0)
+    // No SetDisplayConfiguration: a real Mac adds a virtual display for it.
+    assert!(
+        !r.iter().any(|m| m[0] == 0x1d),
+        "SetDisplayConfiguration sent; a Mac would add a virtual display"
     );
-    assert_eq!(r[1][0], 2, "SetEncodings second");
-    assert_eq!(&r[2][..2], &[3, 0], "a non-incremental request");
-    assert_eq!(r[3][0], 0x09, "AutoFrameBufferUpdate");
-    assert_eq!(r[4], apple_wire::auto_pasteboard(true));
+    assert_eq!(r[0][0], 2, "SetEncodings first");
+    assert_eq!(&r[1][..2], &[3, 0], "a non-incremental request");
+    assert_eq!(r[2][0], 0x09, "AutoFrameBufferUpdate");
+    assert_eq!(r[3], apple_wire::auto_pasteboard(true));
     // Server pushed updates: the client never polls with an incremental
     // request.
     assert!(
@@ -865,7 +884,7 @@ async fn type_33_session_end_to_end() {
         "incremental FramebufferUpdateRequest sent in an auto update session"
     );
     // SetEncodings lists only what the client decodes, zlib first.
-    let encs: Vec<i32> = r[1][4..]
+    let encs: Vec<i32> = r[0][4..]
         .as_chunks::<4>()
         .0
         .iter()
@@ -896,7 +915,8 @@ async fn type_36_session_end_to_end() {
         seen.identity.as_deref(),
         Some(&[0, 0, 0, 13, 0, 0, 0, 6, b't', b'e', b's', b't', b'e', b'r', 0, 0, 0][..])
     );
-    assert_eq!(seen.records[0][0], 0x1d);
+    assert_eq!(seen.records[0][0], 2, "SetEncodings opens the record layer");
+    assert!(!seen.records.iter().any(|m| m[0] == 0x1d));
 }
 
 /// A wrong password: the fake Mac refuses M1 with an ordinary failure result,

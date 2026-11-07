@@ -284,7 +284,19 @@ async fn open_to_offer(t: &Target) -> (TcpStream, Vec<u8>) {
 
 /// A full session with one pinned security type: connect, get a picture,
 /// move the pointer, disconnect. Prints every event that arrives.
+/// Route the client's own tracing to stderr when `RUST_LOG` is set, so a
+/// live run can show what the session saw.
+fn init_tracing() {
+    if std::env::var("RUST_LOG").is_ok() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+}
+
 async fn session_with(pref: &str, what: &str) {
+    init_tracing();
     let Some(t) = target(what) else { return };
     let (handle, mut events) = spawn_session(live_options(&t, pref));
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
@@ -299,15 +311,19 @@ async fn session_with(pref: &str, what: &str) {
     let (_, damage) = outcome.unwrap_or_else(|_| panic!("{what}: no picture within 30 s"));
     eprintln!("LIVE {what}: first update damage {damage:?}");
 
-    send(
-        &handle,
-        ClientCommand::Pointer {
-            x: damage.width / 2,
-            y: damage.height / 2,
-            button_mask: 0,
-        },
-    )
-    .await;
+    // A pointer move is real input on the Mac, so it is opt in: run with
+    // DVV_LIVE_APPLE_INPUT=1 only when nobody is using that Mac.
+    if std::env::var("DVV_LIVE_APPLE_INPUT").is_ok() {
+        send(
+            &handle,
+            ClientCommand::Pointer {
+                x: damage.width / 2,
+                y: damage.height / 2,
+                button_mask: 0,
+            },
+        )
+        .await;
+    }
     events.drain_for(Duration::from_secs(2)).await;
     assert!(
         !events.any(|e| matches!(

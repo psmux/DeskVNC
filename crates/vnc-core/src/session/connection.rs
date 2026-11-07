@@ -248,13 +248,12 @@ async fn establish(
     )
     .await?;
 
-    emit_state(
-        events,
-        SessionState::Authenticating {
-            method: strongest_offered_name(&offered),
-        },
-    )
-    .await?;
+    // Name the type this client will pick, so a pinned type (or the auto
+    // choice) is what the state shows, not merely the strongest on offer.
+    let method = crate::security::select_security_type(&offered, options)
+        .map(|t| format!("{t:?}"))
+        .unwrap_or_else(|_| strongest_offered_name(&offered));
+    emit_state(events, SessionState::Authenticating { method }).await?;
 
     // Adapt our negotiated version to the security module's compact form.
     let version_info = crate::security::ProtocolVersionInfo {

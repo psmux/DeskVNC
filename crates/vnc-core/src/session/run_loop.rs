@@ -1202,6 +1202,14 @@ impl RunLoop {
                 ));
             }
             let (rect, enc) = messages::read_rect_header(&mut self.reader).await?;
+            tracing::trace!(
+                x = rect.x,
+                y = rect.y,
+                w = rect.width,
+                h = rect.height,
+                enc,
+                "rect"
+            );
 
             if enc == encoding::PSEUDO_LAST_RECT {
                 break;
@@ -1435,7 +1443,28 @@ impl RunLoop {
                 // link, before the user sees anything.
                 let changed = width != self.fb_width || height != self.fb_height;
                 self.apply_resize(width, height, events).await?;
-                if changed {
+                let apple_first = self
+                    .apple
+                    .as_mut()
+                    .map(|a| !std::mem::replace(&mut a.rearmed_after_announce, true))
+                    .unwrap_or(false);
+                if apple_first || (self.apple.is_some() && changed) {
+                    // A Mac answers the SetEncodings that opens the session
+                    // with this size announcement and marks a full update as
+                    // due, but its screen capture for the display is not set
+                    // up yet. The full request sent with the opening is then
+                    // dropped, and the next request (an idle probe of a few
+                    // pixels) gets the forced update clipped to its own small
+                    // region: the viewer sat on a blank screen until the user
+                    // moved something. Asking for the whole picture again,
+                    // and re-arming pushed updates, once the Mac has
+                    // announced the desktop gets the full frame every time.
+                    let full = self.full_rect();
+                    self.send(&messages::framebuffer_update_request(false, full))
+                        .await?;
+                    self.send(&crate::apple::wire::auto_framebuffer_update(full))
+                        .await?;
+                } else if changed {
                     // Legacy -223 invalidates the framebuffer and the server
                     // will NOT push a refresh, request one. Never do this for
                     // ExtendedDesktopSize (-308): loop hazard (PRD/02 §9).
