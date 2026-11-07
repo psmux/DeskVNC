@@ -39,7 +39,6 @@ use rdp_core::transport::framer::Framer;
 use rdp_core::transport::writer::{self, WRITER_QUEUE};
 use rdp_core::RdpError;
 use remote_core::{ClientCommand, Credentials, RectPayload, SessionEvent};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use vnc_transport::TrustDecision;
