@@ -18,6 +18,7 @@ use crate::error::{Result, VncError};
 use crate::types::{ConnectOptions, PinScheme, SecurityType, VncOptions};
 
 pub mod apple_dh;
+pub mod apple_srp;
 pub mod mslogon;
 pub mod none;
 pub mod prompt;
@@ -204,6 +205,9 @@ pub(crate) struct AuthOutcome {
     /// Set when the handshake authenticated a server key (VeNCrypt's TLS
     /// upgrade, RA2's RSA key), so the session layer can raise the TOFU prompt.
     pub trust: Option<ServerIdentity>,
+    /// Set by the macOS SRP logins: the key that unwraps the server's first
+    /// session rekey, which the Apple encrypted session starts from.
+    pub apple_wrap_key: Option<[u8; 16]>,
 }
 
 impl AuthOutcome {
@@ -212,6 +216,7 @@ impl AuthOutcome {
             stream,
             result_mode: ResultMode::Auto,
             trust: None,
+            apple_wrap_key: None,
         }
     }
     #[allow(dead_code)]
@@ -220,6 +225,7 @@ impl AuthOutcome {
             stream,
             result_mode: ResultMode::Always,
             trust: None,
+            apple_wrap_key: None,
         }
     }
 }
@@ -265,6 +271,8 @@ pub fn is_supported(t: SecurityType) -> bool {
             | SecurityType::Ra2_256
             | SecurityType::Ra2ne256
             | SecurityType::AppleDh
+            | SecurityType::AppleRsaSrp
+            | SecurityType::AppleSrp
             | SecurityType::MsLogonII
     )
 }
@@ -388,6 +396,28 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
     opts: &ConnectOptions,
     creds: &CredentialSource<'_>,
 ) -> Result<(BoxedStream, SecurityType, Option<ServerIdentity>)> {
+    let a = authenticate_full(stream, version, offered, opts, creds).await?;
+    Ok((a.stream, a.security, a.trust))
+}
+
+/// Everything a finished security handshake hands to the session.
+pub struct Authenticated {
+    pub stream: BoxedStream,
+    pub security: SecurityType,
+    pub trust: Option<ServerIdentity>,
+    /// For the macOS SRP logins, the key the Apple encrypted session starts
+    /// from (see [`crate::apple`]).
+    pub apple_wrap_key: Option<[u8; 16]>,
+}
+
+/// As [`authenticate_with_trust`], also returning the Apple session key.
+pub async fn authenticate_full<S: vnc_transport::Stream + 'static>(
+    stream: S,
+    version: ProtocolVersionInfo,
+    offered: &[u8],
+    opts: &ConnectOptions,
+    creds: &CredentialSource<'_>,
+) -> Result<Authenticated> {
     let chosen = select_security_type(offered, opts)?;
     tracing::info!(security_type = ?chosen, "selected security type");
 
@@ -408,6 +438,8 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
         | SecurityType::Ra2_256
         | SecurityType::Ra2ne256 => ra2::handshake(stream, chosen, opts, creds).await?,
         SecurityType::AppleDh => apple_dh::handshake(stream, opts, creds).await?,
+        SecurityType::AppleRsaSrp => apple_srp::handshake_33(stream, opts, creds).await?,
+        SecurityType::AppleSrp => apple_srp::handshake_36(stream, opts, creds).await?,
         SecurityType::MsLogonII => mslogon::handshake(stream, opts, creds).await?,
         SecurityType::Unknown(v) => return Err(VncError::UnsupportedSecurityType(v)),
     };
@@ -416,6 +448,7 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
         mut stream,
         result_mode,
         trust,
+        apple_wrap_key,
     } = outcome;
 
     let read_result = match result_mode {
@@ -432,7 +465,12 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
         read_security_result(&mut stream, version).await?;
     }
 
-    Ok((stream, chosen, trust))
+    Ok(Authenticated {
+        stream,
+        security: chosen,
+        trust,
+        apple_wrap_key,
+    })
 }
 
 /// Read the u32 SecurityResult. 0 = OK, anything else = failure; RFB 3.8

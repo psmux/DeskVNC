@@ -54,7 +54,7 @@ export function portWasTouched(host: HostProfile | null | undefined): boolean {
  * Whether a VNC host's security type signs in with an account name.
  *
  * RFB is mostly password only, but not always. Apple's Screen Sharing auth
- * (type 30) wants a macOS account and its password, and so do VeNCrypt's
+ * (types 30, 33 and 36) wants a macOS account and its password, and so do VeNCrypt's
  * `*Plain` subtypes and RA2's subtype 1. A pinned VeNCrypt or RA2 may still
  * end up asking for a password alone, which is why a blank user name keeps
  * meaning "ask me if the server wants one" rather than being required.
@@ -67,6 +67,8 @@ export function portWasTouched(host: HostProfile | null | undefined): boolean {
 export function vncTakesUsername(securityPref: string | null, osHint: OsHint): boolean {
   switch (securityPref ?? "auto") {
     case "apple-dh":
+    case "apple-srp-rsa":
+    case "apple-srp":
     case "vencrypt-x509":
     case "ra2":
       return true;

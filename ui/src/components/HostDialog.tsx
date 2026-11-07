@@ -777,7 +777,9 @@ export function HostDialog({
                           <option value="auto">Auto</option>
                           <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
                           <option value="ra2">RSA-AES (RA2)</option>
-                          <option value="apple-dh">Apple Screen Sharing</option>
+                          <option value="apple-srp-rsa">Apple Screen Sharing (encrypted)</option>
+                          <option value="apple-srp">Apple Screen Sharing (SRP)</option>
+                          <option value="apple-dh">Apple Screen Sharing (Diffie-Hellman)</option>
                           <option value="vncauth">VNC password only</option>
                           <option value="none">None</option>
                         </Select>

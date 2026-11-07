@@ -60,6 +60,8 @@ describe("vncTakesUsername", () => {
   it("asks for an account with Apple Screen Sharing, whatever the OS hint says", () => {
     expect(vncTakesUsername("apple-dh", "macos")).toBe(true);
     expect(vncTakesUsername("apple-dh", "unknown")).toBe(true);
+    expect(vncTakesUsername("apple-srp-rsa", "unknown")).toBe(true);
+    expect(vncTakesUsername("apple-srp", "linux")).toBe(true);
   });
 
   it("asks for one with the VeNCrypt and RA2 types that may sign in with a name", () => {

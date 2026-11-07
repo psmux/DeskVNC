@@ -25,6 +25,9 @@ eax = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }
+# PBKDF2-HMAC-SHA512 for the macOS Screen Sharing SRP logins. Already in the
+# workspace for rdp-auth, so no new crate enters the lock file.
+pbkdf2 = { workspace = true }
 rsa = { workspace = true }
 num-bigint-dig = { workspace = true }
 rand = { workspace = true }

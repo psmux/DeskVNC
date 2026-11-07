@@ -10801,6 +10801,7 @@ dependencies = [
  "md-5",
  "num-bigint-dig",
  "parking_lot",
+ "pbkdf2 0.12.2",
  "rand 0.10.3",
  "remote-core",
  "remote-pixel",

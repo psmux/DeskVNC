@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! S->C  u16 generator
-//! S->C  u16 key_length            (bytes, typically 64 => 512-bit DH)
+//! S->C  u16 key_length            (bytes, 128 on macOS => the 1024-bit group)
 //! S->C  prime[key_length]
 //! S->C  server_public[key_length]
 //! C->S  credentials[128]          AES-128-ECB( MD5(shared secret) )
@@ -17,12 +17,12 @@
 //!
 //! ## Security note
 //!
-//! 512-bit Diffie-Hellman is cryptographically dead: it is within reach of
-//! precomputation attacks, and the *session* that follows is entirely
-//! unencrypted regardless. This protects the password from casual capture and
-//! nothing more. PRD/10 §5 is explicit that SSH tunnelling is the only way to
-//! get a genuinely encrypted session to a Mac; the UI should offer it whenever
-//! the banner is `RFB 003.889`.
+//! The group is the fixed 1024-bit one of RFC 2409, which is within reach of
+//! precomputation by a well funded attacker, and the *session* that follows
+//! is entirely unencrypted regardless. This protects the password from
+//! casual capture and nothing more, which is why a Mac that also offers type
+//! 33 is logged into with that instead (see `apple_srp`), and why PRD/10 §5
+//! recommends an SSH tunnel to a Mac whose only login is this one.
 
 use aes::Aes128;
 use cipher::{block_padding::NoPadding, BlockEncryptMut, KeyInit};
@@ -45,7 +45,7 @@ const FIELD_LEN: usize = 64;
 /// Username field + password field.
 const CREDENTIALS_LEN: usize = FIELD_LEN * 2;
 
-/// Smallest DH modulus we will talk to. Apple uses 64 (512-bit).
+/// Smallest DH modulus we will talk to. macOS sends 128 (1024-bit).
 const MIN_KEY_BYTES: usize = 32;
 /// 8192-bit, anything larger is a denial-of-service attempt, not a server.
 const MAX_KEY_BYTES: usize = 1024;

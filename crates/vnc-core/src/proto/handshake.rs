@@ -194,6 +194,7 @@ pub fn build_capabilities(
         // its encoding list.
         supports_h264: !version.is_apple_screen_sharing,
         is_apple_screen_sharing: version.is_apple_screen_sharing,
+        apple_session: security.starts_apple_session(),
     }
 }
 
