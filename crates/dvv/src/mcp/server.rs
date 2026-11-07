@@ -804,6 +804,7 @@ impl Server {
         // told it failed.
         let asked = opt_u64(args, "timeoutMs").unwrap_or(8_000);
         let timeout = asked.min(WAIT_CLAMP_MS);
+        let started = std::time::Instant::now();
         let settlement = plane
             .submit(
                 &limb,
@@ -830,15 +831,21 @@ impl Server {
                 limb.id()
             )
         };
+        // `clampedMs` is the timeout this wait actually ran with, after the
+        // clamp, and `limitMs` is the clamp itself. `waitedMs` is measured:
+        // a condition that already held settles at once, and echoing the
+        // timeout back would tell an agent it had waited when it had not.
+        let waited = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         Ok(format::ok(
             summary,
             json!({
                 "limbId": limb.id().to_string(),
                 "settled": settled,
-                "waitedMs": timeout,
+                "waitedMs": waited,
                 "askedMs": asked,
-                "clampedMs": WAIT_CLAMP_MS,
-                "observed": format!("{:?}", settlement.outcome),
+                "clampedMs": timeout,
+                "limitMs": WAIT_CLAMP_MS,
+                "observed": outcome_json(&settlement.outcome),
             }),
         ))
     }
@@ -1319,6 +1326,60 @@ impl Server {
                 format::ok(summary, structured)
             }
         }
+    }
+}
+
+/// An intent's outcome as JSON with a stable shape.
+///
+/// `outcome` is always present and is the same word every other tool reports
+/// (see [`outcome_word`]); the other fields depend on it. Written out by hand
+/// rather than derived, because `limb_core`'s types carry no serde and their
+/// Debug text is not a contract: a field renamed there would silently change
+/// what an agent parses here.
+pub fn outcome_json(outcome: &limb_core::observation::Outcome) -> Value {
+    use limb_core::limb::{Confidence, QuiescenceSignal};
+    use limb_core::observation::{Outcome, VerifyOutcome};
+    let word = outcome_word(outcome);
+    match outcome {
+        Outcome::Done {
+            delivered,
+            verified,
+        } => json!({
+            "outcome": word,
+            "delivered": delivered,
+            "verified": verified.as_ref().map(|v| json!({
+                "outcome": match v.outcome {
+                    VerifyOutcome::Changed => "changed",
+                    VerifyOutcome::NoChange => "no-change",
+                    VerifyOutcome::ChangedElsewhere => "changed-elsewhere",
+                    VerifyOutcome::BusyScreen => "busy-screen",
+                },
+                "region": v.region,
+                "confidence": match v.confidence {
+                    Confidence::Exact => "exact",
+                    Confidence::Reported => "reported",
+                    Confidence::Inferred => "inferred",
+                },
+            })),
+        }),
+        Outcome::TimedOut { observed } => json!({
+            "outcome": word,
+            "signal": match observed.signal {
+                QuiescenceSignal::Damage => "damage",
+                QuiescenceSignal::OutputBytes => "output-bytes",
+                QuiescenceSignal::Reported => "reported",
+                QuiescenceSignal::None => "none",
+            },
+            "quietMs": observed.quiet_ms,
+            "damageRects": observed.damage_rects,
+            "bytes": observed.bytes,
+        }),
+        Outcome::Refused { because, code } => json!({
+            "outcome": word,
+            "code": code.as_str(),
+            "because": because,
+        }),
+        _ => json!({ "outcome": word }),
     }
 }
 
