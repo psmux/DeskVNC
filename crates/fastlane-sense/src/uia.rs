@@ -3,19 +3,19 @@
 use serde_json::{json, Value};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
-use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
 use windows::core::Interface;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4};
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowTextW,
-    SM_CXSCREEN, SM_CYSCREEN,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowTextW, SM_CXSCREEN,
+    SM_CYSCREEN,
 };
 
 use crate::{fnv, Table};
@@ -72,10 +72,13 @@ impl Worker {
                     match ask {
                         Ask::Read(hwnd, area) => {
                             let (mut rows, mut key) = (Vec::new(), String::new());
-                            let whole = reader.read(HWND(hwnd as *mut _), area, &mut rows, &mut key);
+                            let whole =
+                                reader.read(HWND(hwnd as *mut _), area, &mut rows, &mut key);
                             Answer::Rows(rows, key, whole)
                         }
-                        Ask::Cells(hwnd, names) => Answer::Cells(reader.cells(HWND(hwnd as *mut _), &names)),
+                        Ask::Cells(hwnd, names) => {
+                            Answer::Cells(reader.cells(HWND(hwnd as *mut _), &names))
+                        }
                     }
                 };
                 if outbox.send(answer).is_err() {
@@ -84,7 +87,11 @@ impl Worker {
             }
         });
         ready.recv().map_err(|e| e.to_string())??;
-        Ok(Worker { asks, answers, busy: false })
+        Ok(Worker {
+            asks,
+            answers,
+            busy: false,
+        })
     }
 }
 
@@ -102,7 +109,9 @@ pub struct Sense {
 
 impl Sense {
     pub fn new() -> Result<Sense, String> {
-        Ok(Sense { workers: vec![Worker::spawn()?] })
+        Ok(Sense {
+            workers: vec![Worker::spawn()?],
+        })
     }
 
     /// One answer within `wait`, from a worker that is not stuck.
@@ -173,14 +182,20 @@ impl Sense {
                 // right, its controls are missing.
                 body["partial"] = json!(true);
             }
-            Ok(Table { hash: fnv(&key), body })
+            Ok(Table {
+                hash: fnv(&key),
+                body,
+            })
         }
     }
 
     /// The values of named cells ("C4") in the window in front.
     pub fn cells(&mut self, names: &[String]) -> Result<Value, String> {
         let hwnd = unsafe { GetForegroundWindow() };
-        match self.ask(Ask::Cells(hwnd.0 as isize, names.to_vec()), Duration::from_secs(5)) {
+        match self.ask(
+            Ask::Cells(hwnd.0 as isize, names.to_vec()),
+            Duration::from_secs(5),
+        ) {
             Some(Answer::Cells(result)) => result,
             _ => Err("the window did not answer in time".into()),
         }
@@ -226,17 +241,33 @@ impl Reader {
             ] {
                 cache.AddProperty(property).map_err(|e| e.to_string())?;
             }
-            cache.SetTreeScope(TreeScope_Element).map_err(|e| e.to_string())?;
+            cache
+                .SetTreeScope(TreeScope_Element)
+                .map_err(|e| e.to_string())?;
             // Spreadsheet cells are left out of the table: Excel exposes every
             // visible cell, and walking a thousand of them made one read take
             // minutes. `cells` reads the ones a caller names.
-            let view = automation.ControlViewCondition().map_err(|e| e.to_string())?;
-            let is_cell = automation
-                .CreatePropertyCondition(UIA_ControlTypePropertyId, &variant_i4(UIA_DataItemControlTypeId.0))
+            let view = automation
+                .ControlViewCondition()
                 .map_err(|e| e.to_string())?;
-            let not_cell = automation.CreateNotCondition(&is_cell).map_err(|e| e.to_string())?;
-            let condition = automation.CreateAndCondition(&view, &not_cell).map_err(|e| e.to_string())?;
-            Ok(Reader { automation, cache, condition, gave_up: std::cell::RefCell::new(false) })
+            let is_cell = automation
+                .CreatePropertyCondition(
+                    UIA_ControlTypePropertyId,
+                    &variant_i4(UIA_DataItemControlTypeId.0),
+                )
+                .map_err(|e| e.to_string())?;
+            let not_cell = automation
+                .CreateNotCondition(&is_cell)
+                .map_err(|e| e.to_string())?;
+            let condition = automation
+                .CreateAndCondition(&view, &not_cell)
+                .map_err(|e| e.to_string())?;
+            Ok(Reader {
+                automation,
+                cache,
+                condition,
+                gave_up: std::cell::RefCell::new(false),
+            })
         }
     }
 
@@ -268,11 +299,23 @@ impl Reader {
     /// (a spreadsheet's cells; `cells` reads those by name), and no deeper
     /// once the read has used its budget: a slow app makes one read
     /// incomplete, never the fast lane wait.
-    unsafe fn walk(&self, parent: &IUIAutomationElement, depth: u32, deadline: Instant, out: &mut Vec<IUIAutomationElement>) {
-        if depth > 60 || out.len() >= MAX_ROWS * 4 || Instant::now() > deadline || *self.gave_up.borrow() {
+    unsafe fn walk(
+        &self,
+        parent: &IUIAutomationElement,
+        depth: u32,
+        deadline: Instant,
+        out: &mut Vec<IUIAutomationElement>,
+    ) {
+        if depth > 60
+            || out.len() >= MAX_ROWS * 4
+            || Instant::now() > deadline
+            || *self.gave_up.borrow()
+        {
             return;
         }
-        let Ok(children) = parent.FindAllBuildCache(TreeScope_Children, &self.condition, &self.cache) else {
+        let Ok(children) =
+            parent.FindAllBuildCache(TreeScope_Children, &self.condition, &self.cache)
+        else {
             // An app that stopped answering (timed out) will not answer the
             // next call either: give up on this window now.
             out.push(parent.clone());
@@ -280,7 +323,9 @@ impl Reader {
             return;
         };
         for i in 0..children.Length().unwrap_or(0) {
-            let Ok(el) = children.GetElement(i) else { continue };
+            let Ok(el) = children.GetElement(i) else {
+                continue;
+            };
             let kind = el.CachedControlType().unwrap_or_default();
             out.push(el.clone());
             if kind != UIA_DataGridControlTypeId && kind != UIA_TableControlTypeId {
@@ -291,7 +336,9 @@ impl Reader {
 
     /// False when the window did not answer all of it.
     unsafe fn read(&self, hwnd: HWND, area: &str, rows: &mut Vec<Value>, key: &mut String) -> bool {
-        let Ok(root) = self.automation.ElementFromHandle(hwnd) else { return false };
+        let Ok(root) = self.automation.ElementFromHandle(hwnd) else {
+            return false;
+        };
         let mut found = Vec::new();
         *self.gave_up.borrow_mut() = false;
         let deadline = Instant::now() + READ_BUDGET;
@@ -301,7 +348,9 @@ impl Reader {
             if rows.len() >= MAX_ROWS {
                 return whole;
             }
-            let Some(role) = el.CachedControlType().ok().and_then(role_of) else { continue };
+            let Some(role) = el.CachedControlType().ok().and_then(role_of) else {
+                continue;
+            };
             if el.CachedIsOffscreen().is_ok_and(|b| b.as_bool()) {
                 continue;
             }
@@ -310,7 +359,10 @@ impl Reader {
             if w <= 0 || h <= 0 {
                 continue;
             }
-            let name = el.CachedName().map(|b| clip(&b.to_string())).unwrap_or_default();
+            let name = el
+                .CachedName()
+                .map(|b| clip(&b.to_string()))
+                .unwrap_or_default();
             let value = cached_string(&el, UIA_ValueValuePropertyId);
             if role == "text" && name.is_empty() {
                 continue;
@@ -326,7 +378,10 @@ impl Reader {
                 .GetCachedPropertyValue(UIA_ToggleToggleStatePropertyId)
                 .ok()
                 .and_then(|v| int_of(&v));
-            key.push_str(&format!("{role}|{name}|{value}|{}|{}|{w}|{h}|{enabled}|{focus}|{toggled:?};", r.left, r.top));
+            key.push_str(&format!(
+                "{role}|{name}|{value}|{}|{}|{w}|{h}|{enabled}|{focus}|{toggled:?};",
+                r.left, r.top
+            ));
             let mut row = json!({
                 "i": rows.len() + 1,
                 "area": area,
@@ -409,8 +464,14 @@ pub fn windows() -> Value {
             let owned = GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid());
             let tool = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
             let mut cloaked = 0u32;
-            let _ = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4);
-            if IsWindowVisible(hwnd).as_bool() && !title.is_empty() && !owned && !tool && cloaked == 0 {
+            let _ =
+                DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4);
+            if IsWindowVisible(hwnd).as_bool()
+                && !title.is_empty()
+                && !owned
+                && !tool
+                && cloaked == 0
+            {
                 list.push(json!({
                     "hwnd": hwnd.0 as i64,
                     "title": title,
@@ -446,7 +507,8 @@ pub fn activate(hwnd: i64) -> bool {
         let front = GetForegroundWindow();
         let theirs = GetWindowThreadProcessId(front, None);
         let ours = GetCurrentThreadId();
-        let attached = theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, true).as_bool();
+        let attached =
+            theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, true).as_bool();
         let _ = BringWindowToTop(target);
         let _ = SetForegroundWindow(target);
         if attached {
@@ -460,14 +522,15 @@ pub fn activate(hwnd: i64) -> bool {
 /// an app will not say it through UI Automation (Excel on a bad day), the way
 /// a person pastes a number somewhere to look at it.
 pub fn clipboard_text() -> Result<String, String> {
+    use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
     use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-    use windows::Win32::Foundation::HGLOBAL;
     const CF_UNICODETEXT: u32 = 13;
     unsafe {
         OpenClipboard(None).map_err(|e| format!("clipboard: {e}"))?;
         let text = (|| {
-            let handle = GetClipboardData(CF_UNICODETEXT).map_err(|e| format!("no text on the clipboard: {e}"))?;
+            let handle = GetClipboardData(CF_UNICODETEXT)
+                .map_err(|e| format!("no text on the clipboard: {e}"))?;
             let global = HGLOBAL(handle.0);
             let ptr = GlobalLock(global) as *const u16;
             if ptr.is_null() {
@@ -488,14 +551,20 @@ pub fn clipboard_text() -> Result<String, String> {
 
 unsafe fn text_of(hwnd: HWND, title: bool) -> String {
     let mut buf = [0u16; 256];
-    let n = if title { GetWindowTextW(hwnd, &mut buf) } else { GetClassNameW(hwnd, &mut buf) };
+    let n = if title {
+        GetWindowTextW(hwnd, &mut buf)
+    } else {
+        GetClassNameW(hwnd, &mut buf)
+    };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
 fn is_cell_or_header(name: &str) -> bool {
     let letters = name.chars().take_while(|c| c.is_ascii_uppercase()).count();
     let rest = &name[letters..];
-    name.len() <= 10 && (letters > 0 || !rest.is_empty()) && rest.chars().all(|c| c.is_ascii_digit())
+    name.len() <= 10
+        && (letters > 0 || !rest.is_empty())
+        && rest.chars().all(|c| c.is_ascii_digit())
 }
 
 fn clip(text: &str) -> String {
