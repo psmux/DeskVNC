@@ -11,6 +11,7 @@ mod network;
 mod theme;
 mod tray;
 mod unattended;
+mod wake;
 
 use boundary_session::{
     Approval, Button, Event, HostOptions, Input, Key, Session, unattended::SecretKey,
@@ -267,18 +268,13 @@ impl App {
         if let Ok(mut term) =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         {
+            let ctx = cc.egui_ctx.clone();
             tokio::spawn(async move {
                 term.recv().await;
                 TERMINATED.store(true, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
             });
         }
-        let context = cc.egui_ctx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                context.request_repaint();
-            }
-        });
         let (displays, status, error) = match boundary_platform::displays() {
             Ok(displays) => (displays, "Ready to connect".into(), false),
             Err(error) => (vec![], format!("Could not list displays: {error:#}"), true),
@@ -325,13 +321,13 @@ impl App {
             permission_check: Instant::now(),
             remote_focus: false,
             modifiers: egui::Modifiers::default(),
-            unattended: unattended::Unattended::new(),
+            unattended: unattended::Unattended::new(&cc.egui_ctx),
             helper_key,
             helper: None,
             approved_name: String::new(),
             paired: None,
             quitting: false,
-            tray: tray::Tray::new(),
+            tray: tray::Tray::new(&cc.egui_ctx),
             hide_frames: if std::env::args().any(|a| a == "--background") && TRAY {
                 3
             } else {
@@ -393,6 +389,7 @@ impl App {
         let events = std::mem::replace(&mut session.events, stand_in);
         session.events =
             attention::forward(events, ctx.clone(), self.focused.clone(), attention::notify);
+        wake::on_change(session.connectivity.clone(), ctx.clone());
         self.session = Some(session);
     }
     /// Connect to whatever is in the partner field: a short code, a full
@@ -430,6 +427,21 @@ impl App {
         }
         self.ticket.clear();
         self.password.clear();
+    }
+    /// What the window has going on, for how often it draws.
+    fn load(&self) -> wake::Load {
+        let session = self.session.is_some() && !self.connected;
+        wake::Load {
+            connected: self.connected,
+            connecting: session && !self.hosting,
+            waiting: session && self.hosting,
+            codes: self.codes.busy(),
+            helpers: !self.unattended.active.is_empty(),
+            // macOS has no event for a permission being granted in System
+            // Settings, and the lock screen has none for handing back the ID.
+            checks: !(self.screen_permission && self.input_permission)
+                || self.unattended.needs_checks(),
+        }
     }
     fn poll(&mut self, ctx: &egui::Context) {
         if self.unattended.poll() {
@@ -1148,6 +1160,10 @@ impl eframe::App for App {
             tray.say(&line);
         }
         self.poll(ctx);
+        if self.hide_frames > 0 {
+            ctx.request_repaint();
+        }
+        wake::schedule(ctx, self.load());
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         egui::Panel::bottom("status")
