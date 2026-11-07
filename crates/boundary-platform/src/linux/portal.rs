@@ -112,6 +112,12 @@ fn load_token() -> Option<String> {
     let token = token.trim();
     (!token.is_empty()).then(|| token.to_owned())
 }
+/// Drop the saved grant, so the next session asks the person again.
+fn forget_token() {
+    if let Some(path) = token_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
 fn save_token(token: Option<&str>) {
     let (Some(path), Some(token)) = (token_path(), token) else {
         return;
@@ -449,8 +455,54 @@ fn sources() -> BitFlags<SourceType> {
     BitFlags::from_flag(SourceType::Monitor)
 }
 
+/// What to do with a grant the portal started a session on.
+#[derive(Debug, PartialEq, Eq)]
+enum Grant {
+    /// Control was allowed: use it, and keep its token for next time.
+    Keep,
+    /// The person was asked just now and left Allow Remote Interaction off:
+    /// use it for this session only, so the next one asks again.
+    Once,
+    /// A remembered grant came back without control: drop it and ask the
+    /// person, who otherwise never sees the prompt that could fix it.
+    Again,
+}
+/// GNOME ticks Remember This Selection by default, and a token restores what
+/// was allowed when it was saved without showing anything. One approval with
+/// Allow Remote Interaction off was then every later session view only,
+/// helpers with control included. The portal says in its Start answer which
+/// devices it granted, and Support always asks for the pointer and keyboard,
+/// so a restored grant without them is the wrong one.
+fn grant(restored: bool, granted: BitFlags<DeviceType>) -> Grant {
+    if granted.contains(DeviceType::Pointer | DeviceType::Keyboard) {
+        Grant::Keep
+    } else if restored {
+        Grant::Again
+    } else {
+        Grant::Once
+    }
+}
+
 /// One RemoteDesktop session with the screen cast on it.
 async fn remote(token: Option<&str>) -> Result<(Held, OwnedFd, PortalStream), ashpd::Error> {
+    if let Some(token) = token {
+        match remote_with(Some(token)).await? {
+            Some(found) => return Ok(found),
+            None => forget_token(),
+        }
+    }
+    // Asked without a token, the answer is always used, so this is never
+    // `None`; said as an error rather than a panic all the same.
+    remote_with(None).await?.ok_or_else(|| {
+        ashpd::Error::Portal(ashpd::PortalError::Failed("No screen was shared".into()))
+    })
+}
+
+/// [`remote`] with one token, or none. `None` when a restored grant lacked
+/// control and was closed, for the caller to ask again without it.
+async fn remote_with(
+    token: Option<&str>,
+) -> Result<Option<(Held, OwnedFd, PortalStream)>, ashpd::Error> {
     let unavailable = || {
         ashpd::Error::Portal(ashpd::PortalError::NotFound(
             "RemoteDesktop unavailable".into(),
@@ -491,7 +543,14 @@ async fn remote(token: Option<&str>) -> Result<(Held, OwnedFd, PortalStream), as
     )
     .await?
     .response()?;
-    save_token(started.restore_token());
+    match grant(token.is_some(), started.devices()) {
+        Grant::Keep => save_token(started.restore_token()),
+        Grant::Once => forget_token(),
+        Grant::Again => {
+            let _ = session.close().await;
+            return Ok(None);
+        }
+    }
     let stream = started.streams().first().cloned().ok_or_else(|| {
         ashpd::Error::Portal(ashpd::PortalError::Failed("No screen was shared".into()))
     })?;
@@ -507,7 +566,7 @@ async fn remote(token: Option<&str>) -> Result<(Held, OwnedFd, PortalStream), as
         ready: Instant::now() + SETTLE,
         typed: Default::default(),
     };
-    Ok((Held::Remote(Arc::new(remote)), fd, stream))
+    Ok(Some((Held::Remote(Arc::new(remote)), fd, stream)))
 }
 
 /// A screen cast session alone.
@@ -834,6 +893,25 @@ fn run(
 mod tests {
     use super::*;
     use pipewire::stream::StreamState;
+
+    #[test]
+    fn a_remembered_grant_without_control_is_asked_again() {
+        // What GNOME 50 answered when a token saved with Allow Remote
+        // Interaction off was restored: devices 0, and no prompt shown.
+        let none = BitFlags::<DeviceType>::empty();
+        let both = DeviceType::Pointer | DeviceType::Keyboard;
+        assert_eq!(grant(true, none), Grant::Again);
+        assert_eq!(
+            grant(true, BitFlags::from_flag(DeviceType::Pointer)),
+            Grant::Again
+        );
+        // A token saved with it on came back with devices 3.
+        assert_eq!(grant(true, both), Grant::Keep);
+        assert_eq!(grant(false, both), Grant::Keep);
+        // Asked just now and left off: this session watches, and the next
+        // one asks again rather than remembering it.
+        assert_eq!(grant(false, none), Grant::Once);
+    }
 
     #[test]
     fn a_shared_screen_holds_off_idle_and_nothing_else() {
