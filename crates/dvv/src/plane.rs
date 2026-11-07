@@ -1239,6 +1239,10 @@ impl SessionSource for ShellSource {
             serde_json::json!({ "sessionId": session_id }),
         )
         .ok()?;
+        // The same read carries the clipboard rights, which change whenever
+        // the person ticks or unticks, or gives or takes control. The card
+        // is built right after this, so it offers what is true now.
+        note_clipboard(&session_id, &answer);
         serde_json::from_value(answer.get("state")?.clone()).ok()
     }
 
@@ -1771,6 +1775,7 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
 
     let limb_id = LimbRegistry::resolve(protocol, &machine, slot);
     lock(limb_sessions()).insert(limb_id.to_string(), session_id.clone());
+    note_clipboard(&session_id, attached);
 
     // The mirror, if the shell attached one. `perception.mirror` is the
     // shell's claim that a framebuffer mirror EXISTS for this session, which
@@ -1820,7 +1825,7 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
     );
 
     Ok(Attach {
-        driver: Arc::new(RemoteLimb::new(protocol, frames)),
+        driver: Arc::new(RemoteLimb::new(protocol, frames).for_session(&session_id)),
         machine,
         slot,
         host,
@@ -2365,6 +2370,43 @@ impl RelayLedger {
 }
 
 /// Every relay's ledger, by session id.
+/// What each Boundary session's computer lets this helper do with its
+/// clipboard, by session ID, as the shell last reported it on an attach or a
+/// status read. A session missing here offers no clipboard: its computer
+/// never said, which is every DeskVNC Support older than clipboard over
+/// Boundary.
+fn boundary_clipboards() -> &'static Mutex<BTreeMap<String, BoundaryClipboard>> {
+    static CLIPBOARDS: std::sync::OnceLock<Mutex<BTreeMap<String, BoundaryClipboard>>> =
+        std::sync::OnceLock::new();
+    CLIPBOARDS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A Boundary computer's clipboard rights for this helper.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BoundaryClipboard {
+    /// Text set here is put on that computer's clipboard.
+    write: bool,
+    /// What the person there copies comes here.
+    read: bool,
+}
+
+/// Keep what a shell record (`limb.attach`, `limb.status`) says about the
+/// session's clipboard rights. A record without them, from a computer that
+/// never said or a DeskVNCViewer older than this dvv, takes them away.
+fn note_clipboard(session_id: &str, record: &serde_json::Value) {
+    let rights = record.get("clipboard").and_then(|c| {
+        Some(BoundaryClipboard {
+            write: c.get("write")?.as_bool()?,
+            read: c.get("read")?.as_bool()?,
+        })
+    });
+    let mut held = lock(boundary_clipboards());
+    match rights {
+        Some(rights) => held.insert(session_id.to_string(), rights),
+        None => held.remove(session_id),
+    };
+}
+
 fn ledgers() -> &'static Mutex<BTreeMap<String, Arc<RelayLedger>>> {
     static LEDGERS: std::sync::OnceLock<Mutex<BTreeMap<String, Arc<RelayLedger>>>> =
         std::sync::OnceLock::new();
@@ -2696,6 +2738,10 @@ struct RemoteLimb {
     /// no mirror is a card promising a screenshot every call refuses, and an
     /// agent reads the card before it reads a refusal.
     has_mirror: bool,
+    /// The shell's session this limb is a handle to. A Boundary limb looks
+    /// its clipboard rights up by it, because they change while the limb
+    /// lives.
+    session_id: String,
 }
 
 impl RemoteLimb {
@@ -2707,7 +2753,54 @@ impl RemoteLimb {
                 _ => Grounding::Pixels,
             },
             has_mirror,
+            session_id: String::new(),
         }
+    }
+
+    fn for_session(mut self, session_id: &str) -> RemoteLimb {
+        self.session_id = session_id.to_string();
+        self
+    }
+
+    /// What this Boundary limb's computer lets it do with its clipboard now.
+    fn boundary_clipboard(&self) -> BoundaryClipboard {
+        lock(boundary_clipboards())
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// A Boundary desktop's card. Clipboard read and write each appear only
+/// while the computer says so, and they come and go during the session.
+fn boundary_capabilities(mirror: bool, clip: BoundaryClipboard) -> &'static [Capability] {
+    use Capability::*;
+    match (mirror, clip.write, clip.read) {
+        (true, false, false) => &[View, Capture, Control, Close, HostsRead, Exec],
+        (true, true, false) => &[View, Capture, Control, Close, HostsRead, ClipboardWrite, Exec],
+        (true, false, true) => &[View, Capture, Control, Close, HostsRead, ClipboardRead, Exec],
+        (true, true, true) => &[
+            View,
+            Capture,
+            Control,
+            Close,
+            HostsRead,
+            ClipboardRead,
+            ClipboardWrite,
+            Exec,
+        ],
+        (false, false, false) => &[View, Control, Close, HostsRead, Exec],
+        (false, true, false) => &[View, Control, Close, HostsRead, ClipboardWrite, Exec],
+        (false, false, true) => &[View, Control, Close, HostsRead, ClipboardRead, Exec],
+        (false, true, true) => &[
+            View,
+            Control,
+            Close,
+            HostsRead,
+            ClipboardRead,
+            ClipboardWrite,
+            Exec,
+        ],
     }
 }
 
@@ -2788,26 +2881,15 @@ impl limb_core::limb::Limb for RemoteLimb {
     /// session carries a command stream beside the screen, and the person at
     /// that computer has to allow it before an agent can attach at all.
     ///
-    /// A Boundary desktop offers no clipboard. Its session protocol has no
-    /// clipboard message either way, so a set went nowhere while the agent
-    /// was told it worked, and a get always found nothing.
+    /// A Boundary desktop offers its clipboard only as its computer allows:
+    /// `clipboard.write` while the helper has control there, and
+    /// `clipboard.read` while the person lets the helper see what they copy.
+    /// A computer too old to carry a clipboard never says, and offers neither.
     fn capabilities(&self) -> &'static [Capability] {
         match self.grounding {
-            Grounding::Pixels if self.kind == ProtocolKind::Boundary && self.has_mirror => &[
-                Capability::View,
-                Capability::Capture,
-                Capability::Control,
-                Capability::Close,
-                Capability::HostsRead,
-                Capability::Exec,
-            ],
-            Grounding::Pixels if self.kind == ProtocolKind::Boundary => &[
-                Capability::View,
-                Capability::Control,
-                Capability::Close,
-                Capability::HostsRead,
-                Capability::Exec,
-            ],
+            Grounding::Pixels if self.kind == ProtocolKind::Boundary => {
+                boundary_capabilities(self.has_mirror, self.boundary_clipboard())
+            }
             Grounding::Cells => &[
                 Capability::View,
                 Capability::Control,
@@ -2846,9 +2928,19 @@ impl limb_core::limb::Limb for RemoteLimb {
                 Grounding::Cells => Support::Unsupported {
                     because: "a PTY has no clipboard of its own; paste into it with send bytes instead",
                 },
-                _ if self.kind == ProtocolKind::Boundary => Support::Unsupported {
-                    because: "a Boundary session carries no clipboard in this build, in either direction. Type the text instead, or, where the person allowed the helper's tools, write it to a file with exec",
-                },
+                _ if self.kind == ProtocolKind::Boundary => {
+                    let clip = self.boundary_clipboard();
+                    match intent {
+                        ClipboardSet if clip.write => Support::Lowered,
+                        ClipboardGet if clip.read => Support::Lowered,
+                        ClipboardSet => Support::Unsupported {
+                            because: "that Boundary computer takes clipboard text only while the helper has control, and only from a DeskVNC Support new enough to carry a clipboard. Type the text instead, or ask the person to give control",
+                        },
+                        _ => Support::Unsupported {
+                            because: "the person at that Boundary computer has not let this helper see what they copy, or their DeskVNC Support is too old to carry a clipboard. They can tick Also let them see what I copy",
+                        },
+                    }
+                }
                 _ => Support::Lowered,
             },
             SendBytes => match self.grounding {
@@ -4926,8 +5018,10 @@ mod tests {
         assert!(because.contains("perceive"), "{because}");
     }
 
-    /// A Boundary session has no clipboard message, so its card offered a
-    /// clipboard that a set silently dropped and a get never filled.
+    /// A Boundary computer that never said what it allows with its
+    /// clipboard (a DeskVNC Support from before clipboard over Boundary)
+    /// carries none, so its card offers none and a set or get is refused
+    /// rather than told it worked.
     #[test]
     fn a_boundary_limb_offers_no_clipboard_it_cannot_carry() {
         use limb_core::intent::IntentName;
@@ -4954,6 +5048,77 @@ mod tests {
             vnc.supports(IntentName::ClipboardSet),
             Support::Lowered
         ));
+    }
+
+    /// The card follows what the computer allows: clipboard.write while
+    /// the helper has control, clipboard.read while the person lets the
+    /// helper see what they copy, each on its own, and both gone again when
+    /// a status read comes back without them.
+    #[test]
+    fn a_boundary_limb_offers_its_clipboard_only_while_the_computer_allows_it() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        let session = "boundary-clipboard-rights-test";
+        let limb = RemoteLimb::new(ProtocolKind::Boundary, true).for_session(session);
+        let offers = |limb: &RemoteLimb| {
+            let caps = limb.capabilities();
+            (
+                caps.contains(&Capability::ClipboardWrite),
+                caps.contains(&Capability::ClipboardRead),
+            )
+        };
+        let lowered = |limb: &RemoteLimb, intent| matches!(limb.supports(intent), Support::Lowered);
+
+        // Attached before the computer said anything: nothing offered.
+        note_clipboard(session, &serde_json::json!({ "clipboard": null }));
+        assert_eq!(offers(&limb), (false, false));
+
+        // Control given, reading not ticked.
+        note_clipboard(
+            session,
+            &serde_json::json!({ "clipboard": { "write": true, "read": false } }),
+        );
+        assert_eq!(offers(&limb), (true, false));
+        assert!(lowered(&limb, IntentName::ClipboardSet));
+        let Support::Unsupported { because } = limb.supports(IntentName::ClipboardGet) else {
+            panic!("reading was not allowed");
+        };
+        assert!(because.contains("see what they copy"), "{because}");
+
+        // The person ticks reading too.
+        note_clipboard(
+            session,
+            &serde_json::json!({ "clipboard": { "write": true, "read": true } }),
+        );
+        assert_eq!(offers(&limb), (true, true));
+        assert!(lowered(&limb, IntentName::ClipboardGet));
+        assert!(limb.capabilities().contains(&Capability::Capture));
+        assert!(limb.capabilities().contains(&Capability::Exec));
+
+        // Control taken back, reading kept.
+        note_clipboard(
+            session,
+            &serde_json::json!({ "clipboard": { "write": false, "read": true } }),
+        );
+        assert_eq!(offers(&limb), (false, true));
+        let Support::Unsupported { because } = limb.supports(IntentName::ClipboardSet) else {
+            panic!("control was taken back");
+        };
+        assert!(because.contains("control"), "{because}");
+
+        // A record with no clipboard field at all (an older DeskVNCViewer)
+        // takes both away again.
+        note_clipboard(session, &serde_json::json!({ "state": "connected" }));
+        assert_eq!(offers(&limb), (false, false));
+
+        // Rights for one session never reach a limb on another.
+        note_clipboard(
+            session,
+            &serde_json::json!({ "clipboard": { "write": true, "read": true } }),
+        );
+        let other = RemoteLimb::new(ProtocolKind::Boundary, false).for_session("another-session");
+        assert_eq!(offers(&other), (false, false));
+        note_clipboard(session, &serde_json::json!({}));
     }
 
     /// The ledger's whole contract, without a socket: a refused press trips
