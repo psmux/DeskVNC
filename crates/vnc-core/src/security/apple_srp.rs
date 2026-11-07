@@ -36,12 +36,27 @@
 //! After a successful login the first 16 bytes of `SHA-256(K)` are the key
 //! that unwraps the server's first session rekey (see [`crate::apple`]).
 //!
-//! ## What is still unconfirmed
+//! ## What is confirmed, and what is not
 //!
-//! The SRP arithmetic (`x`, `K`, `M1`, `M2`) and the server proof's layout
-//! can only be checked by a successful login. Each assumption is named in
-//! the doc comment of the function that implements it and pinned by a test
-//! in `tests/apple_screen_sharing.rs`; the live run is `tests/apple_live.rs`.
+//! `x` is confirmed. On macOS 26 the account keeps an SRP verifier with its
+//! own 32 byte salt and iteration count, separate from the login password
+//! hash. Deriving `x` the way this file does, `x = H(salt, H(":" P2))` with
+//! `P2 = PBKDF2-HMAC-SHA512(password, salt, iterations, 128)` and an empty
+//! identity, and raising the generator to it, reproduces that stored verifier
+//! exactly. The challenge on the wire carries the same salt and iteration
+//! count. So `srp_x`, the PBKDF2 and the empty identity are right.
+//!
+//! `K` or `M1` is still wrong. With `x` correct the shared secret is correct,
+//! yet a real macOS 26 Mac rejects the proof (`client evidence does not match
+//! what we calculated`). So the session key `K` or the proof `M1` differs
+//! from the RFC 2945 forms used here (for example whether `K` hashes the
+//! padded or the minimal secret, or the exact bytes hashed into `M1`). This
+//! cannot be read from the stored verifier. The way to settle it without
+//! guessing at the live login is to point Apple's own client at a fake server
+//! that sends a challenge built from a known password, and read back the `A`
+//! and `M1` Apple computes; then the formula is solved offline. Each
+//! assumption is pinned by a test in `tests/apple_screen_sharing.rs`; the live
+//! run is `tests/apple_live.rs`.
 
 use num_bigint_dig::BigUint;
 use rand::Rng;

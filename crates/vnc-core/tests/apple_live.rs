@@ -27,17 +27,16 @@
 //!   sends its SRP challenge, reads the proof, and reaches the point where it
 //!   checks the client's evidence (its log: `SRP received 21 bytes` then
 //!   `SRP received 682 bytes`, `srp_server_mech_step: 1` then the result).
-//! * The proof itself is rejected: `client evidence does not match what we
-//!   calculated` (`srp_server_mech_step: -13`). It is rejected the same way
-//!   with the identity empty and with the account name as the identity, and
-//!   with several forms of `x` (`H(salt, H(":" P2))`, `H(salt, P2)`,
-//!   `H(salt, H(P2))`, the RFC 5054 form over the raw password, a 64 byte
-//!   PBKDF2 output). So Apple's `x`, `K` or `M1` differs from the inferred
-//!   formula in `apple_srp`, and a login cannot be completed until the real
-//!   derivation is known (a capture of a native SRP login, or Apple's
-//!   corecrypto SRP parameters). The session, input and clipboard steps, and
-//!   the stage two 0x1c offer, all sit behind a completed login and so are
-//!   still unreached.
+//! * The proof is rejected: `client evidence does not match what we
+//!   calculated` (`srp_server_mech_step: -13`). `x` is not the problem: it was
+//!   confirmed offline against the account's stored SRP verifier (see the
+//!   module doc of `apple_srp`), and the challenge carries the same salt and
+//!   iteration count that verifier was built with. With `x` right the shared
+//!   secret is right, so the mismatch is in `K` or `M1` only. That last piece
+//!   needs Apple's own `A` and `M1` for a known password, captured by pointing
+//!   Apple's client at a fake server, and is not settled here. The session,
+//!   input and clipboard steps, and the stage two 0x1c offer, all sit behind a
+//!   completed login and so are still unreached.
 //! * Type 30 (Apple DH) cannot log in against this macOS either: see the note
 //!   in `apple_dh`. That is a separate finding about the shipped viewer.
 //!
