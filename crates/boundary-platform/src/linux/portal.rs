@@ -174,6 +174,10 @@ pub(crate) struct Remote {
     typed: std::sync::atomic::AtomicBool,
 }
 impl Remote {
+    /// Whether the person let this session send input at all.
+    pub fn controls(&self) -> bool {
+        controls(self.granted)
+    }
     /// Wait until the session takes events, or say why it never will.
     fn settle(&self, device: DeviceType) -> Result<()> {
         ensure!(
@@ -498,6 +502,12 @@ fn grant(restored: bool, granted: BitFlags<DeviceType>) -> Grant {
     } else {
         Grant::Once
     }
+}
+
+/// Whether a grant takes any input. GNOME grants the pointer and keyboard
+/// together or neither; a portal that grants one alone still takes that one.
+fn controls(granted: BitFlags<DeviceType>) -> bool {
+    !granted.is_empty()
 }
 
 /// One RemoteDesktop session with the screen cast on it.
@@ -910,6 +920,14 @@ fn run(
 mod tests {
     use super::*;
     use pipewire::stream::StreamState;
+
+    #[test]
+    fn a_grant_without_devices_takes_no_input() {
+        // What GNOME 50 answered with Allow Remote Interaction off.
+        assert!(!controls(BitFlags::empty()));
+        assert!(controls(DeviceType::Pointer | DeviceType::Keyboard));
+        assert!(controls(BitFlags::from_flag(DeviceType::Keyboard)));
+    }
 
     #[test]
     fn a_remembered_grant_without_control_is_asked_again() {

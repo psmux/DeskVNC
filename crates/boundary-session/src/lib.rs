@@ -51,6 +51,14 @@ pub trait Desktop {
     fn video(&self) -> Option<video::VideoEncoders> {
         None
     }
+    /// Whether this desktop takes input at all. A Wayland desktop shares the
+    /// screen alone when the person leaves Allow Remote Interaction off in
+    /// its sharing prompt, and every event sent to it fails. The helper is
+    /// then told it can only watch. True, the default, for every other
+    /// backend.
+    fn controllable(&self) -> bool {
+        true
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {

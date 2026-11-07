@@ -930,30 +930,35 @@ where
     // The person is told the screen is shared once it is. Saying so as soon
     // as they approved the helper put "Your screen is being shared" behind
     // GNOME's prompt that was still asking whether to share it.
-    tokio::select! {
-        opened = opened_rx => {
-            if opened.is_err() {
-                // The desktop did not open, and the worker's result says why,
-                // such as Cancel in the desktop's sharing prompt.
-                return capture.await.context("Capture worker failed")?;
-            }
-        }
+    let controllable = tokio::select! {
+        opened = opened_rx => match opened {
+            Ok(controllable) => controllable,
+            // The desktop did not open, and the worker's result says why,
+            // such as Cancel in the desktop's sharing prompt.
+            Err(_) => return capture.await.context("Capture worker failed")?,
+        },
         result = &mut capture => return result.context("Capture worker failed")?,
         _ = connection.closed() => return Ok(()),
-    }
+    };
+    // Approved for control, but the desktop takes no input: on GNOME, Allow
+    // Remote Interaction was left off. The helper was told it had control,
+    // and its first click ended the whole session with "Control was not
+    // allowed". It is told it can only watch instead.
+    let control = allowed && controllable;
     worker.control_tx.send_modify(|p| {
-        p.allowed = allowed;
+        p.allowed = control;
         p.generation += 1;
     });
-    worker
-        .emit(Event::Connected {
-            peer,
-            control: allowed,
-        })
-        .await?;
-    // The helper was told this in its grant. The loop below writes only
-    // what the person changes later.
+    worker.emit(Event::Connected { peer, control }).await?;
+    if allowed && !controllable {
+        wire::write(&mut send, &Message::Control(false)).await?;
+        worker.emit(Event::Status(NO_CONTROL.into())).await?;
+    }
+    // The helper has been told. The loop below writes only what the person
+    // changes later.
     worker.control.borrow_and_update();
+    let events = worker.events.clone();
+    let control_tx = worker.control_tx.clone();
     let read_input = async {
         loop {
             let message: Message = within(
@@ -1010,6 +1015,19 @@ where
                 changed = worker.control.changed() => {
                     changed?;
                     let control = worker.control.borrow_and_update().allowed;
+                    if control && !controllable {
+                        // Ticked on this side, but the desktop takes no
+                        // input, so the helper stays a viewer and the tick
+                        // goes back off with the reason.
+                        control_tx.send_modify(|p| {
+                            p.allowed = false;
+                            p.generation += 1;
+                        });
+                        worker.control.borrow_and_update();
+                        let _ = events.send(Event::Control(false)).await;
+                        let _ = events.send(Event::Status(NO_CONTROL.into())).await;
+                        continue;
+                    }
                     wire::write(&mut send, &Message::Control(control)).await?;
                 }
                 Some((machine, name)) = worker.pairing.recv() => {
@@ -1068,6 +1086,10 @@ where
     result
 }
 
+/// What the person reads when they allowed control but the desktop shares the
+/// screen alone.
+const NO_CONTROL: &str = "The helper can only watch: control was not allowed in the desktop's sharing prompt. To allow it, end the session and share again with Allow Remote Interaction switched on";
+
 /// How long input may wait for a computer that has fallen behind before the
 /// session is given up as stuck.
 const INPUT_STALL: Duration = Duration::from_secs(20);
@@ -1089,7 +1111,7 @@ fn desktop_loop<F>(
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Frame>>>,
     encoders: oneshot::Sender<Option<VideoEncoders>>,
-    opened: oneshot::Sender<()>,
+    opened: oneshot::Sender<bool>,
     changes: Changes,
     cancel: CancellationToken,
 ) -> Result<()>
@@ -1104,7 +1126,7 @@ where
     }
     let mut desktop = Release(factory()?);
     let _ = encoders.send(desktop.0.video());
-    let _ = opened.send(());
+    let _ = opened.send(desktop.0.controllable());
     let mut capture_at = Instant::now();
     let mut last_input = Instant::now();
     let mut last_change = Instant::now();

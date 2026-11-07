@@ -728,6 +728,13 @@ impl Desktop for NativeDesktop {
     fn video(&self) -> Option<boundary_session::video::VideoEncoders> {
         Some(video::encoders())
     }
+    fn controllable(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = &self.remote {
+            return remote.controls();
+        }
+        true
+    }
     fn release(&mut self) {
         #[cfg(target_os = "linux")]
         if let Some(remote) = self.remote.clone() {
