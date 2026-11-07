@@ -138,8 +138,66 @@ fn load_token() -> Option<String> {
 /// Drop the saved grant, so the next session asks the person again.
 fn forget_token() {
     if let Some(path) = token_path() {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(asked_path(&path));
+    }
+}
+/// Beside the token: present when the grant it restores was given in a
+/// prompt that asked for the clipboard. Support 0.34 saved tokens without
+/// asking, so a token with no such file is from then.
+fn asked_path(token: &std::path::Path) -> PathBuf {
+    token.with_extension("clipboard")
+}
+/// Note that the grant just saved came from a prompt that asked for the
+/// clipboard, or that it did not.
+fn note_asked(asked: bool) {
+    let Some(path) = token_path().map(|t| asked_path(&t)) else {
+        return;
+    };
+    if asked {
+        let _ = std::fs::write(path, b"asked\n");
+    } else {
         let _ = std::fs::remove_file(path);
     }
+}
+fn grant_asked_clipboard() -> bool {
+    token_path().is_some_and(|t| asked_path(&t).exists())
+}
+
+/// Why the screen shared now has no clipboard, when sharing again with the
+/// prompt would give it one. Set each time a RemoteDesktop session starts.
+static LEFT_OUT: Mutex<Option<&'static str>> = Mutex::new(None);
+const OLD_GRANT: &str = "This computer's sharing permission is from an older version and does not include the clipboard. Share again and leave Allow Clipboard Access on to use it.";
+const LEFT_OFF: &str = "This computer's sharing permission was given with Allow Clipboard Access off, so it does not include the clipboard. Share again and leave it on to use it.";
+/// What to tell the person about a session's clipboard. Only a remembered
+/// grant can be the reason: a prompt answered just now is what the person
+/// chose. `asked` is whether this desktop's portal has a clipboard to ask
+/// for, and `asked_before` whether the remembered grant's prompt asked for it.
+fn left_out(
+    restored: bool,
+    asked: bool,
+    enabled: bool,
+    asked_before: bool,
+) -> Option<&'static str> {
+    if !restored || !asked || enabled {
+        None
+    } else if asked_before {
+        Some(LEFT_OFF)
+    } else {
+        Some(OLD_GRANT)
+    }
+}
+fn set_left_out(note: Option<&'static str>) {
+    *LEFT_OUT.lock().unwrap_or_else(|e| e.into_inner()) = note;
+}
+/// See [`left_out`]: the line for the screen shared now, if any.
+pub(crate) fn clipboard_left_out() -> Option<&'static str> {
+    *LEFT_OUT.lock().unwrap_or_else(|e| e.into_inner())
+}
+/// Forget the remembered grant, so the next share shows the desktop's prompt.
+pub(crate) fn forget_grant() {
+    forget_token();
+    set_left_out(None);
 }
 fn save_token(token: Option<&str>) {
     let (Some(path), Some(token)) = (token_path(), token) else {
@@ -673,6 +731,7 @@ impl Screen {
 }
 impl Drop for Screen {
     fn drop(&mut self) {
+        set_left_out(None);
         self.video.stop();
         close(&self.held);
     }
@@ -907,16 +966,29 @@ async fn remote_with(
     // a grant remembered before DeskVNC asked for the clipboard comes back
     // with it off and is kept, so unattended access goes on as it was.
     let clipboard = ask_clipboard(&session).await;
+    let asked = clipboard.is_some();
     let started = within(
         ANSWER,
         portal.start(&session, None, StartOptions::default()),
     )
     .await?
     .response()?;
-    let clipboard = clipboard.and_then(|c| c.started(started.is_clipboard_enabled()));
-    match grant(token.is_some(), started.devices()) {
-        Grant::Keep => save_token(started.restore_token()),
-        Grant::Once => forget_token(),
+    let enabled = started.is_clipboard_enabled();
+    let clipboard = clipboard.and_then(|c| c.started(enabled));
+    let restored = token.is_some();
+    match grant(restored, started.devices()) {
+        Grant::Keep => {
+            set_left_out(left_out(restored, asked, enabled, grant_asked_clipboard()));
+            save_token(started.restore_token());
+            // A restored grant is the one remembered, whatever it was asked.
+            if !restored {
+                note_asked(asked);
+            }
+        }
+        Grant::Once => {
+            set_left_out(None);
+            forget_token();
+        }
         Grant::Again => {
             let _ = session.close().await;
             return Ok(None);
@@ -963,6 +1035,8 @@ async fn cast(token: Option<&str>) -> Result<(Held, OwnedFd, PortalStream), ashp
     .await?
     .response()?;
     save_token(started.restore_token());
+    // No clipboard on a screen cast alone, and none to ask for again.
+    set_left_out(None);
     let stream = started.streams().first().cloned().ok_or_else(|| {
         ashpd::Error::Portal(ashpd::PortalError::Failed("No screen was shared".into()))
     })?;
@@ -1272,6 +1346,31 @@ mod tests {
         assert!(!controls(BitFlags::empty()));
         assert!(controls(DeviceType::Pointer | DeviceType::Keyboard));
         assert!(controls(BitFlags::from_flag(DeviceType::Keyboard)));
+    }
+
+    #[test]
+    fn a_grant_from_0_34_says_why_the_clipboard_is_missing() {
+        // GNOME 50 restoring a token Support 0.34 saved: the portal has a
+        // clipboard, it was asked for, and Start said it was off.
+        assert_eq!(left_out(true, true, false, false), Some(OLD_GRANT));
+        // Remembered from a prompt that asked, with the switch left off.
+        assert_eq!(left_out(true, true, false, true), Some(LEFT_OFF));
+        // Restored with it on.
+        assert_eq!(left_out(true, true, true, false), None);
+        assert_eq!(left_out(true, true, true, true), None);
+        // Asked just now: off is what the person chose, nothing to fix.
+        assert_eq!(left_out(false, true, false, false), None);
+        // A portal without a clipboard has none to give, shared again or not.
+        assert_eq!(left_out(true, false, false, false), None);
+    }
+
+    #[test]
+    fn whether_a_grant_asked_is_kept_beside_its_token() {
+        let token = std::path::Path::new("/state/deskvnc/portal-restore-token");
+        assert_eq!(
+            asked_path(token),
+            std::path::Path::new("/state/deskvnc/portal-restore-token.clipboard")
+        );
     }
 
     #[test]

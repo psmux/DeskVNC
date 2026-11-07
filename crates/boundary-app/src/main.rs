@@ -1032,8 +1032,17 @@ impl App {
             ui.add_space(6.0);
         });
     }
+    /// End this session, forget the permission the desktop remembered, and
+    /// share again, so the desktop asks once more with its clipboard switch.
+    fn share_again(&mut self, ctx: &egui::Context) {
+        boundary_platform::forget_screen_grant();
+        self.stop();
+        self.share(ctx);
+        self.status = SHARE_AGAIN_STATUS.into();
+    }
     fn sharing(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        let mut again = false;
         theme::card(ui, |ui| {
             theme::title(ui, "Your screen is being shared");
             theme::muted(
@@ -1084,6 +1093,16 @@ impl App {
                     session.set_clipboard_read(self.clipboard);
                 }
             }
+            if let Some(note) = clipboard_note(
+                self.clipboard_offered,
+                boundary_platform::clipboard_left_out(),
+            ) {
+                theme::small(ui, note);
+                again = ui
+                    .button("Share again")
+                    .on_hover_text(SHARE_AGAIN_HOVER)
+                    .clicked();
+            }
             if self.tools_offered || self.clipboard_offered {
                 activity(ui, &self.activity);
             }
@@ -1109,6 +1128,9 @@ impl App {
                 "Use End session above to disconnect. Closing DeskVNC Support also ends sharing.",
             );
         });
+        if again {
+            self.share_again(ui.ctx());
+        }
     }
     fn remote(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
@@ -1510,6 +1532,17 @@ impl App {
 /// prompt and on the sharing screen.
 pub(crate) const SEE_WHAT_I_COPY: &str = "Also let them see what I copy";
 pub(crate) const SEE_WHAT_I_COPY_NOTE: &str = "Text you copy while they are connected goes to them, and that is sometimes a password. Leave this off unless you need it. You can turn it off at any time.";
+/// The line under the clipboard tick when the desktop's remembered sharing
+/// permission leaves the clipboard out, as a GNOME grant saved by Support
+/// 0.34 does. Only for a helper that can use the clipboard at all, and only
+/// on this screen, which is the one the person at the computer sees: an
+/// unattended session keeps the old grant, since nobody is there to answer
+/// the prompt again.
+fn clipboard_note(offered: bool, left_out: Option<&'static str>) -> Option<&'static str> {
+    left_out.filter(|_| offered)
+}
+const SHARE_AGAIN_HOVER: &str = "Ends this session and forgets the permission your desktop remembered, so it asks again. Your helper connects again with the new code.";
+const SHARE_AGAIN_STATUS: &str = "Sharing again. Give your helper the new code. When your desktop asks which screen to share, leave Allow Clipboard Access on";
 /// What this copy of Support says it can do when it connects as a helper:
 /// take and give clipboard text, which the person there still has to allow.
 fn abilities() -> Abilities {
@@ -1707,6 +1740,16 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_grant_is_explained_beside_the_clipboard_tick() {
+        let line = "This computer's sharing permission is from an older version";
+        assert_eq!(clipboard_note(true, Some(line)), Some(line));
+        // A helper that cannot use the clipboard has no tick to explain.
+        assert_eq!(clipboard_note(false, Some(line)), None);
+        // The grant has the clipboard, or the desktop has none to give.
+        assert_eq!(clipboard_note(true, None), None);
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         std::iter::once("deskvnc-support")
