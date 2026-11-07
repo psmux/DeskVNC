@@ -10,29 +10,38 @@
 //!   the account, is RSA encrypted to the Mac's 2048-bit host key, so the
 //!   user name never crosses the wire in clear. The host key is fetched with
 //!   an `RSA1` request of its own and pinned trust on first use.
-//! * Type 36 sends the same records in clear and has no host key.
+//! * Type 36 sends the same messages in clear, each behind a length word,
+//!   and has no host key.
+//!
+//! Every SRP message in both directions is an [`srp_buffer`] (`u32 len,
+//! body`); what differs is the wrapping. Seen on a Mac running macOS 26:
 //!
 //! ```text
-//! type 33                                 type 36
-//! C->S RSA1(authtype 0)  key request      -
-//! S->C u32 len, u32le 0x100, u16 n, SPKI, u8 0
-//! C->S RSA1(authtype 2) RSA(identity)     C->S identity
-//! S->C frame(challenge)                   S->C frame(challenge)
-//! C->S RSA1(authtype 2) proof             C->S proof
-//! S->C frame(server proof)                S->C frame(server proof)
-//! S->C u32 SecurityResult                 S->C u32 SecurityResult
+//! type 33                                    type 36
+//! C->S 33, RSA1(authtype 0)  key request     C->S 36, u32 len, identity
+//! S->C u32 len, 00 01 00 00, u16 n, SPKI, 00
+//! C->S RSA1(authtype 2) RSA(identity)
+//! S->C u32 len, 00 00 00 02, u16 n, chal.    S->C u32 len, challenge
+//! C->S RSA1(authtype 2) proof, 384 bytes     C->S u32 len, proof
+//! S->C u32 len, 00 00 00 02, u16 n, M2       S->C u32 len, M2
+//! S->C u32 SecurityResult                    S->C u32 SecurityResult
 //! ```
+//!
+//! The type byte and the first message must leave in one write: the Mac
+//! reads them with a single read and, if the message is not there, takes
+//! its first byte as a new security type and hangs up. A user name the Mac
+//! does not know still gets a challenge, so a login fails the same way for
+//! a wrong name as for a wrong password, at the proof.
 //!
 //! After a successful login the first 16 bytes of `SHA-256(K)` are the key
 //! that unwraps the server's first session rekey (see [`crate::apple`]).
 //!
 //! ## What is still unconfirmed
 //!
-//! The parts of this exchange that have not been checked against a real Mac
-//! yet are named in the doc comment of each function that implements them,
-//! and each has a test in `tests/apple_screen_sharing.rs` that pins the
-//! assumption so a live run that disagrees points straight at it. The live
-//! run is `tests/apple_live.rs`.
+//! The SRP arithmetic (`x`, `K`, `M1`, `M2`) and the server proof's layout
+//! can only be checked by a successful login. Each assumption is named in
+//! the doc comment of the function that implements it and pinned by a test
+//! in `tests/apple_screen_sharing.rs`; the live run is `tests/apple_live.rs`.
 
 use num_bigint_dig::BigUint;
 use rand::Rng;
@@ -40,12 +49,13 @@ use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
 use rsa::traits::PublicKeyParts;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
 use sha2::{Digest, Sha256, Sha512};
+use tokio::io::AsyncReadExt;
 use zeroize::Zeroize;
 
 use vnc_transport::{format_fingerprint, normalize_fingerprint, BoxedStream, TrustDecision};
 
 use super::prompt::CredentialSource;
-use super::{read_bytes_max, read_u32, read_u8, write_all, AuthOutcome, ServerIdentity};
+use super::{read_bytes_max, read_u32, write_all, AuthOutcome, ServerIdentity};
 use crate::error::{Result, VncError};
 use crate::types::{ConnectOptions, CredentialKind, PinScheme};
 
@@ -437,7 +447,36 @@ pub fn check_group(group: &SrpGroup, challenge: &Challenge) -> Result<()> {
     Ok(())
 }
 
-/// The identity record: `u32 rest_len, u32 user_len, user, u16 0, u8 0`.
+/// One message as the Mac's SRP code frames it: `u32 len, body`. Every SRP
+/// message in both directions is one of these; the security types differ
+/// only in what they wrap around it.
+pub fn srp_buffer(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// The body of an [`srp_buffer`], checking its length word against the
+/// bytes that carried it.
+pub fn parse_srp_buffer<'a>(buf: &'a [u8], what: &str) -> Result<&'a [u8]> {
+    if buf.len() < 4 {
+        return Err(VncError::Protocol(format!(
+            "{what} is too short for its length word"
+        )));
+    }
+    let len = u32::from_be_bytes(buf[..4].try_into().expect("four")) as usize;
+    if len != buf.len() - 4 {
+        return Err(VncError::Protocol(format!(
+            "{what} says {len} bytes but {} came",
+            buf.len() - 4
+        )));
+    }
+    Ok(&buf[4..])
+}
+
+/// The identity record, the first SRP message: an [`srp_buffer`] holding
+/// `u32 user_len, user, u16 0, u8 0`.
 pub fn identity_record(username: &str) -> Result<Vec<u8>> {
     let user = username.as_bytes();
     if user.len() > MAX_USER_LEN {
@@ -445,13 +484,11 @@ pub fn identity_record(username: &str) -> Result<Vec<u8>> {
             "the user name is too long for macOS Screen Sharing ({MAX_USER_LEN} bytes max)"
         )));
     }
-    let rest_len = 4 + user.len() + 3;
-    let mut out = Vec::with_capacity(4 + rest_len);
-    out.extend_from_slice(&(rest_len as u32).to_be_bytes());
-    out.extend_from_slice(&(user.len() as u32).to_be_bytes());
-    out.extend_from_slice(user);
-    out.extend_from_slice(&[0, 0, 0]);
-    Ok(out)
+    let mut body = Vec::with_capacity(4 + user.len() + 3);
+    body.extend_from_slice(&(user.len() as u32).to_be_bytes());
+    body.extend_from_slice(user);
+    body.extend_from_slice(&[0, 0, 0]);
+    Ok(srp_buffer(&body))
 }
 
 /// An `RSA1` envelope: `u32 total_len, u16 0x0100, "RSA1", u16 authtype,
@@ -468,12 +505,9 @@ pub fn rsa1_envelope(authtype: u16, field: u16, body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The host key request.
-///
-/// UNCONFIRMED: no description of its body exists. This sends the envelope
-/// with an empty body, right after the security type byte. If a Mac rejects
-/// it, the native client's behaviour (it skips the request and uses a cached
-/// key) is the next thing to capture.
+/// The host key request: an `RSA1` envelope with authtype 0 and nothing in
+/// it, sent in the same write as the type byte. A Mac logs it as a 10 byte
+/// RSA message and answers with its key.
 pub fn key_request() -> Vec<u8> {
     rsa1_envelope(AUTHTYPE_KEY_REQUEST, 0, &[])
 }
@@ -485,6 +519,13 @@ pub fn identity_packet_33(ciphertext: &[u8]) -> Vec<u8> {
     body.extend_from_slice(ciphertext);
     body.resize(ciphertext.len() + RSA1_TRAILER, 0);
     rsa1_envelope(AUTHTYPE_SRP, ciphertext.len() as u16, &body)
+}
+
+/// Type 36 packet 1: the identity record in clear, inside one more length
+/// word. A Mac given the bare record reads its first word as that outer
+/// length and then refuses the rest as the wrong size.
+pub fn identity_packet_36(record: &[u8]) -> Vec<u8> {
+    srp_buffer(record)
 }
 
 /// `LV16(A) || LV8(M1) || LV16(options) || LV8(client_random)`.
@@ -502,100 +543,92 @@ pub fn proof_inner(
     Ok(inner)
 }
 
-/// Type 33 packet 2: `RSA1(authtype 2, field = inner_len + 4)` carrying
-/// `u16 0, u16 inner_len, inner` and then 384 trailing bytes.
-///
-/// UNCONFIRMED: whether the trailing bytes are needed. A capture shows 384
-/// non-zero bytes there; random bytes are sent to match it.
+/// Type 33 packet 2: `RSA1(authtype 2, field = buffer length)` carrying the
+/// proof as an [`srp_buffer`], then 384 random bytes so the packet has the
+/// size the native viewer's has.
 pub fn proof_packet_33(inner: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(4 + inner.len() + RSA1_TRAILER);
-    body.extend_from_slice(&0u16.to_be_bytes());
-    body.extend_from_slice(&(inner.len() as u16).to_be_bytes());
-    body.extend_from_slice(inner);
+    let mut body = srp_buffer(inner);
+    let field = body.len() as u16;
     let start = body.len();
     body.resize(start + RSA1_TRAILER, 0);
     rand::rng().fill_bytes(&mut body[start..]);
-    rsa1_envelope(AUTHTYPE_SRP, (inner.len() + 4) as u16, &body)
+    rsa1_envelope(AUTHTYPE_SRP, field, &body)
 }
 
-/// How type 36 frames the client proof.
-///
-/// UNCONFIRMED: nothing describes it. [`ProofFraming36::Bare`] is the
-/// default: the type 33 proof body without the envelope, behind a u32 length
-/// like the identity record. [`ProofFraming36::Rsa1`] sends exactly the type
-/// 33 packet 2. The live test tries both.
+/// Type 36 packet 2: the proof's [`srp_buffer`] inside one more length word,
+/// as packet 1 is.
+pub fn proof_packet_36(inner: &[u8]) -> Vec<u8> {
+    srp_buffer(&srp_buffer(inner))
+}
+
+/// How the server wraps its SRP messages, which follows the security type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProofFraming36 {
-    Bare,
+pub enum Framing {
+    /// Type 33: `u32 total_len, u16 0, u16 2, u16 len`, then `len` bytes of
+    /// [`srp_buffer`], then anything else `total_len` counts.
     Rsa1,
+    /// Type 36: `u32 len`, then `len` bytes of [`srp_buffer`].
+    Plain,
 }
 
-/// Type 36 proof in the given framing.
-pub fn proof_packet_36(inner: &[u8], framing: ProofFraming36) -> Vec<u8> {
-    match framing {
-        ProofFraming36::Rsa1 => proof_packet_33(inner),
-        ProofFraming36::Bare => {
-            let rest = 4 + inner.len();
-            let mut out = Vec::with_capacity(4 + rest);
-            out.extend_from_slice(&(rest as u32).to_be_bytes());
-            out.extend_from_slice(&0u16.to_be_bytes());
-            out.extend_from_slice(&(inner.len() as u16).to_be_bytes());
-            out.extend_from_slice(inner);
-            out
-        }
-    }
-}
-
-/// One server SRP message: `u32 total_len, u8 step, u32 x, u32 payload_len,
-/// payload`, where `x` is `payload_len + 4`.
+/// Read one server SRP message and return the body of its [`srp_buffer`].
 ///
-/// What `total_len` counts is not certain, so it is not trusted to delimit
-/// the message: the payload is read by its own length, and any surplus
-/// `total_len` claims beyond the header and payload is read and dropped.
-///
-/// A server that refuses the login can answer with an ordinary failing
-/// SecurityResult where a frame was expected. No frame is shorter than its
-/// own 9 byte header, so a first word below 9 is read as that result, with
-/// the RFB 3.8 reason string after it, and reported as rejected
-/// credentials. How a Mac reports a wrong password here is unconfirmed.
-pub async fn read_server_frame(stream: &mut BoxedStream, what: &str) -> Result<(u8, Vec<u8>)> {
-    let total = read_u32(stream).await? as usize;
-    if total < 9 {
-        let mut reason = "the Mac rejected the user name or password".to_string();
-        if let Ok(len) = read_u32(stream).await {
-            if let Ok(bytes) = read_bytes_max(stream, len as usize, 8192, "failure reason").await {
-                let text: String = String::from_utf8_lossy(&bytes)
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(512)
-                    .collect();
-                if !text.trim().is_empty() {
-                    reason = text;
-                }
+/// A Mac refuses a proof it cannot verify after a delay of a second or more
+/// (it grows with each failure). Under type 33 it sends an RSA1 frame with
+/// an empty message and then a SecurityResult of 1; under type 36 it sends
+/// the SecurityResult alone where the message would be. Neither carries a
+/// reason string. Both come back as [`VncError::AuthFailed`].
+pub async fn read_server_message(
+    stream: &mut BoxedStream,
+    framing: Framing,
+    what: &str,
+) -> Result<Vec<u8>> {
+    let first = read_u32(stream).await?;
+    let buffer = match framing {
+        Framing::Rsa1 => {
+            // version, authtype and the buffer length: six bytes.
+            if first < 6 {
+                return Err(refused(first, what));
             }
+            let first = first as usize;
+            let mut head = [0u8; 6];
+            stream
+                .read_exact(&mut head)
+                .await
+                .map_err(crate::proto::messages::map_eof)?;
+            let len = u16::from_be_bytes([head[4], head[5]]) as usize;
+            if 6 + len > first {
+                return Err(VncError::Protocol(format!(
+                    "{what}: a {len} byte message in a {first} byte frame"
+                )));
+            }
+            let buffer = read_bytes_max(stream, len, MAX_FRAME, what).await?;
+            if first > 6 + len {
+                read_bytes_max(stream, first - 6 - len, MAX_FRAME, what).await?;
+            }
+            if buffer.is_empty() {
+                let status = read_u32(stream).await.unwrap_or(1);
+                return Err(refused(status, what));
+            }
+            buffer
         }
-        tracing::info!(what, status = total, "the Mac refused the SRP login");
-        return Err(VncError::AuthFailed(reason));
-    }
-    let step = read_u8(stream).await?;
-    let x = read_u32(stream).await? as usize;
-    let payload_len = read_u32(stream).await? as usize;
-    if x != payload_len + 4 {
-        tracing::debug!(
-            what,
-            x,
-            payload_len,
-            "SRP frame length words disagree; trusting the payload length"
-        );
-    }
-    let payload = read_bytes_max(stream, payload_len, MAX_FRAME, what).await?;
-    let used = 1 + 4 + 4 + payload_len;
-    if total > used {
-        let surplus = total - used;
-        tracing::debug!(what, surplus, "SRP frame has trailing bytes");
-        read_bytes_max(stream, surplus, MAX_FRAME, what).await?;
-    }
-    Ok((step, payload))
+        Framing::Plain => {
+            if first < 4 {
+                return Err(refused(first, what));
+            }
+            read_bytes_max(stream, first as usize, MAX_FRAME, what).await?
+        }
+    };
+    Ok(parse_srp_buffer(&buffer, what)?.to_vec())
+}
+
+/// The error for a SecurityResult that refuses the login.
+fn refused(status: u32, what: &str) -> VncError {
+    tracing::info!(what, status, "the Mac refused the SRP login");
+    VncError::AuthFailed(match status {
+        2 => "too many authentication attempts; the Mac is throttling".into(),
+        _ => "the Mac rejected the user name or password".into(),
+    })
 }
 
 /// Parse the host key reply's body (everything after its u32 length).
@@ -675,9 +708,10 @@ async fn obtain_credentials(
 /// Read the challenge, derive the proof and return it with the challenge.
 async fn answer_challenge(
     stream: &mut BoxedStream,
+    framing: Framing,
     password: &str,
 ) -> Result<(Challenge, ClientProof, Vec<u8>)> {
-    let (_step, payload) = read_server_frame(stream, "SRP challenge").await?;
+    let payload = read_server_message(stream, framing, "SRP challenge").await?;
     let challenge = parse_challenge(&payload)?;
     let group = SrpGroup::apple();
     check_group(&group, &challenge)?;
@@ -713,8 +747,12 @@ async fn answer_challenge(
 }
 
 /// Read the server proof and check `M2`.
-async fn check_server_proof(stream: &mut BoxedStream, proof: &ClientProof) -> Result<()> {
-    let (_step, payload) = read_server_frame(stream, "SRP server proof").await?;
+async fn check_server_proof(
+    stream: &mut BoxedStream,
+    framing: Framing,
+    proof: &ClientProof,
+) -> Result<()> {
+    let payload = read_server_message(stream, framing, "SRP server proof").await?;
     let server = parse_server_proof(&payload)?;
     if server.m2 != proof.expected_m2 {
         // Either the server does not know the verifier (wrong password on its
@@ -727,13 +765,25 @@ async fn check_server_proof(stream: &mut BoxedStream, proof: &ClientProof) -> Re
     Ok(())
 }
 
-/// Type 33 after the type byte.
+/// `prefix` and `message` as one write. macOS takes the security type byte
+/// and the first message of its SRP logins from a single read and drops the
+/// connection when the byte comes alone, so the two must leave together.
+fn joined(prefix: &[u8], message: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + message.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(message);
+    out
+}
+
+/// Type 33. `type_prefix` is the security type byte still to be sent (empty
+/// if it already went); it travels in the same write as the key request.
 pub(crate) async fn handshake_33(
     mut stream: BoxedStream,
+    type_prefix: &[u8],
     opts: &ConnectOptions,
     creds: &CredentialSource<'_>,
 ) -> Result<AuthOutcome> {
-    write_all(&mut stream, &key_request()).await?;
+    write_all(&mut stream, &joined(type_prefix, &key_request())).await?;
     let host_key = read_key_reply(&mut stream).await?;
 
     let trust = evaluate_trust(&host_key, opts.cert_pins.for_scheme(PinScheme::AppleRsa))?;
@@ -753,9 +803,10 @@ pub(crate) async fn handshake_33(
     let ciphertext = ciphertext?;
     write_all(&mut stream, &identity_packet_33(&ciphertext)).await?;
 
-    let (_challenge, proof, inner) = answer_challenge(&mut stream, &password).await?;
+    let (_challenge, proof, inner) =
+        answer_challenge(&mut stream, Framing::Rsa1, &password).await?;
     write_all(&mut stream, &proof_packet_33(&inner)).await?;
-    check_server_proof(&mut stream, &proof).await?;
+    check_server_proof(&mut stream, Framing::Rsa1, &proof).await?;
 
     let mut outcome = AuthOutcome::auto(stream);
     outcome.apple_wrap_key = Some(initial_wrap_key(&proof.session_key));
@@ -768,54 +819,31 @@ pub(crate) async fn handshake_33(
     Ok(outcome)
 }
 
-/// Type 36 after the type byte.
+/// Type 36. `type_prefix` is as for [`handshake_33`]; here it travels with
+/// the identity record, so the credentials are asked for before anything is
+/// sent.
 pub(crate) async fn handshake_36(
-    stream: BoxedStream,
-    opts: &ConnectOptions,
-    creds: &CredentialSource<'_>,
-) -> Result<AuthOutcome> {
-    handshake_36_with(stream, opts, creds, ProofFraming36::Bare).await
-}
-
-async fn handshake_36_with(
     mut stream: BoxedStream,
+    type_prefix: &[u8],
     opts: &ConnectOptions,
     creds: &CredentialSource<'_>,
-    framing: ProofFraming36,
 ) -> Result<AuthOutcome> {
     let (username, password) = obtain_credentials(opts, creds).await?;
-    let mut identity = identity_record(&username)?;
+    let mut record = identity_record(&username)?;
+    let mut identity = joined(type_prefix, &identity_packet_36(&record));
+    record.zeroize();
     let sent = write_all(&mut stream, &identity).await;
     identity.zeroize();
     sent?;
 
-    let (_challenge, proof, inner) = answer_challenge(&mut stream, &password).await?;
-    write_all(&mut stream, &proof_packet_36(&inner, framing)).await?;
-    check_server_proof(&mut stream, &proof).await?;
+    let (_challenge, proof, inner) =
+        answer_challenge(&mut stream, Framing::Plain, &password).await?;
+    write_all(&mut stream, &proof_packet_36(&inner)).await?;
+    check_server_proof(&mut stream, Framing::Plain, &proof).await?;
 
     let mut outcome = AuthOutcome::auto(stream);
     outcome.apple_wrap_key = Some(initial_wrap_key(&proof.session_key));
     Ok(outcome)
-}
-
-/// Run a type 36 login with an explicit proof framing, from the point the
-/// server's security offer has been read: writes the type byte, runs the
-/// exchange and reads the SecurityResult. The live test uses it to try both
-/// framings; the session always uses [`ProofFraming36::Bare`].
-#[doc(hidden)]
-pub async fn login_36_with_framing(
-    mut stream: BoxedStream,
-    opts: &ConnectOptions,
-    framing: ProofFraming36,
-) -> Result<(BoxedStream, [u8; 16])> {
-    write_all(&mut stream, &[36]).await?;
-    let outcome = handshake_36_with(stream, opts, &CredentialSource::none(), framing).await?;
-    let mut stream = outcome.stream;
-    super::read_security_result(&mut stream, super::ProtocolVersionInfo::new(3, 8)).await?;
-    let key = outcome
-        .apple_wrap_key
-        .ok_or_else(|| VncError::Other("type 36 produced no session key".into()))?;
-    Ok((stream, key))
 }
 
 #[cfg(test)]
@@ -977,6 +1005,82 @@ b1d9ce7eb54c95ba49118596cf7465719bbe02c4ecab1b1541298c321d13c6f6"
             options: vec![],
         };
         assert!(check_group(&group, &ch).is_err());
+    }
+
+    /// A stream that keeps every write the client makes as a separate entry
+    /// and reads as closed, so a handshake stops after its first message.
+    struct WriteLog(std::sync::Arc<parking_lot::Mutex<Vec<Vec<u8>>>>);
+
+    impl tokio::io::AsyncRead for WriteLog {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl tokio::io::AsyncWrite for WriteLog {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.0.lock().push(buf.to_vec());
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn first_write(pref: &str) -> Vec<u8> {
+        let log = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut o = ConnectOptions::vnc("mac.example.com", 5900);
+        o.credentials = crate::types::Credentials::user_pass("tester", "pw");
+        o.vnc_mut().security_pref = Some(pref.into());
+        let version = super::super::ProtocolVersionInfo::parse("RFB 003.889\n").unwrap();
+        let r = super::super::authenticate_full(
+            WriteLog(log.clone()),
+            version,
+            &[30, 33, 36, 35],
+            &o,
+            &CredentialSource::none(),
+        )
+        .await;
+        assert!(r.is_err(), "the closed stream ends the handshake");
+        let writes = log.lock().clone();
+        writes
+            .into_iter()
+            .next()
+            .expect("the client wrote something")
+    }
+
+    /// A Mac reads the type byte and the first message of types 33 and 36
+    /// in one read and closes the connection when the byte arrives alone, so
+    /// both must go out in a single write.
+    #[tokio::test]
+    async fn the_type_byte_leaves_with_the_first_message() {
+        let mut want = vec![33];
+        want.extend_from_slice(&key_request());
+        assert_eq!(first_write("apple-srp-rsa").await, want);
+
+        let mut want = vec![36];
+        want.extend_from_slice(&identity_packet_36(&identity_record("tester").unwrap()));
+        assert_eq!(first_write("apple-srp").await, want);
+
+        // Type 30 waits for the server's parameters, so its byte goes alone.
+        assert_eq!(first_write("apple-dh").await, [30]);
     }
 
     #[test]
