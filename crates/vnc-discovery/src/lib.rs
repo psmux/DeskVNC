@@ -96,7 +96,8 @@ impl Discovery {
     }
 
     /// Deep probe: complete the version handshake, read the security-type list,
-    /// then close **without** authenticating.
+    /// then close **without** authenticating. A server that refuses instead
+    /// gives [`Error::Refused`] with its reason.
     pub async fn deep_probe(addr: SocketAddr) -> Result<Vec<u8>> {
         probe::deep_probe(addr).await
     }
@@ -303,6 +304,78 @@ mod integration_tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         let types = Discovery::deep_probe(addr).await.unwrap();
         assert_eq!(types, vec![1u8, 18u8]);
+    }
+
+    /// A fake server that sends `banner`, reads the 12-byte version reply,
+    /// then sends `answer` and holds the socket open briefly.
+    async fn fake_rfb(banner: &'static [u8; 12], answer: Vec<u8>) -> SocketAddr {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::AsyncReadExt;
+                let _ = sock.write_all(banner).await;
+                let mut reply = [0u8; 12];
+                let _ = sock.read_exact(&mut reply).await;
+                let _ = sock.write_all(&answer).await;
+                let _ = sock.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        addr
+    }
+
+    /// The wire form of a refusal reason: a u32 length, then the text.
+    fn reason(text: &str) -> Vec<u8> {
+        let mut v = (text.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(text.as_bytes());
+        v
+    }
+
+    /// What TightVNC sends a loopback client when AllowLoopback is off: a
+    /// count of 0 and a reason. The probe must hand the reason back, not an
+    /// empty list.
+    #[tokio::test]
+    async fn deep_probe_reports_a_refusal_with_its_reason() {
+        let text = "Sorry, loopback connections are not enabled";
+        let mut answer = vec![0u8];
+        answer.extend(reason(text));
+        let addr = fake_rfb(b"RFB 003.008\n", answer).await;
+        match Discovery::deep_probe(addr).await {
+            Err(Error::Refused { addr: a, reason }) => {
+                assert_eq!(a, addr);
+                assert_eq!(reason, text);
+            }
+            other => panic!("expected a refusal with its reason, got {other:?}"),
+        }
+    }
+
+    /// RFB 3.3 refuses with a security type of 0 and the same reason shape.
+    #[tokio::test]
+    async fn deep_probe_reports_an_rfb_33_refusal() {
+        let mut answer = vec![0u8, 0, 0, 0];
+        answer.extend(reason("Too many security failures"));
+        let addr = fake_rfb(b"RFB 003.003\n", answer).await;
+        let err = Discovery::deep_probe(addr).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Refused { reason, .. } if reason == "Too many security failures"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("{addr} refused the connection: Too many security failures")
+        );
+    }
+
+    /// A refusal whose reason never arrives is still a refusal.
+    #[tokio::test]
+    async fn deep_probe_reports_a_refusal_without_a_reason() {
+        let addr = fake_rfb(b"RFB 003.008\n", vec![0u8]).await;
+        let err = Discovery::deep_probe(addr).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Refused { reason, .. } if reason == "the server gave no reason"),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
