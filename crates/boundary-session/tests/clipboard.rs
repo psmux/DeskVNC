@@ -403,6 +403,183 @@ async fn the_helper_writes_only_while_it_has_control_and_hears_no_echo() {
     .expect("timed out");
 }
 
+/// A desktop that opens only when the test says, as GNOME's desktop opens
+/// only once the person answers its sharing prompt.
+fn opening_late(board: Shared) -> (std::sync::mpsc::Sender<()>, Session) {
+    let (open, opened) = std::sync::mpsc::channel::<()>();
+    let host = boundary_session::host(local(), move || {
+        let _ = opened.recv_timeout(Duration::from_secs(30));
+        Ok(Box::new(Fake {
+            board,
+            clipboard: true,
+        }))
+    });
+    (open, host)
+}
+
+/// Control given on the sharing screen while the desktop is still opening
+/// reaches the helper once it opens, and with it the right to write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_given_while_the_desktop_opens_reaches_the_helper() {
+    timeout(Duration::from_secs(60), async {
+        let board = board();
+        let (open, mut host) = opening_late(board.clone());
+        let ticket = invitation(&mut host).await;
+        let mut helper = boundary_session::viewer_with(
+            ticket,
+            "Clipboard test".into(),
+            local(),
+            None,
+            abilities(true),
+        );
+        approve(&mut host, Approval::View, true).await;
+        connected(&mut helper).await;
+        assert_eq!(
+            next(&mut helper, SOON).await,
+            Some(Heard::Rights(ClipboardRights {
+                write: false,
+                read: true
+            }))
+        );
+        host.set_control(true);
+        open.send(()).unwrap();
+        assert_eq!(next(&mut helper, SOON).await, Some(Heard::Control(true)));
+        assert_eq!(
+            next(&mut helper, SOON).await,
+            Some(Heard::Rights(ClipboardRights {
+                write: true,
+                read: true
+            }))
+        );
+        helper.send_clipboard("with control".into()).unwrap();
+        assert!(eventually(SOON, || clipboard_of(&board) == "with control").await);
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// Control taken back while the desktop is still opening stays taken back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_taken_back_while_the_desktop_opens_stays_off() {
+    timeout(Duration::from_secs(60), async {
+        let board = board();
+        let (open, mut host) = opening_late(board.clone());
+        let ticket = invitation(&mut host).await;
+        let mut helper = boundary_session::viewer_with(
+            ticket,
+            "Clipboard test".into(),
+            local(),
+            None,
+            abilities(true),
+        );
+        approve(&mut host, Approval::Control, false).await;
+        connected(&mut helper).await;
+        assert_eq!(
+            next(&mut helper, SOON).await,
+            Some(Heard::Rights(ClipboardRights {
+                write: true,
+                read: false
+            }))
+        );
+        host.set_control(false);
+        open.send(()).unwrap();
+        assert_eq!(next(&mut helper, SOON).await, Some(Heard::Control(false)));
+        assert_eq!(
+            next(&mut helper, SOON).await,
+            Some(Heard::Rights(ClipboardRights {
+                write: false,
+                read: false
+            }))
+        );
+        assert!(helper.send_clipboard("too late".into()).is_err());
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A clipboard whose first look is slow, as one busy computer's can be.
+/// That look waits until the test has copied, or two seconds.
+struct SlowFirstLook {
+    fake: Fake,
+    copied: Option<std::sync::mpsc::Receiver<()>>,
+}
+impl Desktop for SlowFirstLook {
+    fn capture(&mut self) -> anyhow::Result<Frame> {
+        self.fake.capture()
+    }
+    fn input(&mut self, input: Input) -> anyhow::Result<()> {
+        self.fake.input(input)
+    }
+    fn release(&mut self) {}
+    fn has_clipboard(&self) -> bool {
+        true
+    }
+    fn clipboard_changed(&mut self) -> anyhow::Result<Option<String>> {
+        if let Some(copied) = self.copied.take() {
+            let _ = copied.recv_timeout(Duration::from_secs(2));
+        }
+        self.fake.clipboard_changed()
+    }
+    fn set_clipboard(&mut self, text: &str) -> anyhow::Result<()> {
+        self.fake.set_clipboard(text)
+    }
+}
+
+/// What the person copies once they are told their screen is shared goes
+/// to the helper, however late the session takes its first look.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_made_as_sharing_starts_reaches_the_helper() {
+    timeout(Duration::from_secs(60), async {
+        let board = board();
+        let shared = board.clone();
+        let (copied, looked) = std::sync::mpsc::channel::<()>();
+        let mut host = boundary_session::host(local(), move || {
+            Ok(Box::new(SlowFirstLook {
+                fake: Fake {
+                    board: shared,
+                    clipboard: true,
+                },
+                copied: Some(looked),
+            }))
+        });
+        let ticket = invitation(&mut host).await;
+        let mut helper = boundary_session::viewer_with(
+            ticket,
+            "Clipboard test".into(),
+            local(),
+            None,
+            abilities(true),
+        );
+        approve(&mut host, Approval::View, true).await;
+        loop {
+            match host.events.recv().await {
+                Some(Event::Connected { .. }) => break,
+                Some(Event::Finished(result)) => panic!("the host stopped: {result:?}"),
+                None => panic!("the host went quiet"),
+                _ => {}
+            }
+        }
+        copy(&board, "copied as it started");
+        let _ = copied.send(());
+        assert_eq!(
+            next(&mut helper, SOON).await,
+            Some(Heard::Rights(ClipboardRights {
+                write: false,
+                read: true
+            }))
+        );
+        assert_eq!(
+            next(&mut helper, SOON).await,
+            Some(Heard::Text("copied as it started".into()))
+        );
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
 /// A desktop without a clipboard: the helper is told it has neither right,
 /// and the person's tick goes back off.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

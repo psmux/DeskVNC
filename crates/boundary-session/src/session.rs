@@ -999,6 +999,9 @@ where
         p.allowed = false;
         p.generation += 1;
     });
+    // Anything the person changes after this, while the desktop opens, is
+    // their newer word on control and is kept below.
+    let opening = worker.control.borrow().generation;
     let permission_rx = worker.control.clone();
     let input_permission = worker.control.clone();
     let (input_tx, input_rx) = mpsc::channel(128);
@@ -1067,14 +1070,32 @@ where
     // Remote Interaction was left off. The helper was told it had control,
     // and its first click ended the whole session with "Control was not
     // allowed". It is told it can only watch instead.
-    let control = allowed && controllable;
+    // The person may have given or taken back control while the desktop
+    // opened, say on the sharing screen during GNOME's prompt. Putting back
+    // what they approved with lost that: the tick showed control, the
+    // helper never heard of it, and only a second tick reached it.
+    let wanted = {
+        let permission = worker.control.borrow();
+        if permission.generation == opening {
+            allowed
+        } else {
+            permission.allowed
+        }
+    };
+    let control = wanted && controllable;
     worker.control_tx.send_modify(|p| {
         p.allowed = control;
         p.generation += 1;
     });
     worker.emit(Event::Connected { peer, control }).await?;
-    if allowed && !controllable {
-        wire::write(&mut send, &Message::Control(false)).await?;
+    if control != allowed {
+        wire::write(&mut send, &Message::Control(control)).await?;
+    }
+    if wanted && !controllable {
+        if !allowed {
+            // Ticked while the desktop opened: the tick goes back off.
+            worker.emit(Event::Control(false)).await?;
+        }
         worker.emit(Event::Status(NO_CONTROL.into())).await?;
     }
     // What the helper was told about the clipboard, and what is true now
@@ -1477,8 +1498,14 @@ where
     let mut desktop = Release(factory()?);
     let _ = encoders.send(desktop.0.video());
     let has_clipboard = desktop.0.has_clipboard();
-    let _ = opened.send((desktop.0.controllable(), has_clipboard));
     let mut clipboard = clipboard.filter(|_| has_clipboard).map(ClipboardWatch::new);
+    // Where the clipboard stands is noted before the person is told the
+    // screen is shared. Noted after, a copy made just then was taken for
+    // what was there before and never sent.
+    if let Some(clipboard) = clipboard.as_mut() {
+        clipboard.turn(desktop.0.as_mut());
+    }
+    let _ = opened.send((desktop.0.controllable(), has_clipboard));
     let mut capture_at = Instant::now();
     let mut last_input = Instant::now();
     let mut last_change = Instant::now();

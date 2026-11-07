@@ -148,7 +148,18 @@ async fn clipboard_text_goes_both_ways_through_the_driver_as_the_host_allows() {
             })
         );
 
-        // What was copied before the session never comes; a new copy does.
+        // What was copied before the session never comes; a copy made once
+        // the person is told the screen is shared does. A copy made before
+        // that, while the desktop was still opening, was taken for what was
+        // there before and the test waited for it in vain.
+        loop {
+            match host.events.recv().await {
+                Some(Event::Connected { .. }) => break,
+                Some(Event::Finished(result)) => panic!("the host stopped: {result:?}"),
+                None => panic!("the host went quiet"),
+                _ => {}
+            }
+        }
         copy(&board, "copied on the host");
         assert_eq!(
             next(&mut rx, SOON).await,
