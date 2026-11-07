@@ -528,7 +528,10 @@ impl Model {
                     }
                     Event::Control(control) => self.control = control,
                     // On the helper's side only.
-                    Event::Tools(_) | Event::Paired { .. } => {}
+                    Event::Tools(_)
+                    | Event::Paired { .. }
+                    | Event::ClipboardRights(_)
+                    | Event::ClipboardText(_) => {}
                     Event::Activity(line) => keep(&mut self.activity, line),
                     Event::Finished(result) => finished = Some(result),
                 }

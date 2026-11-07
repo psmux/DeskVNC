@@ -2777,8 +2777,24 @@ fn boundary_capabilities(mirror: bool, clip: BoundaryClipboard) -> &'static [Cap
     use Capability::*;
     match (mirror, clip.write, clip.read) {
         (true, false, false) => &[View, Capture, Control, Close, HostsRead, Exec],
-        (true, true, false) => &[View, Capture, Control, Close, HostsRead, ClipboardWrite, Exec],
-        (true, false, true) => &[View, Capture, Control, Close, HostsRead, ClipboardRead, Exec],
+        (true, true, false) => &[
+            View,
+            Capture,
+            Control,
+            Close,
+            HostsRead,
+            ClipboardWrite,
+            Exec,
+        ],
+        (true, false, true) => &[
+            View,
+            Capture,
+            Control,
+            Close,
+            HostsRead,
+            ClipboardRead,
+            Exec,
+        ],
         (true, true, true) => &[
             View,
             Capture,
