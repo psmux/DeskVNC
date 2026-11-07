@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
+mod attention;
 mod codes;
 mod install;
 mod journal;
@@ -245,6 +246,9 @@ struct App {
     /// shows the window once its first frame is drawn, whatever it was built
     /// with, so it has to be hidden again after that.
     hide_frames: u8,
+    /// Whether the window had focus when last drawn, for the session's
+    /// events, which are read off the window's thread.
+    focused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -333,6 +337,7 @@ impl App {
             } else {
                 0
             },
+            focused: Default::default(),
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -372,7 +377,7 @@ impl App {
     }
     /// Share this computer: a host session whose invitation becomes the code
     /// on the home screen.
-    fn share(&mut self) {
+    fn share(&mut self, ctx: &egui::Context) {
         let Some(display) = self.displays.get(self.display) else {
             return;
         };
@@ -380,9 +385,15 @@ impl App {
         self.hosting = true;
         self.error = false;
         self.status = "Creating your code".into();
-        self.session = Some(boundary_session::host(self.network_options(), move || {
-            boundary_platform::open(id)
-        }));
+        let mut session =
+            boundary_session::host(self.network_options(), move || boundary_platform::open(id));
+        // Read off the window's thread, so a question gets to the person
+        // even while the window draws nothing.
+        let (_, stand_in) = tokio::sync::mpsc::channel(1);
+        let events = std::mem::replace(&mut session.events, stand_in);
+        session.events =
+            attention::forward(events, ctx.clone(), self.focused.clone(), attention::notify);
+        self.session = Some(session);
     }
     /// Connect to whatever is in the partner field: a short code, a full
     /// invitation, or an unattended computer's ID.
@@ -422,7 +433,7 @@ impl App {
     }
     fn poll(&mut self, ctx: &egui::Context) {
         if self.unattended.poll() {
-            show(ctx);
+            attention::raise(ctx);
         }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
@@ -476,7 +487,7 @@ impl App {
                             allow_tools: false,
                             answer,
                         });
-                        show(ctx);
+                        attention::raise(ctx);
                     }
                     Event::Connected { peer, control } => {
                         self.codes.clear();
@@ -619,7 +630,7 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.share();
+                        self.share(ui.ctx());
                     }
                     theme::small(
                         ui,
@@ -1102,12 +1113,21 @@ impl eframe::App for App {
             }
             self.status = "Still running, so helpers can reach this computer. Turn off unattended access to quit.".into();
         }
+        self.focused.store(
+            ctx.input(|i| i.focused),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
-            if self.tray.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            // A question that came in during these first frames already
+            // raised the window. Hiding it again would leave the question
+            // waiting where nobody can see it.
+            if attention::may_hide(self.pending.is_some() || self.unattended.asking()) {
+                if self.tray.is_some() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
             }
         }
         if let Some(tray) = self.tray.as_mut() {
