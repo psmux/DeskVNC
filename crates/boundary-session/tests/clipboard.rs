@@ -6,7 +6,7 @@
 
 use boundary_session::{
     Abilities, Approval, ClipboardRights, Desktop, Event, Frame, HostOptions, Input, Invitation,
-    MAX_CLIPBOARD, Session,
+    Key, MAX_CLIPBOARD, Session,
     unattended::{self, Access, Notice},
 };
 use iroh::endpoint::{RecvStream, SendStream, presets};
@@ -718,6 +718,111 @@ async fn the_sign_in_screen_never_lets_a_helper_read() {
             listener.stop();
         }
         let _ = std::fs::remove_dir_all(dir);
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A busy computer, slow to come back for the next input, whose keys note
+/// what was on the clipboard when each paste key went down.
+struct Typist {
+    board: Shared,
+    keys: Arc<Mutex<Vec<String>>>,
+}
+impl Desktop for Typist {
+    fn capture(&mut self) -> anyhow::Result<Frame> {
+        // Everything the helper sends meanwhile waits on the host, as it
+        // does behind a slow link.
+        std::thread::sleep(Duration::from_millis(40));
+        Ok(Frame {
+            width: 2,
+            height: 2,
+            rgba: vec![90; 16],
+        })
+    }
+    fn input(&mut self, input: Input) -> anyhow::Result<()> {
+        if let Input::Key {
+            key: Key::Letter('v'),
+            down: true,
+        } = input
+        {
+            let text = clipboard_of(&self.board);
+            self.keys.lock().unwrap().push(text);
+        }
+        Ok(())
+    }
+    fn release(&mut self) {}
+    fn has_clipboard(&self) -> bool {
+        true
+    }
+    fn set_clipboard(&mut self, text: &str) -> anyhow::Result<()> {
+        copy(&self.board, text);
+        Ok(())
+    }
+}
+
+/// A helper pastes by putting its text on the clipboard and then pressing
+/// the paste keys. Each paste must find its own text there, however the
+/// messages pile up on the way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_paste_keys_find_the_text_sent_before_them() {
+    timeout(Duration::from_secs(90), async {
+        let board = board();
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let (b, k) = (board.clone(), keys.clone());
+        let mut host =
+            boundary_session::host(local(), move || Ok(Box::new(Typist { board: b, keys: k })));
+        let ticket = invitation(&mut host).await;
+        let mut helper = boundary_session::viewer_with(
+            ticket,
+            "Clipboard test".into(),
+            local(),
+            None,
+            abilities(true),
+        );
+        approve(&mut host, Approval::Control, false).await;
+        connected(&mut helper).await;
+        loop {
+            if let Some(Heard::Rights(rights)) = next(&mut helper, SOON).await {
+                if rights.write {
+                    break;
+                }
+            } else {
+                panic!("never allowed to write");
+            }
+        }
+        // Let the host's busy loop settle into its pace first.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        const PASTES: usize = 40;
+        for i in 0..PASTES {
+            // The helper's own queue holds two texts; a full one says so.
+            while let Err(error) = helper.send_clipboard(format!("paste {i}")) {
+                assert!(format!("{error:#}").contains("Still sending"), "{error:#}");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            for down in [true, false] {
+                helper
+                    .input(Input::Key {
+                        key: Key::Letter('v'),
+                        down,
+                    })
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let _ = activity(&mut host);
+        }
+        assert!(
+            eventually(Duration::from_secs(30), || {
+                let _ = activity(&mut host);
+                keys.lock().unwrap().len() == PASTES
+            })
+            .await,
+            "only {} pastes arrived",
+            keys.lock().unwrap().len()
+        );
+        let expected: Vec<String> = (0..PASTES).map(|i| format!("paste {i}")).collect();
+        assert_eq!(*keys.lock().unwrap(), expected);
+        host.stop();
     })
     .await
     .expect("timed out");

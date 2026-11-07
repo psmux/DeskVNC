@@ -1007,13 +1007,11 @@ where
     let (refresh_tx, refresh_rx) = watch::channel(0u64);
     let (encoders_tx, encoders_rx) = oneshot::channel();
     let (opened_tx, opened_rx) = oneshot::channel();
-    let (paste_tx, paste_rx) = mpsc::channel(4);
     let (copied_tx, mut copied_rx) = mpsc::channel(4);
     let changes: Changes = Arc::new(Mutex::new(Some(Vec::new())));
     let cancel = worker.cancel.clone();
     let clipboard_link = clipboard.then(|| ClipboardLink {
         read: worker.clipboard_read.subscribe(),
-        paste: paste_rx,
         copied: copied_tx,
         activity: worker.events.clone(),
     });
@@ -1138,11 +1136,14 @@ where
                     input.validate()?;
                     let permission = *input_permission.borrow();
                     if permission.allowed || matches!(input, Input::Release) {
-                        match input_tx.try_send((permission.generation, input)) {
+                        match input_tx.try_send((permission.generation, ToDesktop::Input(input))) {
                             Ok(()) => {}
                             // The next move supersedes this one; dropping it
                             // while the screen is busy beats ending the session.
-                            Err(mpsc::error::TrySendError::Full((_, Input::Move { .. }))) => {}
+                            Err(mpsc::error::TrySendError::Full((
+                                _,
+                                ToDesktop::Input(Input::Move { .. }),
+                            ))) => {}
                             // A computer too busy to keep up, say while a
                             // malware scan holds every core, is waited for.
                             // Not reading meanwhile slows the helper down
@@ -1171,8 +1172,16 @@ where
                         eprintln!("Refused clipboard text: the helper does not have control");
                     } else if let Err(error) = wire::check_clipboard(&text) {
                         eprintln!("Refused clipboard text: {error:#}");
-                    } else if paste_tx.try_send((permission.generation, text)).is_err() {
-                        eprintln!("Refused clipboard text: the last one is still being set");
+                    } else {
+                        // On the same queue as input, so the paste keys the
+                        // helper sends after it find it on the clipboard.
+                        tokio::time::timeout(
+                            INPUT_STALL,
+                            input_tx.send((permission.generation, ToDesktop::Paste(text))),
+                        )
+                        .await
+                        .context("This computer stopped taking input. Session stopped")?
+                        .map_err(|_| anyhow!("Session ended"))?;
                     }
                 }
                 _ => bail!("Unexpected helper message"),
@@ -1314,12 +1323,18 @@ const BODY_WAIT: Duration = Duration::from_secs(60);
 /// what they copy.
 const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
 
+/// What the helper sent for the desktop, in the order it sent it.
+enum ToDesktop {
+    Input(Input),
+    /// Text for the person's clipboard. It goes in line with input, since a
+    /// helper pastes by sending the text and then the paste keys.
+    Paste(String),
+}
+
 /// The clipboard's side of the desktop loop, for a helper that carries it.
 struct ClipboardLink {
     /// Whether the person lets the helper see what they copy.
     read: watch::Receiver<bool>,
-    /// Text from the helper, with the control generation it came under.
-    paste: mpsc::Receiver<(u64, String)>,
     /// Text the person copied, for the helper.
     copied: mpsc::Sender<String>,
     activity: mpsc::Sender<Event>,
@@ -1348,26 +1363,33 @@ impl ClipboardWatch {
             failed: None,
         }
     }
-    /// Put the helper's text on the clipboard while it has control, and look
-    /// for what the person copied while they let the helper see it.
-    fn turn(&mut self, desktop: &mut dyn Desktop, permission: Permission) {
-        while let Ok((epoch, text)) = self.link.paste.try_recv() {
-            if !(permission.allowed && permission.generation == epoch) {
-                eprintln!("Refused clipboard text: control changed before it was set");
-                continue;
-            }
-            match desktop.set_clipboard(&text) {
-                Ok(()) => {
-                    let line = format!(
-                        "They put {} characters on your clipboard",
-                        text.chars().count()
-                    );
-                    let _ = self.link.activity.try_send(Event::Activity(line));
-                    self.set = Some(text);
-                }
-                Err(error) => eprintln!("Could not set the clipboard: {error:#}"),
-            }
+    /// Put the helper's text on the clipboard, if it still has the control
+    /// it sent the text under.
+    fn paste(
+        &mut self,
+        desktop: &mut dyn Desktop,
+        permission: Permission,
+        epoch: u64,
+        text: String,
+    ) {
+        if !(permission.allowed && permission.generation == epoch) {
+            eprintln!("Refused clipboard text: control changed before it was set");
+            return;
         }
+        match desktop.set_clipboard(&text) {
+            Ok(()) => {
+                let line = format!(
+                    "They put {} characters on your clipboard",
+                    text.chars().count()
+                );
+                let _ = self.link.activity.try_send(Event::Activity(line));
+                self.set = Some(text);
+            }
+            Err(error) => eprintln!("Could not set the clipboard: {error:#}"),
+        }
+    }
+    /// Look for what the person copied, while they let the helper see it.
+    fn turn(&mut self, desktop: &mut dyn Desktop) {
         if !*self.link.read.borrow() {
             self.started = false;
             return;
@@ -1434,7 +1456,7 @@ const BUSY_FOR: Duration = Duration::from_secs(1);
 #[allow(clippy::too_many_arguments)]
 fn desktop_loop<F>(
     factory: F,
-    mut input: mpsc::Receiver<(u64, Input)>,
+    mut input: mpsc::Receiver<(u64, ToDesktop)>,
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Frame>>>,
     encoders: oneshot::Sender<Option<VideoEncoders>>,
@@ -1476,6 +1498,16 @@ where
             if cancel.is_cancelled() {
                 break;
             }
+            let event = match event {
+                ToDesktop::Input(event) => event,
+                ToDesktop::Paste(text) => {
+                    if let Some(clipboard) = clipboard.as_mut() {
+                        clipboard.paste(desktop.0.as_mut(), *permission.borrow(), epoch, text);
+                    }
+                    last_input = Instant::now();
+                    continue;
+                }
+            };
             if matches!(event, Input::Release) {
                 desktop.0.release();
             } else {
@@ -1495,7 +1527,7 @@ where
             break;
         }
         if let Some(clipboard) = clipboard.as_mut() {
-            clipboard.turn(desktop.0.as_mut(), *permission.borrow());
+            clipboard.turn(desktop.0.as_mut());
         }
         if Instant::now() >= capture_at {
             let started = Instant::now();
@@ -2462,7 +2494,10 @@ async fn watch(
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             let message = tokio::select! {
-                event = worker.input.recv() => Message::Input(event.context("Window closed")?),
+                // Clipboard text is looked at first: it was queued before any
+                // input still waiting, such as the paste keys that follow it,
+                // and must reach the host ahead of them.
+                biased;
                 Some(text) = clipboard_out.recv() => {
                     // Checked when it was queued; checked again in case the
                     // host took the right away meanwhile.
@@ -2474,6 +2509,9 @@ async fn watch(
                         .context("Input connection stalled")??;
                     continue;
                 }
+                // Acknowledgements are a single latest value each, so they
+                // never hold input up, and a stream of input never holds
+                // them up either.
                 Ok(()) = shown_rx.changed() => Message::Shown(*shown_rx.borrow_and_update()),
                 Ok(()) = refresh.changed() => {
                     refresh.borrow_and_update();
@@ -2482,6 +2520,7 @@ async fn watch(
                     }
                     Message::Refresh
                 }
+                event = worker.input.recv() => Message::Input(event.context("Window closed")?),
                 _ = tick.tick() => Message::Ping,
             };
             tokio::time::timeout(Duration::from_secs(3), wire::write(&mut send, &message))
