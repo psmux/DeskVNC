@@ -48,7 +48,7 @@ jobs:
 
           **macOS** is signed and notarized, so it opens normally.
           **Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.
-          **Linux** packages are unsigned.
+          **Linux** packages are unsigned. There are x64 and ARM64 (Raspberry Pi 4 or 5, 64-bit OS) builds.
 
           **DeskVNC Support** is also attached, for macOS, Windows and Linux,
           for people who need to receive help. Download it on the computer being
@@ -93,6 +93,14 @@ jobs:
             bundle-target: x86_64-unknown-linux-gnu
             toolchain-targets: x86_64-unknown-linux-gnu
             artifact: linux-x64
+          # 64-bit ARM Linux, for a Raspberry Pi 4 or 5 on 64-bit Raspberry Pi
+          # OS and for ARM servers and laptops. GitHub's ARM runner builds it
+          # natively, so nothing here cross compiles.
+          - os: ubuntu-22.04-arm
+            label: Linux ARM64 (deb + AppImage)
+            bundle-target: aarch64-unknown-linux-gnu
+            toolchain-targets: aarch64-unknown-linux-gnu
+            artifact: linux-arm64
           # One universal binary rather than two per-architecture jobs. GitHub
           # retired the Intel macOS image, so a `macos-13` job simply never gets
           # a runner: it sits queued until the 6 hour timeout and then reports
@@ -114,7 +122,7 @@ jobs:
           echo "::error::Windows signing is not configured, and a release must be signed."
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -140,6 +148,8 @@ jobs:
       # keep linking against this runner's 0.3.48 library. The link fails if
       # the app needs anything 0.3.48 lacks, so a build that passes starts on
       # Ubuntu 22.04 and Debian 12 too.
+      # The headers come from the amd64 packages on ARM too, since they are
+      # the same files on every architecture.
       - name: Use PipeWire 1.0 headers against the 22.04 library
         if: runner.os == 'Linux'
         run: |
@@ -165,15 +175,17 @@ jobs:
           echo "PKG_CONFIG_PATH=$headers/pkgconfig" >> "$GITHUB_ENV"
           echo "linking against $(readlink -f "$system/libpipewire-0.3.so")"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned by hash, so the toolchain is named here rather than by the ref.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
         with:
+          toolchain: stable
           targets: ${{ matrix.toolchain-targets }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.bundle-target }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -305,7 +317,7 @@ jobs:
       # Windows is signed by the two steps above when the Certum secrets are
       # set, and Linux is unsigned. The macOS secrets come from
       # scripts/setup-github-signing-secrets.sh.
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           DESKVNC_REQUIRE_CLEAN: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -327,7 +339,7 @@ jobs:
 
             **macOS** is signed and notarized, so it opens normally.
             ${{ env.CERTUM_CONFIGURED == 'true' && '**Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.' || '**Windows** is unsigned: SmartScreen will say "Windows protected your PC", and you continue with **More info** then **Run anyway**.' }}
-            **Linux** packages are unsigned.
+            **Linux** packages are unsigned. There are x64 and ARM64 (Raspberry Pi 4 or 5, 64-bit OS) builds.
 
             **DeskVNC Support** is also attached, for macOS, Windows and
             Linux, for people who need to receive help. Download it on the computer being
@@ -427,7 +439,7 @@ jobs:
 
       - name: Upload the DeskVNC Support recipient app artifact
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvnc-support-macos
           path: |
@@ -467,7 +479,7 @@ jobs:
 
       - name: Upload the Windows DeskVNC Support artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvnc-support-windows
           path: |
@@ -624,7 +636,7 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum ./*; else shasum -a 256 ./*; fi \
             | tee "SHA256SUMS-${{ matrix.artifact }}.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deskvncviewer-${{ matrix.artifact }}
           path: dist/*
@@ -635,17 +647,30 @@ jobs:
   # accounts with push access. Every earlier tag stopped there, which is why
   # v0.27.3 sat with a support app nobody outside the repo could download.
   #
-  # The support app for Linux: one x86_64 binary in a tarball. Its own job,
-  # on Ubuntu 24.04, because its Wayland screen capture binds PipeWire 1.0 and
-  # the viewer stays on 22.04 for the older glibc its installers promise.
+  # The support app for Linux: one binary in a tarball, for x86_64 and for
+  # ARM64. Its own job, on Ubuntu 24.04, because its Wayland screen capture
+  # binds PipeWire 1.0 and the viewer stays on 22.04 for the older glibc its
+  # installers promise.
   support-linux:
-    name: Linux (DeskVNC Support)
+    name: ${{ matrix.label }}
     needs: draft
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: Linux (DeskVNC Support)
+            arch: x86_64
+            sums: SHA256SUMS-DeskVNC-Support-Linux.txt
+          - os: ubuntu-24.04-arm
+            label: Linux ARM64 (DeskVNC Support)
+            arch: aarch64
+            sums: SHA256SUMS-DeskVNC-Support-Linux-aarch64.txt
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Linux system dependencies
         run: |
@@ -656,11 +681,13 @@ jobs:
           # bindings at build time.
           sudo apt-get install -y             libssl-dev libdbus-1-dev pkg-config             libxcb1-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-dev             libwayland-dev libpipewire-0.3-dev libegl1-mesa-dev libgbm-dev             clang libclang-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
         with:
-          key: support-linux
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: support-linux-${{ matrix.arch }}
 
       - name: Build and package the DeskVNC Support recipient app
         shell: bash
@@ -671,22 +698,22 @@ jobs:
           cargo build --locked --release -p boundary
           mkdir -p support
           cp target/release/boundary support/deskvnc-support
-          tar -C support -czf DeskVNC-Support-Linux-x86_64.tar.gz deskvnc-support
-          sha256sum DeskVNC-Support-Linux-x86_64.tar.gz | tee SHA256SUMS-DeskVNC-Support-Linux.txt
+          tar -C support -czf DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz deskvnc-support
+          sha256sum DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz | tee ${{ matrix.sums }}
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-x86_64.tar.gz SHA256SUMS-DeskVNC-Support-Linux.txt --clobber
+            gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz ${{ matrix.sums }} --clobber
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: deskvnc-support-linux
+          name: deskvnc-support-linux-${{ matrix.arch }}
           path: |
-            DeskVNC-Support-Linux-x86_64.tar.gz
-            SHA256SUMS-DeskVNC-Support-Linux.txt
+            DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz
+            ${{ matrix.sums }}
           if-no-files-found: error
           retention-days: 14
 
-  # Publishing is its own job so it waits for all three platforms. Flipping the
+  # Publishing is its own job so it waits for every platform. Flipping the
   # draft from inside the matrix would race: the first job to finish would
   # publish a release the other two were still uploading to.
   publish:
@@ -710,7 +737,7 @@ jobs:
           # Name the platforms rather than counting files, so a partial upload
           # is caught here instead of by whoever downloads the gap.
           missing=0
-          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' 'DeskVNC-Support-Linux-x86_64.tar.gz' '.dmg' '.msi' '-setup.exe' '.deb' '.AppImage'; do
+          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' 'DeskVNC-Support-Linux-x86_64.tar.gz' 'DeskVNC-Support-Linux-aarch64.tar.gz' '.dmg' '.msi' '-setup.exe' '_amd64.deb' '_arm64.deb' '_amd64.AppImage' '_aarch64.AppImage'; do
             if ! grep -qF "$want" /tmp/assets.txt; then
               echo "::error::release $TAG is missing an asset matching '$want'"
               missing=1
