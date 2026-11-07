@@ -4860,7 +4860,10 @@ mod tests {
         assert_eq!(ask.port, 22);
         assert_eq!(ask.protocol, "ssh");
         assert_eq!(ask.host_id, None, "no saved machine was named");
-        assert!(!ask.force_new, "slot 0 on a machine with nothing open is an ordinary open");
+        assert!(
+            !ask.force_new,
+            "slot 0 on a machine with nothing open is an ordinary open"
+        );
     }
 
     /// The opener is a process global, so the tests that install one take
@@ -4903,7 +4906,10 @@ mod tests {
             "{}",
             refused.message
         );
-        assert!(asked.lock().is_none(), "the application was asked to open something");
+        assert!(
+            asked.lock().is_none(),
+            "the application was asked to open something"
+        );
     }
 
     /// Slot 1 on a machine that already has slot 0 open is a second session of
