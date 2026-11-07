@@ -860,6 +860,16 @@ impl RunLoop {
             let (w, h) = (self.fb_width, self.fb_height);
             self.trace.record_client_message(bytes, w, h);
         }
+        // A full update request to a Mac holds back the incremental ones
+        // until its picture arrives (see `AppleSession::full_request_pending`).
+        if let Some(a) = self.apple.as_mut() {
+            if bytes.len() == 10
+                && bytes[0] == messages::client_msg::FRAMEBUFFER_UPDATE_REQUEST
+                && bytes[1] == 0
+            {
+                a.full_request_pending = true;
+            }
+        }
         self.writer
             .write_all(bytes)
             .await
@@ -1301,6 +1311,17 @@ impl RunLoop {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
             self.send(&msg).await?;
             self.arm_pipelined_request(Instant::now());
+        }
+
+        // A Mac's answer to a full request: only now may the incremental
+        // requests start, or they would have cancelled it.
+        if !rects.is_empty() {
+            if let Some(a) = self.apple.as_mut().filter(|a| a.full_request_pending) {
+                a.full_request_pending = false;
+                let msg = messages::framebuffer_update_request(true, self.full_rect());
+                self.send(&msg).await?;
+                self.arm_pipelined_request(Instant::now());
+            }
         }
 
         // Remember what was painted lossily so it can be re-fetched sharp once
@@ -2576,7 +2597,9 @@ impl RunLoop {
     /// server saw the message, and letting each of them pipeline a request is
     /// how one outstanding request becomes five.
     fn pacing_requests(&self) -> bool {
-        !self.cu_active && self.cu_disable_pending.is_none() && self.apple.is_none()
+        !self.cu_active
+            && self.cu_disable_pending.is_none()
+            && !self.apple.as_ref().is_some_and(|a| a.full_request_pending)
     }
 
     /// Restart the one-outstanding-incremental-request pipeline after a
@@ -2880,8 +2903,14 @@ impl RunLoop {
                 self.send(&msg).await?;
                 self.probe = Some((id, Instant::now()));
             }
-        } else {
+        } else if self.apple.is_none() {
             // No Fence: time a one-pixel non-incremental request instead.
+            //
+            // Never inside a macOS encrypted session. A Mac keeps only the
+            // last update request it was sent, so a one-pixel probe replaces
+            // the parked incremental request and every later answer shrinks
+            // to a 3x3 corner: the picture froze on the first frame. The
+            // pulled updates keep the passive round trip readout going.
             if self
                 .probe_request_at
                 .is_some_and(|t| t.elapsed() > PROBE_STALE)

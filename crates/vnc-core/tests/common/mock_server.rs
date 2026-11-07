@@ -45,6 +45,15 @@ pub const SEC_VNC_AUTH: u8 = 2;
 /// VeNCrypt (19). The mock only offers the `Plain` subtype (256), no TLS, /// which is enough to exercise a username+password credential prompt.
 pub const SEC_VENCRYPT: u8 = 19;
 const VENCRYPT_PLAIN: u32 = 256;
+/// Apple's Diffie-Hellman login (30), as an older Mac runs it: the 1024-bit
+/// group of RFC 2409 with generator 2. The mock decrypts the credentials
+/// with the shared secret and checks them like VeNCrypt Plain.
+pub const SEC_APPLE_DH: u8 = 30;
+const APPLE_DH_PRIME_1024: &[u8] = b"\
+FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74\
+020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437\
+4FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED\
+EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF";
 
 /// The effective RFB minor version a banner maps to, using the same rules the
 /// client applies (`003.889` is Apple's 3.8).
@@ -1069,6 +1078,19 @@ async fn serve(
                 auth_ok = false;
             }
         }
+        SEC_APPLE_DH => {
+            let (user, pass) = apple_dh_server(&mut stream).await?;
+            rec.lock()
+                .unwrap()
+                .plain_credentials
+                .push((user.clone(), pass.clone()));
+            if cfg.username.as_deref().is_some_and(|u| u != user) {
+                auth_ok = false;
+            }
+            if cfg.password.as_deref().is_some_and(|p| p != pass) {
+                auth_ok = false;
+            }
+        }
         other => {
             // Nothing else is implemented; the client should never get here.
             panic!("mock server asked for unimplemented security type {other}");
@@ -1376,4 +1398,47 @@ fn take_one(counter: &AtomicUsize) -> bool {
         }
     }
     false
+}
+
+/// The server half of type 30: send the group and a public value, read the
+/// encrypted credentials and the client's public value, and decrypt them
+/// with `MD5(shared secret)` in AES-128-ECB. Returns the user and password.
+async fn apple_dh_server(stream: &mut TcpStream) -> std::io::Result<(String, String)> {
+    use aes::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
+    use md5::{Digest, Md5};
+    use num_bigint_dig::BigUint;
+
+    const KEY_LEN: usize = 128;
+    let prime = BigUint::parse_bytes(APPLE_DH_PRIME_1024, 16).expect("prime");
+    let private = BigUint::from(0x0123_4567_89ab_cdefu64);
+    let public = BigUint::from(2u32).modpow(&private, &prime);
+    let pad = |v: &BigUint| {
+        let b = v.to_bytes_be();
+        let mut out = vec![0u8; KEY_LEN - b.len()];
+        out.extend_from_slice(&b);
+        out
+    };
+    let mut hello = Vec::with_capacity(4 + 2 * KEY_LEN);
+    hello.extend_from_slice(&2u16.to_be_bytes());
+    hello.extend_from_slice(&(KEY_LEN as u16).to_be_bytes());
+    hello.extend_from_slice(&pad(&prime));
+    hello.extend_from_slice(&pad(&public));
+    stream.write_all(&hello).await?;
+    stream.flush().await?;
+
+    let mut answer = [0u8; 128 + KEY_LEN];
+    stream.read_exact(&mut answer).await?;
+    let client_public = BigUint::from_bytes_be(&answer[128..]);
+    let shared = client_public.modpow(&private, &prime);
+    let key = Md5::digest(pad(&shared));
+    let cipher = aes::Aes128::new(GenericArray::from_slice(&key));
+    let mut blob = answer[..128].to_vec();
+    for block in blob.chunks_mut(16) {
+        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+    }
+    let field = |f: &[u8]| {
+        let end = f.iter().position(|b| *b == 0).unwrap_or(f.len());
+        String::from_utf8_lossy(&f[..end]).into_owned()
+    };
+    Ok((field(&blob[..64]), field(&blob[64..])))
 }

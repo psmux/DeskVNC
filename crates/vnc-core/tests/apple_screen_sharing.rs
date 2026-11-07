@@ -389,6 +389,9 @@ struct Seen {
     proof_trailer: usize,
     host_key_spki: Vec<u8>,
     auth_failed: bool,
+    /// Act like a Mac whose account lacks Remote Management privileges:
+    /// verify the password, send the server proof, then refuse the login.
+    refuse_after_proof: bool,
 }
 
 struct FakeMac {
@@ -413,9 +416,16 @@ async fn read_record(s: &mut TcpStream) -> Option<Vec<u8>> {
 
 impl FakeMac {
     async fn start(login: Login, password: &'static str) -> Self {
+        Self::start_with(login, password, false).await
+    }
+
+    async fn start_with(login: Login, password: &'static str, refuse_after_proof: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let seen = Arc::new(Mutex::new(Seen::default()));
+        let seen = Arc::new(Mutex::new(Seen {
+            refuse_after_proof,
+            ..Seen::default()
+        }));
         let s2 = seen.clone();
         let key = if login == Login::Rsa33 {
             Some(
@@ -550,6 +560,17 @@ async fn serve(
     s.write_all(&server_frame(login, &server_proof_payload(&m2)))
         .await
         .unwrap();
+    if seen.lock().refuse_after_proof {
+        // The password was right (the proof above verifies), but the account
+        // is not allowed in: SecurityResult 1 and macOS 26's generic reason.
+        let reason = b"Authentication or authorization failure";
+        s.write_all(&1u32.to_be_bytes()).await.unwrap();
+        s.write_all(&(reason.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        s.write_all(reason).await.unwrap();
+        return;
+    }
     s.write_all(&0u32.to_be_bytes()).await.unwrap();
 
     // --- ClientInit and ServerInit ------------------------------------------
@@ -630,9 +651,31 @@ async fn serve(
         }
         let m = fbu(&[(0, 0, 4, 4, 0, raw_pixels(4, 4, [0, 0, 255, 0]))]);
         s.write_all(&tx.seal(&m)).await.unwrap();
+
+        // Then the screen changes at (8, 8). Like a real Mac this server
+        // pushes nothing on its own and keeps only the last update request:
+        // the change goes out in answer to a request that covers it, and a
+        // request for a few pixels in the corner gets just that corner.
+        let mut change_sent = false;
         while let Some(c) = read_record(s).await {
             let Some(body) = rx.open(&c) else { break };
-            seen.lock().records.push(body);
+            let request = body.len() == 10 && body[0] == 3;
+            seen.lock().records.push(body.clone());
+            if !request {
+                continue;
+            }
+            let word = |i: usize| u16::from_be_bytes([body[i], body[i + 1]]);
+            let (x, y, w, h) = (word(2), word(4), word(6), word(8));
+            let covers = x <= 8 && y <= 8 && x + w >= 10 && y + h >= 10;
+            let m = if covers && !change_sent {
+                change_sent = true;
+                fbu(&[(8, 8, 2, 2, 0, raw_pixels(2, 2, [0, 255, 0, 0]))])
+            } else if !covers {
+                fbu(&[(0, 0, 3, 3, 0, raw_pixels(3, 3, [0, 0, 255, 0]))])
+            } else {
+                continue;
+            };
+            s.write_all(&tx.seal(&m)).await.unwrap();
         }
         return;
     }
@@ -923,11 +966,17 @@ async fn type_33_session_end_to_end() {
     assert_eq!(&r[1][..2], &[3, 0], "a non-incremental request");
     assert_eq!(r[2][0], 0x09, "AutoFrameBufferUpdate");
     assert_eq!(r[3], apple_wire::auto_pasteboard(true));
-    // Server pushed updates: the client never polls with an incremental
-    // request.
+    // A Mac sharing its real displays does not push changes, so the client
+    // pulls with incremental requests once a picture is in, and never sends
+    // the one pixel probe that would narrow the Mac's updates.
     assert!(
-        !r.iter().any(|m| m.len() == 10 && m[0] == 3 && m[1] == 1),
-        "incremental FramebufferUpdateRequest sent in an auto update session"
+        r.iter().any(|m| m.len() == 10 && m[0] == 3 && m[1] == 1),
+        "no incremental FramebufferUpdateRequest; the picture would freeze"
+    );
+    assert!(
+        !r.iter()
+            .any(|m| m.len() == 10 && m[0] == 3 && m[6..10] == [0, 1, 0, 1]),
+        "a one pixel probe went to the Mac"
     );
     // SetEncodings lists only what the client decodes, zlib first.
     let encs: Vec<i32> = r[0][4..]
@@ -963,6 +1012,44 @@ async fn type_36_session_end_to_end() {
     );
     assert_eq!(seen.records[0][0], 2, "SetEncodings opens the record layer");
     assert!(!seen.records.iter().any(|m| m[0] == 0x1d));
+}
+
+/// The picture keeps changing after the first frame. A Mac pushes nothing
+/// on its own and keeps only the last update request, so the viewer must
+/// pull with incremental requests once the full picture is in, and must not
+/// send the one pixel round trip probe that narrowed a real Mac's updates to
+/// a corner and froze the picture.
+#[tokio::test]
+async fn the_picture_keeps_updating_after_the_first_frame() {
+    let mac = FakeMac::start(Login::Srp36, PASSWORD).await;
+    let mut o = session_options(mac.port, PASSWORD);
+    o.vnc_mut().security_pref = Some("apple-srp".into());
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let changed = events
+        .wait(
+            Duration::from_secs(5),
+            "the change at (8, 8)",
+            |e| match e {
+                SessionEvent::FramebufferUpdate { damage, .. }
+                    if damage.x == 8 && damage.y == 8 =>
+                {
+                    Some(*damage)
+                }
+                _ => None,
+            },
+        )
+        .await;
+    assert_eq!((changed.width, changed.height), (2, 2));
+    send(&handle, ClientCommand::Disconnect).await;
+    let seen = mac.seen.lock();
+    assert!(
+        !seen
+            .records
+            .iter()
+            .any(|m| m.len() == 10 && m[0] == 3 && m[6..10] == [0, 1, 0, 1]),
+        "a one pixel probe went to the Mac"
+    );
 }
 
 /// A wrong password: the fake Mac refuses M1 with an ordinary failure result,
@@ -1005,6 +1092,148 @@ async fn wrong_password_with(login: Login) {
         "{:?}",
         events.summary()
     );
+}
+
+/// A Mac that verifies the password and then refuses the account (on macOS
+/// 26, an account without Remote Management privileges) is reported as that,
+/// not as a wrong password, and the password is not asked for again.
+#[tokio::test]
+async fn refused_after_a_good_password_says_why() {
+    for login in [Login::Rsa33, Login::Srp36] {
+        let mac = FakeMac::start_with(login, PASSWORD, true).await;
+        let mut o = session_options(mac.port, PASSWORD);
+        if login == Login::Srp36 {
+            o.vnc_mut().security_pref = Some("apple-srp".into());
+        }
+        let (_handle, mut events) = spawn_session(o);
+        let (reason, can_retry) = events
+            .wait(DEFAULT_TIMEOUT, "a refused login", |e| match e {
+                SessionEvent::StateChanged(vnc_core::types::SessionState::Disconnected {
+                    reason,
+                    can_retry,
+                    ..
+                }) => Some((reason.clone(), *can_retry)),
+                _ => None,
+            })
+            .await;
+        assert_eq!(reason, vnc_core::security::APPLE_ACCESS_DENIED, "{login:?}");
+        assert!(!can_retry, "{login:?}");
+        assert!(
+            !mac.seen.lock().auth_failed,
+            "the password itself was right"
+        );
+        assert!(
+            !events.any(|e| matches!(e, SessionEvent::CredentialsRequired(_))),
+            "{login:?}: asked for the password again"
+        );
+    }
+}
+
+/// A Mac that offers only type 30 (an older Mac, or one with Screen Sharing
+/// set up that way) still gets a full session: the 1024-bit DH login, then
+/// the ordinary cleartext RFB session with no Apple record layer.
+#[tokio::test]
+async fn a_mac_offering_only_30_logs_in_and_draws() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .banner(RFB_APPLE)
+            .security(&[SEC_APPLE_DH])
+            .username(USER)
+            .password(PASSWORD)
+            .size(WIDTH, HEIGHT)
+            .update(vec![RectSpec::Raw {
+                rect: vnc_core::types::Rect::new(0, 0, WIDTH, HEIGHT),
+                colour: [200, 10, 10],
+            }]),
+    )
+    .await;
+    let (handle, mut events) = spawn_session(session_options(server.port(), PASSWORD));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let (_, damage) = events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    assert_eq!((damage.width, damage.height), (WIDTH, HEIGHT));
+    assert_eq!(server.selected_security(), vec![SEC_APPLE_DH]);
+    assert_eq!(
+        server.plain_credentials(),
+        vec![(USER.to_string(), PASSWORD.to_string())]
+    );
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
+/// A Mac that offers only Apple's type 35 and the classic VNC password (2)
+/// logs in with the VNC password: 35 is not something this client speaks,
+/// and offering it must not stop the login.
+#[tokio::test]
+async fn a_mac_offering_35_and_2_uses_the_vnc_password() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .banner(RFB_APPLE)
+            .security(&[35, SEC_VNC_AUTH])
+            .password("vncpw")
+            .size(WIDTH, HEIGHT)
+            .update(vec![RectSpec::Raw {
+                rect: vnc_core::types::Rect::new(0, 0, WIDTH, HEIGHT),
+                colour: [10, 200, 10],
+            }]),
+    )
+    .await;
+    let mut o = options(server.port());
+    o.credentials = Credentials::password("vncpw");
+    o.reconnect.enabled = false;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    assert_eq!(server.selected_security(), vec![SEC_VNC_AUTH]);
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
+/// A type 30 login the Mac refuses cannot say whether the password or the
+/// account's Remote Management privileges were the problem, so the prompt
+/// that asks again carries the hint, and the right password still gets in.
+#[tokio::test]
+async fn a_refused_type_30_login_asks_again_with_the_hint() {
+    let mut config = MockConfig::new()
+        .banner(RFB_APPLE)
+        .security(&[SEC_APPLE_DH])
+        .username(USER)
+        .password(PASSWORD)
+        .size(WIDTH, HEIGHT);
+    // The reason macOS 26 gives for a wrong password and for an account it
+    // will not let in alike.
+    config.auth_failure_reason = "Authentication or authorization failure".into();
+    let server = MockServer::start(config).await;
+    let mut o = options(server.port());
+    o.reconnect.enabled = false;
+    let (handle, mut events) = spawn_session(o);
+    async fn prompt(events: &mut Events) -> vnc_core::types::CredentialRequest {
+        events
+            .wait(DEFAULT_TIMEOUT, "a credential prompt", |e| match e {
+                SessionEvent::CredentialsRequired(r) => Some(r.clone()),
+                _ => None,
+            })
+            .await
+    }
+    let first = prompt(&mut events).await;
+    assert_eq!(first.error, None);
+    let answer = |password: &str| ClientCommand::ProvideCredentials {
+        username: Some(USER.into()),
+        password: password.into(),
+        save: false,
+    };
+    send(&handle, answer("not the password")).await;
+    let second = prompt(&mut events).await;
+    assert_eq!(second.attempt, 2);
+    assert_eq!(
+        second.error.as_deref(),
+        Some(vnc_core::security::APPLE_DH_REFUSED)
+    );
+    assert!(second
+        .error
+        .unwrap()
+        .contains("may need this account allowed under Remote Management, Options"));
+    send(&handle, answer(PASSWORD)).await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    assert_eq!(server.selected_security(), vec![SEC_APPLE_DH, SEC_APPLE_DH]);
+    send(&handle, ClientCommand::Disconnect).await;
 }
 
 /// A host key that differs from the pinned one stops the login before the
