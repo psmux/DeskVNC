@@ -38,6 +38,10 @@ pub struct Ask {
     peer: String,
     tools: bool,
     allow_tools: bool,
+    /// The helper can carry clipboard text, so the person is asked.
+    clipboard: bool,
+    /// Off until they tick it.
+    allow_clipboard: bool,
     pair: bool,
     answer: tokio::sync::oneshot::Sender<Asked>,
 }
@@ -234,9 +238,7 @@ impl Unattended {
             return;
         }
         self.access.allow_tools(peer, tools);
-        if let Some(helper) = self.access.helpers.iter_mut().find(|h| h.id == peer) {
-            helper.clipboard = clipboard;
-        }
+        self.access.allow_clipboard(peer, clipboard);
         let was_enabled = self.access.enabled;
         self.access.enabled = true;
         if !self.save() {
@@ -321,6 +323,7 @@ impl Unattended {
                         name,
                         peer,
                         tools,
+                        clipboard,
                         answer,
                     } => {
                         self.ask = Some(Ask {
@@ -328,6 +331,8 @@ impl Unattended {
                             peer,
                             tools,
                             allow_tools: false,
+                            clipboard,
+                            allow_clipboard: false,
                             pair: false,
                             answer,
                         });
@@ -416,6 +421,11 @@ impl Unattended {
                     );
                     theme::small(ui, "Their tools act as you, outside what the screen shows. Leave this off unless you asked for it.");
                 }
+                if ask.clipboard {
+                    ui.add_space(10.0);
+                    ui.checkbox(&mut ask.allow_clipboard, crate::SEE_WHAT_I_COPY);
+                    theme::small(ui, crate::SEE_WHAT_I_COPY_NOTE);
+                }
                 ui.add_space(6.0);
                 ui.checkbox(
                     &mut ask.pair,
@@ -446,12 +456,10 @@ impl Unattended {
             && let Some(ask) = self.ask.take()
         {
             let allowed = !matches!(approval, Approval::Deny);
-            let _ = ask.answer.send(Asked {
-                approval,
-                tools: allowed && ask.allow_tools,
-                pair: allowed && ask.pair,
-            });
-            if allowed && ask.pair {
+            let pair = allowed && ask.pair;
+            let asked = answer(&ask, approval);
+            let _ = ask.answer.send(asked);
+            if pair {
                 // The listener saved them; show the list as it now is.
                 if let Ok(access) = Access::load(&self.access_path) {
                     self.access = access;
@@ -811,6 +819,18 @@ impl Unattended {
 }
 
 /// Whether to offer setting up the copy at the sign in screen.
+/// The person's answer to a helper who is not paired: nothing beyond
+/// viewing and control unless they ticked it, and nothing at all when they
+/// declined.
+fn answer(ask: &Ask, approval: Approval) -> Asked {
+    let allowed = !matches!(approval, Approval::Deny);
+    Asked {
+        approval,
+        tools: allowed && ask.tools && ask.allow_tools,
+        clipboard: allowed && ask.clipboard && ask.allow_clipboard,
+        pair: allowed && ask.pair,
+    }
+}
 fn show_login_notice(
     supported: bool,
     unattended_on: bool,
@@ -915,7 +935,149 @@ pub mod autostart {
 
 #[cfg(test)]
 mod tests {
-    use super::{after_connect, label, show_login_notice};
+    use super::{Ask, after_connect, answer, label, show_login_notice};
+    use boundary_session::{
+        Approval,
+        unattended::{Access, Helper},
+    };
+
+    fn knock(clipboard: bool) -> Ask {
+        Ask {
+            name: "Sam".into(),
+            peer: "peer".into(),
+            tools: false,
+            allow_tools: false,
+            clipboard,
+            allow_clipboard: false,
+            pair: false,
+            answer: tokio::sync::oneshot::channel().0,
+        }
+    }
+
+    #[test]
+    fn a_helper_asking_by_id_sees_nothing_copied_unless_the_person_ticks_it() {
+        let mut ask = knock(true);
+        assert!(!answer(&ask, Approval::Control).clipboard);
+        ask.allow_clipboard = true;
+        assert!(answer(&ask, Approval::View).clipboard);
+        assert!(!answer(&ask, Approval::Deny).clipboard);
+        let mut old = knock(false);
+        old.allow_clipboard = true;
+        assert!(!answer(&old, Approval::Control).clipboard);
+    }
+
+    struct Fake;
+    impl boundary_session::Desktop for Fake {
+        fn capture(&mut self) -> anyhow::Result<boundary_session::Frame> {
+            Ok(boundary_session::Frame {
+                width: 2,
+                height: 2,
+                rgba: vec![200; 16],
+            })
+        }
+        fn input(&mut self, _: boundary_session::Input) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn release(&mut self) {}
+        fn has_clipboard(&self) -> bool {
+            true
+        }
+    }
+
+    /// Whether a paired helper allowed to see what is copied, connecting as
+    /// this app does, is let see it by a listener at the sign in screen
+    /// (`login`) or in a signed in session.
+    async fn sees_copies(login: bool) -> bool {
+        use boundary_session::unattended::{self as u, Notice};
+        let dir = std::env::temp_dir().join(format!(
+            "support-clipboard-{}-{login}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = u::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let friend = u::load_or_create_key(&dir.join("friend.key")).unwrap();
+        let access_path = dir.join("access.json");
+        let mut access = Access::default();
+        access.enabled = true;
+        let id = friend.public().to_string();
+        access.trust(&id, "Friend", true).unwrap();
+        access.allow_clipboard(&id, true);
+        access.save(&access_path).unwrap();
+        let local = boundary_session::HostOptions {
+            relay: false,
+            relay_url: None,
+            bind_ip: None,
+        };
+        let desktop = || Ok(Box::new(Fake) as Box<dyn boundary_session::Desktop>);
+        let mut listener = if login {
+            u::listen_at_login(local.clone(), machine, access_path, desktop)
+        } else {
+            u::listen(local.clone(), machine, access_path, desktop)
+        };
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let _helper = u::connect_to_with(
+            Ok(address),
+            "Friend".into(),
+            None,
+            friend,
+            local,
+            crate::abilities(),
+        );
+        let seen = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Connected { session, .. }) => break session.clipboard_read_allowed(),
+                Some(Notice::Refused { reason, .. }) => panic!("refused: {reason}"),
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        seen
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sign_in_screen_never_shows_a_helper_what_is_copied() {
+        // On Windows a listener on the machine's own addresses raises a
+        // firewall prompt for each test build, as boundary-session's own
+        // unattended tests note.
+        if cfg!(windows) && std::env::var_os("BOUNDARY_LAN_TESTS").is_none() {
+            return;
+        }
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(60), sees_copies(true))
+            .await
+            .expect("timed out");
+        assert!(!seen, "nobody signed in is there to copy anything for them");
+    }
+
+    #[test]
+    fn saved_helpers_do_not_see_what_is_copied_until_the_person_says_so() {
+        // An access file written before the setting existed.
+        let old: Access = serde_json::from_str(
+            r#"{"enabled":true,"helpers":[{"id":"x","name":"Sam","control":true,"tools":true,"added":1}]}"#,
+        )
+        .unwrap();
+        assert!(!old.helpers[0].clipboard);
+        // A helper paired now starts with it off too.
+        let mut access = Access::default();
+        let id = boundary_session::unattended::machine_id(
+            &boundary_session::unattended::SecretKey::generate(),
+        );
+        access.trust(&id, "Sam", true).unwrap();
+        let Helper { clipboard, .. } = &access.helpers[0];
+        assert!(!clipboard);
+        assert!(access.allow_clipboard(&id, true));
+        assert!(access.helpers[0].clipboard);
+    }
 
     #[test]
     fn a_helper_coming_back_clears_the_news_of_their_last_session_ending() {
