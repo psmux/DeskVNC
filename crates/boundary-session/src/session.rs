@@ -874,8 +874,11 @@ where
         worker.tools_tx.send_replace(false);
     }
     let tools_now = *tools_rx.borrow_and_update();
+    // Nothing is controlled until the desktop is open. On Wayland that waits
+    // for the person to answer the desktop's own sharing prompt, and until
+    // then nothing is being shared at all.
     worker.control_tx.send_modify(|p| {
-        p.allowed = allowed;
+        p.allowed = false;
         p.generation += 1;
     });
     let permission_rx = worker.control.clone();
@@ -885,9 +888,10 @@ where
     let (shown_tx, shown_rx) = watch::channel(0u64);
     let (refresh_tx, refresh_rx) = watch::channel(0u64);
     let (encoders_tx, encoders_rx) = oneshot::channel();
+    let (opened_tx, opened_rx) = oneshot::channel();
     let changes: Changes = Arc::new(Mutex::new(Some(Vec::new())));
     let cancel = worker.cancel.clone();
-    let capture = tokio::task::spawn_blocking({
+    let mut capture = tokio::task::spawn_blocking({
         let changes = changes.clone();
         move || {
             desktop_loop(
@@ -896,11 +900,14 @@ where
                 permission_rx,
                 screen_tx,
                 encoders_tx,
+                opened_tx,
                 changes,
                 cancel,
             )
         }
     });
+    // The helper is let in now, so it stops waiting while the desktop opens.
+    // Its input is dropped until then, since the permission above is off.
     wire::write(
         &mut send,
         &Message::Granted {
@@ -910,12 +917,34 @@ where
     )
     .await?;
     worker
+        .emit(Event::Status("Starting to share your screen".into()))
+        .await?;
+    // The person is told the screen is shared once it is. Saying so as soon
+    // as they approved the helper put "Your screen is being shared" behind
+    // GNOME's prompt that was still asking whether to share it.
+    tokio::select! {
+        opened = opened_rx => {
+            if opened.is_err() {
+                // The desktop did not open, and the worker's result says why,
+                // such as Cancel in the desktop's sharing prompt.
+                return capture.await.context("Capture worker failed")?;
+            }
+        }
+        result = &mut capture => return result.context("Capture worker failed")?,
+        _ = connection.closed() => return Ok(()),
+    }
+    worker.control_tx.send_modify(|p| {
+        p.allowed = allowed;
+        p.generation += 1;
+    });
+    worker
         .emit(Event::Connected {
             peer,
             control: allowed,
         })
         .await?;
-    // Ignore the initial false UI value; subsequent changes are local permission decisions.
+    // The helper was told this in its grant. The loop below writes only
+    // what the person changes later.
     worker.control.borrow_and_update();
     let read_input = async {
         loop {
@@ -1043,12 +1072,14 @@ const IDLE_CAPTURE: Duration = Duration::from_millis(100);
 /// How long a still screen stays on the busy pace after it last changed.
 const BUSY_FOR: Duration = Duration::from_secs(1);
 
+#[allow(clippy::too_many_arguments)]
 fn desktop_loop<F>(
     factory: F,
     mut input: mpsc::Receiver<(u64, Input)>,
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Frame>>>,
     encoders: oneshot::Sender<Option<VideoEncoders>>,
+    opened: oneshot::Sender<()>,
     changes: Changes,
     cancel: CancellationToken,
 ) -> Result<()>
@@ -1063,6 +1094,7 @@ where
     }
     let mut desktop = Release(factory()?);
     let _ = encoders.send(desktop.0.video());
+    let _ = opened.send(());
     let mut capture_at = Instant::now();
     let mut last_input = Instant::now();
     let mut last_change = Instant::now();
