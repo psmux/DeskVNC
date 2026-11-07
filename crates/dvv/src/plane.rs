@@ -2693,6 +2693,14 @@ impl limb_core::limb::Limb for RemoteLimb {
                 },
             },
             Wait | Cancel => Support::Observed,
+            // A terminal has no framebuffer to mirror, so the desktop sentence
+            // below ("open it again with perceive set") was advice that could
+            // never work here.
+            ReadScreen | Capture if matches!(self.grounding, Grounding::Cells) => {
+                Support::Unsupported {
+                    because: "this is a terminal limb: it has no framebuffer, and its output is drawn in DeskVNCViewer's window and not handed to agents in this build, so there is no screen or text here to read. Run the command with dvv_run instead, which returns the whole output with the far side's exit status. dvv_term_send still types into this terminal",
+                }
+            }
             ReadScreen | Capture if self.has_mirror => Support::Observed,
             ReadScreen | Capture => Support::Unsupported {
                 because: "this limb was opened without a framebuffer mirror, so there are no pixels behind it to read. Open the machine again with perceive set, ask the user to look at the window, or read the machine over SSH if it answers there",
@@ -4575,6 +4583,30 @@ pub fn state_json(state: &SessionState) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A terminal limb asked for its screen used to be told to open the
+    /// machine again with perceive set, which a terminal can never satisfy.
+    #[test]
+    fn a_terminal_limb_refuses_a_screen_read_in_terminal_words() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        let shell = RemoteLimb::new(ProtocolKind::Ssh, false);
+        for intent in [IntentName::ReadScreen, IntentName::Capture] {
+            let Support::Unsupported { because } = shell.supports(intent) else {
+                panic!("a terminal has no screen to read");
+            };
+            assert!(because.contains("terminal limb"), "{because}");
+            assert!(because.contains("dvv_run"), "{because}");
+            assert!(!because.contains("perceive"), "{because}");
+            assert!(!because.contains("framebuffer mirror"), "{because}");
+        }
+        // A desktop without a mirror keeps the advice that does work there.
+        let desk = RemoteLimb::new(ProtocolKind::Vnc, false);
+        let Support::Unsupported { because } = desk.supports(IntentName::ReadScreen) else {
+            panic!("no mirror, no pixels");
+        };
+        assert!(because.contains("perceive"), "{because}");
+    }
 
     /// The ledger's whole contract, without a socket: a refused press trips
     /// it, later presses are counted as held back, a settle hands back the

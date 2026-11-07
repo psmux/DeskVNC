@@ -254,7 +254,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "dvv_wait",
-            "Blocks server side until something happens, up to timeoutMs, clamped to 25000 so a wait can never outlive your client's own call timeout. until is connected, screen-stable, screen-changed, text, text-gone, idle or exit. A TIMEOUT IS AN ORDINARY SUCCESS with settled false and what was observed, never an error: call again. screen-stable means the picture stopped changing, which is what 'the dialog finished animating' means; screen-changed means something moved, which is what 'did my click do anything' means. On a desktop limb a text condition needs pixels and this build does no OCR, so ask the terminal sibling instead.",
+            "Blocks server side until something happens, up to timeoutMs, clamped to 25000 so a wait can never outlive your client's own call timeout. until is connected, screen-stable, screen-changed, text, text-gone, idle or exit. A TIMEOUT IS AN ORDINARY SUCCESS with settled false and what was observed, never an error: call again. screen-stable means the picture stopped changing, which is what 'the dialog finished animating' means; screen-changed means something moved, which is what 'did my click do anything' means. text, text-gone and exit are not served on this build on any limb: a desktop would need OCR, and a terminal's output is drawn in DeskVNCViewer's window and not handed to agents. Run the check as a command with dvv_run, which returns its output and exit status.",
             merge(
                 selector(),
                 json!({
