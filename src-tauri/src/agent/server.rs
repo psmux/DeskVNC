@@ -1138,12 +1138,16 @@ fn typing_json(ctx: &Ctx, session_id: &str, peer: &Peer, has_screen: bool) -> Va
         });
     }
     let attachment_id = peer.attachment_id.clone().unwrap_or_default();
-    match admit_typing(ctx, session_id, &attachment_id) {
+    // The verdict only. This is a status read, and a status read is not a
+    // typing attempt: an adapter polls `limb.status` several times a second
+    // while it waits, and going through [`admit_typing`] here wrote a
+    // "typing refused" line on every poll although nothing was ever typed.
+    match typing_verdict(ctx, session_id, &attachment_id) {
         Ok(()) => json!({ "allowed": true }),
         Err(refused) => json!({
             "allowed": false,
-            "code": refused.tag,
-            "why": refused.message,
+            "code": SCREEN_CHANGED,
+            "why": refused.to_string(),
         }),
     }
 }
@@ -1610,24 +1614,36 @@ fn needs_wheel(command: &ClientCommand) -> bool {
 ///
 /// An [`RpcError`] tagged `SCREEN_CHANGED`, and nothing was sent.
 fn admit_typing(ctx: &Ctx, session_id: &str, attachment_id: &str) -> Result<(), RpcError> {
-    // A repaint still waiting on the video decoder must trip the fence.
-    ctx.plane.video.caught_up(session_id);
-    let observed = ctx.plane.observed_content(session_id, attachment_id);
-    ctx.plane
-        .mirrors
-        .admit_typing(session_id, observed)
-        .map_err(|rejected| {
+    typing_verdict(ctx, session_id, attachment_id).map_err(|rejected| {
             // Logged where the refusal is decided rather than left to whatever
             // reads the reply. A person asking why an agent stopped typing at
             // their machine gets both numbers and the session id from the
             // application's own log, without the agent's transcript.
-            tracing::info!(
-                session = %session_id,
-                attachment = %attachment_id,
-                "typing refused: {rejected}"
-            );
-            RpcError::tagged("SCREEN_CHANGED", rejected.to_string())
-        })
+        tracing::info!(
+            session = %session_id,
+            attachment = %attachment_id,
+            "typing refused: {rejected}"
+        );
+        RpcError::tagged(SCREEN_CHANGED, rejected.to_string())
+    })
+}
+
+/// The tag a content fence refusal carries, on the reply and in `limb.status`.
+const SCREEN_CHANGED: &str = "SCREEN_CHANGED";
+
+/// The content fence's answer for this attachment, with nothing written down.
+///
+/// [`admit_typing`] is the check that guards a keystroke and logs the refusal;
+/// this is the question it asks, for a caller that only reports the answer.
+fn typing_verdict(
+    ctx: &Ctx,
+    session_id: &str,
+    attachment_id: &str,
+) -> Result<(), limb_core::fence::ContentRejected> {
+    // A repaint still waiting on the video decoder must trip the fence.
+    ctx.plane.video.caught_up(session_id);
+    let observed = ctx.plane.observed_content(session_id, attachment_id);
+    ctx.plane.mirrors.admit_typing(session_id, observed)
 }
 
 /// One native intent this socket put on a session's wire and is waiting to
@@ -4228,6 +4244,66 @@ mod tests {
         .await;
         assert_eq!(moved["typing"]["allowed"], false);
         assert_eq!(moved["perception"]["contentGeneration"], 3);
+    }
+
+    /// What this thread logs while the guard lives, as text.
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let sink = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || Captured(sink.clone()))
+            .finish();
+        (buffer, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// A status read is not a typing attempt. An adapter polls `limb.status`
+    /// about four times a second while it waits for a picture, and every poll
+    /// logged "typing refused" although nothing had been typed, which buried
+    /// the one refusal that mattered under hundreds that did not.
+    #[tokio::test]
+    async fn reading_limb_status_logs_no_typing_refusal() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        let (logged, _guard) = capture_logs();
+
+        for _ in 0..4 {
+            let status = call(
+                &fixture.ctx,
+                &mut peer,
+                "limb.status",
+                json!({ "sessionId": "s1" }),
+            )
+            .await;
+            // The answer is unchanged: still refused, still saying why.
+            assert_eq!(status["typing"]["allowed"], false);
+            assert_eq!(status["typing"]["code"], "SCREEN_CHANGED");
+        }
+        let text = String::from_utf8_lossy(&logged.lock()).to_string();
+        assert!(
+            !text.contains("typing refused"),
+            "a status read logged a typing refusal: {text}"
+        );
+
+        // A keystroke that is refused is still written down, once.
+        press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("nothing has been read yet");
+        let text = String::from_utf8_lossy(&logged.lock()).to_string();
+        assert_eq!(text.matches("typing refused").count(), 1, "{text}");
     }
 
     /// An attachment that asked to perceive nothing has observed nothing, so
