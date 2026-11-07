@@ -611,6 +611,15 @@ impl NativeDesktop {
             Ok((at(m.x()?, m.width()?, x), at(m.y()?, m.height()?, y)))
         }
     }
+    /// On Wayland the clipboard goes through the portal session or not at
+    /// all: `Some(None)` there when the desktop has no RemoteDesktop portal
+    /// (wlroots) or the person switched Allow Clipboard Access off, and
+    /// `None` on X11, which has its own.
+    #[cfg(target_os = "linux")]
+    fn portal_clipboard(&self) -> Option<Option<&linux::portal::Remote>> {
+        (linux::kind() == linux::Kind::Wayland)
+            .then(|| self.remote.as_deref().filter(|r| r.has_clipboard()))
+    }
     /// Input through the Wayland RemoteDesktop portal, where this session
     /// has one.
     #[cfg(target_os = "linux")]
@@ -735,6 +744,33 @@ impl Desktop for NativeDesktop {
             return remote.controls();
         }
         true
+    }
+    fn has_clipboard(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal_clipboard() {
+            return portal.is_some();
+        }
+        false
+    }
+    fn clipboard_changed(&mut self) -> Result<Option<String>> {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal_clipboard() {
+            return portal.map_or(Ok(None), |remote| remote.clipboard_changed());
+        }
+        Ok(None)
+    }
+    fn set_clipboard(&mut self, text: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal_clipboard() {
+            return match portal {
+                Some(remote) => remote.set_clipboard(text),
+                None => anyhow::bail!(
+                    "This computer's clipboard is not available to helpers: the desktop did not allow clipboard access when the screen was shared"
+                ),
+            };
+        }
+        let _ = text;
+        anyhow::bail!("This computer's clipboard is not available to helpers")
     }
     fn release(&mut self) {
         #[cfg(target_os = "linux")]
