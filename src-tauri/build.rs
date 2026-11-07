@@ -147,6 +147,7 @@ fn main() {
             "delete_password",
             "credential_backend",
             "unlock_credentials",
+            "credential_status",
             // discovery
             "start_discovery",
             "stop_discovery",

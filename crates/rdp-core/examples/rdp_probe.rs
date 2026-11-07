@@ -16,7 +16,7 @@
 //! `RDP_DOMAIN` and `RDP_PORT` are optional. `RDP_CLIP=some text` puts that
 //! text on the server's clipboard once the picture is up, and every clipboard
 //! text the server offers back is printed, which is how clipboard sharing is
-//! checked against a real server. `RDP_SECS` sets how long the probe runs. `RUST_LOG` defaults to a level
+//! checked against a real server. `RDP_SECS` sets how long the probe runs, and `RDP_RESIZE_AFTER=WxH` asks for a second size after the first reactivation. `RUST_LOG` defaults to a level
 //! that prints the diagnostic frame dumps, which is the point of running it.
 
 use remote_core::{ConnectOptions, Credentials, SessionEvent};
@@ -43,6 +43,12 @@ async fn main() {
     println!("connecting to {host}:{port} as {user}");
 
     let mut options = ConnectOptions::rdp(&host, port);
+    // `RDP_LICENSE_DIR=some/folder` keeps the client access licences an RD
+    // licence server issues there, the way the viewer keeps them in its data
+    // folder, so a second run presents the licence the first one was given.
+    if let Some(dir) = std::env::var_os("RDP_LICENSE_DIR").filter(|d| !d.is_empty()) {
+        options.rdp_mut().license_dir = Some(dir.into());
+    }
     // `RDP_SIZE=1920x1080` asks for a desktop of that size, the way a host
     // profile with a fixed resolution does. Without it the probe measures no
     // window, so the resolver falls back to the specification's own default.
@@ -54,6 +60,22 @@ async fn main() {
             width: w,
             height: h,
         };
+    }
+    // `RDP_GATEWAY=gateway.example:443` sends the connection through an RD
+    // Gateway, signing in to it with the same account. `RDP_GATEWAY_TRANSPORT=http`
+    // skips the WebSocket upgrade and uses the two channel form.
+    if let Ok(gateway) = std::env::var("RDP_GATEWAY") {
+        let (gw_host, gw_port) = match gateway.rsplit_once(':') {
+            Some((h, p)) => (h.to_owned(), p.parse().unwrap_or(443)),
+            None => (gateway.clone(), 443),
+        };
+        let mut gw = remote_core::GatewayOptions::new(gw_host);
+        gw.port = gw_port;
+        if std::env::var("RDP_GATEWAY_TRANSPORT").as_deref() == Ok("http") {
+            gw.transport = remote_core::GatewayTransport::Http;
+        }
+        println!("through the RD Gateway at {gateway}");
+        options.rdp_mut().gateway = Some(gw);
     }
     options.credentials = match &domain {
         Some(d) => Credentials::domain_user_pass(d, &user, &pass),
@@ -78,6 +100,16 @@ async fn main() {
         .unwrap_or(20);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let clip = std::env::var("RDP_CLIP").ok().filter(|c| !c.is_empty());
+    // `RDP_RESIZE_AFTER=1600x1200` asks for that size once the server has
+    // reactivated for the first time, the way a user resizes the window after
+    // the session settled. A server that grants it reactivates again, and the
+    // third `desktop` line printed is the proof (issue #26).
+    let mut resize_after: Option<(u16, u16)> =
+        std::env::var("RDP_RESIZE_AFTER").ok().and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        });
+    let mut desktops = 0usize;
 
     while let Some(ev) = events_rx.recv().await {
         match &ev {
@@ -117,6 +149,15 @@ async fn main() {
                 fb_h = *height as usize;
                 fb = vec![0u8; fb_w * fb_h * 4];
                 println!("  desktop {fb_w}x{fb_h}");
+                desktops += 1;
+                if desktops == 2 {
+                    if let Some((width, height)) = resize_after.take() {
+                        println!("  asking for {width}x{height} after the reactivation");
+                        let _ = handle
+                            .send(remote_core::ClientCommand::RequestResize { width, height })
+                            .await;
+                    }
+                }
             }
             SessionEvent::CursorUpdate(_) => cursors += 1,
             SessionEvent::ClipboardText(text) => println!("  CLIPBOARD FROM SERVER: {text}"),

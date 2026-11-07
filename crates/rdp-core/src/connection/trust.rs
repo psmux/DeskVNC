@@ -71,6 +71,24 @@ pub async fn approve(
     events: &mpsc::Sender<SessionEvent>,
     prompt: Option<Prompt<'_>>,
 ) -> Result<()> {
+    approve_as(trust, PinScheme::RdpTls, events, prompt).await
+}
+
+/// [`approve`] for a key pinned under `scheme`.
+///
+/// The RD Gateway's certificate goes through here as
+/// [`PinScheme::RdgTls`]: it is a different machine's key, approved in a
+/// prompt of its own, and an answer for one must not approve the other.
+///
+/// # Errors
+///
+/// As [`approve`].
+pub async fn approve_as(
+    trust: &TrustDecision,
+    scheme: PinScheme,
+    events: &mpsc::Sender<SessionEvent>,
+    prompt: Option<Prompt<'_>>,
+) -> Result<()> {
     match trust {
         TrustDecision::VerifiedByCa | TrustDecision::PinnedMatch => Ok(()),
         TrustDecision::Changed { expected, actual } => Err(RdpError::CertificateMismatch {
@@ -80,13 +98,22 @@ pub async fn approve(
         TrustDecision::Unknown {
             fingerprint,
             subject,
+            certificate,
         } => {
             let Some(prompt) = prompt else {
                 return Err(RdpError::CertificateUntrusted(format!(
                     "{fingerprint} has not been approved and there is nobody to ask"
                 )));
             };
-            ask(fingerprint, subject, events, prompt).await
+            ask(
+                fingerprint,
+                subject,
+                certificate.as_ref(),
+                scheme,
+                events,
+                prompt,
+            )
+            .await
         }
     }
 }
@@ -102,12 +129,15 @@ pub async fn approve(
 async fn ask(
     fingerprint: &str,
     subject: &str,
+    certificate: Option<&vnc_transport::CertificateDigests>,
+    asked_scheme: PinScheme,
     events: &mpsc::Sender<SessionEvent>,
     prompt: Prompt<'_>,
 ) -> Result<()> {
     tracing::info!(
         %fingerprint,
-        "asking the user to approve an unpinned rdp server key"
+        scheme = %asked_scheme,
+        "asking the user to approve an unpinned server key"
     );
     remote_core::emit(
         events,
@@ -116,7 +146,8 @@ async fn ask(
             subject: subject.to_owned(),
             // The changed case never reaches here: it is a hard stop above.
             is_change: false,
-            scheme: PinScheme::RdpTls,
+            scheme: asked_scheme,
+            certificate: certificate.cloned(),
         },
     )
     .await?;
@@ -138,7 +169,7 @@ async fn ask(
                 fingerprint: answered,
                 scheme,
                 permanent,
-            }) => return decide(fingerprint, &answered, scheme, permanent),
+            }) => return decide(fingerprint, &answered, asked_scheme, scheme, permanent),
             // The dialog's cancel button, and the disconnect that a user who
             // closes the window instead produces. Both mean the same thing:
             // the key was not approved, so nothing more may be sent.
@@ -175,12 +206,18 @@ async fn ask(
 /// (`src-tauri/src/commands/session.rs:994`), and the session's only job is
 /// to stop blocking. It is read here so the trace records what the user
 /// chose.
-fn decide(asked: &str, answered: &str, scheme: PinScheme, permanent: bool) -> Result<()> {
-    if scheme != PinScheme::RdpTls {
+fn decide(
+    asked: &str,
+    answered: &str,
+    asked_scheme: PinScheme,
+    scheme: PinScheme,
+    permanent: bool,
+) -> Result<()> {
+    if scheme != asked_scheme {
         return Err(RdpError::CertificateUntrusted(format!(
             "the approval named the {} key and this prompt was for the {} key",
             scheme.as_str(),
-            PinScheme::RdpTls.as_str()
+            asked_scheme.as_str()
         )));
     }
     if !same_key(asked, answered) {
@@ -188,7 +225,7 @@ fn decide(asked: &str, answered: &str, scheme: PinScheme, permanent: bool) -> Re
             "the approval named a different key from the one that was shown".to_owned(),
         ));
     }
-    tracing::info!(permanent, "the user approved the rdp server key");
+    tracing::info!(permanent, scheme = %asked_scheme, "the user approved the server key");
     Ok(())
 }
 
@@ -212,6 +249,7 @@ mod tests {
         TrustDecision::Unknown {
             fingerprint: "AA:BB:CC".into(),
             subject: "CN=host".into(),
+            certificate: None,
         }
     }
 
@@ -271,6 +309,7 @@ mod tests {
                     subject,
                     is_change,
                     scheme,
+                    ..
                 } => {
                     assert_eq!(fingerprint, "AA:BB:CC");
                     assert_eq!(subject, "CN=host");
@@ -341,13 +380,24 @@ mod tests {
     /// approved for port 5900 must not vouch for whatever is on 3389.
     #[tokio::test]
     async fn an_answer_to_a_different_question_does_not_approve_this_key() {
-        assert!(decide("AA:BB", "AA:BB", PinScheme::RdpTls, false).is_ok());
+        let rdp = PinScheme::RdpTls;
+        assert!(decide("AA:BB", "AA:BB", rdp, rdp, false).is_ok());
 
-        let err = decide("AA:BB", "AA:BB", PinScheme::Tls, false).expect_err("wrong scheme");
+        let err = decide("AA:BB", "AA:BB", rdp, PinScheme::Tls, false).expect_err("wrong scheme");
         assert!(err.to_string().contains("rdp-tls"), "{err}");
 
-        let err = decide("AA:BB", "CC:DD", PinScheme::RdpTls, true).expect_err("wrong key");
+        let err = decide("AA:BB", "CC:DD", rdp, rdp, true).expect_err("wrong key");
         assert!(err.to_string().contains("different key"), "{err}");
+    }
+
+    /// The gateway's key is asked about under its own scheme, and an answer
+    /// that approves the RDP server's key does not approve the gateway's.
+    #[test]
+    fn the_gateway_key_is_approved_only_under_its_own_scheme() {
+        let rdg = PinScheme::RdgTls;
+        assert!(decide("AA:BB", "AA:BB", rdg, rdg, true).is_ok());
+        let err = decide("AA:BB", "AA:BB", rdg, PinScheme::RdpTls, true).expect_err("rdp answer");
+        assert!(err.to_string().contains("rdg-tls"), "{err}");
     }
 
     /// A shell that goes away with the dialog open must not hold the attempt

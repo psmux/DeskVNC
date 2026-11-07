@@ -503,9 +503,68 @@ pub fn encode(events: &[FastPathInputEvent]) -> Result<Bytes> {
 /// chunking is defensive only.
 pub const MAX_EVENTS: usize = rdp_pdu::input::MAX_INPUT_EVENTS;
 
+/// The least time between two characters of forwarded text.
+///
+/// Windows turns each unicode event into a `VK_PACKET` keystroke, and an
+/// application that is still busy when several of them queue up reads them
+/// back as the most recent character: twenty bursts of `"... abc 1122"`
+/// injected straight after a select-all came out as `"... abc 2222"` every
+/// time, with no RDP involved. With 8 ms between characters none of twenty
+/// did. A person typing never comes near this rate; dictation and agents do.
+pub const TEXT_GAP: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Holds the next command back until forwarded text has had [`TEXT_GAP`].
+///
+/// Only text with no physical key behind it (the unicode path) arms it, so
+/// ordinary typing, which travels as scancodes, is never delayed.
+#[derive(Debug, Default)]
+pub struct TextPacer {
+    not_before: Option<tokio::time::Instant>,
+}
+
+impl TextPacer {
+    /// A character of forwarded text just went out.
+    pub fn sent_text(&mut self, now: tokio::time::Instant) {
+        self.not_before = Some(now + TEXT_GAP);
+    }
+
+    /// When the next command may go, or `None` when it may go now.
+    #[must_use]
+    pub fn hold_until(&self, now: tokio::time::Instant) -> Option<tokio::time::Instant> {
+        self.not_before.filter(|at| *at > now)
+    }
+}
+
+/// Whether a key command is a character of forwarded text: the unicode
+/// path, taken when there is no scancode for it.
+#[must_use]
+pub fn is_text(keycode: Option<u32>, down: bool) -> bool {
+    down && keycode.filter(|kc| *kc != 0).is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_pacer_holds_for_the_gap_after_text_and_not_otherwise() {
+        let t0 = tokio::time::Instant::now();
+        let mut pacer = TextPacer::default();
+        assert_eq!(pacer.hold_until(t0), None, "nothing sent, nothing held");
+        pacer.sent_text(t0);
+        assert_eq!(pacer.hold_until(t0), Some(t0 + TEXT_GAP));
+        assert_eq!(
+            pacer.hold_until(t0 + TEXT_GAP),
+            None,
+            "free once the gap has passed"
+        );
+        assert!(is_text(None, true) && is_text(Some(0), true));
+        assert!(
+            !is_text(Some(0x1e), true),
+            "a scancode key is typing, not text"
+        );
+        assert!(!is_text(None, false), "the release travels with its press");
+    }
 
     fn input() -> Input {
         Input::new(

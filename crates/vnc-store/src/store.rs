@@ -1772,6 +1772,7 @@ mod tests {
                     rdp_password: Some(sentinels[6].to_string()),
                     ssh_user: None,
                     ssh_password: None,
+                    rdg_password: None,
                 },
             )
             .unwrap();

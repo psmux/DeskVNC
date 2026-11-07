@@ -28,7 +28,11 @@ pub enum Event {
     Invitation(String),
     /// On the host's side: a helper asks to be let in. `tools` is whether
     /// the helper can send commands and file requests. To allow them, call
-    /// [`Session::set_tools`] before answering.
+    /// [`Session::set_tools`] before answering. If the helper leaves, or a
+    /// minute passes with no answer, the question is withdrawn: `answer`
+    /// closes, so take the prompt down once `answer.is_closed()`. Only one
+    /// is ever open at a time; another helper who knocks meanwhile is told
+    /// someone else is already asking.
     Approval {
         name: String,
         peer: String,
@@ -653,58 +657,192 @@ where
     };
     worker.emit(Event::Invitation(invite.encode()?)).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wire::INVITE_SECONDS);
-    loop {
-        let incoming = tokio::time::timeout_at(deadline, endpoint.accept())
-            .await
-            .context("Invitation expired. Create a new invitation")?
-            .context("Listener closed")?;
-        let handshake = async {
-            let connection = incoming.await?;
-            let guard = Close(connection.clone());
-            let (send, mut recv) = connection.accept_bi().await?;
-            let (name, tools, screens) =
-                wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
-            Ok::<_, anyhow::Error>((guard, send, recv, name, tools, screens))
-        };
-        let Ok(Ok((guard, mut send, recv, name, tools, screens))) =
-            tokio::time::timeout(Duration::from_secs(5), handshake).await
-        else {
-            continue;
-        };
-        let connection = &guard.0;
-        let peer = connection.remote_id().to_string();
-        let (answer, decision) = oneshot::channel();
-        // Whatever an earlier helper was allowed is not this one's.
-        worker.tools_tx.send_replace(false);
-        worker
-            .emit(Event::Approval {
-                name,
-                peer: peer.clone(),
-                tools,
-                answer,
-            })
-            .await?;
-        let decision = tokio::select! {
-            _ = connection.closed() => continue,
-            decision = tokio::time::timeout_at(deadline.min(tokio::time::Instant::now() + Duration::from_secs(60)), decision) => decision,
-        };
-        let allowed = match decision {
-            Ok(Ok(Approval::View)) => false,
-            Ok(Ok(Approval::Control)) => true,
-            _ => {
-                let _ = wire::write(&mut send, &Message::Denied).await;
-                continue;
+    // Knocks are read off this loop, each on its own, so a helper that is
+    // slow to say hello, or one the person is still deciding about, holds
+    // up nobody else.
+    let (knocks_tx, mut knocks) = mpsc::channel(8);
+    let _door = AbortOnDrop(tokio::spawn(front_door(
+        endpoint.clone(),
+        Arc::new(invite),
+        knocks_tx,
+    )));
+    let mut pending: Option<Asking> = None;
+    let (asking, allowed) = loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline), if pending.is_none() => {
+                bail!("Invitation expired. Create a new invitation");
             }
-        };
-        // The invitation is consumed by this session, even if the peer later disconnects.
-        let result = serve(
-            worker, connection, send, recv, peer, allowed, tools, screens, desktop,
-        )
-        .await;
-        close_served(connection, &result);
+            knock = knocks.recv() => {
+                let knock = knock.context("Listener closed")?;
+                if pending.is_some() {
+                    // The person has one helper's name in front of them. A
+                    // second prompt would take its place under their hand,
+                    // so the second helper is told plainly instead.
+                    turn_away(knock.guard, knock.send, Message::Refused(
+                        "Someone else is already asking to connect with this invitation. Try again in a minute, or ask for a new invitation".into(),
+                    ));
+                    continue;
+                }
+                let peer = knock.guard.0.remote_id().to_string();
+                let (answer, decision) = oneshot::channel();
+                // Whatever an earlier helper was allowed is not this one's.
+                worker.tools_tx.send_replace(false);
+                worker
+                    .emit(Event::Approval {
+                        name: knock.name.clone(),
+                        peer: peer.clone(),
+                        tools: knock.tools,
+                        answer,
+                    })
+                    .await?;
+                pending = Some(Asking {
+                    knock,
+                    peer,
+                    decision,
+                    until: deadline.min(tokio::time::Instant::now() + APPROVAL_WAIT),
+                });
+            }
+            outcome = settle(pending.as_mut()), if pending.is_some() => {
+                // Dropping the question is what takes the prompt away: the
+                // answer it holds closes, and the window sees that.
+                let Some(asking) = pending.take() else { continue };
+                match outcome {
+                    Settled::Left => {}
+                    Settled::Answered(Approval::View) => break (asking, false),
+                    Settled::Answered(Approval::Control) => break (asking, true),
+                    Settled::Answered(Approval::Deny) | Settled::Dropped => {
+                        turn_away(asking.knock.guard, asking.knock.send, Message::Denied);
+                    }
+                    Settled::Unanswered => {
+                        turn_away(asking.knock.guard, asking.knock.send, Message::Refused(
+                            "Nobody answered on that computer. Ask the person there to look for the prompt, then try again".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    };
+    // The invitation is consumed by this session, even if the peer later
+    // disconnects. Anyone else who knocks while it runs is told so.
+    let _refusing = AbortOnDrop(tokio::spawn(async move {
+        while let Some(knock) = knocks.recv().await {
+            turn_away(
+                knock.guard,
+                knock.send,
+                Message::Refused(
+                    "This invitation is already in use. Ask the person for a new one".into(),
+                ),
+            );
+        }
+    }));
+    let Asking { knock, peer, .. } = asking;
+    let Knock {
+        guard,
+        send,
+        recv,
+        tools,
+        screens,
+        ..
+    } = knock;
+    let connection = &guard.0;
+    let result = serve(
+        worker, connection, send, recv, peer, allowed, tools, screens, desktop,
+    )
+    .await;
+    close_served(connection, &result);
+    drop(guard);
+    endpoint.close().await;
+    result
+}
+/// How long the person has to answer a helper before it is told nobody did.
+const APPROVAL_WAIT: Duration = Duration::from_secs(60);
+/// How long a new connection has to say hello before it is dropped.
+const HELLO_WAIT: Duration = Duration::from_secs(5);
+/// A helper that said hello with the right secret.
+struct Knock {
+    guard: Close,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    name: String,
+    tools: bool,
+    screens: Screens,
+}
+/// A knock the person is being asked about.
+struct Asking {
+    knock: Knock,
+    peer: String,
+    decision: oneshot::Receiver<Approval>,
+    until: tokio::time::Instant,
+}
+enum Settled {
+    Answered(Approval),
+    /// Whoever held the prompt let it go without an answer.
+    Dropped,
+    Unanswered,
+    /// The helper went away before anyone answered.
+    Left,
+}
+async fn settle(asking: Option<&mut Asking>) -> Settled {
+    let Some(asking) = asking else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = asking.knock.guard.0.closed() => Settled::Left,
+        decision = tokio::time::timeout_at(asking.until, &mut asking.decision) => match decision {
+            Ok(Ok(approval)) => Settled::Answered(approval),
+            Ok(Err(_)) => Settled::Dropped,
+            Err(_) => Settled::Unanswered,
+        },
+    }
+}
+/// Take every connection that arrives and read its hello on a task of its
+/// own, passing on the ones that hold the invitation's secret.
+async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::Sender<Knock>) {
+    while let Some(incoming) = endpoint.accept().await {
+        let invite = invite.clone();
+        let knocks = knocks.clone();
+        tokio::spawn(async move {
+            let handshake = async {
+                let connection = incoming.await?;
+                let guard = Close(connection.clone());
+                let (send, mut recv) = connection.accept_bi().await?;
+                let (name, tools, screens) =
+                    wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
+                Ok::<_, anyhow::Error>(Knock {
+                    guard,
+                    send,
+                    recv,
+                    name,
+                    tools,
+                    screens,
+                })
+            };
+            if let Ok(Ok(knock)) = tokio::time::timeout(HELLO_WAIT, handshake).await {
+                let _ = knocks.send(knock).await;
+            }
+        });
+    }
+}
+/// Tell a helper it is not coming in, and close once it has heard.
+///
+/// Closing at once could beat the message to the helper, which then saw only
+/// "Session ended (code 0)" and no reason. The helper closes when it reads
+/// the answer; three seconds is the most this waits for it, off the caller
+/// so the next knock is not held up.
+fn turn_away(guard: Close, mut send: iroh::endpoint::SendStream, message: Message) {
+    tokio::spawn(async move {
+        let _ = wire::write(&mut send, &message).await;
+        let _ = send.finish();
+        let connection = guard.0.clone();
+        // The guard's own close ends it if the helper does not.
+        let _ = tokio::time::timeout(Duration::from_secs(3), connection.closed()).await;
         drop(guard);
-        endpoint.close().await;
-        return result;
+    });
+}
+pub(crate) struct AbortOnDrop<T>(pub(crate) tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 /// Run one session that has been let in: start the desktop, send screens,
@@ -806,7 +944,18 @@ where
                             // The next move supersedes this one; dropping it
                             // while the screen is busy beats ending the session.
                             Err(mpsc::error::TrySendError::Full((_, Input::Move { .. }))) => {}
-                            Err(_) => bail!("Input rate exceeded. Session stopped"),
+                            // A computer too busy to keep up, say while a
+                            // malware scan holds every core, is waited for.
+                            // Not reading meanwhile slows the helper down
+                            // through the link. Ending the session here cut
+                            // people off mid sentence on a loaded Mac.
+                            Err(mpsc::error::TrySendError::Full(event)) => {
+                                tokio::time::timeout(INPUT_STALL, input_tx.send(event))
+                                    .await
+                                    .context("This computer stopped taking input. Session stopped")?
+                                    .map_err(|_| anyhow!("Session ended"))?;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => bail!("Session ended"),
                         }
                     }
                 }
@@ -879,6 +1028,10 @@ where
     };
     result
 }
+
+/// How long input may wait for a computer that has fallen behind before the
+/// session is given up as stuck.
+const INPUT_STALL: Duration = Duration::from_secs(20);
 
 /// How soon to capture again while the screen is changing or someone is
 /// using it: sixty screens a second, as often as a display draws.
@@ -1792,10 +1945,16 @@ pub(crate) fn link_lost(error: anyhow::Error) -> anyhow::Error {
 }
 
 /// Did the other side close this connection on purpose?
+///
+/// A close with no reason is not a decision. It is what QUIC sends when the
+/// computer dropped the connection without a word, such as a knock it gave
+/// up reading while it was starting, or its whole endpoint shutting down as
+/// DeskVNC Support quit for an update. Taking those as the person ending the
+/// session left the helper with a dead window instead of connecting again.
 fn closed_by_peer(connection: &Connection) -> bool {
     matches!(
         connection.close_reason(),
-        Some(iroh::endpoint::ConnectionError::ApplicationClosed(_))
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) if !close.reason.is_empty()
     )
 }
 
@@ -2178,5 +2337,59 @@ mod relay_tests {
         })
         .await
         .context("Public relay test timed out")?
+    }
+
+    /// A computer that drops a knock without a word, as one still starting
+    /// up does when the knock takes too long to read, left the helper a dead
+    /// window, because QUIC closes such a connection with code 0 just as a
+    /// person ending the session does. Only a close that says why is one.
+    #[tokio::test]
+    async fn a_connection_dropped_without_a_reason_is_a_lost_link() -> Result<()> {
+        if cfg!(windows) {
+            return Ok(());
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let host = endpoint(&HostOptions {
+                relay: false,
+                relay_url: None,
+                bind_ip: Some("127.0.0.1".parse()?),
+            })
+            .await?;
+            let _guard = EndpointGuard(host.clone());
+            let address = host.addr();
+            let silent = tokio::spawn(async move {
+                let connection = host.accept().await.context("Listener closed")?.await?;
+                let (_send, mut recv) = connection.accept_bi().await?;
+                let _knock: Message = wire::read(&mut recv).await?;
+                drop(connection);
+                // Keep the endpoint up, so only the connection goes.
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok::<_, anyhow::Error>(())
+            });
+            let mut visit = crate::unattended::connect_to(
+                Ok(address),
+                "Helper".into(),
+                None,
+                iroh::SecretKey::generate(),
+                HostOptions {
+                    relay: false,
+                    relay_url: None,
+                    bind_ip: None,
+                },
+            );
+            let ended = loop {
+                match visit.events.recv().await {
+                    Some(Event::Finished(result)) => break result,
+                    Some(_) => {}
+                    None => bail!("the helper's session went quiet"),
+                }
+            };
+            silent.abort();
+            let ended = ended.err().context("the session should have failed")?;
+            ensure!(LinkLost::is(&ended), "{ended:#}");
+            Ok(())
+        })
+        .await
+        .context("timed out")?
     }
 }

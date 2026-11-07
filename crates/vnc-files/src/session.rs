@@ -415,10 +415,7 @@ impl SftpSession {
         file.shutdown().await?;
 
         if let Some(mode) = mode {
-            let attrs = FileAttributes {
-                permissions: Some(mode & 0o7777),
-                ..Default::default()
-            };
+            let attrs = metadata_to_preserve(mode, None);
             if let Err(e) = self.sftp.set_metadata(full.clone(), attrs).await {
                 tracing::debug!("could not set the mode on {full}: {e}");
             }
@@ -577,12 +574,7 @@ impl SftpSession {
         let secs = job
             .mtime
             .map(|mtime| u32::try_from(mtime.max(0)).unwrap_or(u32::MAX));
-        let attrs = FileAttributes {
-            permissions: Some(job.mode & 0o7777),
-            mtime: secs,
-            atime: secs,
-            ..Default::default()
-        };
+        let attrs = metadata_to_preserve(job.mode, secs);
         if let Err(e) = self.sftp.set_metadata(target, attrs).await {
             tracing::debug!("could not preserve remote metadata: {e}");
         }
@@ -948,6 +940,20 @@ fn preserve_local_metadata(path: &Path, mode: u32, mtime: Option<i64>) {
     }
 }
 
+/// The SETSTAT sent after a file lands: its mode, and its times when known,
+/// and nothing else. It starts from `FileAttributes::empty()` because
+/// russh-sftp's `Default` is a dummy that sets size 0 and uid/gid 0, and a
+/// server applies every field it is given, so building on `Default`
+/// truncated each freshly written file to nothing.
+fn metadata_to_preserve(mode: u32, secs: Option<u32>) -> FileAttributes {
+    FileAttributes {
+        permissions: Some(mode & 0o7777),
+        mtime: secs,
+        atime: secs,
+        ..FileAttributes::empty()
+    }
+}
+
 fn check_cancel(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1053,6 +1059,24 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The attributes sent after an upload must not carry a size or an owner.
+    /// A size of 0 here is a truncate on the server: a 25 MB upload reported
+    /// done and left an empty file behind.
+    #[test]
+    fn preserved_metadata_never_resizes_or_rechowns_the_file() {
+        for secs in [None, Some(1_793_990_107)] {
+            let attrs = metadata_to_preserve(0o100_755, secs);
+            assert_eq!(attrs.size, None, "a size in SETSTAT truncates the upload");
+            assert_eq!(attrs.uid, None);
+            assert_eq!(attrs.gid, None);
+            assert_eq!(attrs.user, None);
+            assert_eq!(attrs.group, None);
+            assert_eq!(attrs.permissions, Some(0o755));
+            assert_eq!(attrs.mtime, secs);
+            assert_eq!(attrs.atime, secs);
+        }
+    }
 
     #[tokio::test]
     async fn plan_upload_of_a_single_file() {

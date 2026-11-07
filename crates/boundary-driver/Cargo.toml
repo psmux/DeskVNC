@@ -13,3 +13,4 @@ tokio-util.workspace = true
 anyhow.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
+tracing.workspace = true

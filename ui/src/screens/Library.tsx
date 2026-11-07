@@ -12,6 +12,7 @@ import { useHosts } from "../state/HostsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
+import { saveCredentials } from "../lib/credentialStore";
 import type { DiscoveredHost, HostGroup, HostProfile, ProtocolKind } from "../lib/types";
 import { serializeRdpSettings } from "../lib/rdp";
 import { discoveredEndpoint } from "../lib/address";
@@ -27,7 +28,9 @@ import {
 } from "../lib/types";
 import {
   allowsMultipleSessions,
+  importRdpFile,
   inTauri,
+  pickRdpFile,
   openSessionWindow,
   safeInvoke,
   safeListen,
@@ -51,6 +54,7 @@ import { HostTile, DiscoveredTile, addressLabel, osLabel } from "../components/H
 import { CommandPalette, type PaletteAction } from "../components/CommandPalette";
 import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDialog";
 import { loadRdpDefaults } from "../lib/rdpDefaults";
+import { draftFromRdpImport } from "../lib/rdpImport";
 import { QuickConnect } from "../components/QuickConnect";
 import { ContextMenu, Dialog, EmptyState, Select, TileSkeleton, type MenuItem } from "../components/primitives";
 import {
@@ -718,6 +722,21 @@ export function Library({
     );
   }, []);
 
+  /**
+   * Import a `.rdp` file: the person picks it, the shell reads it, and the
+   * editor opens on the draft with whatever did not come across written above
+   * the form. Nothing is saved until they press Save.
+   */
+  const importRdp = useCallback(async (): Promise<void> => {
+    const path = await pickRdpFile();
+    if (!path) return;
+    try {
+      setHostDialog(draftFromRdpImport(await importRdpFile(path)));
+    } catch (err: unknown) {
+      push("danger", `Could not import that Remote Desktop file: ${String(err)}`);
+    }
+  }, [push]);
+
   /** The MAC discovery is currently reporting for this endpoint, if any. */
   const discoveredMacFor = useCallback(
     (address: string, port: number): string | null => {
@@ -820,7 +839,11 @@ export function Library({
         sshSettings: draft.protocol === "ssh" ? serializeSshSettings(draft.ssh) : null,
       });
       const id = saved?.id ?? draft.id;
+      let credentialError: unknown = null;
       if (id) {
+        // The host is saved by now. A password that could not be stored is
+        // said out loud: it used to vanish and come back as a prompt.
+        try {
         // An RDP password belongs with its user name and domain, which are
         // three fields of one credential rather than a password on its own.
         if (draft.protocol === "rdp") {
@@ -828,6 +851,7 @@ export function Library({
             user: draft.rdpUser,
             domain: draft.rdpDomain,
             password: draft.password,
+            gatewayPassword: draft.rdgPassword,
           });
         } else if (draft.protocol === "ssh") {
           // `save_password` (Rust) already carries `sshUser` / `sshPassword`
@@ -847,7 +871,7 @@ export function Library({
           if (draft.sshUser.trim()) payload.sshUser = draft.sshUser.trim();
           if (draft.password) payload.sshPassword = draft.password;
           if (Object.keys(payload).length > 0) {
-            await safeInvoke("save_password", { hostId: id, creds: payload }, null);
+            await saveCredentials(id, payload);
             // `saveRdpCredentials` flips `hasPassword` in local state itself
             // after a write like this one, which needs `setHosts` and so
             // lives in HostsContext.tsx, outside this change's scope. A
@@ -869,7 +893,7 @@ export function Library({
           if (payload?.vncPassword && !payload.vencryptUser && !payload.vencryptPass) {
             await savePassword(id, payload.vncPassword);
           } else if (payload) {
-            await safeInvoke("save_password", { hostId: id, creds: payload }, null);
+            await saveCredentials(id, payload);
             // Same reason as the SSH branch: the key icon is re-read rather
             // than flipped here.
             if (payload.vencryptPass) await refresh();
@@ -878,10 +902,20 @@ export function Library({
           await savePassword(id, draft.password);
         }
         if (draft.sshPassphrase) await saveSshPassphrase(id, draft.sshPassphrase);
+        } catch (err) {
+          credentialError = err;
+        }
         await setHostTags(id, draft.tagIds);
       }
       setHostDialog(null);
-      push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
+      if (credentialError) {
+        push(
+          "danger",
+          `${draft.id ? "Host updated" : `Added ${draft.friendlyName}`}, but its password was not saved: ${String(credentialError)}`,
+        );
+      } else {
+        push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
+      }
     },
     [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push],
   );
@@ -898,6 +932,7 @@ export function Library({
         run: () => selectTab(t.id),
       })),
       { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
+      { id: "import-rdp", label: "Import Remote Desktop file…", hint: "", run: () => void importRdp() },
       { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
       { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
       {
@@ -910,7 +945,7 @@ export function Library({
       { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
       { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
     ];
-  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh]);
+  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, importRdp]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -980,19 +1015,20 @@ export function Library({
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void safeListen<{ id: string }>("menu://action", ({ id }) => {
-      if (id !== "menu:quick-connect" && id !== "menu:new-host") return;
+      if (id !== "menu:quick-connect" && id !== "menu:new-host" && id !== "menu:import-rdp") return;
       selectTab(null);
       // Focus cannot land on an element that is still hidden, so let the pane
       // swap paint first.
       requestAnimationFrame(() => {
         if (id === "menu:quick-connect") focusQuickConnect();
+        else if (id === "menu:import-rdp") void importRdp();
         else setHostDialog(draftFromHost(null));
       });
     }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, [focusQuickConnect, selectTab]);
+  }, [focusQuickConnect, selectTab, importRdp]);
 
   // ------------------------------------------------------------ context menu
 
@@ -1239,6 +1275,14 @@ export function Library({
           ) : null}
           <IconZap size={14} />
           {scan.running ? "Scanning…" : "Scan network"}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          title="Import a Remote Desktop (.rdp) file"
+          onClick={() => void importRdp()}
+        >
+          Import .rdp
         </button>
         <button type="button" className="btn-primary" onClick={() => setHostDialog(draftFromHost(null))}>
           <IconPlus size={14} /> New Host

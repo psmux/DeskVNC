@@ -145,6 +145,8 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
     let mut rdp = RdpSettings::default();
     let mut gateway_host: Option<String> = None;
     let mut gateway_enabled = true;
+    let mut gateway_token: Option<String> = None;
+    let mut gateway_separate = false;
 
     // `dynamic resolution` and the `desktopwidth`/`desktopheight` pair are one
     // choice between them, so both are collected and resolved together below.
@@ -342,7 +344,13 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
                     out.profile.scaling_mode = "aspect-fit".into();
                     out.mapped.push(key.into());
                 }
-                Some(false) => out.mapped.push(key.into()),
+                // Off in mstsc is the desktop at its own size, with scroll
+                // bars when the window is smaller. Left alone, the profile's
+                // default would shrink it to fit.
+                Some(false) => {
+                    out.profile.scaling_mode = "actual".into();
+                    out.mapped.push(key.into());
+                }
                 None => out.ignored.push(key.into()),
             },
             "connection type" => match int(kind, value) {
@@ -378,18 +386,36 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
                 out.mapped.push(key.into());
             }
             "gatewaycredentialssource" => {
-                // MS-TSGU distinguishes several sources; `GatewayOptions` has
-                // only "reuse the session credentials or prompt separately",
-                // so anything other than 0 (ask for a password) is recorded as
-                // a warning rather than guessed into that boolean.
-                if int(kind, value) != Some(0) {
-                    out.warnings.push(
-                        "the file's gateway credential source is not a plain password \
-                         prompt; the gateway will ask again when RD Gateway support lands"
-                            .into(),
-                    );
+                // 0 asks for a password and 4 lets the user choose later,
+                // and both are an NTLM sign in here. 5 is a PAA cookie, which
+                // is `gatewayaccesstoken` below. 1 (smart card), 2 (the
+                // Windows sign in) and 3 (Basic) have no equivalent, so the
+                // gateway gets a user name and password and the user is told.
+                match int(kind, value) {
+                    Some(0 | 4 | 5) | None => out.mapped.push(key.into()),
+                    Some(_) => {
+                        out.warnings.push(
+                            "the file asks the RD Gateway for a smart card, the Windows sign in \
+                             or Basic authentication; this app signs in to the gateway with a \
+                             user name and password instead"
+                                .into(),
+                        );
+                        out.ignored.push(key.into());
+                    }
                 }
-                out.ignored.push(key.into());
+            }
+            "gatewayaccesstoken" => {
+                // A pluggable authentication cookie. It is a credential, so
+                // it never reaches a warning or a log, and it travels in the
+                // profile the way the file carried it, in clear text.
+                gateway_token = trimmed(value);
+                out.mapped.push(key.into());
+            }
+            "promptcredentialonce" => {
+                // 1, the default, signs in to the gateway and the computer
+                // with one account. 0 keeps them apart.
+                gateway_separate = int(kind, value) == Some(0);
+                out.mapped.push(key.into());
             }
             "alternate full address" => {
                 out.warnings.push(
@@ -412,13 +438,11 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
                 );
                 out.ignored.push(key.into());
             }
+            // 1 windowed, 2 full screen. mstsc treats anything else as
+            // windowed, and so does this.
             "screen mode id" => {
-                out.warnings.push(
-                    "whether the session opens windowed or full screen is a window \
-                     setting rather than part of the profile, so it was not imported"
-                        .into(),
-                );
-                out.ignored.push(key.into());
+                rdp.fullscreen = int(kind, value) == Some(2);
+                out.mapped.push(key.into());
             }
             "password 51" => {
                 // Never read, never decoded, never logged. Only the key name
@@ -474,24 +498,15 @@ pub fn parse_rdp_file(bytes: &[u8], file_name: Option<&str>) -> Result<RdpImport
             // Microsoft writes the gateway's port into the host name rather
             // than into a key of its own, and 443 is the default.
             let (host, port, _) = split_address(&host);
-            // `GatewayOptions` is `#[non_exhaustive]`, so it cannot be built
-            // with a struct literal or with functional record update from
-            // outside `remote-core`.
-            #[allow(clippy::field_reassign_with_default)]
-            let gateway = {
-                let mut g = GatewayOptions::default();
-                g.host = host;
-                g.port = port.unwrap_or(443);
-                g.separate_credentials = false;
-                g
-            };
+            // `GatewayOptions` is `#[non_exhaustive]`, so it is built from
+            // its constructor rather than a struct literal.
+            let mut gateway = GatewayOptions::new(host);
+            gateway.port = port.unwrap_or(443);
+            // A cookie is the whole sign in, so there is no account to keep
+            // apart from the computer's.
+            gateway.separate_credentials = gateway_separate && gateway_token.is_none();
+            gateway.access_token = gateway_token;
             rdp.options.gateway = Some(gateway);
-            out.warnings.push(
-                "the file uses an RD Gateway. The setting is kept, and connecting through \
-                 a gateway is not supported yet, so this profile will refuse to connect \
-                 rather than reaching the server directly"
-                    .into(),
-            );
         } else {
             out.warnings.push(
                 "the file names an RD Gateway and also turns it off, so it was not imported".into(),
@@ -909,15 +924,60 @@ mod tests {
     }
 
     #[test]
-    fn a_gateway_is_recorded_with_a_warning() {
+    fn a_gateway_is_imported_ready_to_use() {
         let import = parse("gatewayhostname:s:gw.example\ngatewayusagemethod:i:1\n");
         let gateway = settings_of(&import).options.gateway.expect("recorded");
         assert_eq!(gateway.host, "gw.example");
-        assert!(import.warnings.iter().any(|w| w.contains("Gateway")));
+        assert_eq!(gateway.port, 443);
+        assert!(!gateway.separate_credentials);
+        assert!(gateway.access_token.is_none());
+        // Nothing to warn about any more: the gateway is used.
+        assert!(
+            !import.warnings.iter().any(|w| w.contains("Gateway")),
+            "{:?}",
+            import.warnings
+        );
 
         // A file that names a gateway and turns it off does not get one.
         let off = parse("gatewayhostname:s:gw.example\ngatewayusagemethod:i:0\n");
         assert!(settings_of(&off).options.gateway.is_none());
+    }
+
+    /// The shape of the file in issue #20: a gateway on an explicit port with
+    /// a PAA cookie as its credential source.
+    #[test]
+    fn a_gateway_with_a_paa_cookie_keeps_its_port_and_cookie() {
+        let import = parse(
+            "full address:s:10.0.0.5\ngatewayhostname:s:gw.example:8443\n\
+             gatewayaccesstoken:s:token-value\ngatewaycredentialssource:i:5\n\
+             gatewayusagemethod:i:1\ngatewayprofileusagemethod:i:1\n",
+        );
+        let gateway = settings_of(&import).options.gateway.expect("recorded");
+        assert_eq!(gateway.host, "gw.example");
+        assert_eq!(gateway.port, 8443);
+        assert_eq!(gateway.access_token.as_deref(), Some("token-value"));
+        assert!(import.mapped.iter().any(|k| k == "gatewayaccesstoken"));
+        assert!(import
+            .mapped
+            .iter()
+            .any(|k| k == "gatewaycredentialssource"));
+        // The cookie never reaches a warning or a debug print.
+        assert!(!import.warnings.iter().any(|w| w.contains("token-value")));
+        assert!(!format!("{gateway:?}").contains("token-value"));
+    }
+
+    #[test]
+    fn promptcredentialonce_zero_gives_the_gateway_its_own_account() {
+        let import = parse("gatewayhostname:s:gw\npromptcredentialonce:i:0\n");
+        assert!(
+            settings_of(&import)
+                .options
+                .gateway
+                .expect("recorded")
+                .separate_credentials
+        );
+        let import = parse("gatewayhostname:s:gw\ngatewaycredentialssource:i:1\n");
+        assert!(import.warnings.iter().any(|w| w.contains("smart card")));
     }
 
     #[test]

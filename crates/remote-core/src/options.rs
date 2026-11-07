@@ -301,10 +301,8 @@ pub struct RdpOptions {
     /// TS_EXTENDED_INFO_PACKET `performanceFlags`, MS-RDPBCGR 2.2.1.11.1.1.1.
     pub performance: PerformanceFlags,
 
-    /// RD Gateway. Phase 3. Carried earlier as a placeholder so the store
-    /// column and the UI form do not change shape later; the driver rejects a
-    /// connect with `Some(_)` until it lands, with a clear message rather
-    /// than a silent direct connect.
+    /// RD Gateway (MS-TSGU). `Some` carries the whole connection through the
+    /// gateway over HTTPS; `None` dials the server directly.
     pub gateway: Option<GatewayOptions>,
 
     /// Send credentials in the Info PDU so the server skips its own logon
@@ -354,6 +352,17 @@ pub struct RdpOptions {
     /// turns it on, and a host setting can follow once it has been.
     #[serde(skip)]
     pub graphics_pipeline: bool,
+
+    /// The folder the client access licences an RD licence server issues
+    /// are kept in, one file per server, with this installation's hardware
+    /// id beside them (MS-RDPELE 2.2.2.2, 2.2.2.3.1). The viewer points it at
+    /// its own data folder. `None` still completes the licensing exchange,
+    /// but the licence is asked for again on every connection.
+    ///
+    /// Not stored with the host: it is where this installation keeps its
+    /// files, not a setting of the remote computer.
+    #[serde(skip)]
+    pub license_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for RdpOptions {
@@ -381,6 +390,7 @@ impl Default for RdpOptions {
             desktop_scale_factor: 100,
             redirect_clipboard: true,
             graphics_pipeline: false,
+            license_dir: None,
         }
     }
 }
@@ -547,15 +557,84 @@ pub struct PerformanceFlags {
     pub enable_desktop_composition: bool,
 }
 
-/// RD Gateway (MS-TSGU). Phase 3 placeholder, see [`RdpOptions::gateway`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// RD Gateway (MS-TSGU), see [`RdpOptions::gateway`].
+///
+/// Only the HTTP transport is spoken, in both of its forms: one WebSocket
+/// upgrade, which current Windows gateways prefer, and the older
+/// `RDG_OUT_DATA` and `RDG_IN_DATA` pair. The RPC over HTTP transport that
+/// predates both is not implemented.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 #[non_exhaustive]
 pub struct GatewayOptions {
     pub host: String,
+    /// 443 when zero, which is what an imported `gatewayhostname` without a
+    /// port means.
     pub port: u16,
-    /// Reuse the session credentials, or prompt separately.
+    /// Sign in to the gateway with an account of its own rather than with
+    /// the one used for the remote computer.
     pub separate_credentials: bool,
+    /// The gateway account when [`Self::separate_credentials`] is set:
+    /// `DOMAIN\user`, `user@domain` or a bare user name.
+    pub username: Option<String>,
+    /// Which HTTP form to use.
+    pub transport: GatewayTransport,
+    /// A pluggable authentication (PAA) cookie, `gatewayaccesstoken` in a
+    /// `.rdp` file. When present the gateway is not asked for an HTTP sign in
+    /// at all: the cookie is the proof (MS-TSGU 2.2.10.18).
+    pub access_token: Option<String>,
+    /// The gateway account's password. Never stored with the profile: the
+    /// shell loads it from the keychain at connect time, the same way it
+    /// loads the computer's.
+    #[serde(skip)]
+    pub password: Option<String>,
+}
+
+impl GatewayOptions {
+    /// A gateway at `host`, port 443, signing in with the computer's account.
+    pub fn new(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            port: 443,
+            ..Self::default()
+        }
+    }
+
+    /// The port to dial: the configured one, or 443.
+    pub fn effective_port(&self) -> u16 {
+        if self.port == 0 {
+            443
+        } else {
+            self.port
+        }
+    }
+}
+
+// The password and the cookie never reach a log.
+impl std::fmt::Debug for GatewayOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("separate_credentials", &self.separate_credentials)
+            .field("username", &self.username.as_deref().map(|_| "***"))
+            .field("transport", &self.transport)
+            .field("access_token", &self.access_token.as_deref().map(|_| "***"))
+            .field("password", &self.password.as_deref().map(|_| "***"))
+            .finish()
+    }
+}
+
+/// The HTTP form an RD Gateway connection takes (MS-TSGU 3.3.5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayTransport {
+    /// Ask for the WebSocket upgrade and use the two channel form when the
+    /// gateway answers without it.
+    #[default]
+    Auto,
+    /// The `RDG_OUT_DATA` and `RDG_IN_DATA` pair only.
+    Http,
 }
 
 // ---------------------------------------------------------------------------

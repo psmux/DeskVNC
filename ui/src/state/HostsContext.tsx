@@ -10,6 +10,8 @@ import {
 } from "react";
 import { blankHostProfile, type HostGroup, type HostProfile, type HostTag } from "../lib/types";
 import { inTauri, mustInvoke, safeInvoke, safeListen } from "../lib/tauri";
+import { saveCredentials } from "../lib/credentialStore";
+import { CREDENTIALS_UNLOCKED } from "../components/CredentialUnlock";
 import {
   MOCK_GROUPS,
   MOCK_HOSTS,
@@ -76,7 +78,7 @@ interface HostsContextValue {
    */
   saveRdpCredentials: (
     hostId: string,
-    creds: { user: string; domain: string; password: string },
+    creds: { user: string; domain: string; password: string; gatewayPassword?: string },
   ) => Promise<void>;
   deletePassword: (hostId: string) => Promise<void>;
   wakeHost: (hostId: string) => Promise<void>;
@@ -233,6 +235,14 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
     setTags(Array.isArray(t) ? t : []);
     setLoading(false);
   }, [mock, revalidateThumbnails]);
+
+  // An unlock writes saves that were waiting for it and sets their key icons
+  // in the shell; the rows are re-read so the library shows them.
+  useEffect(() => {
+    const onUnlocked = (): void => void refresh();
+    window.addEventListener(CREDENTIALS_UNLOCKED, onUnlocked);
+    return () => window.removeEventListener(CREDENTIALS_UNLOCKED, onUnlocked);
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -463,8 +473,13 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
 
   const savePassword = useCallback(
     async (hostId: string, password: string): Promise<void> => {
-      await safeInvoke("save_password", { hostId, creds: { vncPassword: password } }, null);
-      setHosts((prev) => prev.map((h) => (h.id === hostId ? { ...h, hasPassword: true } : h)));
+      // Rejects when the save failed, for the caller to show. A store that is
+      // locked holds it until the unlock, which sets the key icon itself.
+      if (!inTauri()) return;
+      const outcome = await saveCredentials(hostId, { vncPassword: password });
+      if (outcome === "saved") {
+        setHosts((prev) => prev.map((h) => (h.id === hostId ? { ...h, hasPassword: true } : h)));
+      }
     },
     [],
   );
@@ -474,7 +489,8 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
       // Deliberately does NOT flip `hasPassword`: that flag (and the key
       // icon) means "a VNC password is saved", and the connect flow reads it
       // to decide whether to expect a prompt.
-      await safeInvoke("save_password", { hostId, creds: { sshPassphrase: passphrase } }, null);
+      if (!inTauri()) return;
+      await saveCredentials(hostId, { sshPassphrase: passphrase });
     },
     [],
   );
@@ -482,7 +498,7 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
   const saveRdpCredentials = useCallback(
     async (
       hostId: string,
-      creds: { user: string; domain: string; password: string },
+      creds: { user: string; domain: string; password: string; gatewayPassword?: string },
     ): Promise<void> => {
       // Only non-empty fields are sent: `save_password` fills in rather than
       // overwrites, so an empty box in the editor means "keep what is
@@ -491,9 +507,11 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
       if (creds.user.trim()) payload.rdpUser = creds.user.trim();
       if (creds.domain.trim()) payload.rdpDomain = creds.domain.trim();
       if (creds.password) payload.rdpPassword = creds.password;
+      if (creds.gatewayPassword) payload.rdgPassword = creds.gatewayPassword;
       if (Object.keys(payload).length === 0) return;
-      await safeInvoke("save_password", { hostId, creds: payload }, null);
-      if (payload.rdpPassword) {
+      if (!inTauri()) return;
+      const outcome = await saveCredentials(hostId, payload);
+      if (outcome === "saved" && payload.rdpPassword) {
         setHosts((prev) => prev.map((h) => (h.id === hostId ? { ...h, hasPassword: true } : h)));
       }
     },

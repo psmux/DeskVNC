@@ -41,6 +41,7 @@
 
 pub mod activate;
 pub mod credentials;
+pub mod licensing;
 pub mod mcs;
 pub mod negotiate;
 pub mod nla;

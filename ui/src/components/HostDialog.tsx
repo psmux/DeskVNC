@@ -18,7 +18,8 @@ import {
   parseSshTunnel,
   protocolName,
 } from "../lib/types";
-import type { RdpResolution, RdpSettings } from "../lib/rdp";
+import type { RdpGateway, RdpResolution, RdpSettings } from "../lib/rdp";
+import { blankGateway } from "../lib/rdp";
 import { rdpDefaults } from "../lib/rdpDefaults";
 import {
   blankRdpSettings,
@@ -76,6 +77,12 @@ export interface HostDraft {
    * auto-filled value is never applied out of sight. Never persisted.
    */
   macFromDiscovery?: boolean;
+  /**
+   * UI-only: what importing a `.rdp` file could not carry across, in
+   * sentences, shown above the form so the person reads them before saving.
+   * Never persisted.
+   */
+  importNotes?: string[];
 
   /** Parsed `rdpSettings` blob; `null` for a VNC host. */
   rdp: RdpSettings | null;
@@ -90,6 +97,13 @@ export interface HostDraft {
   /** Logon domain, part of the stored credential rather than the profile
    *  blob's `domain`. Blank means "leave what is stored alone". */
   rdpDomain: string;
+  /**
+   * The RD Gateway account's password, for a gateway with an account of its
+   * own. Written on save as `StoredCredentials.rdgPassword`, never into the
+   * profile. Seeded blank like every password box: blank means "keep what is
+   * stored".
+   */
+  rdgPassword: string;
   /** Parsed `sshSettings` blob; `null` for a non-SSH host. */
   ssh: SshSettings | null;
   /**
@@ -144,16 +158,27 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     // the draft, both for a brand-new host and for a saved one that has none.
     wolMac: h?.wolMac ?? prefill?.wolMac ?? null,
     macFromDiscovery: !h?.wolMac && Boolean(prefill?.wolMac),
+    importNotes: prefill?.importNotes,
     // A new host starts from the Preferences defaults; a saved one is read
     // back verbatim, because its own settings are the answer.
     rdp: protocol === "rdp" ? (parseRdpSettings(h?.rdpSettings) ?? newRdpSettings()) : null,
     rdpUser: "",
     rdpDomain: "",
+    rdgPassword: "",
     ssh: protocol === "ssh" ? (parseSshSettings(h?.sshSettings) ?? newSshSettings()) : null,
     sshUser: "",
     vncUser: "",
     portTouched: portWasTouched(h),
   };
+}
+
+/** A note from the importer, which writes them in lower case for joining,
+ *  as a sentence on its own line. */
+function sentence(note: string): string {
+  const s = note.trim();
+  if (!s) return s;
+  const capital = s[0].toUpperCase() + s.slice(1);
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 /** A blank set of RDP settings with the Preferences defaults applied. */
@@ -249,6 +274,8 @@ export function HostDialog({
   const [advanced, setAdvanced] = useState(
     () =>
       Boolean(initial.macFromDiscovery) ||
+      // An import with notes: the settings the notes talk about are in here.
+      Boolean(initial.importNotes?.length) ||
       Boolean(initial.sshTunnel?.enabled) ||
       securityIsOn(initial),
   );
@@ -358,6 +385,20 @@ export function HostDialog({
           submit();
         }}
       >
+        {d.importNotes && d.importNotes.length > 0 ? (
+          <div
+            role="note"
+            aria-label="About this import"
+            className="rounded-md border border-warning bg-warning-subtle px-3 py-2 text-sm"
+          >
+            <p className="font-medium text-warning">Imported from a Remote Desktop file</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-secondary">
+              {d.importNotes.map((note) => (
+                <li key={note}>{sentence(note)}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <Field label="Friendly name" hint="How this computer appears in your library">
           <input
             data-autofocus
@@ -838,6 +879,14 @@ export function HostDialog({
               ) : null}
               {isRdp ? <RdpOptionsSection rdp={rdp} onChange={setRdp} /> : null}
               {isRdp ? (
+                <GatewaySection
+                  rdp={rdp}
+                  onChange={setRdp}
+                  password={d.rdgPassword}
+                  onPassword={(rdgPassword) => set({ rdgPassword })}
+                />
+              ) : null}
+              {isRdp ? (
                 <SecuritySection
                   rdp={rdp}
                   open={security}
@@ -939,6 +988,11 @@ function RdpOptionsSection({
         hint="Makes the Displays menu list the remote monitors instead of just the one."
       />
       <ResolutionField value={rdp.resolution} onChange={(resolution) => onChange({ resolution })} />
+      <Check
+        checked={rdp.fullscreen}
+        onChange={(fullscreen) => onChange({ fullscreen })}
+        label="Open full screen"
+      />
       <Check
         checked={rdp.clipboard}
         onChange={(clipboard) => onChange({ clipboard })}
@@ -1287,6 +1341,128 @@ function SshOptionsSection({
  * off by default, and neither should be met by accident while looking for
  * something else. The disclosure opens by itself when either is already on.
  */
+/**
+ * Connecting through an RD Gateway (MS-TSGU over HTTPS).
+ *
+ * Off is `gateway: null`, and the connection goes straight to the computer.
+ * The gateway signs in with the computer's account unless it is given one of
+ * its own, whose password goes to the keychain on save. A cookie imported
+ * from a `.rdp` file replaces the sign in and is shown only as present.
+ */
+function GatewaySection({
+  rdp,
+  onChange,
+  password,
+  onPassword,
+}: {
+  rdp: RdpSettings;
+  onChange: (patch: Partial<RdpSettings>) => void;
+  password: string;
+  onPassword: (password: string) => void;
+}): ReactNode {
+  const gw = rdp.gateway;
+  const patch = (p: Partial<RdpGateway>) => {
+    if (gw) onChange({ gateway: { ...gw, ...p } });
+  };
+  return (
+    <div className="space-y-3 rounded-md border border-subtle p-3">
+      <Check
+        checked={gw !== null}
+        onChange={(on) => onChange({ gateway: on ? blankGateway() : null })}
+        label="Connect through an RD Gateway"
+        hint="For a computer that is only reachable through your organisation's Remote Desktop Gateway."
+      />
+      {gw ? (
+        <>
+          <div className="grid grid-cols-[1fr_7rem] gap-3">
+            <Field label="Gateway address" hint="The gateway's name, as on its certificate">
+              <input
+                className="field"
+                value={gw.host}
+                placeholder="gateway.example.com"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                onChange={(e) => patch({ host: e.target.value.trim() })}
+              />
+            </Field>
+            <Field label="Port">
+              <input
+                className="field"
+                inputMode="numeric"
+                value={gw.port === 0 ? "" : String(gw.port)}
+                placeholder="443"
+                onChange={(e) => {
+                  const n = Number.parseInt(e.target.value, 10);
+                  patch({ port: Number.isFinite(n) && n > 0 && n < 65536 ? n : 0 });
+                }}
+              />
+            </Field>
+          </div>
+          {gw.accessToken ? (
+            <div className="flex items-center justify-between gap-3 text-sm text-secondary">
+              <span>Signs in to the gateway with the access token from the imported file.</span>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => patch({ accessToken: null })}
+              >
+                Remove token
+              </button>
+            </div>
+          ) : (
+            <>
+              <Check
+                checked={gw.separateCredentials}
+                onChange={(separateCredentials) => patch({ separateCredentials })}
+                label="Use a different account for the gateway"
+                hint="Off signs in to the gateway with the same account as the computer."
+              />
+              {gw.separateCredentials ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Gateway user name" hint="DOMAIN\user or user@domain">
+                    <input
+                      className="field"
+                      value={gw.username ?? ""}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      onChange={(e) => patch({ username: e.target.value || null })}
+                    />
+                  </Field>
+                  <Field
+                    label="Gateway password"
+                    hint="Saved in your keychain. Leave blank to keep the saved one."
+                  >
+                    <input
+                      className="field"
+                      type="password"
+                      value={password}
+                      autoComplete="new-password"
+                      onChange={(e) => onPassword(e.target.value)}
+                    />
+                  </Field>
+                </div>
+              ) : null}
+            </>
+          )}
+          <Field label="Gateway connection" hint="Automatic suits current Windows gateways">
+            <Select
+              value={gw.transport}
+              onChange={(e) => patch({ transport: e.target.value as RdpGateway["transport"] })}
+            >
+              <option value="auto">Automatic (WebSocket, then HTTP)</option>
+              <option value="http">HTTP only</option>
+            </Select>
+          </Field>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function SecuritySection({
   rdp,
   open,

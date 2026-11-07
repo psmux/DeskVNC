@@ -29,8 +29,10 @@ import {
 } from "../render/frameProtocol";
 import { encodeTerminalInput, encodeTerminalResize } from "../render/input";
 import type { PromptAnswer } from "../lib/credentials";
+import { nextRemoteClipboard, type RemoteClipboard } from "../lib/clipboardEcho";
 import { initTrace, traceMark } from "../render/trace";
 import type {
+  CertificateDigests,
   CredentialRequest,
   PinScheme,
   ProtocolKind,
@@ -82,6 +84,8 @@ export interface CertPromptState {
    * against the key the user actually verified. Never displayed.
    */
   scheme: PinScheme;
+  /** The certificate's thumbprint and SHA-256, for display only. */
+  certificate: CertificateDigests | null;
 }
 
 export interface SessionParams {
@@ -139,7 +143,8 @@ export interface SessionApi {
    * across `retryConnect` on purpose: that is the case it exists for.
    */
   lastCredentialAnswer: PromptAnswer | null;
-  remoteClipboard: string | null;
+  /** A fresh value per arrival, so a repeat of the same text still lands. */
+  remoteClipboard: RemoteClipboard | null;
   bellTick: number;
   /**
    * Set once `ssh-attached` arrives; null before then, and for every non-SSH
@@ -337,7 +342,7 @@ export function useSession(
   const [sshHostKeyPrompt, setSshHostKeyPrompt] = useState<SshHostKeyPromptState | null>(null);
   const [credentialRequest, setCredentialRequest] = useState<CredentialRequest | null>(null);
   const [lastCredentialAnswer, setLastCredentialAnswer] = useState<PromptAnswer | null>(null);
-  const [remoteClipboard, setRemoteClipboard] = useState<string | null>(null);
+  const [remoteClipboard, setRemoteClipboard] = useState<RemoteClipboard | null>(null);
   const [bellTick, setBellTick] = useState(0);
   const [sshAttached, setSshAttached] = useState<{ multiplexer: string | null; resumed: boolean } | null>(
     null,
@@ -486,7 +491,7 @@ export function useSession(
           bridgeRef.current.onCursorPosition(ev.x, ev.y);
           break;
         case "clipboard-text":
-          setRemoteClipboard(ev.text);
+          setRemoteClipboard((prev) => nextRemoteClipboard(prev, ev.text));
           break;
         case "clipboard-notify":
           // Formats only, no data. The session already answers a text notify
@@ -507,6 +512,8 @@ export function useSession(
             subject: ev.subject,
             isChange: ev.isChange,
             scheme: ev.scheme,
+            // An older shell sends no field at all; treat that as no digests.
+            certificate: ev.certificate ?? null,
           });
           break;
         case "credentials-required":

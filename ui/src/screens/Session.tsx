@@ -39,7 +39,8 @@ import { emit } from "@tauri-apps/api/event";
 import { EDIT_HOST_EVENT } from "../lib/editHost";
 import { Dialog } from "../components/primitives";
 import { candidateSeams, detectVerticalSeam } from "../render/seams";
-import type { QualityPreset, ScalingMode, SessionState } from "../lib/types";
+import type { QualityPreset, ScalingMode, SessionState, SshTunnelSettings } from "../lib/types";
+import { parseSshTunnel, sideChannelLogin } from "../lib/types";
 import {
   buildDisplayOptions,
   displayLabel,
@@ -329,6 +330,10 @@ function SessionView({
   // whose remote size is driven by the scaling mode). Changing it here lasts
   // for this session; the profile stays the answer for the next connect.
   const [resolution, setResolution] = useState<RdpResolution | null>(null);
+  // The profile's "Open full screen" (`screen mode id:i:2` in an imported
+  // `.rdp` file). Applied once, the first time the session connects; after
+  // that the window is the person's to put back.
+  const [openFullscreen, setOpenFullscreen] = useState(false);
   const resolutionRef = useRef<RdpResolution | null>(null);
   resolutionRef.current = resolution;
   const [zoom, setZoomState] = useState(stored.zoom);
@@ -897,9 +902,11 @@ function SessionView({
     void safeInvoke<{ rdpSettings?: string | null } | null>("get_host", { hostId: id }, null).then(
       (host) => {
         if (cancelled) return;
-        setResolution(parseRdpSettings(host?.rdpSettings ?? null)?.resolution ?? {
+        const settings = parseRdpSettings(host?.rdpSettings ?? null);
+        setResolution(settings?.resolution ?? {
           mode: "window-at-connect",
         });
+        setOpenFullscreen(settings?.fullscreen === true);
       },
     );
     return () => {
@@ -1128,8 +1135,8 @@ function SessionView({
   // Remote clipboard -> local (text only). The write is native: the webview's
   // own clipboard API is gesture-gated and this text arrives from the socket.
   useEffect(() => {
-    const text = session.remoteClipboard;
-    if (text === null) return;
+    const text = session.remoteClipboard?.text;
+    if (text === undefined) return;
     clipboardEcho.moved(text);
     void writeClipboard(text);
   }, [session.remoteClipboard, clipboardEcho]);
@@ -1371,19 +1378,44 @@ function SessionView({
   const filesRef = useRef(files);
   filesRef.current = files;
 
+  // The SSH identity saved on the profile (its tunnel settings), which the
+  // Files panel and the terminal sign in with. `undefined` while it loads.
+  const [tunnel, setTunnel] = useState<SshTunnelSettings | null | undefined>(
+    params.profileId ? undefined : null,
+  );
+  useEffect(() => {
+    const id = params.profileId;
+    if (!id || params.protocol === "ssh") {
+      setTunnel(null);
+      return;
+    }
+    let cancelled = false;
+    void safeInvoke<{ sshTunnel?: string | null } | null>("get_host", { hostId: id }, null).then(
+      (host) => {
+        if (!cancelled) setTunnel(parseSshTunnel(host?.sshTunnel ?? null));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [params.profileId, params.protocol]);
+  const login = useMemo(
+    () => (tunnel === undefined ? null : sideChannelLogin(params.address ?? "", tunnel)),
+    [params.address, tunnel],
+  );
+
   // Capability probe (PRD/08 §2.1), quiet: a closed port is the normal case
   // for a Windows box without OpenSSH Server, not an error worth a toast.
   useEffect(() => {
-    if (!params.address || session.state.state !== "connected") return;
+    if (!login?.host || session.state.state !== "connected") return;
     let cancelled = false;
-    void filesProbe(params.address, 22).then((ok) => {
+    void filesProbe(login.host, login.port).then((ok) => {
       if (!cancelled) setSshAvailable(ok);
     });
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.address, session.state.state]);
+  }, [login, session.state.state]);
 
   /** Where a drop lands: whatever the remote pane shows, else the remote home. */
   const dropDir = useCallback((): string => {
@@ -1396,18 +1428,19 @@ function SessionView({
   /** Open the sidecar on demand; safe to call repeatedly. */
   const ensureFilesConnected = useCallback((): void => {
     const api = filesRef.current;
-    if (!params.address) return;
+    if (!login?.host) return;
     if (api.conn.state !== "idle" && api.conn.state !== "error") return;
     void api.connect({
-      host: params.address,
-      port: 22,
+      host: login.host,
+      port: login.port,
       // Empty means "the same user as here"; Rust fills it in and loads any
       // stored passphrase from the keychain. Secrets never travel through JS.
-      username: "",
-      auth: "stored",
+      username: login.username,
+      auth: login.auth,
+      keyPath: login.keyPath,
       profileId: params.profileId,
     });
-  }, [params.address, params.profileId]);
+  }, [login, params.profileId]);
 
   useEffect(() => {
     if (filesOpen) ensureFilesConnected();
@@ -1424,14 +1457,15 @@ function SessionView({
    */
   const sshTerminalConfig = useMemo<SshConnectConfig>(
     () => ({
-      host: params.address ?? "",
-      port: 22,
-      username: "",
-      auth: "stored",
+      host: login?.host ?? params.address ?? "",
+      port: login?.port ?? 22,
+      username: login?.username ?? "",
+      auth: login?.auth ?? "stored",
+      keyPath: login?.keyPath ?? null,
       profileId: params.profileId,
       multiplexer: { kind: "tmux", sessionName: "deskvnc", fallbackToShell: true },
     }),
-    [params.address, params.profileId],
+    [login, params.address, params.profileId],
   );
 
   /**
@@ -1554,6 +1588,28 @@ function SessionView({
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen();
   }, [params.sessionId]);
+
+  // A profile that opens full screen does so once, on the first connect. A
+  // reconnect leaves the window as the person last put it.
+  const openedFullscreen = useRef(false);
+  const connectedNow = session.state.state === "connected";
+  useEffect(() => {
+    if (!openFullscreen || !connectedNow || openedFullscreen.current) return;
+    openedFullscreen.current = true;
+    void (async () => {
+      if (inTauri()) {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          if (await getCurrentWindow().isFullscreen()) return;
+        } catch {
+          /* ask anyway */
+        }
+      } else if (document.fullscreenElement) {
+        return;
+      }
+      await toggleFullscreen();
+    })();
+  }, [openFullscreen, connectedNow, toggleFullscreen]);
 
   /**
    * Native menu items that act on the session.
@@ -2132,6 +2188,7 @@ function SessionView({
             isChange: session.certPrompt.isChange,
             hostName: session.desktopName,
             scheme: session.certPrompt.scheme,
+            certificate: session.certPrompt.certificate,
           }}
           onTrust={() => session.trustCertificate(true)}
           onConnectOnce={() => session.trustCertificate(false)}

@@ -249,6 +249,42 @@ export function parseSshTunnel(raw: string | null | undefined): SshTunnelSetting
 }
 
 /**
+ * The SSH login the Files panel and the toolbar terminal use on a graphical
+ * session. A host only records an SSH identity in its tunnel settings (the
+ * editor says the password there is shared with the Files panel), so when
+ * the profile has a tunnel blob whose gateway is this same computer, its
+ * port, user and auth are the login. A tunnel through some other gateway
+ * describes a login to that gateway, not to this machine, so it is not
+ * borrowed. Otherwise it is port 22 on the session's own address as the
+ * local user, with whatever SSH secret the keychain holds for the profile.
+ */
+export interface SideChannelLogin {
+  host: string;
+  port: number;
+  /** Empty means "the same user as here"; Rust fills it in. */
+  username: string;
+  auth: SshTunnelSettings["auth"];
+  keyPath: string | null;
+}
+
+export function sideChannelLogin(
+  address: string,
+  tunnel: SshTunnelSettings | null,
+): SideChannelLogin {
+  const gateway = tunnel?.host.trim() ?? "";
+  if (!tunnel || (gateway && gateway.toLowerCase() !== address.trim().toLowerCase())) {
+    return { host: address, port: 22, username: "", auth: "stored", keyPath: null };
+  }
+  return {
+    host: address,
+    port: tunnel.port,
+    username: tunnel.user.trim(),
+    auth: tunnel.auth,
+    keyPath: tunnel.auth === "key-file" ? tunnel.keyPath : null,
+  };
+}
+
+/**
  * Serialize for the `sshTunnel` column. A tunnel that was never enabled and
  * never edited stores `null`, keeping the column empty for the overwhelming
  * majority of hosts.
@@ -330,6 +366,9 @@ export interface StoredCredentials {
   rdpUser?: string | null;
   rdpDomain?: string | null;
   rdpPassword?: string | null;
+  /** The RD Gateway account's password, for a gateway that signs in with an
+   *  account of its own. */
+  rdgPassword?: string | null;
 }
 
 /** Where secrets live; mirrors `vnc_store::CredentialBackend`. */
@@ -486,7 +525,18 @@ export function hostMac(host: { mac?: string | null } | null | undefined): strin
  * answer must carry the same value back untouched. This never reaches the
  * user; it is routing, not copy.
  */
-export type PinScheme = "tls" | "ra2" | "rdp-tls";
+export type PinScheme = "tls" | "ra2" | "rdp-tls" | "rdg-tls";
+
+/**
+ * Digests of the whole certificate a server key came in, colon separated
+ * hex. `thumbprint` is the SHA-1 Windows shows as Thumbprint, `sha256` the
+ * certificate's SHA-256. Shown beside the pin for matching by eye; the pin
+ * itself is the SHA-256 of the public key and nothing here is pinned.
+ */
+export interface CertificateDigests {
+  thumbprint: string;
+  sha256: string;
+}
 
 /** SessionState mirrors the serde repr: tag = "state", kebab-case. */
 export type SessionState =
@@ -628,6 +678,8 @@ export type SessionEvent =
       subject: string;
       isChange: boolean;
       scheme: PinScheme;
+      /** Null for a key that came without a certificate (RA2). */
+      certificate: CertificateDigests | null;
     }
   | { type: "credentials-required"; request: CredentialRequest }
   | { type: "stats"; stats: SessionStats }

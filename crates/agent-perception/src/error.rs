@@ -54,7 +54,7 @@ pub enum PerceptionError {
     /// what a mirror built directly on `Framebuffer` does, is to return the
     /// frame with no error at all and stale pixels in exactly the region that
     /// is moving.
-    #[error("{} of {region:?} is stale because the mirror cannot composite what passed over it (H.264 is decoded in the webview, never here): stop advertising H.264 on this session, re-send SetEncodings, send a refresh, or ask for the frame with the stale regions annotated instead", stale_regions.len())]
+    #[error("{} of {region:?} is stale because video passed over it that the mirror could not decode, as happens when the mirror joined the video after its keyframe or fell behind: send a refresh, which repaints the screen as still pictures, or on VNC stop advertising H.264 and re-send SetEncodings, or ask for the frame with the stale regions annotated instead", stale_regions.len())]
     Stale {
         region: Rect,
         stale_regions: Vec<StaleRegion>,

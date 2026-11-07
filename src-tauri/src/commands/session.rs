@@ -101,11 +101,16 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
             subject,
             is_change,
             scheme,
+            certificate,
         } => json!({
             "type": "certificate-prompt",
             "fingerprint": fingerprint,
             "subject": subject,
             "isChange": is_change,
+            // `{ thumbprint, sha256 }` of the whole certificate, or null for a
+            // bare key. Shown beside the pin so it can be matched against
+            // what Windows shows; never pinned.
+            "certificate": certificate,
             // Plumbing, not copy: the UI never shows this, it just hands it
             // back to `trust_certificate` so the pin lands under the right key.
             "scheme": scheme,
@@ -303,9 +308,18 @@ fn write_credentials(
         }
     };
     let merged = pending.merge_into(existing);
-    if let Err(e) = credentials.save(profile_id, &merged) {
-        tracing::warn!(profile = %profile_id, "failed to save credentials: {e}");
-        return;
+    match credentials.save(profile_id, &merged) {
+        Ok(()) => {}
+        // The store kept it and told the windows, which ask for the master
+        // password; the unlock writes it and sets the key icon.
+        Err(vnc_store::Error::Locked) => {
+            tracing::info!(profile = %profile_id, "credentials wait for the credential file to be unlocked");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(profile = %profile_id, "failed to save credentials: {e}");
+            return;
+        }
     }
     // Mirror the flag the library uses to draw the key icon. A failure
     // here is cosmetic, the secret itself is already stored.
@@ -1252,11 +1266,6 @@ pub async fn connect_session(
             )
             .map_err(|e| format!("This computer's Remote Desktop settings could not be read: {e}"))?
             .unwrap_or_default();
-            if settings.options.gateway.is_some() {
-                return Err("This computer is set up to connect through an RD Gateway, \
-                            which this version of the app cannot use yet."
-                    .into());
-            }
             let mut rdp = settings.options;
             // The host's "Share my clipboard" box. It lives on the settings
             // envelope rather than in `RdpOptions`, so it is carried across
@@ -1269,6 +1278,14 @@ pub async fn connect_session(
             // on one pin key.
             rdp.server_name.get_or_insert_with(|| options.host.clone());
             rdp.window_size = viewport(&window, viewport_width, viewport_height);
+            // Client access licences from an RD licence server live beside the
+            // rest of this installation's data, never with the host profile:
+            // a licence belongs to this device (issue #25).
+            rdp.license_dir = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|dir| dir.join("rdp-licences"));
             *options.rdp_mut() = rdp;
         }
         _ => {
@@ -1314,6 +1331,17 @@ pub async fn connect_session(
                     .filter(|d| !d.is_empty());
                 let vnc_password_only =
                     profile.as_ref().and_then(|p| p.security_pref.as_deref()) == Some("vncauth");
+                // An RD Gateway with an account of its own takes its password
+                // from the same blob. It is never in the profile, which is
+                // stored in clear, and like the computer's it is left out when
+                // the caller asked to be prompted.
+                if let remote_core::ProtocolOptions::Rdp(rdp) = &mut options.protocol {
+                    if let Some(gateway) = rdp.gateway.as_mut() {
+                        if gateway.separate_credentials && with_password {
+                            gateway.password = stored.rdg_password.clone();
+                        }
+                    }
+                }
                 options.credentials = credentials_from_store(
                     kind,
                     stored,

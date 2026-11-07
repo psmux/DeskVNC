@@ -79,7 +79,7 @@ pub struct SessionMenu {
 
 impl SessionMenu {
     /// Grey out (or restore) everything that needs a session behind it.
-    fn set_live(&self, live: bool, files_available: bool) {
+    fn set_live(&self, live: bool, files_available: bool, terminal: bool) {
         for item in &self.gated_items {
             let _ = item.set_enabled(live);
         }
@@ -91,7 +91,9 @@ impl SessionMenu {
                 let _ = check.set_enabled(live);
             }
         }
-        let _ = self.files.set_enabled(live && files_available);
+        let (enabled, label) = files_item(live, files_available, terminal);
+        let _ = self.files.set_enabled(enabled);
+        let _ = self.files.set_text(label);
     }
 
     fn check(&self, id: &str, checked: bool) {
@@ -149,6 +151,26 @@ pub struct SessionMenuState {
     /// whose desktop size is not the user's to choose.
     #[serde(default)]
     resolution: String,
+    /// An SSH tab: a terminal, which has no file panel to open.
+    #[serde(default)]
+    terminal: bool,
+}
+
+/// The label for File Transfer.
+const FILES_LABEL: &str = "File Transfer…";
+/// The label on an SSH tab, where the item is greyed. A native menu item has
+/// no tooltip, so the reason goes in the label itself.
+const FILES_LABEL_TERMINAL: &str = "File Transfer (not available in an SSH tab)";
+
+/// Whether File Transfer is enabled, and what it says. An SSH tab never
+/// enables it, whatever else it reports: the item opens the SFTP panel beside
+/// a desktop session and an SSH tab has none, so an enabled item there did
+/// nothing at all.
+fn files_item(live: bool, files_available: bool, terminal: bool) -> (bool, &'static str) {
+    if terminal {
+        return (false, FILES_LABEL_TERMINAL);
+    }
+    (live && files_available, FILES_LABEL)
 }
 
 /// The payload of `sync_session_menu`.
@@ -162,7 +184,7 @@ pub struct MenuSync {
 }
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let mut builder = MenuBuilder::new(app);
+    let builder = MenuBuilder::new(app);
     let mut checks: HashMap<&'static str, CheckMenuItem<Wry>> = HashMap::new();
     let mut gated_items: Vec<MenuItem<Wry>> = Vec::new();
     let mut gated_menus: Vec<Submenu<Wry>> = Vec::new();
@@ -191,7 +213,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     }
 
     #[cfg(target_os = "macos")]
-    {
+    let builder = {
         // A custom About item routed to the in-app dialog, NOT the native
         // AboutMetadata panel: two About surfaces drift (the native one was
         // showing the version three different ways), and only the in-app
@@ -214,13 +236,17 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             .separator()
             .quit()
             .build()?;
-        builder = builder.item(&app_menu);
-    }
+        builder.item(&app_menu)
+    };
 
     let file = SubmenuBuilder::new(app, "File")
         .item(
             &MenuItemBuilder::with_id("menu:new-host", "New Host…")
                 .accelerator("CmdOrCtrl+N")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu:import-rdp", "Import Remote Desktop File…")
                 .build(app)?,
         )
         .item(
@@ -419,7 +445,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
     // Gated on the SSH probe as well as on a session, so it is held out of
     // `gated_items` and enabled by hand in `SessionMenu::set_live`.
-    let files = MenuItemBuilder::with_id("menu:files", "File Transfer…")
+    let files = MenuItemBuilder::with_id("menu:files", FILES_LABEL)
         .enabled(false)
         .build(app)?;
 
@@ -600,10 +626,10 @@ pub fn sync(app: &AppHandle, update: MenuSync) {
     menu.check(HIDE_TOOLBAR, update.hide_toolbar);
 
     let Some(s) = update.session else {
-        menu.set_live(false, false);
+        menu.set_live(false, false, false);
         return;
     };
-    menu.set_live(true, s.files_available);
+    menu.set_live(true, s.files_available, s.terminal);
     // Nothing to recall while the toolbar is switched off entirely.
     let _ = menu.toggle_toolbar.set_enabled(!update.hide_toolbar);
 
@@ -772,7 +798,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             let payload = serde_json::json!({ "id": id });
             let _ = app.emit_to("main", "menu://action", payload);
         }
-        "menu:new-host" | "menu:quick-connect" => {
+        "menu:new-host" | "menu:import-rdp" | "menu:quick-connect" => {
             // Library concerns, not session ones. Sent to the library window
             // wherever the focus happens to be, because the alternative is
             // that Cmd+T does nothing at all whenever a session is in front,
@@ -813,5 +839,48 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             }
         }
         _ => {} // predefined items handle themselves
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_transfer_is_never_offered_on_an_ssh_tab() {
+        // The probe answer an SSH tab inherits from the desktop tab before it
+        // must not turn the item back on.
+        assert_eq!(files_item(true, true, true), (false, FILES_LABEL_TERMINAL));
+        assert_eq!(files_item(true, false, true), (false, FILES_LABEL_TERMINAL));
+    }
+
+    #[test]
+    fn file_transfer_follows_the_probe_on_a_desktop_session() {
+        assert_eq!(files_item(true, true, false), (true, FILES_LABEL));
+        assert_eq!(files_item(true, false, false), (false, FILES_LABEL));
+        assert_eq!(files_item(false, true, false), (false, FILES_LABEL));
+    }
+
+    #[test]
+    fn an_ssh_tab_says_so_on_the_wire() {
+        let state: SessionMenuState = serde_json::from_value(serde_json::json!({
+            "scalingMode": "custom", "quality": "auto", "grayLevels": 256,
+            "localCursor": "standard", "showRemoteCursor": false, "viewOnly": false,
+            "passthrough": false, "alwaysRefresh": false, "zoomLocked": false,
+            "edgePan": false, "filesAvailable": false, "layoutKnown": true,
+            "displays": [], "displayId": null, "resolution": "", "terminal": true
+        }))
+        .unwrap();
+        assert!(state.terminal);
+        // An older webview that never sends the field is a desktop session.
+        let older: SessionMenuState = serde_json::from_value(serde_json::json!({
+            "scalingMode": "fit", "quality": "auto", "grayLevels": 256,
+            "localCursor": "standard", "showRemoteCursor": false, "viewOnly": false,
+            "passthrough": false, "alwaysRefresh": false, "zoomLocked": false,
+            "edgePan": false, "filesAvailable": true, "layoutKnown": true,
+            "displays": [], "displayId": null
+        }))
+        .unwrap();
+        assert!(!older.terminal);
     }
 }

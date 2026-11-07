@@ -28,7 +28,8 @@ use std::sync::Arc;
 use common::mock_rdp_server::{
     McsBehaviour, MockConfig, MockRdpServer, Negotiation, SessionBehaviour, BITMAP_AT,
     CF_UNICODETEXT, DISPLAY_DVC_CHANNEL_ID, EGFX_DRAW_AT, EGFX_DVC_CHANNEL_ID, EGFX_FRAME_ID,
-    EGFX_SURFACE_AT, IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, SERVER_DESKTOP, SHARE_ID, USER_CHANNEL_ID,
+    EGFX_SURFACE_AT, IO_CHANNEL_ID, MESSAGE_CHANNEL_ID, MOCK_LICENCE, SERVER_DESKTOP, SHARE_ID,
+    USER_CHANNEL_ID,
 };
 use common::{options_for, rdp_half, DEFAULT_TIMEOUT};
 use rdp_core::connection::{self, Connected, SecurityProtocol};
@@ -55,17 +56,29 @@ async fn run_sequence(
     Vec<SessionEvent>,
     Result<Connected, RdpError>,
 ) {
-    let server = MockRdpServer::start(config).await;
+    run_sequence_against(MockRdpServer::start(config).await, creds, None).await
+}
+
+/// [`run_sequence`] against a server that is already up, with licences kept
+/// in `license_dir`, so two runs can be two connections to one server.
+async fn run_sequence_against(
+    server: MockRdpServer,
+    creds: Credentials,
+    license_dir: Option<&std::path::Path>,
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<Connected, RdpError>,
+) {
     let mut options = options_for(server.addr);
     options.credentials = creds;
+    options.rdp_mut().license_dir = license_dir.map(std::path::Path::to_path_buf);
     let rdp = rdp_half(&options);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
     let (events, mut event_rx) = mpsc::channel(256);
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
 
         let selected =
@@ -275,6 +288,63 @@ async fn a_refused_licence_stops_with_a_sentence() {
     }
 }
 
+/// Issue #25: an RD Session Host with a licence server sends a
+/// `LICENSE_REQUEST`, and the client used to decline it, which a Per Device
+/// host lets through with no licence and a sixty minute warning. The client
+/// now completes the exchange: a `NEW_LICENSE_REQUEST` and a challenge
+/// response on the first connection, the licence stored, and that licence
+/// presented in a `LICENSE_INFO` on the second.
+#[tokio::test]
+async fn a_licence_server_issues_a_licence_that_is_presented_next_time() {
+    use rdp_pdu::rdp::license::message_type;
+
+    let dir = std::env::temp_dir().join(format!("rdp-core-licence-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config = || MockConfig {
+        session: SessionBehaviour::IssueLicence,
+        ..MockConfig::default()
+    };
+
+    let (server, _, result) = run_sequence_against(
+        MockRdpServer::start(config()).await,
+        Credentials::user_pass("alice", "pw"),
+        Some(&dir),
+    )
+    .await;
+    let connected = result.expect("the licensing exchange completed");
+    assert_eq!(connected.activation.share_id, SHARE_ID);
+    assert_eq!(
+        server.recorded().licensing,
+        [
+            message_type::NEW_LICENSE_REQUEST,
+            message_type::PLATFORM_CHALLENGE_RESPONSE
+        ]
+    );
+    let stored: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the licence folder exists")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(stored.iter().any(|n| n.ends_with(".licence")), "{stored:?}");
+
+    let (server, _, result) = run_sequence_against(
+        MockRdpServer::start(config()).await,
+        Credentials::user_pass("alice", "pw"),
+        Some(&dir),
+    )
+    .await;
+    result.expect("the second connection completed");
+    let recorded = server.recorded();
+    assert_eq!(
+        recorded.licensing,
+        [
+            message_type::LICENSE_INFO,
+            message_type::PLATFORM_CHALLENGE_RESPONSE
+        ]
+    );
+    assert_eq!(recorded.presented_licences, [MOCK_LICENCE.to_vec()]);
+    std::fs::remove_dir_all(&dir).expect("scratch folder removed");
+}
+
 /// The joins are pipelined and the confirms come back in any order, which is
 /// what MS-RDPBCGR 2.2.1.9 allows and what saves three round trips on a link
 /// with real latency. The mock answers them in reverse for exactly this.
@@ -372,9 +442,7 @@ async fn run_mcs(config: MockConfig) -> connection::McsConnected {
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
     tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected = connection::negotiate_security(&mut framer, &opts, &options.credentials)
             .await
@@ -572,9 +640,7 @@ async fn credssp_without_a_certificate_is_refused_rather_than_started() {
 
     let (events, _rx) = mpsc::channel(256);
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected =
             connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
@@ -702,9 +768,7 @@ async fn run_session_steps(
     });
 
     let outcome = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected = connection::negotiate_security(&mut framer, &opts, &options.credentials)
             .await
@@ -766,6 +830,20 @@ async fn run_session_steps(
     (server, drained, outcome)
 }
 
+/// Connect to the mock the way the product connects to a server.
+///
+/// The product dials through `vnc_transport::tcp::connect`, which sets
+/// TCP_NODELAY. A bare `TcpStream::connect` leaves Nagle on, and on Linux
+/// loopback Nagle holds a small write back until the previous one is acked,
+/// which a delayed ack puts tens of milliseconds out. Paced input written
+/// 8 ms apart then reaches the mock in one lump, and a timing test measures
+/// the harness rather than the client.
+async fn dial(addr: std::net::SocketAddr) -> TcpStream {
+    vnc_transport::tcp::connect(&addr.ip().to_string(), addr.port(), DEFAULT_TIMEOUT)
+        .await
+        .expect("the mock is up")
+}
+
 /// The legacy shape: one batch of commands, sent once the picture has
 /// arrived.
 async fn run_session(
@@ -819,6 +897,60 @@ async fn a_bitmap_update_is_decoded_and_emitted_as_a_dirty_rect() {
         &[0x00, 0x00, 0xff, 0xff],
         "and the bottom row is blue"
     );
+}
+
+/// Forwarded text arrives a character at a time with room between them.
+/// Windows reads a run of unicode keystrokes that queue up behind a busy
+/// window as the last of them ("abc 1122" typed as "abc 2222"), so the
+/// characters must not reach the server back to back. Scancode typing is
+/// left alone.
+#[tokio::test]
+async fn forwarded_text_reaches_the_server_spaced_out() {
+    use rdp_pdu::input::fastpath::{keyboard_flags, FastPathInputEvent};
+
+    let text = |cp: u32, down: bool| ClientCommand::Key {
+        keysym: 0x0100_0000 + cp,
+        keycode: None,
+        down,
+    };
+    let (server, _, outcome) = run_session(vec![
+        text(0x31, true),
+        text(0x31, false),
+        text(0x32, true),
+        text(0x32, false),
+        text(0x32, true),
+        text(0x32, false),
+        ClientCommand::Disconnect,
+    ])
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    let recorded = server.wait_until(|r| r.client_disconnect.is_some()).await;
+    let presses: Vec<(u16, std::time::Instant)> = recorded
+        .input_events
+        .iter()
+        .zip(&recorded.input_times)
+        .filter_map(|(e, at)| match e {
+            FastPathInputEvent::Unicode { flags, code } if flags & keyboard_flags::RELEASE == 0 => {
+                Some((*code, *at))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        presses.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+        vec![0x31, 0x32, 0x32],
+        "every character, in order"
+    );
+    for pair in presses.windows(2) {
+        let gap = pair[1].1.duration_since(pair[0].1);
+        // A little under the gap: the clock that stamps arrivals is not the
+        // one that timed the send.
+        assert!(
+            gap >= std::time::Duration::from_millis(6),
+            "characters arrived {gap:?} apart"
+        );
+    }
 }
 
 /// The input path, round trip. A pointer command and a key command become fast
@@ -992,9 +1124,7 @@ async fn run_sequence_with_trust(
 
     let gated = decision.clone();
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected =
             connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;
@@ -1035,6 +1165,7 @@ fn unknown_key() -> TrustDecision {
     TrustDecision::Unknown {
         fingerprint: "AA:BB:CC:DD".into(),
         subject: "CN=win-host".into(),
+        certificate: None,
     }
 }
 
@@ -1071,6 +1202,7 @@ async fn a_trust_prompt_is_answered_and_the_sequence_continues_from_where_it_par
                 subject,
                 is_change,
                 scheme,
+                ..
             } => Some((fingerprint, subject, *is_change, *scheme)),
             _ => None,
         })
@@ -1548,9 +1680,7 @@ async fn run_sequence_with_credentials(
     });
 
     let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        let stream = TcpStream::connect(server.addr)
-            .await
-            .expect("the mock is up");
+        let stream = dial(server.addr).await;
         let mut framer = Framer::new(stream, Arc::new(AtomicU64::new(0)));
         let selected =
             connection::negotiate_security(&mut framer, &opts, &options.credentials).await?;

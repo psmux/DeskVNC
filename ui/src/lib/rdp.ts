@@ -87,12 +87,50 @@ export interface PerformanceFlags {
   enableDesktopComposition: boolean;
 }
 
+/**
+ * An RD Gateway, mirroring `remote_core::GatewayOptions`.
+ *
+ * The password is never here: the profile blob is stored in clear, so a
+ * separate gateway account keeps its password in the keychain as
+ * `StoredCredentials.rdgPassword`.
+ */
+export interface RdpGateway {
+  host: string;
+  /** 443 when zero. */
+  port: number;
+  /** Sign in to the gateway with `username` rather than the computer's
+   *  account. */
+  separateCredentials: boolean;
+  username: string | null;
+  /** `auto` asks for the WebSocket upgrade and takes the two channel HTTP
+   *  form when the gateway will not; `http` goes straight to that form. */
+  transport: "auto" | "http";
+  /** A pluggable authentication cookie, `gatewayaccesstoken` in a `.rdp`
+   *  file. When present it replaces the gateway sign in. */
+  accessToken: string | null;
+}
+
+/** A gateway at `host` on 443, signing in with the computer's account. */
+export function blankGateway(host = ""): RdpGateway {
+  return {
+    host,
+    port: 443,
+    separateCredentials: false,
+    username: null,
+    transport: "auto",
+    accessToken: null,
+  };
+}
+
 export interface RdpSettings {
   v: number;
   clipboard: boolean;
   microphone: boolean;
   consoleSession: boolean;
   restrictedAdmin: boolean;
+  /** Open the session full screen when it first connects. A `.rdp` file says
+   *  this with `screen mode id:i:2`. */
+  fullscreen: boolean;
 
   serverName: string | null;
   domain: string | null;
@@ -109,7 +147,7 @@ export interface RdpSettings {
   keyboardLayout: number;
   clientName: string;
   performance: PerformanceFlags;
-  gateway: unknown | null;
+  gateway: RdpGateway | null;
   autologon: boolean;
   kdcProxyUrl: string | null;
   sendMstshashCookie: boolean;
@@ -156,6 +194,7 @@ export function blankRdpSettings(): RdpSettings {
     microphone: false,
     consoleSession: false,
     restrictedAdmin: false,
+    fullscreen: false,
     serverName: null,
     domain: null,
     nla: "required",
@@ -179,7 +218,7 @@ export function blankRdpSettings(): RdpSettings {
 
 /** Every key this module owns, so anything else can be set aside verbatim. */
 const KNOWN_KEYS: readonly string[] = [
-  "v", "clipboard", "microphone", "consoleSession", "restrictedAdmin",
+  "v", "clipboard", "microphone", "consoleSession", "restrictedAdmin", "fullscreen",
   "serverName", "domain", "nla", "legacyTls", "colorDepth", "codecs", "audio",
   "monitors", "resolution", "dynamicResolution", "keyboardLayout", "clientName",
   "performance", "gateway", "autologon", "kdcProxyUrl", "sendMstshashCookie",
@@ -308,6 +347,7 @@ export function parseRdpSettings(raw: string | null | undefined): RdpSettings | 
     microphone: bool(o.microphone, blank.microphone),
     consoleSession: bool(o.consoleSession, blank.consoleSession),
     restrictedAdmin: bool(o.restrictedAdmin, blank.restrictedAdmin),
+    fullscreen: bool(o.fullscreen, blank.fullscreen),
     serverName: nullableStr(o.serverName),
     domain: nullableStr(o.domain),
     // An unrecognised value reads as "required". This one is security
@@ -326,13 +366,33 @@ export function parseRdpSettings(raw: string | null | undefined): RdpSettings | 
     keyboardLayout: num(o.keyboardLayout, 0),
     clientName: str(o.clientName, ""),
     performance: readPerformance(o.performance),
-    gateway: o.gateway ?? null,
+    gateway: readGateway(o.gateway),
     autologon: bool(o.autologon, blank.autologon),
     kdcProxyUrl: nullableStr(o.kdcProxyUrl),
     sendMstshashCookie: bool(o.sendMstshashCookie, blank.sendMstshashCookie),
     allowAutoReconnect: bool(o.allowAutoReconnect, blank.allowAutoReconnect),
     desktopScaleFactor: num(o.desktopScaleFactor, 100),
     ...(Object.keys(unknown).length > 0 ? { unknown } : {}),
+  };
+}
+
+/**
+ * Read a stored gateway. Anything that is not an object with a host reads as
+ * no gateway at all, and the connect path then dials directly, which is what
+ * a profile with no gateway does; a host that is there but blank is kept, so
+ * the connect refuses it by name rather than quietly going direct.
+ */
+function readGateway(v: unknown): RdpGateway | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const g = v as Record<string, unknown>;
+  if (typeof g.host !== "string") return null;
+  return {
+    host: g.host,
+    port: num(g.port, 443),
+    separateCredentials: bool(g.separateCredentials, false),
+    username: nullableStr(g.username),
+    transport: oneOf(g.transport, ["auto", "http"] as const, "auto"),
+    accessToken: nullableStr(g.accessToken),
   };
 }
 

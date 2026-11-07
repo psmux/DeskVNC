@@ -178,8 +178,47 @@ async fn establish(
     let mut creds = options.credentials.clone();
     let mut ask = connection::Ask::new();
 
+    let gateway = options.rdp_options().and_then(|r| r.gateway.as_ref());
+
     loop {
-        let stream = crate::transport::open_stream(options, events).await?;
+        let stream = match gateway {
+            // Through an RD Gateway. Its sign in can ask the user for the
+            // same credentials CredSSP will use, so it borrows the prompt and
+            // the credentials this loop owns, and a refusal of what the user
+            // typed comes round this loop exactly as CredSSP's does.
+            Some(gateway) => {
+                let open = crate::transport::gateway::open(
+                    options,
+                    gateway,
+                    &opts.client_name,
+                    &mut creds,
+                    events,
+                    Some(connection::Prompt {
+                        commands,
+                        cancel,
+                        ask: &mut ask,
+                    }),
+                );
+                let opened = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(RdpError::Cancelled),
+                    opened = open => opened,
+                };
+                match opened {
+                    Ok(stream) => stream,
+                    Err(e @ RdpError::AuthFailed(_)) if ask.prompted() && ask.may_ask_again() => {
+                        tracing::info!(
+                            prompts = ask.raised(),
+                            "the rd gateway rejected the credentials the user supplied; asking again"
+                        );
+                        ask.refused(e.user_message());
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            None => crate::transport::open_stream(options, events).await?,
+        };
 
         // The connection sequence is straight line `await` code and is
         // deliberately not cancellation safe, so it is raced against the

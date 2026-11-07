@@ -35,12 +35,23 @@ pub enum PinScheme {
     /// approved for one protocol silently vouching for the other
     /// (PRDRDP/02 §2.1, PRDRDP/08 §2).
     RdpTls,
+    /// An RD Gateway's HTTPS certificate SPKI (MS-TSGU).
+    ///
+    /// Separate again, because the gateway is a different machine from the
+    /// one the RDP certificate belongs to, and approving one must not vouch
+    /// for the other.
+    RdgTls,
 }
 
 impl PinScheme {
     /// Every scheme, for callers that must handle all of them (loading pins
     /// before a security type is negotiated, forgetting an endpoint).
-    pub const ALL: [PinScheme; 3] = [PinScheme::Tls, PinScheme::Ra2, PinScheme::RdpTls];
+    pub const ALL: [PinScheme; 4] = [
+        PinScheme::Tls,
+        PinScheme::Ra2,
+        PinScheme::RdpTls,
+        PinScheme::RdgTls,
+    ];
 
     /// The wire/database spelling. Matches the serde representation.
     pub const fn as_str(self) -> &'static str {
@@ -48,6 +59,7 @@ impl PinScheme {
             PinScheme::Tls => "tls",
             PinScheme::Ra2 => "ra2",
             PinScheme::RdpTls => "rdp-tls",
+            PinScheme::RdgTls => "rdg-tls",
         }
     }
 
@@ -58,6 +70,7 @@ impl PinScheme {
             "tls" => Some(PinScheme::Tls),
             "ra2" => Some(PinScheme::Ra2),
             "rdp-tls" => Some(PinScheme::RdpTls),
+            "rdg-tls" => Some(PinScheme::RdgTls),
             _ => None,
         }
     }
@@ -83,6 +96,8 @@ pub struct CertPins {
     pub ra2: Option<String>,
     /// SHA-256 SPKI of the pinned RDP TLS certificate (hex).
     pub rdp_tls: Option<String>,
+    /// SHA-256 SPKI of the pinned RD Gateway certificate (hex).
+    pub rdg_tls: Option<String>,
 }
 
 impl CertPins {
@@ -92,6 +107,7 @@ impl CertPins {
             PinScheme::Tls => self.tls.as_deref(),
             PinScheme::Ra2 => self.ra2.as_deref(),
             PinScheme::RdpTls => self.rdp_tls.as_deref(),
+            PinScheme::RdgTls => self.rdg_tls.as_deref(),
         }
     }
 
@@ -100,6 +116,7 @@ impl CertPins {
             PinScheme::Tls => self.tls = pin,
             PinScheme::Ra2 => self.ra2 = pin,
             PinScheme::RdpTls => self.rdp_tls = pin,
+            PinScheme::RdgTls => self.rdg_tls = pin,
         }
     }
 

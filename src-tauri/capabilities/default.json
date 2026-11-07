@@ -53,6 +53,7 @@
     "allow-delete-password",
     "allow-credential-backend",
     "allow-unlock-credentials",
+    "allow-credential-status",
 
     "allow-start-discovery",
     "allow-stop-discovery",

@@ -5,7 +5,7 @@
  */
 import { invoke, isTauri as tauriDetect } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { ProtocolKind } from "./types";
+import type { HostProfile, ProtocolKind } from "./types";
 
 export function inTauri(): boolean {
   try {
@@ -546,6 +546,37 @@ async function nativeOpen(options: Record<string, unknown>): Promise<string[]> {
   };
   const list = Array.isArray(result) ? result : [result];
   return list.map(one).filter((p): p is string => p !== null);
+}
+
+/**
+ * What reading a `.rdp` file gave (`vnc_store::RdpImport`): a draft profile,
+ * the username to pre-fill, and sentences about what did not come across.
+ * Never a password: the shell does not read that line.
+ */
+export interface RdpImport {
+  profile: HostProfile;
+  username: string | null;
+  mapped: string[];
+  ignored: string[];
+  unparseable: number;
+  warnings: string[];
+  desktopSize: [number, number] | null;
+}
+
+/** Ask the person for one `.rdp` file. `null` when they cancelled. */
+export async function pickRdpFile(): Promise<string | null> {
+  const picked = await nativeOpen({
+    multiple: false,
+    directory: false,
+    title: "Import a Remote Desktop file",
+    filters: [{ name: "Remote Desktop file", extensions: ["rdp", "RDP"] }],
+  });
+  return picked[0] ?? null;
+}
+
+/** Read a `.rdp` file into a draft. The shell reads it; nothing is saved. */
+export function importRdpFile(path: string): Promise<RdpImport> {
+  return mustInvoke<RdpImport>("import_rdp_file", { path });
 }
 
 /** Pick files to upload. */

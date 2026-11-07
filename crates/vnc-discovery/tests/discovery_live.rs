@@ -360,13 +360,34 @@ async fn live_mdns_browse_runs_end_to_end() {
 
     let mut hosts: Vec<DiscoveredHost> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    // The rows the app would show: every sighting goes through the registry,
+    // as `src-tauri/src/commands/discovery.rs` does. The raw stream may
+    // resolve one instance again within a browse, and the registry is where
+    // that re-sighting is dropped.
+    let mut registry = HostRegistry::new(LocalNetwork::detect());
+    let mut rows: Vec<DiscoveredHost> = Vec::new();
     let deadline = tokio::time::Instant::now() + BROWSE_FOR;
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Err(_) => break,   // browse window elapsed
             Ok(None) => break, // channel closed
             Ok(Some(ev)) => match ev {
-                DiscoveryEvent::Found(h) => hosts.push(h),
+                DiscoveryEvent::Found(h) => {
+                    for shown in registry.observe_event(DiscoveryEvent::Found(h.clone())) {
+                        match shown {
+                            DiscoveryEvent::Found(row) => rows.push(row),
+                            DiscoveryEvent::Updated(row) => {
+                                rows.retain(|r| (r.address, r.port) != (row.address, row.port));
+                                rows.push(row);
+                            }
+                            DiscoveryEvent::Lost { address, port } => {
+                                rows.retain(|r| (r.address, r.port) != (address, port));
+                            }
+                            _ => {}
+                        }
+                    }
+                    hosts.push(h);
+                }
                 DiscoveryEvent::Error(e) => errors.push(e),
                 _ => {}
             },
@@ -407,8 +428,14 @@ async fn live_mdns_browse_runs_end_to_end() {
 
     // One machine, one row: a single instance resolving to v4 + v6 +
     // link-local must not produce several entries. Before the fix this Mac
-    // alone produced eight.
-    let mut names: Vec<String> = hosts.iter().filter_map(|h| h.hostname.clone()).collect();
+    // alone produced eight. Checked on the rows the app shows, because the
+    // raw stream legitimately repeats an instance that resolved twice.
+    eprintln!(
+        "LIVE mDNS: {} raw sighting(s), {} row(s) after the registry",
+        hosts.len(),
+        rows.len()
+    );
+    let mut names: Vec<String> = rows.iter().filter_map(|h| h.hostname.clone()).collect();
     names.sort();
     let unique = {
         let mut n = names.clone();

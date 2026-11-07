@@ -13,8 +13,11 @@ them and not the shell.** They hand you the screenshot directly. The `dvv`
 shell commands are for agents without those tools, such as Pi.
 
 You never need the user to open, reopen or reconnect a machine, or to open
-DeskVNCViewer: `dvv` starts it when it is closed. Do it yourself with the
-steps below.
+DeskVNCViewer: when it is closed, `dvv_hosts` and `dvv_open` start it
+minimised, once per `dvv` process. `dvv_limbs` and the other tools never start
+it, so an empty `dvv_limbs` can mean the app is closed: call `dvv_hosts` next.
+If `DVV_NO_START=1` is set they fail saying the app is not running, and only
+the user can open it. Do the rest yourself with the steps below.
 
 ## With the dvv_ tools (OpenCode, Claude Code, Codex and other MCP clients)
 

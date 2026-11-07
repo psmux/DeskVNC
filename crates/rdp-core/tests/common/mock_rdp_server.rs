@@ -233,6 +233,10 @@ pub enum SessionBehaviour {
     /// Answer licensing with `ERR_NO_LICENSE_SERVER`, which is a refusal the
     /// client must report as a sentence rather than carry on through.
     RefuseLicence,
+    /// Play an RD licence server: a `LICENSE_REQUEST` with a certificate,
+    /// a platform challenge, and a `NEW_LICENSE` carrying
+    /// [`MOCK_LICENCE`], then the rest of [`SessionBehaviour::Serve`].
+    IssueLicence,
     /// The whole of phases 6 to 10, and then a virtual channel session
     /// instead of a legacy bitmap: the drdynvc version handshake, the
     /// graphics channel with one frame on it, and a clipboard exchange in
@@ -367,6 +371,8 @@ pub struct Recorded {
     pub monitor_layouts: Vec<MonitorLayoutRecord>,
     /// Every fast path input event the client sent, in order.
     pub input_events: Vec<rdp_pdu::input::fastpath::FastPathInputEvent>,
+    /// When each of input_events arrived, one entry per event.
+    pub input_times: Vec<std::time::Instant>,
 
     // -- The virtual channels (MS-RDPEDYC, MS-RDPEGFX, MS-RDPECLIP) -------
     /// The `Version` in the client's drdynvc Capabilities Response
@@ -393,6 +399,13 @@ pub struct Recorded {
     /// decoded from UTF-16LE with its terminator stripped
     /// (MS-RDPECLIP 2.2.5.2).
     pub clipboard_from_client: Option<String>,
+
+    // Licensing (MS-RDPELE).
+    /// The `bMsgType` of every licensing message the client sent, in order,
+    /// across every connection.
+    pub licensing: Vec<u8>,
+    /// The `LicenseInfo` blob of each `LICENSE_INFO` the client presented.
+    pub presented_licences: Vec<Vec<u8>>,
 }
 
 /// One `RDPGFX_FRAME_ACKNOWLEDGE_PDU` (MS-RDPEGFX 2.2.2.13).
@@ -516,6 +529,187 @@ async fn read_tpkt(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
         .read_exact(&mut frame[x224::TPKT_HEADER_LEN..])
         .await?;
     Ok(frame)
+}
+
+/// The licence [`SessionBehaviour::IssueLicence`] issues.
+pub const MOCK_LICENCE: &[u8] = b"a mock client access licence";
+
+/// An RD licence server, from MS-RDPELE 3.2 and 5.1: a 512 bit RSA key whose
+/// private exponent it knows, so it can recover the client's premaster
+/// secret and derive the same keys from it. The key derivation is
+/// `rdp-auth`'s, which has its own vectors; everything else here is written
+/// from the specification separately from the client.
+struct LicenceServer {
+    n: num_bigint_dig::BigUint,
+    d: num_bigint_dig::BigUint,
+    server_random: [u8; 32],
+}
+
+impl LicenceServer {
+    fn new() -> Self {
+        use num_bigint_dig::{BigUint, ModInverse};
+        let one = BigUint::from(1u32);
+        // The two largest primes below 2^256.
+        let p = (BigUint::from(1u32) << 256) - BigUint::from(189u32);
+        let q = (BigUint::from(1u32) << 256) - BigUint::from(357u32);
+        let e = BigUint::from(65537u32);
+        let phi = (&p - &one) * (&q - &one);
+        let d = e
+            .mod_inverse(&phi)
+            .and_then(|d| d.to_biguint())
+            .expect("65537 is invertible");
+        Self {
+            n: p * q,
+            d,
+            server_random: [0x5e; 32],
+        }
+    }
+
+    /// `SERVER_LICENSE_REQUEST` (MS-RDPELE 2.2.2.1) with a proprietary
+    /// certificate (MS-RDPBCGR 2.2.1.4.3.1.1) holding the key.
+    fn request(&self) -> Vec<u8> {
+        let mut modulus = self.n.to_bytes_le();
+        modulus.resize(72, 0);
+        let mut cert = Vec::new();
+        for v in [1u32, 1, 1] {
+            cert.extend_from_slice(&v.to_le_bytes());
+        }
+        cert.extend_from_slice(&0x0006u16.to_le_bytes());
+        cert.extend_from_slice(&92u16.to_le_bytes());
+        cert.extend_from_slice(b"RSA1");
+        for v in [72u32, 512, 63, 65537] {
+            cert.extend_from_slice(&v.to_le_bytes());
+        }
+        cert.extend_from_slice(&modulus);
+        cert.extend_from_slice(&0x0008u16.to_le_bytes());
+        cert.extend_from_slice(&72u16.to_le_bytes());
+        cert.extend_from_slice(&[0u8; 72]);
+
+        let mut body = self.server_random.to_vec();
+        body.extend_from_slice(&0x0006_0000u32.to_le_bytes());
+        body.extend_from_slice(&4u32.to_le_bytes());
+        body.extend_from_slice(b"A\0\0\0");
+        body.extend_from_slice(&4u32.to_le_bytes());
+        body.extend_from_slice(b"B\0\0\0");
+        body.extend_from_slice(&blob_type::KEY_EXCHG_ALG.to_le_bytes());
+        body.extend_from_slice(&4u16.to_le_bytes());
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&blob_type::CERTIFICATE.to_le_bytes());
+        body.extend_from_slice(&(cert.len() as u16).to_le_bytes());
+        body.extend_from_slice(&cert);
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&blob_type::SCOPE.to_le_bytes());
+        body.extend_from_slice(&13u16.to_le_bytes());
+        body.extend_from_slice(b"example.test\0");
+        license_frame(message_type::LICENSE_REQUEST, &body)
+    }
+
+    /// Read the client's `NEW_LICENSE_REQUEST` or `LICENSE_INFO`, recover
+    /// the premaster secret, and return the keys and any licence presented.
+    fn read_first(
+        &self,
+        payload: &[u8],
+    ) -> std::io::Result<(rdp_auth::licensing::LicensingKeys, Option<Vec<u8>>)> {
+        let bad = |what: &str| std::io::Error::other(format!("licensing: {what}"));
+        let mut r = Reader::new(payload);
+        let flags = r.u16("t").map_err(std::io::Error::other)?;
+        r.u16("t").map_err(std::io::Error::other)?;
+        if flags & 0x0080 == 0 {
+            return Err(bad("no SEC_LICENSE_PKT"));
+        }
+        let msg_type = r.u8("t").map_err(std::io::Error::other)?;
+        if msg_type != message_type::NEW_LICENSE_REQUEST && msg_type != message_type::LICENSE_INFO {
+            return Err(bad("an unexpected first message"));
+        }
+        r.skip(3, "t").map_err(std::io::Error::other)?;
+        r.skip(8, "t").map_err(std::io::Error::other)?;
+        let client_random: [u8; 32] = r.array("t").map_err(std::io::Error::other)?;
+        let sealed = LicenseBinaryBlob::read(&mut r, "t").map_err(std::io::Error::other)?;
+        let sealed = sealed.data.as_slice();
+        let mut pm = num_bigint_dig::BigUint::from_bytes_le(sealed.get(..64).unwrap_or(sealed))
+            .modpow(&self.d, &self.n)
+            .to_bytes_le();
+        pm.resize(48, 0);
+        let pm: [u8; 48] = pm.try_into().map_err(|_| bad("premaster"))?;
+        let keys =
+            rdp_auth::licensing::LicensingKeys::derive(&pm, &client_random, &self.server_random);
+        let presented = if msg_type == message_type::LICENSE_INFO {
+            let licence = LicenseBinaryBlob::read(&mut r, "t").map_err(std::io::Error::other)?;
+            Some(licence.data.as_slice().to_vec())
+        } else {
+            None
+        };
+        Ok((keys, presented))
+    }
+
+    /// `SERVER_PLATFORM_CHALLENGE` (MS-RDPELE 2.2.2.4).
+    fn challenge(keys: &rdp_auth::licensing::LicensingKeys, challenge: &[u8]) -> Vec<u8> {
+        let sealed = keys.rc4(challenge);
+        let mut body = 0u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&blob_type::ANY.to_le_bytes());
+        body.extend_from_slice(&(sealed.len() as u16).to_le_bytes());
+        body.extend_from_slice(&sealed);
+        body.extend_from_slice(&keys.mac(challenge));
+        license_frame(message_type::PLATFORM_CHALLENGE, &body)
+    }
+
+    /// Check a `CLIENT_PLATFORM_CHALLENGE_RESPONSE`: the challenge echoed and
+    /// the MAC over the response data and the hardware id (MS-RDPELE
+    /// 2.2.2.5).
+    fn check_response(
+        keys: &rdp_auth::licensing::LicensingKeys,
+        payload: &[u8],
+        challenge: &[u8],
+    ) -> std::io::Result<()> {
+        let bad = |what: &str| std::io::Error::other(format!("licensing: {what}"));
+        if payload.get(4) != Some(&message_type::PLATFORM_CHALLENGE_RESPONSE) {
+            return Err(bad("not a challenge response"));
+        }
+        let mut r = Reader::new(payload.get(8..).unwrap_or_default());
+        let response = LicenseBinaryBlob::read(&mut r, "t").map_err(std::io::Error::other)?;
+        let hwid = LicenseBinaryBlob::read(&mut r, "t").map_err(std::io::Error::other)?;
+        let mac: [u8; 16] = r.array("t").map_err(std::io::Error::other)?;
+        let mut plain = keys.rc4(response.data.as_slice());
+        if plain.get(8..) != Some(challenge) {
+            return Err(bad("the challenge was not echoed"));
+        }
+        plain.extend_from_slice(&keys.rc4(hwid.data.as_slice()));
+        if keys.mac(&plain) != mac {
+            return Err(bad("the response MAC does not verify"));
+        }
+        Ok(())
+    }
+
+    /// `SERVER_NEW_LICENSE` (MS-RDPELE 2.2.2.6).
+    fn new_license(keys: &rdp_auth::licensing::LicensingKeys, licence: &[u8]) -> Vec<u8> {
+        let mut plain = 0x0006_0000u32.to_le_bytes().to_vec();
+        for field in [&b"example.test\0"[..], b"A\0\0\0", b"B\0\0\0", licence] {
+            plain.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            plain.extend_from_slice(field);
+        }
+        let sealed = keys.rc4(&plain);
+        let mut body = blob_type::ENCRYPTED_DATA.to_le_bytes().to_vec();
+        body.extend_from_slice(&(sealed.len() as u16).to_le_bytes());
+        body.extend_from_slice(&sealed);
+        body.extend_from_slice(&keys.mac(&plain));
+        license_frame(message_type::NEW_LICENSE, &body)
+    }
+}
+
+/// A server licensing PDU of any type: the security header, the preamble,
+/// then `body`.
+fn license_frame(msg_type: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        msg_type,
+        preamble_flags::VERSION_3_0,
+    ];
+    out.extend_from_slice(&((LICENSE_PREAMBLE_LEN + body.len()) as u16).to_le_bytes());
+    out.extend_from_slice(body);
+    out
 }
 
 fn encoded(value: &impl Encode) -> Vec<u8> {
@@ -769,6 +963,40 @@ async fn serve(
             stream.write_all(&io_frame(&bye)).await?;
             stream.flush().await?;
             return drain(&mut stream, &recorded, None).await;
+        }
+        SessionBehaviour::IssueLicence => {
+            let server = LicenceServer::new();
+            stream.write_all(&io_frame(&server.request())).await?;
+            stream.flush().await?;
+
+            let frame = read_tpkt(&mut stream).await?;
+            let first = expect_io_payload(&frame)?;
+            let (keys, presented) = server.read_first(&first)?;
+            {
+                let mut rec = recorded.lock().expect("not poisoned");
+                rec.licensing.push(first[4]);
+                rec.presented_licences.extend(presented);
+            }
+
+            let challenge = b"T\0E\0S\0T\0\0\0";
+            stream
+                .write_all(&io_frame(&LicenceServer::challenge(&keys, challenge)))
+                .await?;
+            stream.flush().await?;
+
+            let frame = read_tpkt(&mut stream).await?;
+            let response = expect_io_payload(&frame)?;
+            LicenceServer::check_response(&keys, &response, challenge)?;
+            recorded
+                .lock()
+                .expect("not poisoned")
+                .licensing
+                .push(response[4]);
+
+            stream
+                .write_all(&io_frame(&LicenceServer::new_license(&keys, MOCK_LICENCE)))
+                .await?;
+            stream.flush().await?;
         }
         _ => {
             // The one licensing answer a TLS session actually sees: "no
@@ -1051,11 +1279,12 @@ async fn drain(
         stream.read_exact(&mut frame[header_len..]).await?;
         let pdu =
             FastPathInputPdu::decode(&mut Reader::new(&frame)).map_err(std::io::Error::other)?;
+        let arrived = std::time::Instant::now();
+        let mut recorded = recorded.lock().expect("not poisoned");
         recorded
-            .lock()
-            .expect("not poisoned")
-            .input_events
-            .extend(pdu.events);
+            .input_times
+            .extend(std::iter::repeat_n(arrived, pdu.events.len()));
+        recorded.input_events.extend(pdu.events);
     }
 }
 

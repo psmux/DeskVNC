@@ -7,36 +7,29 @@
 //!
 //! # What actually happens under TLS or CredSSP
 //!
-//! MS-RDPELE's full exchange is encrypted with RC4 keys derived from a
-//! premaster secret the client encrypts under the server certificate of
-//! `TS_UD_SC_SEC1` (MS-RDPELE 3.1.5.1, 5.1). Under an external security
-//! protocol that certificate is absent (MS-RDPBCGR 2.2.1.4.3), so those keys
-//! cannot exist, and Windows sends exactly one licensing PDU: an
+//! A Windows host with no Remote Desktop licensing configured, every client
+//! edition of Windows included, sends exactly one licensing PDU: an
 //! `ERROR_ALERT` with `dwErrorCode = STATUS_VALID_CLIENT` and
 //! `dwStateTransition = ST_NO_TRANSITION`, which means "no licence is
-//! required, proceed to the capability exchange". That is the path phase 1
-//! needs and the only one it completes.
+//! required, proceed to the capability exchange".
 //!
-//! So this module decodes [`LicenseErrorMessage`] in full, walks the outer
-//! structure of the four server messages so that a real licence server's
-//! `LICENSE_REQUEST` is reported as "this server requires a Terminal Services
-//! client access licence" rather than as a parse error, and encodes exactly
-//! one client message: [`LicensePdu::client_error_alert`].
+//! An RD Session Host with a licence server sends a `LICENSE_REQUEST`
+//! instead, and it does so under TLS and CredSSP too. The `TS_UD_SC_SEC1`
+//! certificate is absent under an external security protocol (MS-RDPBCGR
+//! 2.2.1.4.3), so the request's own `ServerCertificate` blob carries the key
+//! the premaster secret is encrypted under (MS-RDPELE 3.1.5.1). The client
+//! then sends a `NEW_LICENSE_REQUEST` or, holding a licence from an earlier
+//! connection, a `LICENSE_INFO`; the server answers with a
+//! `PLATFORM_CHALLENGE`, the client with a `PLATFORM_CHALLENGE_RESPONSE`,
+//! and the server ends the exchange with `NEW_LICENSE`, `UPGRADE_LICENSE` or
+//! `STATUS_VALID_CLIENT` (MS-RDPELE 1.3.3).
 //!
-//! # No cryptography, and none of the derivation either
+//! # No cryptography here
 //!
 //! There is no RC4, no RSA and no hash in this file (PRDRDP/00 R54, V3-A).
-//! The blobs of a `LICENSE_REQUEST` are carried as borrowed views and nothing
-//! is derived from them. `ServerRandom` is a nonce rather than a secret; the
-//! premaster secret and client random appear only in the client messages this
-//! module does not encode, which is why nothing here needs zeroizing.
-//!
-//! PRDRDP/03 §2.8 says phase 1 also answers a `LICENSE_REQUEST` with a
-//! `NEW_LICENSE_REQUEST`. PRDRDP/13 §4.7 says the opposite and gives the
-//! reason: a `NEW_LICENSE_REQUEST` we cannot follow through on leaves the
-//! server waiting and the user looking at a blank screen. This module
-//! implements §4.7, and the contradiction is recorded rather than reconciled
-//! silently.
+//! Encrypted blobs are carried as bytes in both directions; `rdp-auth`'s
+//! `licensing` module derives the keys and does the encryption, and
+//! `rdp-core` decides what to send. Every structure here is plain layout.
 
 use super::security::{security_flags, BasicSecurityHeader};
 use crate::codes::{LicenseError, LicenseStateTransition};
@@ -109,6 +102,34 @@ pub mod blob_type {
 
 /// `SERVER_LICENSE_REQUEST.ServerRandom` (MS-RDPELE 2.2.2.1).
 pub const SERVER_RANDOM_LEN: usize = 32;
+
+/// `ClientRandom` of the two client requests (MS-RDPELE 2.2.2.2, 2.2.2.3).
+pub const CLIENT_RANDOM_LEN: usize = 32;
+
+/// Every `MACData` field in MS-RDPELE is sixteen bytes.
+pub const LICENSE_MAC_LEN: usize = 16;
+
+/// `CLIENT_HARDWARE_ID` (MS-RDPELE 2.2.2.3.1): `PlatformId` and four
+/// `DataN` fields, twenty bytes in all.
+pub const HARDWARE_ID_LEN: usize = 20;
+
+/// `KEY_EXCHANGE_ALG_RSA`, the only key exchange algorithm MS-RDPELE
+/// defines (2.2.2.2).
+pub const KEY_EXCHANGE_ALG_RSA: u32 = 0x0000_0001;
+
+/// `PlatformId` of the client requests (MS-RDPELE 2.2.2.2): the operating
+/// system identifier in the high byte and the ISV in the next. FreeRDP and
+/// mstsc both send `CLIENT_OS_ID_WINNT_POST_52 | CLIENT_IMAGE_ID_MICROSOFT`.
+pub const PLATFORM_ID: u32 = 0x0400_0000 | 0x0001_0000;
+
+/// `PLATFORM_CHALLENGE_RESPONSE_DATA.wVersion` (MS-RDPELE 2.2.2.5.1).
+pub const PLATFORM_CHALLENGE_RESPONSE_VERSION: u16 = 0x0100;
+
+/// `wClientType`: `OTHER_PLATFORM_CHALLENGE_TYPE` (MS-RDPELE 2.2.2.5.1).
+pub const OTHER_PLATFORM_CHALLENGE_TYPE: u16 = 0xff00;
+
+/// `wLicenseDetailLevel`: `LICENSE_DETAIL_DETAIL` (MS-RDPELE 2.2.2.5.1).
+pub const LICENSE_DETAIL_DETAIL: u16 = 0x0003;
 
 /// `LICENSE_PREAMBLE` (MS-RDPBCGR 2.2.1.12.1.1).
 ///
@@ -389,8 +410,18 @@ pub enum LicenseMessage<'a> {
     /// `ERROR_ALERT`, the only message this client sends and the only one a
     /// TLS session normally receives.
     ErrorAlert(LicenseErrorMessage<'a>),
-    /// `LICENSE_REQUEST`, walked far enough to report it.
+    /// `LICENSE_REQUEST` (MS-RDPELE 2.2.2.1).
     LicenseRequest(Box<ServerLicenseRequest<'a>>),
+    /// `PLATFORM_CHALLENGE` (MS-RDPELE 2.2.2.4).
+    PlatformChallenge(ServerPlatformChallenge<'a>),
+    /// `NEW_LICENSE` or `UPGRADE_LICENSE` (MS-RDPELE 2.2.2.6, 2.2.2.7). The
+    /// two have the same layout; `upgrade` says which one arrived.
+    NewLicense {
+        /// True for `UPGRADE_LICENSE`.
+        upgrade: bool,
+        /// The message.
+        license: ServerNewLicense<'a>,
+    },
     /// A server message we do not implement, carried whole so the session can
     /// name it and decline. Its length is known, so preserving it is right
     /// (PRDRDP/13 §2.7 rule 3).
@@ -454,6 +485,8 @@ impl Encode for LicensePdu<'_> {
             LicenseMessage::LicenseRequest(_) => {
                 usize::from(self.preamble.msg_size).saturating_sub(LICENSE_PREAMBLE_LEN)
             }
+            LicenseMessage::PlatformChallenge(challenge) => challenge.size(),
+            LicenseMessage::NewLicense { license, .. } => license.size(),
             LicenseMessage::Unimplemented { body, .. } => body.len(),
         };
         super::security::BASIC_SECURITY_HEADER_LEN + LICENSE_PREAMBLE_LEN + body
@@ -464,6 +497,8 @@ impl Encode for LicensePdu<'_> {
         self.preamble.encode(w)?;
         match &self.message {
             LicenseMessage::ErrorAlert(error) => error.encode(w),
+            LicenseMessage::PlatformChallenge(challenge) => challenge.encode(w),
+            LicenseMessage::NewLicense { license, .. } => license.encode(w),
             LicenseMessage::Unimplemented { body, .. } => {
                 w.bytes(body.as_slice());
                 Ok(())
@@ -499,24 +534,7 @@ impl<'a> Decode<'a> for LicensePdu<'a> {
             usize::from(preamble.msg_size) - LICENSE_PREAMBLE_LEN,
             Self::NAME,
         )?;
-        let message = match preamble.msg_type {
-            message_type::ERROR_ALERT => {
-                LicenseMessage::ErrorAlert(LicenseErrorMessage::read(&mut body)?)
-            }
-            message_type::LICENSE_REQUEST => {
-                LicenseMessage::LicenseRequest(Box::new(ServerLicenseRequest::read(&mut body)?))
-            }
-            msg_type => {
-                tracing::trace!(
-                    msg_type,
-                    "a licensing message this client does not implement"
-                );
-                LicenseMessage::Unimplemented {
-                    msg_type,
-                    body: Payload::new(body.rest()),
-                }
-            }
-        };
+        let message = read_message(&mut body, preamble.msg_type)?;
         Ok(Self { preamble, message })
     }
 }
@@ -532,6 +550,13 @@ pub fn read_message<'a>(body: &mut Reader<'a>, msg_type: u8) -> PduResult<Licens
         message_type::LICENSE_REQUEST => {
             LicenseMessage::LicenseRequest(Box::new(ServerLicenseRequest::read(body)?))
         }
+        message_type::PLATFORM_CHALLENGE => {
+            LicenseMessage::PlatformChallenge(ServerPlatformChallenge::read(body)?)
+        }
+        message_type::NEW_LICENSE | message_type::UPGRADE_LICENSE => LicenseMessage::NewLicense {
+            upgrade: msg_type == message_type::UPGRADE_LICENSE,
+            license: ServerNewLicense::read(body)?,
+        },
         other => {
             tracing::trace!(
                 msg_type = other,
@@ -543,6 +568,402 @@ pub fn read_message<'a>(body: &mut Reader<'a>, msg_type: u8) -> PduResult<Licens
             }
         }
     })
+}
+
+/// Write a blob whose type is fixed by its position, the way every field of
+/// the client messages is.
+fn write_blob(
+    w: &mut Writer<'_>,
+    blob_type: u16,
+    data: &[u8],
+    context: &'static str,
+) -> PduResult<()> {
+    let len = u16::try_from(data.len()).map_err(|_| PduError::Encode {
+        context,
+        reason: "blob longer than its wBlobLen field",
+    })?;
+    w.u16(blob_type);
+    w.u16(len);
+    w.bytes(data);
+    Ok(())
+}
+
+/// `SERVER_PLATFORM_CHALLENGE` (MS-RDPELE 2.2.2.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerPlatformChallenge<'a> {
+    /// `ConnectFlags`, reserved.
+    pub connect_flags: u32,
+    /// `EncryptedPlatformChallenge`, RC4 under the licensing encryption key.
+    /// Windows sends it as `BB_ANY_BLOB`, so the type is not checked.
+    pub encrypted_challenge: LicenseBinaryBlob<'a>,
+    /// `MACData` over the decrypted challenge.
+    pub mac: [u8; LICENSE_MAC_LEN],
+}
+
+impl<'a> ServerPlatformChallenge<'a> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "SERVER_PLATFORM_CHALLENGE";
+
+    /// Read one, the preamble already consumed.
+    pub fn read(r: &mut Reader<'a>) -> PduResult<Self> {
+        let out = Self {
+            connect_flags: r.u32(Self::NAME)?,
+            encrypted_challenge: LicenseBinaryBlob::read(r, Self::NAME)?,
+            mac: r.array(Self::NAME)?,
+        };
+        r.expect_empty(Self::NAME)?;
+        Ok(out)
+    }
+}
+
+impl Encode for ServerPlatformChallenge<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        4 + self.encrypted_challenge.size() + LICENSE_MAC_LEN
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        w.u32(self.connect_flags);
+        self.encrypted_challenge.encode(w)?;
+        w.bytes(&self.mac);
+        Ok(())
+    }
+}
+
+/// `SERVER_NEW_LICENSE` and `SERVER_UPGRADE_LICENSE` (MS-RDPELE 2.2.2.6,
+/// 2.2.2.7), which share one layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerNewLicense<'a> {
+    /// `EncryptedLicenseInfo`: a [`NewLicenseInfo`] under RC4. Windows
+    /// Server 2003 sends it with a type other than `BB_ENCRYPTED_DATA_BLOB`
+    /// (FreeRDP records the same), so the type is not checked.
+    pub encrypted_license_info: LicenseBinaryBlob<'a>,
+    /// `MACData` over the decrypted licence information.
+    pub mac: [u8; LICENSE_MAC_LEN],
+}
+
+impl<'a> ServerNewLicense<'a> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "SERVER_NEW_LICENSE";
+
+    /// Read one, the preamble already consumed.
+    pub fn read(r: &mut Reader<'a>) -> PduResult<Self> {
+        let out = Self {
+            encrypted_license_info: LicenseBinaryBlob::read(r, Self::NAME)?,
+            mac: r.array(Self::NAME)?,
+        };
+        r.expect_empty(Self::NAME)?;
+        Ok(out)
+    }
+}
+
+impl Encode for ServerNewLicense<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        self.encrypted_license_info.size() + LICENSE_MAC_LEN
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        self.encrypted_license_info.encode(w)?;
+        w.bytes(&self.mac);
+        Ok(())
+    }
+}
+
+/// `NEW_LICENSE_INFO` (MS-RDPELE 2.2.2.6.1), the plaintext of
+/// [`ServerNewLicense::encrypted_license_info`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewLicenseInfo<'a> {
+    /// `dwVersion`: the minor version in the low word, the major in the high.
+    pub version: u32,
+    /// `pbScope`, a NUL terminated ANSI string.
+    pub scope: &'a [u8],
+    /// `pbCompanyName`, UTF-16LE.
+    pub company_name: &'a [u8],
+    /// `pbProductId`, UTF-16LE.
+    pub product_id: &'a [u8],
+    /// `pbLicenseInfo`: the licence itself, which the client stores as it is
+    /// and presents in `LICENSE_INFO` on the next connection.
+    pub license_info: &'a [u8],
+}
+
+impl<'a> NewLicenseInfo<'a> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "NEW_LICENSE_INFO";
+
+    fn counted(r: &mut Reader<'a>) -> PduResult<&'a [u8]> {
+        let len = r.u32(Self::NAME)? as usize;
+        r.ensure_cap(len, MAX_LICENSE_BLOB, "MAX_LICENSE_BLOB", Self::NAME)?;
+        r.slice(len, Self::NAME)
+    }
+
+    /// Read the decrypted licence information. Extensible per PRDRDP/13
+    /// §2.5, so trailing bytes are ignored rather than refused.
+    pub fn read(r: &mut Reader<'a>) -> PduResult<Self> {
+        Ok(Self {
+            version: r.u32(Self::NAME)?,
+            scope: Self::counted(r)?,
+            company_name: Self::counted(r)?,
+            product_id: Self::counted(r)?,
+            license_info: Self::counted(r)?,
+        })
+    }
+}
+
+impl Encode for NewLicenseInfo<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        4 + 4 * 4
+            + self.scope.len()
+            + self.company_name.len()
+            + self.product_id.len()
+            + self.license_info.len()
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        w.u32(self.version);
+        for field in [
+            self.scope,
+            self.company_name,
+            self.product_id,
+            self.license_info,
+        ] {
+            let len = u32::try_from(field.len()).map_err(|_| PduError::Encode {
+                context: Self::NAME,
+                reason: "field longer than its u32 length",
+            })?;
+            w.u32(len);
+            w.bytes(field);
+        }
+        Ok(())
+    }
+}
+
+/// The fields `NEW_LICENSE_REQUEST` and `LICENSE_INFO` open with.
+fn write_client_preface(
+    w: &mut Writer<'_>,
+    client_random: &[u8; CLIENT_RANDOM_LEN],
+    encrypted_premaster_secret: &[u8],
+    context: &'static str,
+) -> PduResult<()> {
+    w.u32(KEY_EXCHANGE_ALG_RSA);
+    w.u32(PLATFORM_ID);
+    w.bytes(client_random);
+    write_blob(w, blob_type::RANDOM, encrypted_premaster_secret, context)
+}
+
+/// `CLIENT_NEW_LICENSE_REQUEST` (MS-RDPELE 2.2.2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientNewLicenseRequest<'a> {
+    /// `ClientRandom`.
+    pub client_random: [u8; CLIENT_RANDOM_LEN],
+    /// `EncryptedPreMasterSecret`: the RSA output, little endian, already
+    /// padded with the eight zero bytes MS-RDPELE 2.2.2.3 asks for.
+    pub encrypted_premaster_secret: &'a [u8],
+    /// `ClientUserName`, NUL terminated ANSI.
+    pub user_name: &'a [u8],
+    /// `ClientMachineName`, NUL terminated ANSI.
+    pub machine_name: &'a [u8],
+}
+
+impl ClientNewLicenseRequest<'_> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "CLIENT_NEW_LICENSE_REQUEST";
+}
+
+impl Encode for ClientNewLicenseRequest<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        4 + 4
+            + CLIENT_RANDOM_LEN
+            + LICENSE_BLOB_HEADER_LEN * 3
+            + self.encrypted_premaster_secret.len()
+            + self.user_name.len()
+            + self.machine_name.len()
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        write_client_preface(
+            w,
+            &self.client_random,
+            self.encrypted_premaster_secret,
+            Self::NAME,
+        )?;
+        write_blob(w, blob_type::CLIENT_USER_NAME, self.user_name, Self::NAME)?;
+        write_blob(
+            w,
+            blob_type::CLIENT_MACHINE_NAME,
+            self.machine_name,
+            Self::NAME,
+        )
+    }
+}
+
+/// `CLIENT_LICENSE_INFO` (MS-RDPELE 2.2.2.2): the licence from an earlier
+/// connection, presented instead of a new request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientLicenseInfo<'a> {
+    /// `ClientRandom`.
+    pub client_random: [u8; CLIENT_RANDOM_LEN],
+    /// `EncryptedPreMasterSecret`, as in [`ClientNewLicenseRequest`].
+    pub encrypted_premaster_secret: &'a [u8],
+    /// `LicenseInfo`: the stored licence, exactly as the server issued it.
+    pub license_info: &'a [u8],
+    /// `EncryptedHWID`: the [`HARDWARE_ID_LEN`] byte hardware id under RC4.
+    pub encrypted_hwid: &'a [u8],
+    /// `MACData` over the plaintext hardware id.
+    pub mac: [u8; LICENSE_MAC_LEN],
+}
+
+impl ClientLicenseInfo<'_> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "CLIENT_LICENSE_INFO";
+}
+
+impl Encode for ClientLicenseInfo<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        4 + 4
+            + CLIENT_RANDOM_LEN
+            + LICENSE_BLOB_HEADER_LEN * 3
+            + self.encrypted_premaster_secret.len()
+            + self.license_info.len()
+            + self.encrypted_hwid.len()
+            + LICENSE_MAC_LEN
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        write_client_preface(
+            w,
+            &self.client_random,
+            self.encrypted_premaster_secret,
+            Self::NAME,
+        )?;
+        write_blob(w, blob_type::DATA, self.license_info, Self::NAME)?;
+        write_blob(
+            w,
+            blob_type::ENCRYPTED_DATA,
+            self.encrypted_hwid,
+            Self::NAME,
+        )?;
+        w.bytes(&self.mac);
+        Ok(())
+    }
+}
+
+/// `PLATFORM_CHALLENGE_RESPONSE_DATA` (MS-RDPELE 2.2.2.5.1), the plaintext
+/// the client encrypts into its response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformChallengeResponseData<'a> {
+    /// `pbChallenge`: the decrypted platform challenge, echoed.
+    pub challenge: &'a [u8],
+}
+
+impl PlatformChallengeResponseData<'_> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "PLATFORM_CHALLENGE_RESPONSE_DATA";
+}
+
+impl Encode for PlatformChallengeResponseData<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        8 + self.challenge.len()
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        let len = u16::try_from(self.challenge.len()).map_err(|_| PduError::Encode {
+            context: Self::NAME,
+            reason: "challenge longer than cbChallenge",
+        })?;
+        w.u16(PLATFORM_CHALLENGE_RESPONSE_VERSION);
+        w.u16(OTHER_PLATFORM_CHALLENGE_TYPE);
+        w.u16(LICENSE_DETAIL_DETAIL);
+        w.u16(len);
+        w.bytes(self.challenge);
+        Ok(())
+    }
+}
+
+/// `CLIENT_PLATFORM_CHALLENGE_RESPONSE` (MS-RDPELE 2.2.2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientPlatformChallengeResponse<'a> {
+    /// `EncryptedPlatformChallengeResponse`: a
+    /// [`PlatformChallengeResponseData`] under RC4.
+    pub encrypted_response: &'a [u8],
+    /// `EncryptedHWID`.
+    pub encrypted_hwid: &'a [u8],
+    /// `MACData` over the plaintext response data followed by the plaintext
+    /// hardware id.
+    pub mac: [u8; LICENSE_MAC_LEN],
+}
+
+impl ClientPlatformChallengeResponse<'_> {
+    /// The structure's name in the specification.
+    pub const NAME: &'static str = "CLIENT_PLATFORM_CHALLENGE_RESPONSE";
+}
+
+impl Encode for ClientPlatformChallengeResponse<'_> {
+    const NAME: &'static str = Self::NAME;
+
+    fn size(&self) -> usize {
+        LICENSE_BLOB_HEADER_LEN * 2
+            + self.encrypted_response.len()
+            + self.encrypted_hwid.len()
+            + LICENSE_MAC_LEN
+    }
+
+    fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
+        write_blob(
+            w,
+            blob_type::ENCRYPTED_DATA,
+            self.encrypted_response,
+            Self::NAME,
+        )?;
+        write_blob(
+            w,
+            blob_type::ENCRYPTED_DATA,
+            self.encrypted_hwid,
+            Self::NAME,
+        )?;
+        w.bytes(&self.mac);
+        Ok(())
+    }
+}
+
+/// A client licensing PDU: the basic security header with `SEC_LICENSE_PKT`,
+/// a preamble, and one of the client messages above.
+///
+/// `EXTENDED_ERROR_MSG_SUPPORTED` is set, as mstsc and FreeRDP set it: it
+/// tells the server the client understands an `ERROR_ALERT` in the middle of
+/// the exchange (MS-RDPBCGR 2.2.1.12.1.1).
+///
+/// # Errors
+///
+/// [`PduError::Encode`] when the message does not fit `wMsgSize`.
+pub fn encode_client_message(msg_type: u8, message: &impl Encode) -> PduResult<Vec<u8>> {
+    let msg_size =
+        u16::try_from(LICENSE_PREAMBLE_LEN + message.size()).map_err(|_| PduError::Encode {
+            context: LicensePdu::NAME,
+            reason: "licensing message longer than wMsgSize",
+        })?;
+    let preamble = LicensePreamble {
+        msg_type,
+        flags: preamble_flags::VERSION_3_0 | preamble_flags::EXTENDED_ERROR_MSG_SUPPORTED,
+        msg_size,
+    };
+    let mut out =
+        Vec::with_capacity(super::security::BASIC_SECURITY_HEADER_LEN + usize::from(msg_size));
+    let mut w = Writer::new(&mut out);
+    BasicSecurityHeader::new(security_flags::LICENSE_PKT).encode(&mut w)?;
+    preamble.encode(&mut w)?;
+    message.encode_checked(&mut w)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -667,7 +1088,7 @@ mod tests {
             0x00,
             0x00,
             0x00,
-            message_type::PLATFORM_CHALLENGE,
+            message_type::LICENSE_INFO,
             0x03,
             0x08,
             0x00,
@@ -680,7 +1101,7 @@ mod tests {
         let LicenseMessage::Unimplemented { msg_type, body } = &pdu.message else {
             panic!("not preserved");
         };
-        assert_eq!(*msg_type, message_type::PLATFORM_CHALLENGE);
+        assert_eq!(*msg_type, message_type::LICENSE_INFO);
         assert_eq!(body.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(encode(&pdu), bytes);
     }
@@ -734,6 +1155,199 @@ mod tests {
                     LicensePdu::decode(&mut Reader::new(&bytes[..cut])).is_err(),
                     "a {cut} byte prefix decoded successfully"
                 );
+            }
+        }
+    }
+
+    /// A hex dump from `testdata/`, whitespace separated.
+    fn hex_file(text: &str) -> Vec<u8> {
+        text.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    /// The examples of MS-RDPELE section 4 (revision 18.0) are licensing
+    /// messages without the security header, so each one gets the four
+    /// bytes of `SEC_LICENSE_PKT` in front.
+    fn with_header(message: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x80, 0x00, 0x00, 0x00];
+        out.extend_from_slice(message);
+        out
+    }
+
+    const SPEC_4_1: &str = include_str!("../../testdata/rdpele-4.1-license-request.hex");
+    const SPEC_4_2: &str = include_str!("../../testdata/rdpele-4.2-new-license-request.hex");
+
+    /// MS-RDPELE 4.1, a Windows licence server's `LICENSE_REQUEST`, decodes
+    /// in full, and the RSA key the premaster secret goes under comes out of
+    /// the last certificate of its X.509 chain.
+    #[test]
+    fn the_specification_license_request_decodes_and_yields_its_key() {
+        let bytes = with_header(&hex_file(SPEC_4_1));
+        let pdu = LicensePdu::decode(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(pdu.preamble.msg_size, 0x0898);
+        let LicenseMessage::LicenseRequest(request) = &pdu.message else {
+            panic!("not a license request");
+        };
+        assert_eq!(
+            request.server_random.as_slice()[..4],
+            [0x84, 0xef, 0xae, 0x20]
+        );
+        assert_eq!(request.product_info.version, 0x0006_0000);
+        assert_eq!(request.product_info.company_name.len(), 0x2c);
+        assert_eq!(request.key_exchange_list.data.as_slice(), &[1, 0, 0, 0]);
+        assert_eq!(request.server_certificate.blob_type, blob_type::CERTIFICATE);
+        assert_eq!(request.server_certificate.data.len(), 0x812);
+        assert_eq!(request.scopes.len(), 1);
+        assert_eq!(request.scopes[0].data.len(), 14);
+
+        let cert = crate::gcc::parse_server_certificate(request.server_certificate.data.as_slice())
+            .unwrap();
+        let crate::gcc::ServerCertificate::X509Chain(chain) = &cert else {
+            panic!("not a chain");
+        };
+        assert_eq!(chain.certificates.len(), 2);
+        let crate::gcc::RsaKeyBytes::BigEndian { modulus, exponent } =
+            cert.rsa_public_key().unwrap()
+        else {
+            panic!("not an X.509 key");
+        };
+        // 2048 bits behind DER's sign byte, and F4.
+        assert_eq!(modulus.len(), 257);
+        assert_eq!(modulus[..3], [0x00, 0xc8, 0x90]);
+        assert_eq!(exponent, &[0x01, 0x00, 0x01]);
+    }
+
+    /// MS-RDPELE 4.2 rebuilt from its own fields is the specification's
+    /// bytes exactly, preamble flags included.
+    #[test]
+    fn a_new_license_request_encodes_to_the_specification_bytes() {
+        let spec = hex_file(SPEC_4_2);
+        let mut client_random = [0u8; CLIENT_RANDOM_LEN];
+        client_random.copy_from_slice(&spec[0x0c..0x2c]);
+        let request = ClientNewLicenseRequest {
+            client_random,
+            encrypted_premaster_secret: &spec[0x30..0x138],
+            user_name: &spec[0x13c..0x14a],
+            machine_name: &spec[0x14e..],
+        };
+        let bytes = encode_client_message(message_type::NEW_LICENSE_REQUEST, &request).unwrap();
+        assert_eq!(bytes, with_header(&spec));
+    }
+
+    /// MS-RDPELE 4.4, verbatim.
+    const SPEC_4_4: &[u8] = &[
+        0x02, 0x03, 0x26, 0x00, 0xff, 0xff, 0xff, 0xff, 0x50, 0xf7, 0x0a, 0x00, 0x46, 0x37, 0x85,
+        0x54, 0x8e, 0xc5, 0x91, 0x34, 0x97, 0x5d, 0x78, 0x94, 0xad, 0x3b, 0x81, 0xda, 0x88, 0x18,
+        0x56, 0x0f, 0x3a, 0xd1, 0xf1, 0x03, 0xef, 0x35,
+    ];
+
+    #[test]
+    fn the_specification_platform_challenge_decodes() {
+        let bytes = with_header(SPEC_4_4);
+        let pdu = LicensePdu::decode(&mut Reader::new(&bytes)).unwrap();
+        let LicenseMessage::PlatformChallenge(challenge) = &pdu.message else {
+            panic!("not a platform challenge");
+        };
+        assert_eq!(challenge.connect_flags, 0xffff_ffff);
+        // The blob type is 0xf750 in the example, which is why it is not
+        // checked.
+        assert_eq!(challenge.encrypted_challenge.blob_type, 0xf750);
+        assert_eq!(
+            challenge.encrypted_challenge.data.as_slice(),
+            &SPEC_4_4[12..22]
+        );
+        assert_eq!(challenge.mac[..], SPEC_4_4[22..]);
+        assert_eq!(encode(&pdu), bytes);
+    }
+
+    /// MS-RDPELE 4.5 rebuilt from its fields. The example's two blobs carry
+    /// type `BB_DATA_BLOB`, which the section marks as ignored; this client
+    /// sends `BB_ENCRYPTED_DATA_BLOB` as 2.2.2.5 specifies and as FreeRDP
+    /// does, so those two fields are the only difference.
+    #[test]
+    fn a_platform_challenge_response_encodes_to_the_specification_bytes() {
+        let mut spec: Vec<u8> = vec![
+            0x15, 0x83, 0x42, 0x00, 0x01, 0x00, 0x12, 0x00, 0xfa, 0xb4, 0xe8, 0x24, 0xcf, 0x56,
+            0xb2, 0x4e, 0x80, 0x02, 0xbd, 0xb6, 0x61, 0xfc, 0xdf, 0xe9, 0x6c, 0x44, 0x01, 0x00,
+            0x14, 0x00, 0xf8, 0xb5, 0xe8, 0x25, 0x3d, 0x0f, 0x3f, 0x70, 0x1d, 0xda, 0x60, 0x19,
+            0x16, 0xfe, 0x73, 0x1a, 0x45, 0x7e, 0x02, 0x71, 0x38, 0x23, 0x62, 0x5d, 0x10, 0x8b,
+            0x93, 0xc3, 0xf1, 0xe4, 0x67, 0x1f, 0x4a, 0xb6, 0x00, 0x0a,
+        ];
+        let mut mac = [0u8; LICENSE_MAC_LEN];
+        mac.copy_from_slice(&spec[0x32..]);
+        let response = ClientPlatformChallengeResponse {
+            encrypted_response: &spec[0x08..0x1a],
+            encrypted_hwid: &spec[0x1e..0x32],
+            mac,
+        };
+        let bytes =
+            encode_client_message(message_type::PLATFORM_CHALLENGE_RESPONSE, &response).unwrap();
+        spec[0x04] = 0x09;
+        spec[0x1a] = 0x09;
+        assert_eq!(bytes, with_header(&spec));
+    }
+
+    /// The plaintext of MS-RDPELE 4.5's response: version, client type,
+    /// detail level, the challenge length, then the challenge.
+    #[test]
+    fn platform_challenge_response_data_lays_out_as_2_2_2_5_1() {
+        let challenge = b"T\0E\0S\0T\0\0\0";
+        let data = PlatformChallengeResponseData { challenge };
+        let mut buf = Vec::new();
+        data.encode_checked(&mut Writer::new(&mut buf)).unwrap();
+        let mut want = vec![0x00, 0x01, 0x00, 0xff, 0x03, 0x00, 0x0a, 0x00];
+        want.extend_from_slice(challenge);
+        assert_eq!(buf, want);
+    }
+
+    /// `NEW_LICENSE_INFO` with the field sizes of MS-RDPELE 4.6.
+    #[test]
+    fn new_license_info_round_trips() {
+        let licence = [0x30u8, 0x82, 0x07, 0x95, 0x06, 0x09];
+        let info = NewLicenseInfo {
+            version: 0x0006_0000,
+            scope: b"example.test\0",
+            company_name: b"A\0B\0\0\0",
+            product_id: b"A\x000\x002\0\0\0",
+            license_info: &licence,
+        };
+        let mut buf = Vec::new();
+        info.encode_checked(&mut Writer::new(&mut buf)).unwrap();
+        assert_eq!(buf[..8], [0x00, 0x00, 0x06, 0x00, 0x0d, 0x00, 0x00, 0x00]);
+        let back = NewLicenseInfo::read(&mut Reader::new(&buf)).unwrap();
+        assert_eq!(back, info);
+        for cut in 0..buf.len() {
+            assert!(NewLicenseInfo::read(&mut Reader::new(&buf[..cut])).is_err());
+        }
+    }
+
+    #[test]
+    fn a_new_and_an_upgrade_license_decode_to_the_same_shape() {
+        for (msg_type, upgrade) in [
+            (message_type::NEW_LICENSE, false),
+            (message_type::UPGRADE_LICENSE, true),
+        ] {
+            let mut bytes = vec![0x80, 0x00, 0x00, 0x00, msg_type, 0x03, 0x1b, 0x00];
+            bytes.extend_from_slice(&[0x09, 0x00, 0x03, 0x00, 0xaa, 0xbb, 0xcc]);
+            bytes.extend_from_slice(&[0x5a; LICENSE_MAC_LEN]);
+            let pdu = LicensePdu::decode(&mut Reader::new(&bytes)).unwrap();
+            let LicenseMessage::NewLicense {
+                upgrade: got,
+                license,
+            } = &pdu.message
+            else {
+                panic!("not a new license");
+            };
+            assert_eq!(*got, upgrade);
+            assert_eq!(
+                license.encrypted_license_info.data.as_slice(),
+                &[0xaa, 0xbb, 0xcc]
+            );
+            assert_eq!(license.mac, [0x5a; LICENSE_MAC_LEN]);
+            assert_eq!(encode(&pdu), bytes);
+            for cut in 0..bytes.len() {
+                assert!(LicensePdu::decode(&mut Reader::new(&bytes[..cut])).is_err());
             }
         }
     }

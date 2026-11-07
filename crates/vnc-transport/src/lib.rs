@@ -74,9 +74,42 @@ pub enum TrustDecision {
     Unknown {
         fingerprint: String,
         subject: String,
+        /// The digests of the whole certificate, when the key came in one.
+        /// Shown beside `fingerprint` so a person can match what an admin
+        /// reads off the server; the pin is still `fingerprint`.
+        certificate: Option<CertificateDigests>,
     },
     /// Pin exists but differs. HARD STOP (PRD/10 §4.3).
     Changed { expected: String, actual: String },
+}
+
+/// The two digests of a whole X.509 certificate that people can actually
+/// look up on the server, both in the colon separated form of
+/// [`format_fingerprint`].
+///
+/// The pin is the SHA-256 of the public key, which no Windows dialog shows.
+/// Windows shows the certificate's SHA-1 as its "Thumbprint" (certlm.msc,
+/// `Get-ChildItem Cert:`, the Remote Desktop certificate dialog), and the
+/// certificate's SHA-256 is what most other tools print. Neither is pinned:
+/// they are for matching by eye only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateDigests {
+    /// SHA-1 over the DER certificate, which Windows calls the thumbprint.
+    pub thumbprint: String,
+    /// SHA-256 over the DER certificate.
+    pub sha256: String,
+}
+
+impl CertificateDigests {
+    /// Digests of `der`, the certificate exactly as the server sent it.
+    pub fn of(der: &[u8]) -> Self {
+        use sha1::Digest as _;
+        Self {
+            thumbprint: format_fingerprint(&sha1::Sha1::digest(der)),
+            sha256: format_fingerprint(&sha2::Sha256::digest(der)),
+        }
+    }
 }
 
 /// SHA-256 fingerprint of a certificate's SubjectPublicKeyInfo, hex encoded

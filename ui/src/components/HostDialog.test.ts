@@ -115,3 +115,55 @@ describe("editing a saved Mac", () => {
     expect(vncCredentialPayload(d.vncUser, d.password, true)).toEqual({ vencryptUser: "alice" });
   });
 });
+
+describe("a host imported from a .rdp file", () => {
+  function importedDraft(): HostDraft {
+    const d = draftFromHost(null, {
+      protocol: "rdp",
+      friendlyName: "Imported",
+      address: "192.0.2.10",
+      port: 3390,
+      importNotes: [
+        "the file uses an RD Gateway. The setting is kept, and connecting through a gateway is not supported yet",
+      ],
+    });
+    return { ...d, rdp: d.rdp ? { ...d.rdp, fullscreen: true } : null };
+  }
+
+  it("says what did not come across, above the form", async () => {
+    await act(async () => {
+      root.render(
+        createElement(HostDialog, { draft: importedDraft(), groups: [], tags: [], onSave: () => {}, onClose: () => {} }),
+      );
+    });
+    const note = document.querySelector('[role="note"]');
+    expect(note?.textContent).toContain("Imported from a Remote Desktop file");
+    expect(note?.textContent).toContain("The file uses an RD Gateway");
+    expect(note?.textContent).toContain("not supported yet.");
+  });
+
+  it("shows and saves Open full screen", async () => {
+    const saved: HostDraft[] = [];
+    await act(async () => {
+      root.render(
+        createElement(HostDialog, {
+          draft: importedDraft(),
+          groups: [],
+          tags: [],
+          onSave: (d: HostDraft) => saved.push(d),
+          onClose: () => {},
+        }),
+      );
+    });
+    const box = field("Open full screen");
+    expect(box.checked).toBe(true);
+    act(() => box.click());
+    act(() => button("Add Host").click());
+    expect(saved[0]?.rdp?.fullscreen).toBe(false);
+  });
+
+  it("shows no note for a host typed in by hand", async () => {
+    await open(() => {});
+    expect(document.querySelector('[role="note"]')).toBeNull();
+  });
+});

@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
+mod attention;
 mod codes;
 mod install;
 mod journal;
@@ -65,6 +66,10 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     );
+    // The window closing dropped the listener, which tells each helper still
+    // connected that this computer went away. Those close frames go out from
+    // the runtime's tasks, so they get a moment before the runtime stops.
+    runtime.block_on(tokio::time::sleep(Duration::from_millis(500)));
     runtime.shutdown_timeout(Duration::from_secs(3));
     // A display with no graphics driver behind it, as in a virtual machine,
     // a Remote Desktop session or a virtual monitor, offers OpenGL 1.1 and
@@ -241,6 +246,9 @@ struct App {
     /// shows the window once its first frame is drawn, whatever it was built
     /// with, so it has to be hidden again after that.
     hide_frames: u8,
+    /// Whether the window had focus when last drawn, for the session's
+    /// events, which are read off the window's thread.
+    focused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -251,6 +259,18 @@ impl App {
         if std::env::args().any(|a| a == "--background") && !TRAY {
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        // launchd stops the app with SIGTERM to restart or update it. Left to
+        // the default, that kills the process before a connected helper is
+        // told, and the helper waits out a timeout before connecting again.
+        #[cfg(unix)]
+        if let Ok(mut term) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::spawn(async move {
+                term.recv().await;
+                TERMINATED.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
         }
         let context = cc.egui_ctx.clone();
         tokio::spawn(async move {
@@ -317,6 +337,7 @@ impl App {
             } else {
                 0
             },
+            focused: Default::default(),
         }
     }
     fn network_options(&self) -> HostOptions {
@@ -356,7 +377,7 @@ impl App {
     }
     /// Share this computer: a host session whose invitation becomes the code
     /// on the home screen.
-    fn share(&mut self) {
+    fn share(&mut self, ctx: &egui::Context) {
         let Some(display) = self.displays.get(self.display) else {
             return;
         };
@@ -364,9 +385,15 @@ impl App {
         self.hosting = true;
         self.error = false;
         self.status = "Creating your code".into();
-        self.session = Some(boundary_session::host(self.network_options(), move || {
-            boundary_platform::open(id)
-        }));
+        let mut session =
+            boundary_session::host(self.network_options(), move || boundary_platform::open(id));
+        // Read off the window's thread, so a question gets to the person
+        // even while the window draws nothing.
+        let (_, stand_in) = tokio::sync::mpsc::channel(1);
+        let events = std::mem::replace(&mut session.events, stand_in);
+        session.events =
+            attention::forward(events, ctx.clone(), self.focused.clone(), attention::notify);
+        self.session = Some(session);
     }
     /// Connect to whatever is in the partner field: a short code, a full
     /// invitation, or an unattended computer's ID.
@@ -406,7 +433,7 @@ impl App {
     }
     fn poll(&mut self, ctx: &egui::Context) {
         if self.unattended.poll() {
-            show(ctx);
+            attention::raise(ctx);
         }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
@@ -460,7 +487,7 @@ impl App {
                             allow_tools: false,
                             answer,
                         });
-                        show(ctx);
+                        attention::raise(ctx);
                     }
                     Event::Connected { peer, control } => {
                         self.codes.clear();
@@ -603,7 +630,7 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.share();
+                        self.share(ui.ctx());
                     }
                     theme::small(
                         ui,
@@ -696,14 +723,7 @@ impl App {
             ui.horizontal(|ui| {
                 theme::caption(ui, "Unattended access");
                 if self.unattended.enabled() {
-                    ui.colored_label(
-                        theme::pal(ui.ctx()).success,
-                        if self.unattended.reachable() {
-                            "On"
-                        } else {
-                            "Starting"
-                        },
-                    );
+                    ui.colored_label(theme::pal(ui.ctx()).success, self.unattended.label());
                 } else {
                     theme::muted(ui, "Off");
                 }
@@ -1069,8 +1089,15 @@ fn show(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
+/// Set when the system asked the app to stop, so the next frame quits.
+static TERMINATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if TERMINATED.load(std::sync::atomic::Ordering::Relaxed) && !self.quitting {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         // With unattended access on, the window closing must not take the
         // listener with it: that left a computer unreachable until somebody
         // opened the app again by hand. It goes to the Dock instead.
@@ -1086,12 +1113,21 @@ impl eframe::App for App {
             }
             self.status = "Still running, so helpers can reach this computer. Turn off unattended access to quit.".into();
         }
+        self.focused.store(
+            ctx.input(|i| i.focused),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
-            if self.tray.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            // A question that came in during these first frames already
+            // raised the window. Hiding it again would leave the question
+            // waiting where nobody can see it.
+            if attention::may_hide(self.pending.is_some() || self.unattended.asking()) {
+                if self.tray.is_some() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
             }
         }
         if let Some(tray) = self.tray.as_mut() {

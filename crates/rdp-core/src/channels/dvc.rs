@@ -227,18 +227,6 @@ impl DvcMux {
         Self::default()
     }
 
-    /// Forget every open channel and every partial message.
-    ///
-    /// A held resize deliberately survives: it was asked for and never
-    /// delivered, and the channels are about to be reopened.
-    ///
-    /// A deactivation tears the share down and the server reopens its
-    /// channels on the new one (PRDRDP/05 §5.1 rule 6).
-    pub fn reset(&mut self) {
-        self.open.clear();
-        self.version = None;
-    }
-
     /// Send a size the display control debounce held back
     /// (MS-RDPEDISP 2.2.2.2, PRDRDP/05 §5.4).
     ///

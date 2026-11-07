@@ -208,6 +208,7 @@ impl ProtocolDriver for BoundaryDriver {
                     Err(error) if unattended && reached && LinkLost::is(&error) => error,
                     other => break other,
                 };
+                tracing::info!(session = %session_id, attempt = attempts + 1, error = %format!("{error:#}"), "boundary link lost, connecting again");
                 attempts += 1;
                 if policy.max_attempts.is_some_and(|max| attempts > max) {
                     break Err(error);
@@ -229,7 +230,10 @@ impl ProtocolDriver for BoundaryDriver {
             };
             let reason = match result {
                 Ok(()) => "Support session ended".into(),
-                Err(error) => error.to_string(),
+                Err(error) => {
+                    tracing::info!(session = %session_id, lost = LinkLost::is(&error), error = %format!("{error:#}"), "boundary session stopped");
+                    error.to_string()
+                }
             };
             let _ = events
                 .send(SessionEvent::StateChanged(SessionState::Disconnected {

@@ -7,7 +7,7 @@ import { useState, type ReactNode } from "react";
 import { Dialog } from "./primitives";
 import { fingerprintMnemonic, formatFingerprint } from "../lib/util";
 import { IconAlert, IconLock } from "./icons";
-import type { PinScheme } from "../lib/types";
+import type { CertificateDigests, PinScheme } from "../lib/types";
 
 export interface CertPromptData {
   fingerprint: string;
@@ -20,6 +20,12 @@ export interface CertPromptData {
    * the one branch below, because what a user can usefully verify differs.
    */
   scheme: PinScheme;
+  /**
+   * The whole certificate's thumbprint and SHA-256, when the key came in a
+   * certificate. Display only, so the person can match what an admin reads
+   * off the server; the pin stays `fingerprint`.
+   */
+  certificate?: CertificateDigests | null;
 }
 
 export function CertPrompt({
@@ -65,7 +71,12 @@ export function CertPrompt({
               ) : null}
             </p>
           </div>
-          <FingerprintBlock fingerprint={data.fingerprint} mnemonic={mnemonic} subject={data.subject} />
+          <FingerprintBlock
+            fingerprint={data.fingerprint}
+            mnemonic={mnemonic}
+            subject={data.subject}
+            certificate={data.certificate}
+          />
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-secondary">
               To proceed anyway, type <span className="mono">trust new identity</span>
@@ -98,7 +109,11 @@ export function CertPrompt({
 
   return (
     <Dialog
-      title={`Verify ${data.hostName}`}
+      title={
+        data.scheme === "rdg-tls"
+          ? `Verify the RD Gateway for ${data.hostName}`
+          : `Verify ${data.hostName}`
+      }
       onClose={onCancel}
       width={560}
       initialFocusSelector="[data-cancel]"
@@ -109,7 +124,14 @@ export function CertPrompt({
             <IconLock size={20} />
           </span>
           <p className="text-sm text-secondary">
-            {data.scheme === "rdp-tls" ? (
+            {data.scheme === "rdg-tls" ? (
+              <>
+                This connection goes through an RD Gateway, and this is the
+                certificate the gateway presented. Your password is sent to the
+                gateway once you trust it, so check the fingerprint with whoever
+                runs the gateway if it is not signed by an authority you know.
+              </>
+            ) : data.scheme === "rdp-tls" ? (
               <>
                 Windows Remote Desktop normally identifies itself with a certificate
                 it generated for itself, so on a fresh machine there is nothing to
@@ -125,7 +147,12 @@ export function CertPrompt({
             )}
           </p>
         </div>
-        <FingerprintBlock fingerprint={data.fingerprint} mnemonic={mnemonic} subject={data.subject} />
+        <FingerprintBlock
+            fingerprint={data.fingerprint}
+            mnemonic={mnemonic}
+            subject={data.subject}
+            certificate={data.certificate}
+          />
         <div className="flex flex-wrap justify-end gap-2.5">
           <button type="button" data-cancel className="btn-secondary" onClick={onCancel}>
             Cancel
@@ -142,21 +169,63 @@ export function CertPrompt({
   );
 }
 
-function FingerprintBlock({
+/**
+ * What the hex string is. Every pin in this app is the SHA-256 of the
+ * server's public key (the certificate's SubjectPublicKeyInfo), not of the
+ * whole certificate, so somebody comparing it against a certificate
+ * thumbprint has to be told which digest to compute or the two never match.
+ */
+export const FINGERPRINT_LABEL = "SHA-256 of the server's public key";
+
+/**
+ * Windows calls the certificate's SHA-1 its Thumbprint, in the certificate
+ * dialog, certlm.msc and `Get-ChildItem Cert:`, and prints it as 40 hex
+ * digits with no separators. Shown in that form so it can be read across
+ * character by character.
+ */
+export const THUMBPRINT_LABEL = "Thumbprint";
+export const CERTIFICATE_SHA256_LABEL = "Certificate SHA-256";
+
+/** The Windows form of a thumbprint: upper case hex, no separators. */
+export function windowsThumbprint(colonHex: string): string {
+  return colonHex.replace(/[^0-9a-fA-F]/g, "").toUpperCase();
+}
+
+export function FingerprintBlock({
   fingerprint,
   mnemonic,
   subject,
+  certificate,
 }: {
   fingerprint: string;
   mnemonic: string;
   subject: string;
+  certificate?: CertificateDigests | null;
 }): ReactNode {
   return (
     <div className="space-y-2 rounded-md bg-inset p-3.5">
       {subject ? <div className="text-xs text-secondary">{subject}</div> : null}
-      <div className="mono break-all text-xs leading-relaxed text-primary" aria-label="SHA-256 certificate fingerprint">
+      <div className="text-2xs text-tertiary">{FINGERPRINT_LABEL}</div>
+      <div className="mono break-all text-xs leading-relaxed text-primary" aria-label={FINGERPRINT_LABEL}>
         {formatFingerprint(fingerprint)}
       </div>
+      {certificate ? (
+        <>
+          <div className="text-2xs text-tertiary">
+            {THUMBPRINT_LABEL} <span className="text-tertiary">(SHA-1, as Windows shows it)</span>
+          </div>
+          <div className="mono break-all text-xs leading-relaxed text-primary" aria-label={THUMBPRINT_LABEL}>
+            {windowsThumbprint(certificate.thumbprint)}
+          </div>
+          <div className="text-2xs text-tertiary">{CERTIFICATE_SHA256_LABEL}</div>
+          <div
+            className="mono break-all text-xs leading-relaxed text-primary"
+            aria-label={CERTIFICATE_SHA256_LABEL}
+          >
+            {formatFingerprint(certificate.sha256)}
+          </div>
+        </>
+      ) : null}
       {mnemonic ? (
         <div className="text-sm">
           <span className="text-tertiary">Fingerprint words: </span>

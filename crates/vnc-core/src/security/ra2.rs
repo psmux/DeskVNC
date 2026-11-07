@@ -359,9 +359,11 @@ fn evaluate_trust(key: &RsaPublicKey, bits: u32, pin: Option<&str>) -> Result<Tr
                 expected,
                 actual: fingerprint,
             },
+            // A bare RSA key: there is no certificate to take digests of.
             None => TrustDecision::Unknown {
                 fingerprint,
                 subject,
+                certificate: None,
             },
         },
     )
@@ -1200,6 +1202,7 @@ mod tests {
         let TrustDecision::Unknown {
             fingerprint,
             subject,
+            ..
         } = a
         else {
             panic!("expected Unknown");

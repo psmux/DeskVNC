@@ -411,21 +411,6 @@ impl DisplayControl {
         self.pending = None;
         self.resize(width, height, scale, replies)
     }
-
-    /// Forget everything. Called when the share is deactivated, because the
-    /// server reopens its dynamic channels on the new share and its
-    /// capabilities arrive again (PRDRDP/05 §5.1 rule 6).
-    pub fn reset(&mut self) {
-        // The last size the user asked for is kept and re-sent as soon as the
-        // new channel says it is ready, which is what makes a reactivation
-        // come back at the size they were using.
-        self.pending = self
-            .pending
-            .or_else(|| self.last_sent.map(|l| (l.width, l.height, l.desktop_scale)));
-        self.caps = None;
-        self.last_sent = None;
-        self.last_sent_at = None;
-    }
 }
 
 /// `DISPLAYCONTROL_HEADER`, for an error message.
@@ -718,32 +703,5 @@ mod tests {
             let err = display.message(&bad, &mut replies).expect_err("refused");
             assert!(matches!(err, RdpError::Pdu { .. }), "{err} for {bad:?}");
         }
-    }
-
-    /// A deactivation drops the capabilities, because the server reopens the
-    /// channel on the new share. The size the user asked for survives, so the
-    /// desktop comes back the way they were using it.
-    #[test]
-    fn a_reset_keeps_the_size_and_forgets_the_capabilities() {
-        let mut display = DisplayControl::new();
-        let mut replies = ReplyBuf::default();
-        display
-            .message(&caps_pdu(4, 8192, 8192), &mut replies)
-            .expect("caps");
-        display.resize(1600, 900, 100, &mut replies).expect("sent");
-        replies.take();
-
-        display.reset();
-        assert!(display.caps().is_none());
-        assert!(display.last_sent().is_none());
-
-        display
-            .message(&caps_pdu(4, 8192, 8192), &mut replies)
-            .expect("caps again");
-        assert_eq!(
-            display.last_sent().expect("re-sent").width,
-            1600,
-            "the size the user was using came back"
-        );
     }
 }

@@ -68,6 +68,10 @@ pub struct Unattended {
 }
 
 impl Unattended {
+    /// Whether a helper who is not paired is waiting for an answer.
+    pub fn asking(&self) -> bool {
+        self.ask.is_some()
+    }
     pub fn new() -> Self {
         let mut this = Self {
             access_path: PathBuf::new(),
@@ -205,11 +209,15 @@ impl Unattended {
             return;
         }
         self.access.allow_tools(peer, tools);
+        let was_enabled = self.access.enabled;
         self.access.enabled = true;
         if !self.save() {
             return;
         }
         self.start();
+        if !was_enabled {
+            self.reachable_before_sign_in();
+        }
         match session.offer_pairing(self.machine.clone(), computer_name()) {
             Ok(()) => self.say(format!(
                 "{name} can now connect to this computer any time. Remove them under Unattended access to stop it"
@@ -227,9 +235,9 @@ impl Unattended {
     pub fn machine_id(&self) -> &str {
         &self.machine
     }
-    /// Whether the listener has confirmed it can be found by that ID.
-    pub fn reachable(&self) -> bool {
-        self.reachable
+    /// The word beside "Unattended access" on the home screen.
+    pub fn label(&self) -> &'static str {
+        label(self.access.enabled, self.reachable, self.handed_over)
     }
     /// Drain the listener. `true` when a helper has just come in, so the
     /// caller brings the window forward.
@@ -496,6 +504,7 @@ impl Unattended {
             if self.save() {
                 if enabled {
                     self.start();
+                    self.reachable_before_sign_in();
                 } else {
                     self.halt();
                     self.say("Unattended access is off. Nobody can connect without your approval");
@@ -662,18 +671,33 @@ impl Unattended {
             .on_hover_text("Asks for an administrator. At the sign in screen only paired helpers and the unattended password get in, and helpers' tools cannot run commands.")
             .changed();
         if changed {
-            // The app in the tray takes over once somebody signs in.
-            if login && !self.autostart && autostart::set(true).is_ok() {
-                self.autostart = true;
-            }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let _ = tx.send((login, crate::login::set(login)));
-                ctx.request_repaint();
-            });
-            self.login_change = Some(rx);
-            self.say("Waiting for an administrator to allow it");
+            self.set_login(login);
+        }
+    }
+    /// Set the copy at the sign in screen up, or take it away, on a thread,
+    /// since it waits for an administrator.
+    fn set_login(&mut self, on: bool) {
+        if !crate::login::SUPPORTED || self.login_change.is_some() {
+            return;
+        }
+        // The app in the tray takes over once somebody signs in.
+        if on && !self.autostart && autostart::set(true).is_ok() {
+            self.autostart = true;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((on, crate::login::set(on)));
+        });
+        self.login_change = Some(rx);
+        self.say("Waiting for an administrator to allow it");
+    }
+    /// Unattended access that stops at a restart until somebody signs in is
+    /// not what anyone switching it on expects, so switching it on sets up
+    /// the copy at the sign in screen too. The checkbox below still turns
+    /// that part off.
+    fn reachable_before_sign_in(&mut self) {
+        if !self.login {
+            self.set_login(true);
         }
     }
 }
@@ -693,6 +717,20 @@ fn screen_locked() -> bool {
 fn log(access_path: &std::path::Path, line: &str) {
     if let Some(dir) = access_path.parent() {
         crate::journal::note(dir, "unattended.log", line);
+    }
+}
+
+/// The state of unattended access in a word or two.
+///
+/// When DeskVNC, or the copy at the sign in or lock screen, holds the claim,
+/// this app does not listen and never becomes reachable itself, but helpers
+/// still get in through that copy, so it is on.
+fn label(enabled: bool, reachable: bool, handed_over: bool) -> &'static str {
+    match (enabled, reachable, handed_over) {
+        (false, _, _) => "Off",
+        (true, true, _) => "On",
+        (true, false, true) => "On, answered by DeskVNC",
+        (true, false, false) => "Starting",
     }
 }
 
@@ -731,5 +769,21 @@ pub mod autostart {
             "Move DeskVNC Support to Applications first, so it can start when you sign in"
         );
         autostart::set(ENTRY, on)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::label;
+
+    #[test]
+    fn another_copy_answering_is_not_shown_as_starting() {
+        // DeskVNC, or the copy at the sign in screen, holds the claim, so
+        // this app never listens. It used to say Starting for as long as
+        // that copy ran, which read as stuck.
+        assert_eq!(label(true, false, true), "On, answered by DeskVNC");
+        assert_eq!(label(true, false, false), "Starting");
+        assert_eq!(label(true, true, false), "On");
+        assert_eq!(label(false, false, false), "Off");
     }
 }

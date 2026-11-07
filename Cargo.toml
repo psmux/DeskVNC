@@ -39,6 +39,9 @@ members = [
     # The named pipe both listeners use on Windows, with its owner only ACL.
     "crates/local-pipe",
     "crates/dvv",
+    # The fast lane's eyes: a desktop's controls as a table, served on the LAN.
+    "crates/fastlane-sense",
+    "crates/fastlane-plan",
     # Remote desktop benchmark: the stage window and the measuring client.
     "crates/bench-stage",
     "crates/remote-bench",
@@ -54,7 +57,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.33.0"
+version = "0.34.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"

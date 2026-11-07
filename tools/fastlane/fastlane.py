@@ -1,0 +1,618 @@
+"""The fast lane: drive a desktop through DeskVNC at the speed of the machine.
+
+A large model is slow in the loop because every step is a turn of its own,
+seconds each. Here it writes the plan once and leaves. Each step of the plan is
+then carried out by a loop with no large model in it:
+
+    deskvnc-sense table -> find the control by name -> one DeskVNC action -> settle
+
+* The table is the desktop's controls as numbered rows, read by deskvnc-sense
+  on the remote computer through UI Automation in tens of milliseconds.
+* No model is needed. Each step names its control and the runner finds it in
+  the table by name, breaking ties by focus, by being in the window rather
+  than the taskbar, and by the closest name. Unexpected popups are sent away
+  with the safest button by a fixed list of words.
+* jevos (github.com/feder-cr/jev, MIT), an open decision model, is optional.
+  Set FASTLANE_JEV to a running `jev serve` and it breaks the ties instead,
+  and plans may then use goal steps, where it picks the operation too.
+* The wait is deskvnc-sense's settle: it reads the table until it has changed
+  and then reads the same twice, so a step waits exactly as long as the screen
+  keeps changing. Steps that expect nothing do not wait; the table is read
+  again only when a later step needs it.
+
+Run:  python3 fastlane.py --plan plan.json
+plan.json: {"host_id": "<DeskVNC saved host>", "steps": [...]}, steps as run() describes.
+Settings come from the environment: FASTLANE_KEY (the shared bearer token),
+FASTLANE_JEV (optional, http://host:port of jev serve), FASTLANE_DVV (the dvv binary), FASTLANE_SENSE_PORT (5942).
+"""
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+KEY = os.environ.get("FASTLANE_KEY", "")
+JEV = os.environ.get("FASTLANE_JEV", "")
+DVV = os.environ.get("FASTLANE_DVV", "dvv")
+SENSE_PORT = int(os.environ.get("FASTLANE_SENSE_PORT", "5942"))
+
+CLICKABLE = {"button", "checkbox", "radio", "combobox", "link", "listitem", "menuitem", "tab", "treeitem", "row", "header", "textbox", "document"}
+EDITABLE = {"textbox", "combobox", "document"}
+KEYS = {
+    "Enter": "Enter, to confirm or run what was typed",
+    "Escape": "Escape, to close a menu or dialog",
+    "Tab": "Tab, to move to the next field",
+    "super+r": "Windows+R, to open the Run box when a program must be started by name",
+    "super": "the Windows key, to open the Start menu",
+    "alt+F4": "Alt+F4, to close the window in front",
+}
+
+
+def post(url, body, timeout=10):
+    req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+class Sense:
+    """The remote computer's deskvnc-sense, which dials in to us."""
+
+    def __init__(self, port):
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", port))
+        srv.listen(1)
+        print(f"waiting for deskvnc-sense on port {port}", file=sys.stderr)
+        conn, addr = srv.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.io = conn.makefile("rw")
+        hello = json.loads(self.io.readline())
+        if hello.get("token") != KEY:
+            raise SystemExit("deskvnc-sense sent the wrong token")
+        print(f"deskvnc-sense connected from {addr[0]}", file=sys.stderr)
+
+    def ask(self, **request):
+        self.io.write(json.dumps(request) + "\n")
+        self.io.flush()
+        return json.loads(self.io.readline())
+
+    def snapshot(self):
+        return self.ask(op="snapshot")
+
+    def settle(self, after, change_ms=1000, max_ms=5000):
+        return self.ask(op="settle", after=after, change_ms=change_ms, max_ms=max_ms)
+
+    def clipboard(self):
+        return self.ask(op="clipboard").get("text")
+
+
+class Dvv:
+    """DeskVNC's MCP server over stdio: the hands."""
+
+    def __init__(self, binary, host_id):
+        self.p = subprocess.Popen([binary, "mcp", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+        self.n = 0
+        self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fastlane", "version": "1"}})
+        card = self.call("dvv_open", hostId=host_id, perceive=True)
+        self.limb = card["structuredContent"]["limb"]["limb_id"]
+        size = card["structuredContent"]["limb"].get("size") or {}
+        self.width, self.height = size.get("width", 1920), size.get("height", 1080)
+        self.call("dvv_screen", scale=0.1)
+
+    def rpc(self, method, params):
+        self.n += 1
+        self.p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.n, "method": method, "params": params}) + "\n")
+        self.p.stdin.flush()
+        while True:
+            m = json.loads(self.p.stdout.readline())
+            if m.get("id") == self.n:
+                return m.get("result", {})
+
+    def call(self, name, **args):
+        if name != "dvv_open":
+            args.setdefault("limbId", getattr(self, "limb", None))
+        r = self.rpc("tools/call", {"name": name, "arguments": args})
+        if r.get("isError"):
+            raise RuntimeError(r["content"][0]["text"][:300])
+        return r
+
+    def click(self, x, y):
+        self.call("dvv_click", action="click", x=x, y=y)
+
+    def set_clipboard(self, text):
+        self.call("dvv_clipboard", action="set", text=text)
+
+    def fence(self, row=None):
+        # Typing is refused until the screen has been read since its last big
+        # repaint. A tiny crop of the field is the cheapest read that counts.
+        region = None
+        if row:
+            # Clamped to the framebuffer: a page's search box can report a
+            # rectangle that runs off the screen, and DeskVNC refuses those.
+            x, y = max(0, min(row["x"], self.width - 8)), max(0, min(row["y"], self.height - 8))
+            region = {"x": x, "y": y, "w": max(8, min(row["w"], self.width - x)), "h": max(8, min(row["h"], self.height - y))}
+        if region:
+            self.call("dvv_screen", form="region", region=region)
+        else:
+            self.call("dvv_screen", scale=0.1)
+
+    def type(self, text):
+        # DeskVNC stops typing when the screen repaints a lot, so an agent that
+        # types blind cannot type into a dialog that just opened. Here the
+        # table is the check, and a repaint while typing is usually the field's
+        # own suggestion list, so read the screen and go on from the exact
+        # character DeskVNC stopped at.
+        for _ in range(20):
+            r = self.rpc("tools/call", {"name": "dvv_type", "arguments": {"limbId": self.limb, "text": text, "wpm": 1200}})
+            if not r.get("isError"):
+                return
+            message = r["content"][0]["text"]
+            if not message.startswith("SCREEN_CHANGED"):
+                raise RuntimeError(message[:300])
+            sent = 0
+            if message.startswith("SCREEN_CHANGED: typed "):
+                sent = int(message.split("typed ", 1)[1].split(" ", 1)[0])
+            text = text[sent:]
+            self.fence()
+        raise RuntimeError("the screen kept changing while typing")
+
+    def key(self, keys):
+        try:
+            self.call("dvv_key", keys=keys)
+        except RuntimeError as e:
+            if not str(e).startswith("SCREEN_CHANGED"):
+                raise
+            for _ in range(5):
+                self.fence()
+                r = self.rpc("tools/call", {"name": "dvv_key", "arguments": {"limbId": self.limb, "keys": keys}})
+                if not r.get("isError"):
+                    return
+                if not r["content"][0]["text"].startswith("SCREEN_CHANGED"):
+                    break
+            raise RuntimeError(r["content"][0]["text"][:300])
+
+    def close(self):
+        try:
+            self.call("dvv_control", action="release")
+            self.call("dvv_close")
+        finally:
+            self.p.stdin.close()
+
+
+def rows_text(rows):
+    lines = []
+    for r in rows:
+        extra = f" · {r['value']}" if r.get("value") else ""
+        flags = "".join([" (focused)" if r.get("focus") else "", " (disabled)" if r.get("disabled") else "", " (checked)" if r.get("checked") else ""])
+        lines.append(f"[{r['i']}] {r['area']} {r['role']} {r['name']}{extra}{flags}")
+    return "\n".join(lines)
+
+
+# jevos asks one yes/no pass per option and takes at most 26, so the controls
+# are ranked against the step in code and the best few are offered.
+OFFER = 12
+
+
+def words(text):
+    return {w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if len(w) > 1}
+
+
+def shortlist(rows, step, roles):
+    want = words(step)
+    def score(r):
+        name = words(f"{r['name']} {r.get('value', '')}")
+        overlap = len(want & name)
+        return (overlap, r.get("focus", False), r["area"] == "window")
+    picked = [r for r in rows if r["role"] in roles and not r.get("disabled") and (r["name"] or r["role"] in EDITABLE)]
+    picked.sort(key=score, reverse=True)
+    return {str(r["i"]): f"{r['role']} {r['name']}".strip() for r in picked[:OFFER]}
+
+
+def decide(step, goal, table, history):
+    rows = table["elements"]
+    clickable = shortlist(rows, step, CLICKABLE)
+    editable = shortlist(rows, step, EDITABLE)
+    state = {
+        "overall_goal": goal,
+        "current_step": step,
+        "window_in_front": table["window"]["title"] or table["window"]["class"],
+        "done_so_far": history[-6:] or ["nothing yet"],
+        "controls_on_screen": rows_text(rows),
+    }
+    ops = {
+        "click": "click one of the controls on screen",
+        "type": "type text into a text box",
+        "key": "press a key or shortcut",
+        "done": "the current step is already complete, as the screen shows",
+    }
+    questions = {"op": {"type": "choice", "instructions": "What should be done next to complete the current step? Choose done only if the screen already shows the step is complete.", "criteria": ops}}
+    if len(clickable) >= 2:
+        questions["click"] = {"type": "choice", "instructions": "If clicking, which control should be clicked to complete the current step?", "criteria": clickable}
+    if len(editable) >= 2:
+        questions["field"] = {"type": "choice", "instructions": "If typing, which text box should receive the text?", "criteria": editable}
+    questions["key"] = {"type": "choice", "instructions": "If pressing a key, which one completes the current step?", "criteria": KEYS}
+    started = time.time()
+    answer = post(f"{JEV}/v1/systemone", {"model": "jev-latest", "state": state, "questions": questions})
+    return answer["answers"], (time.time() - started) * 1000, {"click": clickable, "field": editable}
+
+
+def chosen(answer):
+    return answer.get("choice") or answer.get("answer") or max(answer.get("probs", {"": 0}), key=answer["probs"].get)
+
+
+def find(rows, name, roles, step):
+    """The row a plan step names, by its name when that is clear, and by rules
+    (or one jevos choice, when jevos is set) when several share it."""
+    candidates = [r for r in rows if r["role"] in roles and not r.get("disabled")]
+    want = name.lower()
+    for test in (lambda n: n == want, lambda n: n.startswith(want), lambda n: want in n):
+        hits = [r for r in candidates if test(r["name"].lower().rstrip(":"))]
+        # A combo box and the edit inside it share a name; the one with the
+        # keyboard focus is the one that takes text.
+        focused = [r for r in hits if r.get("focus")]
+        if len(hits) == 1 or len(focused) == 1:
+            return (focused or hits)[0], 0.0
+        if hits:
+            candidates = hits
+            break
+    else:
+        # Nothing has the name. Without a model, a near miss is only taken
+        # when it shares a word with the name; anything else would be a guess,
+        # and a guess types into the wrong field. jevos may still choose.
+        if not JEV:
+            # A whole page is never a near miss for a field.
+            want_words = words(name)
+            near = [r for r in candidates if r["role"] != "document" and want_words & words(r["name"])]
+            return (closest(near, want) if near else None), 0.0
+    offered = shortlist(candidates, name, roles)
+    if not offered:
+        return None, 0.0
+    if len(offered) == 1 or not JEV:
+        return closest(candidates, want), 0.0
+    started = time.time()
+    answer = post(f"{JEV}/v1/systemone", {
+        "model": "jev-latest",
+        # Only the candidates and the window, not the whole screen: the
+        # answer is among them, and a short state keeps a call near 50 ms.
+        "state": {"step": step, "window": rows and table_title(rows), "candidates": "\n".join(f"[{k}] {v}" for k, v in offered.items())},
+        "questions": {"target": {"type": "choice", "instructions": f"Which control is the one called {name!r} in the step?", "criteria": offered}},
+    })["answers"]["target"]
+    return next(r for r in rows if str(r["i"]) == chosen(answer)), (time.time() - started) * 1000
+
+
+def closest(candidates, want):
+    """Without a model: the focused one, then one in the window over the
+    taskbar, then the name nearest in length to the one asked for, then the
+    one highest on screen."""
+    return min(candidates, key=lambda r: (not r.get("focus"), r["area"] != "window",
+                                          abs(len(r["name"]) - len(want)), r["y"], r["x"]))
+
+
+def table_title(rows):
+    return " / ".join(r["name"] for r in rows if r["area"] == "window" and r["role"] == "text")[:200]
+
+
+def office_prompt(table):
+    """An Office dialog (Excel's "Want to save your changes?") in front of an
+    app that has stopped answering UI Automation: the title and class are
+    known, the buttons are not. Its keys still work."""
+    return table.get("partial") and table["window"]["class"] == "NUIDialog"
+
+
+def met(expect, table):
+    if not expect:
+        return True
+    title = (table["window"]["title"] or "").lower()
+    if "window" in expect and expect["window"].lower() not in title:
+        return False
+    if "shows" in expect and not any(expect["shows"].lower() in f"{r['name']} {r.get('value', '')}".lower() for r in table["elements"]):
+        return False
+    return True
+
+
+# Words on the buttons that make an unexpected screen go away without
+# agreeing to anything: an extension that wants installing, a sign in offer, a
+# "restore pages" bar, a survey. Safest first. A button matches when its name
+# is one of these, or starts with one of the phrases of two words or more;
+# "Close tab" and "Close panel" do not match "close", because closing
+# something the person has open is never how to get past a popup.
+DISMISS = ["not now", "no thanks", "no, thanks", "maybe later", "remind me later", "later", "skip", "dismiss",
+           "got it", "close", "cancel", "don't allow", "block", "decline", "reject", "no"]
+
+
+def dismisses(name):
+    n = name.lower().strip()
+    if "tab" in n.split():
+        return None
+    return next((k for k, w in enumerate(DISMISS) if n == w or (" " in w and n.startswith(w))), None)
+
+
+def dismissers(table):
+    """The buttons that would send away what is in front, safest first."""
+    rows = [r for r in table["elements"] if r["area"] == "window" and r["role"] in ("button", "link") and not r.get("disabled")]
+    # A window's own caption buttons sit in a row with Minimize; closing
+    # the app is never how to get rid of something in front of it.
+    caption = {r["y"] for r in rows if r["name"].lower().startswith("minimize")}
+    rows = [r for r in rows if not any(abs(r["y"] - y) <= 6 for y in caption)]
+    return sorted((r for r in rows if dismisses(r["name"]) is not None), key=lambda r: dismisses(r["name"]))
+
+
+def echoed(text, table):
+    """Typed text shows up somewhere on screen, letters and digits in order:
+    a calculator that missed the first digit shows a wrong answer with no
+    error."""
+    def plain(t):
+        return "".join(c for c in t.lower() if c.isalnum())
+    typed = plain(text)
+    return any(typed in plain(f"{r['name']} {r.get('value', '')}") for r in table["elements"])
+
+
+class Runner:
+    """One connection to the remote computer, many steps.
+
+    Each step says what to do, so most need no model:
+
+        {"key": "super+r", "expect": {"window": "Run"}}
+        {"type": "notepad", "into": "Open"}       into omitted: the focused field
+        {"click": "Save", "expect": {"shows": "Saved"}}
+        {"read": "price|$"}                       copy matching rows into the log
+        {"goal": "free text", "text": "..."}      jevos picks the operation (needs FASTLANE_JEV)
+
+    when, with the same form as expect, skips the step unless the screen
+    matches it first. expect is checked after the screen settles: window is a
+    piece of the front window's title, shows a piece of any control's name.
+
+    A step that cannot find its control or whose expectation is not met is
+    not given up at once: something the plan did not cause may be in front,
+    so the runner looks for a way to dismiss it, and tries the step again."""
+
+    def __init__(self, host_id):
+        self.sense = Sense(SENSE_PORT)
+        self.dvv = Dvv(DVV, host_id)
+        self.t0 = time.time()
+        self._table = self.sense.snapshot()
+        self.stale = False
+        self.log, self.history = [], []
+
+    @property
+    def table(self):
+        """The screen as it is now. A step that expected nothing left it
+        unread, so it is read here, once something needs it."""
+        if self.stale:
+            self.stale = False
+            self._table = self.sense.settle(self._table["hash"], change_ms=300)
+        return self._table
+
+    @table.setter
+    def table(self, value):
+        self._table = value
+        self.stale = False
+
+    def now(self):
+        return round((time.time() - self.t0) * 1000)
+
+    def note(self, entry):
+        self.log.append(entry)
+        print(json.dumps(entry), file=sys.stderr, flush=True)
+
+    def settle(self, expect=None, limit=4000):
+        started = time.time()
+        self.table = self.sense.settle(self._table["hash"], change_ms=1000 if expect else 300)
+        while not met(expect, self.table) and (time.time() - started) * 1000 < limit:
+            self.table = self.sense.settle(self.table["hash"], change_ms=limit, max_ms=limit)
+        return round((time.time() - started) * 1000)
+
+    def step(self, step, retries=2):
+        """Do one step; True when it did what it said."""
+        for attempt in range(retries + 1):
+            ok, entry = self.attempt(step)
+            if ok:
+                return True
+            if attempt < retries and self.recover(step, typo=entry.get("echo") is False):
+                continue
+            entry["failed"] = True
+            self.note(entry)
+            return False
+        return False
+
+    def attempt(self, step):
+        entry = {"t": self.now(), "step": step}
+        if not met(step.get("when"), self.table):
+            entry["skipped"] = True
+            self.note(entry)
+            return True, entry
+        rows = self.table["elements"]
+        for _ in range(8):
+            # A partial table is a window that has not answered yet (or a
+            # reader still busy with the last app): look again before
+            # deciding a control is missing.
+            if not self.table.get("partial") or not ("click" in step or step.get("into")):
+                break
+            time.sleep(0.4)
+            self.table = self.sense.snapshot()
+            rows = self.table["elements"]
+        if "read" in step:
+            entry["read"] = read_rows(rows, step["read"])[: step.get("limit", 15)]
+            self.note(entry)
+            return True, entry
+        dvv = self.dvv
+        # No screen read before an action: DeskVNC refuses one after a big
+        # repaint, and key() and type() read and carry on when it does.
+        if "key" in step:
+            dvv.key(step["key"])
+            entry["did"] = f"pressed {step['key']}"
+        elif "type" in step:
+            row = None
+            if step.get("into"):
+                row, entry["jev_ms"] = find(rows, step["into"], EDITABLE, f"type into {step['into']}")
+                if row is None:
+                    entry["missing"] = step["into"]
+                    return False, entry
+                if not row.get("focus"):
+                    dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            # A named field is set, not added to: a field keeps what it had
+            # (the Run box remembers the last command). Text typed where the
+            # caret is, in a document, must never select all of it first.
+            if step.get("replace", bool(step.get("into"))):
+                dvv.key("ctrl+a")
+            dvv.type(step["type"])
+            entry["did"] = f"typed {step['type'][:40]!r}" + (f" into {row['name']}" if row else "")
+        elif "click" in step:
+            row, entry["jev_ms"] = find(rows, step["click"], CLICKABLE, f"click {step['click']}")
+            if row is None:
+                entry["missing"] = step["click"]
+                return False, entry
+            dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            entry["did"] = f"clicked {row['role']} {row['name'][:40]}"
+        self.history.append(entry["did"])
+        if not step.get("expect") and not step.get("echo"):
+            # Nothing to check: go straight on. Keys and text reach the app in
+            # order, so the next step needs no wait unless it reads the screen.
+            self.stale = True
+            self.note(entry)
+            return True, entry
+        entry["settle_ms"] = self.settle(step.get("expect"), step.get("expect_ms", 4000))
+        ok = met(step.get("expect"), self.table)
+        if ok and step.get("echo") and "type" in step:
+            ok = echoed(step["type"], self.table)
+            entry["echo"] = ok
+        if ok:
+            self.note(entry)
+        return ok, entry
+
+    def recover(self, step, typo=False):
+        """Something the plan did not expect may be in front. Find the button
+        that sends it away and press it; True if anything was done. After a
+        lost keystroke there is nothing to dismiss, only a field to clear."""
+        candidates = [] if typo else dismissers(self.table)
+        entry = {"t": self.now(), "recover": step, "window": self.table["window"]["title"]}
+        if not candidates:
+            # Nothing to dismiss by name: Escape closes most menus, flyouts
+            # and dialogs, and does nothing harmful on a page.
+            self.dvv.fence()
+            self.dvv.key("Escape")
+            entry["did"] = "pressed Escape"
+        else:
+            # The earliest word in DISMISS is the safest way out.
+            pick = candidates[0]
+            if len(candidates) > 1 and JEV:
+                started = time.time()
+                answer = post(f"{JEV}/v1/systemone", {
+                    "model": "jev-latest",
+                    "state": {"what_we_were_doing": json.dumps(step), "window_in_front": self.table["window"]["title"],
+                              "text_on_screen": " / ".join(r["name"] for r in self.table["elements"] if r["area"] == "window" and r["role"] == "text")[:600]},
+                    "questions": {"dismiss": {"type": "choice", "instructions": "Something unexpected is in the way of the step. Which button closes or declines it without agreeing to anything or losing work?",
+                                              "criteria": {str(r["i"]): r["name"] for r in candidates[:12]}}},
+                })["answers"]["dismiss"]
+                entry["jev_ms"] = round((time.time() - started) * 1000)
+                pick = next(r for r in candidates if str(r["i"]) == chosen(answer))
+            self.dvv.click(pick["x"] + pick["w"] // 2, pick["y"] + pick["h"] // 2)
+            entry["did"] = f"dismissed with {pick['name']}"
+        entry["settle_ms"] = self.settle()
+        self.note(entry)
+        return True
+
+    def close(self):
+        self.dvv.close()
+
+
+def read_rows(rows, filter_text):
+    """Rows whose text holds any of the |-separated words, or all text when
+    the filter is empty. In a browser only the page, not its toolbar."""
+    want = [w.lower() for w in filter_text.split("|") if w]
+    docs = [r for r in rows if r["role"] == "document" and r["area"] == "window"]
+    page = max(docs, key=lambda r: r["w"] * r["h"]) if docs else None
+    def inside(r):
+        return page is None or (r is not page and page["x"] <= r["x"] < page["x"] + page["w"] and page["y"] <= r["y"] < page["y"] + page["h"])
+    found, seen = [], set()
+    for r in rows:
+        text = r["name"] + (f" · {r['value']}" if r.get("value") and r["role"] != "link" else "")
+        if r["area"] != "window" or not inside(r) or text in seen or not text:
+            continue
+        if not want or any(w in text.lower() for w in want):
+            seen.add(text)
+            found.append(text)
+    return found
+
+
+def run(plan, max_actions=40):
+    """Carry out one plan and return its log and the screen it ended on."""
+    runner = Runner(plan["host_id"])
+    failed = None
+    try:
+        for step in plan["steps"]:
+            if "goal" in step:
+                runner.table, ok = goal_loop(step, plan.get("goal", ""), runner.sense, runner.dvv, runner.table, runner.history, runner.log, runner.t0, max_actions)
+            else:
+                ok = runner.step(step)
+            if not ok:
+                failed = step
+                break
+    except RuntimeError as e:
+        failed = {"error": str(e)}
+    finally:
+        runner.close()
+    log, table = runner.log, runner.table
+    result = {"seconds": round(time.time() - runner.t0, 2), "actions": sum(1 for e in log if "did" in e), "log": log}
+    # The screen as it ended, so the planner can check the outcome or plan
+    # from there without looking at a picture.
+    result["window"] = table["window"]
+    result["controls"] = rows_text(table["elements"])
+    if failed is not None:
+        result["failed"] = failed
+    return result
+
+
+def goal_loop(step, goal, sense, dvv, table, history, log, t0, max_actions):
+    """A step the planner could not spell out: jevos picks the operation too."""
+    say_text, text = step.get("text"), step["goal"]
+    if not JEV:
+        raise RuntimeError("a goal step needs jevos (FASTLANE_JEV); without it, plan the step as key, type or click")
+    for _ in range(max_actions):
+        answers, jev_ms, offered = decide(text, goal, table, history)
+        op = chosen(answers["op"])
+        entry = {"t": round((time.time() - t0) * 1000), "step": text, "op": op, "jev_ms": round(jev_ms), "rows": len(table["elements"])}
+        rows = {str(r["i"]): r for r in table["elements"]}
+        if op == "done":
+            log.append(entry)
+            history.append(f"finished: {text}")
+            return table, True
+        only = lambda kind: next(iter(offered[kind]), None)
+        if op == "click" and ("click" in answers or only("click")):
+            row = rows[chosen(answers["click"]) if "click" in answers else only("click")]
+            dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            did = f"clicked {row['role']} {row['name']}"
+        elif op == "type" and ("field" in answers or only("field")):
+            row = rows[chosen(answers["field"]) if "field" in answers else only("field")]
+            if say_text is None:
+                raise RuntimeError(f"goal step {text!r} wants to type but the plan gave no text")
+            typed = say_text
+            if not row.get("focus"):
+                dvv.click(row["x"] + row["w"] // 2, row["y"] + row["h"] // 2)
+            dvv.fence(row)
+            dvv.type(typed)
+            did = f"typed {typed!r} into {row['name']}"
+        else:
+            keys = chosen(answers["key"])
+            dvv.fence()
+            dvv.key(keys)
+            did = f"pressed {keys}"
+        entry["did"] = did
+        history.append(did)
+        settle_started = time.time()
+        table = sense.settle(table["hash"])
+        entry["settle_ms"] = round((time.time() - settle_started) * 1000)
+        log.append(entry)
+        print(json.dumps(entry), file=sys.stderr, flush=True)
+    return table, False
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--plan", required=True)
+    plan = json.load(open(ap.parse_args().plan, encoding="utf-8"))
+    print(json.dumps(run(plan), indent=1))

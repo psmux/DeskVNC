@@ -41,6 +41,15 @@ zeroize = { workspace = true }
 hmac = { workspace = true }
 md-5 = { workspace = true }
 
+# RD Gateway (MS-TSGU over HTTPS). `base64` for the NTLM tokens in the HTTP
+# `Authorization` header, `sha1` for the WebSocket `Sec-WebSocket-Accept`
+# check (RFC 6455 4.2.2, a protocol constant rather than a security choice),
+# and `rand` for the WebSocket masking keys and the connection id. All three
+# are already in Cargo.lock through other crates of this workspace.
+base64 = { workspace = true }
+sha1 = { workspace = true }
+rand = { workspace = true }
+
 [features]
 default = []
 # Kerberos, forwarded to rdp-auth. Off in phase 1 and 2: NTLMv2 covers local
@@ -58,6 +67,9 @@ audio = []
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 hex = { workspace = true }
+# The licensing tests play the licence server, which needs the private half
+# of a test RSA key. Already in Cargo.lock.
+num-bigint-dig = { workspace = true }
 # The interop probe example prints the diagnostic frame dumps, which is the
 # whole reason to run it against a real server.
 tracing-subscriber = { workspace = true }

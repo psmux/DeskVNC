@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 /// A constant so that the count `00 R44` fixed is asserted rather than
 /// counted by hand in four documents. A twenty fifth tool is a decision, not
 /// an accident.
-pub const TOOL_COUNT: usize = 25;
+pub const TOOL_COUNT: usize = 26;
 
 /// How long a client may cache `tools/list`, in milliseconds.
 ///
@@ -68,6 +68,21 @@ fn selector() -> Value {
             "type": ["number", "string"],
             "description": "Which member of groupId: an index from dvv_group_list, or a limbId. Required when groupId is given.",
         },
+    })
+}
+
+/// The look arguments, on every tool that acts.
+///
+/// One call where three were: act, wait for the screen to settle, read it.
+/// Each round trip is a turn of the agent's own model, which costs more than
+/// anything the machine does, so folding the wait and the read into the
+/// action is most of what makes a driven desktop feel quick.
+fn look() -> Value {
+    json!({
+        "look": { "type": "boolean", "description": "After the action, wait for the screen to settle (blinking carets and clocks do not count as movement) and return the picture with the result, in this one call. It also clears the typing fence for the next dvv_type or dvv_key. Use it on almost every action: it replaces a dvv_wait and a dvv_screen." },
+        "lookScale": { "type": "number", "description": "Scale of the returned picture, 0.5 by default. Ignored with lookRegion." },
+        "lookRegion": { "type": "object", "description": "Return only this native resolution region instead of the whole screen.", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" } } },
+        "lookMs": { "type": "number", "description": "Longest to wait for the screen to settle before reading it anyway, 4000 by default." },
     })
 }
 
@@ -179,7 +194,7 @@ pub fn tools() -> Vec<Value> {
             "dvv_click",
             "A pointer event at a framebuffer pixel coordinate. action is move, click, double, right, middle, drag or scroll. Desktop limbs only; a terminal limb returns a clean error naming the protocol. Coordinates are FRAMEBUFFER pixels, not screen pixels and not CSS pixels: read the size from dvv_status first. A move is an action and not an observation, because hover opens menus and fires handlers. A scroll takes a direction and a number of clicks: there is no pixel magnitude on either wire and a pixel delta is refused rather than converted.",
             merge(
-                merge(selector(), generation()),
+                merge(merge(selector(), look()), generation()),
                 json!({
                     "action": { "type": "string", "enum": ["move", "click", "double", "right", "middle", "drag", "scroll"], "description": "Which gesture." },
                     "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
@@ -199,7 +214,7 @@ pub fn tools() -> Vec<Value> {
             "dvv_type",
             "Types a string into whatever has focus. LOOK FIRST: on a desktop limb this is refused with SCREEN_CHANGED unless you have called dvv_screen since the last time something large repainted, and refused outright if you have never called it on this limb at all. A keystroke aims at no coordinate, so it goes wherever focus happens to be, and focus moves when a window opens: an agent that launched an editor and typed without looking would have replaced a file that came up with all of it selected. One dvv_screen clears it and there is no override. Desktop limbs get one key event pair per Unicode code point, layout resolved, never a scancode: a scancode types what the REMOTE layout says that key is, so 'a' becomes 'q' on an AZERTY machine and nothing anywhere reports an error. Terminal limbs get the bytes and are not fenced, because a PTY echoes what it is sent into a stream you read back. Does not press Enter unless the string contains a newline. Interruptible: if a person takes the wheel halfway, the settlement says exactly how many code points went.",
             merge(
-                selector(),
+                merge(selector(), look()),
                 json!({
                     "text": { "type": "string", "description": "What to type." },
                     "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
@@ -212,7 +227,7 @@ pub fn tools() -> Vec<Value> {
             "dvv_key",
             "One named key or a chord, for the things dvv_type cannot say: Enter, Escape, Tab, ctrl+c, alt+F4, ctrl+alt+Delete. Fenced exactly like dvv_type and for the same reason: on a screen holding a selection, Enter, Delete and ctrl+v destroy a document as thoroughly as a letter does, so this is refused with SCREEN_CHANGED until you have read the screen since the last material repaint. Names are the DOM code and key spellings. A modifier alias such as ctrl resolves to ControlLeft and the result reports every resolution, so nothing is chosen on your behalf without telling you; name ControlRight to get the other side. Letters, digits and unshifted punctuation work in a chord as themselves (super+r, ctrl+l, ctrl+shift+t) or as their DOM code (KeyR); text you want entered still goes through dvv_type, which follows the remote layout. A raw numeric scancode is a different action needing the scancode capability, which is in no role bundle.",
             merge(
-                selector(),
+                merge(selector(), look()),
                 json!({
                     "keys": { "type": "string", "description": "One name, or a chord joined with '+'." },
                     "reason": { "type": "string", "description": "Optional. What this is for, shown to a person who is using the machine when this action has to ask them for it." },
@@ -250,6 +265,17 @@ pub fn tools() -> Vec<Value> {
                 }),
             ),
             &["until"],
+        ),
+        tool(
+            "dvv_plan",
+            "Carries out a whole plan of steps in one call, with no model in the loop, and returns a log and the screen as it ended. Each step does one thing: {\"key\": \"super+r\"}, {\"type\": \"notepad\", \"into\": \"Open\"} (into names the field; without it the text goes where the caret is), {\"click\": \"Save\"}, or {\"read\": \"price|total\"} (the text of controls holding any of the words). Any step may add expect {window: part of the title, shows: part of a control's name or value}, checked once the screen settles, when (the same form) to skip the step unless the screen matches, and echo true on a type step to check the text arrived. Controls are found by name, never guessed: a step whose control is missing or whose expect is not met sends away whatever popup is in front by its safest button (Not now, Cancel, never Close tab) or Escape, and is tried twice more before the plan stops and says where. NEEDS deskvnc-sense ON THAT MACHINE, dialled in with the token in DESKVNC_SENSE_TOKEN: it reads the controls through Windows UI Automation, which no remote desktop protocol carries. Without it this refuses with SENSE_ABSENT and the other tools still work. The rules are tools/fastlane/spec in the DeskVNC repository.",
+            merge(
+                selector(),
+                json!({
+                    "steps": { "type": "array", "items": { "type": "object" }, "description": "The steps, in order. The plan stops at the first that fails." },
+                }),
+            ),
+            &["steps"],
         ),
         tool(
             "dvv_clipboard",

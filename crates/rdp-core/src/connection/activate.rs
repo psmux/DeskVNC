@@ -46,8 +46,7 @@ use rdp_pdu::rdp::client_info::{address_family, ExtendedInfoPacket, InfoPacket, 
 use rdp_pdu::rdp::security::security_flags;
 use rdp_pdu::rdp::{
     decode_io_pdu, CapabilitySet, CapabilitySets, ClientInfoPdu, ConfirmActivePdu, ControlPdu,
-    FontListPdu, IoPdu, IoPduContext, LicenseMessage, LicensePdu, SharePdu, SlowPathClass,
-    SynchronizePdu,
+    FontListPdu, IoPdu, IoPduContext, SharePdu, SlowPathClass, SynchronizePdu,
 };
 use rdp_pdu::{codes, x224, Reader};
 use remote_core::{Credentials, SessionEvent};
@@ -528,6 +527,12 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
     // Demand Active ends all three, and the finalisation PDUs come back in
     // whatever order the server likes (MS-RDPBCGR 1.3.1.1).
     let context = IoPduContext::external_security();
+    let mut licensing = super::licensing::Licensing::new(
+        &opts.server_name,
+        creds.username.as_deref().map(str::trim).unwrap_or_default(),
+        &opts.client_name,
+        opts.license_dir.as_deref(),
+    );
     let mut phase = Phase::Licensing;
     let mut activated: Option<Activated> = None;
     let started = std::time::Instant::now();
@@ -590,7 +595,8 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
         })?;
         match decoded {
             IoPdu::License(license) => {
-                if let Some(bytes) = licensing_step(&license)? {
+                let step = licensing.step(&license)?;
+                if let Some(bytes) = step.reply {
                     reply = Some(send_data_request(
                         channels.user_channel_id,
                         channels.io_channel_id,
@@ -598,10 +604,15 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                     )?);
                 }
                 // Licensing is over the moment the server says the client is
-                // valid; anything after that on the I/O channel is a Share
-                // Control PDU, which is what the Demand Active is.
-                if license.is_valid_client() {
-                    tracing::debug!("licensing complete: no licence required");
+                // valid or hands it a licence; anything after that on the I/O
+                // channel is a Share Control PDU, which is what the Demand
+                // Active is.
+                if step.done {
+                    if license.is_valid_client() {
+                        tracing::debug!("licensing complete: no licence required");
+                    } else {
+                        tracing::debug!("licensing complete: a licence was issued");
+                    }
                     phase = Phase::Sharing;
                 }
             }
@@ -761,49 +772,6 @@ const fn stage_of(phase: Phase, activated: bool) -> ConnectStage {
     }
 }
 
-/// What to do about one licensing PDU (MS-RDPBCGR 2.2.1.12, MS-RDPELE 2.2.2,
-/// PRDRDP/03 §2.8).
-///
-/// Returns the body to send back, or `None` when there is nothing to say.
-///
-/// # Errors
-///
-/// [`RdpError::Protocol`] naming licensing for a message this build cannot
-/// complete, and for an error alert that is not `STATUS_VALID_CLIENT`.
-fn licensing_step(license: &LicensePdu<'_>) -> Result<Option<Vec<u8>>> {
-    match &license.message {
-        LicenseMessage::ErrorAlert(error) => {
-            if error.is_valid_client() {
-                return Ok(None);
-            }
-            Err(RdpError::Protocol(format!(
-                "the server refused the licensing exchange: {} ({})",
-                error.error_code.describe(),
-                error.state_transition.symbol()
-            )))
-        }
-        // MS-RDPELE 2.2.2.1. Completing a real licence exchange needs the
-        // platform challenge, the hardware id, and somewhere to store the
-        // granted licence so it is not requested again on every connect, none
-        // of which exists yet (PRDRDP/03 §2.8). Declining cleanly with an
-        // `ERROR_ALERT` is what gets us past a Windows host in per user
-        // licensing mode whose licence server is unreachable, which answers
-        // `STATUS_VALID_CLIENT` next.
-        LicenseMessage::LicenseRequest(_) => {
-            tracing::info!("declining the licence exchange (MS-RDPELE 2.2.2.3 is not implemented)");
-            let alert = LicensePdu::client_error_alert();
-            let mut out = Vec::with_capacity(alert.size());
-            alert.encode_checked(&mut Writer::new(&mut out))?;
-            Ok(Some(out))
-        }
-        LicenseMessage::Unimplemented { msg_type, .. } => Err(RdpError::Protocol(format!(
-            "that computer requires a Remote Desktop Services client access licence, \
-             which this client cannot obtain yet (licensing message 0x{msg_type:02x}, \
-             MS-RDPELE 2.2.2)"
-        ))),
-    }
-}
-
 /// Turn a Set Error Info PDU into the error it announces
 /// (MS-RDPBCGR 2.2.5.1.1).
 ///
@@ -955,49 +923,6 @@ mod tests {
             classify(1003, &channels, Phase::Licensing, &[]),
             SlowPathClass::Licensing
         );
-    }
-
-    /// The only licensing answer phase 1 completes on, and the two it refuses
-    /// with a sentence rather than with a number (PRDRDP/03 §2.8).
-    #[test]
-    fn licensing_accepts_a_valid_client_and_declines_a_real_exchange() {
-        use rdp_pdu::rdp::license::{blob_type, LicenseBinaryBlob, LicenseErrorMessage};
-        use rdp_pdu::rdp::LicensePreamble;
-
-        let valid = LicensePdu {
-            preamble: LicensePreamble {
-                msg_type: rdp_pdu::rdp::license::message_type::ERROR_ALERT,
-                flags: rdp_pdu::rdp::license::preamble_flags::VERSION_3_0,
-                msg_size: 20,
-            },
-            message: LicenseMessage::ErrorAlert(LicenseErrorMessage {
-                error_code: codes::LicenseError::StatusValidClient,
-                state_transition: codes::LicenseStateTransition::NoTransition,
-                error_info: LicenseBinaryBlob::empty(blob_type::ANY),
-            }),
-        };
-        assert!(licensing_step(&valid).expect("valid client").is_none());
-
-        let refused = LicensePdu {
-            preamble: valid.preamble,
-            message: LicenseMessage::ErrorAlert(LicenseErrorMessage {
-                error_code: codes::LicenseError::NoLicenseServer,
-                state_transition: codes::LicenseStateTransition::TotalAbort,
-                error_info: LicenseBinaryBlob::empty(blob_type::ANY),
-            }),
-        };
-        let err = licensing_step(&refused).expect_err("no licence server");
-        assert!(err.to_string().contains("licence server"), "{err}");
-
-        let unimplemented = LicensePdu {
-            preamble: valid.preamble,
-            message: LicenseMessage::Unimplemented {
-                msg_type: rdp_pdu::rdp::license::message_type::PLATFORM_CHALLENGE,
-                body: Payload::new(&[]),
-            },
-        };
-        let err = licensing_step(&unimplemented).expect_err("platform challenge");
-        assert!(err.to_string().contains("licence"), "{err}");
     }
 
     /// A Set Error Info PDU is the server saying why the session is about to

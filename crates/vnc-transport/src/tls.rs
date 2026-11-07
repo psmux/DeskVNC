@@ -362,6 +362,7 @@ impl ServerCertVerifier for TofuVerifier {
                 self.record(TrustDecision::Unknown {
                     fingerprint,
                     subject,
+                    certificate: Some(crate::CertificateDigests::of(end_entity.as_ref())),
                 });
                 Ok(ServerCertVerified::assertion())
             }
@@ -458,6 +459,27 @@ f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e16
             hex::encode(digest),
             "c42563ef393c1cabdf5438ffc8c5a8f0ecd2796cc33b556d4ee4d9f386e2118a"
         );
+    }
+
+    /// What the trust prompt shows next to the pin, against
+    /// `openssl x509 -fingerprint -sha1` and `-sha256` on the same bytes. The
+    /// SHA-1 is the "Thumbprint" Windows shows for the certificate, and
+    /// neither value may come out equal to the pin, which hashes only the
+    /// public key.
+    #[test]
+    fn certificate_digests_match_openssl_and_differ_from_the_pin() {
+        let der_bytes = hex::decode(TEST_CERT_HEX.replace(['\n', ' '], "")).unwrap();
+        let digests = crate::CertificateDigests::of(&der_bytes);
+        assert_eq!(
+            digests.thumbprint,
+            "44:E7:9D:B3:6D:E8:A9:97:D8:A8:57:B9:B6:0C:40:BA:91:EA:62:BF"
+        );
+        assert_eq!(
+            digests.sha256,
+            "17:4D:A4:1D:A3:4E:09:D6:E5:86:D9:A8:B7:1E:13:60:4B:15:C5:04:FC:20:8B:36:1C:45:8D:61:83:61:A3:78"
+        );
+        let pin = format_fingerprint(&Sha256::digest(der::extract_spki(&der_bytes).unwrap()));
+        assert_ne!(digests.sha256, pin);
     }
 
     /// RFC 5929 §4.1 picks the channel binding hash from this OID, so reading

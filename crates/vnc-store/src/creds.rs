@@ -70,6 +70,10 @@ struct Inner {
     backend: Backend,
     /// `Some` while the file fallback is unlocked.
     vault: Option<Vault>,
+    /// Saves refused because the file fallback was locked, by host id, kept
+    /// until the person unlocks it so the password they asked us to remember
+    /// is written then instead of being lost. Wiped by [`CredentialStore::lock`].
+    parked: HashMap<String, StoredCredentials>,
     /// Session cache for keychain-backed credentials, so repeated loads do
     /// not hit the keychain.
     cache: HashMap<String, StoredCredentials>,
@@ -87,7 +91,13 @@ struct Inner {
 pub struct CredentialStore {
     data_dir: PathBuf,
     inner: Mutex<Inner>,
+    /// Called (without the lock held) every time a save is parked because
+    /// the file fallback is locked, so the app can ask for the master password.
+    on_locked_save: Mutex<Option<LockedSaveListener>>,
 }
+
+/// See [`CredentialStore::set_locked_save_listener`].
+pub type LockedSaveListener = Box<dyn Fn(&str) + Send + Sync>;
 
 impl CredentialStore {
     /// Uses the OS keychain; falls back to an encrypted file if unavailable.
@@ -98,10 +108,29 @@ impl CredentialStore {
             inner: Mutex::new(Inner {
                 backend: Backend::Unknown,
                 vault: None,
+                parked: HashMap::new(),
                 cache: HashMap::new(),
                 kdf: (DEFAULT_M_COST, DEFAULT_T_COST, DEFAULT_P_COST),
             }),
+            on_locked_save: Mutex::new(None),
         }
+    }
+
+    /// Registers the function told about every save that had to wait for the
+    /// master password, with the host id it was for.
+    pub fn set_locked_save_listener(&self, listener: LockedSaveListener) {
+        *self.on_locked_save.lock() = Some(listener);
+    }
+
+    /// `true` when the encrypted credential file has been created, so an
+    /// unlock checks the master password rather than choosing one.
+    pub fn vault_exists(&self) -> bool {
+        self.data_dir.join(CRED_FILE).exists()
+    }
+
+    /// How many saves are waiting for the store to be unlocked.
+    pub fn parked_saves(&self) -> usize {
+        self.inner.lock().parked.len()
     }
 
     /// Forces the encrypted-file backend, bypassing the OS keychain. Used
@@ -165,7 +194,19 @@ impl CredentialStore {
             }
         }
         // Encrypted-file path.
-        let vault = inner.vault.as_mut().ok_or(Error::Locked)?;
+        let Some(vault) = inner.vault.as_mut() else {
+            // Locked: keep the credential until the person unlocks the store,
+            // merged over anything parked earlier for the same host, and tell
+            // the app so it can ask for the master password. The caller still
+            // sees `Locked`, because nothing is on disk yet.
+            let merged = overlay(inner.parked.remove(host_id), creds);
+            inner.parked.insert(host_id.to_string(), merged);
+            drop(inner);
+            if let Some(listener) = self.on_locked_save.lock().as_ref() {
+                listener(host_id);
+            }
+            return Err(Error::Locked);
+        };
         vault.entries.insert(host_id.to_string(), creds.clone());
         self.write_vault(vault)
     }
@@ -229,10 +270,17 @@ impl CredentialStore {
     /// first unlock; on later unlocks a wrong password fails with
     /// [`Error::InvalidMasterPassword`].
     pub fn unlock(&self, master_password: &str) -> Result<()> {
+        self.unlock_writing_parked(master_password).map(|_| ())
+    }
+
+    /// [`CredentialStore::unlock`], returning the host ids whose parked saves
+    /// were written into the store by this unlock, so the caller can update
+    /// whatever it shows for them.
+    pub fn unlock_writing_parked(&self, master_password: &str) -> Result<Vec<String>> {
         let mut inner = self.inner.lock();
         self.resolve_backend(&mut inner);
         if inner.backend == Backend::Keychain {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let path = self.data_dir.join(CRED_FILE);
         let vault = if path.exists() {
@@ -254,9 +302,20 @@ impl CredentialStore {
                 entries: HashMap::new(),
             }
         };
+        let mut vault = vault;
+        // Parked saves go in field by field over what the file already holds,
+        // the same merge their callers would have done had the store been open.
+        let parked: Vec<(String, StoredCredentials)> = inner.parked.drain().collect();
+        let mut written = Vec::with_capacity(parked.len());
+        for (host_id, creds) in parked {
+            let merged = overlay(vault.entries.remove(&host_id), &creds);
+            vault.entries.insert(host_id.clone(), merged);
+            written.push(host_id);
+        }
         self.write_vault(&vault)?;
         inner.vault = Some(vault);
-        Ok(())
+        written.sort();
+        Ok(written)
     }
 
     /// Re-locks the encrypted-file fallback, dropping the derived key and
@@ -272,6 +331,10 @@ impl CredentialStore {
             }
         }
         inner.vault = None;
+        for creds in inner.parked.values_mut() {
+            creds.zeroize();
+        }
+        inner.parked.clear();
         // The keychain cache is the same kind of plaintext and is wiped for
         // the same reason. It is empty on the file backend, so this costs
         // nothing there.
@@ -283,7 +346,14 @@ impl CredentialStore {
 
     fn resolve_backend(&self, inner: &mut Inner) {
         if inner.backend == Backend::Unknown {
-            inner.backend = if keychain_available() {
+            // A credential file that exists holds what was saved when the
+            // keychain could not take it, so it stays the store. The probe
+            // below only reads, and on a desktop with no default keyring a
+            // read succeeds while every write fails, so trusting it here
+            // would hide the file and every password in it after a restart.
+            inner.backend = if self.data_dir.join(CRED_FILE).exists() {
+                Backend::File
+            } else if keychain_available() {
                 Backend::Keychain
             } else {
                 Backend::File
@@ -342,6 +412,28 @@ impl CredentialStore {
         std::fs::rename(&tmp, self.data_dir.join(CRED_FILE))?;
         Ok(())
     }
+}
+
+/// `top` written over `base` field by field: a field `top` leaves empty keeps
+/// what `base` holds.
+fn overlay(base: Option<StoredCredentials>, top: &StoredCredentials) -> StoredCredentials {
+    let mut out = base.unwrap_or_default();
+    let pick = |dst: &mut Option<String>, src: &Option<String>| {
+        if src.is_some() {
+            *dst = src.clone();
+        }
+    };
+    pick(&mut out.vnc_password, &top.vnc_password);
+    pick(&mut out.vencrypt_user, &top.vencrypt_user);
+    pick(&mut out.vencrypt_pass, &top.vencrypt_pass);
+    pick(&mut out.ssh_passphrase, &top.ssh_passphrase);
+    pick(&mut out.rdp_user, &top.rdp_user);
+    pick(&mut out.rdp_domain, &top.rdp_domain);
+    pick(&mut out.rdp_password, &top.rdp_password);
+    pick(&mut out.ssh_user, &top.ssh_user);
+    pick(&mut out.ssh_password, &top.ssh_password);
+    pick(&mut out.rdg_password, &top.rdg_password);
+    out
 }
 
 /// Parses + decrypts a credential file with the given master password.
@@ -497,6 +589,7 @@ mod tests {
             rdp_password: Some("rdp-pass-sentinel".into()),
             ssh_user: None,
             ssh_password: None,
+            rdg_password: None,
         }
     }
 
@@ -512,6 +605,120 @@ mod tests {
             Err(Error::Locked)
         ));
         assert!(matches!(store.delete("x"), Err(Error::Locked)));
+    }
+
+    /// After a restart the store must open the file it wrote, not trust a
+    /// keychain probe that answered reads while refusing writes.
+    #[test]
+    fn an_existing_credential_file_is_the_store_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = file_store(dir.path());
+            store.unlock("pw").unwrap();
+            store.save("h", &sample_creds()).unwrap();
+        }
+        let reopened = CredentialStore::new(dir.path().to_path_buf());
+        assert_eq!(reopened.backend(), CredentialBackend::Locked);
+        reopened.unlock("pw").unwrap();
+        assert_eq!(
+            reopened
+                .load("h")
+                .unwrap()
+                .and_then(|c| c.vnc_password)
+                .as_deref(),
+            Some("vnc-pass-123")
+        );
+    }
+
+    /// Uses only the API that existed before the fix, so it shows the old
+    /// behaviour failing: the password was gone after the unlock.
+    #[test]
+    fn a_password_saved_while_locked_is_there_after_the_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        assert!(store.save("host-1", &sample_creds()).is_err());
+        store.unlock("chosen after the save").unwrap();
+        let got = store.load("host-1").unwrap();
+        assert_eq!(
+            got.and_then(|c| c.vnc_password).as_deref(),
+            Some("vnc-pass-123")
+        );
+    }
+
+    /// The Linux finding: with no usable keyring the store is the encrypted
+    /// file and locked, and a password the person asked us to remember was
+    /// dropped. It now waits for the unlock and is written by it.
+    #[test]
+    fn a_save_refused_while_locked_is_written_when_the_store_is_unlocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        let told = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = told.clone();
+        store.set_locked_save_listener(Box::new(move |host| seen.lock().push(host.to_string())));
+
+        assert!(matches!(
+            store.save("host-1", &sample_creds()),
+            Err(Error::Locked)
+        ));
+        assert_eq!(*told.lock(), vec!["host-1".to_string()]);
+        assert_eq!(store.parked_saves(), 1);
+        assert!(!store.vault_exists());
+
+        let written = store
+            .unlock_writing_parked("first master password")
+            .unwrap();
+        assert_eq!(written, vec!["host-1".to_string()]);
+        assert!(store.vault_exists());
+        assert_eq!(store.parked_saves(), 0);
+
+        // Survives a lock cycle, so it is on disk and not only in memory.
+        store.lock();
+        store.unlock("first master password").unwrap();
+        let got = store
+            .load("host-1")
+            .unwrap()
+            .expect("parked save was written");
+        assert_eq!(got.vnc_password.as_deref(), Some("vnc-pass-123"));
+    }
+
+    #[test]
+    fn a_parked_save_merges_over_what_the_file_already_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        store.unlock("pw").unwrap();
+        let first = StoredCredentials {
+            ssh_passphrase: Some("kept".into()),
+            ..Default::default()
+        };
+        store.save("h", &first).unwrap();
+        store.lock();
+        let later = StoredCredentials {
+            vnc_password: Some("new".into()),
+            ..Default::default()
+        };
+        assert!(matches!(store.save("h", &later), Err(Error::Locked)));
+        store.unlock("pw").unwrap();
+        let got = store.load("h").unwrap().unwrap();
+        assert_eq!(got.ssh_passphrase.as_deref(), Some("kept"));
+        assert_eq!(got.vnc_password.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn a_wrong_master_password_keeps_the_parked_save_and_lock_wipes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        store.unlock("right").unwrap();
+        store.lock();
+        assert!(matches!(
+            store.save("h", &sample_creds()),
+            Err(Error::Locked)
+        ));
+        assert!(store.unlock("wrong").is_err());
+        assert_eq!(store.parked_saves(), 1);
+        store.lock();
+        assert_eq!(store.parked_saves(), 0);
+        store.unlock("right").unwrap();
+        assert!(store.load("h").unwrap().is_none());
     }
 
     #[test]
