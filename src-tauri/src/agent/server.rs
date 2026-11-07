@@ -1615,10 +1615,10 @@ fn needs_wheel(command: &ClientCommand) -> bool {
 /// An [`RpcError`] tagged `SCREEN_CHANGED`, and nothing was sent.
 fn admit_typing(ctx: &Ctx, session_id: &str, attachment_id: &str) -> Result<(), RpcError> {
     typing_verdict(ctx, session_id, attachment_id).map_err(|rejected| {
-            // Logged where the refusal is decided rather than left to whatever
-            // reads the reply. A person asking why an agent stopped typing at
-            // their machine gets both numbers and the session id from the
-            // application's own log, without the agent's transcript.
+        // Logged where the refusal is decided rather than left to whatever
+        // reads the reply. A person asking why an agent stopped typing at
+        // their machine gets both numbers and the session id from the
+        // application's own log, without the agent's transcript.
         tracing::info!(
             session = %session_id,
             attachment = %attachment_id,
