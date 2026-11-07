@@ -59,6 +59,8 @@ pub mod codes {
     /// Every limb this agent may drive at once is attached, and each one is
     /// a limb it opened or is driving.
     pub const TOO_MANY_LIMBS: &str = "TOO_MANY_LIMBS";
+    /// The application's mirror budget refused a framebuffer mirror.
+    pub const BUDGET_REFUSED: &str = "BUDGET_REFUSED";
 }
 
 /// A tool execution error: something the model can read and self correct from.

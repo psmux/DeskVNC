@@ -77,12 +77,12 @@ fn memory_is_exactly_what_the_document_says_at_the_four_resolutions() {
 fn a_mirror_over_the_pixel_budget_is_an_error_and_not_a_smaller_image() {
     let mut slot = MirrorSlot::default();
     let refused = slot
-        .attach(4096, 2560, GeometryGeneration::FIRST, 0, Timestamp(0))
-        .expect_err("10.5 megapixels is over the 8.3 megapixel default");
+        .attach(7680, 4320, GeometryGeneration::FIRST, 0, Timestamp(0))
+        .expect_err("33 megapixels is over the 20.5 megapixel default");
 
     match refused {
         PerceptionError::Budget(BudgetRefused::Pixels { pixels, budget, .. }) => {
-            assert_eq!(pixels, 4096 * 2560);
+            assert_eq!(pixels, 7680 * 4320);
             assert_eq!(budget, agent_perception::DEFAULT_MAX_MIRROR_PIXELS);
         }
         other => panic!("expected a pixel budget refusal, got {other:?}"),

@@ -3674,7 +3674,27 @@ impl Plane {
                 ..OpenRequest::default()
             },
         };
-        self.adopt_limb(&request)?;
+        match self.adopt_limb(&request) {
+            // Naming a limb the application already has open attaches it, and
+            // a mirror is asked for so a later screen read can be answered.
+            // The mirror is a convenience here, not what the caller asked
+            // for: `dvv status` reads no pixels at all. So when the budget
+            // refuses one (a desktop larger than it, or too many mirrors out
+            // already), the limb is still attached, without a mirror, and a
+            // screen read on it says so. Refusing the whole attach used to
+            // make even `dvv status` fail with BUDGET_REFUSED on a 4096x2304
+            // iMac.
+            Err(refused) if request.perceive && refused.code == codes::BUDGET_REFUSED => {
+                tracing::info!(limb = %id, why = %refused.message, "attaching without a mirror");
+                self.adopt_limb(&OpenRequest {
+                    perceive: false,
+                    ..request
+                })?;
+            }
+            other => {
+                other?;
+            }
+        }
         Ok(self.registry.get(id))
     }
 
