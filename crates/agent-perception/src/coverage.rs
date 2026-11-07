@@ -25,8 +25,12 @@
 //!
 //! Three states and the transitions between them are deliberately asymmetric:
 //!
-//! * a compositable rect marks a tile [`TileState::Written`] only when it
-//!   covers the tile ENTIRELY, because half a fresh tile is not a fresh tile;
+//! * a tile becomes [`TileState::Written`] only once every pixel of it has
+//!   been composited since it was last unknown or stale, because half a fresh
+//!   tile is not a fresh tile. One rect may do that or several may: servers
+//!   split an update at any pixel (x11vnc and TigerVNC both send Tight rects
+//!   with edges such as y=30), so requiring a single rect to cover a whole
+//!   tile left the tiles along every such edge unknown forever;
 //! * an H.264 rect marks every tile it TOUCHES [`TileState::Stale`], because
 //!   one stale pixel in a tile makes the tile a lie;
 //! * a `CopyRect` whose source is not wholly written makes its destination
@@ -40,6 +44,7 @@
 use crate::error::TooManyStaleRegions;
 use remote_core::geometry::Rect;
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Tile edge, in framebuffer pixels.
 ///
@@ -153,6 +158,10 @@ pub struct Coverage {
     height: u16,
     cols: u16,
     tiles: Vec<TileState>,
+    /// Pixels composited so far in tiles that are not yet `Written`, one bit
+    /// per pixel of the 16x16 tile, row major. Only tiles part way there have
+    /// an entry, so a primed mirror carries none.
+    fresh: HashMap<usize, [u64; 4]>,
 }
 
 /// Tiles spanned by `[start, start + len)` as a half open tile index range.
@@ -173,6 +182,7 @@ impl Coverage {
             height,
             cols,
             tiles: vec![TileState::NeverWritten; cols as usize * rows as usize],
+            fresh: HashMap::new(),
         }
     }
 
@@ -212,11 +222,12 @@ impl Coverage {
         row as usize * self.cols as usize + col as usize
     }
 
-    /// Mark every tile this rect covers ENTIRELY as composited.
+    /// Record that this rect was composited.
     ///
-    /// Partly covered tiles keep whatever they had: their uncovered part still
-    /// holds whatever it held, so the tile is no better than it was, and the
-    /// fresh half does not redeem the stale one.
+    /// A tile it covers entirely is written. A tile it covers in part keeps
+    /// its state until the rest of its pixels arrive too, from this update or
+    /// a later one: the uncovered part still holds whatever it held, so the
+    /// fresh half does not redeem the stale one, but two fresh halves do.
     pub fn mark_written(&mut self, rect: Rect) {
         self.mark(rect, TileState::Written);
     }
@@ -231,16 +242,42 @@ impl Coverage {
         let (r0, r1) = touched(rect.y, rect.height, self.height);
         for row in r0..r1 {
             for col in c0..c1 {
+                let i = self.idx(col, row);
                 if state == TileState::Written {
+                    if self.tiles[i] == TileState::Written {
+                        continue;
+                    }
                     let tile = self.tile_bounds(col, row);
-                    if rect.intersect(&tile) != tile {
+                    let part = rect.intersect(&tile);
+                    if part != tile && !self.fill_tile(i, tile, part) {
                         continue;
                     }
                 }
-                let i = self.idx(col, row);
+                self.fresh.remove(&i);
                 self.tiles[i] = state;
             }
         }
+    }
+
+    /// Add `part` of `tile` to the pixels composited there so far, and say
+    /// whether the whole tile has now been composited.
+    fn fill_tile(&mut self, i: usize, tile: Rect, part: Rect) -> bool {
+        if part.is_empty() {
+            return false;
+        }
+        let mask = self.fresh.entry(i).or_insert([0; 4]);
+        for y in (part.y - tile.y)..(part.y - tile.y + part.height) {
+            for x in (part.x - tile.x)..(part.x - tile.x + part.width) {
+                let bit = usize::from(y) * usize::from(TILE) + usize::from(x);
+                mask[bit / 64] |= 1 << (bit % 64);
+            }
+        }
+        (0..tile.height).all(|y| {
+            (0..tile.width).all(|x| {
+                let bit = usize::from(y) * usize::from(TILE) + usize::from(x);
+                mask[bit / 64] & (1 << (bit % 64)) != 0
+            })
+        })
     }
 
     /// A `CopyRect` moved content from `src` to `dst`.
@@ -393,5 +430,50 @@ mod tests {
         c.mark_stale(Rect::new(0, 0, 16, 16));
         c.mark_copied(Rect::new(0, 0, 16, 16), Rect::new(32, 32, 16, 16));
         assert_eq!(c.region_state(Rect::new(32, 32, 16, 16)).stale, 1);
+    }
+
+    #[test]
+    fn rects_split_at_any_pixel_still_prime_the_mirror() {
+        // The first update x11vnc sent for a 1280x800 desktop, cut down: a
+        // 30 pixel title strip, then the rest starting at y=30. Neither rect
+        // covers the tiles of rows 16 to 31 alone; together they cover every
+        // pixel, so the mirror is primed.
+        let mut c = Coverage::new(64, 64);
+        c.mark_written(Rect::new(0, 0, 64, 30));
+        c.mark_written(Rect::new(0, 30, 30, 34));
+        c.mark_written(Rect::new(30, 30, 34, 34));
+        assert!(c.is_primed());
+        assert!(c.fresh.is_empty(), "a written tile keeps no partial mask");
+    }
+
+    #[test]
+    fn a_tile_half_written_after_going_stale_stays_stale_until_the_rest_arrives() {
+        let mut c = Coverage::new(32, 32);
+        c.mark_written(Rect::new(0, 0, 32, 32));
+        c.mark_stale(Rect::new(0, 0, 16, 16));
+        c.mark_written(Rect::new(0, 0, 16, 9));
+        assert_eq!(c.region_state(Rect::new(0, 0, 16, 16)).stale, 1);
+        c.mark_written(Rect::new(0, 9, 16, 7));
+        assert!(c.region_state(Rect::new(0, 0, 16, 16)).is_complete());
+    }
+
+    #[test]
+    fn pixels_written_before_a_tile_went_stale_do_not_count_after() {
+        let mut c = Coverage::new(16, 16);
+        c.mark_written(Rect::new(0, 0, 16, 8));
+        c.mark_stale(Rect::new(0, 12, 4, 4));
+        c.mark_written(Rect::new(0, 8, 16, 8));
+        assert_eq!(c.region_state(Rect::new(0, 0, 16, 16)).stale, 1);
+    }
+
+    #[test]
+    fn the_short_last_tile_fills_from_pieces() {
+        // 40 by 20: the last column is 8 wide and the last row 4 tall.
+        let mut c = Coverage::new(40, 20);
+        c.mark_written(Rect::new(0, 0, 40, 17));
+        c.mark_written(Rect::new(0, 17, 35, 3));
+        assert!(!c.is_primed());
+        c.mark_written(Rect::new(35, 17, 5, 3));
+        assert!(c.is_primed());
     }
 }
