@@ -9,6 +9,29 @@ mod damage;
 mod dxgi;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::notify::{Notification, notify};
+/// A line to show beside Allow viewing and control where the desktop asks
+/// again before input is allowed, as GNOME on Wayland does with a switch
+/// that starts off. `None` where the answer in the app is enough.
+pub fn control_hint() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::control_hint()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+/// Name the app to the desktop, for what it holds while a screen is
+/// shared. Linux only; elsewhere there is nothing to name.
+pub fn set_app_id(id: &'static str) {
+    #[cfg(target_os = "linux")]
+    linux::portal::set_app_id(id);
+    #[cfg(not(target_os = "linux"))]
+    let _ = id;
+}
 #[cfg(windows)]
 mod mf;
 #[cfg(target_os = "macos")]

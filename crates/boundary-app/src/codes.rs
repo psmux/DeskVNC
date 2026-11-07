@@ -130,7 +130,7 @@ impl Codes {
             if boundary_codes::default_service().is_empty() {
                 "Leave empty to use full invitations only."
             } else {
-                "Leave empty for the shared Boundary service. Private infrastructure needs its own service here."
+                "Leave empty for the shared DeskVNC code service. Private infrastructure needs its own service here."
             },
         );
         if !self.message.is_empty() {

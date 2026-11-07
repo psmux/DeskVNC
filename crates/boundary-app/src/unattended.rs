@@ -68,6 +68,8 @@ pub struct Unattended {
     /// in or lock screen. Picked up again when it hands over.
     handed_over: bool,
     checked: std::time::Instant,
+    /// The window, woken when the listener has something to say.
+    ctx: egui::Context,
 }
 
 impl Unattended {
@@ -75,7 +77,7 @@ impl Unattended {
     pub fn asking(&self) -> bool {
         self.ask.is_some()
     }
-    pub fn new() -> Self {
+    pub fn new(ctx: &egui::Context) -> Self {
         let mut this = Self {
             access_path: PathBuf::new(),
             machine: String::new(),
@@ -96,6 +98,7 @@ impl Unattended {
             login_notice_dismissed: notice_dismissed(),
             handed_over: false,
             checked: std::time::Instant::now(),
+            ctx: ctx.clone(),
         };
         // Rewrite an existing sign in entry, so one written by an older copy
         // picks up what this one adds (a restart after a crash on macOS) and
@@ -168,14 +171,20 @@ impl Unattended {
                 return;
             }
         }
-        self.listener = Some(unattended::listen(
+        let mut listener = unattended::listen(
             boundary_session::HostOptions::default(),
             key,
             self.access_path.clone(),
             // The primary display, found when a helper arrives: nobody is
             // there to pick another, and a sleeping screen lists none now.
             boundary_platform::open_primary,
-        ));
+        );
+        // A helper asking to come in wakes the window, which otherwise draws
+        // nothing while it waits.
+        let (_, stand_in) = tokio::sync::mpsc::channel(1);
+        let notices = std::mem::replace(&mut listener.notices, stand_in);
+        listener.notices = crate::wake::relay(notices, self.ctx.clone());
+        self.listener = Some(listener);
         self.say("Starting unattended access");
     }
     fn halt(&mut self) {
@@ -234,6 +243,11 @@ impl Unattended {
     }
     pub fn enabled(&self) -> bool {
         self.access.enabled
+    }
+    /// Whether the window has to look once a second for the lock screen
+    /// copy to hand the ID back, which sends no event.
+    pub fn needs_checks(&self) -> bool {
+        self.access.enabled && (self.login || self.handed_over)
     }
     /// This computer's lasting ID, the one a helper saves.
     pub fn machine_id(&self) -> &str {
@@ -404,6 +418,8 @@ impl Unattended {
                 });
                 if !control_ok {
                     theme::small(ui, "Accessibility permission is needed for control. You can allow viewing now.");
+                } else if let Some(hint) = boundary_platform::control_hint() {
+                    theme::small(ui, hint);
                 }
             });
         if let Some(approval) = decision
@@ -578,7 +594,7 @@ impl Unattended {
         if ui
             .checkbox(
                 &mut autostart,
-                "Start Boundary when I sign in, so it is ready",
+                "Start DeskVNC Support when I sign in, so it is ready",
             )
             .changed()
         {

@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use boundary_session::Rect;
 use std::sync::Arc;
 
+pub(crate) mod notify;
 pub(crate) mod portal;
 pub(crate) mod x11;
 
@@ -58,9 +59,43 @@ pub(crate) struct Area {
     pub height: u32,
 }
 
+/// What to tell the person before they allow control, or `None` when
+/// allowing it here is the whole answer. On Wayland the desktop asks again
+/// in its own sharing dialog, and GNOME shows its Allow Remote Interaction
+/// switch off whatever was chosen here; the portal cannot turn it on, and
+/// with it off the helper can only watch.
+pub(crate) fn control_hint() -> Option<&'static str> {
+    control_hint_for(kind(), std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref())
+}
+fn control_hint_for(kind: Kind, desktop: Option<&str>) -> Option<&'static str> {
+    if kind != Kind::Wayland {
+        return None;
+    }
+    let gnome = desktop.is_some_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("gnome")));
+    Some(if gnome {
+        "For control, switch on Allow Remote Interaction when your desktop asks which screen to share. It starts off, and left off they can only watch."
+    } else {
+        "For control, allow remote input too when your desktop asks which screen to share. Left off, they can only watch."
+    })
+}
+
+/// Why a Wayland desktop did not share its screen, for the helper and for
+/// the person at the computer. The portal gives no reason when GNOME refuses
+/// a session because the screen is locked or blank, so `asleep` comes from
+/// asking the desktop afterwards.
+fn refused(error: &str, asleep: bool) -> String {
+    if asleep {
+        "The screen is locked or asleep, and the desktop will not share it like that. Ask the person at the computer to unlock it, then connect again".into()
+    } else {
+        format!(
+            "This Wayland desktop did not share its screen ({error}). DeskVNC Support needs the xdg-desktop-portal ScreenCast service, which GNOME, KDE and wlroots desktops provide, or a session on Xorg"
+        )
+    }
+}
+
 pub(crate) enum Screen {
     X11(Box<x11::Screen>),
-    Portal(portal::Screen),
+    Portal(Box<portal::Screen>),
 }
 impl Screen {
     /// The display `id` (a RandR output on X11; on Wayland the person or a
@@ -71,10 +106,8 @@ impl Screen {
         match kind() {
             Kind::X11 => Ok(Self::X11(Box::new(x11::Screen::open(id, accelerated)?))),
             Kind::Wayland => match portal::Screen::open() {
-                Ok(screen) => Ok(Self::Portal(screen)),
-                Err(e) => bail!(
-                    "This Wayland desktop did not share its screen ({e:#}). DeskVNC Support needs the xdg-desktop-portal ScreenCast service, which GNOME, KDE and wlroots desktops provide, or a session on Xorg"
-                ),
+                Ok(screen) => Ok(Self::Portal(Box::new(screen))),
+                Err(e) => bail!(refused(&format!("{e:#}"), portal::screen_asleep())),
             },
         }
     }
@@ -168,6 +201,33 @@ mod tests {
         assert_eq!(keysym('é'), 0xe9);
         assert_eq!(keysym('€'), 0x0100_20ac);
         assert_eq!(keysym('\n'), 0xff0d);
+    }
+
+    #[test]
+    fn a_locked_screen_is_named_as_the_reason() {
+        // What the portal said when GNOME was locked: nothing useful.
+        let portal = "Portal request didn't succeed with no information";
+        let said = refused(portal, true);
+        assert!(said.contains("locked or asleep"), "{said}");
+        assert!(said.contains("unlock"), "{said}");
+        assert!(!said.contains("ScreenCast service"), "{said}");
+    }
+
+    #[test]
+    fn without_a_lock_the_portal_is_still_the_suspect() {
+        let said = refused("Portal request didn't succeed with no information", false);
+        assert!(said.contains("ScreenCast service"), "{said}");
+        assert!(said.contains("no information"), "{said}");
+    }
+
+    #[test]
+    fn control_on_gnome_wayland_names_the_switch() {
+        let gnome = control_hint_for(Kind::Wayland, Some("ubuntu:GNOME")).unwrap();
+        assert!(gnome.contains("Allow Remote Interaction"), "{gnome}");
+        let other = control_hint_for(Kind::Wayland, Some("KDE")).unwrap();
+        assert!(!other.contains("Allow Remote Interaction"), "{other}");
+        // X11 asks nothing more, so there is nothing to say.
+        assert_eq!(control_hint_for(Kind::X11, Some("GNOME")), None);
     }
 
     #[test]
