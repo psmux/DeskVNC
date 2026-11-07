@@ -1364,7 +1364,7 @@ fn status_line(
     setting: &str,
     more: impl FnOnce(&mut egui::Ui),
 ) -> (egui::Rect, egui::Rect) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         let setting = ui
             .label(
                 RichText::new(setting)
@@ -1374,10 +1374,10 @@ fn status_line(
             .rect;
         ui.add_space(16.0);
         let status = ui
-            .with_layout(
-                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-                |ui| {
-                    theme::dot(ui, color);
+            .with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                // Beside the first line, however many lines the status takes.
+                theme::dot(ui, color);
+                ui.vertical(|ui| {
                     let status = ui
                         .add(
                             egui::Label::new(
@@ -1386,10 +1386,11 @@ fn status_line(
                             .wrap(),
                         )
                         .rect;
-                    more(ui);
+                    ui.horizontal_wrapped(more);
                     status
-                },
-            )
+                })
+                .inner
+            })
             .inner;
         (status, setting)
     })
@@ -1485,6 +1486,7 @@ mod tests {
         );
         // All of it is there, on more than one line.
         assert!(status.height() > 30.0, "status {status:?} was cut short");
+        assert!(status.height() < 100.0, "status {status:?} spread out");
     }
 
     #[test]
