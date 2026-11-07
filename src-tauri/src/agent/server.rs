@@ -1874,6 +1874,10 @@ pub struct OpenAsk {
     pub port: u16,
     /// The protocol as `ProtocolKind::as_str` spells it.
     pub protocol: String,
+    /// Open a session of its own even though the machine already has one.
+    /// True only for a slot above 0, which names the next concurrent session;
+    /// without it the application hands back the window it already has.
+    pub force_new: bool,
 }
 
 /// What the application did about an [`OpenAsk`].
@@ -1961,20 +1965,50 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
     // it to touch, and an arbitrary address is not that.
     let (port, protocol) = permitted_endpoint(ctx, params, &address).await?;
 
-    // Slot 0 attaches to whatever is already live (`02 §4.4`). A machine the
-    // person already has open is not opened twice: the agent is handed that
-    // session, which is what makes an agent and a person watch the same thing.
-    if let Some((session_id, _)) = {
+    // The slot is the open's as much as the attach's. Slot N is the Nth live
+    // session against this machine, oldest first, exactly as `limb.attach`
+    // counts them. Reading it here and nowhere else would be the bug this
+    // replaced: an open for slot 1 ignored the slot, so on a machine nobody
+    // had open it dialled what became slot 0, and the attach that followed
+    // asked for slot 1, found one session, and timed out saying a person
+    // might be answering a prompt.
+    let slot = params.get("slot").and_then(Value::as_u64).unwrap_or(0);
+    let live = {
         let sessions = ctx.sessions.lock();
-        sessions_for_machine(&sessions, &key).into_iter().next()
-    } {
+        sessions_for_machine(&sessions, &key)
+    };
+
+    // A slot that is already live is handed back (`02 §4.4`). For slot 0 that
+    // is the session the person already has open: it is not opened twice, so
+    // an agent and a person watch the same thing.
+    if let Some((session_id, _)) = usize::try_from(slot).ok().and_then(|i| live.get(i)) {
         return Ok(json!({
             "opened": false,
             "reused": true,
             "sessionId": session_id,
-            "why": "that machine is already open in DeskVNCViewer, so nothing was dialled and this is the session that was already there. Call limb.attach for it",
+            "slot": slot,
+            "why": "that machine is already open in DeskVNCViewer at this slot, so nothing was dialled and this is the session that was already there. Call limb.attach for it",
         }));
     }
+    // Slots are dense. Opening one more session makes the next slot, so a
+    // slot past that is refused before anything is dialled rather than
+    // opening a session that would land at a different slot than the one
+    // asked for.
+    if slot > live.len() as u64 {
+        return Err(RpcError::tagged(
+            "SLOT_REFUSED",
+            format!(
+                "{address} has {} live session(s), so the next one opened is slot {}, and slot {slot} cannot be opened yet. Nothing was dialled. Slots open in order: open slot {} first, then ask for the next",
+                live.len(),
+                live.len(),
+                live.len(),
+            ),
+        ));
+    }
+    // Slot 0 with nothing open is an ordinary open. A slot above 0 is a
+    // second concurrent session against a machine that already has one, so
+    // the application must not hand back the window it already has.
+    let force_new = slot > 0;
 
     let open = opener().lock().clone().ok_or_else(|| {
         RpcError::tagged(
@@ -1990,6 +2024,7 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
             address: address.clone(),
             port,
             protocol: protocol.clone(),
+            force_new,
         },
         tell,
     );
@@ -2031,6 +2066,7 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
         "opened": true,
         "reused": opened.reused,
         "sessionId": opened.session_id,
+        "slot": slot,
         "address": address,
         "port": port,
         "protocol": protocol,
@@ -4777,6 +4813,7 @@ mod tests {
     /// on the ask that actually crossed.
     #[tokio::test]
     async fn an_open_asks_the_application_and_answers_as_soon_as_the_session_is_spawned() {
+        let _one_opener = OPENER_TESTS.lock().await;
         let asked: Arc<Mutex<Option<OpenAsk>>> = Arc::new(Mutex::new(None));
         let seen = asked.clone();
         install_opener(Arc::new(move |ask: OpenAsk, tell| {
@@ -4823,6 +4860,100 @@ mod tests {
         assert_eq!(ask.port, 22);
         assert_eq!(ask.protocol, "ssh");
         assert_eq!(ask.host_id, None, "no saved machine was named");
+        assert!(
+            !ask.force_new,
+            "slot 0 on a machine with nothing open is an ordinary open"
+        );
+    }
+
+    /// The opener is a process global, so the tests that install one take
+    /// turns rather than replacing each other's closure mid test.
+    static OPENER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Slot 1 on a machine nothing has open. The open used to ignore the slot
+    /// and dial what became slot 0, and the attach after it asked for slot 1,
+    /// found one session and gave up saying a person might be at a prompt.
+    /// Now it is refused before anything is dialled, and says which slot is
+    /// next.
+    #[tokio::test]
+    async fn a_slot_past_the_next_one_is_refused_before_anything_is_dialled() {
+        let _one_opener = OPENER_TESTS.lock().await;
+        let asked: Arc<Mutex<Option<OpenAsk>>> = Arc::new(Mutex::new(None));
+        let seen = asked.clone();
+        install_opener(Arc::new(move |ask: OpenAsk, tell| {
+            *seen.lock() = Some(ask);
+            let _ = tell.send(Ok(Opened {
+                session_id: "s2".to_string(),
+                reused: false,
+            }));
+        }));
+
+        let fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        // 10.0.0.5 is published (the fixture's live session is on it) and
+        // nothing is live on its SSH port.
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "limb.open",
+            &json!({ "address": "10.0.0.5", "protocol": "ssh", "port": 22, "slot": 1 }),
+        )
+        .await
+        .expect_err("slot 1 needs slot 0 first");
+        assert_eq!(refused.tag, Some("SLOT_REFUSED"));
+        assert!(
+            refused.message.contains("open slot 0 first")
+                && refused.message.contains("Nothing was dialled"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            asked.lock().is_none(),
+            "the application was asked to open something"
+        );
+    }
+
+    /// Slot 1 on a machine that already has slot 0 open is a second session of
+    /// its own. Without `force_new` the application hands back the window it
+    /// already has, which is slot 0 again.
+    #[tokio::test]
+    async fn the_next_slot_opens_a_session_of_its_own() {
+        let _one_opener = OPENER_TESTS.lock().await;
+        let asked: Arc<Mutex<Option<OpenAsk>>> = Arc::new(Mutex::new(None));
+        let seen = asked.clone();
+        install_opener(Arc::new(move |ask: OpenAsk, tell| {
+            *seen.lock() = Some(ask);
+            let _ = tell.send(Ok(Opened {
+                session_id: "s2".to_string(),
+                reused: false,
+            }));
+        }));
+
+        let fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        let answer = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.open",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "port": 5900, "slot": 1 }),
+        )
+        .await;
+        assert_eq!(answer["opened"], true, "{answer}");
+        assert_eq!(answer["sessionId"], "s2");
+        assert_eq!(answer["slot"], 1);
+        let ask = seen_ask(&asked);
+        assert!(ask.force_new, "slot 1 has to ask for a session of its own");
+
+        // Slot 0 on the same machine is still the session that was there.
+        let again = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.open",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "port": 5900, "slot": 0 }),
+        )
+        .await;
+        assert_eq!(again["reused"], true);
+        assert_eq!(again["sessionId"], "s1");
     }
 
     fn seen_ask(asked: &Arc<Mutex<Option<OpenAsk>>>) -> OpenAsk {
