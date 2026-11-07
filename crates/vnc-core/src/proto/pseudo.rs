@@ -3,6 +3,7 @@
 //! These carry no framebuffer pixels; they signal capabilities, resizes,
 //! cursor shapes, and similar out-of-band state (PRD/02 §3).
 
+use crate::apple::wire::{self as apple_wire, encoding as apple_enc};
 use crate::encodings::DecoderState;
 use crate::error::{Result, VncError};
 use crate::pixel::convert::pixel_to_rgba;
@@ -44,6 +45,14 @@ pub enum PseudoRect {
     ContinuousUpdatesCapable,
     QemuExtKeyCapable,
     ExtendedMouseButtonsCapable,
+    /// macOS Screen Sharing rekey: the 36 byte payload.
+    AppleRekey(Vec<u8>),
+    /// macOS Screen Sharing display layout.
+    AppleLayout(apple_wire::DisplayLayout),
+    /// macOS Screen Sharing keyboard layout and secure input state.
+    AppleInputSource(apple_wire::InputSource),
+    /// An Apple metadata rectangle that was read and needs no action.
+    AppleIgnored,
 }
 
 /// Whether `enc` is a pseudo-encoding this module handles.
@@ -62,6 +71,13 @@ pub fn is_pseudo(enc: i32) -> bool {
             | encoding::PSEUDO_QEMU_LED_STATE
             | encoding::PSEUDO_QEMU_EXT_KEY_EVENT
             | encoding::PSEUDO_EXTENDED_MOUSE_BUTTONS
+            | apple_enc::REKEY
+            | apple_enc::CURSOR
+            | apple_enc::DISPLAY_LAYOUT
+            | apple_enc::VENDOR_KEYSYMS
+            | apple_enc::KEYBOARD_INPUT_SOURCE
+            | apple_enc::DEVICE_INFO
+            | apple_enc::MEDIA_ANNOUNCE
     )
 }
 
@@ -139,6 +155,34 @@ where
         }
         encoding::PSEUDO_QEMU_EXT_KEY_EVENT => Ok(PseudoRect::QemuExtKeyCapable),
         encoding::PSEUDO_EXTENDED_MOUSE_BUTTONS => Ok(PseudoRect::ExtendedMouseButtonsCapable),
+        apple_enc::REKEY => Ok(PseudoRect::AppleRekey(
+            read_exact_vec(reader, crate::apple::record::REKEY_LEN).await?,
+        )),
+        apple_enc::CURSOR => Ok(match decoder.apple_cursor_mut().read(reader, rect).await? {
+            Some(shape) => PseudoRect::Cursor(shape),
+            None => PseudoRect::AppleIgnored,
+        }),
+        apple_enc::DISPLAY_LAYOUT => {
+            let body = apple_wire::read_u16_prefixed(reader, "display layout").await?;
+            Ok(PseudoRect::AppleLayout(apple_wire::parse_display_layout(
+                &body,
+            )?))
+        }
+        apple_enc::KEYBOARD_INPUT_SOURCE => {
+            let body = apple_wire::read_u16_prefixed(reader, "keyboard input source").await?;
+            Ok(PseudoRect::AppleInputSource(
+                apple_wire::parse_input_source(&body)?,
+            ))
+        }
+        apple_enc::DEVICE_INFO => {
+            let model = apple_wire::read_device_info(reader).await?;
+            tracing::info!(%model, "Mac device info");
+            Ok(PseudoRect::AppleIgnored)
+        }
+        apple_enc::VENDOR_KEYSYMS | apple_enc::MEDIA_ANNOUNCE => {
+            apple_wire::read_u16_prefixed(reader, "Apple metadata").await?;
+            Ok(PseudoRect::AppleIgnored)
+        }
         other => Err(VncError::UnsupportedEncoding(other)),
     }
 }

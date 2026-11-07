@@ -16,6 +16,8 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 flate2 = { workspace = true }
+# The live input test saves the session's picture as a PNG for a person to check.
+image = { workspace = true }
 zune-jpeg = { workspace = true }
 des = { workspace = true }
 cipher = { workspace = true }
@@ -25,6 +27,9 @@ eax = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }
+# PBKDF2-HMAC-SHA512 for the macOS Screen Sharing SRP logins. Already in the
+# workspace for rdp-auth, so no new crate enters the lock file.
+pbkdf2 = { workspace = true }
 rsa = { workspace = true }
 num-bigint-dig = { workspace = true }
 rand = { workspace = true }
@@ -43,6 +48,8 @@ tracing-subscriber = { workspace = true }
 tokio = { version = "1", features = ["full", "test-util"] }
 # Integration tests build real zlib/Tight/ZRLE wire data in the mock RFB server.
 flate2 = { workspace = true }
+# The live input test saves the session's picture as a PNG for a person to check.
+image = { workspace = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
