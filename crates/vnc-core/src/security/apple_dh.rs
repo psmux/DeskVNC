@@ -24,6 +24,25 @@
 //! casual capture and nothing more, which is why a Mac that also offers type
 //! 33 is logged into with that instead (see `apple_srp`), and why PRD/10 §5
 //! recommends an SSH tunnel to a Mac whose only login is this one.
+//!
+//! ## macOS 26 refuses this login
+//!
+//! Against macOS 26.7.1 this path cannot authenticate, with a correct
+//! account, however the credential block is encrypted. Observed on 2026-11-07
+//! with a password confirmed valid out of band (`dscl . -authonly` returned
+//! success): the Mac decrypts the user name correctly (its log names the real
+//! account) but refuses the login with SecurityResult 1, under every mode
+//! tried for the credential block (ECB, one CBC chain from a zero IV, each 64
+//! byte field as its own zero IV chain) and every key tried (MD5 of the
+//! shared secret, and SHA-1, SHA-256, SHA-512 of it). The user name sits in
+//! the first AES block and decrypts the same under all of these, so its being
+//! read does not tell the modes apart; the password half, which does, is
+//! refused by all of them. No standard AES mode makes a valid password
+//! verify, so the macOS 26 server does something else with the password that
+//! is not visible from the handshake. This is why the shipped viewer (which
+//! sends ECB here) reports rejected credentials against macOS 26. The way
+//! forward is the SRP login (type 33 or 36), which this build prefers; type
+//! 30 should stay only as a last resort and will fail on macOS 26.
 
 use aes::Aes128;
 use cipher::{block_padding::NoPadding, BlockEncryptMut, KeyInit};

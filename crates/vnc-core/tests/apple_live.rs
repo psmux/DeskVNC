@@ -7,6 +7,9 @@
 //! * `DVV_LIVE_APPLE_USER`, an account on it
 //! * `DVV_LIVE_APPLE_PASS`, that account's password
 //!
+//! or, instead of the last two, `DVV_LIVE_APPLE_CREDS` naming a file with the
+//! user on its first line and the password on its second.
+//!
 //! The tests named `live_probe_*` need only `DVV_LIVE_APPLE`. They never send
 //! a password or a real account name, so they cannot count against anyone's
 //! login attempts: they look at the offer, the host key and how the Mac
@@ -16,6 +19,27 @@
 //! the wire format can look like a wrong password to the Mac, and macOS
 //! throttles an account after repeated failures, so run them one at a time
 //! (`--test-threads=1`) and expect at most one failed attempt per test.
+//!
+//! Observed against macOS 26.7.1 (build 25G241) on 2026-11-07, with an
+//! account whose password was confirmed valid out of band:
+//!
+//! * The framing of types 33 and 36 is right. The Mac reads the identity,
+//!   sends its SRP challenge, reads the proof, and reaches the point where it
+//!   checks the client's evidence (its log: `SRP received 21 bytes` then
+//!   `SRP received 682 bytes`, `srp_server_mech_step: 1` then the result).
+//! * The proof itself is rejected: `client evidence does not match what we
+//!   calculated` (`srp_server_mech_step: -13`). It is rejected the same way
+//!   with the identity empty and with the account name as the identity, and
+//!   with several forms of `x` (`H(salt, H(":" P2))`, `H(salt, P2)`,
+//!   `H(salt, H(P2))`, the RFC 5054 form over the raw password, a 64 byte
+//!   PBKDF2 output). So Apple's `x`, `K` or `M1` differs from the inferred
+//!   formula in `apple_srp`, and a login cannot be completed until the real
+//!   derivation is known (a capture of a native SRP login, or Apple's
+//!   corecrypto SRP parameters). The session, input and clipboard steps, and
+//!   the stage two 0x1c offer, all sit behind a completed login and so are
+//!   still unreached.
+//! * Type 30 (Apple DH) cannot log in against this macOS either: see the note
+//!   in `apple_dh`. That is a separate finding about the shipped viewer.
 //!
 //! Each test prints what it saw with `LIVE` in front, so a run with
 //! `--nocapture` doubles as a capture of the facts still marked unconfirmed
@@ -42,10 +66,20 @@ struct Target {
 
 fn target(what: &str) -> Option<Target> {
     let addr = std::env::var("DVV_LIVE_APPLE").ok();
-    let user = std::env::var("DVV_LIVE_APPLE_USER").ok();
-    let pass = std::env::var("DVV_LIVE_APPLE_PASS").ok();
+    let (mut user, mut pass) = (
+        std::env::var("DVV_LIVE_APPLE_USER").ok(),
+        std::env::var("DVV_LIVE_APPLE_PASS").ok(),
+    );
+    // Or a file holding the user on its first line and the password on the
+    // second, so the secret never has to sit in the environment or a shell.
+    if let Ok(path) = std::env::var("DVV_LIVE_APPLE_CREDS") {
+        let text = std::fs::read_to_string(&path).expect("DVV_LIVE_APPLE_CREDS is readable");
+        let mut lines = text.lines();
+        user = lines.next().map(str::to_string);
+        pass = lines.next().map(str::to_string);
+    }
     let (Some(addr), Some(user), Some(pass)) = (addr, user, pass) else {
-        eprintln!("SKIP {what}: DVV_LIVE_APPLE, DVV_LIVE_APPLE_USER and DVV_LIVE_APPLE_PASS are not all set");
+        eprintln!("SKIP {what}: DVV_LIVE_APPLE and an account (DVV_LIVE_APPLE_USER and DVV_LIVE_APPLE_PASS, or DVV_LIVE_APPLE_CREDS) are not all set");
         return None;
     };
     let (host, port) = match addr.rsplit_once(':') {
