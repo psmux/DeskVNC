@@ -2,7 +2,6 @@
 //! encrypted Screen Sharing session, and what the server sends back.
 
 use std::collections::HashMap;
-use std::io::Read;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -22,6 +21,8 @@ pub mod client_msg {
     pub const AUTO_PASTEBOARD: u8 = 0x15;
     pub const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
     pub const VIEWER_INFO: u8 = 0x21;
+    pub const CLIPBOARD_FETCH: u8 = 0x0b;
+    pub const CLIPBOARD_SEND: u8 = 0x1f;
 }
 
 /// Server message types.
@@ -80,7 +81,7 @@ const MAX_CURSOR_AREA: usize = 1 << 20;
 
 /// The capability bits the native viewer sets in ViewerInfo. The server is
 /// known to test only bit 20 (observe only mode supported).
-pub const VIEWER_CAPABILITY_BITS: [usize; 9] = [0, 2, 3, 20, 30, 31, 32, 35, 81];
+pub const VIEWER_CAPABILITY_BITS: [usize; 10] = [0, 2, 3, 20, 21, 30, 31, 32, 35, 81];
 
 /// The 32 byte capability bitmap, most significant bit of byte 0 first.
 pub fn capability_bitmap(bits: &[usize]) -> [u8; 32] {
@@ -93,16 +94,21 @@ pub fn capability_bitmap(bits: &[usize]) -> [u8; 32] {
     map
 }
 
-/// ViewerInfo (0x21): `u8 0x21, u8 0, u16 body_len, u16 1, u16 viewer_app,
-/// version strings, 32 byte capability bitmap`.
+/// ViewerInfo (0x21): `u8 0x21, u8 0, u16 body_len`, then a fixed 62 byte
+/// body: `u16 1`, seven u32 values, and the 32 byte capability bitmap.
 ///
-/// UNCONFIRMED: what `viewer_app` means and how the version strings are
-/// framed. This sends `viewer_app` 1 and no version strings, so the bitmap
-/// follows straight after.
+/// The layout and values are the ones Apple's own client sends to a macOS 26
+/// Mac, read through a relay: the seven words were 2, 6, 1, 0 and then 26,
+/// 7, 1 (the client's macOS version). The Mac reads the body at that fixed
+/// size whatever \`body_len\` says, so a shorter ViewerInfo makes it take the
+/// next message as part of this one, and it then never sends the session
+/// key. With this one the Mac also announces clipboard changes.
 pub fn viewer_info() -> Vec<u8> {
-    let mut body = Vec::with_capacity(36);
+    let mut body = Vec::with_capacity(62);
     body.extend_from_slice(&1u16.to_be_bytes());
-    body.extend_from_slice(&1u16.to_be_bytes());
+    for word in VIEWER_INFO_WORDS {
+        body.extend_from_slice(&word.to_be_bytes());
+    }
     body.extend_from_slice(&capability_bitmap(&VIEWER_CAPABILITY_BITS));
     let mut out = Vec::with_capacity(4 + body.len());
     out.push(client_msg::VIEWER_INFO);
@@ -110,6 +116,75 @@ pub fn viewer_info() -> Vec<u8> {
     out.extend_from_slice(&(body.len() as u16).to_be_bytes());
     out.extend_from_slice(&body);
     out
+}
+
+/// The seven words of the native ViewerInfo, as observed.
+pub const VIEWER_INFO_WORDS: [u32; 7] = [2, 6, 1, 0, 26, 7, 1];
+
+/// ClipboardFetch (0x0b) asking for the Mac's clipboard with its data, which
+/// the Mac answers with a ClipboardSend. Apple's client sends this with all
+/// fields zero when it needs the text itself (with a 1 and a random tag it
+/// gets only the list of types).
+pub fn clipboard_fetch() -> [u8; 8] {
+    [client_msg::CLIPBOARD_FETCH, 0, 0, 0, 0, 0, 0, 0]
+}
+
+/// ClipboardSend (0x1f) from the viewer carrying plain text, in the Mac's own
+/// layout: `u8 0x1f, u8 0, u8 0, u8 0, u32 0, u32 uncompressed, u32
+/// compressed`, then a zlib stream (sync flushed) of one item, the UTF-8
+/// text with the aliases the Mac itself attaches. A Mac given this puts the
+/// text on its pasteboard as UTF-8, UTF-16 and classic text alike, where a
+/// standard ClientCutText reaches only the classic text flavour.
+pub fn clipboard_send_text(text: &str) -> Vec<u8> {
+    use std::io::Write;
+    fn blob(out: &mut Vec<u8>, b: &[u8]) {
+        out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        out.extend_from_slice(b);
+    }
+    let aliases: [(&[u8], &[u8]); 3] = [
+        (b"com.apple.ostype", b"utf8"),
+        (b"com.apple.nspboard-type", b"NSStringPboardType"),
+        (b"public.mime-type", b"text/plain;charset=utf-8"),
+    ];
+    let mut raw = 1u32.to_be_bytes().to_vec();
+    blob(&mut raw, b"public.utf8-plain-text");
+    raw.extend_from_slice(&0u32.to_be_bytes());
+    raw.extend_from_slice(&(aliases.len() as u32).to_be_bytes());
+    for (k, v) in aliases {
+        blob(&mut raw, k);
+        blob(&mut raw, v);
+    }
+    blob(&mut raw, text.as_bytes());
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&raw).expect("writing to a Vec");
+    z.flush().expect("writing to a Vec");
+    let compressed = z.get_ref().clone();
+    let mut out = vec![client_msg::CLIPBOARD_SEND, 0, 0, 0, 0, 0, 0, 0];
+    out.extend_from_slice(&(raw.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+    out.extend_from_slice(&compressed);
+    out
+}
+
+/// Inflate a zlib stream that may end on a sync flush with no final block,
+/// which is how the Mac sends its clipboard; a reader that waits for the end
+/// of the stream fails on it. `expected` is the size the message declares.
+pub fn inflate_flushed(data: &[u8], expected: usize) -> Result<Vec<u8>> {
+    let mut d = flate2::Decompress::new(true);
+    let mut out = Vec::with_capacity(expected);
+    while out.len() < expected {
+        let consumed = d.total_in() as usize;
+        let produced = out.len();
+        let status = d
+            .decompress_vec(&data[consumed..], &mut out, flate2::FlushDecompress::Sync)
+            .map_err(|e| VncError::Protocol(format!("clipboard did not inflate: {e}")))?;
+        if status == flate2::Status::StreamEnd
+            || (d.total_in() as usize == consumed && out.len() == produced)
+        {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// SetEncryption command 1, which makes the server send its first rekey.
@@ -531,7 +606,9 @@ pub async fn read_misc_status<R: AsyncRead + Unpin>(r: &mut R) -> Result<u16> {
 }
 
 /// Read a ClipboardSend (0x1f) after its type byte and return its plain
-/// text, if it carries any.
+/// text, if it carries any. A promise (third byte 1) lists the types the Mac
+/// has without their data and is skipped; the data comes in answer to
+/// [`clipboard_fetch`].
 pub async fn read_clipboard<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<String>> {
     let mut head = [0u8; 15];
     r.read_exact(&mut head).await.map_err(map_eof)?;
@@ -543,14 +620,10 @@ pub async fn read_clipboard<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<St
         )));
     }
     let data = read_exact_vec(r, compressed).await?;
-    if uncompressed == 0 {
+    if uncompressed == 0 || head[1] == 1 {
         return Ok(None);
     }
-    let mut inflated = Vec::with_capacity(uncompressed);
-    flate2::read::ZlibDecoder::new(&data[..])
-        .take(MAX_CLIPBOARD as u64)
-        .read_to_end(&mut inflated)
-        .map_err(|e| VncError::Protocol(format!("clipboard did not inflate: {e}")))?;
+    let inflated = inflate_flushed(&data, uncompressed)?;
     Ok(clipboard_text(&inflated))
 }
 
@@ -636,8 +709,8 @@ mod tests {
         let m = capability_bitmap(&VIEWER_CAPABILITY_BITS);
         // Bits 0, 2, 3 -> 1011_0000.
         assert_eq!(m[0], 0b1011_0000);
-        // Bit 20 -> byte 2, mask 0x08.
-        assert_eq!(m[2], 0x08);
+        // Bits 20, 21 -> byte 2, 0x08 | 0x04, as Apple's client sends.
+        assert_eq!(m[2], 0x0c);
         // Bits 30, 31 -> byte 3, low two bits.
         assert_eq!(m[3], 0x03);
         // Bits 32, 35 -> byte 4, 0x80 | 0x10.

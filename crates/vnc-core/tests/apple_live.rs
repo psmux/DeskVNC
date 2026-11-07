@@ -35,22 +35,28 @@
 //!   Remote Management privileges (Observe and Control); without them every
 //!   login, by any type and by Apple's own client, is refused after the
 //!   password is accepted (`lg level 0`, authresult 1).
-//! * After login the Mac stalls on the ViewerInfo message this client used to
-//!   send, and adds a virtual display for a SetDisplayConfiguration; both are
-//!   left out now. It drops the opening's full update request while it sets
-//!   up screen capture, so the client asks again after the first desktop
-//!   size announcement. With that, types 30, 33 and 36 all give the full
-//!   picture, and a disconnect closes cleanly on both sides.
-//! * Apple's own client, against a server we control, opens with SetMode(1),
-//!   SetEncodings `[1011, 1002, 6, 16, -239, 1104, 1100, -223, 1101, 1105,
-//!   1107, 1109, 1110]`, a 32 bpp SetPixelFormat, AutoPasteboard(1), a full
-//!   request and AutoFrameBufferUpdate (screen word 0). It sent no ViewerInfo
-//!   and no SetEncryption to that server, so the native encrypted prelude
-//!   has not been seen yet.
-//! * Clipboard sync does not work yet in either direction: the Mac sends no
-//!   pasteboard or heartbeat messages to this client, and ignores a standard
-//!   ClientCutText, with this client's encodings and with the native list.
-//!   `live_clipboard_both_ways` shows it.
+//! * ViewerInfo has a fixed 62 byte body (version, seven u32 values, the 32
+//!   byte capability bitmap), read off Apple's own client through a relay
+//!   that logs both legs of a real session. The Mac reads it at that size
+//!   whatever its length field says, so the shorter one this client used to
+//!   send swallowed the SetEncryption after it and the session never
+//!   started. With the native one the session runs, and the Mac also reports
+//!   clipboard changes.
+//! * The Mac adds a virtual display for a SetDisplayConfiguration, so none is
+//!   sent. It drops the opening's full update request while it sets up
+//!   screen capture, so the client asks again after the first desktop size
+//!   announcement. Types 30, 33 and 36 all give the full picture, and a
+//!   disconnect closes cleanly on both sides.
+//! * Clipboard, as Apple's client does it: the Mac sends MiscStatus 2 when
+//!   its pasteboard changes, the viewer answers with ClipboardFetch
+//!   (`0b 00 00 00 00 00 00 00`), and the Mac sends a ClipboardSend with the
+//!   data (zlib, sync flushed). A fetch with a 1 and a tag gets only the list
+//!   of types (a promise). The viewer's clipboard goes to the Mac as a
+//!   ClipboardSend in the same layout; a standard ClientCutText reaches only
+//!   the classic text flavour. `live_clipboard_both_ways` checks both ways.
+//! * Keys, shifted symbols, non ASCII letters, Return, Backspace, arrows,
+//!   clicks and cmd+a, cmd+z, cmd+s, cmd+w all arrive:
+//!   `live_input_into_own_textedit`.
 //! * 0x1c (media) on an Intel Mac: the Mac announces media (a 1010 rectangle)
 //!   when 1010 is listed, and answers an offer by loading its video encoder,
 //!   then logging `udpVideoStreamWasInitialized 0` and `unable to init media

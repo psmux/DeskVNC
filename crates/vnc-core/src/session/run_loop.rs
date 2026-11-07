@@ -1029,7 +1029,10 @@ impl RunLoop {
                 match cmd {
                     crate::apple::wire::misc::HEARTBEAT => {}
                     crate::apple::wire::misc::CLIPBOARD_CHANGED => {
-                        tracing::debug!("the clipboard on the Mac changed")
+                        // The Mac only says something changed; the text
+                        // comes in a ClipboardSend once it is asked for.
+                        tracing::debug!("the clipboard on the Mac changed; fetching it");
+                        self.send(&crate::apple::wire::clipboard_fetch()).await?;
                     }
                     other => tracing::debug!(cmd = other, "Mac status message"),
                 }
@@ -2151,6 +2154,13 @@ impl RunLoop {
             | ClientCommand::Key { .. }
             | ClientCommand::ReleaseAllKeys) => {
                 self.handle_input_command(cmd, settings).await?;
+            }
+            ClientCommand::ClipboardText(text) if self.apple.is_some() => {
+                // A Mac takes the viewer's clipboard as a ClipboardSend in its
+                // own layout; a ClientCutText would reach only its classic
+                // text flavour, which most apps do not paste.
+                self.send(&crate::apple::wire::clipboard_send_text(&text))
+                    .await?;
             }
             ClientCommand::ClipboardText(text) => {
                 // Extended peers are ANNOUNCED to first. The provide below is

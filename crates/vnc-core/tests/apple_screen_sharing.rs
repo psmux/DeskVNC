@@ -319,6 +319,16 @@ fn layout(backing: (u16, u16), logical: (u16, u16)) -> Vec<u8> {
     out
 }
 
+/// A zlib stream ended with a sync flush and no final block, as a Mac sends
+/// its clipboard.
+fn zlib_flushed(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(data).unwrap();
+    e.flush().unwrap();
+    e.get_ref().clone()
+}
+
 fn zlib(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -335,7 +345,7 @@ fn clipboard_message(text: &str) -> Vec<u8> {
     inner.extend_from_slice(&0u32.to_be_bytes());
     inner.extend_from_slice(&(text.len() as u32).to_be_bytes());
     inner.extend_from_slice(text.as_bytes());
-    let z = zlib(&inner);
+    let z = zlib_flushed(&inner);
     let mut m = vec![0x1f, 0, 0, 0, 0, 0, 0, 0];
     m.extend_from_slice(&(inner.len() as u32).to_be_bytes());
     m.extend_from_slice(&(z.len() as u32).to_be_bytes());
@@ -554,17 +564,23 @@ async fn serve(
     s.write_all(&si).await.unwrap();
 
     // --- cleartext prelude ----------------------------------------------------
-    // SetEncryption(1), SetMode(1), SetEncryption(2). A real macOS 26 Mac
-    // stalls on the ViewerInfo this client used to send first, never sending
-    // the rekey, so this server does the same: a ViewerInfo here ends it.
-    let se1 = read_n(s, 12).await;
-    if se1[0] == apple_wire::client_msg::VIEWER_INFO {
-        seen.lock().prelude = vec![se1.clone()];
+    // ViewerInfo, SetEncryption(1), SetMode(1), SetEncryption(2). Like a real
+    // macOS 26 Mac, this server reads ViewerInfo's body at its fixed native
+    // size of 62 bytes; one of any other size leaves it waiting for the rest,
+    // and the session never starts.
+    let vi_head = read_n(s, 4).await;
+    assert_eq!(vi_head[0], apple_wire::client_msg::VIEWER_INFO);
+    let vi_len = u16::from_be_bytes([vi_head[2], vi_head[3]]) as usize;
+    if vi_len != 62 {
+        seen.lock().prelude = vec![vi_head.clone()];
         std::future::pending::<()>().await;
     }
+    let mut vi = vi_head;
+    vi.extend_from_slice(&read_n(s, 62).await);
+    let se1 = read_n(s, 12).await;
     let mode = read_n(s, 4).await;
     let se2 = read_n(s, 8).await;
-    seen.lock().prelude = vec![se1, mode, se2];
+    seen.lock().prelude = vec![vi, se1, mode, se2];
 
     let wrap: [u8; 16] = Sha256::digest(&session_key)[..16].try_into().unwrap();
     let mut key1 = [0u8; 16];
@@ -690,6 +706,20 @@ async fn serve(
     s.write_all(&tx.seal(a)).await.unwrap();
     s.write_all(&tx.seal(b)).await.unwrap();
 
+    // The clipboard, the way a real Mac hands it over: a status message says
+    // it changed, and the text follows only once the viewer fetches it.
+    s.write_all(&tx.seal(&[0x14, 0, 0, 4, 0, 1, 0, 2]))
+        .await
+        .unwrap();
+    loop {
+        let c = read_record(s).await.unwrap();
+        let body = rx.open(&c).expect("client record verifies");
+        let fetch = body[0] == apple_wire::client_msg::CLIPBOARD_FETCH;
+        seen.lock().records.push(body);
+        if fetch {
+            break;
+        }
+    }
     s.write_all(&tx.seal(&clipboard_message("hello from the fake Mac")))
         .await
         .unwrap();
@@ -847,8 +877,18 @@ async fn type_33_session_end_to_end() {
     assert_eq!(ptr, [5, 1, 0, 31, 0, 23]);
     let key = wait_record(&mac.seen, "key event", |r| r[0] == 4).await;
     assert_eq!(key, [4, 1, 0, 0, 0, 0, 0, 0x61]);
-    let cut = wait_record(&mac.seen, "ClientCutText", |r| r[0] == 6).await;
-    assert_eq!(&cut[8..], b"from the viewer");
+    // The viewer's clipboard goes as a ClipboardSend in the Mac's layout.
+    let send_ = wait_record(&mac.seen, "ClipboardSend", |r| r[0] == 0x1f).await;
+    let un = u32::from_be_bytes(send_[8..12].try_into().unwrap()) as usize;
+    let co = u32::from_be_bytes(send_[12..16].try_into().unwrap()) as usize;
+    let raw = apple_wire::inflate_flushed(&send_[16..16 + co], un).unwrap();
+    let items = apple_wire::parse_clipboard(&raw).unwrap();
+    assert_eq!(items[0].kind, "public.utf8-plain-text");
+    assert_eq!(items[0].data, b"from the viewer");
+    assert!(
+        !mac.seen.lock().records.iter().any(|r| r[0] == 6),
+        "no ClientCutText in an Apple session"
+    );
 
     send(&handle, ClientCommand::Disconnect).await;
     let _ = tokio::time::timeout(DEFAULT_TIMEOUT, mac.task).await;
@@ -862,9 +902,15 @@ async fn type_33_session_end_to_end() {
     );
     assert_eq!(seen.proof_trailer, 384);
     assert_eq!(seen.client_init, Some(0xC1));
-    assert_eq!(seen.prelude[0], apple_wire::set_encryption_start());
-    assert_eq!(seen.prelude[1], apple_wire::set_mode(true));
-    assert_eq!(seen.prelude[2], apple_wire::set_encryption_finish());
+    assert_eq!(seen.prelude[0], apple_wire::viewer_info());
+    assert_eq!(seen.prelude[1], apple_wire::set_encryption_start());
+    assert_eq!(seen.prelude[2], apple_wire::set_mode(true));
+    assert_eq!(seen.prelude[3], apple_wire::set_encryption_finish());
+    // The clipboard was fetched after the Mac said it changed.
+    assert!(seen
+        .records
+        .iter()
+        .any(|r| r[..] == apple_wire::clipboard_fetch()[..]));
 
     // Opening records, in the native order.
     let r = &seen.records;
@@ -1122,13 +1168,29 @@ mod live_must_confirm {
         assert_eq!(&parsed.client_reply(), b"RFB 003.008\n");
     }
 
-    /// ClientInit is 0xC1; ViewerInfo is not sent (a real Mac stalls on it);
-    /// SetEncryption uses the native bytes; SetMode(1) is sent. All confirmed
-    /// by a full session against a macOS 26 Mac.
+    /// ClientInit is 0xC1. ViewerInfo is sent, 66 bytes in the native
+    /// layout read off Apple's own client through a relay (the Mac stalls on
+    /// any other size). SetEncryption uses the native bytes; SetMode(1) is
+    /// sent. All confirmed by full sessions against a macOS 26 Mac.
     #[test]
     fn prelude_bytes() {
         assert_eq!(apple_wire::CLIENT_INIT_SHARED, 0xC1);
-        assert!(!vnc_core::apple::PreludeOptions::default().viewer_info);
+        assert!(vnc_core::apple::PreludeOptions::default().viewer_info);
+        let vi = apple_wire::viewer_info();
+        assert_eq!(vi.len(), 66);
+        assert_eq!(&vi[..6], &[0x21, 0, 0, 0x3e, 0, 1]);
+        assert_eq!(
+            &vi[6..34],
+            &[
+                0, 0, 0, 2, 0, 0, 0, 6, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x1a, 0, 0, 0, 7, 0, 0, 0,
+                1
+            ]
+        );
+        assert_eq!(
+            &vi[34..45],
+            &[0xb0, 0, 0x0c, 0x03, 0x90, 0, 0, 0, 0, 0, 0x40]
+        );
+        assert!(vi[45..].iter().all(|b| *b == 0));
         assert_eq!(
             apple_wire::set_encryption_start()[8..],
             [0, 0, 0, 1],
