@@ -42,7 +42,7 @@ def outcome(case):
 
 
 def main():
-    cases = json.load(open(os.path.join(HERE, "cases.json")))["cases"]
+    cases = json.load(open(os.path.join(HERE, "cases.json"), encoding="utf-8"))["cases"]
     failed = 0
     for case in cases:
         got = outcome(case)
