@@ -499,11 +499,15 @@ impl Model {
                         self.error = false;
                     }
                     Event::Invitation(ticket) => invitation = Some(ticket),
+                    // This window never offers what the person copies to a
+                    // helper (DeskVNC Support does), so a helper's clipboard
+                    // ability is not asked about here and read stays off.
                     Event::Approval {
                         name,
                         peer,
                         tools,
                         answer,
+                        ..
                     } => {
                         self.pending = Some(Pending {
                             name,
@@ -602,6 +606,7 @@ impl Model {
                         peer,
                         tools,
                         answer,
+                        ..
                     } => {
                         self.ask = Some(Ask {
                             name,
@@ -1080,6 +1085,7 @@ pub async fn support_answer_ask(
             .send(unattended::Asked {
                 approval,
                 tools,
+                clipboard: false,
                 pair,
             })
             .map_err(|_| format!("{} stopped waiting", ask.name))?;

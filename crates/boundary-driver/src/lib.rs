@@ -305,7 +305,10 @@ async fn emit(events: &mpsc::Sender<SessionEvent>, event: SessionEvent) -> Resul
 }
 /// Tell the window and the agent plane what the computer lets this helper
 /// do with its clipboard.
-async fn clipboard_rights(events: &mpsc::Sender<SessionEvent>, rights: ClipboardRights) -> Result<()> {
+async fn clipboard_rights(
+    events: &mpsc::Sender<SessionEvent>,
+    rights: ClipboardRights,
+) -> Result<()> {
     emit(
         events,
         SessionEvent::Protocol(remote_core::ProtocolEvent::BoundaryClipboard {

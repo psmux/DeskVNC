@@ -7,11 +7,11 @@
 
 use boundary_driver::BoundaryDriver;
 use boundary_session::{Approval, Desktop, Event, Frame, HostOptions, Input, Invitation};
-use iroh::endpoint::{RecvStream, SendStream, presets};
+use iroh::endpoint::{presets, RecvStream, SendStream};
 use remote_core::{
     ClientCommand, ConnectOptions, ProtocolDriver, ProtocolEvent, SessionEvent, SessionState,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{sync::mpsc, time::timeout};
@@ -113,8 +113,7 @@ async fn clipboard_text_goes_both_ways_through_the_driver_as_the_host_allows() {
     timeout(Duration::from_secs(60), async {
         let board: Board = Arc::new(Mutex::new(("copied before the session".into(), 1, 0)));
         let shared = board.clone();
-        let mut host =
-            boundary_session::host(local(), move || Ok(Box::new(Fake(shared.clone()))));
+        let mut host = boundary_session::host(local(), move || Ok(Box::new(Fake(shared.clone()))));
         let ticket = loop {
             if let Some(Event::Invitation(ticket)) = host.events.recv().await {
                 break ticket;
@@ -137,7 +136,10 @@ async fn clipboard_text_goes_both_ways_through_the_driver_as_the_host_allows() {
                 break;
             }
         }
-        handle.send(ClientCommand::SetViewOnly(false)).await.unwrap();
+        handle
+            .send(ClientCommand::SetViewOnly(false))
+            .await
+            .unwrap();
         assert_eq!(
             next(&mut rx, SOON).await,
             Some(Heard::Rights {
@@ -171,7 +173,9 @@ async fn clipboard_text_goes_both_ways_through_the_driver_as_the_host_allows() {
             })
         );
         handle
-            .send(ClientCommand::ClipboardText("pasted from the helper".into()))
+            .send(ClientCommand::ClipboardText(
+                "pasted from the helper".into(),
+            ))
             .await
             .unwrap();
         assert!(eventually(SOON, || clipboard_of(&board) == "pasted from the helper").await);
@@ -281,7 +285,10 @@ async fn an_older_host_leaves_the_clipboard_off_and_is_sent_none() {
                 None => panic!("the driver went quiet"),
             }
         }
-        handle.send(ClientCommand::SetViewOnly(false)).await.unwrap();
+        handle
+            .send(ClientCommand::SetViewOnly(false))
+            .await
+            .unwrap();
         handle
             .send(ClientCommand::ClipboardText("never sent".into()))
             .await
@@ -312,13 +319,12 @@ async fn an_older_host_leaves_the_clipboard_off_and_is_sent_none() {
             assert!(
                 !matches!(
                     event,
-                    SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard {
-                        write: true,
-                        ..
-                    }) | SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard {
-                        read: true,
-                        ..
-                    }) | SessionEvent::ClipboardText(_)
+                    SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard { write: true, .. })
+                        | SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard {
+                            read: true,
+                            ..
+                        })
+                        | SessionEvent::ClipboardText(_)
                 ),
                 "the shell was told about a clipboard an older host does not have: {event:?}"
             );
