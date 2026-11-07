@@ -59,6 +59,20 @@ pub(crate) struct Area {
     pub height: u32,
 }
 
+/// Why a Wayland desktop did not share its screen, for the helper and for
+/// the person at the computer. The portal gives no reason when GNOME refuses
+/// a session because the screen is locked or blank, so `asleep` comes from
+/// asking the desktop afterwards.
+fn refused(error: &str, asleep: bool) -> String {
+    if asleep {
+        "The screen is locked or asleep, and the desktop will not share it like that. Ask the person at the computer to unlock it, then connect again".into()
+    } else {
+        format!(
+            "This Wayland desktop did not share its screen ({error}). DeskVNC Support needs the xdg-desktop-portal ScreenCast service, which GNOME, KDE and wlroots desktops provide, or a session on Xorg"
+        )
+    }
+}
+
 pub(crate) enum Screen {
     X11(Box<x11::Screen>),
     Portal(portal::Screen),
@@ -73,9 +87,7 @@ impl Screen {
             Kind::X11 => Ok(Self::X11(Box::new(x11::Screen::open(id, accelerated)?))),
             Kind::Wayland => match portal::Screen::open() {
                 Ok(screen) => Ok(Self::Portal(screen)),
-                Err(e) => bail!(
-                    "This Wayland desktop did not share its screen ({e:#}). DeskVNC Support needs the xdg-desktop-portal ScreenCast service, which GNOME, KDE and wlroots desktops provide, or a session on Xorg"
-                ),
+                Err(e) => bail!(refused(&format!("{e:#}"), portal::screen_asleep())),
             },
         }
     }
@@ -169,6 +181,23 @@ mod tests {
         assert_eq!(keysym('é'), 0xe9);
         assert_eq!(keysym('€'), 0x0100_20ac);
         assert_eq!(keysym('\n'), 0xff0d);
+    }
+
+    #[test]
+    fn a_locked_screen_is_named_as_the_reason() {
+        // What the portal said when GNOME was locked: nothing useful.
+        let portal = "Portal request didn't succeed with no information";
+        let said = refused(portal, true);
+        assert!(said.contains("locked or asleep"), "{said}");
+        assert!(said.contains("unlock"), "{said}");
+        assert!(!said.contains("ScreenCast service"), "{said}");
+    }
+
+    #[test]
+    fn without_a_lock_the_portal_is_still_the_suspect() {
+        let said = refused("Portal request didn't succeed with no information", false);
+        assert!(said.contains("ScreenCast service"), "{said}");
+        assert!(said.contains("no information"), "{said}");
     }
 
     #[test]

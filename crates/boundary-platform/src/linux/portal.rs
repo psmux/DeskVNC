@@ -52,6 +52,52 @@ async fn within<T>(
     .await
 }
 
+/// Whether the screen is locked or blanked. GNOME refuses to start a remote
+/// desktop or screen cast session then ("Session creation inhibited"), and
+/// the portal passes that on as a bare failure with no reason, so this is
+/// asked after the portal fails. GNOME's own screensaver reports a blank
+/// screen as well as a locked one; logind's hint covers other desktops,
+/// which set it on lock.
+pub(crate) fn screen_asleep() -> bool {
+    async_io::block_on(async {
+        let Ok(session) = ashpd::zbus::Connection::session().await else {
+            return false;
+        };
+        let gnome = session
+            .call_method(
+                Some("org.gnome.ScreenSaver"),
+                "/org/gnome/ScreenSaver",
+                Some("org.gnome.ScreenSaver"),
+                "GetActive",
+                &(),
+            )
+            .await
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<bool>().ok());
+        if gnome == Some(true) {
+            return true;
+        }
+        let Ok(system) = ashpd::zbus::Connection::system().await else {
+            return false;
+        };
+        system
+            .call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1/session/auto",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.login1.Session", "LockedHint"),
+            )
+            .await
+            .ok()
+            .and_then(|reply| {
+                let value: ashpd::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+                bool::try_from(value).ok()
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Where the portal's restore token is kept between runs.
 fn token_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
