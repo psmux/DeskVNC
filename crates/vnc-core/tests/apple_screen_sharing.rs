@@ -392,6 +392,9 @@ struct Seen {
     /// Act like a Mac whose account lacks Remote Management privileges:
     /// verify the password, send the server proof, then refuse the login.
     refuse_after_proof: bool,
+    /// Run the short session (desktop size, full picture, then answer
+    /// requests) after a type 33 login too, not only after type 36.
+    short_session: bool,
 }
 
 struct FakeMac {
@@ -441,6 +444,53 @@ impl FakeMac {
             serve(&mut s, login, key, password, s2).await;
         });
         Self { port, seen, task }
+    }
+}
+
+/// A fake Mac that serves one connection after another with the same host
+/// key, running the short session, and drops the current connection when
+/// `drop` is notified: a network blip the viewer reconnects through.
+struct RedialMac {
+    port: u16,
+    seen: Arc<Mutex<Seen>>,
+    drop: Arc<tokio::sync::Notify>,
+    connections: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RedialMac {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Seen {
+            short_session: true,
+            ..Seen::default()
+        }));
+        let key =
+            tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
+                .await
+                .unwrap();
+        let drop = Arc::new(tokio::sync::Notify::new());
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (s2, d2, c2) = (seen.clone(), drop.clone(), connections.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
+                c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (seen, key) = (s2.clone(), key.clone());
+                tokio::select! {
+                    _ = serve(&mut s, Login::Rsa33, Some(key), PASSWORD, seen) => {}
+                    _ = d2.notified() => {}
+                }
+            }
+        });
+        Self {
+            port,
+            seen,
+            drop,
+            connections,
+        }
     }
 }
 
@@ -630,7 +680,7 @@ async fn serve(
         seen.lock().records.push(body);
     }
 
-    if login == Login::Srp36 {
+    if login == Login::Srp36 || seen.lock().short_session {
         // Like a real Mac: the opening's full request is dropped while the
         // display is set up. The Mac announces the desktop size, and only a
         // full non-incremental request that comes after that gets the
@@ -1050,6 +1100,63 @@ async fn the_picture_keeps_updating_after_the_first_frame() {
             .any(|m| m.len() == 10 && m[0] == 3 && m[6..10] == [0, 1, 0, 1]),
         "a one pixel probe went to the Mac"
     );
+}
+
+/// "Connect once" at the host key prompt covers the whole session. The
+/// prompt is raised after the login while the session goes on, and a
+/// reconnect after a network blip used to raise it again, over a live
+/// session, because the core never kept the answer.
+#[tokio::test]
+async fn an_accepted_host_key_is_not_asked_about_again_after_a_reconnect() {
+    let mac = RedialMac::start().await;
+    let mut o = options(mac.port);
+    o.credentials = Credentials::user_pass(USER, PASSWORD);
+    let (handle, mut events) = spawn_session(o);
+    let fingerprint = events
+        .wait(DEFAULT_TIMEOUT, "the host key prompt", |e| match e {
+            SessionEvent::CertificatePrompt { fingerprint, .. } => Some(fingerprint.clone()),
+            _ => None,
+        })
+        .await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    send(
+        &handle,
+        ClientCommand::TrustCertificate {
+            fingerprint,
+            permanent: false,
+            scheme: PinScheme::AppleRsa,
+        },
+    )
+    .await;
+    // Let the run loop take the answer, then drop the connection.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    mac.drop.notify_one();
+    events
+        .wait_state(DEFAULT_TIMEOUT, "a reconnect", |s| {
+            matches!(s, vnc_core::types::SessionState::Reconnecting { .. }).then_some(())
+        })
+        .await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.drain_for(Duration::from_millis(300)).await;
+    assert_eq!(
+        mac.connections.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "{:?}",
+        events.summary()
+    );
+    let prompts = events
+        .seen
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::CertificatePrompt { .. }))
+        .count();
+    assert_eq!(
+        prompts,
+        1,
+        "asked about the same key again: {:?}",
+        events.summary()
+    );
+    send(&handle, ClientCommand::Disconnect).await;
+    let _ = mac.seen;
 }
 
 /// A wrong password: the fake Mac refuses M1 with an ordinary failure result,

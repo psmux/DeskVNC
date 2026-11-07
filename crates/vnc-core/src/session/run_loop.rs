@@ -516,6 +516,9 @@ pub(crate) struct RunLoop {
     /// macOS Screen Sharing's encrypted session, when this is one. The server
     /// pushes updates on its own there, so no requests are pipelined.
     apple: Option<crate::apple::AppleSession>,
+    /// The server key the person accepted at the trust prompt this session
+    /// raised, kept so the supervisor's next connection verifies against it.
+    trusted: Option<(crate::types::PinScheme, String)>,
     /// Continuous updates negotiated and switched on.
     cu_active: bool,
     /// An EnableContinuousUpdates(false) of ours is unacknowledged, sent at
@@ -749,6 +752,7 @@ impl RunLoop {
             last_pos: None,
             last_mask: 0,
             apple: None,
+            trusted: None,
             cu_active: false,
             cu_disable_pending: None,
             cu_off_for_pacing: false,
@@ -797,6 +801,11 @@ impl RunLoop {
 
     fn full_rect(&self) -> Rect {
         Rect::new(0, 0, self.fb_width, self.fb_height)
+    }
+
+    /// The server key accepted at the trust prompt while this loop ran.
+    pub(crate) fn take_trusted(&mut self) -> Option<(crate::types::PinScheme, String)> {
+        self.trusted.take()
     }
 
     /// Run this loop as a macOS Screen Sharing encrypted session.
@@ -2305,9 +2314,17 @@ impl RunLoop {
                     settings.prefer_scancodes = v;
                 }
             }
-            ClientCommand::TrustCertificate { .. } => {
-                // Certificate trust is resolved during the security handshake;
-                // nothing to do while connected.
+            ClientCommand::TrustCertificate {
+                fingerprint,
+                scheme,
+                ..
+            } => {
+                // The handshake that raised the prompt is over and the
+                // connection carries on either way. What the answer changes is
+                // the next connection: an automatic reconnect must verify
+                // against the key the person just accepted, or it raises the
+                // same prompt again over a live session (see `run_once`).
+                self.trusted = Some((scheme, fingerprint));
             }
             ClientCommand::ReconnectNow => {
                 // Asked for while connected, this used to do nothing, and that
