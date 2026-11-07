@@ -25,6 +25,26 @@ pub fn control_hint() -> Option<&'static str> {
         None
     }
 }
+/// A line for the person when the screen shared now came back from a
+/// remembered permission that leaves the clipboard out, as a GNOME grant
+/// saved by Support 0.34 does. Sharing again with the desktop's prompt
+/// fixes it; see [`forget_screen_grant`]. `None` everywhere else.
+pub fn clipboard_left_out() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::clipboard_left_out()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+/// Forget the screen sharing permission the desktop remembered, so the next
+/// share asks the person again. Linux on Wayland only; nothing elsewhere.
+pub fn forget_screen_grant() {
+    #[cfg(target_os = "linux")]
+    linux::portal::forget_grant();
+}
 /// Name the app to the desktop, for what it holds while a screen is
 /// shared. Linux only; elsewhere there is nothing to name.
 pub fn set_app_id(id: &'static str) {
