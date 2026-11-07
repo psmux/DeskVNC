@@ -754,6 +754,14 @@ where
     endpoint.close().await;
     result
 }
+/// `future`, or `why` alone if it takes longer than `limit`. With `.context`
+/// the person read "Helper stopped responding: deadline has elapsed", the
+/// last part being the timer's own words.
+async fn within<T>(limit: Duration, future: impl Future<Output = T>, why: &str) -> Result<T> {
+    tokio::time::timeout(limit, future)
+        .await
+        .map_err(|_| anyhow!("{why}"))
+}
 /// How long the person has to answer a helper before it is told nobody did.
 const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 /// How long a new connection has to say hello before it is dropped.
@@ -919,10 +927,12 @@ where
     worker.control.borrow_and_update();
     let read_input = async {
         loop {
-            let message: Message =
-                tokio::time::timeout(Duration::from_secs(5), wire::read(&mut recv))
-                    .await
-                    .context("Helper stopped responding")??;
+            let message: Message = within(
+                Duration::from_secs(5),
+                wire::read(&mut recv),
+                "Helper stopped responding",
+            )
+            .await??;
             match message {
                 Message::Ping => {}
                 Message::Refresh if screens == Screens::Video => {
@@ -1836,12 +1846,12 @@ async fn run_viewer(
             (endpoint.clone(), Held::Own(EndpointGuard(endpoint)))
         }
     };
-    let connection = tokio::time::timeout(
+    let connection = within(
         Duration::from_secs(25),
         endpoint.connect(invitation.address, wire::ALPN),
+        "Connection timed out",
     )
-    .await
-    .context("Connection timed out")??;
+    .await??;
     let guard = Close(connection.clone());
     let (mut send, recv) = connection.open_bi().await?;
     wire::write(
@@ -1969,9 +1979,12 @@ async fn watch(
             "Waiting for the person to approve sharing".into(),
         ))
         .await?;
-    let grant: Message = tokio::time::timeout(Duration::from_secs(65), wire::read(&mut recv))
-        .await
-        .context("Approval timed out")??;
+    let grant: Message = within(
+        Duration::from_secs(65),
+        wire::read(&mut recv),
+        "Approval timed out",
+    )
+    .await??;
     let (control, tools) = match grant {
         Message::Granted { control, tools } => (control, tools),
         Message::Refused(reason) => return Err(Refusal(reason).into()),
@@ -2218,6 +2231,18 @@ fn ended_by_host(connection: &Connection) -> Option<anyhow::Error> {
 #[cfg(test)]
 mod relay_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_timeout_is_said_in_plain_words() {
+        let late = within(
+            Duration::from_millis(1),
+            std::future::pending::<()>(),
+            "Helper stopped responding",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(format!("{late:#}"), "Helper stopped responding");
+    }
 
     #[test]
     fn relay_urls_reject_other_protocols_and_embedded_secrets() {
