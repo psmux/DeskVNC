@@ -92,6 +92,12 @@ pub struct Helper {
     /// before it existed.
     #[serde(default)]
     pub tools: bool,
+    /// Whether they see what the person copies while they are connected.
+    /// Off unless the person turned it on for this helper, including for
+    /// every helper paired before it existed, and always off at the sign in
+    /// screen.
+    #[serde(default)]
+    pub clipboard: bool,
     /// Unix seconds.
     pub added: u64,
 }
@@ -127,6 +133,7 @@ impl Access {
             name: name.trim().to_string(),
             control,
             tools: false,
+            clipboard: false,
             added: wire::now(),
         });
         Ok(())
@@ -137,6 +144,17 @@ impl Access {
         match self.helpers.iter_mut().find(|h| h.id == id.trim()) {
             Some(helper) => {
                 helper.tools = allowed;
+                true
+            }
+            None => false,
+        }
+    }
+    /// Let a paired helper see what the person copies, or stop it. `false`
+    /// when no helper has that ID.
+    pub fn allow_clipboard(&mut self, id: &str, allowed: bool) -> bool {
+        match self.helpers.iter_mut().find(|h| h.id == id.trim()) {
+            Some(helper) => {
+                helper.clipboard = allowed;
                 true
             }
             None => false,
@@ -198,6 +216,8 @@ pub struct Asked {
     pub approval: Approval,
     /// Let their tools run commands and copy files.
     pub tools: bool,
+    /// Let them see what the person copies.
+    pub clipboard: bool,
     /// Pair them, so they come in later without asking.
     pub pair: bool,
 }
@@ -228,6 +248,9 @@ pub enum Notice {
         peer: String,
         /// The helper can send commands and file requests.
         tools: bool,
+        /// The helper can carry clipboard text, so the person can be asked
+        /// whether it may see what they copy.
+        clipboard: bool,
         answer: tokio::sync::oneshot::Sender<Asked>,
     },
     /// A helper was turned away, and why.
@@ -442,6 +465,7 @@ where
         jpeg,
         tiles,
         video,
+        clipboard,
     } = message
     else {
         refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -461,12 +485,30 @@ where
         Decision::Ask if login => Decision::Refuse(
             "Nobody has signed in on that computer, so nobody can approve you. Ask to be paired, or use its unattended password".into(),
         ),
-        Decision::Ask => ask(notices, asking, &connection, access_path, &name, &peer, tools).await,
+        Decision::Ask => {
+            ask(
+                notices,
+                asking,
+                &connection,
+                access_path,
+                &name,
+                &peer,
+                Offered { tools, clipboard },
+            )
+            .await
+        }
         other => other,
     };
+    // At the sign in screen a command would run as the system, and whatever
+    // is copied there is most likely a password.
     let tools = tools && !login;
-    let (control, allowed_tools) = match decision {
-        Decision::Grant(control, tools) => (control, tools),
+    let clipboard_read = clipboard && !login;
+    let (control, allowed_tools, allowed_clipboard) = match decision {
+        Decision::Grant(Granted {
+            control,
+            tools,
+            clipboard,
+        }) => (control, tools, clipboard),
         Decision::Ask => unreachable!("answered above"),
         Decision::Refuse(reason) => {
             refuse(connection, send, reason.clone());
@@ -484,6 +526,9 @@ where
     };
     let (session, mut worker) = session::channels();
     worker.tools_tx.send_replace(tools && allowed_tools);
+    worker
+        .clipboard_read
+        .send_replace(clipboard_read && allowed_clipboard);
     let desktop = desktop.clone();
     // The session ends when whoever holds it lets go, or when this
     // listener stops: either cancels the same token.
@@ -510,7 +555,7 @@ where
         let result = tokio::select! {
             _ = stop.cancelled() => Ok(()),
             _ = ended.cancelled() => Ok(()),
-            result = session::serve(&mut worker, &connection, send, recv, peer, control, tools, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
+            result = session::serve(&mut worker, &connection, send, recv, peer, session::Offer { control, tools, clipboard }, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
         };
         // The app stopping, for an update or a restart, ends nothing the
         // person decided, so the helper is told the link went and
@@ -567,11 +612,27 @@ fn refuse(
 /// What happens to a helper that knocks.
 #[derive(Debug, PartialEq, Eq)]
 enum Decision {
-    /// In, with control or not, and with its tools allowed or not.
-    Grant(bool, bool),
+    /// In, with what it may do.
+    Grant(Granted),
     /// Not paired and no password: the person at the computer decides.
     Ask,
     Refuse(String),
+}
+
+/// What a helper let in may do.
+#[derive(Debug, PartialEq, Eq)]
+struct Granted {
+    control: bool,
+    /// Its tools may run commands and copy files.
+    tools: bool,
+    /// It sees what the person copies.
+    clipboard: bool,
+}
+/// What a helper said it can do beyond the screen, which the person is asked
+/// about.
+struct Offered {
+    tools: bool,
+    clipboard: bool,
 }
 
 /// Ask the person at the computer about a helper, and pair it if they say so.
@@ -585,8 +646,9 @@ async fn ask(
     access_path: &Path,
     name: &str,
     peer: &str,
-    tools: bool,
+    offered: Offered,
 ) -> Decision {
+    let Offered { tools, clipboard } = offered;
     let Ok(_asking) = asking.try_lock() else {
         return Decision::Refuse("The person at that computer is already answering another helper. Try again in a minute".into());
     };
@@ -596,6 +658,7 @@ async fn ask(
             name: name.to_string(),
             peer: peer.to_string(),
             tools,
+            clipboard,
             answer,
         })
         .await
@@ -620,12 +683,14 @@ async fn ask(
         Approval::Control => true,
     };
     let tools = tools && asked.tools;
+    let clipboard = clipboard && asked.clipboard;
     if asked.pair {
         // A failed save still lets this session in; it only means the next
         // one asks again.
         let saved = Access::load(access_path).and_then(|mut access| {
             access.trust(peer, name, control)?;
             access.allow_tools(peer, tools);
+            access.allow_clipboard(peer, clipboard);
             access.save(access_path)
         });
         if let Err(error) = saved {
@@ -634,7 +699,11 @@ async fn ask(
                 .await;
         }
     }
-    Decision::Grant(control, tools)
+    Decision::Grant(Granted {
+        control,
+        tools,
+        clipboard,
+    })
 }
 
 /// Let a helper in, and with what, or say why not: whether it may control,
@@ -652,7 +721,11 @@ async fn authorize(
         return Refuse("Unattended access is switched off on that computer".into());
     }
     if let Some(helper) = access.helper(peer) {
-        return Grant(helper.control, helper.tools);
+        return Grant(Granted {
+            control: helper.control,
+            tools: helper.tools,
+            clipboard: helper.clipboard,
+        });
     }
     match password {
         Some(password) if access.has_password() => {
@@ -672,7 +745,11 @@ async fn authorize(
                 .await
                 .unwrap_or(false);
             if matches {
-                Grant(true, false)
+                Grant(Granted {
+                    control: true,
+                    tools: false,
+                    clipboard: false,
+                })
             } else {
                 throttle.failed();
                 // A wrong guess costs the guesser time as well as an attempt.
@@ -749,6 +826,7 @@ pub fn connect_with_tools(
         Abilities {
             tools: true,
             video: false,
+            clipboard: false,
         },
     )
 }
@@ -826,6 +904,7 @@ pub fn connect_to_with_tools(
         Abilities {
             tools: true,
             video: false,
+            clipboard: false,
         },
     )
 }
@@ -923,6 +1002,7 @@ async fn visit(
             jpeg: true,
             tiles: true,
             video: abilities.codecs(),
+            clipboard: abilities.clipboard,
         },
     )
     .await
@@ -999,4 +1079,47 @@ pub fn validate_machine_id(text: &str) -> Result<()> {
         bail!("That is not a machine ID");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_saved_before_clipboard_never_read_it() {
+        let saved = br#"{"enabled":true,"helpers":[{"id":"x","name":"Friend","control":true,"tools":true,"added":1}]}"#;
+        let access: Access = serde_json::from_slice(saved).unwrap();
+        assert!(!access.helpers[0].clipboard);
+        let mut access = access;
+        assert!(access.allow_clipboard("x", true));
+        assert!(access.helpers[0].clipboard);
+        assert!(!access.allow_clipboard("nobody", true));
+        let back: Access = serde_json::from_slice(&serde_json::to_vec(&access).unwrap()).unwrap();
+        assert!(back.helpers[0].clipboard);
+    }
+
+    #[tokio::test]
+    async fn a_password_never_lets_a_helper_read() {
+        let mut access = Access {
+            enabled: true,
+            ..Access::default()
+        };
+        access.set_password(Some("correct horse battery")).unwrap();
+        let throttle = tokio::sync::Mutex::new(Throttle::default());
+        let decision = authorize(
+            &access,
+            "stranger",
+            Some("correct horse battery"),
+            &throttle,
+        )
+        .await;
+        assert_eq!(
+            decision,
+            Decision::Grant(Granted {
+                control: true,
+                tools: false,
+                clipboard: false,
+            })
+        );
+    }
 }

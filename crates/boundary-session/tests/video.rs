@@ -94,6 +94,7 @@ async fn connect(encoders: Option<VideoEncoders>, video: bool) -> Pair {
         Abilities {
             tools: false,
             video,
+            clipboard: false,
         },
     );
     loop {

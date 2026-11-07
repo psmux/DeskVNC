@@ -208,6 +208,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
                     let _ = answer.send(unattended::Asked {
                         approval: Approval::Deny,
                         tools: false,
+                        clipboard: false,
                         pair: false,
                     });
                     break;
@@ -239,6 +240,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
                     let _ = answer.send(unattended::Asked {
                         approval: Approval::Control,
                         tools: true,
+                        clipboard: false,
                         pair: true,
                     });
                 }

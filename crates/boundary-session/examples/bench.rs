@@ -362,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
                 Abilities {
                     tools: false,
                     video: !tiles_only,
+                    clipboard: false,
                 },
             );
             loop {
