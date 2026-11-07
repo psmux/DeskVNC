@@ -1048,6 +1048,7 @@ name = "boundary-platform"
 version = "0.34.1"
 dependencies = [
  "anyhow",
+ "arboard",
  "ashpd",
  "async-io",
  "block2 0.6.2",
@@ -1068,6 +1069,7 @@ dependencies = [
  "openh264",
  "openh264-sys2",
  "pipewire",
+ "tokio",
  "windows 0.62.2",
  "windows-sys 0.59.0",
  "x11rb",
