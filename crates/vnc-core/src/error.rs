@@ -142,9 +142,10 @@ impl VncError {
             }
             VncError::ResolveFailed(h) => format!("Could not find a computer named \"{h}\"."),
             VncError::AuthFailed(r) if r == crate::security::APPLE_DH_REFUSED => {
-                "The password was not accepted. If the password is right, the Mac may need \
-                 this account allowed under Remote Management, Options."
-                    .into()
+                format!(
+                    "The password was not accepted. {}",
+                    crate::security::APPLE_DH_HINT
+                )
             }
             VncError::AuthFailed(_) => "The password was not accepted.".into(),
             VncError::AccessDenied(r) => r.clone(),

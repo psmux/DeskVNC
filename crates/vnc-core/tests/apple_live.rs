@@ -35,6 +35,12 @@
 //!   Remote Management privileges (Observe and Control); without them every
 //!   login, by any type and by Apple's own client, is refused after the
 //!   password is accepted (`lg level 0`, authresult 1).
+//! * A wrong password under type 33 or 36 is refused in place of the Mac's
+//!   own proof, about 1.5 to 3 s after the client's proof. A privilege
+//!   refusal comes only after that proof, so the two can be told apart.
+//!   Under type 30 both end in SecurityResult 1 with the same reason,
+//!   "Authentication or authorization failure", so nothing tells them apart
+//!   and the viewer adds a Remote Management hint instead.
 //! * ViewerInfo has a fixed 62 byte body (version, seven u32 values, the 32
 //!   byte capability bitmap), read off Apple's own client through a relay
 //!   that logs both legs of a real session. The Mac reads it at that size
@@ -412,6 +418,49 @@ async fn live_type_36_session() {
 #[tokio::test]
 async fn live_type_30_session() {
     session_with("apple-dh", "live_type_30_session").await;
+}
+
+/// A wrong password, sent once per login type: under 33 and 36 the Mac
+/// refuses before its own proof, so the viewer says the password was not
+/// accepted and asks again; it must not claim the password was right. Type
+/// 30 has no such signal and carries the Remote Management hint. Costs one
+/// failed attempt per type, so it runs only with DVV_LIVE_APPLE_WRONG=1.
+#[tokio::test]
+async fn live_wrong_password_says_so() {
+    init_tracing();
+    if std::env::var("DVV_LIVE_APPLE_WRONG").is_err() {
+        eprintln!("SKIP live_wrong_password_says_so: DVV_LIVE_APPLE_WRONG is not set");
+        return;
+    }
+    let Some(mut t) = target("live_wrong_password_says_so") else {
+        return;
+    };
+    t.pass.push_str("-not-it");
+    let prefs = std::env::var("DVV_LIVE_APPLE_WRONG_TYPES")
+        .unwrap_or_else(|_| "apple-srp-rsa,apple-dh".into());
+    for pref in prefs.split(',') {
+        let started = std::time::Instant::now();
+        let (_handle, mut events) = spawn_session(live_options(&t, pref));
+        let reason = events
+            .wait_state(Duration::from_secs(30), "the refusal", |s| match s {
+                SessionState::Disconnected { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .await;
+        eprintln!(
+            "LIVE {pref} wrong password: {reason:?} after {} ms",
+            started.elapsed().as_millis()
+        );
+        assert_ne!(reason, vnc_core::security::APPLE_ACCESS_DENIED, "{pref}");
+        assert!(
+            reason.contains("password was not accepted"),
+            "{pref}: {reason}"
+        );
+        if pref == "apple-dh" {
+            assert!(reason.contains("Remote Management, Options"), "{reason}");
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// Auto picks type 33 for a Mac and gets a picture.

@@ -562,8 +562,13 @@ async fn serve(
         .unwrap();
     if seen.lock().refuse_after_proof {
         // The password was right (the proof above verifies), but the account
-        // is not allowed in: SecurityResult 1, no reason string.
+        // is not allowed in: SecurityResult 1 and macOS 26's generic reason.
+        let reason = b"Authentication or authorization failure";
         s.write_all(&1u32.to_be_bytes()).await.unwrap();
+        s.write_all(&(reason.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        s.write_all(reason).await.unwrap();
         return;
     }
     s.write_all(&0u32.to_be_bytes()).await.unwrap();
@@ -1047,12 +1052,122 @@ async fn refused_after_a_good_password_says_why() {
             .await;
         assert_eq!(reason, vnc_core::security::APPLE_ACCESS_DENIED, "{login:?}");
         assert!(!can_retry, "{login:?}");
-        assert!(!mac.seen.lock().auth_failed, "the password itself was right");
+        assert!(
+            !mac.seen.lock().auth_failed,
+            "the password itself was right"
+        );
         assert!(
             !events.any(|e| matches!(e, SessionEvent::CredentialsRequired(_))),
             "{login:?}: asked for the password again"
         );
     }
+}
+
+/// A Mac that offers only type 30 (an older Mac, or one with Screen Sharing
+/// set up that way) still gets a full session: the 1024-bit DH login, then
+/// the ordinary cleartext RFB session with no Apple record layer.
+#[tokio::test]
+async fn a_mac_offering_only_30_logs_in_and_draws() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .banner(RFB_APPLE)
+            .security(&[SEC_APPLE_DH])
+            .username(USER)
+            .password(PASSWORD)
+            .size(WIDTH, HEIGHT)
+            .update(vec![RectSpec::Raw {
+                rect: vnc_core::types::Rect::new(0, 0, WIDTH, HEIGHT),
+                colour: [200, 10, 10],
+            }]),
+    )
+    .await;
+    let (handle, mut events) = spawn_session(session_options(server.port(), PASSWORD));
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    let (_, damage) = events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    assert_eq!((damage.width, damage.height), (WIDTH, HEIGHT));
+    assert_eq!(server.selected_security(), vec![SEC_APPLE_DH]);
+    assert_eq!(
+        server.plain_credentials(),
+        vec![(USER.to_string(), PASSWORD.to_string())]
+    );
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
+/// A Mac that offers only Apple's type 35 and the classic VNC password (2)
+/// logs in with the VNC password: 35 is not something this client speaks,
+/// and offering it must not stop the login.
+#[tokio::test]
+async fn a_mac_offering_35_and_2_uses_the_vnc_password() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .banner(RFB_APPLE)
+            .security(&[35, SEC_VNC_AUTH])
+            .password("vncpw")
+            .size(WIDTH, HEIGHT)
+            .update(vec![RectSpec::Raw {
+                rect: vnc_core::types::Rect::new(0, 0, WIDTH, HEIGHT),
+                colour: [10, 200, 10],
+            }]),
+    )
+    .await;
+    let mut o = options(server.port());
+    o.credentials = Credentials::password("vncpw");
+    o.reconnect.enabled = false;
+    let (handle, mut events) = spawn_session(o);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    events.wait_framebuffer(DEFAULT_TIMEOUT).await;
+    assert_eq!(server.selected_security(), vec![SEC_VNC_AUTH]);
+    send(&handle, ClientCommand::Disconnect).await;
+}
+
+/// A type 30 login the Mac refuses cannot say whether the password or the
+/// account's Remote Management privileges were the problem, so the prompt
+/// that asks again carries the hint, and the right password still gets in.
+#[tokio::test]
+async fn a_refused_type_30_login_asks_again_with_the_hint() {
+    let mut config = MockConfig::new()
+        .banner(RFB_APPLE)
+        .security(&[SEC_APPLE_DH])
+        .username(USER)
+        .password(PASSWORD)
+        .size(WIDTH, HEIGHT);
+    // The reason macOS 26 gives for a wrong password and for an account it
+    // will not let in alike.
+    config.auth_failure_reason = "Authentication or authorization failure".into();
+    let server = MockServer::start(config).await;
+    let mut o = options(server.port());
+    o.reconnect.enabled = false;
+    let (handle, mut events) = spawn_session(o);
+    async fn prompt(events: &mut Events) -> vnc_core::types::CredentialRequest {
+        events
+            .wait(DEFAULT_TIMEOUT, "a credential prompt", |e| match e {
+                SessionEvent::CredentialsRequired(r) => Some(r.clone()),
+                _ => None,
+            })
+            .await
+    }
+    let first = prompt(&mut events).await;
+    assert_eq!(first.error, None);
+    let answer = |password: &str| ClientCommand::ProvideCredentials {
+        username: Some(USER.into()),
+        password: password.into(),
+        save: false,
+    };
+    send(&handle, answer("not the password")).await;
+    let second = prompt(&mut events).await;
+    assert_eq!(second.attempt, 2);
+    assert_eq!(
+        second.error.as_deref(),
+        Some(vnc_core::security::APPLE_DH_REFUSED)
+    );
+    assert!(second
+        .error
+        .unwrap()
+        .contains("may need this account allowed under Remote Management, Options"));
+    send(&handle, answer(PASSWORD)).await;
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+    assert_eq!(server.selected_security(), vec![SEC_APPLE_DH, SEC_APPLE_DH]);
+    send(&handle, ClientCommand::Disconnect).await;
 }
 
 /// A host key that differs from the pinned one stops the login before the
