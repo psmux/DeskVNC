@@ -50,3 +50,27 @@ export class ClipboardEcho {
     return force || text !== this.last;
   }
 }
+
+/**
+ * Whether the window sends the local clipboard to the remote on its own when
+ * the person arrives: on connecting, on a reconnect, on switching back to the
+ * window, and (on Boundary) when the remote starts taking clipboard text
+ * because the helper was given control.
+ *
+ * Never on Boundary. There the helper is a support tech at someone else's
+ * computer, and whatever the tech last copied (a password, a note about
+ * another customer) would land on that person's clipboard without the tech
+ * pasting anything. A Boundary helper's clipboard goes over only on an
+ * explicit paste into the remote view (Ctrl+V or Cmd+V) or the Send
+ * clipboard button. VNC and RDP keep the sync the preferences describe: the
+ * remote there is the person's own machine.
+ */
+export function syncsOnArrival(arrival: {
+  protocol: string;
+  connected: boolean;
+  owns: boolean;
+  remoteTakesText: boolean;
+}): boolean {
+  if (arrival.protocol === "boundary") return false;
+  return arrival.connected && arrival.owns && arrival.remoteTakesText;
+}
