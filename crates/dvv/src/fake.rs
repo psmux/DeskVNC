@@ -822,7 +822,12 @@ impl SessionSource for FakeSource {
 
         let driver: Arc<dyn Limb> = match host.protocol {
             ProtocolKind::Ssh => Arc::new(FakeLimb::terminal()),
-            _ => Arc::new(FakeLimb::desktop()),
+            // Of the machine's own protocol, which the limb id is derived
+            // from, as the application's limbs are.
+            _ => Arc::new(FakeLimb {
+                kind: host.protocol,
+                ..FakeLimb::desktop()
+            }),
         };
         Ok(Attach {
             driver,
