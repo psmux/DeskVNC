@@ -102,6 +102,8 @@ async fn next(rx: &mut mpsc::Receiver<SessionEvent>, video: bool) -> RectPayload
     }
 }
 
+// The viewer asks for H.264 everywhere but Linux; see ABILITIES in the driver.
+#[cfg(not(target_os = "linux"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_moving_screen_reaches_the_window_as_h264_and_comes_back_sharp() {
     timeout(Duration::from_secs(30), async {
@@ -154,6 +156,68 @@ async fn a_moving_screen_reaches_the_window_as_h264_and_comes_back_sharp() {
         assert_eq!(pixels.len(), (W * H * 4) as usize);
         let expect = ((step.load(Ordering::SeqCst) * 5) % 251) as u8;
         assert!(pixels[0].abs_diff(expect) < 12, "{} vs {expect}", pixels[0]);
+        handle.send(ClientCommand::Disconnect).await.unwrap();
+        host.stop();
+    })
+    .await
+    .unwrap();
+}
+
+/// On Linux the viewer asks for tiles only, because WebKitGTK decodes
+/// WebCodecs on the GPU and an older AMD card locked up doing it. A screen
+/// that moves still reaches the window, as pixels, and never as H.264.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_moving_screen_reaches_a_linux_window_as_pixels_only() {
+    timeout(Duration::from_secs(30), async {
+        let moving = Arc::new(AtomicBool::new(false));
+        let step = Arc::new(AtomicU32::new(0));
+        let (m, s) = (moving.clone(), step.clone());
+        let mut host = boundary_session::host(
+            HostOptions {
+                relay: false,
+                relay_url: None,
+                bind_ip: None,
+            },
+            move || Ok(Box::new(Moving { moving: m, step: s })),
+        );
+        let ticket = loop {
+            if let Some(Event::Invitation(ticket)) = host.events.recv().await {
+                break ticket;
+            }
+        };
+        let driver = BoundaryDriver::default();
+        let id = driver.prepare(ticket, "DeskVNC helper".into()).unwrap();
+        let (tx, mut rx) = mpsc::channel(256);
+        let handle = driver
+            .spawn("video".into(), ConnectOptions::boundary(id), tx)
+            .unwrap();
+        loop {
+            if let Some(Event::Approval { answer, .. }) = host.events.recv().await {
+                answer.send(Approval::View).ok().unwrap();
+                break;
+            }
+        }
+        assert!(
+            matches!(next(&mut rx, false).await, RectPayload::Rgba(_)),
+            "the first screen is pixels"
+        );
+
+        moving.store(true, Ordering::SeqCst);
+        let (mut pixels, mut video) = (0, 0);
+        let until = tokio::time::Instant::now() + Duration::from_secs(3);
+        while let Ok(Some(event)) = tokio::time::timeout_at(until, rx.recv()).await {
+            if let SessionEvent::FramebufferUpdate { rects, .. } = event {
+                for rect in rects {
+                    match rect.payload {
+                        RectPayload::H264 { .. } => video += 1,
+                        _ => pixels += 1,
+                    }
+                }
+            }
+        }
+        assert_eq!(video, 0, "a Linux viewer was sent H.264");
+        assert!(pixels > 0, "the moving screen did not reach the window");
         handle.send(ClientCommand::Disconnect).await.unwrap();
         host.stop();
     })
