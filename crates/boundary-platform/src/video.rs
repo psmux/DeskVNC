@@ -543,7 +543,9 @@ mod tests {
                 let mut decoder = openh264::decoder::Decoder::new().unwrap();
                 let mut sizes = Vec::new();
                 let mut times = Vec::new();
-                for n in 0..10 {
+                // More pictures than a decoder that keeps them for
+                // reordering has buffers for.
+                for n in 0..30 {
                     let frame = screen(width, height, n * 6);
                     let t = std::time::Instant::now();
                     let unit = encoder.encode(&frame, n == 0).unwrap();
@@ -556,9 +558,10 @@ mod tests {
                         encoder.name()
                     );
                     // What every helper decodes, the mirror and DeskVNC
-                    // Support's own copy with OpenH264. VideoToolbox makes
-                    // High profile, which a Mac decodes in hardware.
-                    #[cfg(not(target_os = "macos"))]
+                    // Support's own copy with OpenH264. Apple's software
+                    // encoder on the Intel i9 made Main with CABAC when
+                    // asked for Main, which OpenH264 refused from the fifth
+                    // picture on.
                     if n == 0 {
                         let profile = profile(&unit.data).expect("a keyframe with parameter sets");
                         assert!(profile.baseline(), "{} made {profile}", encoder.name());
@@ -581,7 +584,7 @@ mod tests {
                     assert!(dw >= width as usize && dh >= height as usize);
                 }
                 assert!(
-                    sizes.iter().filter(|s| **s > 0).count() >= 7,
+                    sizes.iter().filter(|s| **s > 0).count() >= 21,
                     "{} skipped too much: {sizes:?}",
                     encoder.name()
                 );
@@ -612,7 +615,7 @@ mod tests {
                     }
                     off / (w * h) as u64
                 };
-                let (now, before) = (off(9), off(8));
+                let (now, before) = (off(29), off(28));
                 assert!(
                     now * 2 < before,
                     "{}: {now} against {before}",

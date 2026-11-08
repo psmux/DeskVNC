@@ -6,6 +6,13 @@
 //! Intel Macs and crashed there (see `sck::image_buffer_fn`), so this file
 //! takes no chance with the same frameworks: a symbol that is missing makes
 //! the encoder unavailable, and the session sends tiles instead.
+//!
+//! The encoder is asked for Constrained Baseline, and its first keyframe is
+//! read back before it is used: one that makes anything else is passed
+//! over, so the session falls back to OpenH264. Apple's software encoder on
+//! the Intel i9 iMac made Main with CABAC when asked for Main, and OpenH264,
+//! which decodes on every helper that is not a Mac, refused every picture
+//! from the fifth until the next keyframe ten seconds later.
 use anyhow::{Context, Result, bail, ensure};
 use boundary_session::{
     Frame,
@@ -131,8 +138,8 @@ struct Keys {
     expected_frame_rate: Option<CFStringRef>,
     max_key_interval_duration: Option<CFStringRef>,
     profile_level: CFStringRef,
-    profile_main: CFStringRef,
-    profile_constrained_high: Option<CFStringRef>,
+    profile_baseline: CFStringRef,
+    profile_constrained_baseline: Option<CFStringRef>,
     force_key_frame: CFStringRef,
     enable_hardware: Option<CFStringRef>,
     low_latency: Option<CFStringRef>,
@@ -220,10 +227,10 @@ fn api() -> Option<&'static Api> {
                     c"kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration",
                 ),
                 profile_level: constant(vt, c"kVTCompressionPropertyKey_ProfileLevel")?,
-                profile_main: constant(vt, c"kVTProfileLevel_H264_Main_AutoLevel")?,
-                profile_constrained_high: constant(
+                profile_baseline: constant(vt, c"kVTProfileLevel_H264_Baseline_AutoLevel")?,
+                profile_constrained_baseline: constant(
                     vt,
-                    c"kVTProfileLevel_H264_ConstrainedHigh_AutoLevel",
+                    c"kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel",
                 ),
                 force_key_frame: constant(vt, c"kVTEncodeFrameOptionKey_ForceKeyFrame")?,
                 enable_hardware: constant(
@@ -328,10 +335,35 @@ impl VideoToolbox {
         // real time mode measured 30 screens a second across the ocean. A
         // Mac without the mode gets the ordinary one too.
         let hardware = !(cfg!(target_arch = "x86_64") && intra_only(api, width, height));
-        match Self::create(api, width, height, cfg!(target_arch = "aarch64"), hardware) {
+        let checked = |low_latency| {
+            let mut encoder = Self::create(api, width, height, low_latency, hardware)?;
+            encoder.check()?;
+            anyhow::Ok(encoder)
+        };
+        match checked(cfg!(target_arch = "aarch64")) {
             Ok(encoder) => Ok(encoder),
-            Err(_) => Self::create(api, width, height, false, hardware),
+            Err(_) => checked(false),
         }
+    }
+
+    /// Encode a plain screen and read the profile off the keyframe that
+    /// comes out, since VideoToolbox may make another than it was asked
+    /// for. The next picture the session asks for is a keyframe of its own,
+    /// so the helper never sees this one.
+    fn check(&mut self) -> Result<()> {
+        let frame = Frame {
+            width: self.width,
+            height: self.height,
+            rgba: vec![128; self.width as usize * self.height as usize * 4],
+        };
+        let unit = self.encode(&frame, true)?;
+        let profile =
+            crate::video::profile(&unit.data).context("A keyframe without parameter sets")?;
+        ensure!(
+            profile.baseline(),
+            "VideoToolbox made {profile} when asked for Constrained Baseline"
+        );
+        Ok(())
     }
     fn create(
         api: &'static Api,
@@ -414,11 +446,15 @@ impl VideoToolbox {
             // real time mode, since `encode` waits for it.
             let _ = set(key, int(0).0);
         }
-        let profile = match (low_latency, k.profile_constrained_high) {
-            (true, Some(high)) => high,
-            _ => k.profile_main,
-        };
-        let _ = set(k.profile_level, profile);
+        // Constrained Baseline, which every helper's decoder follows. A Mac
+        // that does not know the name gets Baseline, and
+        // [`VideoToolbox::check`] reads back what it really makes.
+        let constrained = k
+            .profile_constrained_baseline
+            .is_some_and(|profile| set(k.profile_level, profile) == 0);
+        if !constrained {
+            let _ = set(k.profile_level, k.profile_baseline);
+        }
         if let Some(key) = k.max_key_interval_duration {
             // Keyframes come when video starts; this only bounds how long a
             // decoder that lost its place has to wait.
