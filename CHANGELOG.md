@@ -39,9 +39,21 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   allowed under Remote Management, Options.
 * dvv can see and drive a desktop up to 6K, and status answers on any size.
   Limbs an agent only looked at no longer use up its four limb allowance.
+* A DeskVNC viewer helping from Linux asks a Boundary computer for tiles
+  instead of H.264. WebKitGTK decodes video on the GPU with no software
+  choice, and on an older AMD card that locked the graphics card.
+* A Boundary helper's clipboard goes to the other computer only when the
+  helper pastes or presses Send clipboard, never just because control was
+  granted or the window regained focus.
 
 ### Fixed
 
+* The Linux viewer's Boundary picture froze for up to a minute while the
+  screen moved, because WebKitGTK refused the video format and every picture
+  until the next keyframe was dropped.
+* A helper ending a session normally showed as a red "connection lost" error.
+  Support now says "They ended the session".
+* dvv offered control on a Boundary computer that lets the helper only watch.
 * A Mac on macOS 26 froze after the first picture. The first full picture of
   a 4K Mac now arrives in about two seconds instead of twenty.
 * A Mac's host key prompt came back after every automatic reconnect.
