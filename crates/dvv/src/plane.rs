@@ -4360,7 +4360,19 @@ impl Plane {
         // `limb.command`, at the last instant before a keystroke reaches the
         // session, because a window can open between this answer and the
         // keystrokes that follow it.
-        if kind.is_text_bearing() {
+        //
+        // Both this and the wheel below wait for the limb's own word on
+        // whether it can carry the intent at all. A Boundary computer whose
+        // person lets this helper watch only refuses every keystroke, and an
+        // agent told SCREEN_CHANGED there would read the screen and be
+        // refused again, never learning that only the person can fix it.
+        // Dispatch refuses an unsupported intent first, in the limb's words,
+        // as it does for a click.
+        let supported = !matches!(
+            limb.limb().supports(kind.name()),
+            limb_core::limb::Support::Unsupported { .. }
+        );
+        if supported && kind.is_text_bearing() {
             if let Some(refused) = self.source.typing_fence(limb.id()) {
                 return Err(ToolError::new(refused.code, refused.why));
             }
@@ -4369,7 +4381,9 @@ impl Plane {
         // The wheel, asked for and waited for here rather than demanded of the
         // agent beforehand. The clock is read again after it, because the
         // wait can be long and the dispatch below counts idle time from it.
-        self.ensure_wheel(limb, &kind, reason).await?;
+        if supported {
+            self.ensure_wheel(limb, &kind, reason).await?;
+        }
         let now = clock::lease_now();
 
         let fence = self.fence_for(limb, &kind, generation)?;
