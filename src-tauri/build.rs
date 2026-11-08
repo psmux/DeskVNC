@@ -154,6 +154,7 @@ fn main() {
             "scan_network",
             "deep_probe",
             "local_subnets",
+            "scan_networks",
             "wake_host",
             // sessions
             "connect_session",

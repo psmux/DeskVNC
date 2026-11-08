@@ -8,14 +8,27 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { DiscoveredHost, DiscoveryEventPayload, ScanProgress } from "../lib/types";
-import { inTauri, safeInvoke, safeListen } from "../lib/tauri";
+import type {
+  DiscoveredHost,
+  DiscoveryEventPayload,
+  ScanNetwork,
+  ScanProgress,
+  ScanTarget,
+} from "../lib/types";
+import { inTauri, mustInvoke, safeInvoke, safeListen } from "../lib/tauri";
 import { MOCK_DISCOVERED, useMockData } from "../lib/mock";
 
 interface DiscoveryContextValue {
   discovered: DiscoveredHost[];
   scan: ScanProgress;
-  startScan: () => Promise<void>;
+  /**
+   * No target: scan the local subnets the shell deems safe, as the button
+   * always did. A target: scan just those ranges; a refusal (too large, not
+   * private, a scan already running) rejects, so the caller can say why.
+   */
+  startScan: (target?: ScanTarget) => Promise<void>;
+  /** The networks this computer can scan (`scan_networks`). */
+  listNetworks: () => Promise<ScanNetwork[]>;
 }
 
 const DiscoveryContext = createContext<DiscoveryContextValue | null>(null);
@@ -71,7 +84,7 @@ export function DiscoveryProvider({ children }: { children: ReactNode }): ReactN
     };
   }, [mock]);
 
-  const startScan = useCallback(async (): Promise<void> => {
+  const startScan = useCallback(async (target?: ScanTarget): Promise<void> => {
     if (mock) {
       setScan({ running: true, done: 0, total: 100 });
       let done = 0;
@@ -83,12 +96,26 @@ export function DiscoveryProvider({ children }: { children: ReactNode }): ReactN
       return;
     }
     setScan({ running: true, done: 0, total: 0 });
-    await safeInvoke("scan_network", undefined, null);
+    if (!target) {
+      await safeInvoke("scan_network", undefined, null);
+      return;
+    }
+    try {
+      await mustInvoke("scan_network", { subnets: target.cidrs, allowLarge: target.allowLarge });
+    } catch (err) {
+      setScan((s) => ({ ...s, running: false }));
+      throw err;
+    }
   }, [mock]);
 
+  const listNetworks = useCallback(
+    (): Promise<ScanNetwork[]> => safeInvoke<ScanNetwork[]>("scan_networks", undefined, []),
+    [],
+  );
+
   const value = useMemo(
-    () => ({ discovered, scan, startScan }),
-    [discovered, scan, startScan],
+    () => ({ discovered, scan, startScan, listNetworks }),
+    [discovered, scan, startScan, listNetworks],
   );
   return <DiscoveryContext.Provider value={value}>{children}</DiscoveryContext.Provider>;
 }

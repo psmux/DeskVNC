@@ -264,6 +264,7 @@ pub fn run() {
             commands::discovery::scan_network,
             commands::discovery::deep_probe,
             commands::discovery::local_subnets,
+            commands::discovery::scan_networks,
             commands::discovery::wake_host,
             // sessions
             commands::session::connect_session,

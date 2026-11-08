@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useHosts } from "../state/HostsContext";
 import { useDiscovery } from "../state/DiscoveryContext";
+import { ScanButton } from "../components/ScanButton";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
 import { saveCredentials } from "../lib/credentialStore";
@@ -126,7 +127,7 @@ export function Library({
   onAutoAddHandled?: () => void;
 }): ReactNode {
   const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, wakeHost, refresh, refreshThumbnail } = useHosts();
-  const { discovered, scan, startScan } = useDiscovery();
+  const { discovered, scan, startScan, listNetworks } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
   const {
@@ -1261,18 +1262,15 @@ export function Library({
         >
           <IconActivity size={15} />
         </button>
-        <button type="button" className="btn-secondary relative overflow-hidden" onClick={() => void startScan()}>
-          {scan.running ? (
-            <span className="absolute inset-x-0 bottom-0 h-0.5 bg-inset">
-              <span
-                className={classNames("block h-full bg-accent", scan.total === 0 && "indeterminate-bar w-1/3")}
-                style={scan.total > 0 ? { width: `${(scan.done / scan.total) * 100}%` } : undefined}
-              />
-            </span>
-          ) : null}
-          <IconZap size={14} />
-          {scan.running ? "Scanning…" : "Scan network"}
-        </button>
+        <ScanButton
+          scan={scan}
+          listNetworks={listNetworks}
+          onScan={(target) =>
+            startScan(target).catch((err: unknown) => {
+              push("danger", `Could not scan: ${err instanceof Error ? err.message : String(err)}`);
+            })
+          }
+        />
         <button
           type="button"
           className="btn-secondary"

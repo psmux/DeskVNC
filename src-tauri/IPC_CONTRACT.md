@@ -282,9 +282,10 @@ camelCase switch still deserialize.
 |---|---|---|
 | `start_discovery` | `invoke("start_discovery")` | `void` (idempotent mDNS browse) |
 | `stop_discovery` | `invoke("stop_discovery")` | `void` |
-| `scan_network` | `invoke("scan_network", { subnets? })` | `void`, `subnets` is a list of CIDR strings; omit for the safe local interfaces. Errors if a scan is already running. |
+| `scan_network` | `invoke("scan_network", { subnets?, allowLarge? })` | `void`, `subnets` is a list of CIDR strings (a bare address means that one address); omit for the safe local interfaces. Named ranges must be private and no larger than a /16, and ranges adding up to more than a /22 need `allowLarge: true`, which the UI sends only after the person confirmed the count. Errors if a scan is already running. |
 | `deep_probe` | `invoke("deep_probe", { address, port, protocol? })` | `{ protocol: "vnc", securityTypes: number[] }` or `{ protocol: "rdp", rdp: RdpCaps }` |
 | `local_subnets` | `invoke("local_subnets")` | `string[]` of CIDRs (VPN/tunnel interfaces excluded) |
+| `scan_networks` | `invoke("scan_networks")` | `ScanNetwork[]`: `{ id, name, kind, interface, range, cidrs, addresses, verdict }`, the networks this computer can scan, read from its interfaces and its IPv4 routes. `kind` is `"lan"`, `"vpn"`, `"warp"`, `"routed"` or `"virtual"`, in that order; `verdict` is `"scan"`, `"confirm"`, `"too-large"` or `"public"`. |
 | `wake_host` | `invoke("wake_host", { profileId })` | `void`, note **`profileId`**, not `hostId` |
 
 `deep_probe` dispatches on `protocol`, which the caller passes and the shell

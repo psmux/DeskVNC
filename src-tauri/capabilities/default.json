@@ -60,6 +60,7 @@
     "allow-scan-network",
     "allow-deep-probe",
     "allow-local-subnets",
+    "allow-scan-networks",
     "allow-wake-host",
 
     "allow-connect-session",

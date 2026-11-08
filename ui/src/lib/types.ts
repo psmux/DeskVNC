@@ -730,3 +730,32 @@ export interface ScanProgress {
   done: number;
   total: number;
 }
+
+/** What kind of network `scan_networks` listed, in the order it lists them. */
+export type ScanNetworkKind = "lan" | "vpn" | "warp" | "routed" | "virtual";
+
+/** Whether a range may be scanned as it stands (`vnc_discovery::networks::RangeVerdict`). */
+export type RangeVerdict = "scan" | "confirm" | "too-large" | "public";
+
+/** One network this computer can scan, from `scan_networks`. */
+export interface ScanNetwork {
+  id: string;
+  /** "Ethernet (enp6s0)", "Cloudflare WARP". */
+  name: string;
+  kind: ScanNetworkKind;
+  interface: string;
+  /** One CIDR, or the enclosing /24 with ", part" when routes cover pieces of it. */
+  range: string;
+  /** What `scan_network` is given to scan this network. */
+  cidrs: string[];
+  /** Host addresses the scan would probe. */
+  addresses: number;
+  verdict: RangeVerdict;
+}
+
+/** A scan of named ranges rather than the default local subnets. */
+export interface ScanTarget {
+  cidrs: string[];
+  /** Sent only after the person confirmed a range larger than a /22. */
+  allowLarge: boolean;
+}
