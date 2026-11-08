@@ -1320,7 +1320,26 @@ where
         result = capture => result.context("Capture worker failed")?,
         _ = connection.closed() => Ok(()),
     };
+    // The helper ending the session closes the connection, which the read
+    // of its next message often notices before `closed` above does. That
+    // read failing is the session ending as the helper meant it to, not the
+    // link failing: said as an error, the person saw "connection lost:
+    // closed by peer: Session ended (code 0)" in red after every normal end.
+    if result.is_err() && ended_by_helper(connection) {
+        return Ok(());
+    }
     result
+}
+
+/// Did the helper close this connection on purpose, the way it ends every
+/// session it leaves? A helper closes with code 0; a link that failed has no
+/// application close at all, and this side closing is not the helper.
+fn ended_by_helper(connection: &Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close))
+            if close.error_code == 0u8.into()
+    )
 }
 
 /// What a helper said it can do, put together with what the person let it

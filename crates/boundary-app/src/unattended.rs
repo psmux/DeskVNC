@@ -57,6 +57,9 @@ pub struct Unattended {
     claim: Option<std::fs::File>,
     /// Helpers connected unattended now, in the order they came in.
     pub active: Vec<Active>,
+    /// How many helpers have connected unattended since the app started,
+    /// so the window can tell a new session from the same ones.
+    pub connections: u64,
     ask: Option<Ask>,
     reachable: bool,
     password: String,
@@ -93,6 +96,7 @@ impl Unattended {
             listener: None,
             claim: None,
             active: Vec::new(),
+            connections: 0,
             ask: None,
             reachable: false,
             password: String::new(),
@@ -304,6 +308,7 @@ impl Unattended {
                         ..
                     } => {
                         log(&self.access_path, &format!("{name} connected"));
+                        self.connections += 1;
                         if let Some(message) = after_connect(&self.message, &name) {
                             self.message = message;
                             self.error = false;
