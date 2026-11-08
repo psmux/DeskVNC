@@ -565,7 +565,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                 />
                 <Toggle
                   label="Push clipboard when the window gains focus"
-                  description="Send your local clipboard to the remote when you switch back to the session"
+                  description="Send your local clipboard to the remote when you switch back to the session. Never when helping someone: there it goes over only when you paste or press Send clipboard"
                   value={clipboardOnFocus}
                   onChange={setClipboardOnFocus}
                 />

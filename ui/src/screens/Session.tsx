@@ -58,7 +58,7 @@ import {
   type ViewPrefs,
 } from "../lib/viewPrefs";
 import { syncSessionMenu, type SessionMenuState } from "../lib/menuSync";
-import { ClipboardEcho } from "../lib/clipboardEcho";
+import { ClipboardEcho, syncsOnArrival } from "../lib/clipboardEcho";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
@@ -1159,7 +1159,7 @@ function SessionView({
       // A Boundary computer takes text only while it says so (while this
       // helper has control). Sent before then it would be dropped there, yet
       // remembered here as moved, and the first paste after control came
-      // would skip it as a repeat. The sync below runs again once it says so.
+      // would skip it as a repeat.
       if (session.boundaryClipboardWrite === false) return "unchanged";
       const text = await readClipboard();
       if (text === null) return "unreadable";
@@ -1200,7 +1200,14 @@ function SessionView({
   pushClipboardRef.current = pushClipboard;
 
   const clipboardReady = session.state.state === "connected";
-  const clipboardWritable = session.boundaryClipboardWrite !== false;
+  // Never true on Boundary, whose helper's clipboard goes over only on a
+  // paste or the Send clipboard button: see `syncsOnArrival`.
+  const syncOnArrival = syncsOnArrival({
+    protocol: params.protocol,
+    connected: clipboardReady,
+    owns,
+    remoteTakesText: session.boundaryClipboardWrite !== false,
+  });
   // Declared ahead of the sync below so it runs first: a reconnect brings up
   // a fresh clipboard channel, and the text pushed before the drop has to be
   // offered on it again rather than skipped as a repeat.
@@ -1208,7 +1215,7 @@ function SessionView({
     if (clipboardReady) clipboardEcho.connected();
   }, [clipboardReady, clipboardEcho]);
   useEffect(() => {
-    if (!clipboardReady || !owns || !clipboardWritable) return;
+    if (!syncOnArrival) return;
     const sync = (): void => {
       if (!readBoolPref(PREF_CLIPBOARD_AUTO, true)) return;
       if (!readBoolPref(PREF_CLIPBOARD_ON_FOCUS, true)) return;
@@ -1219,7 +1226,7 @@ function SessionView({
     sync();
     window.addEventListener("focus", sync);
     return () => window.removeEventListener("focus", sync);
-  }, [clipboardReady, owns, clipboardWritable]);
+  }, [syncOnArrival]);
 
   // Bell: brief visual pulse via toast
   useEffect(() => {
