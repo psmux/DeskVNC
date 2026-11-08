@@ -729,6 +729,8 @@ export interface ScanProgress {
   running: boolean;
   done: number;
   total: number;
+  /** Stop was pressed and the scan has not reported its end yet. */
+  stopping?: boolean;
 }
 
 /** What kind of network `scan_networks` listed, in the order it lists them. */

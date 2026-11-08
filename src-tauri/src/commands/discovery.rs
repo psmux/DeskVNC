@@ -466,17 +466,47 @@ pub async fn scan_network(
     };
     let discovery_state = state.discovery.clone();
     tauri::async_runtime::spawn(async move {
-        let result = Discovery::new().scan_subnet(options, tx, cancel).await;
-        // By id, so a scan that finishes late cannot release a claim that is no
-        // longer its own, see `DiscoveryState::finish_scan`.
-        discovery_state.finish_scan(scan_id);
-        let error = result.err().map(|e| e.to_string());
-        if let Some(e) = &error {
-            tracing::warn!("subnet scan failed: {e}");
-        }
+        let discovery = Discovery::new();
+        let scan = discovery.scan_subnet(options, tx, cancel);
+        let error = drive_scan(&discovery_state, scan_id, scan).await;
         let _ = app.emit("discovery://scan-complete", error);
     });
     Ok(())
+}
+
+/// Run one claimed scan to its end and give its slot back.
+///
+/// The end is either the last probe or [`stop_scan`]: the scan watches the
+/// token `begin_scan` handed out, and on cancel it aborts its probes, sends
+/// `ScanComplete` with what it found so far and returns. Returns the error to
+/// put on `discovery://scan-complete`, `None` for a scan that finished or was
+/// stopped.
+async fn drive_scan(
+    discovery: &crate::state::DiscoveryState,
+    scan_id: u64,
+    scan: impl std::future::Future<Output = vnc_discovery::Result<u32>>,
+) -> Option<String> {
+    let result = scan.await;
+    // By id, so a scan that finishes late cannot release a claim that is no
+    // longer its own, see `DiscoveryState::finish_scan`.
+    discovery.finish_scan(scan_id);
+    let error = result.err().map(|e| e.to_string());
+    if let Some(e) = &error {
+        tracing::warn!("subnet scan failed: {e}");
+    }
+    error
+}
+
+/// Stop the running subnet scan.
+///
+/// No new probes start, the ones in flight are aborted, and the scan ends the
+/// usual way: a `scan-complete` on `discovery://event` with the count found so
+/// far, then `discovery://scan-complete`. Hosts it already found stay listed.
+/// Returns false when no scan was running, so a window whose idea of the scan
+/// went stale can put its button back.
+#[tauri::command]
+pub async fn stop_scan(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.discovery.stop_scan())
 }
 
 /// Second-phase probe of a single host, dispatched on what speaks there.
@@ -575,6 +605,94 @@ mod tests {
 
     fn ranges(list: &[&str]) -> Vec<Subnet> {
         list.iter().map(|s| parse_subnet(s).unwrap()).collect()
+    }
+
+    /// The reported bug: a /16 scan, once started, ran to its end. This runs
+    /// the real scan over 65,534 loopback addresses, which at the polite rate
+    /// would take over two minutes, stops it once probes are coming back, and
+    /// asserts that it ends within a second: the completion arrives, the
+    /// event stream closes (so the probe pool is gone and nothing more can
+    /// connect), the slot is free again and no error is reported.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_scan_ends_a_slash_16_scan_within_a_second() {
+        use std::time::Duration;
+
+        let state = std::sync::Arc::new(crate::state::DiscoveryState::default());
+        let (scan_id, cancel) = state
+            .begin_scan("main", &["127.0.0.0/16".to_string()], Instant::now())
+            .unwrap();
+        // A port nothing listens on, so every probe is a refusal.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let options = ScanOptions {
+            subnets: ranges(&["127.0.0.0/16"]),
+            ports: vec![port],
+            allow_large: true,
+            include_local: true,
+            resolve_names: false,
+            probe_other_services: false,
+            probe_rdp: false,
+            probe_boundary: false,
+            ..ScanOptions::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DiscoveryEvent>(4096);
+        let task = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let discovery = Discovery::new();
+                let scan = discovery.scan_subnet(options, tx, cancel);
+                drive_scan(&state, scan_id, scan).await
+            })
+        };
+
+        // Wait until the scan is really probing.
+        let total = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Some(DiscoveryEvent::ScanProgress { scanned, total }) if scanned > 0 => {
+                        break total
+                    }
+                    Some(_) => {}
+                    None => panic!("the scan ended on its own"),
+                }
+            }
+        })
+        .await
+        .expect("probes should be coming back");
+        assert_eq!(total, 65_534);
+
+        assert!(state.stop_scan(), "a scan was running");
+        let stopped = Instant::now();
+
+        let mut completed = false;
+        let mut last_scanned = 0;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    DiscoveryEvent::ScanProgress { scanned, .. } => {
+                        assert!(!completed, "progress after the completion");
+                        last_scanned = scanned;
+                    }
+                    DiscoveryEvent::ScanComplete { .. } => completed = true,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the scan should end within a second of stop_scan");
+        assert!(completed, "a stopped scan still says it is complete");
+        assert!(last_scanned < total, "it stopped well short of the end");
+
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the scan task returns at once")
+            .unwrap();
+        assert_eq!(error, None, "stopping is not a failure");
+        assert!(!state.scan_is_running(), "the slot is free again");
+        assert!(stopped.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

@@ -127,7 +127,7 @@ export function Library({
   onAutoAddHandled?: () => void;
 }): ReactNode {
   const { hosts, groups, tags, loading, saveHost, deleteHost, saveGroup, saveTag, setHostTags, setHostsGroup, addTagToHosts, removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, wakeHost, refresh, refreshThumbnail } = useHosts();
-  const { discovered, scan, startScan, listNetworks } = useDiscovery();
+  const { discovered, scan, startScan, stopScan, listNetworks } = useDiscovery();
   const { settings, update } = useSettings();
   const { livePreviews, setLivePreviews } = useSessions();
   const {
@@ -932,7 +932,9 @@ export function Library({
       { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
       { id: "import-rdp", label: "Import Remote Desktop file…", hint: "", run: () => void importRdp() },
       { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
-      { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
+      scan.running
+        ? { id: "stop-scan", label: "Stop scan", hint: "", run: () => void stopScan() }
+        : { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
       {
         id: "toggle-view",
         label: settings.libraryView === "grid" ? "Switch to list view" : "Switch to grid view",
@@ -943,7 +945,7 @@ export function Library({
       { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
       { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
     ];
-  }, [summaries, selectTab, settings.libraryView, update, startScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, importRdp]);
+  }, [summaries, selectTab, settings.libraryView, update, scan.running, startScan, stopScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, importRdp]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -1264,6 +1266,7 @@ export function Library({
         </button>
         <ScanButton
           scan={scan}
+          onStop={() => void stopScan()}
           listNetworks={listNetworks}
           onScan={(target) =>
             startScan(target).catch((err: unknown) => {

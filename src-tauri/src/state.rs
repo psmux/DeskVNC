@@ -627,6 +627,41 @@ impl DiscoveryState {
         self.scan.lock().is_some()
     }
 
+    /// Tell the running subnet scan to stop. Returns false when none is running.
+    ///
+    /// The token is cancelled but the slot stays claimed. The scan task gives
+    /// it back through [`Self::finish_scan`] once it has aborted its probes and
+    /// sent its completion, which takes milliseconds. Releasing it here instead
+    /// would let a new scan start while the old one was still unwinding, and
+    /// the old one's `scan-complete` would then arrive in the middle of the new
+    /// one and switch its progress off.
+    ///
+    /// Any window may stop the scan, not only the one that started it. The
+    /// refusal a second caller gets tells the person a scan is running, and
+    /// stopping it should not need a trip to another window.
+    pub fn stop_scan(&self) -> bool {
+        match self.scan.lock().as_ref() {
+            Some(running) => {
+                running.cancel.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stop the scan `window_label` started, if it is still running. Called
+    /// when that window goes away, since nothing would be left to show the
+    /// scan's progress or to stop it.
+    pub fn stop_scan_started_by(&self, window_label: &str) -> bool {
+        match self.scan.lock().as_ref() {
+            Some(running) if running.started_by == window_label => {
+                running.cancel.cancel();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Cancel everything (app exit).
     ///
     /// Still the blunt instrument it was, and it has to be: `lib.rs` calls it
@@ -927,6 +962,43 @@ mod discovery_state_tests {
         // …and the subscriber set went with it, so the next window in is the
         // one that starts the browse rather than joining a token that is gone.
         assert!(state.subscribe_browse("main", ALL_WINDOWS_EXIST).is_some());
+    }
+
+    /// Stop cancels the running scan's token and keeps the slot until the scan
+    /// reports back, so a second scan cannot start under the first one's
+    /// completion.
+    #[test]
+    fn stop_scan_cancels_the_running_scan_and_holds_the_slot_until_it_ends() {
+        let state = DiscoveryState::default();
+        assert!(!state.stop_scan(), "nothing to stop yet");
+
+        let (id, token) = state
+            .begin_scan("main", &["10.0.0.0/16".to_string()], Instant::now())
+            .unwrap();
+        assert!(state.stop_scan());
+        assert!(token.is_cancelled());
+        assert!(
+            state.scan_is_running(),
+            "the slot is the scan task's to give back"
+        );
+        assert!(state.begin_scan("library-2", &[], Instant::now()).is_err());
+
+        state.finish_scan(id);
+        assert!(!state.scan_is_running());
+        assert!(state.begin_scan("library-2", &[], Instant::now()).is_ok());
+    }
+
+    /// A window that goes away stops the scan it started and no other.
+    #[test]
+    fn closing_a_window_stops_only_the_scan_it_started() {
+        let state = DiscoveryState::default();
+        let (_, token) = state.begin_scan("main", &[], Instant::now()).unwrap();
+
+        assert!(!state.stop_scan_started_by("library-2"));
+        assert!(!token.is_cancelled());
+
+        assert!(state.stop_scan_started_by("main"));
+        assert!(token.is_cancelled());
     }
 }
 

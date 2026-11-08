@@ -58,6 +58,7 @@
     "allow-start-discovery",
     "allow-stop-discovery",
     "allow-scan-network",
+    "allow-stop-scan",
     "allow-deep-probe",
     "allow-local-subnets",
     "allow-scan-networks",
