@@ -191,7 +191,9 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
         type="button"
         className="btn-secondary relative overflow-hidden tabular-nums"
         style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
-        title={scan.running ? "Stop the scan (Esc). Computers it found stay listed." : undefined}
+        // No tooltip: WebKitGTK keeps showing one after the scan ends and the
+        // button has gone back to "Scan network".
+        aria-keyshortcuts={scan.running ? "Escape" : undefined}
         aria-busy={scan.running}
         disabled={stopping}
         onClick={() => {
