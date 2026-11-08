@@ -71,6 +71,7 @@ struct Mirror {
     pictures: u32,
     drop: Option<u32>,
     failed: u32,
+    keyframes: u32,
 }
 impl Mirror {
     fn clean(&self) -> bool {
@@ -99,6 +100,7 @@ impl Mirror {
                     self.decoder = None;
                 }
                 if unit.keyframe {
+                    self.keyframes += 1;
                     self.broken = false;
                 }
                 let decoded = !self.broken
@@ -184,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         pictures: 0,
         drop,
         failed: 0,
+        keyframes: 0,
     };
     let mut asked: Option<Instant> = None;
     let mut asks = 0;
@@ -238,8 +241,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     println!(
-        "pictures {} lost {} times, refreshes asked {asks}, stale while moving {:.1} s of {:.1} s, clean after motion stopped: {}",
+        "pictures {} ({} keyframes) lost {} times, refreshes asked {asks}, stale while moving {:.1} s of {:.1} s, clean after motion stopped: {}",
         mirror.pictures,
+        mirror.keyframes,
         mirror.failed,
         stale_moving.as_secs_f64(),
         moving_for.as_secs_f64(),
