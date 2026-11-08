@@ -2830,11 +2830,18 @@ const BOUNDARY_VIEW_ONLY: &str = "the person at that Boundary computer lets this
 /// A Boundary desktop's card. Control appears only while the person there
 /// lets the helper control the computer, and clipboard read and write each
 /// only while the computer says so. All three come and go during the session.
-fn boundary_capabilities(mirror: bool, control: bool, clip: BoundaryClipboard) -> &'static [Capability] {
+fn boundary_capabilities(
+    mirror: bool,
+    control: bool,
+    clip: BoundaryClipboard,
+) -> &'static [Capability] {
     use Capability::*;
     static CARDS: std::sync::OnceLock<Vec<Vec<Capability>>> = std::sync::OnceLock::new();
     let index = |mirror: bool, control: bool, write: bool, read: bool| {
-        usize::from(mirror) << 3 | usize::from(control) << 2 | usize::from(write) << 1 | usize::from(read)
+        usize::from(mirror) << 3
+            | usize::from(control) << 2
+            | usize::from(write) << 1
+            | usize::from(read)
     };
     let cards = CARDS.get_or_init(|| {
         let mut cards = vec![Vec::new(); 16];
@@ -2946,13 +2953,11 @@ impl limb_core::limb::Limb for RemoteLimb {
     /// A computer too old to carry a clipboard never says, and offers neither.
     fn capabilities(&self) -> &'static [Capability] {
         match self.grounding {
-            Grounding::Pixels if self.kind == ProtocolKind::Boundary => {
-                boundary_capabilities(
-                    self.has_mirror,
-                    self.boundary_control(),
-                    self.boundary_clipboard(),
-                )
-            }
+            Grounding::Pixels if self.kind == ProtocolKind::Boundary => boundary_capabilities(
+                self.has_mirror,
+                self.boundary_control(),
+                self.boundary_clipboard(),
+            ),
             Grounding::Cells => &[
                 Capability::View,
                 Capability::Control,
@@ -5280,7 +5285,8 @@ mod tests {
 
             // Watching one session never takes control from another.
             note_rights(session, &serde_json::json!({ "control": false }));
-            let other = RemoteLimb::new(ProtocolKind::Boundary, mirror).for_session("another-control");
+            let other =
+                RemoteLimb::new(ProtocolKind::Boundary, mirror).for_session("another-control");
             assert!(controls(&other));
             // Another protocol is never affected by a Boundary record.
             let vnc = RemoteLimb::new(ProtocolKind::Vnc, mirror).for_session(session);
