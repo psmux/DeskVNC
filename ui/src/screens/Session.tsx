@@ -459,6 +459,13 @@ function SessionView({
       return;
     }
     rendererRef.current = renderer;
+    // A Boundary computer answers a refresh with the whole screen as tiles,
+    // which covers the last pictures of a run that WebKitGTK's decoder keeps
+    // back until more video comes (see `VIDEO_TAIL_QUIET_MS`). VNC and RDP
+    // could answer with more video, so they are not asked.
+    if (params.protocol === "boundary") {
+      renderer.onVideoBehind = () => sessionRef.current.refreshScreen();
+    }
     // The pointer preference was read before this renderer existed; see the
     // effect that owns `showRemoteCursorRef`.
     renderer.setCursorVisible(showRemoteCursorRef.current);

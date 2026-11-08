@@ -25,6 +25,7 @@ import {
   type WireRect,
 } from "./frameProtocol";
 import { traceMark } from "./trace";
+import { VideoPacer, type LearnedLag } from "./videoPacer";
 
 export type RendererScalingMode = "fit" | "aspect-fit" | "actual" | "custom";
 
@@ -125,31 +126,43 @@ interface H264Context {
   h: number;
   /** Renderer generation this decoder belongs to (dropped on resize). */
   generation: number;
-  /** Monotonic presentation timestamps, in microseconds. */
-  timestamp: number;
   /**
-   * Uploads still waiting on the decoder, keyed by the timestamp of the chunk
-   * that will produce them. Insertion order is submission order, which is
-   * also ascending timestamp order; see `decodeH264` for what that buys.
+   * Timestamps for its chunks, and when the pictures they decode into go on
+   * screen. See `videoPacer.ts`.
    */
-  waiters: Map<number, (frame: VideoFrame | null) => void>;
+  pacer: VideoPacer<VideoFrame>;
 }
 
 /** Maximum simultaneous decoder contexts, mirrors the backend's cap. */
 const H264_MAX_CONTEXTS = 64;
 
 /**
- * How long one H.264 rect waits for its decoded frame before giving up on it.
+ * How long one H.264 rect waits for the picture its decoder owes before
+ * giving up on it.
  *
  * A `decode()` normally produces exactly one `output` callback, but a decoder
  * that quietly swallows a chunk (a corrupt slice, a driver hiccup) would
  * otherwise leave the apply loop waiting forever, and every later update
  * queued behind it: the whole viewer freezes, which is far worse than one
  * missing frame. A real decode is tens of milliseconds, so half a second only
- * ever fires when something has genuinely gone wrong, and the picture heals on
- * the next key frame.
+ * fires when something has gone wrong, or while the window is still learning
+ * that its decoder holds pictures back (once per held picture, the first time
+ * video plays in a window).
  */
 const H264_FRAME_TIMEOUT_MS = 500;
+
+/**
+ * How long a decoder that holds pictures back may sit on the last of them
+ * after video stops before the window asks for the whole screen again.
+ *
+ * Those pictures come out only when more chunks go in. On a Boundary session
+ * none follow once the far screen stands still, and the sharp tiles its
+ * computer then sends replace only what its own copy of the last picture got
+ * wrong, so the window would keep what moved during the last two or three
+ * pictures stale until something there changed again. A third of a second is
+ * well past the gap between pictures of any video still playing.
+ */
+const VIDEO_TAIL_QUIET_MS = 300;
 
 /**
  * Hard cap on queued updates before the drain loop stops being polite.
@@ -516,8 +529,23 @@ export class WebGLRenderer {
   // context id the backend assigns per rect geometry (0..63).
   private h264 = new Map<number, H264Context>();
   private h264Failed = false;
+  /** How many chunks this webview's decoder holds back, as learned. */
+  private h264Lag: LearnedLag = { chunks: 0 };
+  /** Chunks fed to any decoder, so a tail check can tell video went on. */
+  private h264Fed = 0;
+  /** `h264Fed` when the window last asked for the screen over a tail. */
+  private tailAskedAt = -1;
+  private tailTimer: ReturnType<typeof setTimeout> | undefined;
 
   onFirstFrame: (() => void) | null = null;
+
+  /**
+   * Ask for the whole screen again: a decoder holds the last pictures of a
+   * run back and no more chunks have come to push them out. Wired only for
+   * protocols that answer with tiles (Boundary), since one that answered
+   * with more video would only move the tail along.
+   */
+  onVideoBehind: (() => void) | null = null;
 
 
   /**
@@ -783,6 +811,45 @@ export class WebGLRenderer {
     } finally {
       this.draining = false;
     }
+    this.watchVideoTail();
+  }
+
+  /**
+   * Something other than decoder `except` drew over `r`. Pictures still to
+   * come out of a decoder whose area it overlaps are older than it, so they
+   * must not land on top of it (see `VideoPacer.overtaken`).
+   */
+  private videoOvertaken(r: { x: number; y: number; w: number; h: number }, except: number): void {
+    for (const [id, ctx] of this.h264) {
+      if (id === except) continue;
+      const w = Math.min(r.x + r.w, ctx.x + ctx.w) - Math.max(r.x, ctx.x);
+      const h = Math.min(r.y + r.h, ctx.y + ctx.h) - Math.max(r.y, ctx.y);
+      if (w > 0 && h > 0) ctx.pacer.overtaken(w * h);
+    }
+  }
+
+  /**
+   * Once updates stop, give a decoder that holds pictures back a moment to
+   * be fed more, and if none comes ask for the whole screen, once per run.
+   * See `VIDEO_TAIL_QUIET_MS`.
+   */
+  private watchVideoTail(): void {
+    if (this.tailTimer !== undefined || !this.onVideoBehind) return;
+    const fed = this.h264Fed;
+    if (fed === this.tailAskedAt) return;
+    if (!Array.from(this.h264.values()).some((ctx) => ctx.pacer.behind())) return;
+    this.tailTimer = setTimeout(() => {
+      this.tailTimer = undefined;
+      if (this.disposed || this.draining || this.pending.length > 0) return;
+      if (this.h264Fed !== fed) {
+        this.watchVideoTail();
+        return;
+      }
+      if (!Array.from(this.h264.values()).some((ctx) => ctx.pacer.behind())) return;
+      this.tailAskedAt = fed;
+      traceMark("video_behind", this.h264Lag.chunks);
+      this.onVideoBehind?.();
+    }, VIDEO_TAIL_QUIET_MS);
   }
 
   /**
@@ -818,6 +885,7 @@ export class WebGLRenderer {
           if (r.payload.byteLength >= r.w * r.h * 4) {
             gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
             gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, r.w, r.h, gl.RGBA, gl.UNSIGNED_BYTE, r.payload);
+            this.videoOvertaken(r, -1);
           }
           break;
         case RectFormat.Jpeg: {
@@ -846,13 +914,16 @@ export class WebGLRenderer {
           gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
           gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
           bmp.close();
+          this.videoOvertaken(r, -1);
           break;
         }
         case RectFormat.CopyRect:
           this.copyRect(r.srcX, r.srcY, r.x, r.y, r.w, r.h);
+          this.videoOvertaken(r, -1);
           break;
         case RectFormat.H264:
           await this.decodeH264(r);
+          this.videoOvertaken(r, r.h264Context ?? 0);
           break;
         default:
           break; // unknown format: skip gracefully
@@ -931,17 +1002,17 @@ export class WebGLRenderer {
    * that per rect on a video stream is exactly the workload it hurts most:
    * the decoder never gets to keep more than one frame in flight, and the
    * cost lands on the main thread, feeding the backlog this queue exists to
-   * shed.
+   * shed. WebCodecs also wants a key chunk after every flush, and a Boundary
+   * computer sends one only when its encoder starts.
    *
-   * Instead the chunk is tagged with a monotonic timestamp that identifies
-   * its position, and `output` hands the decoded frame to whoever is waiting
-   * on that timestamp rather than uploading it itself (see
-   * `deliverH264Frame`). The upload then happens right here, at the rect's
-   * own position in the ordered loop, so ordering is enforced by where the
-   * pixels are written rather than by draining the decoder. The wait is
-   * bounded by `H264_FRAME_TIMEOUT_MS` and released early whenever the
-   * decoder is closed, so a decoder that never answers cannot stall the
-   * queue.
+   * Instead each context's `VideoPacer` numbers the chunks and puts every
+   * picture on screen as it comes back, unless something newer has been
+   * drawn over that area since its chunk went in. Here the loop waits only
+   * for the picture the decoder can have produced by now: this chunk's own
+   * on a decoder that holds nothing back, an older one on WebKitGTK's, which
+   * keeps two or three. The wait is bounded by `H264_FRAME_TIMEOUT_MS` and
+   * released whenever the decoder is closed, so a decoder that never answers
+   * cannot stall the queue.
    */
   private async decodeH264(r: WireRect): Promise<void> {
     if (this.h264Failed) return;
@@ -974,9 +1045,8 @@ export class WebGLRenderer {
       return;
     }
 
-    ctx.timestamp += 1000; // 1 ms apart: monotonic is all the decoder needs
-    const ts = ctx.timestamp;
-    const wait = this.awaitH264Frame(ctx, ts);
+    const ts = ctx.pacer.feed();
+    this.h264Fed++;
     try {
       ctx.decoder.decode(
         new EncodedVideoChunk({
@@ -988,69 +1058,20 @@ export class WebGLRenderer {
       );
     } catch {
       // Decode error, or the decoder was reset/closed (e.g. a resize raced
-      // this update). Closing settles the waiter above, so the await below
-      // returns immediately rather than sitting out the timeout.
+      // this update). Closing releases the wait below at once rather than
+      // letting it sit out the timeout.
       this.closeH264(id);
     }
-    const frame = await wait;
-    if (!frame) return;
+    await ctx.pacer.settle(H264_FRAME_TIMEOUT_MS);
+  }
+
+  /** A decoded picture, on screen now unless the window moved on. */
+  private showVideoFrame(frame: VideoFrame, ctx: H264Context): void {
     if (this.disposed || ctx.generation !== this.generation) {
       frame.close();
       return;
     }
     this.uploadVideoFrame(frame, ctx);
-  }
-
-  /**
-   * Wait for the frame a chunk will decode into, identified by its timestamp.
-   *
-   * The waiter is registered before `decode()` is called so that an output
-   * callback can never arrive before there is anything to hand it to, and it
-   * is settled exactly once: whichever of delivery, decoder close, or the
-   * timeout comes first wins, and the losers close the frame they were handed
-   * rather than leaking a `VideoFrame`.
-   */
-  private awaitH264Frame(ctx: H264Context, ts: number): Promise<VideoFrame | null> {
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const settle = (frame: VideoFrame | null): void => {
-        if (ctx.waiters.get(ts) !== settle) {
-          frame?.close();
-          return;
-        }
-        ctx.waiters.delete(ts);
-        if (timer !== undefined) clearTimeout(timer);
-        resolve(frame);
-      };
-      ctx.waiters.set(ts, settle);
-      timer = setTimeout(() => settle(null), H264_FRAME_TIMEOUT_MS);
-    });
-  }
-
-  /**
-   * Route one decoded frame to the rect that asked for it.
-   *
-   * Chunks go in one at a time in protocol order and this path has no
-   * B-frames, so output comes back in the same order. That means anything
-   * still outstanding with an OLDER timestamp than the frame just delivered
-   * is never coming (a corrupt slice the decoder discarded, say), and holding
-   * those waiters open would stall every update queued behind them until they
-   * timed out. Release them as soon as a newer frame proves them lost.
-   *
-   * Matching is on the exact timestamp, which WebCodecs requires the decoder
-   * to carry through from the chunk. A frame nobody is waiting for is dropped
-   * rather than given to the next waiter in line: that frame's rect already
-   * gave up on it, and handing it over would paint frame N where frame N+1
-   * belongs and leave every frame after it one behind for good.
-   */
-  private deliverH264Frame(ctx: H264Context, frame: VideoFrame): void {
-    const ts = frame.timestamp;
-    for (const key of Array.from(ctx.waiters.keys())) {
-      if (key < ts) ctx.waiters.get(key)?.(null);
-    }
-    const waiter = ctx.waiters.get(ts);
-    if (waiter) waiter(frame);
-    else frame.close();
   }
 
   /** Build a decoder for one context, or `null` if WebCodecs refuses. */
@@ -1068,9 +1089,9 @@ export class WebGLRenderer {
       w: r.w,
       h: r.h,
       generation,
-      timestamp: 0,
-      waiters: new Map(),
+      pacer: null as unknown as VideoPacer<VideoFrame>,
     };
+    ctx.pacer = new VideoPacer<VideoFrame>(this.h264Lag, (frame) => this.showVideoFrame(frame, ctx), r.w * r.h);
     try {
       ctx.decoder = new VideoDecoder({
         output: (frame: VideoFrame) => {
@@ -1078,9 +1099,9 @@ export class WebGLRenderer {
             frame.close();
             return;
           }
-          // Not uploaded here: `decodeH264` uploads it at the rect's own
-          // position in the ordered apply loop.
-          this.deliverH264Frame(ctx, frame);
+          const lag = this.h264Lag.chunks;
+          ctx.pacer.output(frame);
+          if (this.h264Lag.chunks !== lag) traceMark("h264_lag", this.h264Lag.chunks);
         },
         error: () => {
           this.closeH264(id);
@@ -1154,9 +1175,9 @@ export class WebGLRenderer {
     if (!ctx) return;
     this.h264.delete(id);
     // Anything still waiting on this decoder is waiting on a frame that will
-    // never be produced now. Settle those waiters so the apply loop moves on
-    // instead of holding every later update behind a decoder that is gone.
-    for (const settle of Array.from(ctx.waiters.values())) settle(null);
+    // never be produced now. Release it so the apply loop moves on instead of
+    // holding every later update behind a decoder that is gone.
+    ctx.pacer.close();
     try {
       if (ctx.decoder.state !== "closed") ctx.decoder.close();
     } catch {
@@ -1604,6 +1625,8 @@ export class WebGLRenderer {
     this.pending.length = 0;
     this.pendingBytes = 0;
     this.closeAllH264();
+    clearTimeout(this.tailTimer);
+    this.tailTimer = undefined;
     const gl = this.gl;
     gl.deleteTexture(this.frameTex);
     gl.deleteTexture(this.scratchTex);
