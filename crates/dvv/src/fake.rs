@@ -210,6 +210,9 @@ pub struct FakeLimb {
     kind: ProtocolKind,
     grounding: Grounding,
     max_slots: Option<u16>,
+    /// Set while the person at the far side lets the helper only watch, as
+    /// a Boundary computer can. See [`FakeSource::watch_only`].
+    watching: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeLimb {
@@ -219,6 +222,7 @@ impl FakeLimb {
             kind: ProtocolKind::Vnc,
             grounding: Grounding::Pixels,
             max_slots: Some(4),
+            watching: Arc::default(),
         }
     }
 
@@ -228,6 +232,7 @@ impl FakeLimb {
             kind: ProtocolKind::Ssh,
             grounding: Grounding::Cells,
             max_slots: None,
+            watching: Arc::default(),
         }
     }
 }
@@ -302,7 +307,11 @@ impl Limb for FakeLimb {
 
     fn supports(&self, intent: IntentName) -> Support {
         use IntentName::*;
+        let watching = self.watching.load(std::sync::atomic::Ordering::Relaxed);
         match intent {
+            Type | Press | Move | Click | Drag | Scroll if watching => Support::Unsupported {
+                because: "the person at that computer lets this helper watch only",
+            },
             Type | Press | Tune | ClipboardGet | ClipboardSet | SendBytes => Support::Lowered,
             Move | Click | Drag | Scroll => match self.grounding {
                 Grounding::Pixels => Support::Lowered,
@@ -457,6 +466,8 @@ pub struct FakeSource {
     mirror_budget: Mutex<Option<u64>>,
     /// Every repaint or reconnect asked of a limb, by limb id, in order.
     nudges: Mutex<Vec<(String, Nudge)>>,
+    /// Each attached limb's watch only switch, by limb id.
+    watching: Mutex<BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// A far side that takes `allowed` more key presses and refuses the rest.
@@ -485,6 +496,7 @@ impl FakeSource {
             shared: None,
             nudges: Mutex::new(Vec::new()),
             mirror_budget: Mutex::new(None),
+            watching: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -593,6 +605,15 @@ impl FakeSource {
                 },
             },
         );
+    }
+
+    /// Make the person at this limb's far side let the helper only watch, or
+    /// give control back, the way a Boundary computer's person can at any
+    /// time. The limb then refuses every pointer and keyboard intent.
+    pub fn watch_only(&self, limb: &str, watching: bool) {
+        if let Some(switch) = lock(&self.watching).get(limb) {
+            switch.store(watching, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// This limb's mirror, so a test can say that something changed.
@@ -770,10 +791,15 @@ impl SessionSource for FakeSource {
         lock(&self.states).insert(id.to_string(), SessionState::Connected);
         lock(&self.live).insert(id.to_string(), host.clone());
 
-        let driver: Arc<dyn Limb> = match host.protocol {
-            ProtocolKind::Ssh => Arc::new(FakeLimb::terminal()),
-            _ => Arc::new(FakeLimb::desktop()),
+        let mut limb = match host.protocol {
+            ProtocolKind::Ssh => FakeLimb::terminal(),
+            _ => FakeLimb::desktop(),
         };
+        limb.watching = lock(&self.watching)
+            .entry(id.to_string())
+            .or_default()
+            .clone();
+        let driver: Arc<dyn Limb> = Arc::new(limb);
         Ok(Attach {
             driver,
             machine,
