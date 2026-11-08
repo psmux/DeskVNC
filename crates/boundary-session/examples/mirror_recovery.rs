@@ -151,9 +151,8 @@ async fn main() -> anyhow::Result<()> {
     let moving = Arc::new(AtomicBool::new(false));
     let step = Arc::new(AtomicU32::new(0));
     let (m, s) = (moving.clone(), step.clone());
-    let mut host = boundary_session::host(local(), move || {
-        Ok(Box::new(Moving { moving: m, step: s }))
-    });
+    let mut host =
+        boundary_session::host(local(), move || Ok(Box::new(Moving { moving: m, step: s })));
     let ticket = loop {
         if let Some(Event::Invitation(t)) = host.events.recv().await {
             break t;
@@ -242,9 +241,7 @@ async fn main() -> anyhow::Result<()> {
         if Instant::now() >= give_up {
             break None;
         }
-        if let Ok(Ok(())) =
-            tokio::time::timeout_at(give_up.into(), helper.frames.changed()).await
-        {
+        if let Ok(Ok(())) = tokio::time::timeout_at(give_up.into(), helper.frames.changed()).await {
             pump(&mut helper, &mut mirror, &mut asked);
         }
     };

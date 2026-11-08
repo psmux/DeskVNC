@@ -502,14 +502,23 @@ mod tests {
     /// encoder on a Radeon 8060S made when asked for Main, and OpenH264's.
     #[test]
     fn a_keyframe_says_whether_every_helper_can_decode_it() {
+        // An access unit delimiter, the SPS cut short, the PPS and the
+        // start of the IDR slice.
         let amd = [
-            0, 0, 0, 1, 0x09, 0x10, // access unit delimiter
-            0, 0, 0, 1, 0x67, 0x4d, 0x04, 0x28, 0xe8, 0xa0, 0x3c, 0x01, 0x13, 0xf2, // SPS, cut short
-            0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, // PPS
-            0, 0, 0, 1, 0x65, 0x88, 0x84, 0x01, // IDR slice, cut short
-        ];
+            &[0, 0, 0, 1, 0x09, 0x10][..],
+            &[0, 0, 0, 1, 0x67, 0x4d, 0x04, 0x28, 0xe8, 0xa0, 0x3c, 0x01],
+            &[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80],
+            &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x01],
+        ]
+        .concat();
         let made = profile(&amd).expect("parameter sets");
-        assert_eq!(made, Profile { idc: 77, cabac: true });
+        assert_eq!(
+            made,
+            Profile {
+                idc: 77,
+                cabac: true
+            }
+        );
         assert!(!made.baseline());
         assert_eq!(made.to_string(), "Main (77) with CABAC");
         // A picture after the keyframe carries none.

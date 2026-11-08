@@ -109,9 +109,9 @@ impl Video {
         refresh: impl FnOnce() -> Refresh,
     ) {
         let mut workers = self.workers.lock();
-        let worker = workers.entry(session_id.to_string()).or_insert_with(|| {
-            spawn(Arc::downgrade(mirrors), session_id.to_string(), refresh())
-        });
+        let worker = workers
+            .entry(session_id.to_string())
+            .or_insert_with(|| spawn(Arc::downgrade(mirrors), session_id.to_string(), refresh()));
         let (queued, applied) = *worker.progress.counts.lock();
         let job = if queued - applied >= BACKLOG {
             Job::Skip(rects)
@@ -412,7 +412,10 @@ mod tests {
         let start = Instant::now();
         assert!(!decoders.wants_refresh(start), "nothing lost yet");
         decoders.decode(vec![picture(false, vec![0, 0, 0, 1, 0x41, 1, 2, 3])]);
-        assert!(decoders.wants_refresh(start), "asked the moment it was lost");
+        assert!(
+            decoders.wants_refresh(start),
+            "asked the moment it was lost"
+        );
         decoders.decode(vec![picture(false, vec![0, 0, 0, 1, 0x41, 4, 5, 6])]);
         assert!(!decoders.wants_refresh(start + Duration::from_millis(30)));
         assert!(decoders.wants_refresh(start + ASK_AGAIN), "still lost");
@@ -427,7 +430,10 @@ mod tests {
         let keyframe = encoder.encode(&frame, true).expect("encodes").data;
         let out = decoders.decode(vec![picture(true, keyframe)]);
         assert!(matches!(out[0].payload, RectPayload::Rgba(_)));
-        assert!(!decoders.wants_refresh(start + ASK_AGAIN * 3), "found again");
+        assert!(
+            !decoders.wants_refresh(start + ASK_AGAIN * 3),
+            "found again"
+        );
     }
 
     /// The decoding thread asks the session itself, once, when a picture
