@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 
 const W: u32 = 1920;
 const H: u32 = 1200;
-const CELL: u32 = 64;
 
 struct Moving {
     moving: Arc<AtomicBool>,
@@ -64,7 +63,7 @@ impl Desktop for Moving {
     }
 }
 
-/// The mirror: which cells are stale, and the decoder.
+/// The mirror: which pixels are stale, and the decoder.
 struct Mirror {
     stale: Vec<bool>,
     decoder: Option<openh264::decoder::Decoder>,
@@ -78,15 +77,9 @@ impl Mirror {
         !self.stale.iter().any(|s| *s)
     }
     fn cover(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        let (cols, rows) = (W.div_ceil(CELL), H.div_ceil(CELL));
-        for row in 0..rows {
-            for col in 0..cols {
-                let (cx, cy) = (col * CELL, row * CELL);
-                let (cw, ch) = (CELL.min(W - cx), CELL.min(H - cy));
-                if cx >= x && cy >= y && cx + cw <= x + w && cy + ch <= y + h {
-                    self.stale[(row * cols + col) as usize] = false;
-                }
-            }
+        for row in y..(y + h).min(H) {
+            let line = (row * W) as usize;
+            self.stale[line + x as usize..line + (x + w).min(W) as usize].fill(false);
         }
     }
     /// True when this update left the decoder lost.
@@ -123,7 +116,7 @@ impl Mirror {
                     }
                     self.broken = true;
                     self.decoder = None;
-                    self.stale.iter_mut().for_each(|s| *s = true);
+                    self.stale.fill(true);
                 }
             }
         }
@@ -184,9 +177,8 @@ async fn main() -> anyhow::Result<()> {
         "encoder {}",
         boundary_platform::video::encoders()(W, H)?.name()
     );
-    let cells = (W.div_ceil(CELL) * H.div_ceil(CELL)) as usize;
     let mut mirror = Mirror {
-        stale: vec![true; cells],
+        stale: vec![true; (W * H) as usize],
         decoder: None,
         broken: false,
         pictures: 0,
