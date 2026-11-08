@@ -1837,6 +1837,14 @@ impl Coder {
             }
             Work::Whole(frame) => {
                 self.drop_held();
+                // A helper asks for the whole screen when what it holds went
+                // stale under video, as when a decoder there lost its place.
+                // Video after this starts from a keyframe, so that decoder
+                // can follow it again rather than stay lost while the screen
+                // keeps moving.
+                if let Some(video) = self.video.as_mut() {
+                    video.fresh = true;
+                }
                 self.policy.stop();
                 self.tiles.reset();
                 self.last = Some(frame.clone());

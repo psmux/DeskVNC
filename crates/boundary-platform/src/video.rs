@@ -259,6 +259,90 @@ impl VideoEncoder for Shadowed {
     }
 }
 
+/// What a keyframe's parameter sets say about the H.264 around it, as much
+/// as it takes to know whether every helper's decoder can follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Profile {
+    /// `profile_idc` in the sequence parameter set: 66 Baseline, 77 Main,
+    /// 100 High.
+    pub idc: u8,
+    /// The picture parameter set's `entropy_coding_mode_flag`.
+    pub cabac: bool,
+}
+impl Profile {
+    /// Constrained Baseline, which every helper decodes: the window's
+    /// WebCodecs, the agent's mirror and DeskVNC Support's own copy, the
+    /// last two with OpenH264. OpenH264 takes any other profile through a
+    /// reordering queue that keeps one more picture for each it decodes,
+    /// and with the four reference pictures an AMD encoder asks for its six
+    /// buffers ran out on the seventh picture: every picture after that was
+    /// refused until the next keyframe, twenty seconds later.
+    pub fn baseline(&self) -> bool {
+        self.idc == 66 && !self.cabac
+    }
+}
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self.idc {
+            66 => "Baseline",
+            77 => "Main",
+            100 => "High",
+            _ => "profile",
+        };
+        let entropy = if self.cabac { "CABAC" } else { "CAVLC" };
+        write!(f, "{name} ({}) with {entropy}", self.idc)
+    }
+}
+
+/// The profile a picture's parameter sets declare, or None when it carries
+/// none, as only a keyframe does.
+pub fn profile(unit: &[u8]) -> Option<Profile> {
+    let (mut idc, mut cabac) = (None, None);
+    for nal in openh264::nal_units(unit) {
+        let start = if nal.get(2) == Some(&1) { 3 } else { 4 };
+        let Some(&header) = nal.get(start) else {
+            continue;
+        };
+        // Without the bytes added so the payload never looks like a start
+        // code: two zeros and a three.
+        let mut rbsp = Vec::with_capacity(16);
+        let mut zeros = 0;
+        for &byte in nal[start + 1..].iter().take(64) {
+            if zeros >= 2 && byte == 3 {
+                zeros = 0;
+                continue;
+            }
+            zeros = if byte == 0 { zeros + 1 } else { 0 };
+            rbsp.push(byte);
+        }
+        match header & 31 {
+            7 => idc = rbsp.first().copied(),
+            8 => {
+                // pic_parameter_set_id and seq_parameter_set_id, two
+                // Exp-Golomb numbers, then the entropy flag.
+                let mut bits = rbsp
+                    .iter()
+                    .flat_map(|byte| (0..8).rev().map(move |i| byte >> i & 1 == 1));
+                for _ in 0..2 {
+                    let mut leading = 0;
+                    while !bits.next()? {
+                        leading += 1;
+                    }
+                    for _ in 0..leading {
+                        bits.next()?;
+                    }
+                }
+                cabac = Some(bits.next()?);
+            }
+            _ => {}
+        }
+    }
+    Some(Profile {
+        idc: idc?,
+        cabac: cabac?,
+    })
+}
+
 /// Cisco's OpenH264, in software. It makes Constrained Baseline, which
 /// every decoder takes.
 pub struct OpenH264 {
@@ -414,6 +498,29 @@ mod tests {
         }
     }
 
+    /// The profile is read off a keyframe's parameter sets: the ones the AMD
+    /// encoder on a Radeon 8060S made when asked for Main, and OpenH264's.
+    #[test]
+    fn a_keyframe_says_whether_every_helper_can_decode_it() {
+        let amd = [
+            0, 0, 0, 1, 0x09, 0x10, // access unit delimiter
+            0, 0, 0, 1, 0x67, 0x4d, 0x04, 0x28, 0xe8, 0xa0, 0x3c, 0x01, 0x13, 0xf2, // SPS, cut short
+            0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, // PPS
+            0, 0, 0, 1, 0x65, 0x88, 0x84, 0x01, // IDR slice, cut short
+        ];
+        let made = profile(&amd).expect("parameter sets");
+        assert_eq!(made, Profile { idc: 77, cabac: true });
+        assert!(!made.baseline());
+        assert_eq!(made.to_string(), "Main (77) with CABAC");
+        // A picture after the keyframe carries none.
+        assert_eq!(profile(&[0, 0, 0, 1, 0x41, 0x9a, 0x02]), None);
+
+        let mut encoder = OpenH264::new(64, 48).unwrap();
+        let unit = encoder.encode(&screen(64, 48, 0), true).unwrap();
+        let made = profile(&unit.data).expect("parameter sets");
+        assert!(made.baseline(), "{made}");
+    }
+
     /// Encode a moving screen with every encoder this machine has and
     /// decode it back, one picture in and the same picture out, starting
     /// with a keyframe.
@@ -439,6 +546,14 @@ mod tests {
                         "{} started without a keyframe",
                         encoder.name()
                     );
+                    // What every helper decodes, the mirror and DeskVNC
+                    // Support's own copy with OpenH264. VideoToolbox makes
+                    // High profile, which a Mac decodes in hardware.
+                    #[cfg(not(target_os = "macos"))]
+                    if n == 0 {
+                        let profile = profile(&unit.data).expect("a keyframe with parameter sets");
+                        assert!(profile.baseline(), "{} made {profile}", encoder.name());
+                    }
                     sizes.push(unit.data.len());
                     if unit.data.is_empty() {
                         // Skipped to keep to the rate, which only OpenH264 does.

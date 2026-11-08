@@ -1146,10 +1146,38 @@ impl AgentPlane {
         if self.video.carries(session_id)
             || (video::has_video(rects) && self.mirrors.wants_pixels(session_id))
         {
-            self.video.feed(&self.mirrors, session_id, rects.to_vec());
+            self.video
+                .feed(&self.mirrors, session_id, rects.to_vec(), || {
+                    self.refresher(session_id)
+                });
         } else {
             self.mirrors.feed(session_id, rects, now());
         }
+    }
+
+    /// What the mirror's video decoder asks the session for the whole
+    /// screen with, when it loses its place: the same `Refresh` a person's
+    /// window sends when it has dropped frames. A Boundary session answers it
+    /// with the whole screen as rectangles and a keyframe after them.
+    fn refresher(&self, session_id: &str) -> video::Refresh {
+        let sessions = self
+            .running
+            .lock()
+            .as_ref()
+            .map(|running| running.sessions.clone());
+        let session_id = session_id.to_string();
+        Box::new(move || {
+            let handle = sessions.as_ref().and_then(|sessions| {
+                sessions
+                    .lock()
+                    .get(&session_id)
+                    .filter(|entry| entry.is_live())
+                    .map(|entry| entry.handle.clone())
+            });
+            if let Some(handle) = handle {
+                let _ = handle.try_send(vnc_core::ClientCommand::Refresh);
+            }
+        })
     }
 
     /// The remote desktop resized. Bumps the geometry generation a read is

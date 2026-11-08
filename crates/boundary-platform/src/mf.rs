@@ -4,6 +4,12 @@
 //! Only hardware encoders are tried. Without one the session uses OpenH264,
 //! which is faster than Microsoft's software encoder at screen sizes and
 //! behaves the same on every machine.
+//!
+//! The encoder is asked for Constrained Baseline, and its first keyframe is
+//! read back before it is used: one that makes anything else is passed
+//! over, so the session falls back to OpenH264. Main profile from the AMD
+//! encoder on a Radeon 8060S was CABAC with four reference pictures, which
+//! OpenH264 on a helper stopped decoding at the seventh picture.
 use anyhow::{Context, Result, bail, ensure};
 use boundary_session::{
     Frame,
@@ -78,12 +84,14 @@ impl MediaFoundation {
             }
             let mut last = anyhow::anyhow!("No hardware H.264 encoder");
             for activate in activates {
-                match Self::open(&activate, w, h) {
-                    Ok(mut encoder) => {
-                        encoder.width = width;
-                        encoder.height = height;
-                        return Ok(encoder);
-                    }
+                let opened = Self::open(&activate, w, h).and_then(|mut encoder| {
+                    encoder.width = width;
+                    encoder.height = height;
+                    encoder.check()?;
+                    Ok(encoder)
+                });
+                match opened {
+                    Ok(encoder) => return Ok(encoder),
                     Err(error) => {
                         let _ = activate.ShutdownObject();
                         last = error;
@@ -142,10 +150,19 @@ impl MediaFoundation {
             out.SetUINT64(&MF_MT_FRAME_RATE, rate)?;
             out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
             out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)?;
             out.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601.0 as u32)?;
             out.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
-            transform.SetOutputType(0, &out, 0)?;
+            // Constrained Baseline, which every helper's decoder follows.
+            // An encoder that does not know the name gets Baseline, and
+            // [`MediaFoundation::check`] reads back what it really makes.
+            out.SetUINT32(
+                &MF_MT_MPEG2_PROFILE,
+                eAVEncH264VProfile_ConstrainedBase.0 as u32,
+            )?;
+            if transform.SetOutputType(0, &out, 0).is_err() {
+                out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+                transform.SetOutputType(0, &out, 0)?;
+            }
             let input = MFCreateMediaType()?;
             input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
@@ -173,6 +190,31 @@ impl MediaFoundation {
                 nv12: Vec::new(),
             })
         }
+    }
+
+    /// Encode a plain screen and read the profile off the keyframe that
+    /// comes out, since an encoder may make another than it was asked for.
+    /// The next picture the session asks for is a keyframe of its own, so
+    /// the helper never sees this one.
+    fn check(&mut self) -> Result<()> {
+        let frame = Frame {
+            width: self.width,
+            height: self.height,
+            rgba: vec![128; self.width as usize * self.height as usize * 4],
+        };
+        // A hardware encoder may hold its first picture or two back.
+        for _ in 0..4 {
+            let unit = self.encode(&frame, true)?;
+            if let Some(profile) = crate::video::profile(&unit.data) {
+                ensure!(
+                    profile.baseline(),
+                    "{} made {profile} when asked for Constrained Baseline",
+                    self.name
+                );
+                return Ok(());
+            }
+        }
+        bail!("{} made no keyframe to check", self.name)
     }
 
     /// The next event, waiting at most until `until`.

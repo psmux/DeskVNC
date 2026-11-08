@@ -18,6 +18,10 @@
 //! A picture that does not decode, because the decoder joined a run after
 //! its keyframe or fell too far behind, goes to the mirror as the H.264 it
 //! was, which marks its region stale exactly as before. Nothing is guessed.
+//! The session is then asked for the whole screen at once, and the computer
+//! sends it as rectangles and starts its video again from a keyframe. Before
+//! that the mirror waited for the screen to stop moving, and an agent was
+//! refused reads and typing for as long as it moved.
 
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Weak};
@@ -37,6 +41,14 @@ const BACKLOG: u64 = 48;
 /// A picture takes a few milliseconds, so this is only reached when the
 /// machine is starved, and then the read goes ahead on what is there.
 const CATCH_UP: Duration = Duration::from_millis(400);
+
+/// How long after asking for the whole screen the decoder asks again, if it
+/// is still lost: the answer may have been dropped, or the video that
+/// followed it lost again.
+const ASK_AGAIN: Duration = Duration::from_secs(1);
+
+/// Asks the session for the whole screen again.
+pub type Refresh = Box<dyn Fn() + Send>;
 
 enum Job {
     Feed(Vec<DecodedRect>),
@@ -87,12 +99,19 @@ impl Video {
     }
 
     /// Queue an update for the session's decoding thread, starting one when
-    /// there is none.
-    pub fn feed(&self, mirrors: &Arc<Mirrors>, session_id: &str, rects: Vec<DecodedRect>) {
+    /// there is none. `refresh` is called only then, for what the thread
+    /// asks the session with when its decoder loses its place.
+    pub fn feed(
+        &self,
+        mirrors: &Arc<Mirrors>,
+        session_id: &str,
+        rects: Vec<DecodedRect>,
+        refresh: impl FnOnce() -> Refresh,
+    ) {
         let mut workers = self.workers.lock();
-        let worker = workers
-            .entry(session_id.to_string())
-            .or_insert_with(|| spawn(Arc::downgrade(mirrors), session_id.to_string()));
+        let worker = workers.entry(session_id.to_string()).or_insert_with(|| {
+            spawn(Arc::downgrade(mirrors), session_id.to_string(), refresh())
+        });
         let (queued, applied) = *worker.progress.counts.lock();
         let job = if queued - applied >= BACKLOG {
             Job::Skip(rects)
@@ -151,7 +170,7 @@ impl Video {
     }
 }
 
-fn spawn(mirrors: Weak<Mirrors>, session_id: String) -> Worker {
+fn spawn(mirrors: Weak<Mirrors>, session_id: String, refresh: Refresh) -> Worker {
     let (jobs, queue) = mpsc::channel::<Job>();
     let progress = Arc::new(Progress::default());
     let done = progress.clone();
@@ -174,6 +193,10 @@ fn spawn(mirrors: Weak<Mirrors>, session_id: String) -> Worker {
                     }
                     Job::Resize(width, height) => mirrors.resize(&session_id, width, height),
                 }
+                if decoder.wants_refresh(Instant::now()) {
+                    tracing::info!(session = %session_id, "the mirror's video decoder lost its place: asking for the whole screen");
+                    refresh();
+                }
                 done.counts.lock().1 += 1;
                 done.applied.notify_all();
             }
@@ -193,12 +216,31 @@ struct Decoders {
     /// A picture was not decoded, so the ones after it cannot be until the
     /// next keyframe.
     broken: bool,
+    /// When the session was last asked for the whole screen, while broken.
+    asked: Option<Instant>,
 }
 
 impl Decoders {
     fn lost(&mut self) {
         self.contexts.clear();
         self.broken = true;
+    }
+
+    /// Whether to ask the session for the whole screen now: once when the
+    /// decoder loses its place, and again each [`ASK_AGAIN`] it stays lost.
+    fn wants_refresh(&mut self, now: Instant) -> bool {
+        if !self.broken {
+            self.asked = None;
+            return false;
+        }
+        if self
+            .asked
+            .is_some_and(|asked| now.duration_since(asked) < ASK_AGAIN)
+        {
+            return false;
+        }
+        self.asked = Some(now);
+        true
     }
 
     /// The same update with every picture that decoded turned into pixels.
@@ -359,6 +401,59 @@ mod tests {
         };
         let out = decoders.decode(vec![tile]);
         assert!(matches!(out[0].payload, RectPayload::Rgba(_)));
+    }
+
+    /// A picture that does not decode asks for the whole screen at once, not
+    /// again for each picture after it, again if it stays lost, and not at
+    /// all once a keyframe has decoded.
+    #[test]
+    fn a_lost_decoder_asks_for_the_whole_screen_at_once() {
+        let mut decoders = Decoders::default();
+        let start = Instant::now();
+        assert!(!decoders.wants_refresh(start), "nothing lost yet");
+        decoders.decode(vec![picture(false, vec![0, 0, 0, 1, 0x41, 1, 2, 3])]);
+        assert!(decoders.wants_refresh(start), "asked the moment it was lost");
+        decoders.decode(vec![picture(false, vec![0, 0, 0, 1, 0x41, 4, 5, 6])]);
+        assert!(!decoders.wants_refresh(start + Duration::from_millis(30)));
+        assert!(decoders.wants_refresh(start + ASK_AGAIN), "still lost");
+
+        let mut encoder = boundary_platform::video::OpenH264::new(64, 48).expect("an encoder");
+        let frame = boundary_session::Frame {
+            width: 64,
+            height: 48,
+            rgba: [90u8, 90, 90, 255].repeat(64 * 48),
+        };
+        use boundary_session::video::VideoEncoder;
+        let keyframe = encoder.encode(&frame, true).expect("encodes").data;
+        let out = decoders.decode(vec![picture(true, keyframe)]);
+        assert!(matches!(out[0].payload, RectPayload::Rgba(_)));
+        assert!(!decoders.wants_refresh(start + ASK_AGAIN * 3), "found again");
+    }
+
+    /// The decoding thread asks the session itself, once, when a picture
+    /// does not decode, and the mirror is told the region is stale.
+    #[test]
+    fn the_decoding_thread_asks_the_session_for_the_whole_screen() {
+        let mirrors = Arc::new(Mirrors::default());
+        let video = Video::default();
+        let asked = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = asked.clone();
+        for _ in 0..3 {
+            let count = count.clone();
+            video.feed(
+                &mirrors,
+                "s1",
+                vec![picture(false, vec![0, 0, 0, 1, 0x41, 1, 2, 3])],
+                move || {
+                    Box::new(move || {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    })
+                },
+            );
+        }
+        video.caught_up("s1");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        video.forget("s1");
     }
 
     /// Pictures from the encoder DeskVNC Support uses come out as pixels of
