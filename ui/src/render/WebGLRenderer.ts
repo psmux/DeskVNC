@@ -1099,12 +1099,13 @@ export class WebGLRenderer {
    * A decoded picture, for the next frame drawn unless the window moved on.
    *
    * It is held rather than uploaded here. Uploading a hardware decoder's
-   * picture into a GL texture is the expensive half of showing it: on the
-   * AMD card WebKitGTK decodes a 1600x900 picture in about 22 ms and the
-   * upload costs about as much again, so uploading every picture of a 30
-   * picture a second stream on the main thread fell behind it, and the
-   * queue in front of the decoder grew without end. Held, a picture that a
-   * newer one replaces before the next frame is drawn is closed unseen.
+   * picture into a GL texture runs on the main thread, and uploading every
+   * picture as it came fell behind: on the AMD card, with WebKitGTK decoding
+   * a 1600x900 picture in about 22 ms, a Boundary stream of 30 pictures a
+   * second was applied at about 22, and the batches the queue drained grew
+   * from 99 updates to 502 in under a minute while the picture fell further
+   * behind. Held, a picture that a newer one replaces before the next frame
+   * is drawn is closed unseen, so the uploads keep to the display's rate.
    */
   private showVideoFrame(frame: VideoFrame, ctx: H264Context): void {
     if (this.disposed || ctx.generation !== this.generation) {

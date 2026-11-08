@@ -10,11 +10,10 @@
  * in, with `optimizeForLatency` set or not. Measured in the webview itself:
  * picture 1 came out after chunk 3 on the AMD card and after chunk 4 on the
  * NVIDIA one, every time. Waiting for picture N before feeding N+1 then never
- * succeeds. Every chunk sat out the full timeout, the picture it was waiting
- * for arrived after its waiter had gone and was thrown away, and the window
- * showed no video at all while a backlog of half-second waits built up behind
- * it. On a Boundary helper on Linux that was the picture standing still for
- * as long as anything on the far screen moved.
+ * succeeds: every chunk sits out the full timeout, the picture it waited for
+ * arrives after its waiter has gone and is thrown away, and the window shows
+ * no video at all while a backlog of half-second waits builds up behind it.
+ * (Until `avc.ts`, WebKitGTK refused the stream outright, which hid this.)
  *
  * So the pacer learns how many chunks the decoder holds (its lag) from the
  * pictures themselves: a picture that comes back while newer chunks are
