@@ -378,7 +378,7 @@ pub async fn scan_networks() -> Result<Vec<networks::ScanNetwork>, String> {
 ///
 /// Refusing was chosen over giving each caller its own independently cancelled
 /// scan because **the politeness budget is per call**:
-/// `vnc_discovery::scan::scan_subnet` builds its concurrency semaphore and its
+/// `vnc_discovery::scan::scan_subnet` builds its pool of probe tasks and its
 /// rate limiter inside the call (`crates/vnc-discovery/src/scan.rs`), so two
 /// scans at once is twice the connections per second aimed at a network the
 /// user does not necessarily own, and that cap is the whole of PRD/04 §4's

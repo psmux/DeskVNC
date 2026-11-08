@@ -307,10 +307,10 @@ pub struct ScanOptions {
     /// one). An operator running this on a monitored network can turn it off.
     ///
     /// The cost, stated rather than implied: phase 1 opens one connection to
-    /// 3389 per address on top of the one to 5900, and each takes the same
-    /// semaphore permit and the same rate limiter slot as every RFB one, so
-    /// the politeness cap stays a cap on the total rather than becoming one
-    /// per service. On a /24 at the default 500 per second that is about one
+    /// 3389 per address on top of the one to 5900, and each takes a slot in
+    /// the same probe pool and the same rate limiter slot as every RFB one,
+    /// so the politeness cap stays a cap on the total rather than becoming
+    /// one per service. On a /24 at the default 500 per second that is about one
     /// second of pacing instead of half a second. What it does not do is add
     /// any latency to a VNC result: both probes for an address run
     /// concurrently, a VNC row is emitted the moment its banner is read, and
@@ -342,7 +342,7 @@ pub struct ScanOptions {
     ///
     /// On by default for the same reason as `probe_rdp`, and with the same
     /// cost: one more connection per address in phase 1, under the same
-    /// semaphore and rate limiter. The probe writes nothing. A machine on a
+    /// probe pool and rate limiter. The probe writes nothing. A machine on a
     /// random port, or behind a firewall that drops TCP, is still found by
     /// its DNS-SD advertisement, which needs no probe at all.
     pub probe_boundary: bool,
