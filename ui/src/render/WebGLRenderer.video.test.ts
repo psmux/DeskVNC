@@ -15,6 +15,8 @@ const H = 48;
 let uploads: string[] = [];
 /** Pictures a decoder holds back before giving the oldest one out. */
 let holdBack = 0;
+/** The decoder fails on Annex B, as WebKitGTK's does, and takes only length prefixed chunks. */
+let rejectAnnexB = false;
 
 class FakePicture {
   displayWidth = W;
@@ -28,20 +30,38 @@ class FakePicture {
 class FakeChunk {
   readonly timestamp: number;
   readonly type: string;
-  constructor(init: { timestamp: number; type: string }) {
+  readonly data: Uint8Array;
+  constructor(init: { timestamp: number; type: string; data: Uint8Array }) {
     this.timestamp = init.timestamp;
     this.type = init.type;
+    this.data = init.data;
   }
+}
+
+/** Whether `data` is one or more NAL units each after a four byte length. */
+function lengthPrefixed(data: Uint8Array): boolean {
+  let at = 0;
+  while (at + 4 <= data.length) at += 4 + new DataView(data.buffer, data.byteOffset + at).getUint32(0);
+  return at === data.length && data.length > 0;
 }
 
 class FakeDecoder {
   state = "unconfigured";
   private held: number[] = [];
-  constructor(private readonly init: { output: (p: FakePicture) => void }) {}
-  configure(): void {
+  private avcc = false;
+  constructor(private readonly init: { output: (p: FakePicture) => void; error: (e: unknown) => void }) {}
+  configure(config: { description?: Uint8Array }): void {
     this.state = "configured";
+    this.avcc = config.description !== undefined;
   }
   decode(chunk: FakeChunk): void {
+    if (rejectAnnexB && (!this.avcc || !lengthPrefixed(chunk.data))) {
+      setTimeout(() => {
+        this.state = "closed";
+        this.init.error(new DOMException("Decode error", "EncodingError"));
+      }, 1);
+      return;
+    }
     this.held.push(chunk.timestamp);
     while (this.held.length > holdBack) {
       const ts = this.held.shift()!;
@@ -90,10 +110,15 @@ function message(rects: Partial<WireRect>[]): FrameMessage {
   } as unknown as FrameMessage;
 }
 
+// Annex B, as a Boundary computer sends it: parameter sets and an IDR slice
+// in a keyframe, one non-IDR slice in each picture after it.
+const KEY = new Uint8Array([0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0xda, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+const DELTA = new Uint8Array([0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x6c]);
 let chunks = 0;
 function video(): FrameMessage {
   chunks++;
-  return message([{ format: RectFormat.H264, h264Context: 0, h264Key: chunks === 1, h264Reset: chunks === 1 }]);
+  const key = chunks === 1;
+  return message([{ format: RectFormat.H264, h264Context: 0, h264Key: key, h264Reset: key, payload: key ? KEY : DELTA }]);
 }
 function tile(x: number, y: number, w: number, h: number): FrameMessage {
   return message([{ format: RectFormat.Rgba, x, y, w, h, payload: new Uint8Array(w * h * 4) }]);
@@ -103,6 +128,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   uploads = [];
   chunks = 0;
+  rejectAnnexB = false;
   vi.stubGlobal("VideoDecoder", FakeDecoder);
   vi.stubGlobal("EncodedVideoChunk", FakeChunk);
   vi.stubGlobal("VideoFrame", FakePicture);
@@ -198,6 +224,25 @@ describe("H.264 from a decoder that gives each picture back at once (WebView2)",
     expect(uploads).toEqual(["v1", "rgba", "v2"]);
     await vi.advanceTimersByTimeAsync(1000);
     expect(asked).not.toHaveBeenCalled();
+    r.dispose();
+  });
+});
+
+describe("H.264 into a decoder that turns Annex B down (WebKitGTK)", () => {
+  it("starts again from the same keyframe, length prefixed, and the video plays", async () => {
+    holdBack = 2;
+    rejectAnnexB = true;
+    const r = renderer();
+    for (let i = 0; i < 30; i++) {
+      r.applyFrame(video());
+      await vi.advanceTimersByTimeAsync(33);
+    }
+    await vi.advanceTimersByTimeAsync(1500);
+    const shown = uploads.filter((u) => u.startsWith("v"));
+    // Every picture but the two the decoder still holds, the keyframe's
+    // second attempt among them.
+    expect(shown.length).toBeGreaterThanOrEqual(28);
+    expect(r.getQueueStats().depth).toBe(0);
     r.dispose();
   });
 });

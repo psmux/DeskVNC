@@ -26,6 +26,7 @@ import {
 } from "./frameProtocol";
 import { traceMark } from "./trace";
 import { VideoPacer, type LearnedLag } from "./videoPacer";
+import { annexBUnits, avcConfig, toLengthPrefixed } from "./avc";
 
 export type RendererScalingMode = "fit" | "aspect-fit" | "actual" | "custom";
 
@@ -120,6 +121,8 @@ void main() {
 /** One live `VideoDecoder` plus the rect geometry it decodes into. */
 interface H264Context {
   decoder: VideoDecoder;
+  /** Its context id, the key it is held under. */
+  id: number;
   x: number;
   y: number;
   w: number;
@@ -131,6 +134,13 @@ interface H264Context {
    * screen. See `videoPacer.ts`.
    */
   pacer: VideoPacer<VideoFrame>;
+  /** Chunks go in length prefixed, as `avc.ts` explains, not as Annex B. */
+  avcc: boolean;
+  /**
+   * The keyframe this decoder started on, kept until it gives a picture
+   * back, so a decoder that turns Annex B down can start again from it.
+   */
+  startKey: Uint8Array | null;
 }
 
 /** Maximum simultaneous decoder contexts, mirrors the backend's cap. */
@@ -531,6 +541,8 @@ export class WebGLRenderer {
   private h264Failed = false;
   /** How many chunks this webview's decoder holds back, as learned. */
   private h264Lag: LearnedLag = { chunks: 0 };
+  /** This webview's decoder turned Annex B down, so chunks go length prefixed. */
+  private h264Avcc = false;
   /** Chunks fed to any decoder, so a tail check can tell video went on. */
   private h264Fed = 0;
   /** `h264Fed` when the window last asked for the screen over a tail. */
@@ -1037,7 +1049,7 @@ export class WebGLRenderer {
       if (ctx) this.closeH264(id);
       // A decoder can only start on an IDR; anything else is undecodable.
       if (!isKey) return;
-      ctx = this.createH264(r, id) ?? undefined;
+      ctx = this.createH264(r, id, r.payload) ?? undefined;
       if (!ctx) return;
     }
     if (ctx.decoder.state === "closed") {
@@ -1045,6 +1057,12 @@ export class WebGLRenderer {
       return;
     }
 
+    this.feedH264(ctx, r.payload, isKey);
+    await ctx.pacer.settle(H264_FRAME_TIMEOUT_MS);
+  }
+
+  /** Give one chunk to a context's decoder, in the form it takes. */
+  private feedH264(ctx: H264Context, payload: Uint8Array, isKey: boolean): void {
     const ts = ctx.pacer.feed();
     this.h264Fed++;
     try {
@@ -1052,17 +1070,17 @@ export class WebGLRenderer {
         new EncodedVideoChunk({
           type: isKey ? "key" : "delta",
           timestamp: ts,
-          // Copy: the parse buffer is recycled long before decode completes.
-          data: r.payload.slice(),
+          // A copy either way: the parse buffer is recycled long before
+          // decode completes.
+          data: ctx.avcc ? toLengthPrefixed(annexBUnits(payload)) : payload.slice(),
         }),
       );
     } catch {
       // Decode error, or the decoder was reset/closed (e.g. a resize raced
-      // this update). Closing releases the wait below at once rather than
-      // letting it sit out the timeout.
-      this.closeH264(id);
+      // this update). Closing releases the wait in `decodeH264` at once
+      // rather than letting it sit out the timeout.
+      this.closeH264(ctx.id);
     }
-    await ctx.pacer.settle(H264_FRAME_TIMEOUT_MS);
   }
 
   /** A decoded picture, on screen now unless the window moved on. */
@@ -1074,27 +1092,45 @@ export class WebGLRenderer {
     this.uploadVideoFrame(frame, ctx);
   }
 
-  /** Build a decoder for one context, or `null` if WebCodecs refuses. */
-  private createH264(r: WireRect, id: number): H264Context | null {
+  /**
+   * Build a decoder for one context, to start on keyframe `key`, or `null`
+   * if WebCodecs refuses.
+   */
+  private createH264(r: { x: number; y: number; w: number; h: number }, id: number, key: Uint8Array): H264Context | null {
     if (this.h264.size >= H264_MAX_CONTEXTS) {
       // The backend caps contexts at 64 and recycles slots, so this only
       // happens if the two sides disagree. Start clean rather than leak.
       this.closeAllH264();
     }
     const generation = this.generation;
+    const avcc = this.h264Avcc;
+    // Baseline profile per the PRD; a decoder taking Annex B reads the real
+    // profile from the in-band SPS, so this is only the initial hint.
+    let config: VideoDecoderConfig = { codec: "avc1.42E01E", optimizeForLatency: true } as VideoDecoderConfig;
+    if (avcc) {
+      const avc = avcConfig(annexBUnits(key));
+      // A keyframe without its parameter sets cannot start a decoder that
+      // has to be given them up front. The next one will have them.
+      if (!avc) return null;
+      config = { ...config, codec: avc.codec, description: avc.description };
+    }
     const ctx: H264Context = {
       decoder: null as unknown as VideoDecoder,
+      id,
       x: r.x,
       y: r.y,
       w: r.w,
       h: r.h,
       generation,
       pacer: null as unknown as VideoPacer<VideoFrame>,
+      avcc,
+      startKey: avcc ? null : key.slice(),
     };
     ctx.pacer = new VideoPacer<VideoFrame>(this.h264Lag, (frame) => this.showVideoFrame(frame, ctx), r.w * r.h);
     try {
       ctx.decoder = new VideoDecoder({
         output: (frame: VideoFrame) => {
+          ctx.startKey = null;
           if (this.disposed || generation !== this.generation) {
             frame.close();
             return;
@@ -1104,15 +1140,22 @@ export class WebGLRenderer {
           if (this.h264Lag.chunks !== lag) traceMark("h264_lag", this.h264Lag.chunks);
         },
         error: () => {
+          const key = ctx.startKey;
           this.closeH264(id);
+          // A decoder that fails on the very keyframe it started on, before
+          // giving any picture back, turned the stream's form down: that is
+          // WebKitGTK and Annex B. Start again from the same keyframe, length
+          // prefixed, and send every chunk that way from now on. Done here,
+          // before the apply loop wakes from its wait, so the next chunk
+          // finds the new decoder in place.
+          if (!key || this.h264Avcc || this.disposed || generation !== this.generation) return;
+          this.h264Avcc = true;
+          traceMark("h264_avcc");
+          const again = this.createH264(ctx, id, key);
+          if (again) this.feedH264(again, key, true);
         },
       });
-      ctx.decoder.configure({
-        // Baseline profile per the PRD; the decoder reads the real profile
-        // from the in-band SPS, this is only the initial hint.
-        codec: "avc1.42E01E",
-        optimizeForLatency: true,
-      } as VideoDecoderConfig);
+      ctx.decoder.configure(config);
     } catch {
       this.h264Failed = true;
       this.notice("H.264 decoding is unavailable in this webview; those regions will not render.");
