@@ -219,6 +219,12 @@ pub fn run() {
                 // A destroyed window can never re-arm, so drop the intent too.
                 tauri::WindowEvent::Destroyed => {
                     commands::capture::release_for_window(window.app_handle(), window.label());
+                    // A scan whose window is gone has nobody left to show its
+                    // progress or to stop it. Destroyed rather than
+                    // CloseRequested, since a close can still be called off.
+                    if let Some(state) = window.try_state::<AppState>() {
+                        state.discovery.stop_scan_started_by(window.label());
+                    }
                 }
                 _ => {}
             }
@@ -262,6 +268,7 @@ pub fn run() {
             commands::discovery::start_discovery,
             commands::discovery::stop_discovery,
             commands::discovery::scan_network,
+            commands::discovery::stop_scan,
             commands::discovery::deep_probe,
             commands::discovery::local_subnets,
             commands::discovery::scan_networks,

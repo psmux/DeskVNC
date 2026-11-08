@@ -11,6 +11,10 @@
  * A range larger than a /22 asks first, with the address count; one larger
  * than a /16, or one that is not private, cannot be picked. The shell holds
  * the same limits, so this is the friendly half of the check.
+ *
+ * While a scan runs the main part becomes its Stop button, with how far it
+ * has got, and Escape on it stops the scan too. The arrow is off until the
+ * scan has ended, so a second one cannot be started on top of it.
  */
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ScanNetwork, ScanProgress, ScanTarget } from "../lib/types";
@@ -30,13 +34,15 @@ import {
   type LastPick,
 } from "../lib/scanRange";
 import { classNames } from "../lib/util";
-import { IconCheck, IconChevronDown, IconZap } from "./icons";
+import { IconCheck, IconChevronDown, IconStop, IconZap } from "./icons";
 import { Dialog } from "./primitives";
 
 export interface ScanButtonProps {
   scan: ScanProgress;
   /** No target: today's default scan. A target: just those ranges. */
   onScan: (target?: ScanTarget) => Promise<void>;
+  /** Stop the running scan (`stop_scan`). */
+  onStop: () => void;
   /** `scan_networks`. */
   listNetworks: () => Promise<ScanNetwork[]>;
 }
@@ -50,7 +56,7 @@ interface Pending {
   addresses: number;
 }
 
-export function ScanButton({ scan, onScan, listNetworks }: ScanButtonProps): ReactNode {
+export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonProps): ReactNode {
   const [open, setOpen] = useState(false);
   const [networks, setNetworks] = useState<ScanNetwork[] | null>(null);
   const [lastPick, setLastPick] = useState<LastPick | null>(() => readLastPick());
@@ -168,13 +174,31 @@ export function ScanButton({ scan, onScan, listNetworks }: ScanButtonProps): Rea
   const typedLast =
     lastPick && networks && !networks.some((n) => samePick(lastPick, n)) ? lastPick : null;
 
+  const stopping = scan.running && scan.stopping === true;
+  const progress = scan.total > 0 ? `${scan.done.toLocaleString("en-US")} of ${scan.total.toLocaleString("en-US")}` : "";
+
+  const onMainKey = (e: KeyboardEvent<HTMLButtonElement>): void => {
+    if (e.key === "Escape" && scan.running) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!stopping) onStop();
+    }
+  };
+
   return (
     <div className="relative inline-flex">
       <button
         type="button"
-        className="btn-secondary relative overflow-hidden"
+        className="btn-secondary relative overflow-hidden tabular-nums"
         style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
-        onClick={() => void onScan()}
+        title={scan.running ? "Stop the scan (Esc). Computers it found stay listed." : undefined}
+        aria-busy={scan.running}
+        disabled={stopping}
+        onClick={() => {
+          if (!scan.running) void onScan();
+          else if (!stopping) onStop();
+        }}
+        onKeyDown={onMainKey}
       >
         {scan.running ? (
           <span className="absolute inset-x-0 bottom-0 h-0.5 bg-inset">
@@ -184,8 +208,14 @@ export function ScanButton({ scan, onScan, listNetworks }: ScanButtonProps): Rea
             />
           </span>
         ) : null}
-        <IconZap size={14} />
-        {scan.running ? "Scanning…" : "Scan network"}
+        {scan.running ? <IconStop size={14} /> : <IconZap size={14} />}
+        {!scan.running
+          ? "Scan network"
+          : stopping
+            ? "Stopping…"
+            : progress
+              ? `Stop scan ${progress}`
+              : "Stop scan"}
       </button>
       <button
         ref={arrowRef}

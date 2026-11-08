@@ -53,6 +53,7 @@ const NETWORKS: ScanNetwork[] = [
 let host: HTMLDivElement;
 let root: Root;
 let onScan: Mock<(target?: ScanTarget) => Promise<void>>;
+let onStop: Mock<() => void>;
 
 const idle: ScanProgress = { running: false, done: 0, total: 0 };
 
@@ -62,6 +63,7 @@ function render(scan: ScanProgress = idle, networks: ScanNetwork[] = NETWORKS): 
       createElement(ScanButton, {
         scan,
         onScan,
+        onStop,
         listNetworks: () => Promise.resolve(networks),
       }),
     );
@@ -93,6 +95,7 @@ beforeEach(() => {
   document.body.append(host);
   root = createRoot(host);
   onScan = vi.fn<(target?: ScanTarget) => Promise<void>>(() => Promise.resolve());
+  onStop = vi.fn<() => void>();
 });
 
 afterEach(() => {
@@ -241,6 +244,50 @@ describe("ScanButton", () => {
   it("the arrow is off while a scan runs", () => {
     render({ running: true, done: 3, total: 254 });
     expect(arrow().disabled).toBe(true);
-    expect(main().textContent).toContain("Scanning");
+  });
+
+  it("a running scan turns the main part into Stop, with how far it has got", () => {
+    render({ running: true, done: 12345, total: 65534 });
+    expect(main().textContent).toBe("Stop scan 12,345 of 65,534");
+    act(() => main().click());
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onScan).not.toHaveBeenCalled();
+  });
+
+  it("says Stop scan before the first progress arrives", () => {
+    render({ running: true, done: 0, total: 0 });
+    expect(main().textContent).toBe("Stop scan");
+    act(() => main().click());
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("Escape on the button stops a running scan and does nothing when idle", () => {
+    render();
+    main().focus();
+    key(main(), "Escape");
+    expect(onStop).not.toHaveBeenCalled();
+
+    render({ running: true, done: 40, total: 254 });
+    expect(document.activeElement).toBe(main());
+    key(main(), "Escape");
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("once stopping it says so and does not stop twice", () => {
+    render({ running: true, done: 40, total: 254, stopping: true });
+    expect(main().textContent).toBe("Stopping…");
+    expect(main().disabled).toBe(true);
+    key(main(), "Escape");
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it("goes back to Scan network when the scan ends", () => {
+    render({ running: true, done: 40, total: 254 });
+    render({ running: false, done: 40, total: 254 });
+    expect(main().textContent).toBe("Scan network");
+    expect(arrow().disabled).toBe(false);
+    act(() => main().click());
+    expect(onScan).toHaveBeenCalledTimes(1);
+    expect(onStop).not.toHaveBeenCalled();
   });
 });

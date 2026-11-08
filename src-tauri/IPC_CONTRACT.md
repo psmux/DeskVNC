@@ -283,6 +283,7 @@ camelCase switch still deserialize.
 | `start_discovery` | `invoke("start_discovery")` | `void` (idempotent mDNS browse) |
 | `stop_discovery` | `invoke("stop_discovery")` | `void` |
 | `scan_network` | `invoke("scan_network", { subnets?, allowLarge? })` | `void`, `subnets` is a list of CIDR strings (a bare address means that one address); omit for the safe local interfaces. Named ranges must be private and no larger than a /16, and ranges adding up to more than a /22 need `allowLarge: true`, which the UI sends only after the person confirmed the count. Errors if a scan is already running. |
+| `stop_scan` | `invoke("stop_scan")` | `boolean`, true when a scan was running and has been told to stop. No new probes start, the ones in flight are aborted, and the scan ends the usual way with `scan-complete` and the count found so far; hosts it found stay listed. False when nothing was scanning. Closing the window that started a scan, or quitting, stops it too. |
 | `deep_probe` | `invoke("deep_probe", { address, port, protocol? })` | `{ protocol: "vnc", securityTypes: number[] }` or `{ protocol: "rdp", rdp: RdpCaps }` |
 | `local_subnets` | `invoke("local_subnets")` | `string[]` of CIDRs (VPN/tunnel interfaces excluded) |
 | `scan_networks` | `invoke("scan_networks")` | `ScanNetwork[]`: `{ id, name, kind, interface, range, cidrs, addresses, verdict }`, the networks this computer can scan, read from its interfaces and its IPv4 routes. `kind` is `"lan"`, `"vpn"`, `"warp"`, `"routed"` or `"virtual"`, in that order; `verdict` is `"scan"`, `"confirm"`, `"too-large"` or `"public"`. |
@@ -1178,7 +1179,7 @@ this id from the list".
 ### `discovery://scan-complete`, app-wide (JSON)
 
 Payload is `string | null`: an error message, or `null` on success. Emitted
-once when a `scan_network` run finishes, in addition to the
+once when a `scan_network` run finishes or is stopped, in addition to the
 `{ type: "scan-complete" }` event above.
 
 ---
