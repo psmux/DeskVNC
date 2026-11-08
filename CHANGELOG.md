@@ -8,6 +8,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.35.1] (2026-11-08)
+
+### Added
+
+* The Scan network button has its own arrow. It lists every network this
+  computer can reach, with its range and how many addresses it covers: the
+  LAN, VPNs, the ranges Cloudflare WARP routes, ranges behind a gateway, and
+  Docker or other virtual bridges last. Pick one to scan only that, or type a
+  range. Anything larger than a /22 asks first, anything larger than a /16 or
+  outside private address space is refused, and the last pick is remembered.
+
+### Fixed
+
+* A large scan set up every connection it would ever make at the start and
+  held them all in memory. It now starts a new one only as another finishes,
+  so memory stays flat: a /16 went from about 268 MB to under 10 MB in the
+  same time.
+* The scan's progress bar read full when the scan was only a third done.
+
 ## [0.35.0] (2026-11-08)
 
 ### Added

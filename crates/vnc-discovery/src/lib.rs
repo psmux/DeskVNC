@@ -32,6 +32,7 @@ pub mod filter;
 mod mdns;
 mod msrpc;
 mod netbios;
+pub mod networks;
 mod probe;
 mod rdpnego;
 mod registry;

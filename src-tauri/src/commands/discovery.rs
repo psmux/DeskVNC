@@ -37,6 +37,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+use vnc_discovery::networks::{self, RangeVerdict};
 use vnc_discovery::{
     DiscoveredHost, Discovery, DiscoveryEvent, DiscoverySource, HostRegistry, LocalNetwork,
     ScanOptions, Subnet,
@@ -311,23 +312,53 @@ pub async fn stop_discovery(
     Ok(())
 }
 
-/// Parse `"a.b.c.d/nn"` into a [`Subnet`].
+/// Parse `"a.b.c.d/nn"` (or a bare address, for that one address) into a
+/// [`Subnet`].
 fn parse_subnet(s: &str) -> Result<Subnet, String> {
-    let (addr, prefix) = s
-        .split_once('/')
-        .ok_or_else(|| format!("invalid subnet (expected CIDR): {s}"))?;
-    let addr: Ipv4Addr = addr
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid subnet address: {s}"))?;
-    let prefix: u8 = prefix
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid subnet prefix: {s}"))?;
-    if prefix > 32 {
-        return Err(format!("invalid subnet prefix: {s}"));
+    networks::parse_cidr(s)
+}
+
+/// Hold ranges that were asked for by name to the picker's limits: private
+/// only, nothing larger than a /16, and larger than a /22 only when the caller
+/// says the person confirmed the count. The default scan (no ranges) is not
+/// judged here; it keeps to the interfaces vnc-discovery deems safe.
+fn check_requested(parsed: &[Subnet], allow_large: bool) -> Result<(), String> {
+    for s in parsed {
+        let shown = networks::cidr(s);
+        match networks::judge_range(s) {
+            RangeVerdict::Scan | RangeVerdict::Confirm => {}
+            RangeVerdict::Public => {
+                return Err(format!(
+                    "{shown} is not a private range; only private ranges (10.x, 172.16 to 172.31, 192.168.x and 100.64/10) can be scanned"
+                ))
+            }
+            RangeVerdict::TooLarge => {
+                return Err(format!(
+                    "{shown} covers {} addresses, more than a /{} allows; scan a smaller part of it",
+                    s.host_count(),
+                    networks::LARGEST_SCAN_PREFIX
+                ))
+            }
+        }
     }
-    Ok(Subnet::new(addr, prefix))
+    let (verdict, addresses) = networks::judge_ranges(parsed);
+    if verdict == RangeVerdict::Confirm && !allow_large {
+        return Err(format!(
+            "this scan covers {addresses} addresses; confirm it before scanning"
+        ));
+    }
+    Ok(())
+}
+
+/// The networks this computer can scan, for the menu beside "Scan network":
+/// the LAN, VPNs, Cloudflare WARP, ranges routed through a gateway and
+/// virtual bridges, each with its CIDRs and address count. See
+/// `vnc_discovery::networks`.
+#[tauri::command]
+pub async fn scan_networks() -> Result<Vec<networks::ScanNetwork>, String> {
+    tokio::task::spawn_blocking(networks::list_networks)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Kick off an active subnet scan (PRD/04 §4). `subnets` is a list of CIDR
@@ -347,7 +378,7 @@ fn parse_subnet(s: &str) -> Result<Subnet, String> {
 ///
 /// Refusing was chosen over giving each caller its own independently cancelled
 /// scan because **the politeness budget is per call**:
-/// `vnc_discovery::scan::scan_subnet` builds its concurrency semaphore and its
+/// `vnc_discovery::scan::scan_subnet` builds its pool of probe tasks and its
 /// rate limiter inside the call (`crates/vnc-discovery/src/scan.rs`), so two
 /// scans at once is twice the connections per second aimed at a network the
 /// user does not necessarily own, and that cap is the whole of PRD/04 §4's
@@ -369,12 +400,15 @@ pub async fn scan_network(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     subnets: Option<Vec<String>>,
+    allow_large: Option<bool>,
 ) -> Result<(), String> {
     let requested = subnets.unwrap_or_default();
     let parsed: Vec<Subnet> = requested
         .iter()
         .map(|s| parse_subnet(s))
         .collect::<Result<_, _>>()?;
+    let allow_large = allow_large.unwrap_or(false);
+    check_requested(&parsed, allow_large)?;
 
     // Parse first, claim second: a caller who asked for a malformed CIDR must
     // get the parse error, not a complaint about somebody else's scan.
@@ -425,6 +459,9 @@ pub async fn scan_network(
         probe_rdp,
         probe_boundary,
         subnets: parsed,
+        // Only reachable for ranges `check_requested` let through: a /16 at
+        // most, private, and confirmed. The default scan never sets it.
+        allow_large,
         ..ScanOptions::default()
     };
     let discovery_state = state.discovery.clone();
@@ -535,6 +572,38 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
     use vnc_discovery::NameSource;
+
+    fn ranges(list: &[&str]) -> Vec<Subnet> {
+        list.iter().map(|s| parse_subnet(s).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_picked_range_up_to_a_slash_22_scans_without_asking() {
+        assert_eq!(check_requested(&ranges(&["10.0.0.0/24"]), false), Ok(()));
+        assert_eq!(check_requested(&ranges(&["10.0.0.0/22"]), false), Ok(()));
+        assert_eq!(check_requested(&ranges(&["10.0.0.9"]), false), Ok(()));
+    }
+
+    #[test]
+    fn a_range_larger_than_a_slash_22_needs_the_confirmation() {
+        let err = check_requested(&ranges(&["172.17.0.0/16"]), false).unwrap_err();
+        assert!(err.contains("65534 addresses"), "{err}");
+        assert_eq!(check_requested(&ranges(&["172.17.0.0/16"]), true), Ok(()));
+    }
+
+    #[test]
+    fn larger_than_a_slash_16_and_public_ranges_are_refused_even_confirmed() {
+        let err = check_requested(&ranges(&["10.0.0.0/15"]), true).unwrap_err();
+        assert!(err.contains("/16"), "{err}");
+        let err = check_requested(&ranges(&["198.51.100.0/24"]), true).unwrap_err();
+        assert!(err.contains("not a private range"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_range_is_a_parse_error() {
+        assert!(parse_subnet("10.0.0.0/33").is_err());
+        assert!(parse_subnet("ten").is_err());
+    }
 
     /// The single event a sighting was expected to produce.
     fn only(events: Vec<DiscoveryEvent>) -> DiscoveryEvent {
