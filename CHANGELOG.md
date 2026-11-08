@@ -8,6 +8,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.35.2] (2026-11-08)
+
+### Fixed
+
+* A running network scan could not be stopped. While a scan runs, the Scan
+  network button now reads Stop scan with its progress, and clicking it,
+  pressing Escape on it or choosing Stop scan in the command palette ends the
+  scan within a fraction of a second. Hosts already found stay in the list,
+  and closing the window that started a scan stops it too.
+
 ## [0.35.1] (2026-11-08)
 
 ### Added
