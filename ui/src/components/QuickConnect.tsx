@@ -82,7 +82,13 @@ export function QuickConnect({
 }): ReactNode {
   const [value, setValue] = useState("");
   const [open, setOpen] = useState(false);
-  /** -1 is "nothing picked yet", so Enter uses the field, not a highlighted row. */
+  /**
+   * The row picked with the arrow keys. -1 is "nothing picked yet", so Enter
+   * uses the field. Only the keys set it: a row the pointer merely passed
+   * over is not a choice, and letting it count made Enter open `rdp://` for
+   * a bare address typed while the pointer rested on an RDP recent. A row
+   * under the pointer still lights up its own way, for the click.
+   */
   const [selected, setSelected] = useState(-1);
   /** Only red after the user actually tried to connect; typing is not an error. */
   const [attempted, setAttempted] = useState(false);
@@ -327,6 +333,7 @@ export function QuickConnect({
   };
 
   const invalid = trimmed !== "" && !parsed.ok;
+  const chipShown = trimmed !== "" && parsed.ok;
 
   return (
     <div className="flex items-center gap-2 border-b border-subtle bg-surface/40 px-4 py-2">
@@ -377,7 +384,6 @@ export function QuickConnect({
                   "flex w-full items-center gap-3 rounded-md px-3 py-2 text-left",
                   i === selected ? "bg-accent text-accent-fg" : "text-primary hover:bg-inset",
                 )}
-                onPointerMove={() => setSelected(i)}
                 // Keeping focus in the field means the blur that closes this
                 // list cannot land before the click that uses it, which would
                 // unmount this button mid-gesture and swallow the click.
@@ -422,23 +428,31 @@ export function QuickConnect({
         cycles rather than flips, and the tooltip names the protocol one more
         click reaches, so "the other protocol" never has to mean one of two
         unnamed alternatives.
+
+        It keeps its place, hidden, while there is nothing to connect to. Put
+        in only once typing began, it pushed Connect right by its own width,
+        and a click aimed at where Connect had been landed on the chip and
+        switched a bare address to RDP.
       */}
-      {trimmed !== "" && parsed.ok ? (
-        <button
-          type="button"
-          className="mono shrink-0 rounded-md border border-subtle px-2 py-1 text-xs font-semibold text-secondary hover:text-primary"
-          title={
-            savedMatch
-              ? `${savedMatch.friendlyName} is saved as ${protocolLabel(resolved)}`
-              : `Click to connect with ${protocolName(nextProtocol(resolved))} instead`
-          }
-          disabled={savedMatch !== null}
-          onPointerDown={(e) => e.preventDefault()}
-          onClick={() => setFlipped(nextProtocol(resolved))}
-        >
-          {protocolLabel(resolved)}
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className={classNames(
+          "mono shrink-0 rounded-md border border-subtle px-2 py-1 text-xs font-semibold text-secondary hover:text-primary",
+          !chipShown && "invisible",
+        )}
+        title={
+          savedMatch
+            ? `${savedMatch.friendlyName} is saved as ${protocolLabel(resolved)}`
+            : `Click to connect with ${protocolName(nextProtocol(resolved))} instead`
+        }
+        aria-hidden={!chipShown}
+        tabIndex={chipShown ? undefined : -1}
+        disabled={!chipShown || savedMatch !== null}
+        onPointerDown={(e) => e.preventDefault()}
+        onClick={() => setFlipped(nextProtocol(resolved))}
+      >
+        {protocolLabel(resolved)}
+      </button>
       <button
         type="button"
         className="btn-secondary shrink-0"

@@ -513,6 +513,12 @@ pub(crate) struct RunLoop {
     /// it, so a button held at the moment focus went away stayed held with no
     /// state anywhere to release it from.
     last_mask: u16,
+    /// macOS Screen Sharing's encrypted session, when this is one. The server
+    /// pushes updates on its own there, so no requests are pipelined.
+    apple: Option<crate::apple::AppleSession>,
+    /// The server key the person accepted at the trust prompt this session
+    /// raised, kept so the supervisor's next connection verifies against it.
+    trusted: Option<(crate::types::PinScheme, String)>,
     /// Continuous updates negotiated and switched on.
     cu_active: bool,
     /// An EnableContinuousUpdates(false) of ours is unacknowledged, sent at
@@ -745,6 +751,8 @@ impl RunLoop {
             pressed: HashMap::new(),
             last_pos: None,
             last_mask: 0,
+            apple: None,
+            trusted: None,
             cu_active: false,
             cu_disable_pending: None,
             cu_off_for_pacing: false,
@@ -795,6 +803,63 @@ impl RunLoop {
         Rect::new(0, 0, self.fb_width, self.fb_height)
     }
 
+    /// The server key accepted at the trust prompt while this loop ran.
+    pub(crate) fn take_trusted(&mut self) -> Option<(crate::types::PinScheme, String)> {
+        self.trusted.take()
+    }
+
+    /// Run this loop as a macOS Screen Sharing encrypted session.
+    pub(crate) fn set_apple_session(&mut self, session: crate::apple::AppleSession) {
+        self.apple = Some(session);
+    }
+
+    /// The pointer position to put on the wire for a framebuffer position.
+    fn wire_pointer(&self, x: u16, y: u16) -> (u16, u16) {
+        match &self.apple {
+            Some(a) => a.map_pointer(x, y, (self.fb_width, self.fb_height)),
+            None => (x, y),
+        }
+    }
+
+    /// Throw away the rest of the current record. Inside Apple's record layer
+    /// a record never holds two messages, and the reader never holds more
+    /// than one record, so this skips a message we cannot parse without
+    /// losing our place in the stream.
+    fn skip_apple_record(&mut self, msg_type: u8) {
+        use tokio::io::AsyncBufRead;
+        let n = self.reader.buffer().len();
+        Pin::new(&mut self.reader).consume(n);
+        tracing::debug!(msg_type, skipped = n, "skipped an unknown Apple message");
+    }
+
+    /// AppleDisplayLayout: follow the new geometry, then ask for the picture
+    /// again and re-arm server pushed updates, which the Mac needs after
+    /// every layout message, changed or not.
+    async fn handle_apple_layout(
+        &mut self,
+        layout: crate::apple::wire::DisplayLayout,
+        events: &mpsc::Sender<SessionEvent>,
+    ) -> Result<()> {
+        if let Some((backing, logical)) = layout.sizes() {
+            tracing::info!(
+                ?backing,
+                ?logical,
+                displays = layout.displays.len(),
+                "Mac display layout"
+            );
+            self.apply_resize(backing.0, backing.1, events).await?;
+            if let Some(a) = self.apple.as_mut() {
+                a.logical = Some(logical);
+            }
+        }
+        let full = self.full_rect();
+        let msg = messages::framebuffer_update_request(false, full);
+        self.send(&msg).await?;
+        let msg = crate::apple::wire::auto_framebuffer_update(full);
+        self.send(&msg).await?;
+        Ok(())
+    }
+
     async fn send(&mut self, bytes: &[u8]) -> Result<()> {
         // Every client message funnels through here, so this one branch is
         // the whole client->server side of the protocol trace. With the
@@ -803,6 +868,17 @@ impl RunLoop {
         if self.trace.enabled {
             let (w, h) = (self.fb_width, self.fb_height);
             self.trace.record_client_message(bytes, w, h);
+        }
+        // A full update request to a Mac holds back the incremental ones
+        // until its picture arrives (see `AppleSession::full_request_pending`).
+        if let Some(a) = self.apple.as_mut() {
+            if bytes.len() == 10
+                && bytes[0] == messages::client_msg::FRAMEBUFFER_UPDATE_REQUEST
+                && bytes[1] == 0
+            {
+                a.full_request_pending = true;
+                a.full_request_at = Some(Instant::now());
+            }
         }
         self.writer
             .write_all(bytes)
@@ -968,6 +1044,30 @@ impl RunLoop {
                 Ok(())
             }
             server_msg::SERVER_FENCE => self.handle_server_fence().await,
+            crate::apple::wire::server_msg::MISC_STATUS if self.apple.is_some() => {
+                let cmd = crate::apple::wire::read_misc_status(&mut self.reader).await?;
+                match cmd {
+                    crate::apple::wire::misc::HEARTBEAT => {}
+                    crate::apple::wire::misc::CLIPBOARD_CHANGED => {
+                        // The Mac only says something changed; the text
+                        // comes in a ClipboardSend once it is asked for.
+                        tracing::debug!("the clipboard on the Mac changed; fetching it");
+                        self.send(&crate::apple::wire::clipboard_fetch()).await?;
+                    }
+                    other => tracing::debug!(cmd = other, "Mac status message"),
+                }
+                Ok(())
+            }
+            crate::apple::wire::server_msg::CLIPBOARD_SEND if self.apple.is_some() => {
+                if let Some(text) = crate::apple::wire::read_clipboard(&mut self.reader).await? {
+                    emit(events, SessionEvent::ClipboardText(text)).await?;
+                }
+                Ok(())
+            }
+            other if self.apple.is_some() => {
+                self.skip_apple_record(other);
+                Ok(())
+            }
             other => Err(VncError::Protocol(format!(
                 "unknown server message type {other}"
             ))),
@@ -1125,6 +1225,14 @@ impl RunLoop {
                 ));
             }
             let (rect, enc) = messages::read_rect_header(&mut self.reader).await?;
+            tracing::trace!(
+                x = rect.x,
+                y = rect.y,
+                w = rect.width,
+                h = rect.height,
+                enc,
+                "rect"
+            );
 
             if enc == encoding::PSEUDO_LAST_RECT {
                 break;
@@ -1213,6 +1321,33 @@ impl RunLoop {
             let msg = messages::framebuffer_update_request(true, self.full_rect());
             self.send(&msg).await?;
             self.arm_pipelined_request(Instant::now());
+        }
+
+        // A Mac's answer to a full request: only now may the incremental
+        // requests start, or they would have cancelled it. The answer is the
+        // update that covers the screen, not merely the next one with pixels
+        // in it: on a busy screen over a slow link the answer to the previous
+        // incremental request is usually still on its way when a refresh goes
+        // out, and taking that small update for the answer sent an
+        // incremental request that cancelled the refresh. An agent's first
+        // screen read on a 4K Mac then waited out its own reconnect, 22 s.
+        let full_answer = answers_full_refresh(damage, self.full_rect());
+        let overdue = self
+            .apple
+            .as_ref()
+            .and_then(|a| a.full_request_at)
+            .is_some_and(|at| at.elapsed() >= crate::apple::FULL_REQUEST_PATIENCE);
+        if !rects.is_empty() && (full_answer || overdue) {
+            if let Some(a) = self.apple.as_mut().filter(|a| a.full_request_pending) {
+                if !full_answer {
+                    tracing::debug!("a full update request went unanswered; pulling changes again");
+                }
+                a.full_request_pending = false;
+                a.full_request_at = None;
+                let msg = messages::framebuffer_update_request(true, self.full_rect());
+                self.send(&msg).await?;
+                self.arm_pipelined_request(Instant::now());
+            }
         }
 
         // Remember what was painted lossily so it can be re-fetched sharp once
@@ -1358,7 +1493,28 @@ impl RunLoop {
                 // link, before the user sees anything.
                 let changed = width != self.fb_width || height != self.fb_height;
                 self.apply_resize(width, height, events).await?;
-                if changed {
+                let apple_first = self
+                    .apple
+                    .as_mut()
+                    .map(|a| !std::mem::replace(&mut a.rearmed_after_announce, true))
+                    .unwrap_or(false);
+                if apple_first || (self.apple.is_some() && changed) {
+                    // A Mac answers the SetEncodings that opens the session
+                    // with this size announcement and marks a full update as
+                    // due, but its screen capture for the display is not set
+                    // up yet. The full request sent with the opening is then
+                    // dropped, and the next request (an idle probe of a few
+                    // pixels) gets the forced update clipped to its own small
+                    // region: the viewer sat on a blank screen until the user
+                    // moved something. Asking for the whole picture again,
+                    // and re-arming pushed updates, once the Mac has
+                    // announced the desktop gets the full frame every time.
+                    let full = self.full_rect();
+                    self.send(&messages::framebuffer_update_request(false, full))
+                        .await?;
+                    self.send(&crate::apple::wire::auto_framebuffer_update(full))
+                        .await?;
+                } else if changed {
                     // Legacy -223 invalidates the framebuffer and the server
                     // will NOT push a refresh, request one. Never do this for
                     // ExtendedDesktopSize (-308): loop hazard (PRD/02 §9).
@@ -1445,6 +1601,25 @@ impl RunLoop {
             PseudoRect::ExtendedMouseButtonsCapable => {
                 self.caps.supports_extended_mouse_buttons = true;
             }
+            PseudoRect::AppleRekey(payload) => match &self.apple {
+                Some(a) => {
+                    a.rekey.rekey(&payload)?;
+                }
+                None => {
+                    return Err(VncError::Protocol(
+                        "rekey outside an Apple encrypted session".into(),
+                    ))
+                }
+            },
+            PseudoRect::AppleLayout(layout) => self.handle_apple_layout(layout, events).await?,
+            PseudoRect::AppleInputSource(source) => {
+                tracing::info!(
+                    layout = %source.id,
+                    secure = source.secure,
+                    "Mac keyboard input source"
+                );
+            }
+            PseudoRect::AppleIgnored => {}
         }
         Ok(false)
     }
@@ -1781,7 +1956,8 @@ impl RunLoop {
                     // told about.
                     self.last_mask = 0;
                 } else {
-                    let msg = crate::input::encode_pointer_event(x, y, button_mask);
+                    let (wx, wy) = self.wire_pointer(x, y);
+                    let msg = crate::input::encode_pointer_event(wx, wy, button_mask);
                     self.send(&msg).await?;
                     // Recorded AFTER the send, so a write that failed does not
                     // leave us believing the server knows about a button it
@@ -2026,6 +2202,13 @@ impl RunLoop {
             | ClientCommand::ReleaseAllKeys) => {
                 self.handle_input_command(cmd, settings).await?;
             }
+            ClientCommand::ClipboardText(text) if self.apple.is_some() => {
+                // A Mac takes the viewer's clipboard as a ClipboardSend in its
+                // own layout; a ClientCutText would reach only its classic
+                // text flavour, which most apps do not paste.
+                self.send(&crate::apple::wire::clipboard_send_text(&text))
+                    .await?;
+            }
             ClientCommand::ClipboardText(text) => {
                 // Extended peers are ANNOUNCED to first. The provide below is
                 // enough for a server that accepts unsolicited data, but one
@@ -2065,6 +2248,14 @@ impl RunLoop {
                 msg.push(messages::client_msg::CLIENT_CUT_TEXT);
                 msg.extend_from_slice(&body);
                 self.send(&msg).await?;
+            }
+            ClientCommand::ClipboardRequest { .. } if self.apple.is_some() => {
+                // A Mac hands its pasteboard over when asked with
+                // ClipboardFetch, the same message the run loop sends when the
+                // Mac says its pasteboard changed. Without this an agent's
+                // clipboard read on a Mac sent nothing and could only be
+                // answered from whatever the Mac had last reported.
+                self.send(&crate::apple::wire::clipboard_fetch()).await?;
             }
             ClientCommand::ClipboardRequest { formats } => {
                 if self.caps.supports_extended_clipboard {
@@ -2148,9 +2339,17 @@ impl RunLoop {
                     settings.prefer_scancodes = v;
                 }
             }
-            ClientCommand::TrustCertificate { .. } => {
-                // Certificate trust is resolved during the security handshake;
-                // nothing to do while connected.
+            ClientCommand::TrustCertificate {
+                fingerprint,
+                scheme,
+                ..
+            } => {
+                // The handshake that raised the prompt is over and the
+                // connection carries on either way. What the answer changes is
+                // the next connection: an automatic reconnect must verify
+                // against the key the person just accepted, or it raises the
+                // same prompt again over a live session (see `run_once`).
+                self.trusted = Some((scheme, fingerprint));
             }
             ClientCommand::ReconnectNow => {
                 // Asked for while connected, this used to do nothing, and that
@@ -2246,6 +2445,7 @@ impl RunLoop {
             // socket is going away, and we must not be left believing a
             // button is still held on a server we can no longer talk to.
             self.last_mask = 0;
+            let (x, y) = self.wire_pointer(x, y);
             let msg = crate::input::encode_pointer_event(x, y, 0);
             self.send(&msg).await?;
         }
@@ -2288,6 +2488,15 @@ impl RunLoop {
             return Ok(());
         }
         self.applied_quality = qs;
+        // A Mac's encrypted session keeps the encodings it opened with. They
+        // are lossless already (no JPEG, no H.264 on that path), so a quality
+        // preset has nothing to change there, and a Mac sent a different
+        // SetEncodings mid session goes silent: after the High preset an
+        // agent's mirror asks for, a 4K Mac sent three small updates and then
+        // nothing for 40 s, so the refresh the mirror waited for never came.
+        if self.apple.is_some() {
+            return Ok(());
+        }
         let encodings = crate::quality::encodings_for(&qs, &self.caps);
         let msg = messages::set_encodings(&encodings);
         self.send(&msg).await?;
@@ -2439,7 +2648,9 @@ impl RunLoop {
     /// server saw the message, and letting each of them pipeline a request is
     /// how one outstanding request becomes five.
     fn pacing_requests(&self) -> bool {
-        !self.cu_active && self.cu_disable_pending.is_none()
+        !self.cu_active
+            && self.cu_disable_pending.is_none()
+            && !self.apple.as_ref().is_some_and(|a| a.full_request_pending)
     }
 
     /// Restart the one-outstanding-incremental-request pipeline after a
@@ -2743,8 +2954,14 @@ impl RunLoop {
                 self.send(&msg).await?;
                 self.probe = Some((id, Instant::now()));
             }
-        } else {
+        } else if self.apple.is_none() {
             // No Fence: time a one-pixel non-incremental request instead.
+            //
+            // Never inside a macOS encrypted session. A Mac keeps only the
+            // last update request it was sent, so a one-pixel probe replaces
+            // the parked incremental request and every later answer shrinks
+            // to a 3x3 corner: the picture froze on the first frame. The
+            // pulled updates keep the passive round trip readout going.
             if self
                 .probe_request_at
                 .is_some_and(|t| t.elapsed() > PROBE_STALE)

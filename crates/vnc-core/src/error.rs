@@ -54,6 +54,11 @@ pub enum VncError {
     #[error("authentication failed: {0}")]
     AuthFailed(String),
 
+    /// The server accepted the credentials but refused this account access.
+    /// NEVER auto-retried, and asking for the password again would not help.
+    #[error("access denied: {0}")]
+    AccessDenied(String),
+
     /// Credentials are required but were not supplied (prompt the user).
     #[error("credentials required: {0}")]
     CredentialsRequired(String),
@@ -119,6 +124,7 @@ impl VncError {
         matches!(
             self,
             VncError::AuthFailed(_)
+                | VncError::AccessDenied(_)
                 | VncError::CredentialsRequired(_)
                 | VncError::CertificateMismatch { .. }
                 | VncError::CertificateUntrusted(_)
@@ -135,7 +141,14 @@ impl VncError {
                 "The computer did not respond. It may be asleep or unreachable.".into()
             }
             VncError::ResolveFailed(h) => format!("Could not find a computer named \"{h}\"."),
+            VncError::AuthFailed(r) if r == crate::security::APPLE_DH_REFUSED => {
+                format!(
+                    "The password was not accepted. {}",
+                    crate::security::APPLE_DH_HINT
+                )
+            }
             VncError::AuthFailed(_) => "The password was not accepted.".into(),
+            VncError::AccessDenied(r) => r.clone(),
             VncError::CredentialsRequired(_) => "This computer requires a password.".into(),
             VncError::CertificateMismatch { .. } => {
                 "This computer's identity has changed. This could indicate a security problem."

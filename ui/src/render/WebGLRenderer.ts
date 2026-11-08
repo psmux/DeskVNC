@@ -25,6 +25,8 @@ import {
   type WireRect,
 } from "./frameProtocol";
 import { traceMark } from "./trace";
+import { VideoPacer, type LearnedLag } from "./videoPacer";
+import { annexBUnits, avcConfig, toLengthPrefixed } from "./avc";
 
 export type RendererScalingMode = "fit" | "aspect-fit" | "actual" | "custom";
 
@@ -119,37 +121,65 @@ void main() {
 /** One live `VideoDecoder` plus the rect geometry it decodes into. */
 interface H264Context {
   decoder: VideoDecoder;
+  /** Its context id, the key it is held under. */
+  id: number;
   x: number;
   y: number;
   w: number;
   h: number;
   /** Renderer generation this decoder belongs to (dropped on resize). */
   generation: number;
-  /** Monotonic presentation timestamps, in microseconds. */
-  timestamp: number;
   /**
-   * Uploads still waiting on the decoder, keyed by the timestamp of the chunk
-   * that will produce them. Insertion order is submission order, which is
-   * also ascending timestamp order; see `decodeH264` for what that buys.
+   * Timestamps for its chunks, and when the pictures they decode into go on
+   * screen. See `videoPacer.ts`.
    */
-  waiters: Map<number, (frame: VideoFrame | null) => void>;
+  pacer: VideoPacer<VideoFrame>;
+  /** Chunks go in length prefixed, as `avc.ts` explains, not as Annex B. */
+  avcc: boolean;
+  /**
+   * The keyframe this decoder started on, kept until it gives a picture
+   * back, so a decoder that turns Annex B down can start again from it.
+   */
+  startKey: Uint8Array | null;
+  /**
+   * The newest picture back from the decoder and not yet in the frame
+   * texture. Pictures go in once per drawn frame, so a decoder that runs
+   * ahead of the display costs one upload per frame drawn rather than one
+   * per picture (see `showVideoFrame`).
+   */
+  ready: VideoFrame | null;
 }
 
 /** Maximum simultaneous decoder contexts, mirrors the backend's cap. */
 const H264_MAX_CONTEXTS = 64;
 
 /**
- * How long one H.264 rect waits for its decoded frame before giving up on it.
+ * How long one H.264 rect waits for the picture its decoder owes before
+ * giving up on it.
  *
  * A `decode()` normally produces exactly one `output` callback, but a decoder
  * that quietly swallows a chunk (a corrupt slice, a driver hiccup) would
  * otherwise leave the apply loop waiting forever, and every later update
  * queued behind it: the whole viewer freezes, which is far worse than one
  * missing frame. A real decode is tens of milliseconds, so half a second only
- * ever fires when something has genuinely gone wrong, and the picture heals on
- * the next key frame.
+ * fires when something has gone wrong, or while the window is still learning
+ * that its decoder holds pictures back (once per held picture, the first time
+ * video plays in a window).
  */
 const H264_FRAME_TIMEOUT_MS = 500;
+
+/**
+ * How long a decoder that holds pictures back may sit on the last of them
+ * after video stops before the window asks for the whole screen again.
+ *
+ * Those pictures come out only when more chunks go in. On a Boundary session
+ * none follow once the far screen stands still, and the sharp tiles its
+ * computer then sends replace only what its own copy of the last picture got
+ * wrong, so the window would keep what moved during the last two or three
+ * pictures stale until something there changed again. A third of a second is
+ * well past the gap between pictures of any video still playing.
+ */
+const VIDEO_TAIL_QUIET_MS = 300;
 
 /**
  * Hard cap on queued updates before the drain loop stops being polite.
@@ -516,8 +546,25 @@ export class WebGLRenderer {
   // context id the backend assigns per rect geometry (0..63).
   private h264 = new Map<number, H264Context>();
   private h264Failed = false;
+  /** How many chunks this webview's decoder holds back, as learned. */
+  private h264Lag: LearnedLag = { chunks: 0 };
+  /** This webview's decoder turned Annex B down, so chunks go length prefixed. */
+  private h264Avcc = false;
+  /** Chunks fed to any decoder, so a tail check can tell video went on. */
+  private h264Fed = 0;
+  /** `h264Fed` when the window last asked for the screen over a tail. */
+  private tailAskedAt = -1;
+  private tailTimer: ReturnType<typeof setTimeout> | undefined;
 
   onFirstFrame: (() => void) | null = null;
+
+  /**
+   * Ask for the whole screen again: a decoder holds the last pictures of a
+   * run back and no more chunks have come to push them out. Wired only for
+   * protocols that answer with tiles (Boundary), since one that answered
+   * with more video would only move the tail along.
+   */
+  onVideoBehind: (() => void) | null = null;
 
 
   /**
@@ -783,6 +830,45 @@ export class WebGLRenderer {
     } finally {
       this.draining = false;
     }
+    this.watchVideoTail();
+  }
+
+  /**
+   * Something other than decoder `except` drew over `r`. Pictures still to
+   * come out of a decoder whose area it overlaps are older than it, so they
+   * must not land on top of it (see `VideoPacer.overtaken`).
+   */
+  private videoOvertaken(r: { x: number; y: number; w: number; h: number }, except: number): void {
+    for (const [id, ctx] of this.h264) {
+      if (id === except) continue;
+      const w = Math.min(r.x + r.w, ctx.x + ctx.w) - Math.max(r.x, ctx.x);
+      const h = Math.min(r.y + r.h, ctx.y + ctx.h) - Math.max(r.y, ctx.y);
+      if (w > 0 && h > 0) ctx.pacer.overtaken(w * h);
+    }
+  }
+
+  /**
+   * Once updates stop, give a decoder that holds pictures back a moment to
+   * be fed more, and if none comes ask for the whole screen, once per run.
+   * See `VIDEO_TAIL_QUIET_MS`.
+   */
+  private watchVideoTail(): void {
+    if (this.tailTimer !== undefined || !this.onVideoBehind) return;
+    const fed = this.h264Fed;
+    if (fed === this.tailAskedAt) return;
+    if (!Array.from(this.h264.values()).some((ctx) => ctx.pacer.behind())) return;
+    this.tailTimer = setTimeout(() => {
+      this.tailTimer = undefined;
+      if (this.disposed || this.draining || this.pending.length > 0) return;
+      if (this.h264Fed !== fed) {
+        this.watchVideoTail();
+        return;
+      }
+      if (!Array.from(this.h264.values()).some((ctx) => ctx.pacer.behind())) return;
+      this.tailAskedAt = fed;
+      traceMark("video_behind", this.h264Lag.chunks);
+      this.onVideoBehind?.();
+    }, VIDEO_TAIL_QUIET_MS);
   }
 
   /**
@@ -816,8 +902,10 @@ export class WebGLRenderer {
       switch (r.format) {
         case RectFormat.Rgba:
           if (r.payload.byteLength >= r.w * r.h * 4) {
+            this.uploadHeldVideo(r);
             gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
             gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, r.w, r.h, gl.RGBA, gl.UNSIGNED_BYTE, r.payload);
+            this.videoOvertaken(r, -1);
           }
           break;
         case RectFormat.Jpeg: {
@@ -843,16 +931,23 @@ export class WebGLRenderer {
             bmp.close();
             return;
           }
+          this.uploadHeldVideo(r);
           gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
           gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
           bmp.close();
+          this.videoOvertaken(r, -1);
           break;
         }
         case RectFormat.CopyRect:
+          // It reads pixels as well as writing them, so every held picture
+          // has to be in place first.
+          this.uploadHeldVideo();
           this.copyRect(r.srcX, r.srcY, r.x, r.y, r.w, r.h);
+          this.videoOvertaken(r, -1);
           break;
         case RectFormat.H264:
           await this.decodeH264(r);
+          this.videoOvertaken(r, r.h264Context ?? 0);
           break;
         default:
           break; // unknown format: skip gracefully
@@ -931,17 +1026,17 @@ export class WebGLRenderer {
    * that per rect on a video stream is exactly the workload it hurts most:
    * the decoder never gets to keep more than one frame in flight, and the
    * cost lands on the main thread, feeding the backlog this queue exists to
-   * shed.
+   * shed. WebCodecs also wants a key chunk after every flush, and a Boundary
+   * computer sends one only when its encoder starts.
    *
-   * Instead the chunk is tagged with a monotonic timestamp that identifies
-   * its position, and `output` hands the decoded frame to whoever is waiting
-   * on that timestamp rather than uploading it itself (see
-   * `deliverH264Frame`). The upload then happens right here, at the rect's
-   * own position in the ordered loop, so ordering is enforced by where the
-   * pixels are written rather than by draining the decoder. The wait is
-   * bounded by `H264_FRAME_TIMEOUT_MS` and released early whenever the
-   * decoder is closed, so a decoder that never answers cannot stall the
-   * queue.
+   * Instead each context's `VideoPacer` numbers the chunks and puts every
+   * picture on screen as it comes back, unless something newer has been
+   * drawn over that area since its chunk went in. Here the loop waits only
+   * for the picture the decoder can have produced by now: this chunk's own
+   * on a decoder that holds nothing back, an older one on WebKitGTK's, which
+   * keeps two or three. The wait is bounded by `H264_FRAME_TIMEOUT_MS` and
+   * released whenever the decoder is closed, so a decoder that never answers
+   * cannot stall the queue.
    */
   private async decodeH264(r: WireRect): Promise<void> {
     if (this.h264Failed) return;
@@ -966,7 +1061,7 @@ export class WebGLRenderer {
       if (ctx) this.closeH264(id);
       // A decoder can only start on an IDR; anything else is undecodable.
       if (!isKey) return;
-      ctx = this.createH264(r, id) ?? undefined;
+      ctx = this.createH264(r, id, r.payload) ?? undefined;
       if (!ctx) return;
     }
     if (ctx.decoder.state === "closed") {
@@ -974,124 +1069,137 @@ export class WebGLRenderer {
       return;
     }
 
-    ctx.timestamp += 1000; // 1 ms apart: monotonic is all the decoder needs
-    const ts = ctx.timestamp;
-    const wait = this.awaitH264Frame(ctx, ts);
+    this.feedH264(ctx, r.payload, isKey);
+    await ctx.pacer.settle(H264_FRAME_TIMEOUT_MS);
+  }
+
+  /** Give one chunk to a context's decoder, in the form it takes. */
+  private feedH264(ctx: H264Context, payload: Uint8Array, isKey: boolean): void {
+    const ts = ctx.pacer.feed();
+    this.h264Fed++;
     try {
       ctx.decoder.decode(
         new EncodedVideoChunk({
           type: isKey ? "key" : "delta",
           timestamp: ts,
-          // Copy: the parse buffer is recycled long before decode completes.
-          data: r.payload.slice(),
+          // A copy either way: the parse buffer is recycled long before
+          // decode completes.
+          data: ctx.avcc ? toLengthPrefixed(annexBUnits(payload)) : payload.slice(),
         }),
       );
     } catch {
       // Decode error, or the decoder was reset/closed (e.g. a resize raced
-      // this update). Closing settles the waiter above, so the await below
-      // returns immediately rather than sitting out the timeout.
-      this.closeH264(id);
+      // this update). Closing releases the wait in `decodeH264` at once
+      // rather than letting it sit out the timeout.
+      this.closeH264(ctx.id);
     }
-    const frame = await wait;
-    if (!frame) return;
+  }
+
+  /**
+   * A decoded picture, for the next frame drawn unless the window moved on.
+   *
+   * It is held rather than uploaded here. Uploading a hardware decoder's
+   * picture into a GL texture runs on the main thread, and uploading every
+   * picture as it came fell behind: on the AMD card, with WebKitGTK decoding
+   * a 1600x900 picture in about 22 ms, a Boundary stream of 30 pictures a
+   * second was applied at about 22, and the batches the queue drained grew
+   * from 99 updates to 502 in under a minute while the picture fell further
+   * behind. Held, a picture that a newer one replaces before the next frame
+   * is drawn is closed unseen, so the uploads keep to the display's rate.
+   */
+  private showVideoFrame(frame: VideoFrame, ctx: H264Context): void {
     if (this.disposed || ctx.generation !== this.generation) {
       frame.close();
       return;
     }
-    this.uploadVideoFrame(frame, ctx);
+    // Another decoder's picture under this one is older: it goes in first.
+    this.uploadHeldVideo(ctx, ctx.id);
+    ctx.ready?.close();
+    ctx.ready = frame;
+    this.markDirty();
   }
 
   /**
-   * Wait for the frame a chunk will decode into, identified by its timestamp.
-   *
-   * The waiter is registered before `decode()` is called so that an output
-   * callback can never arrive before there is anything to hand it to, and it
-   * is settled exactly once: whichever of delivery, decoder close, or the
-   * timeout comes first wins, and the losers close the frame they were handed
-   * rather than leaking a `VideoFrame`.
+   * Put the held pictures of every decoder whose area overlaps `r` (all of
+   * them without one) into the frame texture, but not decoder `except`'s.
+   * Called before anything else is drawn over a decoder's area, so pixels
+   * land in the order they were sent, and before every frame drawn or read.
    */
-  private awaitH264Frame(ctx: H264Context, ts: number): Promise<VideoFrame | null> {
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const settle = (frame: VideoFrame | null): void => {
-        if (ctx.waiters.get(ts) !== settle) {
-          frame?.close();
-          return;
-        }
-        ctx.waiters.delete(ts);
-        if (timer !== undefined) clearTimeout(timer);
-        resolve(frame);
-      };
-      ctx.waiters.set(ts, settle);
-      timer = setTimeout(() => settle(null), H264_FRAME_TIMEOUT_MS);
-    });
-  }
-
-  /**
-   * Route one decoded frame to the rect that asked for it.
-   *
-   * Chunks go in one at a time in protocol order and this path has no
-   * B-frames, so output comes back in the same order. That means anything
-   * still outstanding with an OLDER timestamp than the frame just delivered
-   * is never coming (a corrupt slice the decoder discarded, say), and holding
-   * those waiters open would stall every update queued behind them until they
-   * timed out. Release them as soon as a newer frame proves them lost.
-   *
-   * Matching is on the exact timestamp, which WebCodecs requires the decoder
-   * to carry through from the chunk. A frame nobody is waiting for is dropped
-   * rather than given to the next waiter in line: that frame's rect already
-   * gave up on it, and handing it over would paint frame N where frame N+1
-   * belongs and leave every frame after it one behind for good.
-   */
-  private deliverH264Frame(ctx: H264Context, frame: VideoFrame): void {
-    const ts = frame.timestamp;
-    for (const key of Array.from(ctx.waiters.keys())) {
-      if (key < ts) ctx.waiters.get(key)?.(null);
+  private uploadHeldVideo(r?: { x: number; y: number; w: number; h: number }, except = -1): void {
+    for (const [id, ctx] of this.h264) {
+      if (!ctx.ready || id === except) continue;
+      if (r && (r.x >= ctx.x + ctx.w || ctx.x >= r.x + r.w || r.y >= ctx.y + ctx.h || ctx.y >= r.y + r.h)) continue;
+      const frame = ctx.ready;
+      ctx.ready = null;
+      this.uploadVideoFrame(frame, ctx);
     }
-    const waiter = ctx.waiters.get(ts);
-    if (waiter) waiter(frame);
-    else frame.close();
   }
 
-  /** Build a decoder for one context, or `null` if WebCodecs refuses. */
-  private createH264(r: WireRect, id: number): H264Context | null {
+  /**
+   * Build a decoder for one context, to start on keyframe `key`, or `null`
+   * if WebCodecs refuses.
+   */
+  private createH264(r: { x: number; y: number; w: number; h: number }, id: number, key: Uint8Array): H264Context | null {
     if (this.h264.size >= H264_MAX_CONTEXTS) {
       // The backend caps contexts at 64 and recycles slots, so this only
       // happens if the two sides disagree. Start clean rather than leak.
       this.closeAllH264();
     }
     const generation = this.generation;
+    const avcc = this.h264Avcc;
+    // Baseline profile per the PRD; a decoder taking Annex B reads the real
+    // profile from the in-band SPS, so this is only the initial hint.
+    let config: VideoDecoderConfig = { codec: "avc1.42E01E", optimizeForLatency: true } as VideoDecoderConfig;
+    if (avcc) {
+      const avc = avcConfig(annexBUnits(key));
+      // A keyframe without its parameter sets cannot start a decoder that
+      // has to be given them up front. The next one will have them.
+      if (!avc) return null;
+      config = { ...config, codec: avc.codec, description: avc.description };
+    }
     const ctx: H264Context = {
       decoder: null as unknown as VideoDecoder,
+      id,
       x: r.x,
       y: r.y,
       w: r.w,
       h: r.h,
       generation,
-      timestamp: 0,
-      waiters: new Map(),
+      pacer: null as unknown as VideoPacer<VideoFrame>,
+      avcc,
+      startKey: avcc ? null : key.slice(),
+      ready: null,
     };
+    ctx.pacer = new VideoPacer<VideoFrame>(this.h264Lag, (frame) => this.showVideoFrame(frame, ctx), r.w * r.h);
     try {
       ctx.decoder = new VideoDecoder({
         output: (frame: VideoFrame) => {
+          ctx.startKey = null;
           if (this.disposed || generation !== this.generation) {
             frame.close();
             return;
           }
-          // Not uploaded here: `decodeH264` uploads it at the rect's own
-          // position in the ordered apply loop.
-          this.deliverH264Frame(ctx, frame);
+          const lag = this.h264Lag.chunks;
+          ctx.pacer.output(frame);
+          if (this.h264Lag.chunks !== lag) traceMark("h264_lag", this.h264Lag.chunks);
         },
         error: () => {
+          const key = ctx.startKey;
           this.closeH264(id);
+          // A decoder that fails on the very keyframe it started on, before
+          // giving any picture back, turned the stream's form down: that is
+          // WebKitGTK and Annex B. Start again from the same keyframe, length
+          // prefixed, and send every chunk that way from now on. Done here,
+          // before the apply loop wakes from its wait, so the next chunk
+          // finds the new decoder in place.
+          if (!key || this.h264Avcc || this.disposed || generation !== this.generation) return;
+          this.h264Avcc = true;
+          traceMark("h264_avcc");
+          const again = this.createH264(ctx, id, key);
+          if (again) this.feedH264(again, key, true);
         },
       });
-      ctx.decoder.configure({
-        // Baseline profile per the PRD; the decoder reads the real profile
-        // from the in-band SPS, this is only the initial hint.
-        codec: "avc1.42E01E",
-        optimizeForLatency: true,
-      } as VideoDecoderConfig);
+      ctx.decoder.configure(config);
     } catch {
       this.h264Failed = true;
       this.notice("H.264 decoding is unavailable in this webview; those regions will not render.");
@@ -1154,9 +1262,15 @@ export class WebGLRenderer {
     if (!ctx) return;
     this.h264.delete(id);
     // Anything still waiting on this decoder is waiting on a frame that will
-    // never be produced now. Settle those waiters so the apply loop moves on
-    // instead of holding every later update behind a decoder that is gone.
-    for (const settle of Array.from(ctx.waiters.values())) settle(null);
+    // never be produced now. Release it so the apply loop moves on instead of
+    // holding every later update behind a decoder that is gone.
+    ctx.pacer.close();
+    // A held picture is still the newest thing sent for that area, unless the
+    // window has since changed size under it.
+    const held = ctx.ready;
+    ctx.ready = null;
+    if (held && !this.disposed && ctx.generation === this.generation) this.uploadVideoFrame(held, ctx);
+    else held?.close();
     try {
       if (ctx.decoder.state !== "closed") ctx.decoder.close();
     } catch {
@@ -1420,6 +1534,7 @@ export class WebGLRenderer {
   }
 
   private draw(): void {
+    this.uploadHeldVideo();
     traceMark("frame_drawn");
     const gl = this.gl;
     const W = this.canvas.width;
@@ -1492,6 +1607,7 @@ export class WebGLRenderer {
    */
   readFramebufferRGBA(): { width: number; height: number; pixels: Uint8Array } | null {
     if (this.fbWidth === 0 || this.fbHeight === 0) return null;
+    this.uploadHeldVideo();
     const gl = this.gl;
     const width = this.fbWidth;
     const height = this.fbHeight;
@@ -1513,6 +1629,7 @@ export class WebGLRenderer {
    */
   readSampledRowsRGBA(rowCount: number): { width: number; rows: number; pixels: Uint8Array } | null {
     if (this.fbWidth === 0 || this.fbHeight === 0 || rowCount <= 0) return null;
+    this.uploadHeldVideo();
     const gl = this.gl;
     const w = this.fbWidth;
     const n = Math.min(rowCount, this.fbHeight);
@@ -1542,6 +1659,7 @@ export class WebGLRenderer {
    */
   readPreviewRGBA(maxWidth: number): { width: number; height: number; pixels: Uint8Array } | null {
     if (this.fbWidth === 0 || this.fbHeight === 0) return null;
+    this.uploadHeldVideo();
     const gl = this.gl;
     const width = Math.max(1, Math.min(maxWidth, this.fbWidth));
     const height = Math.max(1, Math.round((this.fbHeight * width) / this.fbWidth));
@@ -1604,6 +1722,8 @@ export class WebGLRenderer {
     this.pending.length = 0;
     this.pendingBytes = 0;
     this.closeAllH264();
+    clearTimeout(this.tailTimer);
+    this.tailTimer = undefined;
     const gl = this.gl;
     gl.deleteTexture(this.frameTex);
     gl.deleteTexture(this.scratchTex);

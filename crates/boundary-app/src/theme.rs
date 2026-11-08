@@ -283,7 +283,10 @@ pub fn field<'a>(value: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
 
 /// A coloured dot, the kind every status bar has.
 pub fn dot(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+    // As tall as a line of text, so the dot sits in the middle of the line
+    // beside it rather than at its top.
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, line), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.5, color);
 }
 

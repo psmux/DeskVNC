@@ -217,6 +217,17 @@ pub enum ProtocolEvent {
         control: bool,
         tools: bool,
     },
+    /// What a support session's computer lets this helper do with its
+    /// clipboard, sent when the computer first says and on every change.
+    /// `write`: text sent from here is put on that computer's clipboard
+    /// (true exactly while the helper has control). `read`: what the person
+    /// there copies is sent here (their own separate tick). A computer whose
+    /// support app predates clipboard over Boundary never sends this, and
+    /// both stay off.
+    BoundaryClipboard {
+        write: bool,
+        read: bool,
+    },
     Rdp(RdpEvent),
     Ssh(SshEvent),
 }

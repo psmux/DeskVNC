@@ -520,12 +520,13 @@ export function hostMac(host: { mac?: string | null } | null | undefined): strin
  * crates/remote-core/src/pins.rs).
  *
  * "tls" is a VeNCrypt X.509 certificate, "ra2" a RealVNC RSA key, "rdp-tls"
- * an RDP server's own certificate. One host can offer all three, and the
+ * an RDP server's own certificate, "apple-rsa" a Mac's Screen Sharing host
+ * key. One host can offer all three, and the
  * fingerprints are unrelated, so a prompt says which one it is about and the
  * answer must carry the same value back untouched. This never reaches the
  * user; it is routing, not copy.
  */
-export type PinScheme = "tls" | "ra2" | "rdp-tls" | "rdg-tls";
+export type PinScheme = "tls" | "ra2" | "rdp-tls" | "rdg-tls" | "apple-rsa";
 
 /**
  * Digests of the whole certificate a server key came in, colon separated
@@ -664,6 +665,7 @@ export interface DisplayOption extends RemoteScreen {
  */
 export type SessionEvent =
   | { type: "boundary-control"; control: boolean }
+  | { type: "boundary-clipboard"; write: boolean; read: boolean }
   | { type: "state-changed"; state: SessionState }
   | { type: "desktop-resize"; width: number; height: number }
   | { type: "desktop-name"; name: string }

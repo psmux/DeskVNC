@@ -123,6 +123,13 @@ export interface SshHostKeyPromptState {
 
 export interface SessionApi {
   boundaryControl: boolean | null;
+  /**
+   * A Boundary session only: whether its computer puts text sent from here on
+   * its clipboard right now (while this helper has control there). `false`
+   * until the computer says so, and for good from one too old to carry a
+   * clipboard; `null` for every other protocol, whose clipboard is its own.
+   */
+  boundaryClipboardWrite: boolean | null;
   state: SessionState;
   desktopName: string;
   /**
@@ -336,6 +343,9 @@ export function useSession(
   const [state, setState] = useState<SessionState>({ state: "connecting" });
   const [desktopName, setDesktopName] = useState(params.name);
   const [boundaryControl, setBoundaryControl] = useState<boolean | null>(params.protocol === "boundary" ? false : null);
+  const [boundaryClipboardWrite, setBoundaryClipboardWrite] = useState<boolean | null>(
+    params.protocol === "boundary" ? false : null,
+  );
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
@@ -480,6 +490,9 @@ export function useSession(
           break;
         case "boundary-control":
           setBoundaryControl(ev.control);
+          break;
+        case "boundary-clipboard":
+          setBoundaryClipboardWrite(ev.write);
           break;
         case "desktop-name":
           setDesktopName(ev.name);
@@ -663,12 +676,18 @@ export function useSession(
         // The same safety net for Boundary's permission: it is announced once,
         // and a window that missed it would stay view only for good.
         if (params.protocol === "boundary") {
-          const permission = await safeInvoke<{ control: boolean } | null>(
+          const permission = await safeInvoke<{
+            control: boolean;
+            clipboard?: { write: boolean; read: boolean } | null;
+          } | null>(
             "boundary_permission",
             { sessionId: sessionIdRef.current },
             null,
           );
-          if (!cancelled && permission) setBoundaryControl(permission.control);
+          if (!cancelled && permission) {
+            setBoundaryControl(permission.control);
+            setBoundaryClipboardWrite(permission.clipboard?.write ?? false);
+          }
         }
 
         // Safety net for a prompt raised between the session starting and this
@@ -1028,7 +1047,7 @@ export function useSession(
   }, []);
 
   return {
-    state, desktopName, boundaryControl, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
+    state, desktopName, boundaryControl, boundaryClipboardWrite, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,

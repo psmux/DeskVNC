@@ -8,6 +8,71 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.35.0] (2026-11-08)
+
+### Added
+
+* macOS Screen Sharing, natively. DeskVNC logs in to a Mac with Apple's SRP
+  sign in (security types 33 and 36), falls back to the older Diffie Hellman
+  login (type 30) where that is all a Mac offers, and runs the whole session
+  inside Apple's encrypted channel. Picture, keyboard, pointer, macOS
+  shortcuts and clipboard both ways work against macOS 26, with no extra
+  virtual display added to the Mac. Tested against a real Mac.
+* Clipboard over Boundary. A helper's copied text can be pasted on the
+  computer they help while they have control, and the person can tick "Also
+  let them see what I copy" (off by default, per helper for unattended
+  access, never at the sign in screen). Works on Windows, macOS, Linux X11
+  and GNOME Wayland, in DeskVNC Support and in the DeskVNC viewer, including
+  `dvv_clipboard`. Older peers carry on exactly as before.
+* On GNOME, DeskVNC Support asks for the clipboard in the sharing prompt and
+  explains when a permission remembered by an older version leaves it out,
+  with a Share again button.
+* `deskvnc-support --help` and `--version` print and exit.
+
+### Changed
+
+* `deskvnc-support --install` copies the program under `~/.local/share`, so
+  the menu entry keeps working after the unpacked folder is deleted.
+* Support says invitation, not code, when no code service is set, and the
+  expiry line counts down.
+* A refused Mac login says when the password was right but the account is not
+  allowed under Remote Management, Options.
+* dvv can see and drive a desktop up to 6K, and status answers on any size.
+  Limbs an agent only looked at no longer use up its four limb allowance.
+* A DeskVNC viewer helping from Linux asks a Boundary computer for tiles
+  instead of H.264. WebKitGTK decodes video on the GPU with no software
+  choice, and on an older AMD card that locked the graphics card.
+* A Boundary helper's clipboard goes to the other computer only when the
+  helper pastes or presses Send clipboard, never just because control was
+  granted or the window regained focus.
+
+### Fixed
+
+* The Linux viewer's Boundary picture froze for up to a minute while the
+  screen moved, because WebKitGTK refused the video format and every picture
+  until the next keyframe was dropped.
+* A helper ending a session normally showed as a red "connection lost" error.
+  Support now says "They ended the session".
+* dvv offered control on a Boundary computer that lets the helper only watch.
+* A Mac on macOS 26 froze after the first picture. The first full picture of
+  a 4K Mac now arrives in about two seconds instead of twenty.
+* A Mac's host key prompt came back after every automatic reconnect.
+* GNOME restored a remembered view only share silently, so a helper given
+  control could only watch. Support now asks again.
+* A helper given a view only grant is told it can only watch; its input is
+  refused instead of ending the session.
+* Control ticked while the desktop was still opening never reached the helper.
+* "Your screen is being shared" no longer shows while GNOME's prompt is open,
+  and Cancel in that prompt is no longer blamed on a missing portal.
+* A typed paste into a host could turn its letters into shortcuts.
+* Plainer wording when a helper drops or a prompt times out, a stale "Helper
+  stopped responding" after a helper reconnects, and a long error that ran out
+  of the window.
+* The quick connect bar could switch an address to RDP when Connect was
+  clicked, and a suggestion under the pointer won on Enter.
+* `dvv_open` with slot 1 opened slot 0, a status read logged a typing refusal
+  four times a second, and a finished clipboard request stayed "in flight".
+
 ## [0.34.1] (2026-11-07)
 
 ### Added

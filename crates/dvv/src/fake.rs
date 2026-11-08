@@ -23,8 +23,8 @@
 
 use crate::error::{codes, ToolError};
 use crate::plane::{
-    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, LeaseAsk, LiveSession, OpenRequest,
-    RemoteClip, SessionClosed, SessionSource, TypingRefused,
+    FileEntry, FileOp, FileOutcome, HostRecord, InputRefused, LeaseAsk, LiveSession, Nudge,
+    OpenRequest, RemoteClip, SessionClosed, SessionSource, TypingRefused,
 };
 use agent_plane::{Attach, Damage, Frame, FrameSource, LimbRegistry, PerceptionUnavailable};
 use limb_core::capability::Capability;
@@ -130,6 +130,9 @@ impl Recorder {
 pub struct FakeFrames {
     size: (u16, u16),
     pending: Mutex<Vec<Rect>>,
+    /// Until when a read refuses as priming, the way a mirror waiting for a
+    /// full refresh over a slow link does.
+    priming_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl FakeFrames {
@@ -138,7 +141,14 @@ impl FakeFrames {
         FakeFrames {
             size,
             pending: Mutex::new(Vec::new()),
+            priming_until: Mutex::new(None),
         }
+    }
+
+    /// Refuse reads as priming for this long, as a mirror does while a full
+    /// refresh of a large screen is still on its way.
+    pub fn priming_for(&self, how_long: std::time::Duration) {
+        *lock(&self.priming_until) = Some(std::time::Instant::now() + how_long);
     }
 
     /// Tell the mirror something changed. The next [`FrameSource::damage`] call
@@ -156,6 +166,11 @@ impl FrameSource for FakeFrames {
         _scale: Option<f32>,
         _at: Timestamp,
     ) -> Result<Frame, PerceptionUnavailable> {
+        if lock(&self.priming_until).is_some_and(|until| std::time::Instant::now() < until) {
+            return Err(PerceptionUnavailable(
+                "the mirror is priming: a full refresh is on its way".to_string(),
+            ));
+        }
         let covers = region.unwrap_or(Rect::new(0, 0, self.size.0, self.size.1));
         // A description rather than pixels. Nothing in this build decodes a
         // framebuffer, and returning bytes that look like an image would be a
@@ -437,6 +452,11 @@ pub struct FakeSource {
     /// attachment id on it. `None` is an application that keeps none, which
     /// is what every fake was before the lease moved into the viewer.
     shared: Option<(Arc<Mutex<agent_lease::Board>>, String)>,
+    /// Refuse a mirror for any desktop larger than this many pixels, the way
+    /// the application's mirror budget does. `None` admits every size.
+    mirror_budget: Mutex<Option<u64>>,
+    /// Every repaint or reconnect asked of a limb, by limb id, in order.
+    nudges: Mutex<Vec<(String, Nudge)>>,
 }
 
 /// A far side that takes `allowed` more key presses and refuses the rest.
@@ -463,6 +483,8 @@ impl FakeSource {
             typing_refusals: Mutex::new(BTreeMap::new()),
             press_refusals: Mutex::new(BTreeMap::new()),
             shared: None,
+            nudges: Mutex::new(Vec::new()),
+            mirror_budget: Mutex::new(None),
         }
     }
 
@@ -483,6 +505,17 @@ impl FakeSource {
             FakeHost::desktop("h_lab01", "10.0.0.5"),
             FakeHost::terminal("h_lab02", "10.0.0.6"),
         ])
+    }
+
+    /// Refuse a mirror for a desktop over `pixels`, with the code and the
+    /// kind of sentence the application's budget refuses with.
+    pub fn refuse_mirrors_over(&self, pixels: u64) {
+        *lock(&self.mirror_budget) = Some(pixels);
+    }
+
+    /// Every repaint or reconnect asked so far, by limb id.
+    pub fn nudges(&self) -> Vec<(String, Nudge)> {
+        lock(&self.nudges).clone()
     }
 
     /// A saved machine opened in "the application" by somebody else, so it is
@@ -704,6 +737,21 @@ impl SessionSource for FakeSource {
             }
         };
 
+        if host.mirror && request.perceive {
+            let pixels = host.size.0 as u64 * host.size.1 as u64;
+            if let Some(budget) = *lock(&self.mirror_budget) {
+                if pixels > budget {
+                    return Err(ToolError::new(
+                        "BUDGET_REFUSED",
+                        format!(
+                            "a {}x{} mirror is {pixels} pixels and the per session budget is {budget}: nothing was allocated",
+                            host.size.0, host.size.1
+                        ),
+                    ));
+                }
+            }
+        }
+
         let frames: Option<Arc<dyn FrameSource>> = if host.mirror && request.perceive {
             let mut mirrors = lock(&self.mirrors);
             let mirror = mirrors
@@ -744,6 +792,11 @@ impl SessionSource for FakeSource {
 
     fn state(&self, limb: &LimbId) -> Option<SessionState> {
         lock(&self.states).get(limb.as_str()).cloned()
+    }
+
+    fn nudge(&self, limb: &LimbId, nudge: Nudge) -> Result<(), ToolError> {
+        lock(&self.nudges).push((limb.to_string(), nudge));
+        Ok(())
     }
 
     fn remote_clipboard(&self, limb: &LimbId) -> Result<Option<RemoteClip>, ToolError> {

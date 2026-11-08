@@ -4,8 +4,10 @@
 //! (the X11 class under X11) and take the name and icon from that file.
 //! Run from the tarball with no file installed, the dock showed a generic
 //! icon. `deskvnc-support --install` writes the file and the icon into the
-//! person's own data folder, so it needs no administrator, and points the
-//! entry at wherever this copy was unpacked.
+//! person's own data folder, so it needs no administrator. It also copies
+//! the program there and points the entry at that copy: an entry pointing at
+//! the unpacked tarball stopped working as soon as that folder was cleaned
+//! out of Downloads.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -64,15 +66,61 @@ fn data_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
 }
 
-/// Write the entry and icon for this copy. Returns the entry's path.
-pub fn install() -> Result<PathBuf> {
-    // An AppImage runs from a mount that goes when it quits.
+/// Copy this program into the person's data folder and write the entry and
+/// icon for that copy. Returns the entry's path and where the program went.
+pub fn install() -> Result<(PathBuf, PathBuf)> {
+    // An AppImage runs from a mount that goes when it quits, so the image
+    // itself is what gets copied.
     let exe = match std::env::var_os("APPIMAGE") {
         Some(image) => PathBuf::from(image),
         None => std::env::current_exe().context("This app cannot find itself")?,
     };
     let data = data_home().context("No home folder to install into")?;
-    write(&data, &exe)
+    let program = copy_program(&data, &exe)?;
+    Ok((write(&data, &program)?, program))
+}
+
+/// Where the installed copy of the program lives under `data`.
+fn program_path(data: &Path, exe: &Path) -> PathBuf {
+    let name = if exe
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("appimage"))
+    {
+        format!("{}.AppImage", crate::APP_ID)
+    } else {
+        crate::APP_ID.to_owned()
+    };
+    data.join(crate::APP_ID).join(name)
+}
+
+/// Copy `exe` to its installed place under `data`, unless it already runs
+/// from there. The copy is written beside it and renamed over the old one,
+/// so a copy that is running keeps running and the entry never points at
+/// half a file.
+fn copy_program(data: &Path, exe: &Path) -> Result<PathBuf> {
+    let target = program_path(data, exe);
+    let same = match (exe.canonicalize(), target.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same {
+        return Ok(target);
+    }
+    let folder = target.parent().context("No folder")?;
+    std::fs::create_dir_all(folder)
+        .with_context(|| format!("Cannot create {}", folder.display()))?;
+    let partial = folder.join(format!(".{}.partial", crate::APP_ID));
+    std::fs::copy(exe, &partial)
+        .with_context(|| format!("Cannot copy the program to {}", folder.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Cannot make {} runnable", partial.display()))?;
+    }
+    std::fs::rename(&partial, &target)
+        .with_context(|| format!("Cannot write {}", target.display()))?;
+    Ok(target)
 }
 
 fn write(data: &Path, exe: &Path) -> Result<PathBuf> {
@@ -143,6 +191,61 @@ mod tests {
         assert_eq!(
             value(&written, "Exec"),
             Some(r#""/tmp/new/deskvnc-support""#)
+        );
+    }
+
+    #[test]
+    fn installing_copies_the_program_so_the_unpacked_folder_can_go() {
+        let data = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let unpacked = downloads.path().join("deskvnc-support");
+        std::fs::write(&unpacked, b"program v1").unwrap();
+        let program = copy_program(data.path(), &unpacked).unwrap();
+        assert_eq!(program, data.path().join("deskvnc-support/deskvnc-support"));
+        let desktop = write(data.path(), &program).unwrap();
+        // The folder it was unpacked into is cleaned out.
+        drop(downloads);
+        assert!(!unpacked.exists());
+        let written = std::fs::read_to_string(desktop).unwrap();
+        let exec = value(&written, "Exec").unwrap().trim_matches('"');
+        assert_eq!(std::fs::read(exec).unwrap(), b"program v1");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(exec).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn installing_again_replaces_the_copy_and_from_the_copy_keeps_it() {
+        let data = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let newer = downloads.path().join("deskvnc-support");
+        std::fs::write(&newer, b"program v1").unwrap();
+        let program = copy_program(data.path(), &newer).unwrap();
+        std::fs::write(&newer, b"program v2").unwrap();
+        assert_eq!(copy_program(data.path(), &newer).unwrap(), program);
+        assert_eq!(std::fs::read(&program).unwrap(), b"program v2");
+        // Run from the installed copy itself, nothing is copied over it.
+        assert_eq!(copy_program(data.path(), &program).unwrap(), program);
+        assert_eq!(std::fs::read(&program).unwrap(), b"program v2");
+        let leftovers: Vec<_> = std::fs::read_dir(program.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, ["deskvnc-support"]);
+    }
+
+    #[test]
+    fn an_appimage_is_copied_as_an_appimage() {
+        let data = Path::new("/home/sam/.local/share");
+        assert_eq!(
+            program_path(
+                data,
+                Path::new("/home/sam/Downloads/DeskVNC-Support.AppImage")
+            ),
+            data.join("deskvnc-support/deskvnc-support.AppImage")
         );
     }
 }

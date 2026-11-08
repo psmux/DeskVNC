@@ -355,6 +355,7 @@ pub(crate) async fn handshake(
         stream,
         result_mode: ResultMode::Always,
         trust,
+        apple_wrap_key: None,
     })
 }
 

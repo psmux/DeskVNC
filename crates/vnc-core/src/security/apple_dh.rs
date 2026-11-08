@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! S->C  u16 generator
-//! S->C  u16 key_length            (bytes, typically 64 => 512-bit DH)
+//! S->C  u16 key_length            (bytes: 128 on older macOS, 512 on macOS 26)
 //! S->C  prime[key_length]
 //! S->C  server_public[key_length]
 //! C->S  credentials[128]          AES-128-ECB( MD5(shared secret) )
@@ -17,13 +17,26 @@
 //!
 //! ## Security note
 //!
-//! 512-bit Diffie-Hellman is cryptographically dead: it is within reach of
-//! precomputation attacks, and the *session* that follows is entirely
-//! unencrypted regardless. This protects the password from casual capture and
-//! nothing more. PRD/10 §5 is explicit that SSH tunnelling is the only way to
-//! get a genuinely encrypted session to a Mac; the UI should offer it whenever
-//! the banner is `RFB 003.889`.
-
+//! Older Macs use the fixed 1024-bit group of RFC 2409, which is within
+//! reach of precomputation by a well funded attacker. macOS 26 sends the
+//! 4096-bit group of RFC 3526 with generator 5 instead. Either way the
+//! *session* that follows is entirely unencrypted. This protects the password from
+//! casual capture and nothing more, which is why a Mac that also offers type
+//! 33 is logged into with that instead (see `apple_srp`), and why PRD/10 §5
+//! recommends an SSH tunnel to a Mac whose only login is this one.
+//!
+//! ## A refusal after a correct password
+//!
+//! Checked against macOS 26.7.1, including against Apple's own client: the
+//! client sends exactly what this code sends (user at 0 and password at 64,
+//! each NUL terminated and random filled, a 512 byte public value, key MD5 of
+//! the padded secret, ECB). With a correct password a Mac running Remote
+//! Management still answers SecurityResult 1 when the account holds no
+//! Remote Management privileges: its log shows the password accepted, then
+//! a privilege lookup (`lg level 0`), then the refusal. The same happens for
+//! types 33 and 36, and for Apple's client, so that is a setting on the Mac,
+//! not something a client can change.
+//!
 use aes::Aes128;
 use cipher::{block_padding::NoPadding, BlockEncryptMut, KeyInit};
 use md5::{Digest, Md5};
@@ -45,7 +58,8 @@ const FIELD_LEN: usize = 64;
 /// Username field + password field.
 const CREDENTIALS_LEN: usize = FIELD_LEN * 2;
 
-/// Smallest DH modulus we will talk to. Apple uses 64 (512-bit).
+/// Smallest DH modulus we will talk to. Older macOS sends 128 (1024-bit),
+/// macOS 26 sends 512 (4096-bit).
 const MIN_KEY_BYTES: usize = 32;
 /// 8192-bit, anything larger is a denial-of-service attempt, not a server.
 const MAX_KEY_BYTES: usize = 1024;

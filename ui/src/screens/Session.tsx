@@ -58,7 +58,7 @@ import {
   type ViewPrefs,
 } from "../lib/viewPrefs";
 import { syncSessionMenu, type SessionMenuState } from "../lib/menuSync";
-import { ClipboardEcho } from "../lib/clipboardEcho";
+import { ClipboardEcho, syncsOnArrival } from "../lib/clipboardEcho";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
@@ -459,6 +459,13 @@ function SessionView({
       return;
     }
     rendererRef.current = renderer;
+    // A Boundary computer answers a refresh with the whole screen as tiles,
+    // which covers the last pictures of a run that WebKitGTK's decoder keeps
+    // back until more video comes (see `VIDEO_TAIL_QUIET_MS`). VNC and RDP
+    // could answer with more video, so they are not asked.
+    if (params.protocol === "boundary") {
+      renderer.onVideoBehind = () => sessionRef.current.refreshScreen();
+    }
     // The pointer preference was read before this renderer existed; see the
     // effect that owns `showRemoteCursorRef`.
     renderer.setCursorVisible(showRemoteCursorRef.current);
@@ -1138,7 +1145,13 @@ function SessionView({
     const text = session.remoteClipboard?.text;
     if (text === undefined) return;
     clipboardEcho.moved(text);
-    void writeClipboard(text);
+    // Text the local clipboard already holds is not written again. A write
+    // is a new copy as far as the system is concerned, so a Boundary host on
+    // this same machine (one clipboard for both) would see it, send it back,
+    // and the two would pass the same text to each other twice a second.
+    void readClipboard().then((current) => {
+      if (current !== text) void writeClipboard(text);
+    });
   }, [session.remoteClipboard, clipboardEcho]);
 
   /**
@@ -1150,6 +1163,11 @@ function SessionView({
    */
   const pushClipboard = useCallback(
     async (force: boolean): Promise<"sent" | "unchanged" | "unreadable"> => {
+      // A Boundary computer takes text only while it says so (while this
+      // helper has control). Sent before then it would be dropped there, yet
+      // remembered here as moved, and the first paste after control came
+      // would skip it as a repeat.
+      if (session.boundaryClipboardWrite === false) return "unchanged";
       const text = await readClipboard();
       if (text === null) return "unreadable";
       if (!clipboardEcho.shouldPush(text, force)) return "unchanged";
@@ -1189,6 +1207,14 @@ function SessionView({
   pushClipboardRef.current = pushClipboard;
 
   const clipboardReady = session.state.state === "connected";
+  // Never true on Boundary, whose helper's clipboard goes over only on a
+  // paste or the Send clipboard button: see `syncsOnArrival`.
+  const syncOnArrival = syncsOnArrival({
+    protocol: params.protocol,
+    connected: clipboardReady,
+    owns,
+    remoteTakesText: session.boundaryClipboardWrite !== false,
+  });
   // Declared ahead of the sync below so it runs first: a reconnect brings up
   // a fresh clipboard channel, and the text pushed before the drop has to be
   // offered on it again rather than skipped as a repeat.
@@ -1196,7 +1222,7 @@ function SessionView({
     if (clipboardReady) clipboardEcho.connected();
   }, [clipboardReady, clipboardEcho]);
   useEffect(() => {
-    if (!clipboardReady || !owns) return;
+    if (!syncOnArrival) return;
     const sync = (): void => {
       if (!readBoolPref(PREF_CLIPBOARD_AUTO, true)) return;
       if (!readBoolPref(PREF_CLIPBOARD_ON_FOCUS, true)) return;
@@ -1207,7 +1233,7 @@ function SessionView({
     sync();
     window.addEventListener("focus", sync);
     return () => window.removeEventListener("focus", sync);
-  }, [clipboardReady, owns]);
+  }, [syncOnArrival]);
 
   // Bell: brief visual pulse via toast
   useEffect(() => {
@@ -1728,13 +1754,20 @@ function SessionView({
   );
 
   const clipboardSend = useCallback(async (): Promise<void> => {
+    if (session.boundaryClipboardWrite === false) {
+      push(
+        "warning",
+        "That computer takes clipboard text only while you have control, and only from a DeskVNC Support new enough to carry it",
+      );
+      return;
+    }
     const outcome = await pushClipboard(true);
     if (outcome === "unreadable") {
       push("warning", "Could not read the local clipboard");
       return;
     }
     if (outcome === "sent") push("success", "Clipboard sent to remote");
-  }, [pushClipboard, push]);
+  }, [pushClipboard, push, session.boundaryClipboardWrite]);
 
   const changeQuality = useCallback((q: QualityPreset): void => {
     setQualityState(q);

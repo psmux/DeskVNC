@@ -203,7 +203,14 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                         let app = app.clone();
                         move |label: &str| app.get_webview_window(label).is_some()
                     };
-                    if let Some(main) = app.get_webview_window(crate::windows::MAIN_WINDOW_LABEL) {
+                    // A second concurrent session against a machine that
+                    // already has one skips the person's path: the library
+                    // de-duplicates by machine, which is right for a click
+                    // and is exactly what a slot above 0 asks it not to do.
+                    let main = (!ask.force_new)
+                        .then(|| app.get_webview_window(crate::windows::MAIN_WINDOW_LABEL))
+                        .flatten();
+                    if let Some(main) = main {
                         // Already open: report it, exactly as a click would be
                         // told, without asking the webview to do anything.
                         if let Some(found) =
@@ -260,7 +267,7 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                         Some(ask.port),
                         None,
                         Some(ask.protocol),
-                        None,
+                        Some(ask.force_new),
                         None,
                         Some(true),
                     )

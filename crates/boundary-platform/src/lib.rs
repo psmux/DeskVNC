@@ -4,6 +4,7 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 #[cfg(not(target_os = "linux"))]
 use xcap::Monitor;
 
+pub mod clipboard;
 mod damage;
 #[cfg(windows)]
 mod dxgi;
@@ -23,6 +24,26 @@ pub fn control_hint() -> Option<&'static str> {
     {
         None
     }
+}
+/// A line for the person when the screen shared now came back from a
+/// remembered permission that leaves the clipboard out, as a GNOME grant
+/// saved by Support 0.34 does. Sharing again with the desktop's prompt
+/// fixes it; see [`forget_screen_grant`]. `None` everywhere else.
+pub fn clipboard_left_out() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::clipboard_left_out()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+/// Forget the screen sharing permission the desktop remembered, so the next
+/// share asks the person again. Linux on Wayland only; nothing elsewhere.
+pub fn forget_screen_grant() {
+    #[cfg(target_os = "linux")]
+    linux::portal::forget_grant();
 }
 /// Name the app to the desktop, for what it holds while a screen is
 /// shared. Linux only; elsewhere there is nothing to name.
@@ -139,6 +160,7 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         enigo: None,
         buttons: Vec::new(),
         keys: Vec::new(),
+        clipboard: clipboard::Clipboard::new(),
         _awake: awake,
     }))
 }
@@ -540,6 +562,9 @@ struct NativeDesktop {
     /// screen.
     #[cfg(target_os = "linux")]
     remote: Option<std::sync::Arc<linux::portal::Remote>>,
+    /// The person's clipboard on Windows, macOS and X11. Wayland goes
+    /// through the portal instead.
+    clipboard: clipboard::Clipboard,
     _awake: Awake,
 }
 
@@ -609,6 +634,15 @@ impl NativeDesktop {
             let m = &self.screen.monitor;
             Ok((at(m.x()?, m.width()?, x), at(m.y()?, m.height()?, y)))
         }
+    }
+    /// On Wayland the clipboard goes through the portal session or not at
+    /// all: `Some(None)` there when the desktop has no RemoteDesktop portal
+    /// (wlroots) or the person switched Allow Clipboard Access off, and
+    /// `None` on X11, which has its own.
+    #[cfg(target_os = "linux")]
+    fn portal_clipboard(&self) -> Option<Option<&linux::portal::Remote>> {
+        (linux::kind() == linux::Kind::Wayland)
+            .then(|| self.remote.as_deref().filter(|r| r.has_clipboard()))
     }
     /// Input through the Wayland RemoteDesktop portal, where this session
     /// has one.
@@ -727,6 +761,46 @@ impl Desktop for NativeDesktop {
     }
     fn video(&self) -> Option<boundary_session::video::VideoEncoders> {
         Some(video::encoders())
+    }
+    fn controllable(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = &self.remote {
+            return remote.controls();
+        }
+        true
+    }
+    fn has_clipboard(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal_clipboard() {
+            return portal.is_some();
+        }
+        clipboard::Clipboard::available()
+    }
+    fn clipboard_changed(&mut self) -> Result<Option<String>> {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal_clipboard() {
+            return portal.map_or(Ok(None), |remote| remote.clipboard_changed());
+        }
+        if !clipboard::Clipboard::available() {
+            return Ok(None);
+        }
+        self.clipboard.changed()
+    }
+    fn set_clipboard(&mut self, text: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal_clipboard() {
+            return match portal {
+                Some(remote) => remote.set_clipboard(text),
+                None => anyhow::bail!(
+                    "This computer's clipboard is not available to helpers: the desktop did not allow clipboard access when the screen was shared"
+                ),
+            };
+        }
+        ensure!(
+            clipboard::Clipboard::available(),
+            "This computer's clipboard is not available to helpers"
+        );
+        self.clipboard.set(text)
     }
     fn release(&mut self) {
         #[cfg(target_os = "linux")]

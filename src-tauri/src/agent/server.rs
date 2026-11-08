@@ -555,6 +555,14 @@ fn record(id: &str, entry: &SessionEntry, slot: u16, attachment: Option<String>)
         "slot": slot,
         "state": facts.state,
         "size": facts.size.map(|(w, h)| json!({ "width": w, "height": h })),
+        // A Boundary session only: what its computer lets this helper do
+        // with its clipboard. Null from one that never said, and for every
+        // other protocol, whose clipboard is its own.
+        "clipboard": facts.clipboard.map(|c| json!({ "write": c.write, "read": c.read })),
+        // A Boundary session only: whether the person there lets this helper
+        // control the computer (false while they let it only watch). Null
+        // before the computer has answered, and for every other protocol.
+        "control": facts.control,
         "attachmentId": attachment,
         "machine": machine_json(&entry.machine_key()),
     })
@@ -1008,6 +1016,13 @@ fn limb_close(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcError>
     Ok(json!({ "sessionId": session_id, "closed": true }))
 }
 
+/// Said when a Boundary computer does not take clipboard text from this
+/// helper right now.
+const BOUNDARY_NO_CLIPBOARD_WRITE: &str = "that Boundary computer does not take clipboard text from this helper right now. It takes it only while the helper has control, and only from a DeskVNC Support new enough to carry a clipboard. Nothing was put on its clipboard; type the text instead, or ask the person to give control";
+
+/// Said when a Boundary computer does not send what its person copies.
+const BOUNDARY_NO_CLIPBOARD_READ: &str = "the person at that Boundary computer has not let this helper see what they copy, or their DeskVNC Support is too old to carry a clipboard. Nothing was read. They can tick Also let them see what I copy in DeskVNC Support, or allow it for this helper under unattended access";
+
 /// The text the remote machine last put on its clipboard.
 ///
 /// The session already receives it: VNC's ServerCutText, and RDP's clipboard
@@ -1031,6 +1046,9 @@ fn clipboard_read(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcEr
             )
         })?;
     let facts = entry.facts.lock();
+    if !facts.clipboard_readable(entry.handle.kind) {
+        return Err(RpcError::tagged("UNSUPPORTED", BOUNDARY_NO_CLIPBOARD_READ));
+    }
     Ok(match &facts.remote_clipboard {
         Some(clip) => json!({
             "text": clip.text,
@@ -1138,12 +1156,16 @@ fn typing_json(ctx: &Ctx, session_id: &str, peer: &Peer, has_screen: bool) -> Va
         });
     }
     let attachment_id = peer.attachment_id.clone().unwrap_or_default();
-    match admit_typing(ctx, session_id, &attachment_id) {
+    // The verdict only. This is a status read, and a status read is not a
+    // typing attempt: an adapter polls `limb.status` several times a second
+    // while it waits, and going through [`admit_typing`] here wrote a
+    // "typing refused" line on every poll although nothing was ever typed.
+    match typing_verdict(ctx, session_id, &attachment_id) {
         Ok(()) => json!({ "allowed": true }),
         Err(refused) => json!({
             "allowed": false,
-            "code": refused.tag,
-            "why": refused.message,
+            "code": SCREEN_CHANGED,
+            "why": refused.to_string(),
         }),
     }
 }
@@ -1478,7 +1500,14 @@ fn limb_command(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcErro
         // the right test for the content fence below: a PTY has nothing to
         // observe, echoes what it is sent into a stream the agent reads back,
         // and fencing it would refuse every SSH session forever.
-        let has_screen = entry.facts.lock().size.is_some();
+        let facts = entry.facts.lock();
+        let has_screen = facts.size.is_some();
+        if matches!(command, ClientCommand::ClipboardText(_))
+            && !facts.clipboard_writable(entry.handle.kind)
+        {
+            return Err(RpcError::tagged("UNSUPPORTED", BOUNDARY_NO_CLIPBOARD_WRITE));
+        }
+        drop(facts);
         (entry.handle.clone(), has_screen)
     };
 
@@ -1610,24 +1639,36 @@ fn needs_wheel(command: &ClientCommand) -> bool {
 ///
 /// An [`RpcError`] tagged `SCREEN_CHANGED`, and nothing was sent.
 fn admit_typing(ctx: &Ctx, session_id: &str, attachment_id: &str) -> Result<(), RpcError> {
+    typing_verdict(ctx, session_id, attachment_id).map_err(|rejected| {
+        // Logged where the refusal is decided rather than left to whatever
+        // reads the reply. A person asking why an agent stopped typing at
+        // their machine gets both numbers and the session id from the
+        // application's own log, without the agent's transcript.
+        tracing::info!(
+            session = %session_id,
+            attachment = %attachment_id,
+            "typing refused: {rejected}"
+        );
+        RpcError::tagged(SCREEN_CHANGED, rejected.to_string())
+    })
+}
+
+/// The tag a content fence refusal carries, on the reply and in `limb.status`.
+const SCREEN_CHANGED: &str = "SCREEN_CHANGED";
+
+/// The content fence's answer for this attachment, with nothing written down.
+///
+/// [`admit_typing`] is the check that guards a keystroke and logs the refusal;
+/// this is the question it asks, for a caller that only reports the answer.
+fn typing_verdict(
+    ctx: &Ctx,
+    session_id: &str,
+    attachment_id: &str,
+) -> Result<(), limb_core::fence::ContentRejected> {
     // A repaint still waiting on the video decoder must trip the fence.
     ctx.plane.video.caught_up(session_id);
     let observed = ctx.plane.observed_content(session_id, attachment_id);
-    ctx.plane
-        .mirrors
-        .admit_typing(session_id, observed)
-        .map_err(|rejected| {
-            // Logged where the refusal is decided rather than left to whatever
-            // reads the reply. A person asking why an agent stopped typing at
-            // their machine gets both numbers and the session id from the
-            // application's own log, without the agent's transcript.
-            tracing::info!(
-                session = %session_id,
-                attachment = %attachment_id,
-                "typing refused: {rejected}"
-            );
-            RpcError::tagged("SCREEN_CHANGED", rejected.to_string())
-        })
+    ctx.plane.mirrors.admit_typing(session_id, observed)
 }
 
 /// One native intent this socket put on a session's wire and is waiting to
@@ -1874,6 +1915,10 @@ pub struct OpenAsk {
     pub port: u16,
     /// The protocol as `ProtocolKind::as_str` spells it.
     pub protocol: String,
+    /// Open a session of its own even though the machine already has one.
+    /// True only for a slot above 0, which names the next concurrent session;
+    /// without it the application hands back the window it already has.
+    pub force_new: bool,
 }
 
 /// What the application did about an [`OpenAsk`].
@@ -1961,20 +2006,50 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
     // it to touch, and an arbitrary address is not that.
     let (port, protocol) = permitted_endpoint(ctx, params, &address).await?;
 
-    // Slot 0 attaches to whatever is already live (`02 §4.4`). A machine the
-    // person already has open is not opened twice: the agent is handed that
-    // session, which is what makes an agent and a person watch the same thing.
-    if let Some((session_id, _)) = {
+    // The slot is the open's as much as the attach's. Slot N is the Nth live
+    // session against this machine, oldest first, exactly as `limb.attach`
+    // counts them. Reading it here and nowhere else would be the bug this
+    // replaced: an open for slot 1 ignored the slot, so on a machine nobody
+    // had open it dialled what became slot 0, and the attach that followed
+    // asked for slot 1, found one session, and timed out saying a person
+    // might be answering a prompt.
+    let slot = params.get("slot").and_then(Value::as_u64).unwrap_or(0);
+    let live = {
         let sessions = ctx.sessions.lock();
-        sessions_for_machine(&sessions, &key).into_iter().next()
-    } {
+        sessions_for_machine(&sessions, &key)
+    };
+
+    // A slot that is already live is handed back (`02 §4.4`). For slot 0 that
+    // is the session the person already has open: it is not opened twice, so
+    // an agent and a person watch the same thing.
+    if let Some((session_id, _)) = usize::try_from(slot).ok().and_then(|i| live.get(i)) {
         return Ok(json!({
             "opened": false,
             "reused": true,
             "sessionId": session_id,
-            "why": "that machine is already open in DeskVNCViewer, so nothing was dialled and this is the session that was already there. Call limb.attach for it",
+            "slot": slot,
+            "why": "that machine is already open in DeskVNCViewer at this slot, so nothing was dialled and this is the session that was already there. Call limb.attach for it",
         }));
     }
+    // Slots are dense. Opening one more session makes the next slot, so a
+    // slot past that is refused before anything is dialled rather than
+    // opening a session that would land at a different slot than the one
+    // asked for.
+    if slot > live.len() as u64 {
+        return Err(RpcError::tagged(
+            "SLOT_REFUSED",
+            format!(
+                "{address} has {} live session(s), so the next one opened is slot {}, and slot {slot} cannot be opened yet. Nothing was dialled. Slots open in order: open slot {} first, then ask for the next",
+                live.len(),
+                live.len(),
+                live.len(),
+            ),
+        ));
+    }
+    // Slot 0 with nothing open is an ordinary open. A slot above 0 is a
+    // second concurrent session against a machine that already has one, so
+    // the application must not hand back the window it already has.
+    let force_new = slot > 0;
 
     let open = opener().lock().clone().ok_or_else(|| {
         RpcError::tagged(
@@ -1990,6 +2065,7 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
             address: address.clone(),
             port,
             protocol: protocol.clone(),
+            force_new,
         },
         tell,
     );
@@ -2031,6 +2107,7 @@ async fn limb_open(ctx: &Ctx, peer: &Peer, params: &Value) -> Result<Value, RpcE
         "opened": true,
         "reused": opened.reused,
         "sessionId": opened.session_id,
+        "slot": slot,
         "address": address,
         "port": port,
         "protocol": protocol,
@@ -4230,6 +4307,66 @@ mod tests {
         assert_eq!(moved["perception"]["contentGeneration"], 3);
     }
 
+    /// What this thread logs while the guard lives, as text.
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let sink = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || Captured(sink.clone()))
+            .finish();
+        (buffer, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// A status read is not a typing attempt. An adapter polls `limb.status`
+    /// about four times a second while it waits for a picture, and every poll
+    /// logged "typing refused" although nothing had been typed, which buried
+    /// the one refusal that mattered under hundreds that did not.
+    #[tokio::test]
+    async fn reading_limb_status_logs_no_typing_refusal() {
+        let mut fixture = fixture();
+        let mut peer = mirrored(&mut fixture).await;
+        let (logged, _guard) = capture_logs();
+
+        for _ in 0..4 {
+            let status = call(
+                &fixture.ctx,
+                &mut peer,
+                "limb.status",
+                json!({ "sessionId": "s1" }),
+            )
+            .await;
+            // The answer is unchanged: still refused, still saying why.
+            assert_eq!(status["typing"]["allowed"], false);
+            assert_eq!(status["typing"]["code"], "SCREEN_CHANGED");
+        }
+        let text = String::from_utf8_lossy(&logged.lock()).to_string();
+        assert!(
+            !text.contains("typing refused"),
+            "a status read logged a typing refusal: {text}"
+        );
+
+        // A keystroke that is refused is still written down, once.
+        press_a(&fixture.ctx, &mut peer)
+            .await
+            .expect_err("nothing has been read yet");
+        let text = String::from_utf8_lossy(&logged.lock()).to_string();
+        assert_eq!(text.matches("typing refused").count(), 1, "{text}");
+    }
+
     /// An attachment that asked to perceive nothing has observed nothing, so
     /// it is fenced out of typing too. There is no cheaper way to be exempt
     /// from looking than not looking.
@@ -4777,6 +4914,7 @@ mod tests {
     /// on the ask that actually crossed.
     #[tokio::test]
     async fn an_open_asks_the_application_and_answers_as_soon_as_the_session_is_spawned() {
+        let _one_opener = OPENER_TESTS.lock().await;
         let asked: Arc<Mutex<Option<OpenAsk>>> = Arc::new(Mutex::new(None));
         let seen = asked.clone();
         install_opener(Arc::new(move |ask: OpenAsk, tell| {
@@ -4823,6 +4961,100 @@ mod tests {
         assert_eq!(ask.port, 22);
         assert_eq!(ask.protocol, "ssh");
         assert_eq!(ask.host_id, None, "no saved machine was named");
+        assert!(
+            !ask.force_new,
+            "slot 0 on a machine with nothing open is an ordinary open"
+        );
+    }
+
+    /// The opener is a process global, so the tests that install one take
+    /// turns rather than replacing each other's closure mid test.
+    static OPENER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Slot 1 on a machine nothing has open. The open used to ignore the slot
+    /// and dial what became slot 0, and the attach after it asked for slot 1,
+    /// found one session and gave up saying a person might be at a prompt.
+    /// Now it is refused before anything is dialled, and says which slot is
+    /// next.
+    #[tokio::test]
+    async fn a_slot_past_the_next_one_is_refused_before_anything_is_dialled() {
+        let _one_opener = OPENER_TESTS.lock().await;
+        let asked: Arc<Mutex<Option<OpenAsk>>> = Arc::new(Mutex::new(None));
+        let seen = asked.clone();
+        install_opener(Arc::new(move |ask: OpenAsk, tell| {
+            *seen.lock() = Some(ask);
+            let _ = tell.send(Ok(Opened {
+                session_id: "s2".to_string(),
+                reused: false,
+            }));
+        }));
+
+        let fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        // 10.0.0.5 is published (the fixture's live session is on it) and
+        // nothing is live on its SSH port.
+        let refused = dispatch(
+            &fixture.ctx,
+            &mut peer,
+            "limb.open",
+            &json!({ "address": "10.0.0.5", "protocol": "ssh", "port": 22, "slot": 1 }),
+        )
+        .await
+        .expect_err("slot 1 needs slot 0 first");
+        assert_eq!(refused.tag, Some("SLOT_REFUSED"));
+        assert!(
+            refused.message.contains("open slot 0 first")
+                && refused.message.contains("Nothing was dialled"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            asked.lock().is_none(),
+            "the application was asked to open something"
+        );
+    }
+
+    /// Slot 1 on a machine that already has slot 0 open is a second session of
+    /// its own. Without `force_new` the application hands back the window it
+    /// already has, which is slot 0 again.
+    #[tokio::test]
+    async fn the_next_slot_opens_a_session_of_its_own() {
+        let _one_opener = OPENER_TESTS.lock().await;
+        let asked: Arc<Mutex<Option<OpenAsk>>> = Arc::new(Mutex::new(None));
+        let seen = asked.clone();
+        install_opener(Arc::new(move |ask: OpenAsk, tell| {
+            *seen.lock() = Some(ask);
+            let _ = tell.send(Ok(Opened {
+                session_id: "s2".to_string(),
+                reused: false,
+            }));
+        }));
+
+        let fixture = fixture();
+        let mut peer = greeted(&fixture.ctx).await;
+        let answer = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.open",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "port": 5900, "slot": 1 }),
+        )
+        .await;
+        assert_eq!(answer["opened"], true, "{answer}");
+        assert_eq!(answer["sessionId"], "s2");
+        assert_eq!(answer["slot"], 1);
+        let ask = seen_ask(&asked);
+        assert!(ask.force_new, "slot 1 has to ask for a session of its own");
+
+        // Slot 0 on the same machine is still the session that was there.
+        let again = call(
+            &fixture.ctx,
+            &mut peer,
+            "limb.open",
+            json!({ "address": "10.0.0.5", "protocol": "vnc", "port": 5900, "slot": 0 }),
+        )
+        .await;
+        assert_eq!(again["reused"], true);
+        assert_eq!(again["sessionId"], "s1");
     }
 
     fn seen_ask(asked: &Arc<Mutex<Option<OpenAsk>>>) -> OpenAsk {

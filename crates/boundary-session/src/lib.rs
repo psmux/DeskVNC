@@ -26,7 +26,7 @@ use std::io::Cursor;
 const JPEG_QUALITY: u8 = 70;
 pub use screen::Rect;
 pub use video::{Update, VideoUnit};
-pub use wire::{Button, Input, Invitation, Key};
+pub use wire::{Button, ClipboardRights, Input, Invitation, Key, MAX_CLIPBOARD};
 
 /// Implemented by a local platform backend, created only after consent.
 pub trait Desktop {
@@ -50,6 +50,30 @@ pub trait Desktop {
     /// that decodes video. `None`, the default, sends rectangles only.
     fn video(&self) -> Option<video::VideoEncoders> {
         None
+    }
+    /// Whether this desktop takes input at all. A Wayland desktop shares the
+    /// screen alone when the person leaves Allow Remote Interaction off in
+    /// its sharing prompt, and every event sent to it fails. The helper is
+    /// then told it can only watch. True, the default, for every other
+    /// backend.
+    fn controllable(&self) -> bool {
+        true
+    }
+    /// Whether this desktop can read and write the person's clipboard at all.
+    fn has_clipboard(&self) -> bool {
+        false
+    }
+    /// Text the person copied since the last call, or None if nothing changed.
+    /// The first call only records where the clipboard stands and returns None,
+    /// so what was copied before the session is never sent.
+    fn clipboard_changed(&mut self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// Put text on the person's clipboard. It must stay pasteable after the call
+    /// returns (X11 and Wayland need an owner that keeps serving it).
+    fn set_clipboard(&mut self, text: &str) -> Result<()> {
+        let _ = text;
+        anyhow::bail!("This computer's clipboard is not available to helpers")
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

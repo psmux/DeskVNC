@@ -213,12 +213,14 @@ fn strongest_offered_name(offered: &[u8]) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// What `establish` hands back on success.
+/// What `establish` hands back on success. The last element is set for a
+/// macOS Screen Sharing encrypted session.
 type Established = (
     BoxedStream,
     NegotiatedVersion,
     SecurityType,
     proto::ServerInit,
+    Option<crate::apple::RekeyHandle>,
 );
 
 /// Everything up to (and including) the ServerInit exchange.
@@ -246,13 +248,12 @@ async fn establish(
     )
     .await?;
 
-    emit_state(
-        events,
-        SessionState::Authenticating {
-            method: strongest_offered_name(&offered),
-        },
-    )
-    .await?;
+    // Name the type this client will pick, so a pinned type (or the auto
+    // choice) is what the state shows, not merely the strongest on offer.
+    let method = crate::security::select_security_type(&offered, options)
+        .map(|t| format!("{t:?}"))
+        .unwrap_or_else(|_| strongest_offered_name(&offered));
+    emit_state(events, SessionState::Authenticating { method }).await?;
 
     // Adapt our negotiated version to the security module's compact form.
     let version_info = crate::security::ProtocolVersionInfo {
@@ -260,9 +261,12 @@ async fn establish(
         minor: negotiated.version.minor() as u8,
         is_apple: negotiated.is_apple_screen_sharing,
     };
-    let (mut stream, security, trust) =
-        crate::security::authenticate_with_trust(tcp, version_info, &offered, options, creds)
-            .await?;
+    let crate::security::Authenticated {
+        mut stream,
+        security,
+        trust,
+        apple_wrap_key,
+    } = crate::security::authenticate_full(tcp, version_info, &offered, options, creds).await?;
     // The security result was OK, so whatever the user typed for this attempt
     // is now proven, whatever happens to the connection after this line.
     creds.mark_authenticated();
@@ -297,12 +301,37 @@ async fn establish(
 
     emit_state(events, SessionState::Negotiating).await?;
     let shared = options.vnc_options().map(|v| v.shared).unwrap_or(true);
-    proto::write_client_init(&mut stream, shared).await?;
+    let apple_key = apple_wrap_key.filter(|_| security.starts_apple_session());
+    if apple_key.is_some() {
+        // The native viewer's ClientInit carries two Apple bits beside the
+        // shared flag.
+        let init = if shared {
+            crate::apple::wire::CLIENT_INIT_SHARED
+        } else {
+            crate::apple::wire::CLIENT_INIT_EXCLUSIVE
+        };
+        crate::security::write_all(&mut stream, &[init]).await?;
+    } else {
+        proto::write_client_init(&mut stream, shared).await?;
+    }
     let server_init = with_timeout(
         options.connect_timeout,
         proto::read_server_init(&mut stream),
     )
     .await?;
+
+    // macOS Screen Sharing after an SRP login: the cleartext prelude, the
+    // first rekey, and from then on the AES record layer.
+    let mut rekey = None;
+    if let Some(key) = apple_key {
+        let (records, handle) = with_timeout(
+            options.connect_timeout,
+            crate::apple::start_session(stream, &key, crate::apple::PreludeOptions::default()),
+        )
+        .await?;
+        stream = Box::pin(records);
+        rekey = Some(handle);
+    }
 
     // The Tight security type appends capability lists to ServerInit. They
     // MUST be consumed or the stream stays offset by 8 + 16N bytes and every
@@ -328,7 +357,7 @@ async fn establish(
         "server init complete"
     );
 
-    Ok((stream, negotiated, security, server_init))
+    Ok((stream, negotiated, security, server_init, rekey))
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +508,7 @@ pub(crate) async fn run_once(
     // `establish_interactive` handles cancellation itself (it has to, so a
     // pending credential prompt tears down promptly); the run loop does too
     // (it wants to release pressed keys first).
-    let (stream, negotiated, security, server_init) =
+    let (stream, negotiated, security, server_init, apple_rekey) =
         establish_interactive(options, settings, events, commands, cancel).await?;
 
     let mut caps = proto::build_capabilities(&negotiated, &server_init, security);
@@ -508,11 +537,56 @@ pub(crate) async fn run_once(
 
     // Negotiate our pixel format and encoding preferences.
     let quality_settings = settings.quality.settings();
+    use tokio::io::AsyncWriteExt;
+    if let Some(rekey) = apple_rekey {
+        // Inside Apple's record layer every write is one record, so each
+        // message goes out on its own. The native viewer sends no
+        // SetPixelFormat; the server's own format is used when it is one the
+        // decoders take, which a Mac's 32-bit true colour is.
+        let native = server_init.pixel_format;
+        let pf = if native.true_colour && matches!(native.bits_per_pixel, 16 | 32) {
+            native
+        } else {
+            wire_format(quality_settings.pixel_format, settings.quality, &caps)
+        };
+        caps.pixel_format = Some(pf);
+        for msg in crate::apple::opening_messages(server_init.width, server_init.height) {
+            write_half
+                .write_all(&msg)
+                .await
+                .map_err(messages::map_eof)?;
+            // A SetPixelFormat, when one is needed, goes after SetEncodings
+            // so the display configuration stays the first record.
+            if msg.first() == Some(&messages::client_msg::SET_ENCODINGS) && pf != native {
+                write_half
+                    .write_all(&messages::set_pixel_format(&pf))
+                    .await
+                    .map_err(messages::map_eof)?;
+            }
+        }
+        write_half.flush().await.map_err(messages::map_eof)?;
+        emit_state(events, SessionState::Connected).await?;
+        *connected_at = Some(Instant::now());
+        let mut run_loop = RunLoop::new(
+            reader,
+            write_half,
+            caps,
+            pf,
+            quality_settings,
+            bytes_counter,
+            sent_counter,
+            link_peak,
+        );
+        run_loop.set_apple_session(crate::apple::AppleSession::new(rekey));
+        let outcome = run_loop.run(settings, events, commands, cancel).await;
+        remember_trust(options, run_loop.take_trusted());
+        return outcome;
+    }
+
     let pf = wire_format(quality_settings.pixel_format, settings.quality, &caps);
     let encodings = crate::quality::encodings_for(&quality_settings, &caps);
     caps.pixel_format = Some(pf);
 
-    use tokio::io::AsyncWriteExt;
     write_half
         .write_all(&messages::set_pixel_format(&pf))
         .await
@@ -545,7 +619,33 @@ pub(crate) async fn run_once(
         sent_counter,
         link_peak,
     );
-    run_loop.run(settings, events, commands, cancel).await
+    let outcome = run_loop.run(settings, events, commands, cancel).await;
+    remember_trust(options, run_loop.take_trusted());
+    outcome
+}
+
+/// Keep a key the person accepted at the trust prompt for the rest of this
+/// session.
+///
+/// The prompt is raised after the handshake, while the connection goes on,
+/// and the answer used to change nothing in the core: the options the
+/// supervisor dials again with still held no pin, so every automatic
+/// reconnect saw an unknown key and raised the prompt again over a live
+/// session. "Connect once" means this session, reconnects included, and
+/// "Trust" is persisted by the shell for the next session; either way the
+/// key goes into this session's pins. Only an empty slot is filled: a pin
+/// already there is never replaced from here, and a reconnect that meets a
+/// different key still stops as a changed identity.
+fn remember_trust(
+    options: &mut ConnectOptions,
+    trusted: Option<(crate::types::PinScheme, String)>,
+) {
+    if let Some((scheme, fingerprint)) = trusted {
+        if options.cert_pins.for_scheme(scheme).is_none() {
+            tracing::info!(?scheme, "keeping the accepted server key for this session");
+            options.cert_pins.set(scheme, Some(fingerprint));
+        }
+    }
 }
 
 #[cfg(test)]

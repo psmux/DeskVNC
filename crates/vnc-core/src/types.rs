@@ -94,6 +94,10 @@ pub enum SecurityType {
     Ra2_256,
     Ra2ne256,
     AppleDh,
+    /// macOS Screen Sharing, SRP with the user name RSA encrypted (33).
+    AppleRsaSrp,
+    /// macOS Screen Sharing, SRP without RSA (36).
+    AppleSrp,
     MsLogonII,
     Unknown(u8),
 }
@@ -108,6 +112,8 @@ impl SecurityType {
             16 => Self::Tight,
             19 => Self::VeNCrypt,
             30 => Self::AppleDh,
+            33 => Self::AppleRsaSrp,
+            36 => Self::AppleSrp,
             113 => Self::MsLogonII,
             129 => Self::Ra2_256,
             130 => Self::Ra2ne256,
@@ -124,6 +130,8 @@ impl SecurityType {
             Self::Tight => 16,
             Self::VeNCrypt => 19,
             Self::AppleDh => 30,
+            Self::AppleRsaSrp => 33,
+            Self::AppleSrp => 36,
             Self::MsLogonII => 113,
             Self::Ra2_256 => 129,
             Self::Ra2ne256 => 130,
@@ -138,7 +146,13 @@ impl SecurityType {
             Self::VeNCrypt => 90,
             Self::Ra2_256 | Self::Ra2ne256 => 80,
             Self::Ra2 | Self::Ra2ne => 70,
+            // A Mac offers 30, 33, 35 and 36. 33 is the strongest login and
+            // leads to an encrypted session, so it wins. 36 is the same SRP
+            // without the RSA wrapper, but its framing is the least well
+            // known of the three, so the older type 30 is tried before it.
+            Self::AppleRsaSrp => 45,
             Self::AppleDh => 40,
+            Self::AppleSrp => 35,
             Self::MsLogonII => 30,
             Self::VncAuth => 20,
             // Ranked BELOW VncAuth deliberately. Tight (16) is a wrapper whose
@@ -156,7 +170,16 @@ impl SecurityType {
 
     /// Whether the *session* (not just auth) is encrypted.
     pub fn encrypts_session(self) -> bool {
-        matches!(self, Self::VeNCrypt | Self::Ra2 | Self::Ra2_256)
+        matches!(
+            self,
+            Self::VeNCrypt | Self::Ra2 | Self::Ra2_256 | Self::AppleRsaSrp | Self::AppleSrp
+        )
+    }
+
+    /// The macOS Screen Sharing logins that are followed by Apple's encrypted
+    /// session (prelude, rekey and AES record layer) rather than plain RFB.
+    pub fn starts_apple_session(self) -> bool {
+        matches!(self, Self::AppleRsaSrp | Self::AppleSrp)
     }
 
     /// Legacy DES auth truncates the password to 8 characters (PRD/10 §3.4).
@@ -185,6 +208,8 @@ impl SecurityType {
             // which `crates/vnc-core/examples/live_quality.rs:55` did.
             "ra2-256" => Some(Self::Ra2_256),
             "apple-dh" => Some(Self::AppleDh),
+            "apple-srp-rsa" => Some(Self::AppleRsaSrp),
+            "apple-srp" => Some(Self::AppleSrp),
             "ms-logon" | "mslogon" => Some(Self::MsLogonII),
             // "auto", and anything a newer build wrote that this one
             // predates: negotiate rather than guess at what was meant.
@@ -240,6 +265,9 @@ pub struct ServerCapabilities {
     pub supports_h264: bool,
     /// True when the banner was `RFB 003.889` (macOS Screen Sharing).
     pub is_apple_screen_sharing: bool,
+    /// The session runs inside Apple's AES record layer (after security type
+    /// 33 or 36), with Apple's own update and metadata messages.
+    pub apple_session: bool,
 }
 
 impl ServerCapabilities {

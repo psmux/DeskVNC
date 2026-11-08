@@ -83,9 +83,13 @@ fn control_hint_for(kind: Kind, desktop: Option<&str>) -> Option<&'static str> {
 /// the person at the computer. The portal gives no reason when GNOME refuses
 /// a session because the screen is locked or blank, so `asleep` comes from
 /// asking the desktop afterwards.
-fn refused(error: &str, asleep: bool) -> String {
+fn refused(error: &anyhow::Error, asleep: bool) -> String {
     if asleep {
         "The screen is locked or asleep, and the desktop will not share it like that. Ask the person at the computer to unlock it, then connect again".into()
+    } else if error.is::<portal::Declined>() {
+        // GNOME's Cancel. Explained as a missing portal service before, which
+        // sent people looking for a package they already had.
+        "The screen was not shared: Cancel was chosen when the desktop asked. Connect again and choose Share to go on".into()
     } else {
         format!(
             "This Wayland desktop did not share its screen ({error}). DeskVNC Support needs the xdg-desktop-portal ScreenCast service, which GNOME, KDE and wlroots desktops provide, or a session on Xorg"
@@ -107,7 +111,7 @@ impl Screen {
             Kind::X11 => Ok(Self::X11(Box::new(x11::Screen::open(id, accelerated)?))),
             Kind::Wayland => match portal::Screen::open() {
                 Ok(screen) => Ok(Self::Portal(Box::new(screen))),
-                Err(e) => bail!(refused(&format!("{e:#}"), portal::screen_asleep())),
+                Err(e) => bail!(refused(&e, portal::screen_asleep())),
             },
         }
     }
@@ -204,10 +208,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_prompt_is_not_blamed_on_the_portal() {
+        // What GNOME 50 answered when Cancel was clicked in its prompt.
+        let cancelled = portal::portal_error(ashpd::Error::Response(
+            ashpd::desktop::ResponseError::Cancelled,
+        ));
+        let said = refused(&cancelled, false);
+        assert!(said.contains("Cancel was chosen"), "{said}");
+        assert!(!said.contains("ScreenCast service"), "{said}");
+    }
+
+    #[test]
     fn a_locked_screen_is_named_as_the_reason() {
         // What the portal said when GNOME was locked: nothing useful.
-        let portal = "Portal request didn't succeed with no information";
-        let said = refused(portal, true);
+        let portal = anyhow::anyhow!("Portal request didn't succeed with no information");
+        let said = refused(&portal, true);
         assert!(said.contains("locked or asleep"), "{said}");
         assert!(said.contains("unlock"), "{said}");
         assert!(!said.contains("ScreenCast service"), "{said}");
@@ -215,7 +230,10 @@ mod tests {
 
     #[test]
     fn without_a_lock_the_portal_is_still_the_suspect() {
-        let said = refused("Portal request didn't succeed with no information", false);
+        let said = refused(
+            &anyhow::anyhow!("Portal request didn't succeed with no information"),
+            false,
+        );
         assert!(said.contains("ScreenCast service"), "{said}");
         assert!(said.contains("no information"), "{said}");
     }

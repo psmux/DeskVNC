@@ -310,6 +310,34 @@ pub struct SessionFacts {
     /// machine has sent one. Kept for the agent plane's `clipboard.read`: the
     /// webview gets the same event, and an agent has no webview.
     pub remote_clipboard: Option<RemoteClipboard>,
+    /// A Boundary session only: what the computer lets this helper do with
+    /// its clipboard, as it last said. `None` from a computer that never
+    /// said, which is every support app older than clipboard over Boundary,
+    /// and then both directions stay off.
+    pub clipboard: Option<ClipboardRights>,
+}
+
+/// What a Boundary computer lets the helper do with its clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClipboardRights {
+    /// Text sent from here goes onto that computer's clipboard.
+    pub write: bool,
+    /// What the person there copies is sent here.
+    pub read: bool,
+}
+
+impl SessionFacts {
+    /// May text be put on this session's remote clipboard? Always for a
+    /// protocol that carries a clipboard of its own; for Boundary, only while
+    /// the computer said so.
+    pub fn clipboard_writable(&self, kind: remote_core::ProtocolKind) -> bool {
+        kind != remote_core::ProtocolKind::Boundary || self.clipboard.is_some_and(|c| c.write)
+    }
+    /// May this session's remote clipboard be read? The same rule as
+    /// [`SessionFacts::clipboard_writable`], with the person's read tick.
+    pub fn clipboard_readable(&self, kind: remote_core::ProtocolKind) -> bool {
+        kind != remote_core::ProtocolKind::Boundary || self.clipboard.is_some_and(|c| c.read)
+    }
 }
 
 /// Text that came from a remote machine's clipboard.
@@ -333,6 +361,7 @@ impl Default for SessionFacts {
             tools: false,
             control: None,
             remote_clipboard: None,
+            clipboard: None,
         }
     }
 }

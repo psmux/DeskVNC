@@ -10,6 +10,9 @@ boundary-session.workspace = true
 image.workspace = true
 fast_image_resize.workspace = true
 enigo = "0.6.1"
+# The person's clipboard on Windows, macOS and X11, text only. Already in
+# the lock through egui-winit; images are not carried, so no image support.
+arboard = { version = "3.7.0", default-features = false }
 # Software H.264, compiled from source, for machines without a hardware
 # encoder and for Linux.
 openh264 = "0.9.9"
@@ -25,7 +28,7 @@ xcap = "0.9.8"
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "randr"] }
 # inhibit keeps the screen from blanking while a helper watches it.
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "inhibit", "remote_desktop", "screencast"] }
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "clipboard", "inhibit", "remote_desktop", "screencast"] }
 async-io = "2"
 futures-lite = "2"
 pipewire = "0.10"
@@ -42,6 +45,8 @@ windows-sys = { version = "0.59", features = [
     # The service and the copy it starts at the sign in screen.
     "Win32_Foundation",
     "Win32_Security",
+    # GetClipboardSequenceNumber, to notice a copy without reading it.
+    "Win32_System_DataExchange",
     "Win32_System_RemoteDesktop",
     "Win32_System_Services",
     "Win32_System_StationsAndDesktops",
@@ -62,6 +67,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_Variant",
 ] }
+
+# The runtime for the clip_host example, which hosts a session.
+[dev-dependencies]
+tokio.workspace = true
 
 # CPU time in the capture_time example.
 [target.'cfg(unix)'.dev-dependencies]

@@ -208,6 +208,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
                     let _ = answer.send(unattended::Asked {
                         approval: Approval::Deny,
                         tools: false,
+                        clipboard: false,
                         pair: false,
                     });
                     break;
@@ -239,6 +240,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
                     let _ = answer.send(unattended::Asked {
                         approval: Approval::Control,
                         tools: true,
+                        clipboard: false,
                         pair: true,
                     });
                 }
@@ -679,6 +681,78 @@ async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
         };
         let helper = unattended::connect(typed, "Godwin".into(), None, helper_key, local());
         assert_eq!(outcome(helper).await, Ok(true));
+        listener.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// Everything a helper read while it connected, up to being let in.
+async fn said_until_in(session: &mut Session) -> Vec<String> {
+    let mut said = Vec::new();
+    loop {
+        match session.events.recv().await {
+            Some(Event::Status(status)) => said.push(status),
+            Some(Event::Connected { .. }) => return said,
+            Some(Event::Finished(result)) => panic!("ended before it was in: {result:?}"),
+            None => panic!("the session went quiet"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paired_helper_is_not_told_a_person_must_approve() {
+    if skipped() {
+        return;
+    }
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("wording");
+        let access_path = dir.join("access.json");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let helper_key = unattended::load_or_create_key(&dir.join("helper.key")).unwrap();
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&helper_key.public().to_string(), "Sam", true)
+            .unwrap();
+        access.save(&access_path).unwrap();
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        // Dialled by address, as the test above does, since nothing here
+        // publishes the machine's ID.
+        let picked = address
+            .ip_addrs()
+            .find(|a| a.is_ipv4() && !a.ip().is_loopback())
+            .or_else(|| address.ip_addrs().next())
+            .copied()
+            .expect("a direct address");
+        let ip = if picked.ip().is_unspecified() {
+            "127.0.0.1".parse().unwrap()
+        } else {
+            picked.ip()
+        };
+        let typed = format!("{ip}:{}", picked.port());
+        let mut helper = unattended::connect(typed, "Sam".into(), None, helper_key, local());
+        let said = said_until_in(&mut helper).await;
+        // Nobody was asked: the computer let a paired helper straight in.
+        assert!(
+            !said.iter().any(|s| s.contains("approve")),
+            "the helper read {said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|s| s == "Waiting for the computer to let you in"),
+            "the helper read {said:?}"
+        );
+        helper.stop();
         listener.stop();
     })
     .await

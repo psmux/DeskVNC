@@ -15,7 +15,8 @@ mod unattended;
 mod wake;
 
 use boundary_session::{
-    Approval, Button, Event, HostOptions, Input, Key, Session, unattended::SecretKey,
+    Abilities, Approval, Button, ClipboardRights, Event, HostOptions, Input, Key, Session,
+    unattended::SecretKey,
 };
 use eframe::egui::{self, Margin, RichText};
 use std::time::{Duration, Instant};
@@ -24,6 +25,12 @@ use tokio::sync::oneshot;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|a| a == name);
+    // Answered before anything else: these never open a window, so they
+    // work in a terminal with no display, as they do for any other program.
+    if let Some(text) = information(&args) {
+        print!("{text}");
+        return Ok(());
+    }
     if let Some(code) = other_mode(&args) {
         std::process::exit(code);
     }
@@ -161,7 +168,11 @@ fn other_mode(args: &[String]) -> Option<i32> {
     } else if cfg!(target_os = "linux") && args.iter().any(|a| a == "--install") {
         // Put the app in the menu and give the dock its icon, for this
         // person only: `./deskvnc-support --install` after unpacking.
-        launcher::install().map(|path| println!("Installed {}", path.display()))
+        launcher::install().map(|(entry, program)| {
+            println!("Installed {}", program.display());
+            println!("Added {} to the app menu", entry.display());
+            println!("The folder you unpacked it from can be deleted.");
+        })
     } else if args.iter().any(|a| a == "--uninstall-service") {
         #[cfg(windows)]
         let result = login::uninstall();
@@ -180,6 +191,36 @@ fn other_mode(args: &[String]) -> Option<i32> {
     })
 }
 
+/// What `--help` and `--version` print, or `None` for a run that opens the
+/// app. Only the first argument counts, so a flag meant for another mode is
+/// never read as one of these.
+fn information(args: &[String]) -> Option<String> {
+    match args.get(1).map(String::as_str)? {
+        "--version" | "-V" => Some(format!("{APP_NAME} {}\n", env!("CARGO_PKG_VERSION"))),
+        "--help" | "-h" => Some(format!(
+            "{APP_NAME} {}\n\
+             Let someone you trust see this computer and help you, or help someone else.\n\
+             \n\
+             Usage: deskvnc-support [OPTION]\n\
+             \n\
+             With no option, the app opens its window.\n\
+             \n\
+             Options:\n\
+             {INSTALL_HELP}\
+             \x20 --background   Start out of the way, as at sign in, for unattended access\n\
+             \x20 -h, --help     Print this help and exit\n\
+             \x20 -V, --version  Print the version and exit\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        _ => None,
+    }
+}
+/// The line about `--install` in the help, on Linux where it exists.
+const INSTALL_HELP: &str = if cfg!(target_os = "linux") {
+    "  --install      Add DeskVNC Support to your app menu, for you only\n"
+} else {
+    ""
+};
 /// A lock held for as long as this copy runs, or `None` when another copy
 /// holds it already.
 fn only_instance() -> Option<std::fs::File> {
@@ -210,6 +251,11 @@ struct Pending {
     tools: bool,
     /// What the person ticked for them. Off until they tick it.
     allow_tools: bool,
+    /// The helper can take text this computer copies, and this computer can
+    /// give it, so the person is asked whether it may.
+    clipboard: bool,
+    /// Off until they tick it: whatever they copy may be a password.
+    allow_clipboard: bool,
     answer: oneshot::Sender<Approval>,
 }
 /// How many lines of what a helper's tools did the sharing screen keeps.
@@ -230,9 +276,21 @@ struct App {
     tools_offered: bool,
     /// Whether the person allows them now.
     tools: bool,
+    /// Whether this helper can be shown what the person copies at all.
+    clipboard_offered: bool,
+    /// Whether the person lets them see it now.
+    clipboard: bool,
+    /// On the helper's side: what the host lets this copy do with clipboards.
+    rights: ClipboardRights,
+    /// On the helper's side: the last text the person at the other computer
+    /// copied, kept until this helper chooses to copy it.
+    copied: Option<String>,
     /// What they did, newest last.
     activity: Vec<String>,
     invitation: String,
+    /// When this computer's invitation stops working, while it waits for a
+    /// helper, so the status line can count down to it.
+    expires: Option<Instant>,
     ticket: String,
     password: String,
     name: String,
@@ -323,8 +381,13 @@ impl App {
             control: false,
             tools_offered: false,
             tools: false,
+            clipboard_offered: false,
+            clipboard: false,
+            rights: ClipboardRights::default(),
+            copied: None,
             activity: Vec::new(),
             invitation: String::new(),
+            expires: None,
             ticket: String::new(),
             password: String::new(),
             name,
@@ -377,8 +440,13 @@ impl App {
         self.control = false;
         self.tools_offered = false;
         self.tools = false;
+        self.clipboard_offered = false;
+        self.clipboard = false;
+        self.rights = ClipboardRights::default();
+        self.copied = None;
         self.activity.clear();
         self.invitation.clear();
+        self.expires = None;
         self.texture = None;
         self.remote_focus = false;
         self.modifiers = egui::Modifiers::default();
@@ -393,6 +461,27 @@ impl App {
             self.status = error.to_string();
             self.error = true;
         }
+    }
+    /// Put text on the other computer's clipboard and paste it there with
+    /// V under the modifier the helper is holding, which reached it already,
+    /// so the paste lands where it would have been typed.
+    fn paste_there(&mut self, text: String) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Err(error) = session.send_clipboard(text) {
+            self.status = format!("{error:#}");
+            self.error = true;
+            return;
+        }
+        self.send(Input::Key {
+            key: Key::Letter('v'),
+            down: true,
+        });
+        self.send(Input::Key {
+            key: Key::Letter('v'),
+            down: false,
+        });
     }
     /// Share this computer: a host session whose invitation becomes the code
     /// on the home screen.
@@ -424,11 +513,12 @@ impl App {
         self.hosting = false;
         self.error = false;
         if target.starts_with("boundary1:") {
-            self.session = Some(boundary_session::viewer_as(
+            self.session = Some(boundary_session::viewer_with(
                 target,
                 name,
                 self.network_options(),
                 self.helper_key.clone(),
+                abilities(),
             ));
         } else if boundary_session::unattended::validate_machine_id(&target).is_ok() {
             let Some(key) = self.helper_key.clone() else {
@@ -438,12 +528,13 @@ impl App {
             };
             let password = Some(self.password.clone()).filter(|p| !p.is_empty());
             self.status = "Connecting to the computer".into();
-            self.session = Some(boundary_session::unattended::connect(
+            self.session = Some(boundary_session::unattended::connect_with(
                 target,
                 name,
                 password,
                 key,
                 self.network_options(),
+                abilities(),
             ));
         } else {
             self.codes.resolve(target);
@@ -467,18 +558,26 @@ impl App {
         }
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        let helpers_before = self.unattended.connections;
         if self.unattended.poll() {
             attention::raise(ctx);
+        }
+        // A helper connecting unattended is a new session too: what the
+        // last one ended with is old news beside the banner saying who is in.
+        if self.unattended.connections != helpers_before && self.session.is_none() && self.error {
+            self.status = "Ready to connect".into();
+            self.error = false;
         }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
             self.hosting = false;
             self.error = false;
-            self.session = Some(boundary_session::viewer_as(
+            self.session = Some(boundary_session::viewer_with(
                 ticket,
                 self.name.trim().to_owned(),
                 self.network_options(),
                 self.helper_key.clone(),
+                abilities(),
             ));
         }
         if self.permission_check.elapsed() > Duration::from_secs(1) {
@@ -491,6 +590,9 @@ impl App {
             while let Ok(event) = session.events.try_recv() {
                 match event {
                     Event::Status(status) => {
+                        // Something newer than the countdown, such as the
+                        // screen starting to be shared once a helper is let in.
+                        self.expires = None;
                         self.status = status;
                         self.error = false;
                     }
@@ -501,17 +603,17 @@ impl App {
                         if self.codes.available() {
                             self.codes.publish(ticket.clone());
                         }
+                        let left = boundary_session::Invitation::decode(&ticket)
+                            .map(|invite| invite.expires.saturating_sub(unix_now()))
+                            .unwrap_or(0);
+                        self.expires = Some(Instant::now() + Duration::from_secs(left));
                         self.invitation = ticket;
-                        self.status = if self.codes.available() {
-                            "Waiting for your helper. The code expires in 10 minutes".into()
-                        } else {
-                            "Waiting for your helper. The invitation expires in 10 minutes".into()
-                        };
                     }
                     Event::Approval {
                         name,
                         peer,
                         tools,
+                        clipboard,
                         answer,
                     } => {
                         self.approved_name = name.clone();
@@ -520,11 +622,14 @@ impl App {
                             peer,
                             tools,
                             allow_tools: false,
+                            clipboard,
+                            allow_clipboard: false,
                             answer,
                         });
                         attention::raise(ctx);
                     }
                     Event::Connected { peer, control } => {
+                        self.expires = None;
                         self.codes.clear();
                         self.pending = None;
                         self.connected = true;
@@ -539,6 +644,11 @@ impl App {
                     // On the helper's side. This app sends no commands of its
                     // own, so there is nothing to show.
                     Event::Tools(_) => {}
+                    Event::ClipboardRights(rights) => self.rights = rights,
+                    // Kept for a button, never put on this computer's
+                    // clipboard unasked: that would replace what the helper
+                    // copied themselves.
+                    Event::ClipboardText(text) => self.copied = Some(text),
                     Event::Activity(line) => {
                         self.activity.push(line);
                         let excess = self.activity.len().saturating_sub(ACTIVITY_LINES);
@@ -576,11 +686,24 @@ impl App {
         if self.pending.as_ref().is_some_and(|p| p.answer.is_closed()) {
             self.pending = None;
         }
+        // Said again on every frame, which is once a second while waiting,
+        // so the minutes left go down instead of staying at ten.
+        if let Some(expires) = self.expires {
+            self.status = waiting(
+                self.codes.available(),
+                expires.saturating_duration_since(Instant::now()),
+            );
+            self.error = false;
+        }
         if let Some(result) = finished {
+            // On this side of a shared screen, a session that ends without
+            // an error was ended by the helper: the person ends theirs with
+            // End session, which stops it before it can finish.
+            let shared = self.hosting && self.connected;
             self.stop();
-            if let Err(error) = result {
-                self.status = format!("{error:#}");
-                self.error = true;
+            if let Some((status, error)) = ended_status(shared, &result) {
+                self.status = status;
+                self.error = error;
             }
         }
     }
@@ -667,10 +790,7 @@ impl App {
                     {
                         self.share(ui.ctx());
                     }
-                    theme::small(
-                        ui,
-                        "One code per session. It expires after 10 minutes if nobody connects.",
-                    );
+                    theme::small(ui, share_words(with_codes).expiry);
                 }
             } else if self.invitation.is_empty() || self.codes.publishing() {
                 ui.horizontal(|ui| {
@@ -678,7 +798,7 @@ impl App {
                     theme::muted(
                         ui,
                         if self.invitation.is_empty() {
-                            "Creating your code"
+                            share_words(with_codes).creating
                         } else {
                             "Getting your code"
                         },
@@ -923,8 +1043,17 @@ impl App {
             ui.add_space(6.0);
         });
     }
+    /// End this session, forget the permission the desktop remembered, and
+    /// share again, so the desktop asks once more with its clipboard switch.
+    fn share_again(&mut self, ctx: &egui::Context) {
+        boundary_platform::forget_screen_grant();
+        self.stop();
+        self.share(ctx);
+        self.status = SHARE_AGAIN_STATUS.into();
+    }
     fn sharing(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        let mut again = false;
         theme::card(ui, |ui| {
             theme::title(ui, "Your screen is being shared");
             theme::muted(
@@ -965,6 +1094,27 @@ impl App {
                 {
                     session.set_tools(self.tools);
                 }
+            }
+            if self.clipboard_offered {
+                let before = self.clipboard;
+                ui.checkbox(&mut self.clipboard, SEE_WHAT_I_COPY);
+                if before != self.clipboard
+                    && let Some(session) = &self.session
+                {
+                    session.set_clipboard_read(self.clipboard);
+                }
+            }
+            if let Some(note) = clipboard_note(
+                self.clipboard_offered,
+                boundary_platform::clipboard_left_out(),
+            ) {
+                theme::small(ui, note);
+                again = ui
+                    .button("Share again")
+                    .on_hover_text(SHARE_AGAIN_HOVER)
+                    .clicked();
+            }
+            if self.tools_offered || self.clipboard_offered {
                 activity(ui, &self.activity);
             }
             ui.add_space(14.0);
@@ -979,7 +1129,8 @@ impl App {
                     .clicked()
                 {
                     // What they may do later starts as what they may do now.
-                    self.unattended.pair(session, &peer, &name, self.tools);
+                    self.unattended
+                        .pair(session, &peer, &name, self.tools, self.clipboard);
                 }
             }
             ui.add_space(14.0);
@@ -988,16 +1139,29 @@ impl App {
                 "Use End session above to disconnect. Closing DeskVNC Support also ends sharing.",
             );
         });
+        if again {
+            self.share_again(ui.ctx());
+        }
     }
     fn remote(&mut self, ui: &mut egui::Ui) {
-        theme::small(
-            ui,
-            if self.control {
-                "Control allowed. Click the remote screen to send input. Click outside it to release input."
-            } else {
-                "View only. The person sharing can allow control from their window."
-            },
-        );
+        ui.horizontal_wrapped(|ui| {
+            theme::small(ui, remote_hint(self.control, self.rights));
+            if let Some(text) = self.copied.as_ref() {
+                let count = text.chars().count();
+                if ui
+                    .button("Copy what they copied")
+                    .on_hover_text(format!(
+                        "{count} characters. Puts them on your clipboard, replacing what is there."
+                    ))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(text.clone());
+                    self.status =
+                        format!("Your clipboard now has the {count} characters they copied");
+                    self.error = false;
+                }
+            }
+        });
         let Some(texture) = self.texture.as_ref() else {
             ui.spinner();
             ui.label("Waiting for the first screen");
@@ -1090,11 +1254,25 @@ impl App {
                 egui::Event::Text(text) if !modifiers.ctrl && !modifiers.mac_cmd => {
                     self.send(Input::Text(text));
                 }
-                egui::Event::Paste(text) => {
-                    for chunk in text.chars().collect::<Vec<_>>().chunks(200) {
-                        self.send(Input::Text(chunk.iter().collect()));
+                egui::Event::Paste(text) => match paste(text, self.rights) {
+                    Paste::Clipboard(text) => self.paste_there(text),
+                    Paste::Typed(chunks) => {
+                        // The Control or Command of the paste reached the
+                        // other computer already. Typing under it turns the
+                        // text into shortcuts there (an "a" selects all), so
+                        // it is let go first. Still held here, it goes down
+                        // again on the next frame.
+                        for key in held_for_shortcuts(self.modifiers) {
+                            self.send(Input::Key { key, down: false });
+                        }
+                        self.modifiers.ctrl = false;
+                        self.modifiers.alt = false;
+                        self.modifiers.mac_cmd = false;
+                        for chunk in chunks {
+                            self.send(Input::Text(chunk));
+                        }
                     }
-                }
+                },
                 egui::Event::Key {
                     key,
                     pressed,
@@ -1209,39 +1387,38 @@ impl App {
     /// The bar every remote support tool has at the bottom: a dot, and what
     /// is going on.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let color = if self.error {
-                theme::pal(ui.ctx()).danger
-            } else if self.connected || self.session.is_none() {
-                theme::pal(ui.ctx()).success
-            } else {
-                theme::pal(ui.ctx()).warning
+        let color = if self.error {
+            theme::pal(ui.ctx()).danger
+        } else if self.connected || self.session.is_none() {
+            theme::pal(ui.ctx()).success
+        } else {
+            theme::pal(ui.ctx()).warning
+        };
+        let session = self.session.as_ref();
+        let connected = self.connected;
+        status_line(ui, color, &self.status, &self.network.label(), |ui| {
+            let Some(session) = session else {
+                return;
             };
-            theme::dot(ui, color);
-            ui.label(RichText::new(&self.status).color(theme::pal(ui.ctx()).text));
-            if let Some(session) = &self.session {
-                let connectivity = session.connectivity.borrow();
-                if let Some(warning) = &connectivity.warning {
-                    ui.colored_label(theme::pal(ui.ctx()).warning, warning);
-                }
-                if self.connected
-                    && let Some(route) = connectivity.route
-                {
-                    let label = match route {
-                        boundary_session::Route::Direct => "Direct connection",
-                        boundary_session::Route::Relay => "Relayed connection",
-                        boundary_session::Route::Unknown => "Checking connection path",
-                    };
-                    let timing = connectivity
-                        .rtt
-                        .map(|rtt| format!(", round trip {} ms", rtt.as_millis()))
-                        .unwrap_or_default();
-                    theme::small(ui, format!("{label}{timing}"));
-                }
+            let connectivity = session.connectivity.borrow();
+            if let Some(warning) = &connectivity.warning {
+                ui.add(
+                    egui::Label::new(RichText::new(warning).color(theme::pal(ui.ctx()).warning))
+                        .wrap(),
+                );
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::small(ui, self.network.label());
-            });
+            if connected && let Some(route) = connectivity.route {
+                let label = match route {
+                    boundary_session::Route::Direct => "Direct connection",
+                    boundary_session::Route::Relay => "Relayed connection",
+                    boundary_session::Route::Unknown => "Checking connection path",
+                };
+                let timing = connectivity
+                    .rtt
+                    .map(|rtt| format!(", round trip {} ms", rtt.as_millis()))
+                    .unwrap_or_default();
+                theme::small(ui, format!("{label}{timing}"));
+            }
         });
     }
     fn content(&mut self, ui: &mut egui::Ui) {
@@ -1313,6 +1490,11 @@ impl App {
                         );
                         theme::small(ui, "Their tools act as you, outside what the screen shows. Leave this off unless you asked for it. You can turn it off at any time, and each command shows here as it runs.");
                     }
+                    if pending.clipboard {
+                        ui.add_space(10.0);
+                        ui.checkbox(&mut pending.allow_clipboard, SEE_WHAT_I_COPY);
+                        theme::small(ui, SEE_WHAT_I_COPY_NOTE);
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui
@@ -1341,26 +1523,196 @@ impl App {
                 && let Some(pending) = self.pending.take()
             {
                 let allow = pending.allow_tools && !matches!(decision, Approval::Deny);
+                let read = clipboard_read(&pending, &decision);
                 if let Some(session) = &self.session {
                     // Set before the answer, so the grant the helper reads
                     // already says it.
                     session.set_tools(allow);
+                    session.set_clipboard_read(read);
                 }
                 self.tools_offered = pending.tools;
                 self.tools = allow;
+                self.clipboard_offered = pending.clipboard;
+                self.clipboard = read;
                 let _ = pending.answer.send(decision);
             }
         }
     }
 }
-/// What a helper's tools did, newest last, so the person at the computer
-/// can see it.
+/// The tick that lets a helper see what the person copies, in the approval
+/// prompt and on the sharing screen.
+pub(crate) const SEE_WHAT_I_COPY: &str = "Also let them see what I copy";
+pub(crate) const SEE_WHAT_I_COPY_NOTE: &str = "Text you copy while they are connected goes to them, and that is sometimes a password. Leave this off unless you need it. You can turn it off at any time.";
+/// The line under the clipboard tick when the desktop's remembered sharing
+/// permission leaves the clipboard out, as a GNOME grant saved by Support
+/// 0.34 does. Only for a helper that can use the clipboard at all, and only
+/// on this screen, which is the one the person at the computer sees: an
+/// unattended session keeps the old grant, since nobody is there to answer
+/// the prompt again.
+fn clipboard_note(offered: bool, left_out: Option<&'static str>) -> Option<&'static str> {
+    left_out.filter(|_| offered)
+}
+const SHARE_AGAIN_HOVER: &str = "Ends this session and forgets the permission your desktop remembered, so it asks again. Your helper connects again with the new code.";
+const SHARE_AGAIN_STATUS: &str = "Sharing again. Give your helper the new code. When your desktop asks which screen to share, leave Allow Clipboard Access on";
+/// What this copy of Support says it can do when it connects as a helper:
+/// take and give clipboard text, which the person there still has to allow.
+fn abilities() -> Abilities {
+    Abilities {
+        clipboard: true,
+        ..Abilities::default()
+    }
+}
+/// Whether the person's answer lets the helper see what they copy: only
+/// when the helper can take it, the person ticked it, and they let them in.
+fn clipboard_read(pending: &Pending, decision: &Approval) -> bool {
+    pending.clipboard && pending.allow_clipboard && !matches!(decision, Approval::Deny)
+}
+/// The line over the remote screen: what this helper may do there.
+fn remote_hint(control: bool, rights: ClipboardRights) -> &'static str {
+    match (control, rights.write, rights.read) {
+        (true, true, true) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard, and what they copy comes to you."
+        }
+        (true, true, false) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input. Pasting puts your text on their clipboard."
+        }
+        (true, false, true) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input. What they copy comes to you."
+        }
+        (true, false, false) => {
+            "Control allowed. Click the remote screen to send input. Click outside it to release input."
+        }
+        (false, _, true) => {
+            "View only. The person sharing can allow control from their window. What they copy comes to you."
+        }
+        (false, _, false) => "View only. The person sharing can allow control from their window.",
+    }
+}
+/// What a paste into the remote screen becomes.
+#[derive(Debug, PartialEq, Eq)]
+enum Paste {
+    /// Put on their clipboard, then pasted there with the keys the helper
+    /// pressed. Only while they let this helper write their clipboard.
+    Clipboard(String),
+    /// Typed into whatever has focus there, in pieces, as before clipboards
+    /// were shared.
+    Typed(Vec<String>),
+}
+fn paste(text: String, rights: ClipboardRights) -> Paste {
+    if rights.write {
+        Paste::Clipboard(text)
+    } else {
+        Paste::Typed(
+            text.chars()
+                .collect::<Vec<_>>()
+                .chunks(200)
+                .map(|chunk| chunk.iter().collect())
+                .collect(),
+        )
+    }
+}
+/// The modifiers the other computer holds down for this helper that turn
+/// typed letters into shortcuts.
+fn held_for_shortcuts(modifiers: egui::Modifiers) -> Vec<Key> {
+    [
+        (modifiers.ctrl, Key::Control),
+        (modifiers.alt, Key::Alt),
+        (modifiers.mac_cmd, Key::Meta),
+    ]
+    .into_iter()
+    .filter_map(|(held, key)| held.then_some(key))
+    .collect()
+}
+/// What the sharing card says about what the person gives their helper.
+struct ShareWords {
+    creating: &'static str,
+    expiry: &'static str,
+}
+/// The words for a short code when a code service is set, and for the full
+/// invitation otherwise. No release build names a shared code service, so
+/// without one set in Settings the person gets an invitation, and the card
+/// said "Creating your code" and "One code per session" over it.
+fn share_words(code: bool) -> ShareWords {
+    if code {
+        ShareWords {
+            creating: "Creating your code",
+            expiry: "One code per session. It expires after 10 minutes if nobody connects.",
+        }
+    } else {
+        ShareWords {
+            creating: "Creating your invitation",
+            expiry: "One invitation per session. It expires after 10 minutes if nobody connects.",
+        }
+    }
+}
+/// The status line while this computer waits for a helper, with `left`
+/// until its code or invitation expires.
+fn waiting(code: bool, left: Duration) -> String {
+    let what = if code { "code" } else { "invitation" };
+    // Rounded up: "1 minute" lasts until it has gone, never "0 minutes".
+    match left.as_secs().div_ceil(60) {
+        0 => format!("Waiting for your helper. The {what} has expired"),
+        1 => format!("Waiting for your helper. The {what} expires in less than a minute"),
+        minutes => format!("Waiting for your helper. The {what} expires in {minutes} minutes"),
+    }
+}
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+/// The status line: a dot, what is going on, then `more`, with the network
+/// setting at the right. The setting is laid out first and the rest wraps in
+/// the space left of it, so a long error goes onto more lines instead of
+/// running over the setting and out of the window. Returns where the status
+/// and the setting were drawn.
+fn status_line(
+    ui: &mut egui::Ui,
+    color: egui::Color32,
+    status: &str,
+    setting: &str,
+    more: impl FnOnce(&mut egui::Ui),
+) -> (egui::Rect, egui::Rect) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        let setting = ui
+            .label(
+                RichText::new(setting)
+                    .size(12.0)
+                    .color(theme::pal(ui.ctx()).text_tertiary),
+            )
+            .rect;
+        ui.add_space(16.0);
+        let status = ui
+            .with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                // Beside the first line, however many lines the status takes.
+                theme::dot(ui, color);
+                ui.vertical(|ui| {
+                    let status = ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(status).color(theme::pal(ui.ctx()).text),
+                            )
+                            .wrap(),
+                        )
+                        .rect;
+                    ui.horizontal_wrapped(more);
+                    status
+                })
+                .inner
+            })
+            .inner;
+        (status, setting)
+    })
+    .inner
+}
+/// What a helper's tools did, and the clipboard text that went either way
+/// (its length only), newest last, so the person at the computer can see it.
 pub(crate) fn activity(ui: &mut egui::Ui, lines: &[String]) {
     if lines.is_empty() {
         return;
     }
     ui.add_space(6.0);
-    theme::caption(ui, "What their tools did");
+    theme::caption(ui, "What they did");
     for line in lines {
         theme::small(ui, line);
     }
@@ -1396,9 +1748,164 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
     })
 }
 
+/// What the status bar says when a session finishes on its own, and whether
+/// in red: `None` keeps what stopping it said. `shared` is whether this
+/// computer's screen was being shared with a helper who was in.
+fn ended_status(shared: bool, result: &anyhow::Result<()>) -> Option<(String, bool)> {
+    match result {
+        Err(error) => Some((format!("{error:#}"), true)),
+        Ok(()) if shared => Some(("They ended the session. Ready to connect".into(), false)),
+        Ok(()) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper ending the session is said plainly and not in red; only a
+    /// session that failed is an error.
+    #[test]
+    fn a_session_the_helper_ends_is_not_an_error() {
+        assert_eq!(
+            ended_status(true, &Ok(())),
+            Some(("They ended the session. Ready to connect".into(), false))
+        );
+        assert_eq!(ended_status(false, &Ok(())), None);
+        let (status, error) = ended_status(
+            true,
+            &Err(anyhow::anyhow!("This computer stopped taking input")),
+        )
+        .unwrap();
+        assert!(error);
+        assert_eq!(status, "This computer stopped taking input");
+    }
+
+    #[test]
+    fn an_old_grant_is_explained_beside_the_clipboard_tick() {
+        let line = "This computer's sharing permission is from an older version";
+        assert_eq!(clipboard_note(true, Some(line)), Some(line));
+        // A helper that cannot use the clipboard has no tick to explain.
+        assert_eq!(clipboard_note(false, Some(line)), None);
+        // The grant has the clipboard, or the desktop has none to give.
+        assert_eq!(clipboard_note(true, None), None);
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        std::iter::once("deskvnc-support")
+            .chain(list.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn help_and_version_print_instead_of_opening_the_window() {
+        let version = format!("DeskVNC Support {}\n", env!("CARGO_PKG_VERSION"));
+        assert_eq!(information(&args(&["--version"])), Some(version.clone()));
+        assert_eq!(information(&args(&["-V"])), Some(version.clone()));
+        for flag in ["--help", "-h"] {
+            let help = information(&args(&[flag])).expect("help is printed");
+            assert!(help.starts_with(&version), "{help}");
+            assert!(help.contains("--version"));
+            assert!(help.contains("--background"));
+            assert_eq!(help.contains("--install"), cfg!(target_os = "linux"));
+        }
+    }
+
+    #[test]
+    fn other_runs_still_open_the_app() {
+        assert_eq!(information(&args(&[])), None);
+        assert_eq!(information(&args(&["--background"])), None);
+        assert_eq!(information(&args(&["--install"])), None);
+        // Only the first argument counts.
+        assert_eq!(information(&args(&["--background", "--help"])), None);
+    }
+
+    #[test]
+    fn an_invitation_is_never_called_a_code() {
+        let invitation = share_words(false);
+        for line in [invitation.creating, invitation.expiry] {
+            assert!(!line.contains("code"), "{line}");
+            assert!(line.contains("invitation"), "{line}");
+        }
+        let code = share_words(true);
+        for line in [code.creating, code.expiry] {
+            assert!(line.contains("code"), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_waiting_line_counts_down_to_expiry() {
+        let at = |seconds| waiting(false, Duration::from_secs(seconds));
+        assert_eq!(
+            at(600),
+            "Waiting for your helper. The invitation expires in 10 minutes"
+        );
+        // Eight minutes in, as the person saw it still saying ten.
+        assert_eq!(
+            at(120),
+            "Waiting for your helper. The invitation expires in 2 minutes"
+        );
+        assert_eq!(
+            at(61),
+            "Waiting for your helper. The invitation expires in 2 minutes"
+        );
+        assert_eq!(
+            at(60),
+            "Waiting for your helper. The invitation expires in less than a minute"
+        );
+        assert_eq!(at(0), "Waiting for your helper. The invitation has expired");
+        assert_eq!(
+            waiting(true, Duration::from_secs(300)),
+            "Waiting for your helper. The code expires in 5 minutes"
+        );
+    }
+
+    #[test]
+    fn a_long_status_wraps_beside_the_network_setting_instead_of_over_it() {
+        // The error a helper saw for a computer that could not be found.
+        let status = "Cannot reach the computer: No addressing information available: \
+            All address lookup services failed or produced no results. \
+            Service 'pkarr' failed: Error resolving http request. \
+            Service 'dns' failed: no calls succeeded: Failed to resolve TXT record";
+        let ctx = egui::Context::default();
+        let mut drawn = None;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(820.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::Panel::bottom("status").show(ui, |ui| {
+                    drawn = Some(status_line(
+                        ui,
+                        egui::Color32::RED,
+                        status,
+                        "Automatic connection with relay fallback",
+                        |_| {},
+                    ));
+                });
+            });
+            // No renderer here to upload the font atlas to.
+            output.textures_delta.clear();
+        }
+        let (status, setting) = drawn.expect("the status line was drawn");
+        assert!(
+            !status.intersects(setting),
+            "status {status:?} runs into the setting {setting:?}"
+        );
+        assert!(status.max.x <= 820.0, "status {status:?} leaves the window");
+        assert!(
+            setting.max.x <= 820.0,
+            "setting {setting:?} leaves the window"
+        );
+        // All of it is there, on more than one line.
+        assert!(status.height() > 30.0, "status {status:?} was cut short");
+        assert!(status.height() < 100.0, "status {status:?} spread out");
+    }
 
     #[test]
     fn the_window_says_deskvnc_support_and_pairs_with_its_desktop_file() {
@@ -1408,5 +1915,105 @@ mod tests {
         assert_eq!(window.app_id.as_deref(), Some("deskvnc-support"));
         let icon = window.icon.expect("the window carries the app's icon");
         assert_eq!((icon.width, icon.height), (256, 256));
+    }
+
+    fn asked(clipboard: bool) -> Pending {
+        Pending {
+            name: "Sam".into(),
+            peer: "peer".into(),
+            tools: false,
+            allow_tools: false,
+            clipboard,
+            allow_clipboard: false,
+            answer: oneshot::channel().0,
+        }
+    }
+
+    #[test]
+    fn what_i_copy_stays_private_until_the_person_ticks_it() {
+        // The prompt opens with the tick off, so letting a helper in, even
+        // with control, does not hand them what the person copies.
+        let mut pending = asked(true);
+        assert!(!pending.allow_clipboard);
+        assert!(!clipboard_read(&pending, &Approval::Control));
+        assert!(!clipboard_read(&pending, &Approval::View));
+        pending.allow_clipboard = true;
+        assert!(clipboard_read(&pending, &Approval::Control));
+        assert!(clipboard_read(&pending, &Approval::View));
+        // Declining lets nothing through, whatever was ticked.
+        assert!(!clipboard_read(&pending, &Approval::Deny));
+        // A helper that cannot take clipboard text is never offered it.
+        let mut old = asked(false);
+        old.allow_clipboard = true;
+        assert!(!clipboard_read(&old, &Approval::Control));
+    }
+
+    #[test]
+    fn a_paste_goes_as_clipboard_only_while_they_let_this_helper_write() {
+        let text = "x".repeat(450);
+        let write = ClipboardRights {
+            write: true,
+            read: false,
+        };
+        assert_eq!(paste(text.clone(), write), Paste::Clipboard(text.clone()));
+        // Being shown what they copy is not leave to change their clipboard.
+        for rights in [
+            ClipboardRights::default(),
+            ClipboardRights {
+                write: false,
+                read: true,
+            },
+        ] {
+            let Paste::Typed(chunks) = paste(text.clone(), rights) else {
+                panic!("without write the paste is typed, as before");
+            };
+            assert_eq!(
+                chunks.iter().map(|c| c.chars().count()).collect::<Vec<_>>(),
+                [200, 200, 50]
+            );
+            assert_eq!(chunks.concat(), text);
+        }
+    }
+
+    #[test]
+    fn support_as_a_helper_says_it_can_carry_clipboard_text() {
+        let abilities = abilities();
+        assert!(abilities.clipboard);
+        // Nothing else it does not do: it sends no commands and draws no video.
+        assert!(!abilities.tools);
+        assert!(!abilities.video);
+    }
+
+    #[test]
+    fn the_helper_is_told_what_happens_to_a_paste() {
+        let none = ClipboardRights::default();
+        let write = ClipboardRights {
+            write: true,
+            read: false,
+        };
+        assert!(!remote_hint(true, none).contains("clipboard"));
+        assert!(remote_hint(true, write).contains("Pasting puts your text on their clipboard"));
+        assert!(remote_hint(false, write).starts_with("View only"));
+        assert!(!remote_hint(false, write).contains("Pasting"));
+    }
+
+    #[test]
+    fn a_typed_paste_lets_go_of_control_first_so_letters_stay_letters() {
+        // Ctrl+V on Linux and Windows, Cmd+V on a Mac: either is down on the
+        // other computer when the paste arrives.
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        assert_eq!(held_for_shortcuts(ctrl), [Key::Control]);
+        let cmd = egui::Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Default::default()
+        };
+        assert_eq!(held_for_shortcuts(cmd), [Key::Meta]);
+        // Shift changes no letter into a shortcut, so it stays down.
+        assert!(held_for_shortcuts(egui::Modifiers::SHIFT).is_empty());
     }
 }

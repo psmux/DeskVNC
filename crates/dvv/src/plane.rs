@@ -1239,6 +1239,10 @@ impl SessionSource for ShellSource {
             serde_json::json!({ "sessionId": session_id }),
         )
         .ok()?;
+        // The same read carries the clipboard rights, which change whenever
+        // the person ticks or unticks, or gives or takes control. The card
+        // is built right after this, so it offers what is true now.
+        note_rights(&session_id, &answer);
         serde_json::from_value(answer.get("state")?.clone()).ok()
     }
 
@@ -1714,6 +1718,35 @@ fn files_outcome(op: &FileOp, answer: &serde_json::Value) -> Result<FileOutcome,
 /// plane above it sends into an ordinary channel and knows nothing about a
 /// socket, which is `04 §1.1`'s ruling holding: the lowering, the lease and
 /// the fencing are all unchanged by where the session actually lives.
+/// Whether an open asks for the machine this key names.
+///
+/// By saved host id, or by protocol, address and port, never by address alone:
+/// two VNC servers on one address and different ports are two machines. When
+/// it cannot tell (an address with no port, or an address for a machine saved
+/// in the library) it says no, which at worst lets go of a limb that did not
+/// need to be let go, and never skips making room that was needed.
+fn names_machine(request: &OpenRequest, machine: &MachineKey) -> bool {
+    match (machine, &request.host_id) {
+        (MachineKey::Profile(held), Some(asked)) => held == asked,
+        (
+            MachineKey::Endpoint {
+                protocol,
+                address,
+                port,
+            },
+            None,
+        ) => {
+            request.protocol == Some(*protocol)
+                && request.port == Some(*port)
+                && request
+                    .address
+                    .as_deref()
+                    .is_some_and(|asked| asked.eq_ignore_ascii_case(address))
+        }
+        _ => false,
+    }
+}
+
 fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, ToolError> {
     let session_id = string(attached, "sessionId");
     let protocol = ProtocolKind::parse(&string(attached, "protocol")).ok_or_else(|| {
@@ -1742,6 +1775,7 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
 
     let limb_id = LimbRegistry::resolve(protocol, &machine, slot);
     lock(limb_sessions()).insert(limb_id.to_string(), session_id.clone());
+    note_rights(&session_id, attached);
 
     // The mirror, if the shell attached one. `perception.mirror` is the
     // shell's claim that a framebuffer mirror EXISTS for this session, which
@@ -1791,7 +1825,7 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
     );
 
     Ok(Attach {
-        driver: Arc::new(RemoteLimb::new(protocol, frames)),
+        driver: Arc::new(RemoteLimb::new(protocol, frames).for_session(&session_id)),
         machine,
         slot,
         host,
@@ -2081,7 +2115,27 @@ fn relay(
         // never dropping something silently, and this drops nothing: what is
         // coalesced is the NOTICE, and the commands themselves all go.
         let mut reported: Option<&'static str> = None;
-        while let Some(command) = receiver.blocking_recv() {
+        loop {
+            // Nothing queued: whatever was reported as in flight has gone out,
+            // so the pane is told before this thread waits for the next
+            // command. Without it the last command's name stayed "in flight"
+            // in the person's pane after it had long been carried, because a
+            // report was only ever sent when a NEW kind of command started; a
+            // `dvv clip get` that sends one clipboard request and nothing else
+            // showed as in flight until the lease timed out.
+            let command = match receiver.try_recv() {
+                Ok(command) => command,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    if reported.take().is_some() {
+                        report_inflight(&session_id, &[]);
+                    }
+                    match receiver.blocking_recv() {
+                        Some(command) => command,
+                        None => break,
+                    }
+                }
+            };
             ledger.took();
             let _finished = Finished(&ledger);
             // `00 R28`. An intent the driver serves natively is the one thing
@@ -2111,18 +2165,7 @@ fn relay(
             };
             if reported != Some(name) {
                 reported = Some(name);
-                let _ = call(
-                    "control.report",
-                    serde_json::json!({
-                        "sessionId": session_id,
-                        "held": true,
-                        "phase": "held",
-                        "holderKind": "agent",
-                        "holderLabel": "dvv",
-                        "humanTookOver": false,
-                        "inflight": [name],
-                    }),
-                );
+                report_inflight(&session_id, &[name]);
             }
             let press = matches!(command, ClientCommand::Key { down: true, .. });
             if press && ledger.tripped() {
@@ -2153,6 +2196,23 @@ fn relay(
             }
         }
     });
+}
+
+/// Tell the application what this limb's relay is carrying right now, for the
+/// person's pane. An empty list says it has carried everything it was given.
+fn report_inflight(session_id: &str, inflight: &[&str]) {
+    let _ = call(
+        "control.report",
+        serde_json::json!({
+            "sessionId": session_id,
+            "held": true,
+            "phase": "held",
+            "holderKind": "agent",
+            "holderLabel": "dvv",
+            "humanTookOver": false,
+            "inflight": inflight,
+        }),
+    );
 }
 
 /// Counts one command as carried when it goes out of scope, so every path
@@ -2336,6 +2396,64 @@ impl RelayLedger {
 }
 
 /// Every relay's ledger, by session id.
+/// What each Boundary session's computer lets this helper do with its
+/// clipboard, by session ID, as the shell last reported it on an attach or a
+/// status read. A session missing here offers no clipboard: its computer
+/// never said, which is every DeskVNC Support older than clipboard over
+/// Boundary.
+fn boundary_clipboards() -> &'static Mutex<BTreeMap<String, BoundaryClipboard>> {
+    static CLIPBOARDS: std::sync::OnceLock<Mutex<BTreeMap<String, BoundaryClipboard>>> =
+        std::sync::OnceLock::new();
+    CLIPBOARDS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// A Boundary computer's clipboard rights for this helper.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BoundaryClipboard {
+    /// Text set here is put on that computer's clipboard.
+    write: bool,
+    /// What the person there copies comes here.
+    read: bool,
+}
+
+/// Which Boundary sessions the person there lets this helper only watch, by
+/// session ID, as the shell last reported it on an attach or a status read.
+/// A session missing here is controllable, or its computer has not said yet,
+/// or the DeskVNCViewer is older than this dvv and never says.
+fn boundary_view_only() -> &'static Mutex<std::collections::BTreeSet<String>> {
+    static VIEW_ONLY: std::sync::OnceLock<Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    VIEW_ONLY.get_or_init(|| Mutex::new(std::collections::BTreeSet::new()))
+}
+
+/// Keep what a shell record (`limb.attach`, `limb.status`) says about what
+/// the session's computer allows: control, and the clipboard rights. A
+/// record without clipboard rights, from a computer that never said or a
+/// DeskVNCViewer older than this dvv, takes them away. One that says
+/// `"control": false` takes control away until a later record says
+/// otherwise; one without the field leaves control offered, as it was
+/// before the shell said.
+fn note_rights(session_id: &str, record: &serde_json::Value) {
+    let rights = record.get("clipboard").and_then(|c| {
+        Some(BoundaryClipboard {
+            write: c.get("write")?.as_bool()?,
+            read: c.get("read")?.as_bool()?,
+        })
+    });
+    let mut held = lock(boundary_clipboards());
+    match rights {
+        Some(rights) => held.insert(session_id.to_string(), rights),
+        None => held.remove(session_id),
+    };
+    drop(held);
+    let mut watching = lock(boundary_view_only());
+    if record.get("control").and_then(serde_json::Value::as_bool) == Some(false) {
+        watching.insert(session_id.to_string());
+    } else {
+        watching.remove(session_id);
+    }
+}
+
 fn ledgers() -> &'static Mutex<BTreeMap<String, Arc<RelayLedger>>> {
     static LEDGERS: std::sync::OnceLock<Mutex<BTreeMap<String, Arc<RelayLedger>>>> =
         std::sync::OnceLock::new();
@@ -2667,6 +2785,10 @@ struct RemoteLimb {
     /// no mirror is a card promising a screenshot every call refuses, and an
     /// agent reads the card before it reads a refusal.
     has_mirror: bool,
+    /// The shell's session this limb is a handle to. A Boundary limb looks
+    /// its clipboard rights up by it, because they change while the limb
+    /// lives.
+    session_id: String,
 }
 
 impl RemoteLimb {
@@ -2678,8 +2800,74 @@ impl RemoteLimb {
                 _ => Grounding::Pixels,
             },
             has_mirror,
+            session_id: String::new(),
         }
     }
+
+    fn for_session(mut self, session_id: &str) -> RemoteLimb {
+        self.session_id = session_id.to_string();
+        self
+    }
+
+    /// What this Boundary limb's computer lets it do with its clipboard now.
+    fn boundary_clipboard(&self) -> BoundaryClipboard {
+        lock(boundary_clipboards())
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Whether the person at this Boundary limb's computer lets it control
+    /// the computer now, rather than only watch.
+    fn boundary_control(&self) -> bool {
+        !lock(boundary_view_only()).contains(&self.session_id)
+    }
+}
+
+/// Said when the person at a Boundary computer lets the helper only watch.
+const BOUNDARY_VIEW_ONLY: &str = "the person at that Boundary computer lets this helper watch only, so nothing typed, clicked or scrolled would reach it. Ask them to give control in DeskVNC Support";
+
+/// A Boundary desktop's card. Control appears only while the person there
+/// lets the helper control the computer, and clipboard read and write each
+/// only while the computer says so. All three come and go during the session.
+fn boundary_capabilities(
+    mirror: bool,
+    control: bool,
+    clip: BoundaryClipboard,
+) -> &'static [Capability] {
+    use Capability::*;
+    static CARDS: std::sync::OnceLock<Vec<Vec<Capability>>> = std::sync::OnceLock::new();
+    let index = |mirror: bool, control: bool, write: bool, read: bool| {
+        usize::from(mirror) << 3
+            | usize::from(control) << 2
+            | usize::from(write) << 1
+            | usize::from(read)
+    };
+    let cards = CARDS.get_or_init(|| {
+        let mut cards = vec![Vec::new(); 16];
+        for bits in 0..16usize {
+            let (mirror, control, write, read) =
+                (bits & 8 != 0, bits & 4 != 0, bits & 2 != 0, bits & 1 != 0);
+            let card = &mut cards[index(mirror, control, write, read)];
+            card.push(View);
+            if mirror {
+                card.push(Capture);
+            }
+            if control {
+                card.push(Control);
+            }
+            card.extend([Close, HostsRead]);
+            if read {
+                card.push(ClipboardRead);
+            }
+            if write {
+                card.push(ClipboardWrite);
+            }
+            card.push(Exec);
+        }
+        cards
+    });
+    &cards[index(mirror, control, clip.write, clip.read)]
 }
 
 impl remote_core::driver::ProtocolDriver for RemoteLimb {
@@ -2758,27 +2946,18 @@ impl limb_core::limb::Limb for RemoteLimb {
     /// A Boundary desktop is the one framebuffer that does offer it. Its
     /// session carries a command stream beside the screen, and the person at
     /// that computer has to allow it before an agent can attach at all.
+    ///
+    /// A Boundary desktop offers its clipboard only as its computer allows:
+    /// `clipboard.write` while the helper has control there, and
+    /// `clipboard.read` while the person lets the helper see what they copy.
+    /// A computer too old to carry a clipboard never says, and offers neither.
     fn capabilities(&self) -> &'static [Capability] {
         match self.grounding {
-            Grounding::Pixels if self.kind == ProtocolKind::Boundary && self.has_mirror => &[
-                Capability::View,
-                Capability::Capture,
-                Capability::Control,
-                Capability::Close,
-                Capability::HostsRead,
-                Capability::ClipboardRead,
-                Capability::ClipboardWrite,
-                Capability::Exec,
-            ],
-            Grounding::Pixels if self.kind == ProtocolKind::Boundary => &[
-                Capability::View,
-                Capability::Control,
-                Capability::Close,
-                Capability::HostsRead,
-                Capability::ClipboardRead,
-                Capability::ClipboardWrite,
-                Capability::Exec,
-            ],
+            Grounding::Pixels if self.kind == ProtocolKind::Boundary => boundary_capabilities(
+                self.has_mirror,
+                self.boundary_control(),
+                self.boundary_clipboard(),
+            ),
             Grounding::Cells => &[
                 Capability::View,
                 Capability::Control,
@@ -2811,12 +2990,29 @@ impl limb_core::limb::Limb for RemoteLimb {
     fn supports(&self, intent: limb_core::intent::IntentName) -> limb_core::limb::Support {
         use limb_core::intent::IntentName::*;
         use limb_core::limb::Support;
+        let watching = self.kind == ProtocolKind::Boundary && !self.boundary_control();
         match intent {
+            Type | Press | Move | Click | Drag | Scroll if watching => Support::Unsupported {
+                because: BOUNDARY_VIEW_ONLY,
+            },
             Type | Press | Tune => Support::Lowered,
             ClipboardGet | ClipboardSet => match self.grounding {
                 Grounding::Cells => Support::Unsupported {
                     because: "a PTY has no clipboard of its own; paste into it with send bytes instead",
                 },
+                _ if self.kind == ProtocolKind::Boundary => {
+                    let clip = self.boundary_clipboard();
+                    match intent {
+                        ClipboardSet if clip.write => Support::Lowered,
+                        ClipboardGet if clip.read => Support::Lowered,
+                        ClipboardSet => Support::Unsupported {
+                            because: "that Boundary computer takes clipboard text only while the helper has control, and only from a DeskVNC Support new enough to carry a clipboard. Type the text instead, or ask the person to give control",
+                        },
+                        _ => Support::Unsupported {
+                            because: "the person at that Boundary computer has not let this helper see what they copy, or their DeskVNC Support is too old to carry a clipboard. They can tick Also let them see what I copy",
+                        },
+                    }
+                }
                 _ => Support::Lowered,
             },
             SendBytes => match self.grounding {
@@ -3083,6 +3279,9 @@ pub struct Plane {
     group_seq: Mutex<u64>,
     /// The size this crate handed to [`Attach`], per limb. See [`Plane::size_of`].
     sizes: Mutex<BTreeMap<String, (u16, u16)>>,
+    /// Limbs attached only because a call named an available one, oldest
+    /// first. A limb `dvv_open` asked for is not here. See [`Plane::make_room`].
+    adopted: Mutex<Vec<String>>,
     /// The label everyone else is shown when this attachment holds a lease.
     /// `08 §5.5` makes it a safety property rather than a nicety: a pane whose
     /// limb is held by an agent says so, visibly, always.
@@ -3135,6 +3334,7 @@ impl Plane {
             groups: Mutex::new(BTreeMap::new()),
             group_seq: Mutex::new(0),
             sizes: Mutex::new(BTreeMap::new()),
+            adopted: Mutex::new(Vec::new()),
             label,
         }
     }
@@ -3287,6 +3487,26 @@ impl Plane {
     /// control, the host check and the slot check, each naming what the caller
     /// can do about it.
     pub fn open(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
+        let card = self.attach_limb(request)?;
+        // Asked for by name, so it is this agent's now even if it was adopted
+        // first, and it is never let go to make room for another.
+        lock(&self.adopted).retain(|id| *id != card.limb_id);
+        Ok(card)
+    }
+
+    /// [`Plane::open`], for a call that names an available limb rather than
+    /// asking for one. The limb is remembered as adopted, so it can be let go
+    /// again when the agent needs the room for a machine it asked for.
+    fn adopt_limb(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
+        let card = self.attach_limb(request)?;
+        let mut adopted = lock(&self.adopted);
+        if !adopted.contains(&card.limb_id) {
+            adopted.push(card.limb_id.clone());
+        }
+        Ok(card)
+    }
+
+    fn attach_limb(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
         let named = self.by_label(request)?;
         let request = named.as_ref().unwrap_or(request);
         if request.host_id.is_some() && request.protocol.is_some() {
@@ -3308,6 +3528,10 @@ impl Plane {
             let refusal = grant.host_refusal(&host);
             return Err(ToolError::new(codes::POLICY_DENIED, refusal.to_string()));
         }
+        // Before the source is asked too, for the same reason: the source can
+        // dial, and an open that is refused for room after it dialled leaves a
+        // session behind that nothing here is attached to.
+        self.make_room(request)?;
         let attach = self.source.open(request)?;
         let host = attach.host.clone();
         let size = attach.size;
@@ -3330,6 +3554,65 @@ impl Plane {
             host,
         });
         Ok(self.card(&attached))
+    }
+
+    /// Make sure one more limb fits under `max_driven_limbs`.
+    ///
+    /// The cap counts every limb attached here, and a limb gets attached just
+    /// by a call naming one `dvv_limbs` listed as available: a status read to
+    /// learn which window is which is enough. So an agent that looked at four
+    /// sessions the person had open could not open the one machine it was
+    /// asked to work on. Such a limb is the person's session, it stays open
+    /// in their pane whatever happens here, and naming it again attaches it
+    /// again. So when there is no room, the oldest one this agent adopted and
+    /// is not driving (no wheel held, nothing in flight) is let go to make
+    /// room. A limb the agent opened, or is driving, is never let go here.
+    ///
+    /// # Errors
+    ///
+    /// `TOO_MANY_LIMBS` when every attached limb is one the agent opened or is
+    /// driving, naming them and how to free one.
+    fn make_room(&self, request: &OpenRequest) -> Result<(), ToolError> {
+        let limit = self.registry.config().max_driven_limbs;
+        let limbs = self.registry.list();
+        // A limb already attached for this machine and slot is handed back by
+        // the registry and costs no room.
+        if limbs.len() < limit
+            || limbs
+                .iter()
+                .any(|limb| limb.slot() == request.slot && names_machine(request, limb.machine()))
+        {
+            return Ok(());
+        }
+        let spare = lock(&self.adopted)
+            .iter()
+            .find(|id| self.not_driving(id))
+            .cloned();
+        if let Some(id) = spare {
+            tracing::info!(limb = %id, "let go of an adopted limb nothing was driving, to make room");
+            return self.let_go(&id);
+        }
+        let held: Vec<String> = limbs
+            .iter()
+            .map(|limb| format!("{} ({})", limb.id(), limb.host()))
+            .collect();
+        Err(ToolError::new(
+            codes::TOO_MANY_LIMBS,
+            format!(
+                "this agent drives at most {limit} limbs at once and has {} attached: {}. Nothing was dialled. Free one with dvv_close on a limbId you are finished with; on a limb the person opened that only detaches it and their session stays open in DeskVNCViewer. Then call dvv_open again",
+                limbs.len(),
+                held.join(", ")
+            ),
+        ))
+    }
+
+    /// Whether this agent is doing nothing with a limb: no wheel held and no
+    /// intent in flight.
+    fn not_driving(&self, id: &str) -> bool {
+        !lock(&self.leases).contains_key(id)
+            && lock(&self.inflight)
+                .get(id)
+                .is_none_or(|intents| intents.is_empty())
     }
 
     /// Close a limb: let go of it here, and end its session in the
@@ -3381,6 +3664,7 @@ impl Plane {
         }
         self.registry.detach(&self.grant(), &limb_id)?;
         forget_answerable(id);
+        lock(&self.adopted).retain(|adopted| adopted != id);
         lock(&self.leases).remove(id);
         lock(&self.inflight).remove(id);
         lock(&self.observed_at).remove(id);
@@ -3554,7 +3838,27 @@ impl Plane {
                 ..OpenRequest::default()
             },
         };
-        self.open(&request)?;
+        match self.adopt_limb(&request) {
+            // Naming a limb the application already has open attaches it, and
+            // a mirror is asked for so a later screen read can be answered.
+            // The mirror is a convenience here, not what the caller asked
+            // for: `dvv status` reads no pixels at all. So when the budget
+            // refuses one (a desktop larger than it, or too many mirrors out
+            // already), the limb is still attached, without a mirror, and a
+            // screen read on it says so. Refusing the whole attach used to
+            // make even `dvv status` fail with BUDGET_REFUSED on a 4096x2304
+            // iMac.
+            Err(refused) if request.perceive && refused.code == codes::BUDGET_REFUSED => {
+                tracing::info!(limb = %id, why = %refused.message, "attaching without a mirror");
+                self.adopt_limb(&OpenRequest {
+                    perceive: false,
+                    ..request
+                })?;
+            }
+            other => {
+                other?;
+            }
+        }
         Ok(self.registry.get(id))
     }
 
@@ -3604,6 +3908,29 @@ impl Plane {
     pub fn refresh(&self, limb: &AttachedLimb) {
         if let Some(state) = self.source.state(limb.id()) {
             limb.note_state(state);
+        }
+    }
+
+    /// Wait until the limb reports connected, true when it did.
+    ///
+    /// Asks the source each time round. The limb's copy of its state is only
+    /// refreshed when something asks for it, and a connected wait inside the
+    /// plane reads that copy: after a reconnect it read the reconnecting
+    /// state for its whole timeout, so a screen read that had to reconnect a
+    /// 4K Mac sat 15 s after the session was back. A wait that ran out also
+    /// came back as connected, because a timeout is not a refusal; this says
+    /// false then.
+    pub async fn until_connected(&self, limb: &AttachedLimb, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            self.refresh(limb);
+            if matches!(limb.state(), SessionState::Connected) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
@@ -4804,6 +5131,168 @@ mod tests {
             panic!("no mirror, no pixels");
         };
         assert!(because.contains("perceive"), "{because}");
+    }
+
+    /// A Boundary computer that never said what it allows with its
+    /// clipboard (a DeskVNC Support from before clipboard over Boundary)
+    /// carries none, so its card offers none and a set or get is refused
+    /// rather than told it worked.
+    #[test]
+    fn a_boundary_limb_offers_no_clipboard_it_cannot_carry() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        for mirror in [false, true] {
+            let boundary = RemoteLimb::new(ProtocolKind::Boundary, mirror);
+            let offered = boundary.capabilities();
+            assert!(!offered.contains(&Capability::ClipboardRead));
+            assert!(!offered.contains(&Capability::ClipboardWrite));
+            // What it does carry stays on the card.
+            assert!(offered.contains(&Capability::Exec));
+            assert!(offered.contains(&Capability::Control));
+            for intent in [IntentName::ClipboardGet, IntentName::ClipboardSet] {
+                let Support::Unsupported { because } = boundary.supports(intent) else {
+                    panic!("a Boundary limb has no clipboard");
+                };
+                assert!(because.contains("Boundary"), "{because}");
+            }
+        }
+        // VNC carries one, and keeps offering it.
+        let vnc = RemoteLimb::new(ProtocolKind::Vnc, true);
+        assert!(vnc.capabilities().contains(&Capability::ClipboardRead));
+        assert!(matches!(
+            vnc.supports(IntentName::ClipboardSet),
+            Support::Lowered
+        ));
+    }
+
+    /// The card follows what the computer allows: clipboard.write while
+    /// the helper has control, clipboard.read while the person lets the
+    /// helper see what they copy, each on its own, and both gone again when
+    /// a status read comes back without them.
+    #[test]
+    fn a_boundary_limb_offers_its_clipboard_only_while_the_computer_allows_it() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        let session = "boundary-clipboard-rights-test";
+        let limb = RemoteLimb::new(ProtocolKind::Boundary, true).for_session(session);
+        let offers = |limb: &RemoteLimb| {
+            let caps = limb.capabilities();
+            (
+                caps.contains(&Capability::ClipboardWrite),
+                caps.contains(&Capability::ClipboardRead),
+            )
+        };
+        let lowered = |limb: &RemoteLimb, intent| matches!(limb.supports(intent), Support::Lowered);
+
+        // Attached before the computer said anything: nothing offered.
+        note_rights(session, &serde_json::json!({ "clipboard": null }));
+        assert_eq!(offers(&limb), (false, false));
+
+        // Control given, reading not ticked.
+        note_rights(
+            session,
+            &serde_json::json!({ "clipboard": { "write": true, "read": false } }),
+        );
+        assert_eq!(offers(&limb), (true, false));
+        assert!(lowered(&limb, IntentName::ClipboardSet));
+        let Support::Unsupported { because } = limb.supports(IntentName::ClipboardGet) else {
+            panic!("reading was not allowed");
+        };
+        assert!(because.contains("see what they copy"), "{because}");
+
+        // The person ticks reading too.
+        note_rights(
+            session,
+            &serde_json::json!({ "clipboard": { "write": true, "read": true } }),
+        );
+        assert_eq!(offers(&limb), (true, true));
+        assert!(lowered(&limb, IntentName::ClipboardGet));
+        assert!(limb.capabilities().contains(&Capability::Capture));
+        assert!(limb.capabilities().contains(&Capability::Exec));
+
+        // Control taken back, reading kept.
+        note_rights(
+            session,
+            &serde_json::json!({ "clipboard": { "write": false, "read": true } }),
+        );
+        assert_eq!(offers(&limb), (false, true));
+        let Support::Unsupported { because } = limb.supports(IntentName::ClipboardSet) else {
+            panic!("control was taken back");
+        };
+        assert!(because.contains("control"), "{because}");
+
+        // A record with no clipboard field at all (an older DeskVNCViewer)
+        // takes both away again.
+        note_rights(session, &serde_json::json!({ "state": "connected" }));
+        assert_eq!(offers(&limb), (false, false));
+
+        // Rights for one session never reach a limb on another.
+        note_rights(
+            session,
+            &serde_json::json!({ "clipboard": { "write": true, "read": true } }),
+        );
+        let other = RemoteLimb::new(ProtocolKind::Boundary, false).for_session("another-session");
+        assert_eq!(offers(&other), (false, false));
+        note_rights(session, &serde_json::json!({}));
+    }
+
+    /// The card follows control the way it follows the clipboard: a status
+    /// read saying the person lets this helper only watch takes `control`
+    /// off the card and refuses input with the reason, and one saying
+    /// control was given puts it back. A record without the field (a shell
+    /// older than this dvv) leaves control offered, as before.
+    #[test]
+    fn a_boundary_limb_offers_control_only_while_the_person_gives_it() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        let session = "boundary-control-rights-test";
+        for mirror in [false, true] {
+            let limb = RemoteLimb::new(ProtocolKind::Boundary, mirror).for_session(session);
+            let controls = |limb: &RemoteLimb| limb.capabilities().contains(&Capability::Control);
+
+            note_rights(session, &serde_json::json!({ "state": "connected" }));
+            assert!(controls(&limb), "a shell that never says leaves control on");
+
+            note_rights(
+                session,
+                &serde_json::json!({ "control": false, "clipboard": { "write": false, "read": true } }),
+            );
+            assert!(!controls(&limb), "view only takes control off the card");
+            assert!(limb.capabilities().contains(&Capability::View));
+            assert!(limb.capabilities().contains(&Capability::ClipboardRead));
+            assert_eq!(limb.capabilities().contains(&Capability::Capture), mirror);
+            for intent in [
+                IntentName::Click,
+                IntentName::Type,
+                IntentName::Press,
+                IntentName::Scroll,
+                IntentName::Move,
+                IntentName::Drag,
+            ] {
+                let Support::Unsupported { because } = limb.supports(intent) else {
+                    panic!("{intent:?} reached a computer that lets the helper only watch");
+                };
+                assert!(because.contains("watch only"), "{because}");
+            }
+
+            note_rights(
+                session,
+                &serde_json::json!({ "control": true, "clipboard": { "write": true, "read": true } }),
+            );
+            assert!(controls(&limb), "control given puts it back");
+            assert!(matches!(limb.supports(IntentName::Click), Support::Lowered));
+            assert!(matches!(limb.supports(IntentName::Type), Support::Lowered));
+
+            // Watching one session never takes control from another.
+            note_rights(session, &serde_json::json!({ "control": false }));
+            let other =
+                RemoteLimb::new(ProtocolKind::Boundary, mirror).for_session("another-control");
+            assert!(controls(&other));
+            // Another protocol is never affected by a Boundary record.
+            let vnc = RemoteLimb::new(ProtocolKind::Vnc, mirror).for_session(session);
+            assert!(controls(&vnc));
+            note_rights(session, &serde_json::json!({}));
+        }
     }
 
     /// The ledger's whole contract, without a socket: a refused press trips

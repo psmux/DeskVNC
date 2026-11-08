@@ -1,6 +1,6 @@
 use crate::pace::Pace;
 use crate::{
-    Desktop, Frame, Input, Invitation,
+    ClipboardRights, Desktop, Frame, Input, Invitation,
     screen::{self, Rect},
     tools,
     video::{self, Update, VideoEncoder, VideoEncoders, VideoUnit},
@@ -37,6 +37,11 @@ pub enum Event {
         name: String,
         peer: String,
         tools: bool,
+        /// The helper can carry clipboard text. To let it see what the
+        /// person copies, call [`Session::set_clipboard_read`] before
+        /// answering. Putting text on the person's clipboard follows control
+        /// and needs no question of its own.
+        clipboard: bool,
         answer: oneshot::Sender<Approval>,
     },
     Connected {
@@ -47,8 +52,15 @@ pub enum Event {
     /// On the helper's side: the person changed whether commands and files
     /// are allowed.
     Tools(bool),
+    /// On the helper's side: what the host lets this helper do with the
+    /// person's clipboard. Sent after it is let in, only by a host that
+    /// serves clipboard, and again whenever either right changes.
+    ClipboardRights(ClipboardRights),
+    /// On the helper's side: text the person copied.
+    ClipboardText(String),
     /// On the host's side: one line for each command or file request the
-    /// helper ran, so the person can see what was done.
+    /// helper ran, and for each clipboard text that went either way (its
+    /// length, never the text), so the person can see what was done.
     Activity(String),
     /// On the helper's side: the person helped chose to let this helper in
     /// any time. `machine` is the ID to save and connect to later.
@@ -109,6 +121,13 @@ pub struct Session {
     pairing: mpsc::Sender<(String, String)>,
     /// Bumped to ask the host for the whole screen again.
     refresh: watch::Sender<u64>,
+    /// On the host's side, whether the person lets the helper see what they
+    /// copy.
+    clipboard_read: watch::Sender<bool>,
+    /// On the helper's side, what the host last said about the clipboard.
+    clipboard_rights: watch::Receiver<ClipboardRights>,
+    /// On the helper's side, text for the person's clipboard.
+    clipboard_out: mpsc::Sender<String>,
     cancel: CancellationToken,
 }
 /// What a helper can do beyond drawing screens, said in its first message.
@@ -120,6 +139,10 @@ pub struct Abilities {
     /// caller that reads updates that way may say so: [`Session::screen`]
     /// has nowhere to put a picture of video.
     pub video: bool,
+    /// Carry clipboard text both ways: [`Session::send_clipboard`], and
+    /// [`Event::ClipboardText`] and [`Event::ClipboardRights`]. Only a
+    /// caller that reads those events may say so.
+    pub clipboard: bool,
 }
 impl Abilities {
     /// The video codecs to name in the first message.
@@ -243,6 +266,41 @@ impl Session {
     pub fn tools_allowed(&self) -> bool {
         *self.tools.borrow()
     }
+    /// On the host's side: let the helper see what the person copies, or
+    /// stop it. Off unless the person turns it on. Call it before answering
+    /// the approval, as with [`Session::set_tools`]; changed during the
+    /// session, the helper is told and copies stop or start at once.
+    pub fn set_clipboard_read(&self, allowed: bool) {
+        self.clipboard_read.send_replace(allowed);
+    }
+    /// On the host's side, whether the helper sees what the person copies.
+    pub fn clipboard_read_allowed(&self) -> bool {
+        *self.clipboard_read.borrow()
+    }
+    /// On the helper's side: put text on the person's clipboard. Refused
+    /// while the host does not take it (it takes it only while this helper
+    /// has control, and only a host that serves clipboard does at all), and
+    /// for text over [`crate::MAX_CLIPBOARD`] bytes. A refusal ends nothing.
+    pub fn send_clipboard(&self, text: String) -> Result<()> {
+        ensure!(
+            self.clipboard_rights.borrow().write,
+            "That computer does not take clipboard text from you right now. It takes it only while you have control"
+        );
+        wire::check_clipboard(&text)?;
+        self.clipboard_out
+            .try_send(text)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    anyhow!("Still sending the last clipboard text. Try again in a moment")
+                }
+                mpsc::error::TrySendError::Closed(_) => anyhow!("The session has ended"),
+            })
+    }
+    /// On the helper's side, what the host lets this helper do with the
+    /// person's clipboard now. Nothing until it says so.
+    pub fn clipboard_rights(&self) -> ClipboardRights {
+        *self.clipboard_rights.borrow()
+    }
     /// On the helper's side: how to send commands and file requests, once the
     /// host has let this helper in and said it serves them. `None` before
     /// that, after the session ends, and with a host too old to serve them.
@@ -302,6 +360,9 @@ pub(crate) struct Worker {
     client: watch::Sender<Option<tools::Client>>,
     pairing: mpsc::Receiver<(String, String)>,
     refresh: watch::Receiver<u64>,
+    pub(crate) clipboard_read: watch::Sender<bool>,
+    clipboard_rights: watch::Sender<ClipboardRights>,
+    clipboard_out: mpsc::Receiver<String>,
     cancel: CancellationToken,
 }
 pub(crate) fn channels() -> (Session, Worker) {
@@ -318,6 +379,9 @@ pub(crate) fn channels() -> (Session, Worker) {
     // Off until somebody says otherwise, on both sides.
     let (tools_tx, _) = watch::channel(false);
     let (client_tx, client) = watch::channel(None);
+    let (clipboard_read, _) = watch::channel(false);
+    let (clipboard_rights_tx, clipboard_rights) = watch::channel(ClipboardRights::default());
+    let (clipboard_out, clipboard_out_rx) = mpsc::channel(2);
     let cancel = CancellationToken::new();
     let damage = Arc::new(Mutex::new(Damage::default()));
     let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -334,6 +398,9 @@ pub(crate) fn channels() -> (Session, Worker) {
             client,
             pairing,
             refresh,
+            clipboard_read: clipboard_read.clone(),
+            clipboard_rights,
+            clipboard_out,
             cancel: cancel.clone(),
         },
         Worker {
@@ -349,6 +416,9 @@ pub(crate) fn channels() -> (Session, Worker) {
             client: client_tx,
             pairing: pairing_rx,
             refresh: refresh_rx,
+            clipboard_read,
+            clipboard_rights: clipboard_rights_tx,
+            clipboard_out: clipboard_out_rx,
             cancel,
         },
     )
@@ -412,6 +482,7 @@ pub fn viewer_with_tools(
         Abilities {
             tools: true,
             video: false,
+            clipboard: false,
         },
     )
 }
@@ -615,6 +686,14 @@ impl Drop for EndpointGuard {
         });
     }
 }
+/// Takes the clipboard rights away when a helper's session ends, so nothing
+/// is sent to the next host before it says what it allows.
+struct ForgetRights<'a>(&'a watch::Sender<ClipboardRights>);
+impl Drop for ForgetRights<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(ClipboardRights::default());
+    }
+}
 /// Takes the tools client away when a helper's session ends, however it ends.
 struct ForgetClient<'a>(&'a watch::Sender<Option<tools::Client>>);
 impl Drop for ForgetClient<'_> {
@@ -687,11 +766,13 @@ where
                 let (answer, decision) = oneshot::channel();
                 // Whatever an earlier helper was allowed is not this one's.
                 worker.tools_tx.send_replace(false);
+                worker.clipboard_read.send_replace(false);
                 worker
                     .emit(Event::Approval {
                         name: knock.name.clone(),
                         peer: peer.clone(),
                         tools: knock.tools,
+                        clipboard: knock.clipboard,
                         answer,
                     })
                     .await?;
@@ -742,17 +823,37 @@ where
         recv,
         tools,
         screens,
+        clipboard,
         ..
     } = knock;
     let connection = &guard.0;
     let result = serve(
-        worker, connection, send, recv, peer, allowed, tools, screens, desktop,
+        worker,
+        connection,
+        send,
+        recv,
+        peer,
+        Offer {
+            control: allowed,
+            tools,
+            clipboard,
+        },
+        screens,
+        desktop,
     )
     .await;
     close_served(connection, &result);
     drop(guard);
     endpoint.close().await;
     result
+}
+/// `future`, or `why` alone if it takes longer than `limit`. With `.context`
+/// the person read "Helper stopped responding: deadline has elapsed", the
+/// last part being the timer's own words.
+async fn within<T>(limit: Duration, future: impl Future<Output = T>, why: &str) -> Result<T> {
+    tokio::time::timeout(limit, future)
+        .await
+        .map_err(|_| anyhow!("{why}"))
 }
 /// How long the person has to answer a helper before it is told nobody did.
 const APPROVAL_WAIT: Duration = Duration::from_secs(60);
@@ -766,6 +867,7 @@ struct Knock {
     name: String,
     tools: bool,
     screens: Screens,
+    clipboard: bool,
 }
 /// A knock the person is being asked about.
 struct Asking {
@@ -806,8 +908,12 @@ async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::S
                 let connection = incoming.await?;
                 let guard = Close(connection.clone());
                 let (send, mut recv) = connection.accept_bi().await?;
-                let (name, tools, screens) =
-                    wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
+                let wire::Hello {
+                    name,
+                    tools,
+                    screens,
+                    clipboard,
+                } = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
                 Ok::<_, anyhow::Error>(Knock {
                     guard,
                     send,
@@ -815,6 +921,7 @@ async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::S
                     name,
                     tools,
                     screens,
+                    clipboard,
                 })
             };
             if let Ok(Ok(knock)) = tokio::time::timeout(HELLO_WAIT, handshake).await {
@@ -850,9 +957,10 @@ impl<T> Drop for AbortOnDrop<T> {
 /// side does. Shared by attended and unattended sessions, so the rules for
 /// what a helper can do are written once.
 ///
-/// `tools` is whether the helper said it can send commands and file
-/// requests. Whether it may is the session's own tools permission, which the
-/// caller set before this and the person can change at any time.
+/// `offer.tools` and `offer.clipboard` are whether the helper said it can
+/// send commands and file requests, and carry clipboard text. Whether it may
+/// is the session's own permission for each, which the caller set before
+/// this and the person can change at any time.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve<F>(
     worker: &mut Worker,
@@ -860,24 +968,40 @@ pub(crate) async fn serve<F>(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     peer: String,
-    allowed: bool,
-    tools: bool,
+    offer: Offer,
     screens: Screens,
     desktop: F,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<Box<dyn Desktop>> + Send + 'static,
 {
+    let Offer {
+        control: allowed,
+        tools,
+        clipboard,
+    } = offer;
     let mut tools_rx = worker.tools_tx.subscribe();
     if !tools {
         // A helper that cannot send them is never allowed them, whatever was set.
         worker.tools_tx.send_replace(false);
     }
     let tools_now = *tools_rx.borrow_and_update();
+    let mut read_rx = worker.clipboard_read.subscribe();
+    if !clipboard {
+        // Nor is one that cannot take clipboard text ever sent any.
+        worker.clipboard_read.send_replace(false);
+    }
+    let read_now = *read_rx.borrow_and_update();
+    // Nothing is controlled until the desktop is open. On Wayland that waits
+    // for the person to answer the desktop's own sharing prompt, and until
+    // then nothing is being shared at all.
     worker.control_tx.send_modify(|p| {
-        p.allowed = allowed;
+        p.allowed = false;
         p.generation += 1;
     });
+    // Anything the person changes after this, while the desktop opens, is
+    // their newer word on control and is kept below.
+    let opening = worker.control.borrow().generation;
     let permission_rx = worker.control.clone();
     let input_permission = worker.control.clone();
     let (input_tx, input_rx) = mpsc::channel(128);
@@ -885,9 +1009,16 @@ where
     let (shown_tx, shown_rx) = watch::channel(0u64);
     let (refresh_tx, refresh_rx) = watch::channel(0u64);
     let (encoders_tx, encoders_rx) = oneshot::channel();
+    let (opened_tx, opened_rx) = oneshot::channel();
+    let (copied_tx, mut copied_rx) = mpsc::channel(4);
     let changes: Changes = Arc::new(Mutex::new(Some(Vec::new())));
     let cancel = worker.cancel.clone();
-    let capture = tokio::task::spawn_blocking({
+    let clipboard_link = clipboard.then(|| ClipboardLink {
+        read: worker.clipboard_read.subscribe(),
+        copied: copied_tx,
+        activity: worker.events.clone(),
+    });
+    let mut capture = tokio::task::spawn_blocking({
         let changes = changes.clone();
         move || {
             desktop_loop(
@@ -896,33 +1027,120 @@ where
                 permission_rx,
                 screen_tx,
                 encoders_tx,
+                opened_tx,
                 changes,
+                clipboard_link,
                 cancel,
             )
         }
     });
+    // The helper is let in now, so it stops waiting while the desktop opens.
+    // Its input is dropped until then, since the permission above is off.
     wire::write(
         &mut send,
         &Message::Granted {
             control: allowed,
             tools: tools.then_some(tools_now),
+            // What the helper may do once the desktop is open, as `control`
+            // above: corrected below if the desktop has no clipboard.
+            clipboard: clipboard.then_some(ClipboardRights {
+                write: allowed,
+                read: read_now,
+            }),
         },
     )
     .await?;
     worker
-        .emit(Event::Connected {
-            peer,
-            control: allowed,
-        })
+        .emit(Event::Status("Starting to share your screen".into()))
         .await?;
-    // Ignore the initial false UI value; subsequent changes are local permission decisions.
+    // The person is told the screen is shared once it is. Saying so as soon
+    // as they approved the helper put "Your screen is being shared" behind
+    // GNOME's prompt that was still asking whether to share it.
+    let (controllable, has_clipboard) = tokio::select! {
+        opened = opened_rx => match opened {
+            Ok(opened) => opened,
+            // The desktop did not open, and the worker's result says why,
+            // such as Cancel in the desktop's sharing prompt.
+            Err(_) => return capture.await.context("Capture worker failed")?,
+        },
+        result = &mut capture => return result.context("Capture worker failed")?,
+        _ = connection.closed() => return Ok(()),
+    };
+    // Approved for control, but the desktop takes no input: on GNOME, Allow
+    // Remote Interaction was left off. The helper was told it had control,
+    // and its first click ended the whole session with "Control was not
+    // allowed". It is told it can only watch instead.
+    // The person may have given or taken back control while the desktop
+    // opened, say on the sharing screen during GNOME's prompt. Putting back
+    // what they approved with lost that: the tick showed control, the
+    // helper never heard of it, and only a second tick reached it.
+    let wanted = {
+        let permission = worker.control.borrow();
+        if permission.generation == opening {
+            allowed
+        } else {
+            permission.allowed
+        }
+    };
+    let control = wanted && controllable;
+    worker.control_tx.send_modify(|p| {
+        p.allowed = control;
+        p.generation += 1;
+    });
+    worker.emit(Event::Connected { peer, control }).await?;
+    if control != allowed {
+        wire::write(&mut send, &Message::Control(control)).await?;
+    }
+    if wanted && !controllable {
+        if !allowed {
+            // Ticked while the desktop opened: the tick goes back off.
+            worker.emit(Event::Control(false)).await?;
+        }
+        worker.emit(Event::Status(NO_CONTROL.into())).await?;
+    }
+    // What the helper was told about the clipboard, and what is true now
+    // that the desktop is open.
+    let mut rights_sent = ClipboardRights {
+        write: allowed,
+        read: read_now,
+    };
+    let rights_now = |control: bool, read: bool| ClipboardRights {
+        write: control && has_clipboard,
+        read: read && has_clipboard,
+    };
+    if clipboard {
+        if !has_clipboard && *read_rx.borrow() {
+            worker.clipboard_read.send_replace(false);
+            worker.emit(Event::Status(NO_CLIPBOARD.into())).await?;
+        }
+        let now = rights_now(control, *read_rx.borrow_and_update());
+        if now != rights_sent {
+            wire::write(&mut send, &Message::ClipboardRights(now)).await?;
+            rights_sent = now;
+        }
+    }
+    // The helper has been told. The loop below writes only what the person
+    // changes later.
     worker.control.borrow_and_update();
+    let events = worker.events.clone();
+    let control_tx = worker.control_tx.clone();
     let read_input = async {
         loop {
-            let message: Message =
-                tokio::time::timeout(Duration::from_secs(5), wire::read(&mut recv))
-                    .await
-                    .context("Helper stopped responding")??;
+            let length = within(
+                Duration::from_secs(5),
+                wire::read_length(&mut recv),
+                "Helper stopped responding",
+            )
+            .await??;
+            // Clipboard text can be a megabyte, which takes a while on a
+            // slow link: the wait for a message is short, the wait for the
+            // rest of one that has begun is not.
+            let message = within(
+                BODY_WAIT,
+                wire::read_body(&mut recv, length),
+                "Helper stopped responding",
+            )
+            .await??;
             match message {
                 Message::Ping => {}
                 Message::Refresh if screens == Screens::Video => {
@@ -939,11 +1157,14 @@ where
                     input.validate()?;
                     let permission = *input_permission.borrow();
                     if permission.allowed || matches!(input, Input::Release) {
-                        match input_tx.try_send((permission.generation, input)) {
+                        match input_tx.try_send((permission.generation, ToDesktop::Input(input))) {
                             Ok(()) => {}
                             // The next move supersedes this one; dropping it
                             // while the screen is busy beats ending the session.
-                            Err(mpsc::error::TrySendError::Full((_, Input::Move { .. }))) => {}
+                            Err(mpsc::error::TrySendError::Full((
+                                _,
+                                ToDesktop::Input(Input::Move { .. }),
+                            ))) => {}
                             // A computer too busy to keep up, say while a
                             // malware scan holds every core, is waited for.
                             // Not reading meanwhile slows the helper down
@@ -959,6 +1180,31 @@ where
                         }
                     }
                 }
+                // Text for the person's clipboard. Nothing the helper sends
+                // here ends the session: what it may not do is refused and
+                // the session goes on.
+                Message::Clipboard(text) => {
+                    let permission = *input_permission.borrow();
+                    if !clipboard || !has_clipboard {
+                        eprintln!(
+                            "Refused clipboard text: this session does not carry the clipboard"
+                        );
+                    } else if !permission.allowed {
+                        eprintln!("Refused clipboard text: the helper does not have control");
+                    } else if let Err(error) = wire::check_clipboard(&text) {
+                        eprintln!("Refused clipboard text: {error:#}");
+                    } else {
+                        // On the same queue as input, so the paste keys the
+                        // helper sends after it find it on the clipboard.
+                        tokio::time::timeout(
+                            INPUT_STALL,
+                            input_tx.send((permission.generation, ToDesktop::Paste(text))),
+                        )
+                        .await
+                        .context("This computer stopped taking input. Session stopped")?
+                        .map_err(|_| anyhow!("Session ended"))?;
+                    }
+                }
                 _ => bail!("Unexpected helper message"),
             }
         }
@@ -971,7 +1217,55 @@ where
                 changed = worker.control.changed() => {
                     changed?;
                     let control = worker.control.borrow_and_update().allowed;
+                    // Writing the clipboard follows control, and the helper
+                    // is told after the control change itself.
+                    let rights = rights_now(control && controllable, *read_rx.borrow());
+                    if control && !controllable {
+                        // Ticked on this side, but the desktop takes no
+                        // input, so the helper stays a viewer and the tick
+                        // goes back off with the reason.
+                        control_tx.send_modify(|p| {
+                            p.allowed = false;
+                            p.generation += 1;
+                        });
+                        worker.control.borrow_and_update();
+                        let _ = events.send(Event::Control(false)).await;
+                        let _ = events.send(Event::Status(NO_CONTROL.into())).await;
+                        continue;
+                    }
                     wire::write(&mut send, &Message::Control(control)).await?;
+                    if clipboard && rights != rights_sent {
+                        wire::write(&mut send, &Message::ClipboardRights(rights)).await?;
+                        rights_sent = rights;
+                    }
+                }
+                changed = read_rx.changed(), if clipboard => {
+                    changed?;
+                    let read = *read_rx.borrow_and_update();
+                    if read && !has_clipboard {
+                        worker.clipboard_read.send_replace(false);
+                        let _ = events.send(Event::Status(NO_CLIPBOARD.into())).await;
+                        continue;
+                    }
+                    let rights = rights_now(worker.control.borrow().allowed, read);
+                    if rights != rights_sent {
+                        wire::write(&mut send, &Message::ClipboardRights(rights)).await?;
+                        rights_sent = rights;
+                    }
+                }
+                Some(text) = copied_rx.recv() => {
+                    // Copied while reading was allowed, but the person may
+                    // have stopped it since: then it stays here.
+                    if !rights_sent.read || !*read_rx.borrow() {
+                        continue;
+                    }
+                    let count = text.chars().count();
+                    wire::write_message(&mut send, &Message::Clipboard(text)).await?;
+                    let _ = events
+                        .send(Event::Activity(format!(
+                            "They got {count} characters you copied"
+                        )))
+                        .await;
                 }
                 Some((machine, name)) = worker.pairing.recv() => {
                     wire::write(&mut send, &Message::Paired { machine, name }).await?;
@@ -1026,8 +1320,164 @@ where
         result = capture => result.context("Capture worker failed")?,
         _ = connection.closed() => Ok(()),
     };
+    // The helper ending the session closes the connection, which the read
+    // of its next message often notices before `closed` above does. That
+    // read failing is the session ending as the helper meant it to, not the
+    // link failing: said as an error, the person saw "connection lost:
+    // closed by peer: Session ended (code 0)" in red after every normal end.
+    if result.is_err() && ended_by_helper(connection) {
+        return Ok(());
+    }
     result
 }
+
+/// Did the helper close this connection on purpose, the way it ends every
+/// session it leaves? A helper closes with code 0; a link that failed has no
+/// application close at all, and this side closing is not the helper.
+fn ended_by_helper(connection: &Connection) -> bool {
+    matches!(
+        connection.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close))
+            if close.error_code == 0u8.into()
+    )
+}
+
+/// What a helper said it can do, put together with what the person let it
+/// do: control, and whether it may ask for commands and carry clipboard text.
+pub(crate) struct Offer {
+    pub(crate) control: bool,
+    pub(crate) tools: bool,
+    pub(crate) clipboard: bool,
+}
+
+/// What the person reads when they let a helper see what they copy on a
+/// desktop whose clipboard nobody can reach.
+const NO_CLIPBOARD: &str =
+    "The helper cannot see what you copy: this computer's clipboard is not available to helpers";
+
+/// How long the rest of a message may take once its length has arrived.
+/// Clipboard text of a megabyte takes several seconds on a slow uplink.
+const BODY_WAIT: Duration = Duration::from_secs(60);
+
+/// How often the person's clipboard is looked at while the helper may see
+/// what they copy.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
+
+/// What the helper sent for the desktop, in the order it sent it.
+enum ToDesktop {
+    Input(Input),
+    /// Text for the person's clipboard. It goes in line with input, since a
+    /// helper pastes by sending the text and then the paste keys.
+    Paste(String),
+}
+
+/// The clipboard's side of the desktop loop, for a helper that carries it.
+struct ClipboardLink {
+    /// Whether the person lets the helper see what they copy.
+    read: watch::Receiver<bool>,
+    /// Text the person copied, for the helper.
+    copied: mpsc::Sender<String>,
+    activity: mpsc::Sender<Event>,
+}
+
+/// The desktop's clipboard as the loop that owns the desktop sees it: when
+/// it last looked, and the text it last set, which must not go back to the
+/// helper as if the person had copied it.
+struct ClipboardWatch {
+    link: ClipboardLink,
+    next: Instant,
+    /// The first look after reading is allowed only records where the
+    /// clipboard stands, so nothing copied before then is sent.
+    started: bool,
+    set: Option<String>,
+    /// The last failure, said once rather than twice a second.
+    failed: Option<String>,
+}
+impl ClipboardWatch {
+    fn new(link: ClipboardLink) -> Self {
+        Self {
+            link,
+            next: Instant::now(),
+            started: false,
+            set: None,
+            failed: None,
+        }
+    }
+    /// Put the helper's text on the clipboard, if it still has the control
+    /// it sent the text under.
+    fn paste(
+        &mut self,
+        desktop: &mut dyn Desktop,
+        permission: Permission,
+        epoch: u64,
+        text: String,
+    ) {
+        if !(permission.allowed && permission.generation == epoch) {
+            eprintln!("Refused clipboard text: control changed before it was set");
+            return;
+        }
+        match desktop.set_clipboard(&text) {
+            Ok(()) => {
+                let line = format!(
+                    "They put {} characters on your clipboard",
+                    text.chars().count()
+                );
+                let _ = self.link.activity.try_send(Event::Activity(line));
+                self.set = Some(text);
+            }
+            Err(error) => eprintln!("Could not set the clipboard: {error:#}"),
+        }
+    }
+    /// Look for what the person copied, while they let the helper see it.
+    fn turn(&mut self, desktop: &mut dyn Desktop) {
+        if !*self.link.read.borrow() {
+            self.started = false;
+            return;
+        }
+        let now = Instant::now();
+        if now < self.next {
+            return;
+        }
+        self.next = now + CLIPBOARD_POLL;
+        let changed = match desktop.clipboard_changed() {
+            Ok(changed) => {
+                self.failed = None;
+                changed
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                if self.failed.as_ref() != Some(&error) {
+                    eprintln!("Could not read the clipboard: {error}");
+                    self.failed = Some(error);
+                }
+                return;
+            }
+        };
+        if !std::mem::replace(&mut self.started, true) {
+            return;
+        }
+        let Some(text) = changed else { return };
+        if self.set.as_ref() == Some(&text) {
+            // What the helper itself just put there.
+            self.set = None;
+            return;
+        }
+        self.set = None;
+        if let Err(error) = wire::check_clipboard(&text) {
+            eprintln!("Did not send what was copied: {error:#}");
+            let _ = self.link.activity.try_send(Event::Activity(format!(
+                "You copied {} characters, too many to send to them",
+                text.chars().count()
+            )));
+            return;
+        }
+        let _ = self.link.copied.try_send(text);
+    }
+}
+
+/// What the person reads when they allowed control but the desktop shares the
+/// screen alone.
+const NO_CONTROL: &str = "The helper can only watch: control was not allowed in the desktop's sharing prompt. To allow it, end the session and share again with Allow Remote Interaction switched on";
 
 /// How long input may wait for a computer that has fallen behind before the
 /// session is given up as stuck.
@@ -1043,13 +1493,16 @@ const IDLE_CAPTURE: Duration = Duration::from_millis(100);
 /// How long a still screen stays on the busy pace after it last changed.
 const BUSY_FOR: Duration = Duration::from_secs(1);
 
+#[allow(clippy::too_many_arguments)]
 fn desktop_loop<F>(
     factory: F,
-    mut input: mpsc::Receiver<(u64, Input)>,
+    mut input: mpsc::Receiver<(u64, ToDesktop)>,
     permission: watch::Receiver<Permission>,
     screens: watch::Sender<Option<Arc<Frame>>>,
     encoders: oneshot::Sender<Option<VideoEncoders>>,
+    opened: oneshot::Sender<(bool, bool)>,
     changes: Changes,
+    clipboard: Option<ClipboardLink>,
     cancel: CancellationToken,
 ) -> Result<()>
 where
@@ -1063,6 +1516,15 @@ where
     }
     let mut desktop = Release(factory()?);
     let _ = encoders.send(desktop.0.video());
+    let has_clipboard = desktop.0.has_clipboard();
+    let mut clipboard = clipboard.filter(|_| has_clipboard).map(ClipboardWatch::new);
+    // Where the clipboard stands is noted before the person is told the
+    // screen is shared. Noted after, a copy made just then was taken for
+    // what was there before and never sent.
+    if let Some(clipboard) = clipboard.as_mut() {
+        clipboard.turn(desktop.0.as_mut());
+    }
+    let _ = opened.send((desktop.0.controllable(), has_clipboard));
     let mut capture_at = Instant::now();
     let mut last_input = Instant::now();
     let mut last_change = Instant::now();
@@ -1082,6 +1544,16 @@ where
             if cancel.is_cancelled() {
                 break;
             }
+            let event = match event {
+                ToDesktop::Input(event) => event,
+                ToDesktop::Paste(text) => {
+                    if let Some(clipboard) = clipboard.as_mut() {
+                        clipboard.paste(desktop.0.as_mut(), *permission.borrow(), epoch, text);
+                    }
+                    last_input = Instant::now();
+                    continue;
+                }
+            };
             if matches!(event, Input::Release) {
                 desktop.0.release();
             } else {
@@ -1099,6 +1571,9 @@ where
         }
         if cancel.is_cancelled() {
             break;
+        }
+        if let Some(clipboard) = clipboard.as_mut() {
+            clipboard.turn(desktop.0.as_mut());
         }
         if Instant::now() >= capture_at {
             let started = Instant::now();
@@ -1836,12 +2311,12 @@ async fn run_viewer(
             (endpoint.clone(), Held::Own(EndpointGuard(endpoint)))
         }
     };
-    let connection = tokio::time::timeout(
+    let connection = within(
         Duration::from_secs(25),
         endpoint.connect(invitation.address, wire::ALPN),
+        "Connection timed out",
     )
-    .await
-    .context("Connection timed out")??;
+    .await??;
     let guard = Close(connection.clone());
     let (mut send, recv) = connection.open_bi().await?;
     wire::write(
@@ -1854,26 +2329,36 @@ async fn run_viewer(
             jpeg: true,
             tiles: true,
             video: abilities.codecs(),
+            clipboard: abilities.clipboard,
         },
     )
     .await?;
-    let result = watch_session(worker, &connection, send, recv).await;
+    let result = watch_session(worker, &connection, send, recv, ATTENDED_WAIT).await;
     drop(guard);
     if matches!(_endpoint_guard, Held::Own(_)) {
         endpoint.close().await;
     }
     result
 }
+/// What a helper reads while the person they invited decides.
+pub(crate) const ATTENDED_WAIT: &str = "Waiting for the person to approve sharing";
+/// What a helper reads while an unattended computer checks it. A paired
+/// helper or the right password is let straight in, and only an unknown
+/// helper is put to whoever is at the computer, so this does not say a
+/// person has to approve.
+pub(crate) const UNATTENDED_WAIT: &str = "Waiting for the computer to let you in";
+
 /// The helper's side of a session once its request is on the wire: wait to
-/// be let in, then show screens, send input and keep the session alive.
-/// Shared by invitations and unattended connections.
+/// be let in, saying `waiting` meanwhile, then show screens, send input and
+/// keep the session alive. Shared by invitations and unattended connections.
 pub(crate) async fn watch_session(
     worker: &mut Worker,
     connection: &Connection,
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
+    waiting: &str,
 ) -> Result<()> {
-    let result = watch(worker, connection, send, recv).await;
+    let result = watch(worker, connection, send, recv, waiting).await;
     if result.is_err() && connection.close_reason().is_none() {
         // A stream can end a moment before the close that explains it, so
         // give the reason a moment to land rather than report the symptom.
@@ -1963,17 +2448,21 @@ async fn watch(
     connection: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
+    waiting: &str,
 ) -> Result<()> {
-    worker
-        .emit(Event::Status(
-            "Waiting for the person to approve sharing".into(),
-        ))
-        .await?;
-    let grant: Message = tokio::time::timeout(Duration::from_secs(65), wire::read(&mut recv))
-        .await
-        .context("Approval timed out")??;
-    let (control, tools) = match grant {
-        Message::Granted { control, tools } => (control, tools),
+    worker.emit(Event::Status(waiting.into())).await?;
+    let grant: Message = within(
+        Duration::from_secs(65),
+        wire::read(&mut recv),
+        "Approval timed out",
+    )
+    .await??;
+    let (control, tools, clipboard) = match grant {
+        Message::Granted {
+            control,
+            tools,
+            clipboard,
+        } => (control, tools, clipboard),
         Message::Refused(reason) => return Err(Refusal(reason).into()),
         _ => return Err(Refusal("The person declined this connection".into()).into()),
     };
@@ -1988,12 +2477,20 @@ async fn watch(
         )));
     }
     let _forget = ForgetClient(&worker.client);
+    let _forget_rights = ForgetRights(&worker.clipboard_rights);
     worker
         .emit(Event::Connected {
             peer: connection.remote_id().to_string(),
             control,
         })
         .await?;
+    // Only a host that answered about the clipboard serves it, and only it
+    // is ever sent clipboard text.
+    if let Some(rights) = clipboard {
+        worker.clipboard_rights.send_replace(rights);
+        worker.emit(Event::ClipboardRights(rights)).await?;
+    }
+    let clipboard_rights = worker.clipboard_rights.clone();
     let events = worker.events.clone();
     let tools_tx = worker.tools_tx.clone();
     let (shown_tx, mut shown_rx) = watch::channel(0u64);
@@ -2004,9 +2501,25 @@ async fn watch(
     refresh.borrow_and_update();
     let read_control = async {
         loop {
-            match wire::read::<Message>(&mut recv).await? {
+            match wire::read_message(&mut recv).await? {
                 Message::Control(value) => {
                     events.send(Event::Control(value)).await?;
+                }
+                Message::ClipboardRights(rights) if clipboard.is_some() => {
+                    clipboard_rights.send_replace(rights);
+                    events.send(Event::ClipboardRights(rights)).await?;
+                }
+                // What the person copied. Text over the limit, or sent
+                // after reading was stopped, is dropped and the session
+                // goes on.
+                Message::Clipboard(text) if clipboard.is_some() => {
+                    if !clipboard_rights.borrow().read {
+                        eprintln!("Dropped clipboard text the computer was not allowed to send");
+                    } else if let Err(error) = wire::check_clipboard(&text) {
+                        eprintln!("Dropped clipboard text: {error:#}");
+                    } else {
+                        events.send(Event::ClipboardText(text)).await?;
+                    }
                 }
                 Message::Tools(value) if tools.is_some() => {
                     tools_tx.send_replace(value);
@@ -2021,11 +2534,30 @@ async fn watch(
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
+    let rights = worker.clipboard_rights.subscribe();
+    let clipboard_out = &mut worker.clipboard_out;
     let write_input = async {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             let message = tokio::select! {
-                event = worker.input.recv() => Message::Input(event.context("Window closed")?),
+                // Clipboard text is looked at first: it was queued before any
+                // input still waiting, such as the paste keys that follow it,
+                // and must reach the host ahead of them.
+                biased;
+                Some(text) = clipboard_out.recv() => {
+                    // Checked when it was queued; checked again in case the
+                    // host took the right away meanwhile.
+                    if clipboard.is_none() || !rights.borrow().write {
+                        continue;
+                    }
+                    tokio::time::timeout(BODY_WAIT, wire::write_message(&mut send, &Message::Clipboard(text)))
+                        .await
+                        .context("Input connection stalled")??;
+                    continue;
+                }
+                // Acknowledgements are a single latest value each, so they
+                // never hold input up, and a stream of input never holds
+                // them up either.
                 Ok(()) = shown_rx.changed() => Message::Shown(*shown_rx.borrow_and_update()),
                 Ok(()) = refresh.changed() => {
                     refresh.borrow_and_update();
@@ -2034,6 +2566,7 @@ async fn watch(
                     }
                     Message::Refresh
                 }
+                event = worker.input.recv() => Message::Input(event.context("Window closed")?),
                 _ = tick.tick() => Message::Ping,
             };
             tokio::time::timeout(Duration::from_secs(3), wire::write(&mut send, &message))
@@ -2218,6 +2751,18 @@ fn ended_by_host(connection: &Connection) -> Option<anyhow::Error> {
 #[cfg(test)]
 mod relay_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_timeout_is_said_in_plain_words() {
+        let late = within(
+            Duration::from_millis(1),
+            std::future::pending::<()>(),
+            "Helper stopped responding",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(format!("{late:#}"), "Helper stopped responding");
+    }
 
     #[test]
     fn relay_urls_reject_other_protocols_and_embedded_secrets() {

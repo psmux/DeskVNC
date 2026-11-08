@@ -18,6 +18,7 @@ use crate::error::{Result, VncError};
 use crate::types::{ConnectOptions, PinScheme, SecurityType, VncOptions};
 
 pub mod apple_dh;
+pub mod apple_srp;
 pub mod mslogon;
 pub mod none;
 pub mod prompt;
@@ -204,6 +205,9 @@ pub(crate) struct AuthOutcome {
     /// Set when the handshake authenticated a server key (VeNCrypt's TLS
     /// upgrade, RA2's RSA key), so the session layer can raise the TOFU prompt.
     pub trust: Option<ServerIdentity>,
+    /// Set by the macOS SRP logins: the key that unwraps the server's first
+    /// session rekey, which the Apple encrypted session starts from.
+    pub apple_wrap_key: Option<[u8; 16]>,
 }
 
 impl AuthOutcome {
@@ -212,6 +216,7 @@ impl AuthOutcome {
             stream,
             result_mode: ResultMode::Auto,
             trust: None,
+            apple_wrap_key: None,
         }
     }
     #[allow(dead_code)]
@@ -220,6 +225,7 @@ impl AuthOutcome {
             stream,
             result_mode: ResultMode::Always,
             trust: None,
+            apple_wrap_key: None,
         }
     }
 }
@@ -265,6 +271,8 @@ pub fn is_supported(t: SecurityType) -> bool {
             | SecurityType::Ra2_256
             | SecurityType::Ra2ne256
             | SecurityType::AppleDh
+            | SecurityType::AppleRsaSrp
+            | SecurityType::AppleSrp
             | SecurityType::MsLogonII
     )
 }
@@ -388,14 +396,47 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
     opts: &ConnectOptions,
     creds: &CredentialSource<'_>,
 ) -> Result<(BoxedStream, SecurityType, Option<ServerIdentity>)> {
+    let a = authenticate_full(stream, version, offered, opts, creds).await?;
+    Ok((a.stream, a.security, a.trust))
+}
+
+/// Everything a finished security handshake hands to the session.
+pub struct Authenticated {
+    pub stream: BoxedStream,
+    pub security: SecurityType,
+    pub trust: Option<ServerIdentity>,
+    /// For the macOS SRP logins, the key the Apple encrypted session starts
+    /// from (see [`crate::apple`]).
+    pub apple_wrap_key: Option<[u8; 16]>,
+}
+
+/// As [`authenticate_with_trust`], also returning the Apple session key.
+pub async fn authenticate_full<S: vnc_transport::Stream + 'static>(
+    stream: S,
+    version: ProtocolVersionInfo,
+    offered: &[u8],
+    opts: &ConnectOptions,
+    creds: &CredentialSource<'_>,
+) -> Result<Authenticated> {
     let chosen = select_security_type(offered, opts)?;
     tracing::info!(security_type = ?chosen, "selected security type");
 
     let mut stream: BoxedStream = Box::pin(stream);
 
     // RFB 3.7+: echo the chosen type back. 3.3: the server already decided.
+    //
+    // macOS reads the type byte of its SRP logins in one read together with
+    // the client's first message, and closes the connection when the byte
+    // arrives alone. Those two handshakes put the byte in front of their
+    // first write instead.
+    let joins_first_message = matches!(chosen, SecurityType::AppleRsaSrp | SecurityType::AppleSrp);
+    let mut type_prefix = Vec::new();
     if version.client_selects_security() {
-        write_all(&mut stream, &[chosen.to_wire()]).await?;
+        if joins_first_message {
+            type_prefix.push(chosen.to_wire());
+        } else {
+            write_all(&mut stream, &[chosen.to_wire()]).await?;
+        }
     }
 
     let outcome = match chosen {
@@ -408,6 +449,12 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
         | SecurityType::Ra2_256
         | SecurityType::Ra2ne256 => ra2::handshake(stream, chosen, opts, creds).await?,
         SecurityType::AppleDh => apple_dh::handshake(stream, opts, creds).await?,
+        SecurityType::AppleRsaSrp => {
+            apple_srp::handshake_33(stream, &type_prefix, opts, creds).await?
+        }
+        SecurityType::AppleSrp => {
+            apple_srp::handshake_36(stream, &type_prefix, opts, creds).await?
+        }
         SecurityType::MsLogonII => mslogon::handshake(stream, opts, creds).await?,
         SecurityType::Unknown(v) => return Err(VncError::UnsupportedSecurityType(v)),
     };
@@ -416,6 +463,7 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
         mut stream,
         result_mode,
         trust,
+        apple_wrap_key,
     } = outcome;
 
     let read_result = match result_mode {
@@ -429,24 +477,79 @@ pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
     };
 
     if read_result {
-        read_security_result(&mut stream, version).await?;
+        if let Some(refusal) = read_security_status(&mut stream, version).await? {
+            return Err(refine_apple_refusal(chosen, refusal));
+        }
     }
 
-    Ok((stream, chosen, trust))
+    Ok(Authenticated {
+        stream,
+        security: chosen,
+        trust,
+        apple_wrap_key,
+    })
+}
+
+/// The hint a refused type 30 login carries.
+pub const APPLE_DH_HINT: &str = "If the password is right, the Mac may need this account \
+allowed under Remote Management, Options.";
+
+/// What a refused type 30 login reports. Type 30 has no signal that tells a
+/// wrong password from an account the Mac will not let in: macOS 26 answers
+/// both with SecurityResult 1 and the same reason, "Authentication or
+/// authorization failure". So the reason carries the hint, and it is what
+/// the credential prompt shows when it asks again.
+pub const APPLE_DH_REFUSED: &str = "The Mac refused the login. If the password is right, the \
+Mac may need this account allowed under Remote Management, Options.";
+
+/// What the user is told when a Mac proved it knew the password (its SRP
+/// proof verified) and still refused the login.
+pub const APPLE_ACCESS_DENIED: &str = "The Mac accepted the password but did not let this \
+account share its screen. If Remote Management is on, allow the account under System \
+Settings, General, Sharing, Remote Management, Options; otherwise add it under Screen Sharing.";
+
+/// A SecurityResult other than 0: the status word and the reason, ours when
+/// the server gave none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub status: u32,
+    pub reason: String,
+}
+
+/// Turn a refused SecurityResult into what it means for a Mac.
+///
+/// Types 33 and 36 read the result only after the Mac's own SRP proof has
+/// verified, which it cannot produce without the right password: a wrong
+/// password is refused earlier, in place of that proof. So status 1 there is
+/// the Mac declining this account (on macOS 26 with Remote Management on, an
+/// account without its privileges gets exactly that), not a wrong password.
+/// It becomes [`VncError::AccessDenied`] and the user is not asked for the
+/// password again. The Mac's reason text is the same generic sentence either
+/// way, so only the status word and where it arrived are looked at. Type 30
+/// gives no such signal and gets the hint instead. Throttling (status 2) and
+/// every other server keep the plain refusal.
+fn refine_apple_refusal(chosen: SecurityType, refusal: Refusal) -> VncError {
+    let srp = matches!(chosen, SecurityType::AppleRsaSrp | SecurityType::AppleSrp);
+    match refusal.status {
+        1 if srp => VncError::AccessDenied(APPLE_ACCESS_DENIED.into()),
+        1 if chosen == SecurityType::AppleDh => VncError::AuthFailed(APPLE_DH_REFUSED.into()),
+        _ => VncError::AuthFailed(refusal.reason),
+    }
 }
 
 /// Read the u32 SecurityResult. 0 = OK, anything else = failure; RFB 3.8
-/// appends a u32-prefixed reason string.
-pub(crate) async fn read_security_result(
+/// appends a u32-prefixed reason string. A refusal comes back as data, with
+/// its status word, so the caller can say what it means for the type it chose.
+pub(crate) async fn read_security_status(
     stream: &mut BoxedStream,
     version: ProtocolVersionInfo,
-) -> Result<()> {
-    let result = read_u32(stream).await?;
-    if result == 0 {
-        return Ok(());
+) -> Result<Option<Refusal>> {
+    let status = read_u32(stream).await?;
+    if status == 0 {
+        return Ok(None);
     }
 
-    let mut reason = match result {
+    let mut reason = match status {
         1 => "the server rejected the credentials".to_string(),
         2 => "too many authentication attempts; the server is throttling".to_string(),
         other => format!("the server reported authentication status {other}"),
@@ -470,7 +573,8 @@ pub(crate) async fn read_security_result(
         }
     }
 
-    Err(VncError::AuthFailed(reason))
+    tracing::info!(status, %reason, "the server refused the login");
+    Ok(Some(Refusal { status, reason }))
 }
 
 #[cfg(test)]
@@ -480,6 +584,100 @@ mod tests {
 
     fn opts() -> ConnectOptions {
         ConnectOptions::vnc("host", 5900)
+    }
+
+    /// A Mac's refusal says what it can know: after a verified SRP proof the
+    /// password was right; type 30 cannot tell, so it gets the hint. Other
+    /// servers, and a throttling status, keep their old wording.
+    #[test]
+    fn apple_refusals_say_what_they_mean() {
+        // What macOS 26 sends with every refusal, whatever the cause.
+        let mac = |status| Refusal {
+            status,
+            reason: "Authentication or authorization failure".into(),
+        };
+        for t in [SecurityType::AppleRsaSrp, SecurityType::AppleSrp] {
+            let e = refine_apple_refusal(t, mac(1));
+            assert!(matches!(e, VncError::AccessDenied(_)), "{t:?}");
+            assert_eq!(e.user_message(), APPLE_ACCESS_DENIED);
+            assert!(e.needs_user_action() && !e.is_transient());
+        }
+        let dh = refine_apple_refusal(SecurityType::AppleDh, mac(1));
+        assert!(matches!(&dh, VncError::AuthFailed(r) if r == APPLE_DH_REFUSED));
+        assert_eq!(
+            dh.user_message(),
+            "The password was not accepted. If the password is right, the Mac may need this \
+             account allowed under Remote Management, Options."
+        );
+        let other = refine_apple_refusal(
+            SecurityType::VncAuth,
+            Refusal {
+                status: 1,
+                reason: "Authentication failed".into(),
+            },
+        );
+        assert!(matches!(&other, VncError::AuthFailed(r) if r == "Authentication failed"));
+        assert_eq!(other.user_message(), "The password was not accepted.");
+        assert!(matches!(
+            refine_apple_refusal(SecurityType::AppleSrp, mac(2)),
+            VncError::AuthFailed(_)
+        ));
+    }
+
+    /// A whole type 30 login that the Mac refuses comes back with the hint.
+    #[tokio::test]
+    async fn a_refused_type_30_login_carries_the_hint() {
+        use num_bigint_dig::BigUint;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let p = BigUint::parse_bytes(
+            b"FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74\
+              020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437\
+              4FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED\
+              EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF",
+            16,
+        )
+        .unwrap();
+        let server_public = BigUint::from(2u32).modpow(&BigUint::from(0x1234_5678u32), &p);
+        let (client, mut server) = tokio::io::duplex(8192);
+        let mac = tokio::spawn(async move {
+            server.write_all(&[0, 2, 0, 128]).await.unwrap();
+            server.write_all(&p.to_bytes_be()).await.unwrap();
+            let mut pubv = server_public.to_bytes_be();
+            while pubv.len() < 128 {
+                pubv.insert(0, 0);
+            }
+            server.write_all(&pubv).await.unwrap();
+            let mut answer = vec![0u8; 128 + 128];
+            server.read_exact(&mut answer).await.unwrap();
+            // SecurityResult 1 and the reason macOS 26 gives, then it hangs up.
+            let reason = b"Authentication or authorization failure";
+            server.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server
+                .write_all(&(reason.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            server.write_all(reason).await.unwrap();
+            drop(server);
+        });
+        let mut o = opts();
+        o.credentials = Credentials::user_pass("someone", "pw");
+        o.vnc_mut().security_pref = Some("apple-dh".into());
+        let version = ProtocolVersionInfo::parse("RFB 003.889\n").unwrap();
+        let err =
+            match authenticate_full(client, version, &[30], &o, &CredentialSource::none()).await {
+                Err(e) => e,
+                Ok(_) => panic!("the refused login succeeded"),
+            };
+        let _ = mac.await;
+        assert!(
+            matches!(&err, VncError::AuthFailed(r) if r == APPLE_DH_REFUSED),
+            "{err:?}"
+        );
+        assert!(
+            err.user_message().contains("Remote Management, Options"),
+            "{}",
+            err.user_message()
+        );
     }
 
     #[test]

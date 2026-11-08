@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ClipboardEcho, nextRemoteClipboard } from "./clipboardEcho";
+import { ClipboardEcho, nextRemoteClipboard, syncsOnArrival } from "./clipboardEcho";
 
 describe("nextRemoteClipboard", () => {
   // Copy X on the remote, copy something else locally, copy X on the remote
@@ -42,5 +42,24 @@ describe("ClipboardEcho", () => {
     echo.moved("copied before the drop");
     echo.connected();
     expect(echo.shouldPush("copied before the drop", false)).toBe(true);
+  });
+});
+
+describe("syncsOnArrival", () => {
+  const ready = { connected: true, owns: true, remoteTakesText: true };
+
+  // A Boundary helper connecting, being given control, coming back to the
+  // window or reconnecting put whatever it last copied on the customer's
+  // clipboard without a paste. It goes over only on a paste or the button.
+  it("never sends a Boundary helper's clipboard on its own", () => {
+    expect(syncsOnArrival({ protocol: "boundary", ...ready })).toBe(false);
+    expect(syncsOnArrival({ protocol: "boundary", ...ready, remoteTakesText: false })).toBe(false);
+  });
+
+  it("keeps the arrival sync for VNC and RDP", () => {
+    expect(syncsOnArrival({ protocol: "vnc", ...ready })).toBe(true);
+    expect(syncsOnArrival({ protocol: "rdp", ...ready })).toBe(true);
+    expect(syncsOnArrival({ protocol: "vnc", ...ready, connected: false })).toBe(false);
+    expect(syncsOnArrival({ protocol: "rdp", ...ready, owns: false })).toBe(false);
   });
 });

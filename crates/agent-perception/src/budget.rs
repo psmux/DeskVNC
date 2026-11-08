@@ -22,12 +22,17 @@
 /// tables of `03 §2.2` and a reader should be able to find the two together.
 pub const BYTES_PER_PIXEL: u64 = 4;
 
-/// `03 §2.7`'s recommendation: 4K plus headroom.
+/// One desktop up to a 6K display.
 ///
-/// 3840x2160 is 8,294,400 pixels, so this admits a 4K desktop and refuses the
-/// next size up. It is a setting and not a law, and it is quoted in `00 R5`
-/// where an owner decision is still recorded as pending.
-pub const DEFAULT_MAX_MIRROR_PIXELS: u64 = 8_300_000;
+/// This used to be 8,300,000, just over 3840x2160, which refused every Mac
+/// with a larger screen: a 4.5K iMac shares 4096x2304 (9.4 million pixels)
+/// and a 5K iMac 5120x2880 (14.7 million), so an agent could not even read
+/// `dvv status` on the most common Mac desktops. 6016x3384 (Apple's 6K
+/// display) is 20,358,144 pixels, 81 MB of mirror, and fits. What stops
+/// several large mirrors adding up is [`DEFAULT_MAX_TOTAL_BYTES`], which is
+/// unchanged: it still admits three 4K mirrors, and one 5K mirror beside a
+/// few small ones, and refuses a second 5K. Still a setting, quoted in `00 R5`.
+pub const DEFAULT_MAX_MIRROR_PIXELS: u64 = 20_500_000;
 
 /// `03 §2.7`'s recommendation for every mirror in the process together.
 ///
@@ -161,13 +166,36 @@ mod tests {
         assert_eq!(mirror_bytes(3840, 2160), 33_177_600);
     }
 
+    /// One Mac desktop of any common size gets a mirror on its own: 4K, a
+    /// 4.5K iMac, a 5K iMac and a 6K display. 8K does not.
     #[test]
-    fn four_k_fits_the_default_pixel_budget_and_the_next_size_up_does_not() {
+    fn one_mac_desktop_up_to_6k_fits_the_default_pixel_budget() {
         let budget = MirrorBudget::default();
-        assert!(budget.admit(3840, 2160, 0).is_ok());
+        for (w, h) in [
+            (3840, 2160),
+            (4096, 2304),
+            (4096, 2560),
+            (5120, 2880),
+            (6016, 3384),
+        ] {
+            assert!(budget.admit(w, h, 0).is_ok(), "{w}x{h}");
+        }
         assert!(matches!(
-            budget.admit(4096, 2560, 0),
+            budget.admit(7680, 4320, 0),
             Err(BudgetRefused::Pixels { .. })
         ));
+    }
+
+    /// The total still guards several large limbs: a second 5K mirror is
+    /// refused, while a 5K beside a 1080p one fits.
+    #[test]
+    fn the_total_still_refuses_a_second_large_mirror() {
+        let budget = MirrorBudget::default();
+        let five_k = mirror_bytes(5120, 2880);
+        assert!(matches!(
+            budget.admit(5120, 2880, five_k),
+            Err(BudgetRefused::TotalBytes { .. })
+        ));
+        assert!(budget.admit(1920, 1080, five_k).is_ok());
     }
 }
