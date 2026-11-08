@@ -8,6 +8,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.35.3] (2026-11-09)
+
+### Fixed
+
+* An agent could not type on a computer running DeskVNC Support for Windows or
+  macOS for up to twenty seconds after the screen moved, and not at all while
+  it kept moving. The graphics encoder there made H.264 that the agent's own
+  decoder ran out of buffers on, so its picture went stale and typing was
+  refused. Support now asks Media Foundation and VideoToolbox for Constrained
+  Baseline, checks what they really produced, and encodes in software when
+  they do not comply. The agent's picture also asks for a fresh screen as soon
+  as it loses its place. Baseline video is somewhat larger on the wire.
+* With control off on a Boundary computer, typing is refused with the same
+  view only reason a click gets, instead of asking the agent to look again.
+* `dvv open` named a session id the caller never passed. It now opens an
+  unsaved machine by its address, accepts a limb id, and says what it was
+  given.
+
 ## [0.35.2] (2026-11-08)
 
 ### Fixed
