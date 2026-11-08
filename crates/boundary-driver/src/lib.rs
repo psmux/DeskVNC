@@ -24,9 +24,15 @@ use tokio_util::sync::CancellationToken;
 /// plane, draw H.264, which the window decodes with WebCodecs, and carry
 /// clipboard text both ways, which the window and the agent plane use as
 /// they do a VNC server's cut text.
+///
+/// Not H.264 on Linux. WebKitGTK hands WebCodecs to the GPU's video decoder
+/// and offers no way to ask for software, and on an older AMD card running
+/// the radeon driver that decoder locked the GPU and reset the machine. A
+/// Linux helper gets tiles, which are slower while the screen moves and
+/// never reach the decoder.
 const ABILITIES: Abilities = Abilities {
     tools: true,
-    video: true,
+    video: !cfg!(target_os = "linux"),
     clipboard: true,
 };
 struct Pending {
