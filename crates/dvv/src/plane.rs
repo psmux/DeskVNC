@@ -4840,9 +4840,11 @@ impl Plane {
             .collect();
         match named.as_slice() {
             [] => Ok(None),
-            [one] => Ok(Some(by_address(one, request).unwrap_or_else(|| OpenRequest {
-                host_id: Some(one.host_id.clone()),
-                ..request.clone()
+            [one] => Ok(Some(by_address(one, request).unwrap_or_else(|| {
+                OpenRequest {
+                    host_id: Some(one.host_id.clone()),
+                    ..request.clone()
+                }
             }))),
             many => Err(ToolError::bad_request(format!(
                 "{} saved machines are called {name}: {}. Open one by its hostId",
