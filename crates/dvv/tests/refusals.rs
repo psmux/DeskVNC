@@ -336,6 +336,65 @@ async fn text_is_refused_before_it_is_lowered_when_the_shell_says_the_screen_cha
     assert!(recorder.commands().is_empty());
 }
 
+/// A limb whose person lets the helper only watch says so for a key and for
+/// text, as it does for a click, even while the typing fence would refuse.
+///
+/// The incident: on a Boundary computer with control off, `dvv type` and
+/// `dvv key` answered SCREEN_CHANGED. An agent that obeyed read the screen and
+/// was refused again, and never learned that only the person can let it type.
+/// The fence was asked before the limb said whether it could type at all.
+#[tokio::test]
+async fn watch_only_is_said_before_the_typing_fence() {
+    let (source, plane) = fake_plane();
+    let limb = open(&plane, "h_lab01", true);
+    let mut client = Client::connect(plane);
+    client
+        .tool(
+            "dvv_control",
+            json!({ "limbId": limb, "action": "acquire" }),
+        )
+        .await;
+    let recorder = source.recorder(&limb).expect("a recorder");
+    source.refuse_typing(
+        &limb,
+        "the screen changed materially since this attachment last read it. Nothing was typed",
+    );
+
+    // The control: with control given, the fence answers, so the refusals
+    // below are not the fence being skipped on every limb.
+    let fenced = client
+        .tool("dvv_type", json!({ "limbId": limb, "text": "hello" }))
+        .await;
+    assert_eq!(error_code(&fenced), Some("SCREEN_CHANGED"), "{fenced}");
+
+    source.watch_only(&limb, true);
+    recorder.clear();
+    let click = client
+        .tool(
+            "dvv_click",
+            json!({ "limbId": limb, "action": "click", "x": 5, "y": 5, "generation": 1 }),
+        )
+        .await;
+    let watching = error_code(&click).expect("a click is refused").to_string();
+    assert_ne!(watching, "SCREEN_CHANGED");
+    let typed = client
+        .tool("dvv_type", json!({ "limbId": limb, "text": "hello" }))
+        .await;
+    let key = client
+        .tool("dvv_key", json!({ "limbId": limb, "keys": "Enter" }))
+        .await;
+    for refused in [&typed, &key] {
+        assert_eq!(error_code(refused), Some(watching.as_str()), "{refused}");
+        let message = structured(refused)["message"].as_str().expect("a message");
+        assert!(message.contains("watch only"), "{message}");
+    }
+    assert!(
+        recorder.commands().is_empty(),
+        "nothing reaches the wire of a limb that is only watched; {:?} did",
+        recorder.names()
+    );
+}
+
 /// The far side refusing partway through a long `type` is reported, with the
 /// exact number of characters that went and the text that did not.
 ///

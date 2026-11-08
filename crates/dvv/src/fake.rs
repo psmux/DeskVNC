@@ -210,6 +210,9 @@ pub struct FakeLimb {
     kind: ProtocolKind,
     grounding: Grounding,
     max_slots: Option<u16>,
+    /// Set while the person at the far side lets the helper only watch, as
+    /// a Boundary computer can. See [`FakeSource::watch_only`].
+    watching: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeLimb {
@@ -219,6 +222,7 @@ impl FakeLimb {
             kind: ProtocolKind::Vnc,
             grounding: Grounding::Pixels,
             max_slots: Some(4),
+            watching: Arc::default(),
         }
     }
 
@@ -228,6 +232,7 @@ impl FakeLimb {
             kind: ProtocolKind::Ssh,
             grounding: Grounding::Cells,
             max_slots: None,
+            watching: Arc::default(),
         }
     }
 }
@@ -302,7 +307,11 @@ impl Limb for FakeLimb {
 
     fn supports(&self, intent: IntentName) -> Support {
         use IntentName::*;
+        let watching = self.watching.load(std::sync::atomic::Ordering::Relaxed);
         match intent {
+            Type | Press | Move | Click | Drag | Scroll if watching => Support::Unsupported {
+                because: "the person at that computer lets this helper watch only",
+            },
             Type | Press | Tune | ClipboardGet | ClipboardSet | SendBytes => Support::Lowered,
             Move | Click | Drag | Scroll => match self.grounding {
                 Grounding::Pixels => Support::Lowered,
@@ -457,6 +466,12 @@ pub struct FakeSource {
     mirror_budget: Mutex<Option<u64>>,
     /// Every repaint or reconnect asked of a limb, by limb id, in order.
     nudges: Mutex<Vec<(String, Nudge)>>,
+    /// Each attached limb's watch only switch, by limb id.
+    watching: Mutex<BTreeMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    /// Sessions somebody opened by address and never saved, by limb id, with
+    /// the session id the application lists them under. See
+    /// [`FakeSource::open_unsaved_in_app`].
+    unsaved: Mutex<BTreeMap<String, String>>,
 }
 
 /// A far side that takes `allowed` more key presses and refuses the rest.
@@ -485,6 +500,8 @@ impl FakeSource {
             shared: None,
             nudges: Mutex::new(Vec::new()),
             mirror_budget: Mutex::new(None),
+            watching: Mutex::new(BTreeMap::new()),
+            unsaved: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -531,6 +548,34 @@ impl FakeSource {
         let id = LimbRegistry::resolve(host.protocol, &MachineKey::profile(host_id), Slot(0));
         lock(&self.states).insert(id.to_string(), SessionState::Connected);
         lock(&self.live).insert(id.to_string(), host);
+        id.to_string()
+    }
+
+    /// A machine somebody opened by address and never saved, as a person
+    /// joins a Boundary support session by its invitation. The application
+    /// lists it among the hosts as discovered, under its own session id and
+    /// labelled with the address, and among the limbs with no saved machine
+    /// behind it. Returns the limb id `dvv_limbs` would list it under.
+    pub fn open_unsaved_in_app(
+        &self,
+        address: &str,
+        protocol: ProtocolKind,
+        session_id: &str,
+    ) -> String {
+        let port = protocol.default_port();
+        let machine = MachineKey::endpoint(protocol, address, port);
+        let id = LimbRegistry::resolve(protocol, &machine, Slot(0));
+        let host = FakeHost {
+            host_id: address.to_string(),
+            address: address.to_string(),
+            port,
+            protocol,
+            size: (1280, 720),
+            mirror: true,
+        };
+        lock(&self.states).insert(id.to_string(), SessionState::Connected);
+        lock(&self.live).insert(id.to_string(), host);
+        lock(&self.unsaved).insert(id.to_string(), session_id.to_string());
         id.to_string()
     }
 
@@ -595,6 +640,15 @@ impl FakeSource {
         );
     }
 
+    /// Make the person at this limb's far side let the helper only watch, or
+    /// give control back, the way a Boundary computer's person can at any
+    /// time. The limb then refuses every pointer and keyboard intent.
+    pub fn watch_only(&self, limb: &str, watching: bool) {
+        if let Some(switch) = lock(&self.watching).get(limb) {
+            switch.store(watching, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// This limb's mirror, so a test can say that something changed.
     pub fn mirror(&self, limb: &str) -> Option<Arc<FakeFrames>> {
         lock(&self.mirrors).get(limb).cloned()
@@ -647,7 +701,7 @@ impl FakeSource {
 
 impl SessionSource for FakeSource {
     fn hosts(&self) -> Result<Vec<HostRecord>, ToolError> {
-        Ok(self
+        let mut hosts: Vec<HostRecord> = self
             .hosts
             .iter()
             .map(|host| HostRecord {
@@ -662,7 +716,24 @@ impl SessionSource for FakeSource {
                 credential_stored: false,
                 discovered: false,
             })
-            .collect())
+            .collect();
+        // What is open and not saved, as the application lists it: under the
+        // session's id, labelled with its address.
+        let live = lock(&self.live);
+        for (limb, session) in lock(&self.unsaved).iter() {
+            if let Some(host) = live.get(limb) {
+                hosts.push(HostRecord {
+                    host_id: session.clone(),
+                    label: host.address.clone(),
+                    address: host.address.clone(),
+                    port: host.port,
+                    protocol: host.protocol.to_string(),
+                    credential_stored: false,
+                    discovered: true,
+                });
+            }
+        }
+        Ok(hosts)
     }
 
     fn open(&self, request: &OpenRequest) -> Result<Attach, ToolError> {
@@ -770,10 +841,20 @@ impl SessionSource for FakeSource {
         lock(&self.states).insert(id.to_string(), SessionState::Connected);
         lock(&self.live).insert(id.to_string(), host.clone());
 
-        let driver: Arc<dyn Limb> = match host.protocol {
-            ProtocolKind::Ssh => Arc::new(FakeLimb::terminal()),
-            _ => Arc::new(FakeLimb::desktop()),
+        let mut limb = match host.protocol {
+            ProtocolKind::Ssh => FakeLimb::terminal(),
+            // Of the machine's own protocol, which the limb id is derived
+            // from, as the application's limbs are.
+            _ => FakeLimb {
+                kind: host.protocol,
+                ..FakeLimb::desktop()
+            },
         };
+        limb.watching = lock(&self.watching)
+            .entry(id.to_string())
+            .or_default()
+            .clone();
+        let driver: Arc<dyn Limb> = Arc::new(limb);
         Ok(Attach {
             driver,
             machine,
@@ -804,12 +885,13 @@ impl SessionSource for FakeSource {
     }
 
     fn live(&self) -> Vec<LiveSession> {
+        let unsaved = lock(&self.unsaved);
         lock(&self.live)
             .iter()
             .map(|(id, host)| LiveSession {
                 limb_id: id.clone(),
                 host: host.address.clone(),
-                host_id: Some(host.host_id.clone()),
+                host_id: (!unsaved.contains_key(id)).then(|| host.host_id.clone()),
                 port: host.port,
                 protocol: host.protocol.to_string(),
                 slot: 0,
