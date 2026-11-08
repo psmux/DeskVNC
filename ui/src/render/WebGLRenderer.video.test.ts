@@ -132,6 +132,9 @@ beforeEach(() => {
   vi.stubGlobal("VideoDecoder", FakeDecoder);
   vi.stubGlobal("EncodedVideoChunk", FakeChunk);
   vi.stubGlobal("VideoFrame", FakePicture);
+  // A display refreshing at 60 Hz, on the fake clock.
+  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => setTimeout(() => cb(0), 16));
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => clearTimeout(id));
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -141,6 +144,8 @@ afterEach(() => {
 function renderer(): WebGLRenderer {
   const r = new WebGLRenderer(canvas());
   r.setRemoteSize(W, H);
+  r.setCanvasSize(W, H);
+  r.start();
   return r;
 }
 
@@ -154,11 +159,11 @@ describe("H.264 from a decoder that holds pictures back (WebKitGTK)", () => {
       r.applyFrame(video());
       await vi.advanceTimersByTimeAsync(33);
     }
-    // Learning the lag costs one wait per held picture, once. After that
-    // every picture but the last three is on screen, in order.
+    // Learning the lag costs one wait per held picture, once, and the
+    // pictures that queued up meanwhile go by faster than frames are drawn.
+    // Then the newest picture but the three still inside is on screen.
     await vi.advanceTimersByTimeAsync(1000);
     const shown = uploads.filter((u) => u.startsWith("v"));
-    expect(shown).toHaveLength(27);
     expect(shown.at(-1)).toBe("v27");
     expect(shown).toEqual([...shown].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))));
     // And the window keeps up from then on: a second of video, no waiting.
@@ -238,11 +243,24 @@ describe("H.264 into a decoder that turns Annex B down (WebKitGTK)", () => {
       await vi.advanceTimersByTimeAsync(33);
     }
     await vi.advanceTimersByTimeAsync(1500);
+    // The newest picture but the two the decoder still holds is on screen,
+    // and the window has kept up with the stream.
     const shown = uploads.filter((u) => u.startsWith("v"));
-    // Every picture but the two the decoder still holds, the keyframe's
-    // second attempt among them.
-    expect(shown.length).toBeGreaterThanOrEqual(28);
+    expect(shown.at(-1)).toBe("v28");
     expect(r.getQueueStats().depth).toBe(0);
+    r.dispose();
+  });
+});
+
+describe("H.264 from a decoder that runs ahead of the display", () => {
+  it("uploads only the newest picture for each frame drawn", async () => {
+    holdBack = 0;
+    const r = renderer();
+    // A burst of pictures, all back before the next frame is drawn.
+    for (let i = 0; i < 10; i++) r.applyFrame(video());
+    await vi.advanceTimersByTimeAsync(40);
+    expect(uploads.at(-1)).toBe("v10");
+    expect(uploads.length).toBeLessThan(10);
     r.dispose();
   });
 });

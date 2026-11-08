@@ -141,6 +141,13 @@ interface H264Context {
    * back, so a decoder that turns Annex B down can start again from it.
    */
   startKey: Uint8Array | null;
+  /**
+   * The newest picture back from the decoder and not yet in the frame
+   * texture. Pictures go in once per drawn frame, so a decoder that runs
+   * ahead of the display costs one upload per frame drawn rather than one
+   * per picture (see `showVideoFrame`).
+   */
+  ready: VideoFrame | null;
 }
 
 /** Maximum simultaneous decoder contexts, mirrors the backend's cap. */
@@ -895,6 +902,7 @@ export class WebGLRenderer {
       switch (r.format) {
         case RectFormat.Rgba:
           if (r.payload.byteLength >= r.w * r.h * 4) {
+            this.uploadHeldVideo(r);
             gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
             gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, r.w, r.h, gl.RGBA, gl.UNSIGNED_BYTE, r.payload);
             this.videoOvertaken(r, -1);
@@ -923,6 +931,7 @@ export class WebGLRenderer {
             bmp.close();
             return;
           }
+          this.uploadHeldVideo(r);
           gl.bindTexture(gl.TEXTURE_2D, this.frameTex);
           gl.texSubImage2D(gl.TEXTURE_2D, 0, r.x, r.y, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
           bmp.close();
@@ -930,6 +939,9 @@ export class WebGLRenderer {
           break;
         }
         case RectFormat.CopyRect:
+          // It reads pixels as well as writing them, so every held picture
+          // has to be in place first.
+          this.uploadHeldVideo();
           this.copyRect(r.srcX, r.srcY, r.x, r.y, r.w, r.h);
           this.videoOvertaken(r, -1);
           break;
@@ -1083,13 +1095,43 @@ export class WebGLRenderer {
     }
   }
 
-  /** A decoded picture, on screen now unless the window moved on. */
+  /**
+   * A decoded picture, for the next frame drawn unless the window moved on.
+   *
+   * It is held rather than uploaded here. Uploading a hardware decoder's
+   * picture into a GL texture is the expensive half of showing it: on the
+   * AMD card WebKitGTK decodes a 1600x900 picture in about 22 ms and the
+   * upload costs about as much again, so uploading every picture of a 30
+   * picture a second stream on the main thread fell behind it, and the
+   * queue in front of the decoder grew without end. Held, a picture that a
+   * newer one replaces before the next frame is drawn is closed unseen.
+   */
   private showVideoFrame(frame: VideoFrame, ctx: H264Context): void {
     if (this.disposed || ctx.generation !== this.generation) {
       frame.close();
       return;
     }
-    this.uploadVideoFrame(frame, ctx);
+    // Another decoder's picture under this one is older: it goes in first.
+    this.uploadHeldVideo(ctx, ctx.id);
+    ctx.ready?.close();
+    ctx.ready = frame;
+    this.markDirty();
+  }
+
+  /**
+   * Put the held pictures of every decoder whose area overlaps `r` (all of
+   * them without one) into the frame texture, but not decoder `except`'s.
+   * Called before anything else is drawn over a decoder's area, so pixels
+   * land in the order they were sent, and before every frame drawn or read.
+   */
+  private uploadHeldVideo(r?: { x: number; y: number; w: number; h: number }, except = -1): void {
+    for (const [id, ctx] of this.h264) {
+      if (!ctx.ready || id === except) continue;
+      if (r && (r.x >= ctx.x + ctx.w || ctx.x >= r.x + r.w || r.y >= ctx.y + ctx.h || ctx.y >= r.y + r.h)) continue;
+      const frame = ctx.ready;
+      ctx.ready = null;
+      this.uploadVideoFrame(frame, ctx);
+    }
   }
 
   /**
@@ -1125,6 +1167,7 @@ export class WebGLRenderer {
       pacer: null as unknown as VideoPacer<VideoFrame>,
       avcc,
       startKey: avcc ? null : key.slice(),
+      ready: null,
     };
     ctx.pacer = new VideoPacer<VideoFrame>(this.h264Lag, (frame) => this.showVideoFrame(frame, ctx), r.w * r.h);
     try {
@@ -1221,6 +1264,12 @@ export class WebGLRenderer {
     // never be produced now. Release it so the apply loop moves on instead of
     // holding every later update behind a decoder that is gone.
     ctx.pacer.close();
+    // A held picture is still the newest thing sent for that area, unless the
+    // window has since changed size under it.
+    const held = ctx.ready;
+    ctx.ready = null;
+    if (held && !this.disposed && ctx.generation === this.generation) this.uploadVideoFrame(held, ctx);
+    else held?.close();
     try {
       if (ctx.decoder.state !== "closed") ctx.decoder.close();
     } catch {
@@ -1484,6 +1533,7 @@ export class WebGLRenderer {
   }
 
   private draw(): void {
+    this.uploadHeldVideo();
     traceMark("frame_drawn");
     const gl = this.gl;
     const W = this.canvas.width;
@@ -1556,6 +1606,7 @@ export class WebGLRenderer {
    */
   readFramebufferRGBA(): { width: number; height: number; pixels: Uint8Array } | null {
     if (this.fbWidth === 0 || this.fbHeight === 0) return null;
+    this.uploadHeldVideo();
     const gl = this.gl;
     const width = this.fbWidth;
     const height = this.fbHeight;
@@ -1577,6 +1628,7 @@ export class WebGLRenderer {
    */
   readSampledRowsRGBA(rowCount: number): { width: number; rows: number; pixels: Uint8Array } | null {
     if (this.fbWidth === 0 || this.fbHeight === 0 || rowCount <= 0) return null;
+    this.uploadHeldVideo();
     const gl = this.gl;
     const w = this.fbWidth;
     const n = Math.min(rowCount, this.fbHeight);
@@ -1606,6 +1658,7 @@ export class WebGLRenderer {
    */
   readPreviewRGBA(maxWidth: number): { width: number; height: number; pixels: Uint8Array } | null {
     if (this.fbWidth === 0 || this.fbHeight === 0) return null;
+    this.uploadHeldVideo();
     const gl = this.gl;
     const width = Math.max(1, Math.min(maxWidth, this.fbWidth));
     const height = Math.max(1, Math.round((this.fbHeight * width) / this.fbWidth));
