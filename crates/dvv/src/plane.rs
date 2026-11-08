@@ -1242,7 +1242,7 @@ impl SessionSource for ShellSource {
         // The same read carries the clipboard rights, which change whenever
         // the person ticks or unticks, or gives or takes control. The card
         // is built right after this, so it offers what is true now.
-        note_clipboard(&session_id, &answer);
+        note_rights(&session_id, &answer);
         serde_json::from_value(answer.get("state")?.clone()).ok()
     }
 
@@ -1775,7 +1775,7 @@ fn build_attach(attached: &serde_json::Value, slot: Slot) -> Result<Attach, Tool
 
     let limb_id = LimbRegistry::resolve(protocol, &machine, slot);
     lock(limb_sessions()).insert(limb_id.to_string(), session_id.clone());
-    note_clipboard(&session_id, attached);
+    note_rights(&session_id, attached);
 
     // The mirror, if the shell attached one. `perception.mirror` is the
     // shell's claim that a framebuffer mirror EXISTS for this session, which
@@ -2416,10 +2416,24 @@ struct BoundaryClipboard {
     read: bool,
 }
 
-/// Keep what a shell record (`limb.attach`, `limb.status`) says about the
-/// session's clipboard rights. A record without them, from a computer that
-/// never said or a DeskVNCViewer older than this dvv, takes them away.
-fn note_clipboard(session_id: &str, record: &serde_json::Value) {
+/// Which Boundary sessions the person there lets this helper only watch, by
+/// session ID, as the shell last reported it on an attach or a status read.
+/// A session missing here is controllable, or its computer has not said yet,
+/// or the DeskVNCViewer is older than this dvv and never says.
+fn boundary_view_only() -> &'static Mutex<std::collections::BTreeSet<String>> {
+    static VIEW_ONLY: std::sync::OnceLock<Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    VIEW_ONLY.get_or_init(|| Mutex::new(std::collections::BTreeSet::new()))
+}
+
+/// Keep what a shell record (`limb.attach`, `limb.status`) says about what
+/// the session's computer allows: control, and the clipboard rights. A
+/// record without clipboard rights, from a computer that never said or a
+/// DeskVNCViewer older than this dvv, takes them away. One that says
+/// `"control": false` takes control away until a later record says
+/// otherwise; one without the field leaves control offered, as it was
+/// before the shell said.
+fn note_rights(session_id: &str, record: &serde_json::Value) {
     let rights = record.get("clipboard").and_then(|c| {
         Some(BoundaryClipboard {
             write: c.get("write")?.as_bool()?,
@@ -2431,6 +2445,13 @@ fn note_clipboard(session_id: &str, record: &serde_json::Value) {
         Some(rights) => held.insert(session_id.to_string(), rights),
         None => held.remove(session_id),
     };
+    drop(held);
+    let mut watching = lock(boundary_view_only());
+    if record.get("control").and_then(serde_json::Value::as_bool) == Some(false) {
+        watching.insert(session_id.to_string());
+    } else {
+        watching.remove(session_id);
+    }
 }
 
 fn ledgers() -> &'static Mutex<BTreeMap<String, Arc<RelayLedger>>> {
@@ -2795,55 +2816,51 @@ impl RemoteLimb {
             .copied()
             .unwrap_or_default()
     }
+
+    /// Whether the person at this Boundary limb's computer lets it control
+    /// the computer now, rather than only watch.
+    fn boundary_control(&self) -> bool {
+        !lock(boundary_view_only()).contains(&self.session_id)
+    }
 }
 
-/// A Boundary desktop's card. Clipboard read and write each appear only
-/// while the computer says so, and they come and go during the session.
-fn boundary_capabilities(mirror: bool, clip: BoundaryClipboard) -> &'static [Capability] {
+/// Said when the person at a Boundary computer lets the helper only watch.
+const BOUNDARY_VIEW_ONLY: &str = "the person at that Boundary computer lets this helper watch only, so nothing typed, clicked or scrolled would reach it. Ask them to give control in DeskVNC Support";
+
+/// A Boundary desktop's card. Control appears only while the person there
+/// lets the helper control the computer, and clipboard read and write each
+/// only while the computer says so. All three come and go during the session.
+fn boundary_capabilities(mirror: bool, control: bool, clip: BoundaryClipboard) -> &'static [Capability] {
     use Capability::*;
-    match (mirror, clip.write, clip.read) {
-        (true, false, false) => &[View, Capture, Control, Close, HostsRead, Exec],
-        (true, true, false) => &[
-            View,
-            Capture,
-            Control,
-            Close,
-            HostsRead,
-            ClipboardWrite,
-            Exec,
-        ],
-        (true, false, true) => &[
-            View,
-            Capture,
-            Control,
-            Close,
-            HostsRead,
-            ClipboardRead,
-            Exec,
-        ],
-        (true, true, true) => &[
-            View,
-            Capture,
-            Control,
-            Close,
-            HostsRead,
-            ClipboardRead,
-            ClipboardWrite,
-            Exec,
-        ],
-        (false, false, false) => &[View, Control, Close, HostsRead, Exec],
-        (false, true, false) => &[View, Control, Close, HostsRead, ClipboardWrite, Exec],
-        (false, false, true) => &[View, Control, Close, HostsRead, ClipboardRead, Exec],
-        (false, true, true) => &[
-            View,
-            Control,
-            Close,
-            HostsRead,
-            ClipboardRead,
-            ClipboardWrite,
-            Exec,
-        ],
-    }
+    static CARDS: std::sync::OnceLock<Vec<Vec<Capability>>> = std::sync::OnceLock::new();
+    let index = |mirror: bool, control: bool, write: bool, read: bool| {
+        usize::from(mirror) << 3 | usize::from(control) << 2 | usize::from(write) << 1 | usize::from(read)
+    };
+    let cards = CARDS.get_or_init(|| {
+        let mut cards = vec![Vec::new(); 16];
+        for bits in 0..16usize {
+            let (mirror, control, write, read) =
+                (bits & 8 != 0, bits & 4 != 0, bits & 2 != 0, bits & 1 != 0);
+            let card = &mut cards[index(mirror, control, write, read)];
+            card.push(View);
+            if mirror {
+                card.push(Capture);
+            }
+            if control {
+                card.push(Control);
+            }
+            card.extend([Close, HostsRead]);
+            if read {
+                card.push(ClipboardRead);
+            }
+            if write {
+                card.push(ClipboardWrite);
+            }
+            card.push(Exec);
+        }
+        cards
+    });
+    &cards[index(mirror, control, clip.write, clip.read)]
 }
 
 impl remote_core::driver::ProtocolDriver for RemoteLimb {
@@ -2930,7 +2947,11 @@ impl limb_core::limb::Limb for RemoteLimb {
     fn capabilities(&self) -> &'static [Capability] {
         match self.grounding {
             Grounding::Pixels if self.kind == ProtocolKind::Boundary => {
-                boundary_capabilities(self.has_mirror, self.boundary_clipboard())
+                boundary_capabilities(
+                    self.has_mirror,
+                    self.boundary_control(),
+                    self.boundary_clipboard(),
+                )
             }
             Grounding::Cells => &[
                 Capability::View,
@@ -2964,7 +2985,11 @@ impl limb_core::limb::Limb for RemoteLimb {
     fn supports(&self, intent: limb_core::intent::IntentName) -> limb_core::limb::Support {
         use limb_core::intent::IntentName::*;
         use limb_core::limb::Support;
+        let watching = self.kind == ProtocolKind::Boundary && !self.boundary_control();
         match intent {
+            Type | Press | Move | Click | Drag | Scroll if watching => Support::Unsupported {
+                because: BOUNDARY_VIEW_ONLY,
+            },
             Type | Press | Tune => Support::Lowered,
             ClipboardGet | ClipboardSet => match self.grounding {
                 Grounding::Cells => Support::Unsupported {
@@ -5155,11 +5180,11 @@ mod tests {
         let lowered = |limb: &RemoteLimb, intent| matches!(limb.supports(intent), Support::Lowered);
 
         // Attached before the computer said anything: nothing offered.
-        note_clipboard(session, &serde_json::json!({ "clipboard": null }));
+        note_rights(session, &serde_json::json!({ "clipboard": null }));
         assert_eq!(offers(&limb), (false, false));
 
         // Control given, reading not ticked.
-        note_clipboard(
+        note_rights(
             session,
             &serde_json::json!({ "clipboard": { "write": true, "read": false } }),
         );
@@ -5171,7 +5196,7 @@ mod tests {
         assert!(because.contains("see what they copy"), "{because}");
 
         // The person ticks reading too.
-        note_clipboard(
+        note_rights(
             session,
             &serde_json::json!({ "clipboard": { "write": true, "read": true } }),
         );
@@ -5181,7 +5206,7 @@ mod tests {
         assert!(limb.capabilities().contains(&Capability::Exec));
 
         // Control taken back, reading kept.
-        note_clipboard(
+        note_rights(
             session,
             &serde_json::json!({ "clipboard": { "write": false, "read": true } }),
         );
@@ -5193,17 +5218,75 @@ mod tests {
 
         // A record with no clipboard field at all (an older DeskVNCViewer)
         // takes both away again.
-        note_clipboard(session, &serde_json::json!({ "state": "connected" }));
+        note_rights(session, &serde_json::json!({ "state": "connected" }));
         assert_eq!(offers(&limb), (false, false));
 
         // Rights for one session never reach a limb on another.
-        note_clipboard(
+        note_rights(
             session,
             &serde_json::json!({ "clipboard": { "write": true, "read": true } }),
         );
         let other = RemoteLimb::new(ProtocolKind::Boundary, false).for_session("another-session");
         assert_eq!(offers(&other), (false, false));
-        note_clipboard(session, &serde_json::json!({}));
+        note_rights(session, &serde_json::json!({}));
+    }
+
+    /// The card follows control the way it follows the clipboard: a status
+    /// read saying the person lets this helper only watch takes `control`
+    /// off the card and refuses input with the reason, and one saying
+    /// control was given puts it back. A record without the field (a shell
+    /// older than this dvv) leaves control offered, as before.
+    #[test]
+    fn a_boundary_limb_offers_control_only_while_the_person_gives_it() {
+        use limb_core::intent::IntentName;
+        use limb_core::limb::{Limb as _, Support};
+        let session = "boundary-control-rights-test";
+        for mirror in [false, true] {
+            let limb = RemoteLimb::new(ProtocolKind::Boundary, mirror).for_session(session);
+            let controls = |limb: &RemoteLimb| limb.capabilities().contains(&Capability::Control);
+
+            note_rights(session, &serde_json::json!({ "state": "connected" }));
+            assert!(controls(&limb), "a shell that never says leaves control on");
+
+            note_rights(
+                session,
+                &serde_json::json!({ "control": false, "clipboard": { "write": false, "read": true } }),
+            );
+            assert!(!controls(&limb), "view only takes control off the card");
+            assert!(limb.capabilities().contains(&Capability::View));
+            assert!(limb.capabilities().contains(&Capability::ClipboardRead));
+            assert_eq!(limb.capabilities().contains(&Capability::Capture), mirror);
+            for intent in [
+                IntentName::Click,
+                IntentName::Type,
+                IntentName::Press,
+                IntentName::Scroll,
+                IntentName::Move,
+                IntentName::Drag,
+            ] {
+                let Support::Unsupported { because } = limb.supports(intent) else {
+                    panic!("{intent:?} reached a computer that lets the helper only watch");
+                };
+                assert!(because.contains("watch only"), "{because}");
+            }
+
+            note_rights(
+                session,
+                &serde_json::json!({ "control": true, "clipboard": { "write": true, "read": true } }),
+            );
+            assert!(controls(&limb), "control given puts it back");
+            assert!(matches!(limb.supports(IntentName::Click), Support::Lowered));
+            assert!(matches!(limb.supports(IntentName::Type), Support::Lowered));
+
+            // Watching one session never takes control from another.
+            note_rights(session, &serde_json::json!({ "control": false }));
+            let other = RemoteLimb::new(ProtocolKind::Boundary, mirror).for_session("another-control");
+            assert!(controls(&other));
+            // Another protocol is never affected by a Boundary record.
+            let vnc = RemoteLimb::new(ProtocolKind::Vnc, mirror).for_session(session);
+            assert!(controls(&vnc));
+            note_rights(session, &serde_json::json!({}));
+        }
     }
 
     /// The ledger's whole contract, without a socket: a refused press trips

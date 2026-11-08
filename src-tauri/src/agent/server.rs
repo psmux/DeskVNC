@@ -559,6 +559,10 @@ fn record(id: &str, entry: &SessionEntry, slot: u16, attachment: Option<String>)
         // with its clipboard. Null from one that never said, and for every
         // other protocol, whose clipboard is its own.
         "clipboard": facts.clipboard.map(|c| json!({ "write": c.write, "read": c.read })),
+        // A Boundary session only: whether the person there lets this helper
+        // control the computer (false while they let it only watch). Null
+        // before the computer has answered, and for every other protocol.
+        "control": facts.control,
         "attachmentId": attachment,
         "machine": machine_json(&entry.machine_key()),
     })
