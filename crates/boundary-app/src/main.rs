@@ -558,8 +558,15 @@ impl App {
         }
     }
     fn poll(&mut self, ctx: &egui::Context) {
+        let helpers_before = self.unattended.connections;
         if self.unattended.poll() {
             attention::raise(ctx);
+        }
+        // A helper connecting unattended is a new session too: what the
+        // last one ended with is old news beside the banner saying who is in.
+        if self.unattended.connections != helpers_before && self.session.is_none() && self.error {
+            self.status = "Ready to connect".into();
+            self.error = false;
         }
         self.codes.private_required = !matches!(self.network, network::Profile::Automatic);
         if let Some(ticket) = self.codes.poll() {
@@ -689,10 +696,14 @@ impl App {
             self.error = false;
         }
         if let Some(result) = finished {
+            // On this side of a shared screen, a session that ends without
+            // an error was ended by the helper: the person ends theirs with
+            // End session, which stops it before it can finish.
+            let shared = self.hosting && self.connected;
             self.stop();
-            if let Err(error) = result {
-                self.status = format!("{error:#}");
-                self.error = true;
+            if let Some((status, error)) = ended_status(shared, &result) {
+                self.status = status;
+                self.error = error;
             }
         }
     }
@@ -1737,9 +1748,38 @@ fn remote_key(key: egui::Key, shortcut: bool) -> Option<Key> {
     })
 }
 
+/// What the status bar says when a session finishes on its own, and whether
+/// in red: `None` keeps what stopping it said. `shared` is whether this
+/// computer's screen was being shared with a helper who was in.
+fn ended_status(shared: bool, result: &anyhow::Result<()>) -> Option<(String, bool)> {
+    match result {
+        Err(error) => Some((format!("{error:#}"), true)),
+        Ok(()) if shared => Some(("They ended the session. Ready to connect".into(), false)),
+        Ok(()) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper ending the session is said plainly and not in red; only a
+    /// session that failed is an error.
+    #[test]
+    fn a_session_the_helper_ends_is_not_an_error() {
+        assert_eq!(
+            ended_status(true, &Ok(())),
+            Some(("They ended the session. Ready to connect".into(), false))
+        );
+        assert_eq!(ended_status(false, &Ok(())), None);
+        let (status, error) = ended_status(
+            true,
+            &Err(anyhow::anyhow!("This computer stopped taking input")),
+        )
+        .unwrap();
+        assert!(error);
+        assert_eq!(status, "This computer stopped taking input");
+    }
 
     #[test]
     fn an_old_grant_is_explained_beside_the_clipboard_tick() {
