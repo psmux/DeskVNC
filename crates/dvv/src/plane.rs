@@ -1709,6 +1709,21 @@ fn files_outcome(op: &FileOp, answer: &serde_json::Value) -> Result<FileOutcome,
     }
 }
 
+/// The same open, aimed at a machine that is open and not saved by its
+/// address, or None for a saved machine, which is opened by its id.
+fn by_address(host: &HostRecord, request: &OpenRequest) -> Option<OpenRequest> {
+    if !host.discovered {
+        return None;
+    }
+    Some(OpenRequest {
+        host_id: None,
+        address: Some(host.address.clone()),
+        port: Some(host.port),
+        protocol: Some(ProtocolKind::parse(&host.protocol)?),
+        ..request.clone()
+    })
+}
+
 /// Turn the plane's attach reply into everything `agent-plane` needs.
 ///
 /// The one interesting part is the command channel. [`Attach`] wants a live
@@ -3507,6 +3522,20 @@ impl Plane {
     }
 
     fn attach_limb(&self, request: &OpenRequest) -> Result<LimbCard, ToolError> {
+        // A limb id, as `dvv limbs` lists one, names a session that is open
+        // already, so it is attached as any verb naming it would be.
+        if let Some(limb) = request
+            .host_id
+            .as_deref()
+            .and_then(|id| LimbId::from_caller(id).ok())
+        {
+            return match self.adopt_or_why(&limb)? {
+                Some(attached) => Ok(self.card(&attached)),
+                None => Err(ToolError::bad_request(format!(
+                    "{limb} is not open in DeskVNCViewer, so there is no session to attach; dvv limbs lists the limbs that are, and dvv hosts the machines that can be opened"
+                ))),
+            };
+        }
         let named = self.by_label(request)?;
         let request = named.as_ref().unwrap_or(request);
         if request.host_id.is_some() && request.protocol.is_some() {
@@ -4804,13 +4833,20 @@ impl Plane {
     /// is no id but is exactly one machine's label (ignoring case) is taken to
     /// mean that machine. Two machines with the label is a refusal naming
     /// both, rather than a guess. `None` when there is nothing to resolve.
+    ///
+    /// A machine that is open and not saved, as a Boundary support session
+    /// is, is listed under the application's session id and labelled with its
+    /// address. The application opens and attaches only saved machines by
+    /// id, so such a machine is asked for by its address. Asked for by its
+    /// session id, it was refused as "no saved machine is called" that id,
+    /// which the caller may never have typed.
     fn by_label(&self, request: &OpenRequest) -> Result<Option<OpenRequest>, ToolError> {
         let Some(name) = request.host_id.as_deref() else {
             return Ok(None);
         };
         let hosts = self.source.hosts()?;
-        if hosts.iter().any(|host| host.host_id == name) {
-            return Ok(None);
+        if let Some(host) = hosts.iter().find(|host| host.host_id == name) {
+            return Ok(by_address(host, request));
         }
         let named: Vec<&HostRecord> = hosts
             .iter()
@@ -4818,10 +4854,12 @@ impl Plane {
             .collect();
         match named.as_slice() {
             [] => Ok(None),
-            [one] => Ok(Some(OpenRequest {
-                host_id: Some(one.host_id.clone()),
-                ..request.clone()
-            })),
+            [one] => Ok(Some(by_address(one, request).unwrap_or_else(|| {
+                OpenRequest {
+                    host_id: Some(one.host_id.clone()),
+                    ..request.clone()
+                }
+            }))),
             many => Err(ToolError::bad_request(format!(
                 "{} saved machines are called {name}: {}. Open one by its hostId",
                 many.len(),
@@ -4860,7 +4898,7 @@ impl Plane {
             .map(|host| host.address)
             .ok_or_else(|| {
                 ToolError::bad_request(format!(
-                    "no saved machine is called {host_id}; call dvv_hosts for the ids"
+                    "no saved machine is called {host_id}. Open a machine by the hostId dvv_hosts lists, a session that is open already by the limb id dvv_limbs lists (lmb_...), or an address with a protocol"
                 ))
             })
     }
