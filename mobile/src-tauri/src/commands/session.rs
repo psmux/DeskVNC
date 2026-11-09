@@ -255,6 +255,7 @@ pub async fn session_connect(
         paused,
         pending_save,
         background_ended,
+        kind,
     });
     Ok(Connected { session_id: id })
 }
@@ -288,6 +289,7 @@ struct Forward {
     paused: Arc<AtomicBool>,
     pending_save: Arc<Mutex<Option<Secret>>>,
     background_ended: Arc<AtomicBool>,
+    kind: ProtocolKind,
 }
 
 /// Pump one session's events to the UI until the session ends, then say so.
@@ -303,6 +305,7 @@ fn forward_events(f: Forward) {
         paused,
         pending_save,
         background_ended,
+        kind,
     } = f;
     tauri::async_runtime::spawn(async move {
         // The UI sizes its canvas from `desktop-resize`, so no frame goes out
@@ -312,7 +315,12 @@ fn forward_events(f: Forward) {
         // is known.
         let mut sized = false;
         let mut repaint_when_sized = false;
-        while let Some(event) = rx.recv().await {
+        while let Some(mut event) = rx.recv().await {
+            if kind == ProtocolKind::Boundary {
+                if let SessionEvent::StateChanged(state) = event {
+                    event = SessionEvent::StateChanged(events::boundary_state(state));
+                }
+            }
             if let SessionEvent::DesktopResize { .. } = &event {
                 if !sized && repaint_when_sized {
                     let sender = sessions

@@ -9,7 +9,7 @@
 //! handles, plus the few small ones it may show later. Events that are for
 //! the agent plane, audio and terminal bytes are dropped, as on the desktop.
 
-use remote_core::{ProtocolEvent, RdpEvent, SessionEvent};
+use remote_core::{ProtocolEvent, RdpEvent, SessionEvent, SessionState};
 use serde_json::{json, Value};
 
 /// The JSON for one event, or `None` for an event that travels on the binary
@@ -85,6 +85,29 @@ pub fn event_json(session_id: &str, event: &SessionEvent) -> Option<Value> {
     Some(value)
 }
 
+/// A Boundary session's progress, in the words the phone UI keys on.
+///
+/// `boundary-driver` reports each step of a Boundary connect as
+/// `authenticating` with the sentence the session printed as `method`. The
+/// phone UI shows its own copy and keys on `method: "approval"` while the
+/// other side decides, so the two waiting sentences become that, and the
+/// earlier progress sentences (finding the computer, preparing) become plain
+/// `connecting`. Every other state passes through untouched.
+pub fn boundary_state(state: SessionState) -> SessionState {
+    match state {
+        SessionState::Authenticating { method }
+            if method == boundary_session::ATTENDED_WAIT
+                || method == boundary_session::UNATTENDED_WAIT =>
+        {
+            SessionState::Authenticating {
+                method: "approval".into(),
+            }
+        }
+        SessionState::Authenticating { .. } => SessionState::Connecting,
+        other => other,
+    }
+}
+
 /// A `state-changed` the phone itself raises, for the background timeout.
 pub fn disconnected(session_id: &str, reason: &str) -> Value {
     json!({
@@ -101,7 +124,31 @@ pub fn ended(session_id: &str, duration_s: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use remote_core::{CredentialKind, CredentialRequest, SessionState};
+    use remote_core::{CredentialKind, CredentialRequest};
+
+    #[test]
+    fn boundary_waiting_is_approval() {
+        let wait = |m: &str| SessionState::Authenticating { method: m.into() };
+        for m in [
+            boundary_session::ATTENDED_WAIT,
+            boundary_session::UNATTENDED_WAIT,
+        ] {
+            assert_eq!(
+                boundary_state(wait(m)),
+                SessionState::Authenticating {
+                    method: "approval".into()
+                }
+            );
+        }
+        assert_eq!(
+            boundary_state(wait("Finding the computer")),
+            SessionState::Connecting
+        );
+        assert_eq!(
+            boundary_state(SessionState::Connected),
+            SessionState::Connected
+        );
+    }
 
     #[test]
     fn events_are_flat_with_the_contract_keys() {
