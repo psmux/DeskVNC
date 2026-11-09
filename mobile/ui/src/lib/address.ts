@@ -1,0 +1,484 @@
+/**
+ * Ported from the desktop app (ui/src/lib/address.ts) so both read an address
+ * the same way. Keep the two in step; the mobile helpers sit at the bottom.
+ *
+ * One address parser for every place the user types where to connect:
+ * QuickConnect, the host dialog, and anything that pastes a `vnc://` link.
+ *
+ * The forms accepted are the ones other viewers accept, so muscle memory
+ * carries over:
+ *
+ * - `office`              -> office:5900
+ * - `office:1`            -> office:5901   (display number, the VNC convention)
+ * - `office:5901`         -> office:5901   (>= 100 reads as a literal port)
+ * - `office::5901`        -> office:5901   (RealVNC's explicit-port form)
+ * - `[fe80::1%en0]:5901`  -> fe80::1%en0:5901
+ * - `fe80::1`             -> fe80::1:5900  (no room for a port without brackets)
+ * - `vnc://office:5901/`  -> office:5901
+ * - `rdp://box`            -> box:3389
+ * - `rdp://alice@box`      -> box:3389, user alice
+ * - `ssh://box`            -> box:22
+ * - `ssh://alice@box`      -> box:22, user alice
+ * - `boundary://box`       -> a Boundary computer at box, on its usual port
+ * - `boundary://<id>@box`  -> the same, with its machine ID pinned
+ * - `<64 hex characters>`  -> a Boundary computer by machine ID
+ * - `alice@box`            -> box:5900, user alice  (no port typed, so nothing
+ *                             names a protocol; see `presetProtocol` for how
+ *                             a caller decides what badge to preset)
+ *
+ * A protocol is only ever reported when the input NAMED one. `box:3389` comes
+ * back with a null protocol, and so does `alice@box`, because the parser's
+ * job is to say what was typed and a user name is not a protocol; who
+ * resolves that null, and how, is QuickConnect's decision and not the
+ * parser's.
+ */
+
+import type { Protocol } from "../api/contract";
+
+/** Every scheme the parser understands. The phone only connects to vnc, rdp
+ *  and boundary, but it still recognises ssh so it can say so plainly. */
+export type ProtocolKind = "vnc" | "rdp" | "ssh" | "boundary";
+export const DEFAULT_PORT: Record<ProtocolKind, number> = { vnc: 5900, rdp: 3389, ssh: 22, boundary: 0 };
+
+export const DEFAULT_VNC_PORT = DEFAULT_PORT.vnc;
+export const DEFAULT_RDP_PORT = DEFAULT_PORT.rdp;
+export const DEFAULT_SSH_PORT = DEFAULT_PORT.ssh;
+
+/**
+ * Display numbers stop here: `host:99` is display 99, `host:100` is port 100.
+ * The boundary is arbitrary but it is the one every other viewer draws, and no
+ * real deployment uses displays that high.
+ */
+const MAX_DISPLAY_NUMBER = 100;
+
+export interface Endpoint {
+  address: string;
+  port: number;
+  /**
+   * False when the port came from {@link DEFAULT_VNC_PORT} rather than from
+   * what the user typed. The host dialog needs the difference: typing a bare
+   * hostname there must leave a profile's saved port alone.
+   */
+  explicitPort: boolean;
+}
+
+export type AddressResult =
+  | { ok: true; endpoint: Endpoint }
+  | { ok: false; error: string };
+
+export interface Target extends Endpoint {
+  /**
+   * The protocol the input NAMED, or null when it said nothing. Null is not
+   * "vnc": QuickConnect resolves it against a saved profile first, so
+   * `box:3389` still reaches an RDP host saved on that port.
+   */
+  protocol: ProtocolKind | null;
+  /** User name carried in the address (`rdp://alice@box`, `ssh://alice@box`,
+   *  or bare `alice@box`). Never a password. */
+  username: string | null;
+}
+
+export type TargetResult =
+  | { ok: true; target: Target }
+  | { ok: false; error: string };
+
+const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+function isIpv4Literal(value: string): boolean {
+  return IPV4.test(value) && value.split(".").every((octet) => Number(octet) <= 255);
+}
+
+/**
+ * Whether `value` is an IPv6 literal.
+ *
+ * This carries real weight rather than being a nicety: it is what separates
+ * `fe80::1` (an address, default port) from `office::5901` (a host and an
+ * explicit port). So it has to reject anything whose groups are not hex
+ * instead of just counting colons.
+ */
+export function isIpv6Literal(value: string): boolean {
+  const zoned = value.split("%"); // a zone id, as in fe80::1%en0
+  if (zoned.length > 2 || (zoned.length === 2 && zoned[1] === "")) return false;
+  const bare = zoned[0];
+  if (!bare.includes(":")) return false;
+
+  const halves = bare.split("::");
+  if (halves.length > 2) return false; // `::` may appear at most once
+
+  const split = (s: string): string[] => (s === "" ? [] : s.split(":"));
+  const groups = [...split(halves[0]), ...split(halves[1] ?? "")];
+
+  // A trailing IPv4 form (`::ffff:192.0.2.1`) is legal and fills two groups.
+  const last = groups[groups.length - 1];
+  const hasIpv4Tail = last !== undefined && last.includes(".");
+  if (hasIpv4Tail && !isIpv4Literal(last)) return false;
+
+  const hex = hasIpv4Tail ? groups.slice(0, -1) : groups;
+  if (!hex.every((g) => /^[0-9a-fA-F]{1,4}$/.test(g))) return false;
+
+  // `::` stands for at least one omitted group, so a compressed address can
+  // never already carry all eight.
+  const slots = groups.length + (hasIpv4Tail ? 1 : 0);
+  return halves.length === 2 ? slots < 8 : slots === 8;
+}
+
+function endpoint(address: string, digits: string, allowDisplayNumber: boolean): AddressResult {
+  if (address === "") return { ok: false, error: "Enter an address before the colon" };
+  const typed = Number(digits);
+  const port = allowDisplayNumber && typed < MAX_DISPLAY_NUMBER ? DEFAULT_VNC_PORT + typed : typed;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, error: "Port must be between 1 and 65535" };
+  }
+  return { ok: true, endpoint: { address, port, explicitPort: true } };
+}
+
+/** The scheme a URL-ish input names, and the rest of the input after it. */
+function readScheme(raw: string): { protocol: ProtocolKind | null; rest: string; url: boolean } {
+  if (/^(?:rdps?):\/\//i.test(raw)) {
+    return { protocol: "rdp", rest: raw.replace(/^(?:rdps?):\/\//i, ""), url: true };
+  }
+  if (/^ssh:\/\//i.test(raw)) {
+    return { protocol: "ssh", rest: raw.replace(/^ssh:\/\//i, ""), url: true };
+  }
+  if (/^boundary:\/\//i.test(raw)) {
+    return { protocol: "boundary", rest: raw.replace(/^boundary:\/\//i, ""), url: true };
+  }
+  if (/^(?:vncs?|rfb):\/\//i.test(raw)) {
+    return { protocol: "vnc", rest: raw.replace(/^(?:vncs?|rfb):\/\//i, ""), url: true };
+  }
+  return { protocol: null, rest: raw, url: false };
+}
+
+const MACHINE_ID = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * A Boundary target: `id`, `id@host[:port]` or `host[:port]`. The address
+ * keeps the ID in front when one was given, so it travels with the host to
+ * the driver. With no port typed the port is 0, which the driver reads as
+ * the computer's usual one.
+ */
+function parseBoundary(text: string): TargetResult {
+  const boundary = (address: string, port: number, explicitPort: boolean): TargetResult => ({
+    ok: true,
+    target: { address, port, explicitPort, protocol: "boundary", username: null },
+  });
+  if (MACHINE_ID.test(text)) return boundary(text.toLowerCase(), 0, false);
+  // A long run of hex is a machine ID with a character missing or extra,
+  // not a host name anybody has.
+  if (/^[0-9a-fA-F]{40,}$/.test(text)) {
+    return { ok: false, error: `A machine ID has 64 characters, and this has ${text.length}` };
+  }
+  const at = text.lastIndexOf("@");
+  const id = at >= 0 ? text.slice(0, at) : null;
+  if (id !== null && !MACHINE_ID.test(id)) {
+    return { ok: false, error: "Before the @ goes the 64 character machine ID" };
+  }
+  // Parsed as an RDP address: no display numbers, so `box:6000` is a port.
+  const where = parseConnectTarget(text.slice(at + 1), "rdp");
+  if (!where.ok) {
+    return {
+      ok: false,
+      error:
+        at >= 0 || /[.:]/.test(text)
+          ? where.error
+          : "Enter the 64 character ID shown under Unattended access in DeskVNC Support, or an address",
+    };
+  }
+  const { address, port, explicitPort } = where.target;
+  const prefix = id === null ? "" : `${id.toLowerCase()}@`;
+  return boundary(`${prefix}${address}`, explicitPort ? port : 0, explicitPort);
+}
+
+/**
+ * Parse what the user typed, keeping the protocol it named.
+ *
+ * @param assume the protocol to parse AS when the input names none. The host
+ *        dialog passes the draft's protocol, so `box:1` in an RDP host's
+ *        address field reads as port 1 rather than as display 1 on 3390.
+ *        QuickConnect passes nothing and resolves the null itself.
+ *
+ * The error strings are written to be shown verbatim next to the field.
+ */
+export function parseConnectTarget(input: string, assume?: ProtocolKind): TargetResult {
+  const trimmed = input.trim();
+  if (trimmed === "") return { ok: false, error: "Enter an address" };
+
+  const { protocol: named, rest, url } = readScheme(trimmed);
+
+  // A Boundary computer is reached by the machine ID that DeskVNC Support
+  // shows under unattended access, or by its address like any other.
+  if (named === "boundary" || (named === null && (assume === "boundary" || MACHINE_ID.test(trimmed)))) {
+    return parseBoundary(named === "boundary" ? rest.replace(/[/?#].*$/, "") : trimmed);
+  }
+  let raw = rest;
+  let username: string | null = null;
+  let protocol = named;
+
+  if (url) {
+    // A "connect" link off a wiki page or a chat message arrives as a URL, so
+    // accept one rather than making the user edit it down by hand first. Only
+    // a real URL gets its path trimmed: doing that unconditionally would turn
+    // `192.168.1.20/24` into a silent connect to `192.168.1.20`.
+    raw = raw.replace(/[/?#].*$/, "");
+  }
+
+  // Userinfo. An RDP or SSH scheme CAPTURES it, split at the LAST `@`, so
+  // `rdp://alice@corp.example@box` yields user `alice@corp.example` and host
+  // `box`. Splitting at the first would mangle a UPN, which is the commonest
+  // form a domain user types. The VNC schemes keep discarding userinfo, so
+  // nothing about VNC changes: RFB carries no user in the address form.
+  const at = raw.lastIndexOf("@");
+  if (at >= 0) {
+    if (protocol === "vnc") {
+      // VeNCrypt asks for a username at its own prompt, so userinfo on a
+      // `vnc://` link carries no meaning and is discarded exactly as it
+      // always was.
+      raw = raw.slice(at + 1);
+    } else {
+      // Capture the userinfo for RDP, SSH, or no scheme at all. Nothing
+      // regresses: the parser used to reject `@` outright for anything but a
+      // `vnc://` link.
+      //
+      // Userinfo alone no longer decides `protocol`, though. It used to force
+      // RDP, which connected `alice@box` somewhere the user never asked for:
+      // `user@host` is the single most common way to write an SSH target,
+      // not an RDP one, and the shape of the address gives no way to tell
+      // the two apart. So a bare `user@host` reports no protocol at all,
+      // exactly like `box:3389` already does, leaving it to the caller (via
+      // `presetProtocol`, once a port is known) to decide what to preset.
+      const user = raw.slice(0, at);
+      raw = raw.slice(at + 1);
+      if (user !== "") username = user;
+    }
+  }
+
+  if (raw === "") return { ok: false, error: "Enter an address" };
+  if (/\s/.test(raw)) return { ok: false, error: "An address cannot contain spaces" };
+  if (/[/?#@]/.test(raw)) return { ok: false, error: "An address cannot contain / ? # or @" };
+
+  // Display numbers are a VNC convention and do not exist for RDP or SSH, so
+  // `rdp://box:1` is port 1 and not 3390, and `ssh://box:1` is port 1 and not
+  // 5901. Absent any other information, "vnc" is the existing default this
+  // falls back to, unchanged from before RDP or SSH existed.
+  const resolved = protocol ?? assume ?? "vnc";
+  const displayNumbers = resolved === "vnc";
+  const fallbackPort = DEFAULT_PORT[resolved];
+
+  const done = (result: AddressResult): TargetResult =>
+    result.ok
+      ? { ok: true, target: { ...result.endpoint, protocol, username } }
+      : result;
+
+  const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(raw);
+  if (bracketed) {
+    const [, inner, digits] = bracketed;
+    if (!isIpv6Literal(inner)) return { ok: false, error: `${inner} is not a valid IPv6 address` };
+    // Brackets exist to delimit the address, so a number after them is always
+    // a literal port. Reading `[::1]:1` as display 1 would be a nasty surprise.
+    if (digits === undefined) {
+      return {
+        ok: true,
+        target: { address: inner, port: fallbackPort, explicitPort: false, protocol, username },
+      };
+    }
+    return done(endpoint(inner, digits, false));
+  }
+  if (raw.includes("[") || raw.includes("]")) {
+    return { ok: false, error: "Write an IPv6 address as [::1] or [::1]:5901" };
+  }
+
+  // Before the `host::port` rule below, or `fe80::1` would parse as host
+  // `fe80` on port 1.
+  //
+  // The two forms genuinely collide when a hostname is one to four hex
+  // characters: `dc::5901` is both "host dc, port 5901" and a valid literal.
+  // The literal wins, because guessing wrong on `fe80::1` breaks something
+  // common while `dc:5901`, with one colon, is an unambiguous way to say the
+  // other thing.
+  if (isIpv6Literal(raw)) {
+    return {
+      ok: true,
+      target: { address: raw, port: fallbackPort, explicitPort: false, protocol, username },
+    };
+  }
+
+  const explicit = /^(.+?)::(\d+)$/.exec(raw);
+  if (explicit) {
+    // `1::2::3` reaches here because it is not a valid literal, and reading it
+    // as host `1::2` port 3 would be a guess dressed up as an answer. An IPv6
+    // address with a port has exactly one spelling and it has brackets.
+    if (isIpv6Literal(explicit[1])) {
+      return { ok: false, error: "Write an IPv6 address as [::1] or [::1]:5901" };
+    }
+    return done(endpoint(explicit[1], explicit[2], false));
+  }
+
+  const suffixed = /^(.+?):(\d+)$/.exec(raw);
+  if (suffixed) return done(endpoint(suffixed[1], suffixed[2], displayNumbers));
+
+  if (raw.startsWith(":")) return { ok: false, error: "Enter an address before the colon" };
+  if (raw.includes(":")) return { ok: false, error: "Add a port or display number after the colon" };
+  return {
+    ok: true,
+    target: { address: raw, port: fallbackPort, explicitPort: false, protocol, username },
+  };
+}
+
+/**
+ * The original two-field parser, kept as a thin wrapper so nothing importing
+ * it has to change in the same commit.
+ */
+export function parseConnectAddress(input: string): AddressResult {
+  const result = parseConnectTarget(input);
+  if (!result.ok) return result;
+  const { address, port, explicitPort } = result.target;
+  return { ok: true, endpoint: { address, port, explicitPort } };
+}
+
+/**
+ * Render a target the way it should be typed back in.
+ *
+ * "The way it should be typed back in" is the whole contract: QuickConnect
+ * stores these strings and re-parses them later, so anything that does not
+ * survive the round trip connects somewhere the user never went. That is why
+ * a low VNC port uses the explicit form: `office:42` would read back as
+ * display 42, which is port 5942. And it is why an RDP or SSH target always
+ * carries its scheme, even on the default port: a bare `box` reads back as
+ * VNC, and a bare `user@host` reads back with no protocol at all.
+ */
+export function formatTarget(
+  protocol: ProtocolKind,
+  address: string,
+  port: number,
+  username?: string | null,
+): string {
+  const host = isIpv6Literal(address) ? `[${address}]` : address;
+  if (protocol === "rdp") {
+    const user = username ? `${username}@` : "";
+    return port === DEFAULT_RDP_PORT
+      ? `rdp://${user}${host}`
+      : `rdp://${user}${host}:${port}`;
+  }
+  if (protocol === "boundary") {
+    if (MACHINE_ID.test(address)) return address;
+    const at = address.lastIndexOf("@");
+    const bare = address.slice(at + 1);
+    const where = `${address.slice(0, at + 1)}${isIpv6Literal(bare) ? `[${bare}]` : bare}`;
+    return port === 0 ? `boundary://${where}` : `boundary://${where}:${port}`;
+  }
+  if (protocol === "ssh") {
+    const user = username ? `${username}@` : "";
+    return port === DEFAULT_SSH_PORT
+      ? `ssh://${user}${host}`
+      : `ssh://${user}${host}:${port}`;
+  }
+  if (isIpv6Literal(address)) {
+    return port === DEFAULT_VNC_PORT ? host : `${host}:${port}`;
+  }
+  if (port === DEFAULT_VNC_PORT) return address;
+  return port < MAX_DISPLAY_NUMBER ? `${address}::${port}` : `${address}:${port}`;
+}
+
+/** The VNC-only form, kept for existing importers. */
+export function formatEndpoint(address: string, port: number): string {
+  return formatTarget("vnc", address, port);
+}
+
+/**
+ * The protocol to offer when the input named none and no saved profile
+ * matched.
+ *
+ * Port 3389 presets RDP and port 22 presets SSH, and the chip shows it before
+ * Enter so the user can flip it in one click. The hard rule this exists for:
+ * ambiguity never resolves silently to VNC against one of those ports. What
+ * must not ship is a connect that sends an RFB handshake at 3389 or 22
+ * without having said so.
+ *
+ * The inference lives here rather than in the parser on purpose. The parser
+ * reports what the input NAMED; presetting is a separate, visible, reversible
+ * decision made one layer up. That is also why `alice@box` alone does not
+ * end up here presetting SSH: with no port typed, there is nothing for this
+ * function to look at, so the parser's null protocol stands until the user
+ * adds one.
+ */
+export function presetProtocol(target: { port: number }): ProtocolKind {
+  if (target.port === DEFAULT_SSH_PORT) return "ssh";
+  return target.port === DEFAULT_RDP_PORT ? "rdp" : "vnc";
+}
+
+/**
+ * Where to dial a row the network scan found, and what to save for it.
+ *
+ * Most rows are their address and port as found. A Boundary computer also
+ * told the scan its machine ID, so the address carries it in front
+ * (`id@192.168.1.42`): the key is then pinned rather than asked for, and
+ * another machine that later takes the address cannot answer in its place.
+ * The port travels as found, since a computer that could not have 5940
+ * listens somewhere else.
+ */
+export function discoveredEndpoint(d: {
+  address: string;
+  port: number;
+  protocol?: ProtocolKind | null;
+  boundaryId?: string | null;
+}): { protocol: ProtocolKind; address: string; port: number } {
+  const protocol = d.protocol ?? "vnc";
+  const id = protocol === "boundary" && d.boundaryId && MACHINE_ID.test(d.boundaryId) ? d.boundaryId : null;
+  return {
+    protocol,
+    address: id ? `${id.toLowerCase()}@${d.address}` : d.address,
+    port: d.port,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phone helpers
+// ---------------------------------------------------------------------------
+
+
+export interface PhoneTarget {
+  protocol: Protocol | null;
+  address: string;
+  port: number;
+  explicitPort: boolean;
+  username: string | null;
+}
+
+export type PhoneTargetResult = { ok: true; target: PhoneTarget } | { ok: false; error: string };
+
+/**
+ * Read what someone typed or pasted into the phone's address field. Like the
+ * desktop parser, plus two things the phone needs: an `ssh://` link is turned
+ * away in plain words, and a typed port of 3389 presets Remote Desktop.
+ */
+export function parsePhoneTarget(input: string, assume?: Protocol): PhoneTargetResult {
+  const result = parseConnectTarget(input, assume);
+  if (!result.ok) return result;
+  const t = result.target;
+  if (t.protocol === "ssh") {
+    return { ok: false, error: "That is a terminal link. The phone app opens screens, not terminals." };
+  }
+  let protocol: Protocol | null = t.protocol;
+  if (protocol === null && t.explicitPort) {
+    const preset = presetProtocol(t);
+    protocol = preset === "ssh" ? null : preset;
+  }
+  return {
+    ok: true,
+    target: { protocol, address: t.address, port: t.port, explicitPort: t.explicitPort, username: t.username },
+  };
+}
+
+/**
+ * Does this pasted text look like a whole link (`rdp://`, `vnc://`) or an
+ * address with a port, so the wizard should fill in everything at once?
+ */
+export function looksLikeLink(input: string): boolean {
+  const s = input.trim();
+  return /^(?:rdps?|vncs?|rfb|boundary):\/\//i.test(s) || /^[^\s:/]+:\d{2,5}$/.test(s) || /^\[[^\]]+\]:\d+$/.test(s);
+}
+
+/** The port a protocol uses when nobody says otherwise. */
+export function defaultPort(protocol: Protocol): number {
+  return DEFAULT_PORT[protocol];
+}
