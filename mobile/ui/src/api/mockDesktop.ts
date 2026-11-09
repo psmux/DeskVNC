@@ -10,8 +10,16 @@ import type { HostOs } from "./contract";
 
 export type DesktopStyle = "windows" | "mac" | "linux" | "raspberry" | "demo";
 
+type WinKind = "notes" | "hello" | "photos" | "weather" | "music" | "sheet" | "calendar" | "terminal" | "chart" | "gallery";
+
+/**
+ * Which windows are open. `try` is the interactive one every live session
+ * shows; the others only dress the card pictures of the sample computers.
+ */
+export type Scene = "try" | "studio" | "family" | "office" | "server" | "pi" | "frontdesk";
+
 interface Win {
-  id: "notes" | "hello" | "photos" | "weather";
+  id: WinKind;
   title: string;
   x: number;
   y: number;
@@ -57,7 +65,16 @@ export class FakeDesktop {
   private toast: { text: string; until: number } | null = null;
   dirty = true;
 
-  constructor(style: DesktopStyle, name: string, width = 1280, height = 800) {
+  private wallpaper: [string, string, string, string];
+  private terminalLines: string[] = [];
+
+  constructor(
+    style: DesktopStyle,
+    name: string,
+    width = 1280,
+    height = 800,
+    opts: { scene?: Scene; wallpaper?: [string, string, string, string] } = {},
+  ) {
     this.style = style;
     this.name = name;
     this.width = width;
@@ -73,14 +90,67 @@ export class FakeDesktop {
     this.ctx = this.canvas.getContext("2d") as CanvasRenderingContext2D;
     const s = width / 1280;
     const top = style === "mac" || style === "raspberry" ? 60 : 36;
-    this.wins = [
-      { id: "photos", title: "Holiday photos", x: 700 * s, y: (top + 210) * s, w: 470 * s, h: 330 * s },
-      { id: "weather", title: "Weather", x: 830 * s, y: (top + 10) * s, w: 340 * s, h: 170 * s },
-      { id: "hello", title: "Try me", x: 90 * s, y: (top + 380) * s, w: 380 * s, h: 220 * s },
-      { id: "notes", title: "Notes", x: 70 * s, y: (top + 10) * s, w: 560 * s, h: 330 * s },
-    ];
+    this.wallpaper = opts.wallpaper ?? WALLPAPERS[style];
+    // Card pictures sit under a badge in the top corner, so their windows
+    // start a little lower and end a little shorter to stay in view.
+    const card = (opts.scene ?? "try") !== "try";
+    const win = (id: WinKind, title: string, x: number, y: number, w: number, h: number): Win => ({
+      id,
+      title,
+      x: x * s,
+      y: (top + y + (card ? 70 : 0)) * s,
+      w: w * s,
+      h: (h - (card ? 50 : 0)) * s,
+    });
+    const left = style === "linux" ? 100 : 60;
+    switch (opts.scene ?? "try") {
+      case "studio":
+        this.wins = [win("weather", "Weather", 880, 10, 340, 170), win("music", "Track mixer", 60, 40, 780, 470)];
+        break;
+      case "family":
+        this.wins = [win("notes", "Shopping list", 820, 300, 380, 260), win("gallery", "Summer by the sea", 80, 20, 700, 520)];
+        break;
+      case "office":
+        this.wins = [win("calendar", "This week", 640, 230, 560, 360), win("sheet", "Budget", 60, 20, 640, 400)];
+        break;
+      case "server":
+        this.wins = [
+          win("chart", "Disk and network", 680, 250, 520, 300),
+          win("terminal", "backups", 640, 20, 560, 210),
+          win("terminal", "garage", left, 20, 520, 520),
+        ];
+        this.terminalLines = [
+          "$ ./backup.sh photos",
+          "copying 1,204 files ... done",
+          "backup finished in 3 min",
+          "$ uptime",
+          "up 41 days, load 0.12",
+          "$ df -h /data",
+          "/data  1.8T  62% used",
+          "$ _",
+        ];
+        break;
+      case "pi":
+        this.wins = [win("terminal", "sensors", 720, 300, 480, 260), win("chart", "Greenhouse temperature", 80, 20, 660, 400)];
+        this.terminalLines = ["$ python3 read_sensors.py", "soil 41%  air 22.5\u00B0C", "soil 41%  air 22.6\u00B0C", "fan off, window open", "$ _"];
+        break;
+      case "frontdesk":
+        this.wins = [win("notes", "Messages", 840, 330, 360, 230), win("calendar", "Bookings", 60, 20, 760, 480)];
+        break;
+      default:
+        this.wins = [
+          win("photos", "Holiday photos", 700, 210, 470, 330),
+          win("weather", "Weather", 830, 10, 340, 170),
+          win("hello", "Try me", 90, 380, 380, 220),
+          win("notes", "Notes", 70, 10, 560, 330),
+        ];
+    }
     this.notes =
-      style === "demo"
+      opts.scene === "family"
+        ? "Bread\nMilk\nStrawberries\nBirthday card for Jo\n"
+        : opts.scene === "frontdesk"
+          ? "10:30 courier, parcel at the desk\nCall back the plumber\nNew printer paper ordered\n"
+          : style === "demo"
         ? "Welcome to the demo computer!\nTap anywhere, drag a window by its title bar, or open the keyboard and type. Your words appear here.\n"
         : `Hello from ${name}.\nThis is a pretend desktop, made up for trying the app.\nType something and it shows up here.\n`;
   }
@@ -201,7 +271,7 @@ export class FakeDesktop {
   render(now = performance.now()): Uint8ClampedArray {
     const { ctx, width: W, height: H } = this;
     const s = W / 1280;
-    const [skyTop, skyBottom, near, far] = WALLPAPERS[this.style];
+    const [skyTop, skyBottom, near, far] = this.wallpaper;
 
     // Wallpaper: sky, sun, two rolling hills.
     const sky = ctx.createLinearGradient(0, 0, 0, H);
@@ -524,6 +594,242 @@ export class FakeDesktop {
       ctx.fillStyle = dim;
       ctx.font = `${17 * s}px ${FONT}`;
       ctx.fillText("Mostly sunny", w.x + 172 * s, w.y + th + 102 * s);
+    } else {
+      this.extraWindow(w, { s, th, ink, dim, dark });
+    }
+  }
+
+  /** A seeded wobble, so the made up data looks the same every time. */
+  private wobble(i: number, seed = 1): number {
+    const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453;
+    return x - Math.floor(x);
+  }
+
+  private photo(x: number, y: number, w: number, h: number, i: number): void {
+    const { ctx } = this;
+    const s = this.width / 1280;
+    const scenes = [
+      ["#8fd3ff", "#3b82f6", "#ffe08a"],
+      ["#ffcf70", "#ff8a65", "#fff3c4"],
+      ["#b5f2c2", "#3fbf5f", "#ffffff"],
+      ["#ffc2dc", "#f0508c", "#fff0f6"],
+      ["#d9ccff", "#7c5cff", "#fff7d1"],
+      ["#a7f3e4", "#14b8a6", "#fffbe6"],
+      ["#fff0a8", "#f5b52e", "#ffffff"],
+      ["#c9d6ff", "#5b7cfa", "#ffe8f0"],
+    ][i % 8];
+    const g = ctx.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, scenes[0]);
+    g.addColorStop(1, scenes[1]);
+    ctx.fillStyle = g;
+    this.round(x, y, w, h, 10 * s);
+    ctx.fill();
+    ctx.save();
+    this.round(x, y, w, h, 10 * s);
+    ctx.clip();
+    ctx.fillStyle = scenes[2];
+    ctx.beginPath();
+    ctx.arc(x + w * (0.25 + 0.5 * this.wobble(i, 3)), y + h * 0.3, h * 0.13, 0, Math.PI * 2);
+    ctx.fill();
+    // Sea or hills along the bottom.
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    ctx.beginPath();
+    ctx.moveTo(x, y + h);
+    for (let k = 0; k <= 8; k++) ctx.lineTo(x + (w * k) / 8, y + h * (0.68 + 0.08 * Math.sin(k + i)));
+    ctx.lineTo(x + w, y + h);
+    ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.16)";
+    ctx.beginPath();
+    ctx.moveTo(x + w * 0.05, y + h);
+    ctx.lineTo(x + w * (0.3 + 0.2 * this.wobble(i, 5)), y + h * 0.5);
+    ctx.lineTo(x + w * 0.75, y + h);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  private extraWindow(w: Win, t: { s: number; th: number; ink: string; dim: string; dark: boolean }): void {
+    const { ctx } = this;
+    const { s, th, ink, dim, dark } = t;
+    const bodyX = w.x + 18 * s;
+    const bodyY = w.y + th + 16 * s;
+    const bodyW = w.w - 36 * s;
+    const bodyH = w.h - th - 32 * s;
+    const line = dark ? "#3a4058" : "#ece9f6";
+
+    if (w.id === "music") {
+      const colors = ["#7c5cff", "#f0508c", "#14b8a6", "#f5b52e"];
+      const names = ["Vocals", "Guitar", "Drums", "Keys"];
+      const rowH = (bodyH - 70 * s) / 4;
+      names.forEach((name, r) => {
+        const y = bodyY + r * rowH;
+        ctx.fillStyle = colors[r];
+        this.round(bodyX, y + 6 * s, 110 * s, rowH - 12 * s, 10 * s);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = `600 ${16 * s}px ${FONT}`;
+        ctx.fillText(name, bodyX + 14 * s, y + rowH / 2 + 6 * s);
+        ctx.fillStyle = line;
+        this.round(bodyX + 124 * s, y + 6 * s, bodyW - 124 * s, rowH - 12 * s, 10 * s);
+        ctx.fill();
+        // A waveform of thin bars.
+        ctx.fillStyle = colors[r];
+        const bars = 70;
+        const bw = (bodyW - 140 * s) / bars;
+        for (let b = 0; b < bars; b++) {
+          const amp = (0.25 + 0.75 * this.wobble(b + r * 100, r + 1)) * Math.abs(Math.sin(b / (5 + r)));
+          const bh = Math.max(3 * s, amp * (rowH - 26 * s));
+          ctx.fillRect(bodyX + 132 * s + b * bw, y + rowH / 2 - bh / 2, Math.max(1, bw * 0.6), bh);
+        }
+      });
+      // Playhead and transport.
+      ctx.fillStyle = "#ff4d4d";
+      ctx.fillRect(bodyX + 124 * s + (bodyW - 124 * s) * 0.42, bodyY, 3 * s, rowH * 4);
+      const cy = bodyY + rowH * 4 + 34 * s;
+      ctx.fillStyle = "#7c5cff";
+      ctx.beginPath();
+      ctx.arc(w.x + w.w / 2, cy, 24 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.moveTo(w.x + w.w / 2 - 7 * s, cy - 11 * s);
+      ctx.lineTo(w.x + w.w / 2 + 11 * s, cy);
+      ctx.lineTo(w.x + w.w / 2 - 7 * s, cy + 11 * s);
+      ctx.fill();
+      ctx.fillStyle = dim;
+      ctx.font = `600 ${18 * s}px ${FONT}`;
+      ctx.fillText("1:42 / 3:58", bodyX, cy + 6 * s);
+      ctx.textAlign = "right";
+      ctx.fillText("Sunday song, take 3", bodyX + bodyW, cy + 6 * s);
+      ctx.textAlign = "left";
+    } else if (w.id === "gallery") {
+      const cols = 4;
+      const rows = 3;
+      const gap = 10 * s;
+      const cw = (bodyW - gap * (cols - 1)) / cols;
+      const ch = (bodyH - gap * (rows - 1)) / rows;
+      for (let i = 0; i < cols * rows; i++) {
+        const c = i % cols;
+        const r = Math.floor(i / cols);
+        // The first picture is a big one, spanning two by two.
+        if (i === 0) this.photo(bodyX, bodyY, cw * 2 + gap, ch * 2 + gap, 0);
+        else if (!(r < 2 && c < 2)) this.photo(bodyX + c * (cw + gap), bodyY + r * (ch + gap), cw, ch, i);
+      }
+      ctx.fillStyle = "#f0508c";
+      ctx.beginPath();
+      const hx = bodyX + 24 * s;
+      const hy = bodyY + 24 * s;
+      ctx.arc(hx - 6 * s, hy, 8 * s, 0, Math.PI * 2);
+      ctx.arc(hx + 6 * s, hy, 8 * s, 0, Math.PI * 2);
+      ctx.moveTo(hx - 14 * s, hy + 3 * s);
+      ctx.lineTo(hx, hy + 18 * s);
+      ctx.lineTo(hx + 14 * s, hy + 3 * s);
+      ctx.fill();
+    } else if (w.id === "sheet") {
+      const cols = 5;
+      const rows = 9;
+      const cw = bodyW / cols;
+      const rh = (bodyH * 0.62) / rows;
+      const heads = ["Month", "Rent", "Food", "Travel", "Saved"];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const x = bodyX + c * cw;
+          const y = bodyY + r * rh;
+          ctx.fillStyle = r === 0 ? "#7c5cff" : r % 2 ? (dark ? "#2c3247" : "#f7f5fd") : dark ? "#262b3d" : "#ffffff";
+          ctx.fillRect(x, y, cw - 1, rh - 1);
+          ctx.fillStyle = r === 0 ? "#fff" : c === 0 ? ink : dim;
+          ctx.font = `${r === 0 ? 600 : 400} ${14 * s}px ${FONT}`;
+          const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
+          const text = r === 0 ? heads[c] : c === 0 ? months[r - 1] : String(Math.round(120 + 880 * this.wobble(r * 7 + c, 2)));
+          ctx.fillText(text, x + 8 * s, y + rh / 2 + 5 * s);
+        }
+      }
+      // A little bar chart under the table.
+      const chartY = bodyY + bodyH * 0.68;
+      const chartH = bodyH * 0.3;
+      for (let b = 0; b < 8; b++) {
+        const v = 0.3 + 0.7 * this.wobble(b, 9);
+        ctx.fillStyle = b === 7 ? "#14b8a6" : "#c4b5fd";
+        this.round(bodyX + b * (bodyW / 8) + 8 * s, chartY + chartH * (1 - v), bodyW / 8 - 16 * s, chartH * v, 6 * s);
+        ctx.fill();
+      }
+    } else if (w.id === "calendar") {
+      const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+      const cw = bodyW / days.length;
+      ctx.font = `600 ${15 * s}px ${FONT}`;
+      days.forEach((d, i) => {
+        ctx.fillStyle = i === 2 ? "#7c5cff" : dim;
+        ctx.fillText(d, bodyX + i * cw + 8 * s, bodyY + 14 * s);
+        ctx.fillStyle = line;
+        ctx.fillRect(bodyX + i * cw, bodyY + 26 * s, 1, bodyH - 26 * s);
+      });
+      const events: [number, number, number, string, string][] = [
+        [0, 0.05, 0.18, "#3b82f6", "Team call"],
+        [0, 0.5, 0.2, "#14b8a6", "Lunch"],
+        [1, 0.2, 0.3, "#f0508c", "Dentist"],
+        [2, 0.08, 0.16, "#f5b52e", "Delivery"],
+        [2, 0.42, 0.34, "#7c5cff", "Workshop"],
+        [3, 0.3, 0.2, "#3b82f6", "Review"],
+        [4, 0.12, 0.22, "#14b8a6", "Gym"],
+        [4, 0.6, 0.24, "#f97a3c", "Pizza night"],
+      ];
+      const top = bodyY + 30 * s;
+      const span = bodyH - 30 * s;
+      for (const [d, y0, hh, c, label] of events) {
+        ctx.fillStyle = c;
+        this.round(bodyX + d * cw + 5 * s, top + span * y0, cw - 10 * s, span * hh, 8 * s);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = `600 ${14 * s}px ${FONT}`;
+        ctx.fillText(label, bodyX + d * cw + 13 * s, top + span * y0 + 20 * s, cw - 24 * s);
+      }
+    } else if (w.id === "terminal") {
+      ctx.fillStyle = "#151a28";
+      this.round(w.x + 4 * s, w.y + th, w.w - 8 * s, w.h - th - 4 * s, 12 * s);
+      ctx.fill();
+      ctx.font = `${17 * s}px ui-monospace, Menlo, Consolas, monospace`;
+      const lines = w.title === "backups" ? this.terminalLines.slice(0, 3) : this.terminalLines;
+      lines.forEach((l, i) => {
+        ctx.fillStyle = l.startsWith("$") ? "#3ddc8f" : "#d6dcf5";
+        ctx.fillText(l, bodyX, bodyY + 14 * s + i * 28 * s);
+      });
+    } else if (w.id === "chart") {
+      const n = 24;
+      const pts: [number, number][] = [];
+      for (let i = 0; i < n; i++) {
+        const v = 0.45 + 0.25 * Math.sin(i / 3.2) + 0.15 * this.wobble(i, 4);
+        pts.push([bodyX + (bodyW * i) / (n - 1), bodyY + bodyH * (1 - v)]);
+      }
+      ctx.strokeStyle = line;
+      ctx.lineWidth = 1;
+      for (let g = 0; g <= 4; g++) {
+        ctx.beginPath();
+        ctx.moveTo(bodyX, bodyY + (bodyH * g) / 4);
+        ctx.lineTo(bodyX + bodyW, bodyY + (bodyH * g) / 4);
+        ctx.stroke();
+      }
+      const grad = ctx.createLinearGradient(0, bodyY, 0, bodyY + bodyH);
+      grad.addColorStop(0, "rgba(20,184,166,0.45)");
+      grad.addColorStop(1, "rgba(20,184,166,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], bodyY + bodyH);
+      pts.forEach(([x, y]) => ctx.lineTo(x, y));
+      ctx.lineTo(pts[n - 1][0], bodyY + bodyH);
+      ctx.fill();
+      ctx.strokeStyle = "#14b8a6";
+      ctx.lineWidth = 4 * s;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.stroke();
+      const [lx, ly] = pts[n - 1];
+      ctx.fillStyle = "#14b8a6";
+      ctx.beginPath();
+      ctx.arc(lx, ly, 7 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = ink;
+      ctx.font = `700 ${30 * s}px ${FONT}`;
+      ctx.fillText(w.title.startsWith("Green") ? "22.6\u00B0" : "62%", bodyX + 6 * s, bodyY + 34 * s);
     }
   }
 

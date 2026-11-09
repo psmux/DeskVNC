@@ -12,7 +12,7 @@ import { Ground, LINE, PAPER, Sparkle, stroke, type ArtProps } from "./common";
 export const PROTOCOL_LABEL: Record<Protocol, string> = {
   rdp: "Remote Desktop",
   vnc: "Screen sharing",
-  boundary: "Help code",
+  boundary: "Boundary code",
 };
 
 export const PROTOCOL_TITLE: Record<Protocol, string> = {

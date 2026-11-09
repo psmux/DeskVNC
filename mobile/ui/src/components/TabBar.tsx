@@ -7,7 +7,7 @@ import { TabIcon, type TabKey } from "../art/Icons";
 export const TABS: { key: TabKey; label: string }[] = [
   { key: "computers", label: "Computers" },
   { key: "nearby", label: "Nearby" },
-  { key: "help", label: "Help" },
+  { key: "help", label: "Help someone" },
   { key: "settings", label: "Settings" },
 ];
 

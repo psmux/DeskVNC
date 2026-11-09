@@ -22,7 +22,25 @@ import type {
   SessionEvent,
   SessionState,
 } from "./contract";
-import { arrowCursor, FakeDesktop, styleForOs, type DesktopStyle } from "./mockDesktop";
+import { swatch } from "../theme/palette";
+import { arrowCursor, FakeDesktop, styleForOs, type DesktopStyle, type Scene } from "./mockDesktop";
+
+/** What each sample computer's card picture shows, tinted with its own colour. */
+const CARD_SCENES: Record<string, Scene> = {
+  studio: "studio",
+  mum: "family",
+  officemac: "office",
+  garage: "server",
+  pi: "pi",
+  reception: "frontdesk",
+};
+
+function cardLook(host: Host): { scene: Scene; wallpaper?: [string, string, string, string] } {
+  const scene = CARD_SCENES[host.id] ?? "try";
+  if (host.os === "linux") return { scene };
+  const sw = swatch(host.color);
+  return { scene, wallpaper: [sw.main, sw.soft, sw.deep, sw.main] };
+}
 
 const HOSTS_KEY = "deskvnc.mock.hosts";
 const THUMBS_KEY = "deskvnc.mock.thumbs";
@@ -37,7 +55,7 @@ function seedHosts(): Host[] {
     { ...base, id: "studio", name: "Studio PC", protocol: "rdp", address: "10.0.0.21", port: 3389, os: "windows", color: "blue", favorite: true, username: "alex", hasPassword: true, lastConnectedAt: now - 2 * 3600_000, hasThumbnail: true },
     { ...base, id: "mum", name: "Mum's laptop", protocol: "boundary", address: "", port: 0, os: "windows", color: "rose", favorite: true, lastConnectedAt: now - 3 * DAY, hasThumbnail: true, boundaryInvitation: "boundary1:mock-mums-laptop" },
     { ...base, id: "officemac", name: "Office Mac", protocol: "vnc", address: "192.0.2.40", port: 5900, os: "mac", color: "violet", favorite: false, lastConnectedAt: now - 6 * DAY, hasThumbnail: true },
-    { ...base, id: "pi", name: "Raspberry Pi", protocol: "vnc", address: "10.0.0.31", port: 5901, os: "raspberry", color: "green", favorite: false },
+    { ...base, id: "pi", name: "Raspberry Pi", protocol: "vnc", address: "10.0.0.31", port: 5901, os: "raspberry", color: "green", favorite: false, lastConnectedAt: now - 9 * DAY, hasThumbnail: true },
     { ...base, id: "garage", name: "Garage server", protocol: "vnc", address: "10.0.0.50", port: 5900, os: "linux", color: "slate", favorite: false, lastConnectedAt: now - 20 * DAY, hasThumbnail: true, hasPassword: true },
     { ...base, id: "reception", name: "Reception desk", protocol: "rdp", address: "192.0.2.77", port: 3389, os: "windows", color: "sun", favorite: false },
   ];
@@ -394,7 +412,7 @@ export function createMockApi(): Api {
   async function thumbnailFor(host: Host): Promise<string | null> {
     if (!host.hasThumbnail) return null;
     if (thumbs[host.id]) return thumbs[host.id];
-    const d = new FakeDesktop(styleForOs(host.os), host.name, 960, 600);
+    const d = new FakeDesktop(styleForOs(host.os), host.name, 960, 600, cardLook(host));
     const url = await d.thumbnail(480);
     thumbs[host.id] = url;
     return url;
