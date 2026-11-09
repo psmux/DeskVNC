@@ -81,8 +81,8 @@ export class FakeDesktop {
     ];
     this.notes =
       style === "demo"
-        ? "Welcome to the demo computer!\nTap anywhere, drag a window by its title bar, or open the keyboard and type. Your words appear here.\n\n"
-        : `Hello from ${name}.\nThis is a pretend desktop, made up for trying the app.\n\n`;
+        ? "Welcome to the demo computer!\nTap anywhere, drag a window by its title bar, or open the keyboard and type. Your words appear here.\n"
+        : `Hello from ${name}.\nThis is a pretend desktop, made up for trying the app.\nType something and it shows up here.\n`;
   }
 
   /** Whether the next frame differs from the last one sent. */

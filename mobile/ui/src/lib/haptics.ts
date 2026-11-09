@@ -19,7 +19,11 @@ const PATTERNS: Record<HapticKind, number | number[]> = {
 
 let backend: Backend = (kind) => {
   try {
-    if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate(PATTERNS[kind]);
+    if (typeof navigator === "undefined" || !("vibrate" in navigator)) return;
+    // Browsers refuse (and log) a vibration before the first tap.
+    const activation = (navigator as Navigator & { userActivation?: { hasBeenActive: boolean } }).userActivation;
+    if (activation && !activation.hasBeenActive) return;
+    navigator.vibrate(PATTERNS[kind]);
   } catch {
     // Some webviews throw when vibration is not allowed. Silence is fine.
   }

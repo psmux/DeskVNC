@@ -27,6 +27,7 @@ function Shell() {
 
   return (
     <div className="flex h-full">
+      <div className="contents" inert={!!(app.wizard || app.session)}>
       <SideRail tab={app.tab} onTab={app.setTab} />
       <main className="pl-safe pr-safe relative h-full min-w-0 flex-1 md:pl-0">
         <AnimatePresence mode="wait" initial={false}>
@@ -46,6 +47,7 @@ function Shell() {
         </AnimatePresence>
       </main>
       <TabBar tab={app.tab} onTab={app.setTab} />
+      </div>
 
       <AnimatePresence>{app.wizard && <AddComputer key="wizard" initial={app.wizard} />}</AnimatePresence>
       <SessionRoute />

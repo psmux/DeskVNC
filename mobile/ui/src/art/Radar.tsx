@@ -86,9 +86,9 @@ export function Radar({ blips, scanning, onBlip, className }: { blips: Blip[]; s
               style={{ originX: `${x}px`, originY: `${y}px`, cursor: onBlip ? "pointer" : undefined }}
               onClick={() => onBlip?.(b.key)}
             >
-              <circle cx={x} cy={y} r={20} fill={protocolColor(b.protocol)} opacity={0.22} />
-              <circle cx={x} cy={y} r={12} fill={protocolColor(b.protocol)} stroke={LINE} strokeWidth={2.5} />
-              <circle cx={x - 3.5} cy={y - 3.5} r={3} fill="#fff" opacity={0.7} />
+              <circle cx={x} cy={y} r={16} fill={protocolColor(b.protocol)} opacity={0.22} />
+              <circle cx={x} cy={y} r={10} fill={protocolColor(b.protocol)} stroke={LINE} strokeWidth={2.5} />
+              <circle cx={x - 3} cy={y - 3} r={2.5} fill="#fff" opacity={0.7} />
             </motion.g>
           );
         })}
