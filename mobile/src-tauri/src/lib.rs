@@ -13,7 +13,7 @@ mod events;
 mod keys;
 mod lifecycle;
 mod pins;
-mod secrets;
+mod vault;
 mod state;
 mod store;
 mod thumbs;
@@ -92,7 +92,7 @@ fn build_state(app: &tauri::App) -> Result<AppState, Box<dyn std::error::Error>>
     let thumbs_dir = data_dir.join("thumbnails");
     Ok(AppState {
         hosts: Arc::new(store::HostStore::open(&data_dir)?),
-        secrets: secrets::platform_store(),
+        secrets: vault::platform_store(),
         pins: pins::PinStore::open(&data_dir),
         drivers: Drivers {
             vnc: Arc::new(vnc_core::VncDriver::new()),

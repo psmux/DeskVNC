@@ -3,7 +3,7 @@
 use tauri::State;
 
 use super::blocking;
-use crate::secrets::Secret;
+use crate::vault::Secret;
 use crate::state::AppState;
 use crate::store::{validate_id, Host, HostDraft};
 use crate::thumbs;

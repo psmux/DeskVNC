@@ -26,7 +26,7 @@ use crate::codes::{self, Entered};
 use crate::events;
 use crate::framing;
 use crate::keys::{self, KeyCombo};
-use crate::secrets::Secret;
+use crate::vault::Secret;
 use crate::state::{AppState, Session, Sessions};
 use crate::store::{self, Protocol};
 use crate::thumbs;
