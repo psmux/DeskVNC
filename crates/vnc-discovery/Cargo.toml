@@ -33,7 +33,6 @@ tracing = { workspace = true }
 serde = { workspace = true }
 mdns-sd = { workspace = true }
 netdev = { workspace = true }
-mac_address = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 # Unicast reverse DNS only: a thin `getaddrinfo`/`getnameinfo` wrapper, not a
@@ -46,3 +45,8 @@ dns-lookup = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 # Decodes the captured certificate/packet fixtures in the unit tests.
 hex = { workspace = true }
+
+# Not built for iOS, which `mac_address` does not support. Nothing in this
+# crate calls it today; the desktop keeps the dependency exactly as before.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+mac_address = { workspace = true }
