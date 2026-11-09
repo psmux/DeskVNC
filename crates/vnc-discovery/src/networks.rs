@@ -773,6 +773,9 @@ fn is_bridge(_name: &str) -> bool {
 }
 
 /// Run a system tool by absolute path and return its stdout, or None.
+///
+/// Nothing on a phone calls it: the callers are the desktop lookups above.
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 fn run(path: &str, args: &[&str]) -> Option<String> {
     let mut cmd = std::process::Command::new(path);
     cmd.args(args)

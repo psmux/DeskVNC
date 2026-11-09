@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "The phone app has one window. It gets core events and channels and exactly the commands in mobile/CONTRACT.md.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-hosts-list",
+    "allow-hosts-save",
+    "allow-hosts-delete",
+    "allow-hosts-set-secret",
+    "allow-hosts-thumbnail",
+    "allow-scan-start",
+    "allow-scan-stop",
+    "allow-session-connect",
+    "allow-boundary-resolve",
+    "allow-session-input",
+    "allow-session-text",
+    "allow-session-key-combo",
+    "allow-session-credentials",
+    "allow-session-trust",
+    "allow-session-quality",
+    "allow-session-clipboard",
+    "allow-session-snapshot",
+    "allow-session-disconnect"
+  ]
+}
