@@ -45,8 +45,8 @@ export function Nearby() {
         title="Nearby"
         subtitle={app.scanning ? "Looking around your network…" : app.found.length ? `Found ${app.found.length} ${app.found.length === 1 ? "computer" : "computers"} on this network` : undefined}
       />
-      <div className="md:grid md:grid-cols-[minmax(0,26rem)_1fr] md:gap-8 md:px-8">
-        <div className="px-6 md:sticky md:top-4 md:self-start md:px-0">
+      <div className="tab:px-8 @4xl:grid @4xl:grid-cols-[minmax(0,22rem)_1fr] @4xl:gap-8">
+        <div className="px-6 tab:px-0 @4xl:sticky @4xl:top-4 @4xl:self-start">
           {nothing ? (
             <div className="flex flex-col items-center text-center">
               <SceneSleepyRadar className="w-64" />
@@ -79,7 +79,7 @@ export function Nearby() {
           )}
         </div>
 
-        <div className="mt-6 grid grid-cols-1 gap-3 px-4 pb-6 sm:grid-cols-2 md:mt-0 md:grid-cols-1 md:px-0 xl:grid-cols-2">
+        <div className="mt-6 grid grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-3 px-4 pb-6 tab:px-0 @4xl:mt-0">
           <AnimatePresence>
             {app.found.map((f) => {
               const k = keyOf(f);

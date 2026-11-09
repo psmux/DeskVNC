@@ -120,18 +120,18 @@ export function Help() {
   return (
     <ScreenScroll>
       <ScreenHeader title="Help someone" />
-      <div className="mx-auto max-w-5xl px-4 pb-6 md:grid md:grid-cols-2 md:items-start md:gap-10 md:px-8">
-        <section className="mb-4 flex items-center gap-2 rounded-[1.75rem] bg-surface p-2 pr-4 shadow-card md:flex-col md:p-6 md:text-center">
-          <ProtocolScene protocol="boundary" className="h-20 w-24 shrink-0 md:h-auto md:w-64" />
+      <div className="mx-auto max-w-md px-4 pb-6 @3xl:grid @3xl:max-w-4xl @3xl:grid-cols-2 @3xl:items-start @3xl:gap-10 @3xl:px-8">
+        <section className="mb-4 flex items-center gap-2 rounded-[1.75rem] bg-surface p-2 pr-4 shadow-card @3xl:flex-col @3xl:p-6 @3xl:text-center">
+          <ProtocolScene protocol="boundary" className="h-20 w-24 shrink-0 @3xl:h-auto @3xl:w-64" />
           <div>
-            <h2 className="text-lg font-bold leading-tight md:text-2xl">Ask them for their code</h2>
-            <p className="mt-1 text-base leading-snug text-ink-dim md:text-lg">
+            <h2 className="text-lg font-bold leading-tight @3xl:text-2xl">Ask them for their code</h2>
+            <p className="mt-1 text-base leading-snug text-ink-dim @3xl:text-lg">
               They open DeskVNC Support, press Get a code and read you 12 numbers.
             </p>
           </div>
         </section>
 
-        <div>
+        <div className="mx-auto w-full max-w-md">
           {phase.kind === "error" && (
             <div role="alert" className="mb-4 flex items-start gap-3 rounded-2xl bg-danger-soft p-4 text-danger">
               <p className="flex-1 font-medium">{phase.message}</p>
@@ -196,16 +196,16 @@ function CodeBoxes({ digits }: { digits: string }) {
   const rows = codeBoxes(digits);
   const at = codeDigits(digits).length;
   return (
-    <div className="mx-auto flex w-full max-w-md justify-center gap-2.5 sm:gap-4" aria-label={digits ? `Code ${formatCode(digits)}` : "No code yet"} role="status">
+    <div className="mx-auto flex w-full max-w-md justify-center gap-2.5 @md:gap-3" aria-label={digits ? `Code ${formatCode(digits)}` : "No code yet"} role="status">
       {rows.map((row, g) => (
-        <div key={g} className="flex min-w-0 flex-1 gap-1 sm:gap-1.5">
+        <div key={g} className="flex min-w-0 flex-1 gap-1 @md:gap-1.5">
           {row.map((d, i) => {
             const index = g * 4 + i;
             const current = index === at;
             return (
               <div
                 key={i}
-                className={`relative flex h-14 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-xl text-[1.6rem] font-extrabold tabular-nums transition-colors sm:h-16 sm:text-3xl ${d ? "bg-boundary text-white shadow-card" : current ? "border-2 border-boundary bg-surface" : "bg-surface-2"}`}
+                className={`relative flex h-14 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-xl text-[1.6rem] font-extrabold tabular-nums transition-colors @md:h-16 @md:text-3xl ${d ? "bg-boundary text-white shadow-card" : current ? "border-2 border-boundary bg-surface" : "bg-surface-2"}`}
               >
                 <AnimatePresence>
                   {d && (
@@ -225,7 +225,7 @@ function CodeBoxes({ digits }: { digits: string }) {
 }
 
 function Keypad({ onDigit, onErase, onPaste, disabled }: { onDigit: (d: string) => void; onErase: () => void; onPaste: () => void; disabled: boolean }) {
-  const key = "flex min-h-14 [@media(min-height:860px)]:min-h-16 items-center justify-center rounded-[1.25rem] text-[1.75rem] font-bold transition-transform active:scale-90 active:bg-accent-soft disabled:opacity-40 sm:min-h-[4.5rem]";
+  const key = "flex min-h-14 [@media(min-height:860px)]:min-h-16 items-center justify-center rounded-[1.25rem] text-[1.75rem] font-bold transition-transform active:scale-90 active:bg-accent-soft disabled:opacity-40 @md:min-h-[4.5rem]";
   return (
     <div className="mt-4 grid grid-cols-3 gap-2" aria-label="Number pad">
       {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (

@@ -30,7 +30,7 @@ export function Sheet({ open, onClose, children, art, title, subtitle, dismissib
   return (
     <AnimatePresence>
       {open && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center md:items-center" role="dialog" aria-modal>
+        <div className="fixed inset-0 z-50 flex items-end justify-center tab:items-center" role="dialog" aria-modal>
           <motion.div
             className="absolute inset-0 bg-black/45"
             initial={{ opacity: 0 }}
@@ -39,7 +39,7 @@ export function Sheet({ open, onClose, children, art, title, subtitle, dismissib
             onClick={() => dismissible && onClose?.()}
           />
           <motion.div
-            className="relative max-h-[92dvh] w-full overflow-y-auto rounded-t-[2rem] bg-surface px-5 pb-safe shadow-lift md:max-w-lg md:rounded-[2rem] md:pb-0"
+            className="relative max-h-[92dvh] w-full overflow-y-auto rounded-t-[2rem] bg-surface px-5 pb-safe shadow-lift tab:max-w-lg tab:rounded-[2rem] tab:pb-0"
             initial={{ y: "100%" }}
             animate={{ y: 0 }}
             exit={{ y: "100%" }}

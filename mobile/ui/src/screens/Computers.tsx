@@ -93,7 +93,7 @@ export function Computers() {
         }
       />
       {app.hosts.length > 3 && (
-        <div className="px-4 pb-4 md:px-8">
+        <div className="px-4 pb-4 tab:px-8">
           <label className="flex min-h-14 items-center gap-3 rounded-2xl bg-surface px-4 shadow-card focus-within:ring-2 focus-within:ring-accent">
             <IconSearch className="text-ink-dim" />
             <input
@@ -112,7 +112,7 @@ export function Computers() {
           </label>
         </div>
       )}
-      <div className="grid grid-cols-1 gap-4 px-4 pb-8 md:grid-cols-2 md:gap-6 md:px-8 xl:grid-cols-3">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-4 px-4 pb-8 tab:gap-6 tab:px-8">
         <AnimatePresence initial={false}>
           {list.map((h) => (
             <ComputerCard

@@ -29,7 +29,7 @@ function Shell() {
     <div className="flex h-full">
       <div className="contents" inert={!!(app.wizard || app.session)}>
       <SideRail tab={app.tab} onTab={app.setTab} />
-      <main className="pl-safe pr-safe relative h-full min-w-0 flex-1 md:pl-0">
+      <main className="@container pl-safe pr-safe relative h-full min-w-0 flex-1 tab:pl-0">
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={app.tab}
@@ -55,7 +55,7 @@ function Shell() {
       <AnimatePresence>
         {app.toast && (
           <motion.div
-            className="pointer-events-none fixed inset-x-0 bottom-[calc(5.5rem+env(safe-area-inset-bottom))] z-[60] flex justify-center px-6 md:bottom-8"
+            className="pointer-events-none fixed inset-x-0 bottom-[calc(5.5rem+env(safe-area-inset-bottom))] z-[60] flex justify-center px-6 tab:bottom-8"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}

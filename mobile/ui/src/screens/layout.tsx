@@ -9,9 +9,9 @@ import { haptic } from "../lib/haptics";
 
 export function ScreenHeader({ title, subtitle, action }: { title: string; subtitle?: ReactNode; action?: ReactNode }) {
   return (
-    <header className="flex items-end gap-3 px-5 pb-4 pt-4 md:px-8 md:pt-8">
+    <header className="flex items-end gap-3 px-5 pb-4 pt-4 tab:px-8 tab:pt-8">
       <div className="min-w-0 flex-1">
-        <h1 className="text-[2rem] font-extrabold leading-tight tracking-tight md:text-[2.4rem]">{title}</h1>
+        <h1 className="text-[2rem] font-extrabold leading-tight tracking-tight tab:text-[2.4rem]">{title}</h1>
         {subtitle && <p className="mt-1 text-base text-ink-dim">{subtitle}</p>}
       </div>
       {action}
@@ -50,7 +50,7 @@ export function ScreenScroll({ children, onRefresh, className = "" }: { children
   return (
     <div
       ref={ref}
-      className={`pt-safe relative h-full overflow-y-auto overscroll-contain pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-10 ${className}`}
+      className={`pt-safe relative h-full overflow-y-auto overscroll-contain pb-[calc(6rem+env(safe-area-inset-bottom))] tab:pb-10 ${className}`}
       onTouchStart={(e) => {
         if (onRefresh && ref.current && ref.current.scrollTop <= 0) start.current = e.touches[0].clientY;
       }}

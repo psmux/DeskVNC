@@ -1,6 +1,11 @@
 @import "tailwindcss";
 @import "./theme/theme.css";
 
+@theme {
+  /* Tablets and landscape phones get the side rail from 600 pt. */
+  --breakpoint-tab: 37.5rem;
+}
+
 @theme inline {
   --color-bg: var(--dv-bg);
   --color-surface: var(--dv-surface);

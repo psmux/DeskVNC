@@ -37,7 +37,7 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className="overflow-hidden rounded-[1.75rem] bg-surface shadow-card"
+      className="@container overflow-hidden rounded-[1.75rem] bg-surface shadow-card"
       onContextMenu={(e) => {
         e.preventDefault();
         onMenu();
@@ -80,7 +80,9 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
           </span>
         </button>
       </div>
-      <div className="flex items-center gap-3 p-4 pl-5">
+      {/* A narrow card puts Connect on its own line so the name keeps its room. */}
+      <div className="flex flex-col gap-3 p-4 pl-5 @[21rem]:flex-row @[21rem]:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-1">
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-xl font-bold leading-tight">{host.name}</h3>
           <p className="mt-0.5 truncate text-sm text-ink-dim">{usedAgo(host.lastConnectedAt)}</p>
@@ -96,13 +98,14 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
         >
           <IconMore />
         </button>
+        </div>
         <button
           type="button"
           onClick={() => {
             haptic("tap");
             onConnect();
           }}
-          className="inline-flex min-h-14 shrink-0 items-center gap-2 rounded-[1.25rem] px-5 text-lg font-bold text-white shadow-card transition-transform active:scale-95"
+          className="inline-flex min-h-14 shrink-0 items-center justify-center gap-2 rounded-[1.25rem] px-5 text-lg font-bold text-white shadow-card transition-transform active:scale-95"
           style={{ background: sw.deep }}
         >
           <IconPlay size={20} />

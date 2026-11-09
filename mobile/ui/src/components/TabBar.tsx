@@ -14,7 +14,7 @@ export const TABS: { key: TabKey; label: string }[] = [
 export function TabBar({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void }) {
   return (
     <nav
-      className="pb-safe pl-safe pr-safe fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/90 backdrop-blur-xl md:hidden"
+      className="pb-safe pl-safe pr-safe fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/90 backdrop-blur-xl tab:hidden"
       aria-label="Main"
     >
       <div className="mx-auto flex max-w-xl">
@@ -42,8 +42,8 @@ export function TabBar({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void
 
 export function SideRail({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void }) {
   return (
-    <nav className="pt-safe pb-safe pl-safe hidden w-28 shrink-0 flex-col items-center gap-2 border-r border-line bg-surface md:flex" aria-label="Main">
-      <div className="mb-4 mt-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent text-white shadow-card">
+    <nav className="pt-safe pb-safe pl-safe hidden w-28 shrink-0 flex-col items-center gap-2 overflow-y-auto border-r border-line bg-surface tab:flex" aria-label="Main">
+      <div className="mb-4 mt-6 flex h-14 w-14 shrink-0 [@media(max-height:560px)]:hidden items-center justify-center rounded-2xl bg-accent text-white shadow-card">
         <svg viewBox="0 0 32 32" width="34" height="34" aria-hidden>
           <rect x="4" y="6" width="24" height="16" rx="3.5" fill="#fff" />
           <path d="M8 18q4-5 8-2t8-2v4H8Z" fill="var(--dv-accent)" opacity={0.6} />
@@ -58,7 +58,7 @@ export function SideRail({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => vo
             type="button"
             onClick={() => onTab(t.key)}
             aria-current={on ? "page" : undefined}
-            className={`flex w-24 flex-col items-center gap-1 rounded-3xl py-3 transition-colors ${on ? "bg-accent-soft" : "active:bg-surface-2"}`}
+            className={`flex w-24 shrink-0 flex-col items-center gap-1 rounded-3xl py-3 transition-colors first-of-type:mt-3 ${on ? "bg-accent-soft" : "active:bg-surface-2"}`}
           >
             <TabIcon tab={t.key} active={on} size={36} />
             <span className={`text-sm font-semibold ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
