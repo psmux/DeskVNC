@@ -45,6 +45,12 @@ done, total }` or `{ type: "complete" }`.
 | `session_snapshot` | `{ sessionId, rgba, width, height }` raw body | nothing. Saves the thumbnail for the host card |
 | `session_disconnect` | `{ sessionId }` | nothing |
 
+`ConnectTarget` has a fourth kind, `{ kind: "demo" }`, the built in demo
+computer that store reviewers (and anyone curious) can try with no network.
+It is handled purely in the UI: `src/api/index.ts` routes it, and every later
+`session_*` call for its session id, to the in browser mock session from
+`src/api/mock.ts`. Rust never sees it and needs no code for it.
+
 `onFrame` carries `msg_type` 1 (framebuffer) and 2 (cursor) messages in the
 exact byte layout of `src-tauri/FRAME_FORMAT.md`.
 

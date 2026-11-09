@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- DeskVNC phone icon, full bleed. iOS and Android cut their own corners,
+       so this square has none and no transparency. Colours match the desktop
+       icon in src-tauri/icons. The glyph is heavier than the desktop one so
+       the screen and stand still read at 29 px. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1D62D9"/>
+      <stop offset="1" stop-color="#1447AD"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g id="glyph">
+    <rect x="212" y="244" width="600" height="404" rx="36" fill="#FFFFFF"/>
+    <rect x="262" y="294" width="500" height="304" rx="10" fill="#3C82F5"/>
+    <rect x="452" y="648" width="120" height="96" fill="#FFFFFF"/>
+    <rect x="340" y="736" width="344" height="58" rx="29" fill="#FFFFFF"/>
+    <path d="M560 360 L560 548 L604 506 L634 572 L666 558 L636 494 L696 490 Z"
+          fill="#FFFFFF" stroke="#1447AD" stroke-width="14" stroke-linejoin="round"/>
+  </g>
+</svg>

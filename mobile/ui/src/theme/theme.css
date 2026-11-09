@@ -1,0 +1,101 @@
+/*
+ * Theme tokens. Every colour in the app comes from one of these, so the
+ * session screen and the sheets look the same whoever wrote them.
+ *
+ *   --dv-bg         page background
+ *   --dv-surface    cards and sheets
+ *   --dv-surface-2  wells, fields, pressed states
+ *   --dv-ink        main text
+ *   --dv-ink-dim    secondary text
+ *   --dv-accent     the one action colour
+ *   --dv-vnc / --dv-rdp / --dv-boundary   the three ways to connect
+ *   --dv-danger / --dv-ok                 bad news and good news
+ *
+ * Light by default, dark when the system says so, and either one forced by
+ * data-theme on <html> (Settings writes it).
+ */
+:root {
+  color-scheme: light;
+  --dv-bg: #f5f3fc;
+  --dv-surface: #ffffff;
+  --dv-surface-2: #eeebf8;
+  --dv-line: #e2ddf2;
+  --dv-ink: #1c1a2e;
+  --dv-ink-dim: #6b6880;
+  --dv-accent: #6c4df6;
+  --dv-accent-ink: #ffffff;
+  --dv-accent-soft: #e9e3ff;
+  --dv-vnc: #10a58a;
+  --dv-vnc-soft: #d5f4ec;
+  --dv-rdp: #2f78f0;
+  --dv-rdp-soft: #dbe8ff;
+  --dv-boundary: #f0762d;
+  --dv-boundary-soft: #ffe4d3;
+  --dv-danger: #e5484d;
+  --dv-danger-soft: #ffe1e1;
+  --dv-ok: #20b26b;
+  --dv-ok-soft: #d6f5e4;
+  --dv-shadow: 0 1px 2px rgba(40, 20, 110, 0.06), 0 8px 24px rgba(40, 20, 110, 0.08);
+  --dv-shadow-lg: 0 2px 6px rgba(40, 20, 110, 0.08), 0 20px 50px rgba(40, 20, 110, 0.16);
+  --dv-art-line: #1c1a2e;
+  --dv-art-paper: #ffffff;
+  --dv-art-shade: #e9e5f7;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --dv-bg: #121019;
+    --dv-surface: #1d1b28;
+    --dv-surface-2: #29263a;
+    --dv-line: #35314a;
+    --dv-ink: #f3f1ff;
+    --dv-ink-dim: #a4a0bb;
+    --dv-accent: #8f78ff;
+    --dv-accent-ink: #ffffff;
+    --dv-accent-soft: #2e2754;
+    --dv-vnc: #2fd3ae;
+    --dv-vnc-soft: #133a33;
+    --dv-rdp: #5c9cff;
+    --dv-rdp-soft: #172a4a;
+    --dv-boundary: #ff9550;
+    --dv-boundary-soft: #42261a;
+    --dv-danger: #ff6b6e;
+    --dv-danger-soft: #45201f;
+    --dv-ok: #3ddc8f;
+    --dv-ok-soft: #133a26;
+    --dv-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.3);
+    --dv-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.35), 0 20px 50px rgba(0, 0, 0, 0.45);
+    --dv-art-line: #0d0b14;
+    --dv-art-paper: #f6f4ff;
+    --dv-art-shade: #3a3552;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --dv-bg: #121019;
+  --dv-surface: #1d1b28;
+  --dv-surface-2: #29263a;
+  --dv-line: #35314a;
+  --dv-ink: #f3f1ff;
+  --dv-ink-dim: #a4a0bb;
+  --dv-accent: #8f78ff;
+  --dv-accent-ink: #ffffff;
+  --dv-accent-soft: #2e2754;
+  --dv-vnc: #2fd3ae;
+  --dv-vnc-soft: #133a33;
+  --dv-rdp: #5c9cff;
+  --dv-rdp-soft: #172a4a;
+  --dv-boundary: #ff9550;
+  --dv-boundary-soft: #42261a;
+  --dv-danger: #ff6b6e;
+  --dv-danger-soft: #45201f;
+  --dv-ok: #3ddc8f;
+  --dv-ok-soft: #133a26;
+  --dv-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.3);
+  --dv-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.35), 0 20px 50px rgba(0, 0, 0, 0.45);
+  --dv-art-line: #0d0b14;
+  --dv-art-paper: #f6f4ff;
+  --dv-art-shade: #3a3552;
+}

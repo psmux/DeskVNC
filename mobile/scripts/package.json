@@ -1,0 +1,15 @@
+{
+  "name": "deskvnc-mobile-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Store screenshot and upload helpers for the DeskVNC phone app",
+  "scripts": {
+    "screenshots": "node store-screenshots.mjs --serve",
+    "screenshots:stub": "node store-screenshots.mjs --stub",
+    "check-copy": "node check-copy.mjs",
+    "privacy-html": "node privacy-html.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
+  }
+}
