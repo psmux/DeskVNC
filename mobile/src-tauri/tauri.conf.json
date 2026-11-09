@@ -4,15 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.psmux.deskvnc.mobile",
   "build": {
-    "beforeDevCommand": {
-      "script": "npm run dev",
-      "cwd": "ui"
-    },
+    "beforeDevCommand": "node -e \"const c=require('child_process');const root=c.execSync('git rev-parse --show-toplevel').toString().trim();c.execSync('npm run dev',{cwd:root+'/mobile/ui',stdio:'inherit'})\"",
     "devUrl": "http://localhost:5174",
-    "beforeBuildCommand": {
-      "script": "npm run build",
-      "cwd": "ui"
-    },
+    "beforeBuildCommand": "node -e \"const c=require('child_process');const root=c.execSync('git rev-parse --show-toplevel').toString().trim();c.execSync('npm run build',{cwd:root+'/mobile/ui',stdio:'inherit'})\"",
     "frontendDist": "../ui/dist"
   },
   "app": {
