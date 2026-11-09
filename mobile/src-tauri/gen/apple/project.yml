@@ -90,6 +90,8 @@ targets:
       - sdk: MetalKit.framework
       - sdk: QuartzCore.framework
       - sdk: Security.framework
+      # netdev and iroh's DNS resolver read the network setup through it.
+      - sdk: SystemConfiguration.framework
       - sdk: UIKit.framework
       - sdk: WebKit.framework
     preBuildScripts:

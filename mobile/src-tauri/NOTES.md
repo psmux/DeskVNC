@@ -33,6 +33,9 @@ was set after generating (then `xcodegen generate` in `gen/apple`, with empty
 `Externals` and `assets` folders present, to add the privacy manifest to the
 Xcode project):
 
+* iOS `project.yml` links `SystemConfiguration.framework`, which netdev and
+  iroh's DNS resolver call. A Rust static library cannot carry the framework
+  link itself.
 * iOS `ITSAppUsesNonExemptEncryption` false: the app only uses the
   encryption built into TLS and QUIC, which is exempt.
 * iOS `PrivacyInfo.xcprivacy` in `gen/apple/deskvnc-mobile_iOS`: no tracking,

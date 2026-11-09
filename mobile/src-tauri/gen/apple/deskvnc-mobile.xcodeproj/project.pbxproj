@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0DFFBA51C37C7A3188865F4A /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1D5D86BFC495DF7AE5E7623 /* MetalKit.framework */; };
 		19307AD59ECC4F67E41BD273 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7C7167ACAD731BEBF0163B77 /* Security.framework */; };
+		1BC4D56C167CF4B205ECB95D /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D7ED54787DCB004B718A18D0 /* SystemConfiguration.framework */; };
 		33708E27AD2E73E5B098C063 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2AAB8E2FBB262BA5E2B0CE6A /* WebKit.framework */; };
 		56A32FFC66317C2E4FA9C5E8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 12023269FB80E13E58D7B92D /* Assets.xcassets */; };
 		5CAE4FE179121360D3740ECC /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A56AFABEBD7F9FC29F31833A /* CoreGraphics.framework */; };
@@ -54,6 +55,7 @@
 		B937A2DF127100F0D85482DA /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
 		C16CDCD8E1754D86FF74EF6A /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		CAC26F61287BC83C12EDD276 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		D7ED54787DCB004B718A18D0 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		F09C1C0F207C5937AE253875 /* deskvnc-mobile_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "deskvnc-mobile_iOS.entitlements"; sourceTree = "<group>"; };
 		F232740BFE92D52817C6489B /* thumbs.rs */ = {isa = PBXFileReference; path = thumbs.rs; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -69,6 +71,7 @@
 				0DFFBA51C37C7A3188865F4A /* MetalKit.framework in Frameworks */,
 				CDE689D1942EA13F28C05FEB /* QuartzCore.framework in Frameworks */,
 				19307AD59ECC4F67E41BD273 /* Security.framework in Frameworks */,
+				1BC4D56C167CF4B205ECB95D /* SystemConfiguration.framework in Frameworks */,
 				A686A38BCF5211105BB8C173 /* UIKit.framework in Frameworks */,
 				33708E27AD2E73E5B098C063 /* WebKit.framework in Frameworks */,
 			);
@@ -156,6 +159,7 @@
 				A1D5D86BFC495DF7AE5E7623 /* MetalKit.framework */,
 				C16CDCD8E1754D86FF74EF6A /* QuartzCore.framework */,
 				7C7167ACAD731BEBF0163B77 /* Security.framework */,
+				D7ED54787DCB004B718A18D0 /* SystemConfiguration.framework */,
 				9C5E5658F5E1288DCC14C7BD /* UIKit.framework */,
 				2AAB8E2FBB262BA5E2B0CE6A /* WebKit.framework */,
 			);
