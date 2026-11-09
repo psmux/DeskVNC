@@ -65,13 +65,95 @@ use crate::{
 /// rustls 0.23 refuses to build a `ClientConfig` until a provider is installed;
 /// `install_default` errors if one already is, which is fine, some other part
 /// of the app (or a test) may have got there first.
-fn ensure_provider() -> Arc<CryptoProvider> {
+///
+/// `pub(crate)` because the legacy backend builds the same chain verifier from
+/// the same provider (PRDRDP/03 §4.7.1): one provider, one root set, one
+/// answer to "does this chain to a CA" on both backends.
+pub(crate) fn ensure_provider() -> Arc<CryptoProvider> {
     if CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     }
     CryptoProvider::get_default()
         .cloned()
         .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+}
+
+/// The chain-and-hostname half of the trust decision, built from the Mozilla
+/// root set (PRDRDP/03 §4.7.1).
+///
+/// Shared so that a host reached on rustls and the same host reached on the
+/// legacy backend get the same [`TrustDecision::VerifiedByCa`] from the same
+/// certificate bytes, rather than each backend growing its own root set and
+/// its own idea of what a valid chain is.
+pub(crate) fn ca_verifier(provider: Arc<CryptoProvider>) -> Result<Arc<WebPkiServerVerifier>> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+        .build()
+        .map_err(|e| TransportError::Tls(e.to_string()))
+}
+
+/// The certificate did not parse far enough to yield a SubjectPublicKeyInfo,
+/// so there is nothing to fingerprint and no decision to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MalformedCertificate;
+
+/// The trust ladder both TLS backends run over the same certificate bytes
+/// (PRDRDP/03 §4.7.1): chain and hostname first, then the stored pin, then
+/// trust on first use.
+///
+/// This is the seam the phase 1b notes track: `TofuVerifier` used to own this
+/// ladder inline, which meant a second backend would have had to reimplement
+/// it and could drift. It takes only owned, library neutral inputs
+/// (certificate bytes, a pin string, a time) so the OpenSSL backend calls it
+/// without a rustls handshake anywhere in sight.
+///
+/// [`TrustDecision::Changed`] is an answer, not an error: the caller aborts
+/// the handshake when it sees one. [`MalformedCertificate`] is the only
+/// failure, and it means the bytes did not parse far enough to name a key.
+/// The OCSP argument both backends used to pass through is gone because
+/// neither rustls nor webpki performs OCSP checking; it was always ignored.
+pub(crate) fn decide_certificate(
+    ca: &WebPkiServerVerifier,
+    leaf: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    server_name: &ServerName<'_>,
+    now: UnixTime,
+    pin: Option<&str>,
+) -> std::result::Result<TrustDecision, MalformedCertificate> {
+    let der_bytes = leaf.as_ref();
+    let spki = der::extract_spki(der_bytes).ok_or(MalformedCertificate)?;
+    let fingerprint = format_fingerprint(&Sha256::digest(spki));
+    let normalized = normalize_fingerprint(&fingerprint);
+
+    // 1. Real PKI validation. If this passes there is nothing to prompt about.
+    if ca
+        .verify_server_cert(leaf, intermediates, server_name, &[], now)
+        .is_ok()
+    {
+        return Ok(TrustDecision::VerifiedByCa);
+    }
+
+    // 2/3. Pin comparison.
+    let pin = pin.map(normalize_fingerprint).filter(|p| !p.is_empty());
+    match pin {
+        Some(expected) if expected == normalized => Ok(TrustDecision::PinnedMatch),
+        Some(expected) => Ok(TrustDecision::Changed {
+            expected,
+            actual: fingerprint,
+        }),
+        // 5. First contact: accept the connection but tell the caller it is
+        // unverified so the UI can prompt before any traffic flows.
+        None => {
+            let subject = der::subject_common_name(der_bytes)
+                .unwrap_or_else(|| "(unknown subject)".to_string());
+            Ok(TrustDecision::Unknown {
+                fingerprint,
+                subject,
+                certificate: Some(crate::CertificateDigests::of(der_bytes)),
+            })
+        }
+    }
 }
 
 /// Which TLS implementation performs the handshake (PRDRDP/03 §4.7.2).
@@ -276,12 +358,10 @@ struct TofuVerifier {
 
 impl TofuVerifier {
     fn new(provider: Arc<CryptoProvider>, pin: Option<&str>) -> Result<Self> {
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        let webpki = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-            .build()
-            .map_err(|e| TransportError::Tls(e.to_string()))?;
+        // One root set, one chain verifier, shared with the legacy backend
+        // (PRDRDP/03 §4.7.1): `ca_verifier` builds exactly what this used to
+        // build inline, from the same provider.
+        let webpki = ca_verifier(provider.clone())?;
 
         let pin = pin.map(normalize_fingerprint).filter(|p| !p.is_empty());
 
@@ -313,57 +393,43 @@ impl ServerCertVerifier for TofuVerifier {
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
         server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
+        _ocsp_response: &[u8],
         now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        let spki = der::extract_spki(end_entity.as_ref())
-            .ok_or_else(|| rustls::Error::General("malformed server certificate".into()))?;
         // Copied out here rather than after the handshake, because this is the
         // only place the concrete rustls type exists and because RFC 5929 wants
         // the certificate "as it appears, octet for octet, in the server's
         // Certificate message" rather than a re-encode (PRDRDP/03 §4.7.6).
         *self.certificate.lock() = Some(end_entity.as_ref().to_vec());
-        let digest = Sha256::digest(spki);
-        let fingerprint = format_fingerprint(&digest);
-        let normalized = normalize_fingerprint(&fingerprint);
 
-        // 1. Real PKI validation. If this passes there is nothing to prompt about.
-        let ca_ok = self
-            .webpki
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
-            .is_ok();
-        if ca_ok {
-            self.record(TrustDecision::VerifiedByCa);
-            return Ok(ServerCertVerified::assertion());
-        }
+        // The ladder itself lives in `decide_certificate` so the legacy backend
+        // runs the identical sequence over the identical bytes (PRDRDP/03
+        // §4.7.1). `ocsp_response` is dropped there because neither rustls nor
+        // webpki performs OCSP checking — it never reached a check here either.
+        let decision = decide_certificate(
+            &self.webpki,
+            end_entity,
+            intermediates,
+            server_name,
+            now,
+            self.pin.as_deref(),
+        )
+        .map_err(|MalformedCertificate| {
+            rustls::Error::General("malformed server certificate".into())
+        })?;
 
-        // 2/3. Pin comparison.
-        match &self.pin {
-            Some(expected) if *expected == normalized => {
-                self.record(TrustDecision::PinnedMatch);
-                Ok(ServerCertVerified::assertion())
-            }
-            Some(expected) => {
-                // Abort the handshake; `upgrade` turns the recorded decision
-                // into `CertificateMismatch`.
-                self.record(TrustDecision::Changed {
-                    expected: expected.clone(),
-                    actual: fingerprint,
-                });
+        match &decision {
+            // 4. A pin was supplied and differs: abort the handshake from
+            // inside the verifier; `upgrade` turns the recorded decision into
+            // `CertificateMismatch`.
+            TrustDecision::Changed { .. } => {
+                self.record(decision);
                 Err(rustls::Error::General(
                     "server certificate does not match the pinned fingerprint".into(),
                 ))
             }
-            // 5. First contact: accept the connection but tell the caller it is
-            // unverified so the UI can prompt before any traffic flows.
-            None => {
-                let subject = der::subject_common_name(end_entity.as_ref())
-                    .unwrap_or_else(|| "(unknown subject)".to_string());
-                self.record(TrustDecision::Unknown {
-                    fingerprint,
-                    subject,
-                    certificate: Some(crate::CertificateDigests::of(end_entity.as_ref())),
-                });
+            _ => {
+                self.record(decision);
                 Ok(ServerCertVerified::assertion())
             }
         }
