@@ -51,11 +51,11 @@ Xcode project):
 
 ## Things that differ from the desktop, and why
 
-* netdev: 0.45 (vnc-discovery) and 0.46 (iroh's netwatch) do not compile for
-  iOS, because `libc::in6_ifreq` exists for macOS only. The workspace patches
-  both with copies under `mobile/patches/` whose only change is an iOS
-  fallback at the end of `src/os/darwin/ipv6_addr_flags.rs`. Every other
-  target compiles the published code. Remove the patch once upstream fixes it.
+* libc is pinned to 0.2.189 (in this crate's iOS dependencies, which pins
+  the whole workspace). 0.2.190 and 0.2.191 declare `in6_ifreq` and the
+  routing socket constants for macOS only, and netdev (via vnc-discovery and
+  iroh's netwatch) and netwatch then fail to compile for iOS. Lift the pin
+  once those crates and libc agree.
 * Boundary progress: `boundary-driver` reports each step as `authenticating`
   with a sentence. The phone turns the two waiting sentences into
   `method: "approval"` and the earlier steps into `connecting`.

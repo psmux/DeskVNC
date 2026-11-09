@@ -2271,6 +2271,7 @@ dependencies = [
  "image",
  "jni 0.21.1",
  "keyring-core",
+ "libc",
  "limb-core",
  "ndk-context",
  "parking_lot",
@@ -5074,9 +5075,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.191"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libdbus-sys"
@@ -5706,6 +5707,8 @@ dependencies = [
 [[package]]
 name = "netdev"
 version = "0.45.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "096c44b66a9b09b99b4dd36b1c295ff3a492039ccecaf55466bd6ddcdba59968"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -5731,6 +5734,8 @@ dependencies = [
 [[package]]
 name = "netdev"
 version = "0.46.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c52c2584961c68f5a6e3356797344061f818c93b8acc9cd6d7e284795e563e"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",

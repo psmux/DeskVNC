@@ -51,6 +51,13 @@ keyring-core = "1"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["protected"] }
+# libc 0.2.190 and 0.2.191 declare `in6_ifreq` and the routing socket
+# constants (RTM_*, RTAX_*) for macOS only, which breaks netdev (through
+# vnc-discovery and iroh's netwatch) and netwatch itself on iOS. 0.2.189
+# still declares them for every Apple target. Cargo keeps one libc 0.2 for
+# the whole workspace, so this pin holds the desktop on 0.2.189 too, two
+# patch releases back. Lift it once libc, netdev and netwatch agree on iOS.
+libc = "=0.2.189"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "1"
