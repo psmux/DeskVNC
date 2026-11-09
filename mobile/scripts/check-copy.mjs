@@ -51,7 +51,7 @@ const walk = (dir) => readdirSync(dir).flatMap((f) => {
 for (const file of walk(store).filter((f) => /\.(md|txt|html|svg)$/.test(f))) {
   readFileSync(file, "utf8").split("\n").forEach((line, i) => {
     // Table rules and HTML comments are formatting, not punctuation.
-    const prose = line.replace(/^\s*\|?[-|: ]+\|?\s*$/, "").replace(/<!--|-->/g, "");
+    const prose = line.replace(/^\s*\|?[-|: ]+\|?\s*$/, "").replace(/<!--|-->/g, "").replace(/`[^`]*`/g, "");
     if (dashes.test(prose)) fail(`${file}:${i + 1}: dash punctuation: ${line.trim()}`);
     if (banned.test(prose)) fail(`${file}:${i + 1}: word to avoid: ${line.trim()}`);
   });

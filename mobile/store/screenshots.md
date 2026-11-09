@@ -11,8 +11,8 @@ npm install                 # once, Playwright only
 node store-screenshots.mjs --serve
 ```
 
-`--serve` starts the UI's dev server on port 5174 (`npm run dev -- --port
-5174` in `mobile/ui`) and stops it at the end. Output goes to
+With `--serve` the script starts the UI's dev server in `mobile/ui` on port
+5174 and stops it at the end. Output goes to
 `mobile/store/screenshots/out/<device>/`, which git ignores: a framed image
 per shot, and the bare screen in `raw/`. Both are at the store's exact size,
 so either can be uploaded.
