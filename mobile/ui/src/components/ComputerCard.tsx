@@ -128,7 +128,7 @@ export function DemoCard({ onConnect, onHide }: { onConnect: () => void; onHide?
         <div className="min-w-0 flex-1">
           <p className="text-xs font-bold uppercase tracking-wider text-white/75">Try it out</p>
           <h3 className="text-xl font-bold leading-tight">Demo computer</h3>
-          <p className="mt-1 text-sm leading-snug text-white/85">A pretend desktop to practise on. No set up, no network.</p>
+          <p className="mt-1 text-sm leading-snug text-white/85">A pretend desktop to practise on. Nothing to set up.</p>
         </div>
       </div>
       <div className="flex gap-2 px-4 pb-4">

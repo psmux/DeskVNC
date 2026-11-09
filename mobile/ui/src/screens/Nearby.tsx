@@ -55,7 +55,7 @@ export function Nearby() {
             </div>
           ) : (
             <Radar
-              className="mx-auto w-full max-w-[22rem]"
+              className="mx-auto w-full max-w-[min(22rem,42dvh)]"
               scanning={app.scanning}
               blips={app.found.map((f) => ({ key: keyOf(f), protocol: f.protocol, os: f.os }))}
               onBlip={(k) => {

@@ -1,7 +1,7 @@
 /**
  * The Nearby radar. Rings, a sweep that turns while a scan runs, the phone in
- * the middle, and a blip for every computer found, placed by its address so
- * the same computer always lands in the same spot.
+ * the middle, and a blip for every computer found, spread out so none
+ * hides another.
  */
 import { AnimatePresence, motion } from "motion/react";
 import type { HostOs, Protocol } from "../api/contract";
@@ -72,8 +72,11 @@ export function Radar({ blips, scanning, onBlip, className }: { blips: Blip[]; s
         <rect x="11" y="2.5" width="8" height="2" rx="1" fill={LINE} />
       </g>
       <AnimatePresence>
-        {blips.map((b) => {
-          const { angle, dist } = blipSpot(b.key);
+        {blips.map((b, i) => {
+          // Spread by order with the golden angle so blips never pile up;
+          // the hash only nudges the distance.
+          const { dist } = blipSpot(b.key);
+          const angle = -Math.PI / 3 + i * 2.39996;
           const x = C + Math.cos(angle) * R * dist;
           const y = C + Math.sin(angle) * R * dist;
           return (

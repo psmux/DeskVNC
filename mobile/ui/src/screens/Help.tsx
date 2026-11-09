@@ -121,12 +121,12 @@ export function Help() {
     <ScreenScroll>
       <ScreenHeader title="Help someone" />
       <div className="mx-auto max-w-5xl px-4 pb-6 md:grid md:grid-cols-2 md:items-start md:gap-10 md:px-8">
-        <section className="mb-4 flex items-center gap-3 rounded-[1.75rem] bg-surface p-3 pr-4 shadow-card md:flex-col md:p-6 md:text-center">
-          <ProtocolScene protocol="boundary" className="h-24 w-32 shrink-0 md:h-auto md:w-64" />
+        <section className="mb-4 flex items-center gap-2 rounded-[1.75rem] bg-surface p-2 pr-4 shadow-card md:flex-col md:p-6 md:text-center">
+          <ProtocolScene protocol="boundary" className="h-20 w-24 shrink-0 md:h-auto md:w-64" />
           <div>
             <h2 className="text-lg font-bold leading-tight md:text-2xl">Ask them for their code</h2>
             <p className="mt-1 text-base leading-snug text-ink-dim md:text-lg">
-              On their computer they open DeskVNC Support and press Get a code. Tap in the 12 numbers they read out.
+              They open DeskVNC Support, press Get a code and read you 12 numbers.
             </p>
           </div>
         </section>
@@ -160,7 +160,7 @@ export function Help() {
 
           {note && <p className="mt-3 text-center text-base text-ink-dim">{note}</p>}
 
-          <div className="mt-4 flex items-center justify-center gap-2 text-base">
+          <div className="mt-3 flex items-center justify-center gap-2 text-base">
             <span className="text-ink-dim">They will see</span>
             <button type="button" onClick={() => setAskName(true)} className="inline-flex min-h-11 items-center gap-1.5 rounded-full bg-surface-2 px-4 font-semibold">
               {prefs.helperName || "your name"}
@@ -168,7 +168,7 @@ export function Help() {
             </button>
           </div>
 
-          <div className="mt-4">
+          <div className="mt-3">
             <Button size="xl" block disabled={!ready} icon={<IconPlay />} onClick={() => void go()}>
               Connect
             </Button>
@@ -225,9 +225,9 @@ function CodeBoxes({ digits }: { digits: string }) {
 }
 
 function Keypad({ onDigit, onErase, onPaste, disabled }: { onDigit: (d: string) => void; onErase: () => void; onPaste: () => void; disabled: boolean }) {
-  const key = "flex min-h-16 items-center justify-center rounded-[1.25rem] text-[1.75rem] font-bold transition-transform active:scale-90 active:bg-accent-soft disabled:opacity-40 sm:min-h-[4.5rem]";
+  const key = "flex min-h-14 [@media(min-height:860px)]:min-h-16 items-center justify-center rounded-[1.25rem] text-[1.75rem] font-bold transition-transform active:scale-90 active:bg-accent-soft disabled:opacity-40 sm:min-h-[4.5rem]";
   return (
-    <div className="mt-5 grid grid-cols-3 gap-2.5" aria-label="Number pad">
+    <div className="mt-4 grid grid-cols-3 gap-2" aria-label="Number pad">
       {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
         <button key={d} type="button" disabled={disabled} className={`${key} bg-surface shadow-card`} onClick={() => onDigit(d)}>
           {d}
