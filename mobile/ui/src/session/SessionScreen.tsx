@@ -45,15 +45,16 @@ import {
   type View,
 } from "./input/viewport";
 import { haptic } from "./haptics";
-import { load, save } from "./storage";
-import { qualityLevel, stepOf, LEVEL_WORDS } from "./status";
+import { qualityLevel, stepOf, stepWords, LEVEL_WORDS } from "./status";
 import { hasVideoDecoder, useRemoteSession } from "./useRemoteSession";
 import { Coach, coachSeen } from "./ui/Coach";
 import { ConnectingScreen, ErrorScreen, ReconnectCard } from "./ui/ConnectingScreen";
 import { IconRotate, IconZoomOut } from "./ui/icons";
 import { KeyBar, type KeyBarPress } from "./ui/KeyBar";
 import { ClipboardSheet, ModeSheet, QualitySheet, StatsSheet } from "./ui/Panels";
-import { CertSheet, CredentialSheet } from "./ui/Prompts";
+import { CertificateSheet } from "../components/sheets/CertificateSheet";
+import { CredentialSheet } from "../components/sheets/CredentialSheet";
+import { readPrefs, usePrefs } from "../lib/prefs";
 import { Toolbar, type ToolbarAction } from "./ui/Toolbar";
 import "./session.css";
 
@@ -102,14 +103,22 @@ function metaLabelFor(os: HostOs | null): string {
 }
 
 export function SessionScreen({ api, target, title, onExit }: SessionScreenProps) {
-  const s = useRemoteSession(api, target);
-  const [mode, setModeState] = useState<TouchMode>(() => (load("mode") === "trackpad" ? "trackpad" : "direct"));
+  // Settings give the starting touch mode and quality; switching them here
+  // lasts for this session only.
+  const prefs = usePrefs();
+  const s = useRemoteSession(api, target, readPrefs().quality);
+  const [mode, setModeState] = useState<TouchMode>(() => readPrefs().touchMode);
   const [sheet, setSheet] = useState<SheetKind>(null);
   const [toolbarOpen, setToolbarOpen] = useState(false);
   const [keysOn, setKeysOn] = useState(false);
   const [keyboardOn, setKeyboardOn] = useState(false);
   const [mods, setMods] = useState<Record<ModifierKey, ModState>>(NO_MODS);
-  const [quality, setQualityState] = useState<Quality>("auto");
+  const [quality, setQualityState] = useState<Quality>(() => readPrefs().quality);
+  const hapticsOn = useRef(prefs.haptics);
+  hapticsOn.current = prefs.haptics;
+  const tick = (kind: Parameters<typeof haptic>[0]): void => {
+    if (hapticsOn.current) haptic(kind);
+  };
   const [coach, setCoach] = useState<TouchMode | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [ring, setRing] = useState<{ x: number; y: number; key: number } | null>(null);
@@ -412,7 +421,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
             sendPointer();
             mask.current &= ~bit;
             sendPointer();
-            haptic(a.button === "right" ? "right" : "click");
+            tick(a.button === "right" ? "right" : "click");
             flashClick(a.button);
             break;
           }
@@ -423,7 +432,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
             }
             mask.current |= BUTTON.left;
             sendPointer();
-            haptic("soft");
+            tick("soft");
             break;
           case "up":
             if (anim.current.kind === "edge") stopAnim();
@@ -469,7 +478,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
             const to = toggleZoomAt(view.current, st, f, a.x, a.y);
             anim.current = { raf: 0, kind: "zoom", vx: 0, vy: 0, from: { ...view.current }, to, t0: performance.now() };
             runAnim();
-            haptic("soft");
+            tick("soft");
             break;
           }
           case "keyboard":
@@ -671,7 +680,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
   const onKeyBar = useCallback(
     (p: KeyBarPress) => {
-      haptic("soft");
+      tick("soft");
       if (p.kind === "mod") {
         setMods((cur) => ({ ...cur, [p.mod]: nextModState(cur[p.mod], p.doubleTap) }));
         return;
@@ -690,7 +699,6 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
   const setMode = useCallback((m: TouchMode) => {
     setModeState(m);
-    save("mode", m);
     if (!coachSeen(m)) setCoach(m);
   }, []);
 
@@ -778,7 +786,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
   return (
     <div ref={rootRef} className={`dv-session mode-${mode}${keyBarVisible ? " has-keybar" : ""}`}>
-      <div ref={stageRef} className="dv-s-stage" aria-label={`Screen of ${name}`} role="application">
+      <div ref={stageRef} className="dv-s-stage" aria-label="The computer's screen" role="application">
         <canvas ref={s.attachCanvas} className="dv-s-canvas" />
         {showDesktop ? (
           <>
@@ -877,14 +885,14 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
       {keyBarVisible ? <KeyBar mods={mods} metaLabel={metaLabelFor(os)} onPress={onKeyBar} /> : null}
 
-      {s.phase === "connecting" ? <ConnectingScreen title={name} step={stepOf(s.state)} reconnecting={reconnecting} onCancel={() => void leave()} /> : null}
+      {s.phase === "connecting" ? <ConnectingScreen title={name} step={stepOf(s.state)} words={stepWords(s.state)} reconnecting={reconnecting} onCancel={() => void leave()} /> : null}
       {s.phase === "error" ? <ErrorScreen title={name} message={s.error} onRetry={s.reconnect} onExit={() => void leave()} /> : null}
       {s.phase === "ended" && s.needsReconnect ? <ReconnectCard title={name} onReconnect={s.reconnect} onExit={() => void leave()} /> : null}
 
       {s.credentials ? (
-        <CredentialSheet request={s.credentials} computerName={name} onSubmit={s.answerCredentials} onCancel={s.cancelCredentials} />
+        <CredentialSheet open request={s.credentials} hostName={name} onSubmit={s.answerCredentials} onCancel={s.cancelCredentials} />
       ) : null}
-      {s.cert ? <CertSheet data={s.cert} computerName={name} onAnswer={s.answerCert} /> : null}
+      {s.cert ? <CertificateSheet open prompt={s.cert} hostName={name} onAnswer={s.answerCert} /> : null}
 
       {sheet === "mode" ? (
         <ModeSheet

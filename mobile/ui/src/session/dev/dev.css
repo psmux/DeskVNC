@@ -1,0 +1,3 @@
+/* The app styles, with Tailwind told to look at the whole app, since the dev page has its own root. */
+@import "../../index.css";
+@source "../../";
