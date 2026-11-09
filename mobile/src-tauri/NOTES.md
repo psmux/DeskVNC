@@ -23,7 +23,9 @@ field names follow `mobile/ui/src/api/contract.ts`.
 `tauri android init` (run by `.github/workflows/mobile-core-check.yml` with
 `init: true`, then committed). What was set by hand after generating:
 
-* iOS `Info.plist`:
+* iOS `Info.plist` (`gen/apple/deskvnc-mobile_iOS/Info.plist`, and the same
+  keys in `Info.ios.plist`, which the Tauri CLI merges in, so they survive a
+  fresh `ios init`):
   * `NSLocalNetworkUsageDescription`: why the app reaches computers on the
     local network.
   * `NSBonjourServices`: `_rfb._tcp`, `_rdp._tcp`, `_boundary._udp`,
@@ -33,6 +35,17 @@ field names follow `mobile/ui/src/api/contract.ts`.
   `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`.
 
 ## Things that differ from the desktop, and why
+
+* netdev: 0.45 (vnc-discovery) and 0.46 (iroh's netwatch) do not compile for
+  iOS, because `libc::in6_ifreq` exists for macOS only. The workspace patches
+  both with copies under `mobile/patches/` whose only change is an iOS
+  fallback at the end of `src/os/darwin/ipv6_addr_flags.rs`. Every other
+  target compiles the published code. Remove the patch once upstream fixes it.
+* Boundary progress: `boundary-driver` reports each step as `authenticating`
+  with a sentence. The phone turns the two waiting sentences into
+  `method: "approval"` and the earlier steps into `connecting`.
+* Frames are held back until a session has sent `desktop-resize`; a held
+  frame is replaced by a full repaint.
 
 * Secrets: iOS Keychain through `apple-native-keyring-store` (protected data
   store, the only one iOS has). Android: `android-native-keyring-store`, AES
