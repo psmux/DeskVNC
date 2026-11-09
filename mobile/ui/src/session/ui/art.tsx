@@ -34,15 +34,20 @@ function Pointer({ x, y, className }: { x: number; y: number; className?: string
   );
 }
 
-/** The miniature screen every coach scene draws on. */
-function MiniScreen({ children }: { children: React.ReactNode }) {
+/**
+ * The miniature screen every coach scene draws on. With `pad`, a phone
+ * shaped trackpad sits under it and the hand works there, which is how the
+ * trackpad mode feels.
+ */
+function MiniScreen({ children, pad = false }: { children: React.ReactNode; pad?: boolean }) {
   return (
-    <svg viewBox="0 0 120 96" className="dv-s-scene" aria-hidden="true">
+    <svg viewBox={pad ? "0 0 120 124" : "0 0 120 96"} className="dv-s-scene" aria-hidden="true">
       <rect x="6" y="6" width="108" height="70" rx="8" fill="var(--s-surface-2)" stroke="var(--s-line)" strokeWidth="1.5" />
       <rect x="14" y="14" width="40" height="26" rx="3" fill="var(--s-accent)" opacity="0.22" />
       <rect x="60" y="14" width="46" height="8" rx="2" fill="var(--s-ink-dim)" opacity="0.25" />
       <rect x="60" y="26" width="34" height="8" rx="2" fill="var(--s-ink-dim)" opacity="0.18" />
       <rect x="14" y="46" width="92" height="22" rx="3" fill="var(--s-ink-dim)" opacity="0.12" />
+      {pad ? <rect x="26" y="82" width="68" height="36" rx="7" fill="var(--s-surface-2)" stroke="var(--s-line)" strokeWidth="1.5" /> : null}
       {children}
     </svg>
   );
@@ -89,28 +94,28 @@ export type CoachGesture =
   | "dt-zoom";
 
 /** One animated gesture, the hand acting it out on a tiny screen. */
-export function GestureScene({ kind }: { kind: CoachGesture }) {
+export function GestureScene({ kind, pad = false }: { kind: CoachGesture; pad?: boolean }) {
   switch (kind) {
     case "tp-move":
       return (
-        <MiniScreen>
+        <MiniScreen pad>
           <Pointer x={40} y={30} className="dv-a-slide" />
-          <Dots n={1} x={52} y={84} className="dv-a-slide" />
-          <Hand x={52} y={84} scale={0.55} className="dv-a-slide" />
+          <Dots n={1} x={42} y={96} className="dv-a-slide-small" />
+          <Hand x={42} y={96} scale={0.5} className="dv-a-slide-small" />
         </MiniScreen>
       );
     case "tp-click":
       return (
-        <MiniScreen>
+        <MiniScreen pad>
           <Pointer x={30} y={24} />
           <Ripple x={30} y={24} />
-          <Dots n={1} x={62} y={84} className="dv-a-tap" />
-          <Hand x={62} y={84} scale={0.55} className="dv-a-tap" />
+          <Dots n={1} x={60} y={98} className="dv-a-tap" />
+          <Hand x={60} y={98} scale={0.5} className="dv-a-tap" />
         </MiniScreen>
       );
     case "tp-right":
       return (
-        <MiniScreen>
+        <MiniScreen pad>
           <Pointer x={30} y={24} />
           <g className="dv-a-menu">
             <rect x="38" y="30" width="34" height="30" rx="3" fill="var(--s-surface)" stroke="var(--s-line)" />
@@ -118,21 +123,30 @@ export function GestureScene({ kind }: { kind: CoachGesture }) {
             <rect x="42" y="43" width="20" height="4" rx="1" fill="var(--s-ink-dim)" opacity="0.5" />
             <rect x="42" y="51" width="22" height="4" rx="1" fill="var(--s-ink-dim)" opacity="0.5" />
           </g>
-          <Dots n={2} x={62} y={84} className="dv-a-tap" />
-          <Hand x={62} y={84} scale={0.55} className="dv-a-tap" />
+          <Dots n={2} x={60} y={98} className="dv-a-tap" />
+          <Hand x={60} y={98} scale={0.5} className="dv-a-tap" />
         </MiniScreen>
       );
     case "tp-drag":
       return (
-        <MiniScreen>
+        <MiniScreen pad>
           <rect x="22" y="48" width="0" height="8" fill="var(--s-accent)" opacity="0.45" className="dv-a-select" />
           <Pointer x={22} y={48} className="dv-a-slide-x" />
-          <Dots n={1} x={40} y={84} className="dv-a-tapdrag" />
-          <Hand x={40} y={84} scale={0.55} className="dv-a-tapdrag" />
+          <Dots n={1} x={42} y={98} className="dv-a-tapdrag-small" />
+          <Hand x={42} y={98} scale={0.5} className="dv-a-tapdrag-small" />
         </MiniScreen>
       );
     case "scroll":
-      return (
+      return pad ? (
+        <MiniScreen pad>
+          <g className="dv-a-scroll-content">
+            <rect x="60" y="40" width="46" height="5" rx="2" fill="var(--s-ink-dim)" opacity="0.3" />
+            <rect x="60" y="49" width="38" height="5" rx="2" fill="var(--s-ink-dim)" opacity="0.3" />
+          </g>
+          <Dots n={2} x={60} y={108} className="dv-a-scroll-small" />
+          <Hand x={60} y={108} scale={0.5} className="dv-a-scroll-small" />
+        </MiniScreen>
+      ) : (
         <MiniScreen>
           <g className="dv-a-scroll-content">
             <rect x="60" y="40" width="46" height="5" rx="2" fill="var(--s-ink-dim)" opacity="0.3" />
@@ -144,7 +158,7 @@ export function GestureScene({ kind }: { kind: CoachGesture }) {
       );
     case "pinch":
       return (
-        <MiniScreen>
+        <MiniScreen pad={pad}>
           <rect x="14" y="14" width="40" height="26" rx="3" fill="var(--s-accent)" opacity="0.35" className="dv-a-grow" style={{ transformOrigin: "34px 27px" }} />
           <circle cx="50" cy="56" r="5" fill="var(--s-accent)" className="dv-a-pinch-a" />
           <circle cx="70" cy="44" r="5" fill="var(--s-accent)" className="dv-a-pinch-b" />

@@ -50,7 +50,7 @@ import { qualityLevel, stepOf, LEVEL_WORDS } from "./status";
 import { hasVideoDecoder, useRemoteSession } from "./useRemoteSession";
 import { Coach, coachSeen } from "./ui/Coach";
 import { ConnectingScreen, ErrorScreen, ReconnectCard } from "./ui/ConnectingScreen";
-import { IconZoomOut } from "./ui/icons";
+import { IconRotate, IconZoomOut } from "./ui/icons";
 import { KeyBar, type KeyBarPress } from "./ui/KeyBar";
 import { ClipboardSheet, ModeSheet, QualitySheet, StatsSheet } from "./ui/Panels";
 import { CertSheet, CredentialSheet } from "./ui/Prompts";
@@ -694,6 +694,21 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.remoteClipboard]);
 
+  // A wide desktop on an upright phone is small: suggest turning it, once.
+  const [sidewaysHint, setSidewaysHint] = useState(false);
+  const hintDone = useRef(false);
+  useEffect(() => {
+    if (hintDone.current || s.phase !== "connected" || coach || s.desktop.w === 0 || stage.w === 0) return;
+    if (!(stage.h > stage.w * 1.2 && s.desktop.w > s.desktop.h)) return;
+    hintDone.current = true;
+    setSidewaysHint(true);
+    const id = setTimeout(() => setSidewaysHint(false), 6000);
+    return () => clearTimeout(id);
+  }, [s.phase, coach, s.desktop, stage]);
+  useEffect(() => {
+    if (stage.w > stage.h) setSidewaysHint(false);
+  }, [stage]);
+
   // ------------------------------------------------------------ toolbar
 
   const leave = useCallback(async () => {
@@ -728,7 +743,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
           void leave();
           break;
       }
-      if (a !== "keyboard" && a !== "keys") setToolbarOpen(false);
+      setToolbarOpen(false);
     },
     [keyboardOn, leave, openKeyboard, s, showToast],
   );
@@ -795,6 +810,14 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
               runAnim();
             }}>
               <IconZoomOut size={20} /> Show the whole screen
+            </button>
+          ) : null}
+          {sidewaysHint && !zoomed ? (
+            <button type="button" className="dv-s-hint" onClick={() => setSidewaysHint(false)}>
+              <IconRotate size={30} />
+              <span>
+                Turn your phone sideways for a bigger picture, or double tap to zoom in
+              </span>
             </button>
           ) : null}
           {reconnecting ? (

@@ -43,7 +43,7 @@ export function Coach({ mode, onDone }: { mode: TouchMode; onDone(): void }) {
         <ul className="dv-s-tips">
           {TIPS[mode].map((t) => (
             <li key={t.g}>
-              <GestureScene kind={t.g} />
+              <GestureScene kind={t.g} pad={mode === "trackpad"} />
               <span>{t.text}</span>
             </li>
           ))}

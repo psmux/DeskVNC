@@ -201,3 +201,11 @@ export const IconArrow = ({ dir, size }: P & { dir: "up" | "down" | "left" | "ri
     </Svg>
   );
 };
+
+export const IconRotate = ({ size }: P) => (
+  <Svg size={size}>
+    <rect x="7" y="2.5" width="10" height="16" rx="2" className="dv-a-tilt" />
+    <path d="M3.5 14.5a9 9 0 0 0 7 7M20.5 9.5a9 9 0 0 0-7-7" />
+    <path d="M10.5 21.5l-2.3.4.6-2.4M13.5 2.5l2.3-.4-.6 2.4" />
+  </Svg>
+);
