@@ -15,12 +15,11 @@ dash punctuation.
 | Tags | Remote desktop, Productivity (pick the closest Play offers, check) |
 | Free or paid | Free |
 | Contains ads | No |
-| Email | a support address on the publishing account (Play requires one; it is shown publicly) |
+| Email | support@ripeflow.com |
 | Website | https://deskvnc.ripeflow.com |
 | Privacy policy | https://deskvnc.ripeflow.com/privacy |
 
-The developer contact email is required and public. Use an address made for
-this, not a personal one, and do not write it into this repository.
+Play shows the contact email publicly on the listing.
 
 ## Short description (80)
 
@@ -61,6 +60,6 @@ each upload to the internal track.
 |---|---|---|
 | App icon | 512 x 512 PNG, 32 bit | `mobile/icons/out/store/play-icon-512.png` |
 | Feature graphic | 1024 x 500 PNG or JPEG, no alpha | `mobile/store/art/out/feature-graphic.png` |
-| Phone screenshots | 2 to 8, 1080 x 1920 | `mobile/store/screenshots/out/android-phone/` |
-| 7 inch tablet | up to 8, 1200 x 1920 | `mobile/store/screenshots/out/android-tablet-7/` |
-| 10 inch tablet | up to 8, 1600 x 2560 | `mobile/store/screenshots/out/android-tablet-10/` |
+| Phone screenshots | 2 to 8, 1080 x 1920 (the session shot is 1920 x 1080) | `mobile/store/screenshots/android-phone/` |
+| 7 inch tablet | up to 8, 1200 x 1920 | `mobile/store/screenshots/android-tablet-7/` |
+| 10 inch tablet | up to 8, 1600 x 2560 | `mobile/store/screenshots/android-tablet-10/` |

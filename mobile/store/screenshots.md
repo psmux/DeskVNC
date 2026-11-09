@@ -13,9 +13,11 @@ node store-screenshots.mjs --serve
 
 With `--serve` the script starts the UI's dev server in `mobile/ui` on port
 5174 and stops it at the end. Output goes to
-`mobile/store/screenshots/out/<device>/`, which git ignores: a framed image
-per shot, and the bare screen in `raw/`. Both are at the store's exact size,
-so either can be uploaded.
+`mobile/store/screenshots/<device>/`, committed: one framed image per shot,
+at the store's exact size. The bare screens go to
+`mobile/store/screenshots/raw/<device>/`, which git ignores. The demo session
+shot is wide (the store size turned sideways), which both stores accept
+in a set of upright shots.
 
 The route names are constants at the top of the script (`ROUTES`). If the UI
 moves a screen, change them there.
@@ -39,16 +41,23 @@ slot on Apple, 8 on Play.
 
 ## The shots, in order
 
-| # | Screen | Caption | What must be on screen |
+Light theme, mock data, the store size of each device.
+
+| # | Screen | Caption | How the script gets there |
 |---|---|---|---|
-| 1 | Demo computer session | Your computer's screen, on your phone | The built in demo desktop, key bar visible |
-| 2 | Computers | Every computer you use, at a glance | Four to six mock cards with thumbnails, mixed protocols and OS artwork |
-| 3 | Help (Boundary code) | Help someone with a twelve digit code | Number pad with a code half typed |
-| 4 | Nearby | Find computers on your network | The radar with a few mock results |
-| 5 | Settings | No account, nothing collected | The privacy and about section |
+| 1 | Demo computer session, phone turned sideways, toolbar open | Your computer's screen, on your phone (tablet on tablets) | Computers, Try the demo, Show the toolbar |
+| 2 | Computers | Every computer you use, at a glance | `?tab=computers` |
+| 3 | Help someone | Help someone with a twelve digit code | `?tab=help`, eight digits typed |
+| 4 | Nearby | Find the computers on your network | `?tab=nearby`, wait for Look again |
+| 5 | Add a computer | Pick how you reach it, and it asks the rest | Computers, the + button |
 
 The first shot is the demo session on purpose. It is the one people see in
 search results, and it is also exactly what a reviewer can reproduce.
+
+The 10 inch Android set is drawn 1000 points wide rather than 800. At 800
+the side rail and the two column layouts squeeze card titles and the code
+boxes on Help; once the UI handles that width, set the device back in the
+script.
 
 Mock data rules (for the UI agents): names like "Office PC", "Studio Mac",
 "Pi in the hall"; addresses only from `192.0.2.x` or `example.com`; no real

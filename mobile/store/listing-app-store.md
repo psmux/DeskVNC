@@ -17,6 +17,7 @@ dash punctuation.
 | Content rights | Does not contain, show or access third party content |
 | Price | Free |
 | Support URL | https://github.com/psmux/DeskVNC/issues |
+| Support email | support@ripeflow.com (App Review contact and the privacy policy) |
 | Marketing URL | https://deskvnc.ripeflow.com |
 | Privacy Policy URL | https://deskvnc.ripeflow.com/privacy |
 

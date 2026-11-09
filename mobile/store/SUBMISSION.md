@@ -70,7 +70,9 @@ closed test build to a production release, plus review time.
    audience (18 and over), data safety (no data collected), news, government
    and financial features (no).
 7. Owner: Store presence, Main store listing. Copy from
-   `listing-google-play.md`, icon, feature graphic and screenshots.
+   `listing-google-play.md`, icon, feature graphic and screenshots. Store
+   settings, contact details: email support@ripeflow.com, website
+   https://deskvnc.ripeflow.com.
 
 ### Internal testing (days 1 to 2)
 
@@ -181,8 +183,8 @@ are owner steps and CI signs with a certificate and profile from secrets.
     13 inch iPad, promotional text, description, keywords, support and
     marketing URLs, what's new (`listing-app-store.md`).
 15. Owner: App Review Information: sign in not required; paste the notes
-    from `review-notes.md`; contact name, phone and email (kept in App Store
-    Connect only).
+    from `review-notes.md`; contact email support@ripeflow.com, with the
+    owner's name and phone (kept in App Store Connect only).
 16. Owner: choose the build from TestFlight, choose manual release, Add for
     Review, Submit. Review usually takes a day or two (check).
 17. Owner: if rejected, reply in Resolution Center. The usual causes for a

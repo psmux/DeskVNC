@@ -67,4 +67,5 @@ this file is public in the DeskVNC repository on GitHub.
 
 ## Contact
 
-Questions go to the issue tracker at https://github.com/psmux/DeskVNC/issues.
+Write to support@ripeflow.com, or open an issue at
+https://github.com/psmux/DeskVNC/issues.

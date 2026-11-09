@@ -40,8 +40,8 @@ Nearby scans the local network for computers that accept VNC or RDP. On a networ
 The app asks for Local Network access only when you open Nearby or connect to a computer on your network. It collects no data and has no in app purchases or ads.
 <!-- end -->
 
-Contact information: the account owner's name, phone and email go in App
-Store Connect only. Do not add them here.
+Contact information: email support@ripeflow.com. The account owner's name
+and phone number go in App Store Connect only.
 
 If a reviewer still wants a live server: we can run a public demo VNC server
 with a read only view of a throwaway desktop and give its address here. That
