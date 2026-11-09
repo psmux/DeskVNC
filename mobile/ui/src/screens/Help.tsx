@@ -198,14 +198,14 @@ function CodeBoxes({ digits }: { digits: string }) {
   return (
     <div className="mx-auto flex w-full max-w-md justify-center gap-2.5 sm:gap-4" aria-label={digits ? `Code ${formatCode(digits)}` : "No code yet"} role="status">
       {rows.map((row, g) => (
-        <div key={g} className="flex flex-1 gap-1 sm:gap-1.5">
+        <div key={g} className="flex min-w-0 flex-1 gap-1 sm:gap-1.5">
           {row.map((d, i) => {
             const index = g * 4 + i;
             const current = index === at;
             return (
               <div
                 key={i}
-                className={`relative flex h-14 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-xl text-[1.6rem] font-extrabold tabular-nums transition-colors sm:h-16 sm:w-10 sm:text-3xl ${d ? "bg-boundary text-white shadow-card" : current ? "border-2 border-boundary bg-surface" : "bg-surface-2"}`}
+                className={`relative flex h-14 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-xl text-[1.6rem] font-extrabold tabular-nums transition-colors sm:h-16 sm:text-3xl ${d ? "bg-boundary text-white shadow-card" : current ? "border-2 border-boundary bg-surface" : "bg-surface-2"}`}
               >
                 <AnimatePresence>
                   {d && (
