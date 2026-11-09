@@ -305,7 +305,26 @@ fn forward_events(f: Forward) {
         background_ended,
     } = f;
     tauri::async_runtime::spawn(async move {
+        // The UI sizes its canvas from `desktop-resize`, so no frame goes out
+        // before the first one. Every driver already sends the size first;
+        // this makes it a rule here rather than a habit there. A frame held
+        // back for that reason is replaced by a full repaint once the size
+        // is known.
+        let mut sized = false;
+        let mut repaint_when_sized = false;
         while let Some(event) = rx.recv().await {
+            if let SessionEvent::DesktopResize { .. } = &event {
+                if !sized && repaint_when_sized {
+                    let sender = sessions
+                        .lock()
+                        .get(&session_id)
+                        .map(|s| s.handle.commands.clone());
+                    if let Some(sender) = sender {
+                        let _ = sender.try_send(ClientCommand::Refresh);
+                    }
+                }
+                sized = true;
+            }
             if let SessionEvent::StateChanged(SessionState::Connected) = &event {
                 on_connected(&app, host_id.as_deref(), &pending_save);
             }
@@ -320,6 +339,10 @@ fn forward_events(f: Forward) {
                         // Nobody is drawing. Dropped here, and the whole
                         // screen is asked for again on the way back
                         // (`crate::lifecycle`).
+                        continue;
+                    }
+                    if !sized {
+                        repaint_when_sized = true;
                         continue;
                     }
                     let rects = framing::decode_jpeg_rects(rects);
