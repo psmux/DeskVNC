@@ -3,7 +3,8 @@ name: Mobile iOS
 # The phone app's iOS build, kept apart from the desktop CI and release
 # workflows so neither waits on the other.
 #
-#   pull request or push to main touching the phone app or the shared crates
+#   pull request, or push to main or a mobile* branch, touching the phone
+#                      app or the shared crates
 #                      build for the simulator, which proves it compiles
 #   workflow_dispatch  the same on any branch, or a signed IPA when the
 #                      signing secrets exist
@@ -30,7 +31,9 @@ name: Mobile iOS
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # main, and the phone app's own branches while it is being built
+    # (workflow_dispatch only works once a workflow is on the default branch).
+    branches: [main, "mobile", "mobile-*"]
     # Path filters are not applied to tag pushes, so every mobile-v* tag builds.
     tags: ["mobile-v*"]
     paths: &mobile_paths

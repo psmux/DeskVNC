@@ -3,7 +3,8 @@ name: Mobile Android
 # The phone app's Android build, kept apart from the desktop CI and release
 # workflows so neither waits on the other.
 #
-#   pull request or push to main touching the phone app or the shared crates
+#   pull request, or push to main or a mobile* branch, touching the phone
+#                      app or the shared crates
 #                      build an AAB and an APK and keep them as artifacts
 #   workflow_dispatch  the same, on demand, on any branch
 #   push tag mobile-v* the same, signed with the upload key, and sent to the
@@ -18,7 +19,9 @@ name: Mobile Android
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # main, and the phone app's own branches while it is being built
+    # (workflow_dispatch only works once a workflow is on the default branch).
+    branches: [main, "mobile", "mobile-*"]
     # Path filters are not applied to tag pushes, so every mobile-v* tag builds.
     tags: ["mobile-v*"]
     paths: &mobile_paths
