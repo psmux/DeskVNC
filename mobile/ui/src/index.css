@@ -34,6 +34,7 @@
   }
 }
 
+@layer base {
 html,
 body,
 #root {
@@ -68,6 +69,8 @@ button {
   font: inherit;
   color: inherit;
   cursor: pointer;
+}
+
 }
 
 .pt-safe {
