@@ -46,6 +46,9 @@ members = [
     "crates/bench-stage",
     "crates/remote-bench",
     "src-tauri",
+    # The phone app, its own Tauri crate over the same protocol crates
+    # (mobile/README.md).
+    "mobile/src-tauri",
 ]
 
 # Fuzz targets live in their own workspaces so `libfuzzer-sys` and `arbitrary`

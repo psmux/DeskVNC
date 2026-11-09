@@ -1,0 +1,63 @@
+[package]
+name = "deskvnc-mobile"
+# The phone app versions on its own `mobile-v*` tags, apart from the desktop.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DeskVNC for iPhone, iPad and Android"
+publish = false
+
+[lib]
+name = "deskvnc_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# The protocol stack the desktop shell drives, unchanged.
+remote-core = { path = "../../crates/remote-core" }
+vnc-core = { path = "../../crates/vnc-core" }
+rdp-core = { path = "../../crates/rdp-core" }
+boundary-driver = { path = "../../crates/boundary-driver" }
+boundary-session = { path = "../../crates/boundary-session" }
+boundary-codes = { path = "../../crates/boundary-codes" }
+vnc-discovery = { path = "../../crates/vnc-discovery" }
+# Typing a string and pressing a chord, the same lowering the agent plane uses.
+limb-core = { path = "../../crates/limb-core" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+
+# Secrets. The phone keeps them in the platform's own vault, never in a file
+# of ours: the iOS Keychain (the "protected data" store, the only one iOS
+# has) and, on Android, values encrypted with a key held in the Android
+# Keystore. A desktop build of this crate, which only exists for checks and
+# tests, keeps them in memory.
+keyring-core = "1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["protected"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1"
+# The Wi-Fi multicast lock for discovery, through the activity Tauri hands
+# to `ndk-context` at start.
+jni = "0.21"
+ndk-context = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

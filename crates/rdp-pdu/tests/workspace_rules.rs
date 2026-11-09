@@ -258,9 +258,13 @@ fn only_the_ruled_crates_reach_into_the_rdp_set() {
         // `remote-bench` is exempt for the same reason as the shell: it
         // starts a session through `rdp-core`'s public spawn, exactly as the
         // registry does, to measure the viewer's own RDP path.
+        //
+        // `deskvnc-mobile` is the phone app's shell, the second consumer of
+        // the same registry pattern, and is exempt for the shell's reason.
         if LEAVES.iter().any(|(l, _)| *l == name)
             || name == "rdp-core"
             || name == "deskvncviewer"
+            || name == "deskvnc-mobile"
             || name == "remote-bench"
         {
             continue;
