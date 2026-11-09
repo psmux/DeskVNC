@@ -1,0 +1,243 @@
+name: Mobile Android
+
+# The phone app's Android build, kept apart from the desktop CI and release
+# workflows so neither waits on the other.
+#
+#   pull request or push to main touching the phone app or the shared crates
+#                      build an AAB and an APK and keep them as artifacts
+#   workflow_dispatch  the same, on demand, on any branch
+#   push tag mobile-v* the same, signed with the upload key, and sent to the
+#                      Google Play internal track when the Play secret exists
+#
+# Signing: with ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD set, the AAB and APK are signed
+# with the upload key (mobile/scripts/make-android-upload-key.sh makes it,
+# mobile/scripts/set-mobile-secrets.sh stores it). Without them, as on forks
+# and pull requests, the AAB stays unsigned and the APK is signed with a
+# throwaway debug key made in this job, so it still installs for testing.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Path filters are not applied to tag pushes, so every mobile-v* tag builds.
+    tags: ["mobile-v*"]
+    paths: &mobile_paths
+      - "mobile/**"
+      # Store copy and screenshots do not change the app.
+      - "!mobile/store/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mobile-android.yml"
+  pull_request:
+    paths: *mobile_paths
+
+concurrency:
+  group: mobile-android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_PACKAGE: com.psmux.deskvnc.mobile
+  NDK_VERSION: 27.2.12479018
+
+jobs:
+  android:
+    name: Android (AAB and APK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      HAS_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' }}
+      HAS_PLAY: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check the phone app crate exists
+        shell: bash
+        run: |
+          if [ ! -f mobile/src-tauri/tauri.conf.json ]; then
+            echo "::error::mobile/src-tauri/tauri.conf.json is missing, so there is no phone app to build on this ref."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The runner image carries the Android SDK. Install the NDK version this
+      # workflow names so a runner image update cannot change it underneath.
+      - name: Install the Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" --install "ndk;$NDK_VERSION" "platform-tools" >/dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          bt=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -n1)
+          echo "BUILD_TOOLS=$ANDROID_HOME/build-tools/$bt" >> "$GITHUB_ENV"
+          echo "NDK $NDK_VERSION, build tools $bt"
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: mobile-android
+          workspaces: |
+            . -> target
+            mobile/src-tauri -> mobile/src-tauri/target
+
+      # A prebuilt Tauri CLI through cargo-binstall, which compiles it only
+      # when no binary matches. rust-cache keeps ~/.cargo/bin between runs.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install the Tauri CLI
+        shell: bash
+        run: |
+          command -v cargo-tauri >/dev/null || cargo binstall --no-confirm --locked "tauri-cli@^2"
+          cargo tauri --version
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install the phone UI's dependencies
+        working-directory: mobile/ui
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+
+      # The Android project is normally committed under mobile/src-tauri/gen.
+      # When it is not, generate it so the build still proves the crate works.
+      - name: Generate the Android project if it is not committed
+        working-directory: mobile/src-tauri
+        shell: bash
+        run: |
+          if [ -d gen/android ]; then
+            echo "Using the committed Android project."
+          else
+            echo "::warning::mobile/src-tauri/gen/android is not committed; generating it for this run."
+            cargo tauri android init --ci
+          fi
+
+      - name: Put the phone icons in the Android project
+        run: mobile/icons/build-icons.sh --install-only
+
+      # Version name from the tag (mobile-v1.2.3 gives 1.2.3), otherwise from
+      # tauri.conf.json. versionCode is the run number, which only grows, so
+      # every upload to Play is higher than the one before it.
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            name=${GITHUB_REF_NAME#mobile-v}
+          else
+            name=$(node -p "require('./mobile/src-tauri/tauri.conf.json').version")
+          fi
+          code=$((GITHUB_RUN_NUMBER + 100))
+          cfg="$RUNNER_TEMP/version.conf.json"
+          printf '{"version":"%s","bundle":{"android":{"versionCode":%d}}}\n' "$name" "$code" > "$cfg"
+          {
+            echo "name=$name"
+            echo "code=$code"
+            echo "config=$cfg"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $name, versionCode $code"
+
+      - name: Build the AAB and APK
+        working-directory: mobile/src-tauri
+        run: cargo tauri android build --ci --aab --apk --config "${{ steps.version.outputs.config }}"
+
+      - name: Collect the build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=mobile/src-tauri/gen/android/app/build/outputs
+          find "$out" -name '*.aab' -o -name '*.apk' | sort
+          aab=$(find "$out/bundle" -name '*universal*release*.aab' | head -n1)
+          apk=$(find "$out/apk" -name '*universal*release*.apk' | head -n1)
+          [ -n "$aab" ] && [ -n "$apk" ] || { echo "::error::No universal release AAB or APK was built"; exit 1; }
+          mkdir -p dist
+          cp "$aab" dist/unsigned.aab
+          cp "$apk" dist/unsigned.apk
+
+      - name: Sign with the upload key
+        if: env.HAS_KEYSTORE == 'true'
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ks="$RUNNER_TEMP/upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ks"
+          name="deskvnc-${{ steps.version.outputs.name }}-${{ steps.version.outputs.code }}"
+          # An AAB is signed like a jar. Play checks this signature against
+          # the upload key it has on record.
+          cp dist/unsigned.aab "dist/$name.aab"
+          jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore "$ks" -storepass:env ANDROID_KEYSTORE_PASSWORD -keypass:env ANDROID_KEY_PASSWORD \
+            "dist/$name.aab" "$ANDROID_KEY_ALIAS" >/dev/null
+          jarsigner -verify "dist/$name.aab" >/dev/null
+          "$BUILD_TOOLS/zipalign" -p -f 4 dist/unsigned.apk "$RUNNER_TEMP/aligned.apk"
+          "$BUILD_TOOLS/apksigner" sign --ks "$ks" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "dist/$name.apk" "$RUNNER_TEMP/aligned.apk"
+          "$BUILD_TOOLS/apksigner" verify --print-certs "dist/$name.apk" | grep -i 'SHA-256 digest'
+          rm -f "$ks" dist/unsigned.aab dist/unsigned.apk
+          echo "SIGNED_AAB=dist/$name.aab" >> "$GITHUB_ENV"
+
+      - name: Sign the APK with a throwaway debug key
+        if: env.HAS_KEYSTORE != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "No upload key in this repository's secrets, so the AAB stays unsigned and the APK gets a debug key made just for this run."
+          ks="$RUNNER_TEMP/debug.jks"
+          keytool -genkeypair -keystore "$ks" -storetype PKCS12 -storepass android -keypass android \
+            -alias debug -keyalg RSA -keysize 2048 -validity 30 -dname "CN=DeskVNC CI debug" >/dev/null 2>&1
+          name="deskvnc-${{ steps.version.outputs.name }}-${{ steps.version.outputs.code }}"
+          "$BUILD_TOOLS/zipalign" -p -f 4 dist/unsigned.apk "$RUNNER_TEMP/aligned.apk"
+          "$BUILD_TOOLS/apksigner" sign --ks "$ks" --ks-key-alias debug --ks-pass pass:android \
+            --out "dist/$name-debug-signed.apk" "$RUNNER_TEMP/aligned.apk"
+          mv dist/unsigned.aab "dist/$name-unsigned.aab"
+          rm -f dist/unsigned.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskvnc-android-${{ steps.version.outputs.name }}-${{ steps.version.outputs.code }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload to the Google Play internal track
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_PLAY" != true ]; then
+            echo "PLAY_SERVICE_ACCOUNT_JSON is not set, so nothing goes to Google Play. The signed AAB is in the artifacts for a manual upload."
+            exit 0
+          fi
+          if [ "$HAS_KEYSTORE" != true ]; then
+            echo "::error::A Play upload needs the upload key secrets, and they are not set."
+            exit 1
+          fi
+          notes=""
+          [ -f mobile/store/whats-new.txt ] && notes=mobile/store/whats-new.txt
+          node mobile/scripts/play-upload.mjs --package "$APP_PACKAGE" --aab "$SIGNED_AAB" \
+            --track internal ${notes:+--notes-file "$notes"}

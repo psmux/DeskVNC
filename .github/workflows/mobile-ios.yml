@@ -1,0 +1,246 @@
+name: Mobile iOS
+
+# The phone app's iOS build, kept apart from the desktop CI and release
+# workflows so neither waits on the other.
+#
+#   pull request or push to main touching the phone app or the shared crates
+#                      build for the simulator, which proves it compiles
+#   workflow_dispatch  the same on any branch, or a signed IPA when the
+#                      signing secrets exist
+#   push tag mobile-v* a signed IPA, uploaded to TestFlight
+#
+# Signing, in the order this workflow tries them:
+#
+# 1. Manual: APPLE_DIST_CERT_P12_BASE64, APPLE_DIST_CERT_PASSWORD,
+#    APPLE_PROVISIONING_PROFILE_BASE64 and APPLE_TEAM_ID. The Tauri CLI puts
+#    the certificate in a temporary keychain of its own (IOS_CERTIFICATE) and
+#    signs with the App Store profile (IOS_MOBILE_PROVISION). This works with
+#    an App Store Connect key of any role, because the key is only used to
+#    upload.
+# 2. Automatic: no certificate or profile, only the App Store Connect key.
+#    The CLI passes -allowProvisioningUpdates with the key to xcodebuild, and
+#    Xcode makes or fetches the distribution certificate and profile in the
+#    cloud. Apple only lets that happen with a key that may manage
+#    certificates (Admin, check), so with a Developer role key use way 1.
+# 3. Neither: a simulator build and no IPA.
+#
+# The upload to TestFlight needs APP_STORE_CONNECT_KEY_ID,
+# APP_STORE_CONNECT_ISSUER_ID and APP_STORE_CONNECT_KEY_P8_BASE64, and runs on
+# mobile-v* tags only. mobile/scripts/set-mobile-secrets.sh sets them all.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Path filters are not applied to tag pushes, so every mobile-v* tag builds.
+    tags: ["mobile-v*"]
+    paths: &mobile_paths
+      - "mobile/**"
+      # Store copy and screenshots do not change the app.
+      - "!mobile/store/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mobile-ios.yml"
+  pull_request:
+    paths: *mobile_paths
+
+concurrency:
+  group: mobile-ios-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios:
+    name: iOS
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      HAS_MANUAL_SIGNING: ${{ secrets.APPLE_DIST_CERT_P12_BASE64 != '' && secrets.APPLE_DIST_CERT_PASSWORD != '' && secrets.APPLE_PROVISIONING_PROFILE_BASE64 != '' && secrets.APPLE_TEAM_ID != '' }}
+      HAS_ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY_ID != '' && secrets.APP_STORE_CONNECT_ISSUER_ID != '' && secrets.APP_STORE_CONNECT_KEY_P8_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check the phone app crate exists
+        shell: bash
+        run: |
+          if [ ! -f mobile/src-tauri/tauri.conf.json ]; then
+            echo "::error::mobile/src-tauri/tauri.conf.json is missing, so there is no phone app to build on this ref."
+            exit 1
+          fi
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11-07
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: mobile-ios
+          workspaces: |
+            . -> target
+            mobile/src-tauri -> mobile/src-tauri/target
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install the Tauri CLI and XcodeGen
+        shell: bash
+        run: |
+          command -v cargo-tauri >/dev/null || cargo binstall --no-confirm --locked "tauri-cli@^2"
+          cargo tauri --version
+          command -v xcodegen >/dev/null || brew install xcodegen
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install the phone UI's dependencies
+        working-directory: mobile/ui
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+
+      - name: Generate the Xcode project if it is not committed
+        working-directory: mobile/src-tauri
+        shell: bash
+        run: |
+          if [ -d gen/apple ]; then
+            echo "Using the committed Xcode project."
+          else
+            echo "::warning::mobile/src-tauri/gen/apple is not committed; generating it for this run."
+            cargo tauri ios init --ci
+          fi
+
+      - name: Put the phone icons in the Xcode project
+        run: mobile/icons/build-icons.sh --install-only
+
+      # CFBundleShortVersionString from the tag (mobile-v1.2.3 gives 1.2.3),
+      # otherwise from tauri.conf.json. The CLI appends the run number as the
+      # build number, so CFBundleVersion is 1.2.3.N and only grows.
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            name=${GITHUB_REF_NAME#mobile-v}
+          else
+            name=$(node -p "require('./mobile/src-tauri/tauri.conf.json').version")
+          fi
+          cfg="$RUNNER_TEMP/version.conf.json"
+          printf '{"version":"%s"}\n' "$name" > "$cfg"
+          {
+            echo "name=$name"
+            echo "build=$GITHUB_RUN_NUMBER"
+            echo "config=$cfg"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$HAS_MANUAL_SIGNING" = true ]; then mode=manual
+          elif [ "$HAS_ASC_KEY" = true ]; then mode=automatic
+          else mode=simulator; fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Version $name, build $GITHUB_RUN_NUMBER, signing: $mode"
+
+      - name: Put the App Store Connect key in place
+        if: env.HAS_ASC_KEY == 'true'
+        shell: bash
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          # altool looks for AuthKey_<id>.p8 in ~/private_keys.
+          mkdir -p ~/private_keys
+          key=~/private_keys/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8_BASE64" | base64 --decode > "$key"
+          chmod 600 "$key"
+          echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
+
+      - name: Build for the simulator
+        if: steps.version.outputs.mode == 'simulator'
+        working-directory: mobile/src-tauri
+        run: |
+          echo "No signing secrets in this repository, so this is a simulator build that proves the app compiles."
+          cargo tauri ios build --ci --target aarch64-sim --config "${{ steps.version.outputs.config }}" --build-number "${{ steps.version.outputs.build }}"
+
+      - name: Build a signed IPA (manual signing)
+        if: steps.version.outputs.mode == 'manual'
+        working-directory: mobile/src-tauri
+        env:
+          IOS_CERTIFICATE: ${{ secrets.APPLE_DIST_CERT_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DIST_CERT_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cargo tauri ios build --ci --export-method app-store-connect \
+            --config "${{ steps.version.outputs.config }}" --build-number "${{ steps.version.outputs.build }}"
+
+      - name: Build a signed IPA (automatic signing with the API key)
+        if: steps.version.outputs.mode == 'automatic'
+        working-directory: mobile/src-tauri
+        env:
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          export APPLE_API_KEY_PATH="$ASC_KEY_PATH"
+          cargo tauri ios build --ci --export-method app-store-connect \
+            --config "${{ steps.version.outputs.config }}" --build-number "${{ steps.version.outputs.build }}"
+
+      - name: Collect the build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          build=mobile/src-tauri/gen/apple/build
+          find "$build" -maxdepth 3 \( -name '*.ipa' -o -name '*.app' \) | sort
+          mkdir -p dist
+          name="deskvnc-${{ steps.version.outputs.name }}-${{ steps.version.outputs.build }}"
+          ipa=$(find "$build" -maxdepth 3 -name '*.ipa' | head -n1)
+          if [ -n "$ipa" ]; then
+            cp "$ipa" "dist/$name.ipa"
+            echo "IPA=dist/$name.ipa" >> "$GITHUB_ENV"
+          else
+            app=$(find "$build" -maxdepth 3 -name '*.app' | head -n1)
+            [ -n "$app" ] || { echo "::error::Neither an IPA nor a simulator app was built"; exit 1; }
+            (cd "$(dirname "$app")" && ditto -c -k --keepParent "$(basename "$app")" "$GITHUB_WORKSPACE/dist/$name-simulator.zip")
+          fi
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskvnc-ios-${{ steps.version.outputs.name }}-${{ steps.version.outputs.build }}-${{ steps.version.outputs.mode }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload to TestFlight
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_ASC_KEY" != true ]; then
+            echo "The App Store Connect key secrets are not set, so nothing goes to TestFlight. The IPA, if one was built, is in the artifacts."
+            exit 0
+          fi
+          if [ -z "${IPA:-}" ]; then
+            echo "::error::No signed IPA was built, so there is nothing to upload. Set the signing secrets."
+            exit 1
+          fi
+          xcrun altool --upload-app --type ios --file "$IPA" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+          echo "Uploaded. App Store Connect processes the build for a few minutes before TestFlight shows it."
+
+      - name: Remove the App Store Connect key
+        if: always()
+        shell: bash
+        run: rm -rf ~/private_keys

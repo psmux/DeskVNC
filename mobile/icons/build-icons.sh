@@ -5,6 +5,9 @@
 #   mobile/icons/build-icons.sh --install       render, then copy into
 #                                               mobile/src-tauri/gen (iOS and
 #                                               Android projects) if they exist
+#   mobile/icons/build-icons.sh --install-only  copy the committed out/ folder
+#                                               into the gen projects without
+#                                               rendering (what CI does)
 #   mobile/icons/build-icons.sh --tauri         render master-1024.png, then
 #                                               let `tauri icon` make its own set
 #
@@ -22,6 +25,34 @@ here=$(cd "$(dirname "$0")" && pwd)
 mobile=$(cd "$here/.." && pwd)
 out="$here/out"
 mode=${1:-}
+
+install_icons() {
+  gen="$mobile/src-tauri/gen"
+  ios_set_dir="$gen/apple/Assets.xcassets/AppIcon.appiconset"
+  res="$gen/android/app/src/main/res"
+  if [ -d "$gen/apple/Assets.xcassets" ]; then
+    rm -rf "$ios_set_dir"
+    cp -R "$out/ios/AppIcon.appiconset" "$ios_set_dir"
+    echo "Installed the iOS icon set in $ios_set_dir"
+  else
+    echo "No iOS project at $gen/apple yet (run tauri ios init first), skipped."
+  fi
+  if [ -d "$res" ]; then
+    for dir in "$out"/android/mipmap-*; do
+      mkdir -p "$res/$(basename "$dir")"
+      cp "$dir"/* "$res/$(basename "$dir")/"
+    done
+    echo "Installed the Android icons in $res"
+  else
+    echo "No Android project at $res yet (run tauri android init first), skipped."
+  fi
+}
+
+if [ "$mode" = --install-only ]; then
+  [ -d "$out/ios" ] || { echo "No rendered icons in $out, run without options first."; exit 1; }
+  install_icons
+  exit 0
+fi
 
 command -v rsvg-convert >/dev/null || { echo "rsvg-convert is missing (brew install librsvg)"; exit 1; }
 if command -v magick >/dev/null; then IM=magick; elif command -v convert >/dev/null; then IM=convert; else
@@ -121,25 +152,7 @@ echo "Icons written to $out"
 
 case "$mode" in
   --install)
-    gen="$mobile/src-tauri/gen"
-    ios_set_dir="$gen/apple/Assets.xcassets/AppIcon.appiconset"
-    res="$gen/android/app/src/main/res"
-    if [ -d "$gen/apple/Assets.xcassets" ]; then
-      rm -rf "$ios_set_dir"
-      cp -R "$out/ios/AppIcon.appiconset" "$ios_set_dir"
-      echo "Installed the iOS icon set in $ios_set_dir"
-    else
-      echo "No iOS project at $gen/apple yet (run tauri ios init first), skipped."
-    fi
-    if [ -d "$res" ]; then
-      for dir in "$out"/android/mipmap-*; do
-        mkdir -p "$res/$(basename "$dir")"
-        cp "$dir"/* "$res/$(basename "$dir")/"
-      done
-      echo "Installed the Android icons in $res"
-    else
-      echo "No Android project at $res yet (run tauri android init first), skipped."
-    fi
+    install_icons
     ;;
   --tauri)
     # tauri icon makes its own names and sizes from one 1024 PNG, writing into
