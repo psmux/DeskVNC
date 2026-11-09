@@ -73,7 +73,8 @@ function writeJson(key: string, value: unknown): void {
 /** One full screen msg_type 1 message with a single format 0 rect. */
 export function encodeRgbaFrame(rgba: Uint8ClampedArray, w: number, h: number): ArrayBuffer {
   const payload = w * h * 4;
-  const buf = new ArrayBuffer(12 + 16 + payload);
+  // 12 byte message header, then a 14 byte rect header, then the pixels.
+  const buf = new ArrayBuffer(12 + 14 + payload);
   const v = new DataView(buf);
   v.setUint8(0, 1);
   v.setUint8(1, 0);
@@ -89,7 +90,7 @@ export function encodeRgbaFrame(rgba: Uint8ClampedArray, w: number, h: number): 
   v.setUint8(20, 0); // format 0, RGBA
   v.setUint8(21, 0);
   v.setUint32(22, payload, true);
-  new Uint8Array(buf, 28).set(rgba);
+  new Uint8Array(buf, 26).set(rgba);
   return buf;
 }
 
