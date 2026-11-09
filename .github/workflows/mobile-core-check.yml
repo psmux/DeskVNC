@@ -96,16 +96,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-      - name: Install xcodegen
-        run: brew install xcodegen
-      - name: tauri ios init and android init
-        working-directory: mobile/src-tauri
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install the Tauri CLI and XcodeGen
+        run: |
+          command -v cargo-tauri >/dev/null || cargo binstall --no-confirm --locked --targets aarch64-apple-darwin "tauri-cli@^2"
+          cargo tauri --version
+          command -v xcodegen >/dev/null || brew install xcodegen
+      - name: cargo tauri ios init and android init
+        # From mobile, the folder the mobile workflows run the CLI in, so the
+        # generated projects call `cargo tauri` the way those builds do.
+        working-directory: mobile
         run: |
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          rm -rf gen/apple gen/android
-          npx --yes @tauri-apps/cli@2 ios init --ci --skip-targets-install
-          npx --yes @tauri-apps/cli@2 android init --ci --skip-targets-install
-          ls -la gen gen/apple gen/android
+          rm -rf src-tauri/gen/apple src-tauri/gen/android
+          cargo tauri ios init --ci --skip-targets-install
+          cargo tauri android init --ci --skip-targets-install
+          ls -la src-tauri/gen src-tauri/gen/apple src-tauri/gen/android
       - uses: actions/upload-artifact@v4
         with:
           name: mobile-gen
