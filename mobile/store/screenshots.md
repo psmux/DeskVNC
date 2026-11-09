@@ -54,11 +54,6 @@ Light theme, mock data, the store size of each device.
 The first shot is the demo session on purpose. It is the one people see in
 search results, and it is also exactly what a reviewer can reproduce.
 
-The 10 inch Android set is drawn 1000 points wide rather than 800. At 800
-the side rail and the two column layouts squeeze card titles and the code
-boxes on Help; once the UI handles that width, set the device back in the
-script.
-
 Mock data rules (for the UI agents): names like "Office PC", "Studio Mac",
 "Pi in the hall"; addresses only from `192.0.2.x` or `example.com`; no real
 person's name anywhere.

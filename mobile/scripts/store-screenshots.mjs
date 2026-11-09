@@ -107,10 +107,7 @@ const DEVICES = {
   "android-phone": { out: [1080, 1920], view: [432, 768], scale: 2.5, mobile: true },
   // Google Play 7 inch and 10 inch tablets.
   "android-tablet-7": { out: [1200, 1920], view: [600, 960], scale: 2, mobile: true },
-  // 1000 points wide. At 800 the side rail and two column layouts squeeze
-  // card titles and the code boxes (a UI fix is pending), so the 10 inch set
-  // is drawn at the width of a larger tablet.
-  "android-tablet-10": { out: [1600, 2560], view: [1000, 1600], scale: 1.6, mobile: true },
+  "android-tablet-10": { out: [1600, 2560], view: [800, 1280], scale: 2, mobile: true },
 };
 
 const here = dirname(fileURLToPath(import.meta.url));
