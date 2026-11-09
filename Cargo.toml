@@ -57,6 +57,9 @@ exclude = [
     "crates/rdp-pdu/fuzz",
     "crates/rdp-codecs/fuzz",
     "crates/rdp-auth/fuzz",
+    # Patched copies of third party crates, see [patch.crates-io] below.
+    "mobile/patches/netdev-0.46.3",
+    "mobile/patches/netdev-0.45.1",
 ]
 
 [workspace.package]
@@ -185,3 +188,15 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# netdev 0.45 and 0.46 do not compile for iOS: their Darwin code names
+# `libc::in6_ifreq`, which `libc` declares for macOS only. The copies under
+# mobile/patches are the published crates with one function given an iOS
+# fallback (see the end of src/os/darwin/ipv6_addr_flags.rs in each); every
+# other target compiles the published code unchanged. 0.46 arrives through
+# iroh's netwatch, 0.45 through vnc-discovery. Drop these once netdev or
+# libc fixes it upstream.
+[patch.crates-io]
+netdev = { path = "mobile/patches/netdev-0.46.3" }
+netdev_045 = { path = "mobile/patches/netdev-0.45.1", package = "netdev" }
+
