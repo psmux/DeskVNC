@@ -173,6 +173,10 @@ jobs:
           mkdir -p dist
           cp "$aab" dist/unsigned.aab
           cp "$apk" dist/unsigned.apk
+          # The permissions Play will see, so a new one shows up in review of
+          # the log before it shows up in a Play policy email.
+          echo "Permissions in the merged manifest:"
+          "$BUILD_TOOLS/aapt2" dump permissions dist/unsigned.apk
 
       - name: Sign with the upload key
         if: env.HAS_KEYSTORE == 'true'
