@@ -79,7 +79,7 @@ export function Nearby() {
           )}
         </div>
 
-        <div className="mt-6 grid grid-cols-1 gap-3 px-4 pb-6 sm:grid-cols-2 md:mt-0 md:grid-cols-1 md:px-0 lg:grid-cols-2">
+        <div className="mt-6 grid grid-cols-1 gap-3 px-4 pb-6 sm:grid-cols-2 md:mt-0 md:grid-cols-1 md:px-0 xl:grid-cols-2">
           <AnimatePresence>
             {app.found.map((f) => {
               const k = keyOf(f);
