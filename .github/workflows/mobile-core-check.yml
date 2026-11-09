@@ -22,7 +22,7 @@ on:
       - ".github/workflows/mobile-core-check.yml"
 
 concurrency:
-  group: mobile-core-check-${{ github.ref }}
+  group: mobile-core-check-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
