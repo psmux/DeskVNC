@@ -45,7 +45,10 @@ export type ScanEvent =
 export type ConnectTarget =
   | { kind: "saved"; hostId: string }
   | { kind: "adhoc"; protocol: Protocol; address: string; port: number; username?: string; password?: string }
-  | { kind: "boundary"; invitation: string; helperName: string };
+  | { kind: "boundary"; invitation: string; helperName: string }
+  /** The built in demo computer. Handled entirely in the UI (src/api/index.ts
+   *  routes it to the in browser mock session), never sent to Rust. */
+  | { kind: "demo" };
 
 export type SessionState =
   | { state: "idle" | "resolving" | "connecting" | "negotiating" | "connected" }
