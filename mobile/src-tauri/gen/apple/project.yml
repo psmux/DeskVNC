@@ -45,6 +45,14 @@ targets:
       path: deskvnc-mobile_iOS/Info.plist
       properties:
         LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: "DeskVNC connects to computers on your network, and looks for them when you scan."
+        NSBonjourServices:
+          - _rfb._tcp
+          - _rdp._tcp
+          - _boundary._udp
+          - _ard._tcp
+          - _workstation._tcp
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations:
@@ -86,7 +94,7 @@ targets:
       - sdk: WebKit.framework
     preBuildScripts:
       - script: |
-          npm run -- tauri ios xcode-script -v --platform "${PLATFORM_DISPLAY_NAME:?}" --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR} ${ARCHS:?}
+          cargo tauri ios xcode-script -v --platform "${PLATFORM_DISPLAY_NAME:?}" --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false
         outputFiles:

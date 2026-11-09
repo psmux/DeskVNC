@@ -9,8 +9,12 @@ field names follow `mobile/ui/src/api/contract.ts`.
   entry point `run()` with `tauri::mobile_entry_point`.
 * `tauri.conf.json`: productName DeskVNC, identifier
   `com.psmux.deskvnc.mobile`, version 0.1.0, frontendDist `../ui/dist`,
-  devUrl `http://localhost:5174`, beforeBuildCommand
-  `npm run build --prefix ../ui` (the same shape as the desktop's).
+  devUrl `http://localhost:5174`, beforeDevCommand `npm run dev` and
+  beforeBuildCommand `npm run build`. Run the CLI from `mobile/`, as the
+  mobile workflows do: it runs these in the folder of the first
+  `package.json` below where it starts, which is `mobile/ui`. Started from
+  `mobile/src-tauri` it finds none, falls back to `mobile`, and the command
+  fails rather than building the desktop UI.
   iOS minimum 15.0, Android minSdk 26.
 * Icons are copies of the desktop ones in `icons/`. Replace freely.
 * `capabilities/default.json` grants `core:default` and exactly the
@@ -19,12 +23,23 @@ field names follow `mobile/ui/src/api/contract.ts`.
 
 ## Native projects (`gen/`)
 
-`gen/apple` and `gen/android` come from `tauri ios init` and
-`tauri android init` (run by `.github/workflows/mobile-core-check.yml` with
-`init: true`, then committed). What was set by hand after generating:
+`gen/apple` and `gen/android` come from `cargo tauri ios init --ci` and
+`cargo tauri android init --ci`, run from `mobile/` by
+`.github/workflows/mobile-core-check.yml` with `init: true`, so the Xcode
+build phase and the Gradle task call `cargo tauri` like the CI builds. What
+was set after generating (then `xcodegen generate` in `gen/apple`, with empty
+`Externals` and `assets` folders present, to add the privacy manifest to the
+Xcode project):
 
+* iOS `ITSAppUsesNonExemptEncryption` false: the app only uses the
+  encryption built into TLS and QUIC, which is exempt.
+* iOS `PrivacyInfo.xcprivacy` in `gen/apple/deskvnc-mobile_iOS`: no tracking,
+  no collected data, and three required reason APIs: system boot time 35F9.1
+  (`std::time::Instant`), file timestamp C617.1 (files in the app container),
+  user defaults CA92.1 (the web view and runtime).
 * iOS `Info.plist` (`gen/apple/deskvnc-mobile_iOS/Info.plist`, and the same
-  keys in `Info.ios.plist`, which the Tauri CLI merges in, so they survive a
+  keys in `gen/apple/project.yml`, since xcodegen rewrites the plist from it,
+  and in `Info.ios.plist`, which the Tauri CLI merges in, so they survive a
   fresh `ios init`):
   * `NSLocalNetworkUsageDescription`: why the app reaches computers on the
     local network.

@@ -15,6 +15,7 @@
 		62ACD00AC9A1D261311682E2 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 162D6847C053E02C06AB8758 /* assets */; };
 		80D1BB766EABF97B1307C40A /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2E48C5E0603370C3D3ED4760 /* main.mm */; };
 		95205764115834A4EE934139 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 1A9F2E9D9CB81CE80939D055 /* LaunchScreen.storyboard */; };
+		98A0B59D1AA1BB609B7790AA /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = CAC26F61287BC83C12EDD276 /* PrivacyInfo.xcprivacy */; };
 		A686A38BCF5211105BB8C173 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9C5E5658F5E1288DCC14C7BD /* UIKit.framework */; };
 		CDE689D1942EA13F28C05FEB /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C16CDCD8E1754D86FF74EF6A /* QuartzCore.framework */; };
 		E07BF409A8FC5D08DCDA93FC /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3AE862A9391147C4AA5ADD2F /* Metal.framework */; };
@@ -52,6 +53,7 @@
 		B18BA1020819C136AA6018DC /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		B937A2DF127100F0D85482DA /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
 		C16CDCD8E1754D86FF74EF6A /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		CAC26F61287BC83C12EDD276 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		F09C1C0F207C5937AE253875 /* deskvnc-mobile_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "deskvnc-mobile_iOS.entitlements"; sourceTree = "<group>"; };
 		F232740BFE92D52817C6489B /* thumbs.rs */ = {isa = PBXFileReference; path = thumbs.rs; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -173,6 +175,7 @@
 			children = (
 				F09C1C0F207C5937AE253875 /* deskvnc-mobile_iOS.entitlements */,
 				1588643F0B010C3A74A99126 /* Info.plist */,
+				CAC26F61287BC83C12EDD276 /* PrivacyInfo.xcprivacy */,
 			);
 			path = "deskvnc-mobile_iOS";
 			sourceTree = "<group>";
@@ -246,6 +249,7 @@
 			files = (
 				56A32FFC66317C2E4FA9C5E8 /* Assets.xcassets in Resources */,
 				95205764115834A4EE934139 /* LaunchScreen.storyboard in Resources */,
+				98A0B59D1AA1BB609B7790AA /* PrivacyInfo.xcprivacy in Resources */,
 				62ACD00AC9A1D261311682E2 /* assets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -272,7 +276,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "npm run -- tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+			shellScript = "cargo tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
