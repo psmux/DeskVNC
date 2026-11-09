@@ -15,6 +15,13 @@ export interface CertificatePrompt {
   scheme: string;
 }
 
+/** Groups a hex fingerprint into pairs so a person can compare it by eye. */
+export function formatFingerprint(fp: string): string {
+  const hex = fp.replace(/[^0-9a-fA-F]/g, "").toUpperCase();
+  if (hex.length < 8) return fp;
+  return (hex.match(/.{1,2}/g) ?? []).join(" ");
+}
+
 interface Props {
   open: boolean;
   prompt: CertificatePrompt | null;
@@ -25,14 +32,14 @@ interface Props {
 export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
   const [details, setDetails] = useState(false);
   const change = prompt?.isChange ?? false;
-  const name = hostName ?? "this computer";
+  const name = hostName ?? "This computer";
   return (
     <Sheet
       open={open}
       onClose={() => onAnswer(false)}
       dismissible={false}
       art={<SceneIdCard warn={change} />}
-      title={change ? `${name} looks different` : `First time connecting to ${name}`}
+      title={change ? `${name} looks different` : "First time connecting"}
       subtitle={
         change
           ? "Its security ID changed since last time. That happens after a reinstall, but it can also mean something is in the way. If you did not expect this, stop."
@@ -48,15 +55,29 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
             <p className="text-ink-dim">Name on its certificate</p>
             <p className="mb-3 break-all font-medium">{prompt.subject}</p>
             <p className="text-ink-dim">Fingerprint</p>
-            <p className="break-all font-mono text-xs leading-relaxed">{prompt.fingerprint}</p>
+            <p className="break-all font-mono text-xs leading-relaxed">{formatFingerprint(prompt.fingerprint)}</p>
           </div>
         )}
-        <Button size="xl" block tone={change ? "var(--dv-danger)" : undefined} onClick={() => onAnswer(true)}>
-          {change ? "I expected this, connect" : "Yes, connect"}
-        </Button>
-        <Button variant="soft" size="lg" block onClick={() => onAnswer(false)}>
-          No, stop
-        </Button>
+        {change ? (
+          <>
+            {/* A changed identity: the big, easy button is the safe one. */}
+            <Button size="xl" block onClick={() => onAnswer(false)}>
+              No, stop
+            </Button>
+            <button type="button" className="min-h-12 text-center text-[15px] font-semibold text-danger" onClick={() => onAnswer(true)}>
+              I expected this, connect anyway
+            </button>
+          </>
+        ) : (
+          <>
+            <Button size="xl" block onClick={() => onAnswer(true)}>
+              Yes, connect
+            </Button>
+            <Button variant="soft" size="lg" block onClick={() => onAnswer(false)}>
+              No, stop
+            </Button>
+          </>
+        )}
       </div>
     </Sheet>
   );

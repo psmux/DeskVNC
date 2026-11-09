@@ -33,6 +33,13 @@ export function stepOf(s: SessionState): Step {
   }
 }
 
+/** The words under the picture: like STEP_WORDS, but a Boundary session waiting for the other person says so. */
+export function stepWords(s: SessionState): string {
+  if (s.state === "authenticating" && s.method === "approval") return "Waiting for them to say yes";
+  if (s.state === "reconnecting") return "Trying again";
+  return STEP_WORDS[stepOf(s)];
+}
+
 export type Level = "good" | "fair" | "poor";
 
 /** Green, amber or red from round trip time and frame rate. */

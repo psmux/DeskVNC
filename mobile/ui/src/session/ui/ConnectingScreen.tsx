@@ -11,11 +11,14 @@ import { IconRefresh } from "./icons";
 export function ConnectingScreen({
   title,
   step,
+  words,
   reconnecting,
   onCancel,
 }: {
   title: string;
   step: Step;
+  /** What is happening, in plain words. */
+  words: string;
   reconnecting: boolean;
   onCancel(): void;
 }) {
@@ -25,8 +28,9 @@ export function ConnectingScreen({
       <div className="dv-s-scene-body">
         <ConnectArt step={step} failed={false} />
         <div className="dv-s-scene-text">
-          <h1 className="dv-s-scene-title">{reconnecting ? `Getting ${title} back` : `Connecting to ${title}`}</h1>
-          <p className="dv-s-scene-step">{STEP_WORDS[step]}</p>
+          <p className="dv-s-scene-kicker">{reconnecting ? "Reconnecting" : "Connecting"}</p>
+          <h1 className="dv-s-scene-title">{title}</h1>
+          <p className="dv-s-scene-step">{words}</p>
           <ol className="dv-s-steps" aria-label="Progress">
             {steps.map((s) => (
               <li key={s} className={s < step ? "done" : s === step ? "now" : ""} aria-current={s === step ? "step" : undefined}>
@@ -43,14 +47,14 @@ export function ConnectingScreen({
   );
 }
 
-export function ErrorScreen({ title, message, onRetry, onExit }: { title: string; message: string | null; onRetry(): void; onExit(): void }) {
+export function ErrorScreen({ message, onRetry, onExit }: { title?: string; message: string | null; onRetry(): void; onExit(): void }) {
   const f = friendlyError(message ?? "");
   return (
     <div className="dv-s-scene-screen" role="alert">
       <div className="dv-s-scene-body">
         <ConnectArt step={0} failed />
         <div className="dv-s-scene-text">
-          <h1 className="dv-s-scene-title">{message ? f.title : `We could not connect to ${title}`}</h1>
+          <h1 className="dv-s-scene-title">{message ? f.title : "We could not connect"}</h1>
           <p className="dv-s-scene-detail">{message ? f.detail : "Check that it is switched on, then try again."}</p>
           <div className="dv-s-scene-actions">
             <button type="button" className="dv-s-big" onClick={onRetry}>
@@ -71,8 +75,8 @@ export function ReconnectCard({ title, onReconnect, onExit }: { title: string; o
     <div className="dv-s-reconnect" role="alertdialog" aria-label="Connection paused">
       <div className="dv-s-reconnect-card">
         <ConnectArt step={0} failed />
-        <h2>The connection to {title} was paused</h2>
-        <p className="dv-s-lead">This happens when DeskVNC is in the background for a while, or the network changes.</p>
+        <h2>{title}</h2>
+        <p className="dv-s-lead">The connection was paused. This happens when DeskVNC is in the background for a while, or the network changes.</p>
         <button type="button" className="dv-s-big" onClick={onReconnect}>
           <IconRefresh size={24} /> Reconnect
         </button>

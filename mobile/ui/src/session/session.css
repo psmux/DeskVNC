@@ -41,16 +41,22 @@
   overscroll-behavior: none;
 }
 
-.dv-session *,
-.dv-session *::before,
-.dv-session *::after {
-  box-sizing: border-box;
-}
+/*
+ * Resets sit in the base layer, under the app's Tailwind utilities, so the
+ * shared sheets keep their own button colours inside this screen.
+ */
+@layer base {
+  .dv-session *,
+  .dv-session *::before,
+  .dv-session *::after {
+    box-sizing: border-box;
+  }
 
-.dv-session button {
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
+  .dv-session button {
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
 }
 
 .dv-session.has-keybar {
@@ -1112,6 +1118,15 @@
   line-height: 1.25;
   font-weight: 750;
   overflow-wrap: anywhere;
+}
+
+.dv-s-scene-kicker {
+  margin: 8px 0 -6px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--s-accent);
 }
 
 .dv-s-scene-step {

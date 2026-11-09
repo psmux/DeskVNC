@@ -77,7 +77,7 @@ export interface RemoteSession {
 
 const IDLE: SessionState = { state: "connecting" };
 
-export function useRemoteSession(api: Api, target: ConnectTarget): RemoteSession {
+export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality: Quality = "auto"): RemoteSession {
   const [phase, setPhase] = useState<Phase>("connecting");
   const [state, setState] = useState<SessionState>(IDLE);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -100,7 +100,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget): RemoteSession
   const sender = useRef<InputSender | null>(null);
   const sid = useRef<string | null>(null);
   const phaseRef = useRef<Phase>("connecting");
-  const quality = useRef<Quality>("auto");
+  const quality = useRef<Quality>(initialQuality);
   const hidden = useRef(false);
   const endedWhileHidden = useRef(false);
   const exiting = useRef(false);

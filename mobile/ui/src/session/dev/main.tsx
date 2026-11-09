@@ -7,7 +7,7 @@
 import { StrictMode, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 // The app theme, so the dev page shows the real colours (light, or ?theme=dark).
-import "../../theme/theme.css";
+import "./dev.css";
 import { SessionScreen } from "../SessionScreen";
 import { makeFakeApi } from "./fakeApi";
 import { createMockApi } from "../../api/mock";

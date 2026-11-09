@@ -30,3 +30,11 @@ describe("status words", () => {
     expect(wireQuality("speed", false)).toBe("speed");
   });
 });
+
+describe("step words", () => {
+  it("says a Boundary session is waiting for the other person", async () => {
+    const { stepWords } = await import("../status");
+    expect(stepWords({ state: "authenticating", method: "approval" })).toBe("Waiting for them to say yes");
+    expect(stepWords({ state: "authenticating", method: "VncAuth" })).toBe("Signing in");
+  });
+});
