@@ -1,4 +1,4 @@
-// Config for the session screen dev harness only.
+// Config for the session screen dev page only.
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 

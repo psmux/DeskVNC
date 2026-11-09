@@ -1,5 +1,5 @@
 /**
- * Dev harness for the session screen: `npx vite mobile/ui/src/session/dev`.
+ * Dev page for the session screen: `npx vite mobile/ui/src/session/dev`.
  * Runs SessionScreen against the fake Api in fakeApi.ts. See that file for
  * the query string scenarios. With `?demo=1` it runs against the app's own
  * mock Api (src/api) and the built in demo computer instead.

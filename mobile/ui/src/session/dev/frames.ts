@@ -1,6 +1,6 @@
 /**
  * Builds channel messages in the src-tauri/FRAME_FORMAT.md layout, for the
- * dev harness's fake session and for the tests.
+ * dev page's pretend computer and for the tests.
  */
 
 export interface OutRect {

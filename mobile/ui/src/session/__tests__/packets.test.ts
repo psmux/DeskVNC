@@ -24,7 +24,7 @@ describe("input packets", () => {
 });
 
 describe("InputSender", () => {
-  const harness = () => {
+  const bench = () => {
     const sent: { seq: number; body: number[] }[] = [];
     let pending: (() => void) | null = null;
     const s = new InputSender({
@@ -42,7 +42,7 @@ describe("InputSender", () => {
   };
 
   it("keeps only the newest pointer move per frame", () => {
-    const { s, sent, frame } = harness();
+    const { s, sent, frame } = bench();
     s.pointer(1, 1, 0);
     s.pointer(2, 2, 0);
     s.pointer(3, 3, 0);
@@ -53,7 +53,7 @@ describe("InputSender", () => {
   });
 
   it("never drops a button change, and numbers bodies from 1", () => {
-    const { s, sent, frame } = harness();
+    const { s, sent, frame } = bench();
     s.pointer(5, 5, 0);
     s.pointer(5, 5, BUTTON.left);
     s.pointer(6, 6, BUTTON.left);
@@ -73,7 +73,7 @@ describe("InputSender", () => {
   });
 
   it("keeps keys in order between moves", () => {
-    const { s, sent, frame } = harness();
+    const { s, sent, frame } = bench();
     s.pointer(1, 1, 0);
     s.key(true, 0x61, 0x1e);
     s.pointer(2, 2, 0);
@@ -83,7 +83,7 @@ describe("InputSender", () => {
   });
 
   it("sends release all at once, after anything queued", () => {
-    const { s, sent } = harness();
+    const { s, sent } = bench();
     s.key(true, 0xffe3, 0x1d);
     s.releaseAll();
     expect(sent).toHaveLength(1);
