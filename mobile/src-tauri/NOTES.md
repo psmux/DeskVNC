@@ -9,12 +9,12 @@ field names follow `mobile/ui/src/api/contract.ts`.
   entry point `run()` with `tauri::mobile_entry_point`.
 * `tauri.conf.json`: productName DeskVNC, identifier
   `com.psmux.deskvnc.mobile`, version 0.1.0, frontendDist `../ui/dist`,
-  devUrl `http://localhost:5174`, beforeDevCommand `npm run dev` and
-  beforeBuildCommand `npm run build`. Run the CLI from `mobile/`, as the
-  mobile workflows do: it runs these in the folder of the first
-  `package.json` below where it starts, which is `mobile/ui`. Started from
-  `mobile/src-tauri` it finds none, falls back to `mobile`, and the command
-  fails rather than building the desktop UI.
+  devUrl `http://localhost:5174`, beforeDevCommand and beforeBuildCommand
+  `npm run dev` and `npm run build` with `cwd: "ui"`. The Tauri CLI resolves
+  a hook's `cwd` against the folder it was started in, so run it from
+  `mobile/`, as the mobile workflows do. Without an explicit `cwd` it runs the
+  hook in the first folder below with a `package.json`, which from `mobile/`
+  is `mobile/scripts`, not the UI.
   iOS minimum 15.0, Android minSdk 26.
 * Icons are copies of the desktop ones in `icons/`. Replace freely.
 * `capabilities/default.json` grants `core:default` and exactly the
