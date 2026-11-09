@@ -248,7 +248,7 @@ export function ConnectArt({ step, failed }: { step: number; failed: boolean }) 
         </g>
       </g>
       {/* the link */}
-      <path d={path} fill="none" stroke="var(--s-line)" strokeWidth="3" strokeDasharray="2 9" strokeLinecap="round" />
+      <path d={path} fill="none" stroke="var(--s-ink-dim)" strokeOpacity="0.55" strokeWidth="3" strokeDasharray="2 9" strokeLinecap="round" />
       {failed ? (
         <g transform="translate(130 50)">
           <circle r="13" fill="var(--s-danger)" />

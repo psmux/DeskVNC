@@ -6,6 +6,8 @@
  */
 import { StrictMode, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+// The app theme, so the dev page shows the real colours (light, or ?theme=dark).
+import "../../theme/theme.css";
 import { SessionScreen } from "../SessionScreen";
 import { makeFakeApi } from "./fakeApi";
 import { createMockApi } from "../../api/mock";
@@ -13,6 +15,8 @@ import { withDemo } from "../../api";
 import type { ConnectTarget } from "../../api/contract";
 
 const demo = new URLSearchParams(location.search).get("demo") === "1";
+const theme = new URLSearchParams(location.search).get("theme");
+if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
 
 function App() {
   const api = useMemo(() => (demo ? withDemo(createMockApi()) : makeFakeApi()), []);

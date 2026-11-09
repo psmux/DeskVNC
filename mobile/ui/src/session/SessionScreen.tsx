@@ -60,8 +60,23 @@ import "./session.css";
 export interface SessionScreenProps {
   api: Api;
   target: ConnectTarget;
-  title: string;
+  /** The computer's name. Optional: without it the saved host's name, the helper's name or the address is used. */
+  title?: string;
   onExit(): void;
+}
+
+/** A name for the computer from the target alone, before anything is looked up. */
+export function targetName(target: ConnectTarget): string {
+  switch (target.kind) {
+    case "demo":
+      return "Demo computer";
+    case "boundary":
+      return target.helperName || "Their computer";
+    case "adhoc":
+      return target.address;
+    default:
+      return "Your computer";
+  }
 }
 
 type SheetKind = "mode" | "quality" | "clipboard" | "stats" | null;
@@ -101,6 +116,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   const [zoomed, setZoomed] = useState(false);
   const [stage, setStage] = useState<Size>({ w: 0, h: 0 });
   const [os, setOs] = useState<HostOs | null>(null);
+  const [hostName, setHostName] = useState<string | null>(null);
   const [clipSeen, setClipSeen] = useState<string | null>(null);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -152,7 +168,10 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
       .hostsList()
       .then((hosts) => {
         const h = hosts.find((x) => x.id === target.hostId);
-        if (live && h) setOs(h.os);
+        if (live && h) {
+          setOs(h.os);
+          setHostName(h.name);
+        }
       })
       .catch(() => {});
     return () => {
@@ -750,7 +769,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
   // ------------------------------------------------------------ render
 
-  const name = s.desktopName && title.trim() === "" ? s.desktopName : title;
+  const name = title?.trim() || hostName || (target.kind === "saved" && s.desktopName) || targetName(target);
   const level = qualityLevel(s.stats);
   const showDesktop = s.phase === "connected" || s.phase === "ended";
   const reconnecting = s.state.state === "reconnecting";

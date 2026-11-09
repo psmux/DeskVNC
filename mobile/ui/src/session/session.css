@@ -16,7 +16,7 @@
   --s-danger: var(--dv-danger, #ff5a5f);
   --s-ok: var(--dv-ok, #2fc97a);
   --s-warn: #f6a723;
-  --s-line: rgba(160, 175, 210, 0.22);
+  --s-line: var(--dv-line, rgba(160, 175, 210, 0.22));
   --s-hand: #ffd8b5;
   --s-hand-line: #7c4f33;
   --s-safe-t: env(safe-area-inset-top, 0px);
