@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="432" height="432" viewBox="0 0 1024 1024">
+  <!-- Android 13 themed icon. The launcher tints it, so only the shape counts:
+       a solid monitor with the screen cut out and the pointer drawn inside. -->
+  <g transform="translate(512 512) scale(0.74) translate(-512 -519)" fill="#FFFFFF">
+    <path fill-rule="evenodd" d="M248 244 H776 A36 36 0 0 1 812 280 V612 A36 36 0 0 1 776 648 H248 A36 36 0 0 1 212 612 V280 A36 36 0 0 1 248 244 Z M272 294 H752 A10 10 0 0 1 762 304 V588 A10 10 0 0 1 752 598 H272 A10 10 0 0 1 262 588 V304 A10 10 0 0 1 272 294 Z"/>
+    <rect x="452" y="648" width="120" height="96"/>
+    <rect x="340" y="736" width="344" height="58" rx="29"/>
+    <path d="M560 360 L560 548 L604 506 L634 572 L666 558 L636 494 L696 490 Z"/>
+  </g>
+</svg>

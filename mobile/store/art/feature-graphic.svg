@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="500" viewBox="0 0 1024 500">
+  <!-- Google Play feature graphic, 1024 x 500. Play may crop the edges and lay
+       a play button over the middle on some surfaces, so the words sit left
+       and nothing that matters touches the outer 40 px. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1D62D9"/>
+      <stop offset="1" stop-color="#1447AD"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C82F5"/>
+      <stop offset="1" stop-color="#2E6BD6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="500" fill="url(#bg)"/>
+
+  <!-- A computer on the right, and a phone in front of it showing the same screen. -->
+  <g transform="translate(646 92) scale(0.9)">
+    <rect x="0" y="0" width="380" height="250" rx="22" fill="#FFFFFF"/>
+    <rect x="22" y="22" width="336" height="206" rx="8" fill="url(#screen)"/>
+    <rect x="44" y="46" width="170" height="104" rx="8" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="44" y="46" width="170" height="20" rx="8" fill="#DCE7FB"/>
+    <rect x="230" y="96" width="106" height="110" rx="8" fill="#FFFFFF" opacity="0.55"/>
+    <rect x="160" y="250" width="60" height="50" fill="#FFFFFF"/>
+    <rect x="110" y="296" width="160" height="26" rx="13" fill="#FFFFFF"/>
+  </g>
+  <g transform="translate(560 170)">
+    <rect x="0" y="0" width="150" height="290" rx="26" fill="#0B1220"/>
+    <rect x="9" y="9" width="132" height="272" rx="19" fill="url(#screen)"/>
+    <rect x="22" y="40" width="88" height="54" rx="5" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="22" y="40" width="88" height="11" rx="5" fill="#DCE7FB"/>
+    <rect x="76" y="110" width="52" height="58" rx="5" fill="#FFFFFF" opacity="0.55"/>
+    <path d="M70 70 L70 112 L80 103 L87 118 L94 115 L87 100 L101 99 Z" fill="#FFFFFF" stroke="#1447AD" stroke-width="3" stroke-linejoin="round"/>
+    <rect x="22" y="236" width="106" height="28" rx="8" fill="#0B1220" opacity="0.35"/>
+  </g>
+
+  <text x="64" y="214" fill="#FFFFFF" font-family="-apple-system, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="68" font-weight="700">DeskVNC</text>
+  <text x="64" y="270" fill="#DCE7FB" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="27" font-weight="500">Your computers, from your phone.</text>
+  <text x="64" y="308" fill="#DCE7FB" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="27" font-weight="500">VNC and RDP.</text>
+</svg>
