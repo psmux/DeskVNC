@@ -27,6 +27,8 @@ pub const GRACE: Duration = Duration::from_secs(30);
 /// What a session is told when the background ended it.
 pub const REASON: &str = "DeskVNC was in the background for more than 30 seconds";
 
+// Only the phone gets Suspended; a desktop check build never calls this.
+#[cfg_attr(not(mobile), allow(dead_code))]
 pub fn backgrounded(app: &AppHandle) {
     let state = app.state::<AppState>();
     let generation = {

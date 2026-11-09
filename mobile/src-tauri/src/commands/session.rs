@@ -26,10 +26,10 @@ use crate::codes::{self, Entered};
 use crate::events;
 use crate::framing;
 use crate::keys::{self, KeyCombo};
-use crate::vault::Secret;
 use crate::state::{AppState, Session, Sessions};
 use crate::store::{self, Protocol};
 use crate::thumbs;
+use crate::vault::Secret;
 
 /// `ConnectTarget` in `contract.ts`.
 #[derive(Deserialize)]

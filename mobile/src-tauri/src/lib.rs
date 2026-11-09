@@ -13,10 +13,10 @@ mod events;
 mod keys;
 mod lifecycle;
 mod pins;
-mod vault;
 mod state;
 mod store;
 mod thumbs;
+mod vault;
 
 /// The desktop shell's frame and input codec, compiled into this crate from
 /// the desktop's own file. It is pure code over `vnc-core` and `bytes`, so

@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 /// The service name every entry is filed under.
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
 pub const SERVICE: &str = "com.psmux.deskvnc.mobile";
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

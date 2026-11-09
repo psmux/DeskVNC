@@ -3,10 +3,10 @@
 use tauri::State;
 
 use super::blocking;
-use crate::vault::Secret;
 use crate::state::AppState;
 use crate::store::{validate_id, Host, HostDraft};
 use crate::thumbs;
+use crate::vault::Secret;
 
 #[tauri::command]
 pub async fn hosts_list(state: State<'_, AppState>) -> Result<Vec<Host>, String> {

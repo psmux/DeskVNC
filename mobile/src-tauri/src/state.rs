@@ -11,8 +11,8 @@ use remote_core::{ProtocolDriver, ProtocolKind, SessionHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::pins::PinStore;
-use crate::vault::{Secret, SecretStore};
 use crate::store::HostStore;
+use crate::vault::{Secret, SecretStore};
 
 /// One live session.
 pub struct Session {
