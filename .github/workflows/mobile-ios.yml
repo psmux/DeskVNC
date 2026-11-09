@@ -97,7 +97,12 @@ jobs:
       - name: Install the Tauri CLI and XcodeGen
         shell: bash
         run: |
-          command -v cargo-tauri >/dev/null || cargo binstall --no-confirm --locked "tauri-cli@^2"
+          # Ask for an Apple Silicon build. Left alone, binstall fetched an
+          # Intel binary, and under Rosetta the CLI's own brew calls failed.
+          # If no native binary is published it compiles one, and rust-cache
+          # keeps it for the next run.
+          command -v cargo-tauri >/dev/null || cargo binstall --no-confirm --locked --targets aarch64-apple-darwin "tauri-cli@^2"
+          file "$(command -v cargo-tauri)"
           cargo tauri --version
           command -v xcodegen >/dev/null || brew install xcodegen
 

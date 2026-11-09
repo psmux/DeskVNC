@@ -16,6 +16,7 @@ const store = join(dirname(fileURLToPath(import.meta.url)), "..", "store");
 const limits = {
   "listing-app-store.md": { promo: 170, keywords: 100, description: 4000, whatsnew: 4000 },
   "listing-google-play.md": { short: 80, full: 4000 },
+  "review-notes.md": { "apple-review": 4000, "play-access": 4000 },
 };
 const fixed = { "App Store subtitle": ["VNC and RDP for your computers", 30], "Name": ["DeskVNC", 30] };
 const banned = /\b(leverage|seamless(ly)?|robust|cutting edge|delve|elevate|unlock|harness|landscape|journey|transformative|testament)\b/i;
