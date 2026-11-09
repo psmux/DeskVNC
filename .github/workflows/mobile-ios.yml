@@ -117,10 +117,10 @@ jobs:
           if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
 
       - name: Generate the Xcode project if it is not committed
-        working-directory: mobile/src-tauri
+        working-directory: mobile
         shell: bash
         run: |
-          if [ -d gen/apple ]; then
+          if [ -d src-tauri/gen/apple ]; then
             echo "Using the committed Xcode project."
           else
             echo "::warning::mobile/src-tauri/gen/apple is not committed; generating it for this run."
@@ -171,16 +171,21 @@ jobs:
           chmod 600 "$key"
           echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
 
+      # The Tauri CLI runs from mobile, not mobile/src-tauri. It runs
+      # beforeBuildCommand in the folder of the first package.json it finds
+      # below where it starts, and falls back to the parent of src-tauri when
+      # it finds none. Started in mobile/src-tauri, `--prefix ../ui` built the
+      # desktop UI at the repository root instead of the phone one.
       - name: Build for the simulator
         if: steps.version.outputs.mode == 'simulator'
-        working-directory: mobile/src-tauri
+        working-directory: mobile
         run: |
           echo "No signing secrets in this repository, so this is a simulator build that proves the app compiles."
           cargo tauri ios build --ci --target aarch64-sim --config "${{ steps.version.outputs.config }}" --build-number "${{ steps.version.outputs.build }}"
 
       - name: Build a signed IPA (manual signing)
         if: steps.version.outputs.mode == 'manual'
-        working-directory: mobile/src-tauri
+        working-directory: mobile
         env:
           IOS_CERTIFICATE: ${{ secrets.APPLE_DIST_CERT_P12_BASE64 }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DIST_CERT_PASSWORD }}
@@ -192,7 +197,7 @@ jobs:
 
       - name: Build a signed IPA (automatic signing with the API key)
         if: steps.version.outputs.mode == 'automatic'
-        working-directory: mobile/src-tauri
+        working-directory: mobile
         env:
           APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}

@@ -121,10 +121,10 @@ jobs:
       # The Android project is normally committed under mobile/src-tauri/gen.
       # When it is not, generate it so the build still proves the crate works.
       - name: Generate the Android project if it is not committed
-        working-directory: mobile/src-tauri
+        working-directory: mobile
         shell: bash
         run: |
-          if [ -d gen/android ]; then
+          if [ -d src-tauri/gen/android ]; then
             echo "Using the committed Android project."
           else
             echo "::warning::mobile/src-tauri/gen/android is not committed; generating it for this run."
@@ -157,8 +157,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Version $name, versionCode $code"
 
+      # The Tauri CLI runs from mobile, not mobile/src-tauri. It runs
+      # beforeBuildCommand in the folder of the first package.json it finds
+      # below where it starts, and falls back to the parent of src-tauri when
+      # it finds none. Started in mobile/src-tauri, `--prefix ../ui` built the
+      # desktop UI at the repository root instead of the phone one.
       - name: Build the AAB and APK
-        working-directory: mobile/src-tauri
+        working-directory: mobile
         run: cargo tauri android build --ci --aab --apk --config "${{ steps.version.outputs.config }}"
 
       - name: Collect the build outputs
