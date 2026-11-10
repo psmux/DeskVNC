@@ -22,7 +22,7 @@
 //!
 //! # What crosses the seam
 //!
-//! A [`TlsUpgrade`] and nothing else — the same four owned values the
+//! A [`TlsUpgrade`] and nothing else: the same four owned values the
 //! modern backend builds (PRDRDP/00 R47): the upgraded stream, the trust
 //! decision, the leaf certificate DER as the peer sent it, and that
 //! certificate's `signatureAlgorithm` OID. `rdp-core` derives the CredSSP
@@ -65,14 +65,14 @@
 //!    certificate is `sha1WithRSAEncryption`, and level 1 already rejects
 //!    SHA-1 signatures.
 //! 3. **The cipher list, set with `set_cipher_list`: [`CIPHER_LIST`],**
-//!    which is `DEFAULT`. The original plan named four suites —
+//!    which is `DEFAULT`. The original plan named four suites,
 //!    `ECDHE-RSA-AES256-SHA:ECDHE-RSA-AES128-SHA:AES256-SHA:AES128-SHA`,
 //!    "every one of those is in the default enabled list of Windows 7 SP1
 //!    and Server 2008 R2 Schannel". Interop probing against the real RDP
 //!    listener this fork was written for (Windows Server 2012) found the
 //!    server resetting the connection, before a single byte came back, on
-//!    every ClientHello that carried a short cipher list — that four-suite
-//!    list included — while the full OpenSSL default list negotiated
+//!    every ClientHello that carried a short cipher list (that four-suite
+//!    list included), while the full OpenSSL default list negotiated
 //!    `ECDHE-RSA-AES256-SHA384` on every attempt, each success sandwiched
 //!    between failing probes of the narrow lists. So the narrow list is
 //!    dropped in favour of the broadest one the vendored build enables.
@@ -81,9 +81,9 @@
 //!    a reviewer should know the deviation was measured, not guessed.
 //! 4. **RC4 and 3DES are absent, and neither the `weak-crypto`
 //!    `openssl-src` feature nor the OpenSSL legacy provider is enabled.**
-//!    In this build they are absent from `DEFAULT` outright — checked with
+//!    In this build they are absent from `DEFAULT` outright (checked with
 //!    `openssl ciphers DEFAULT`, which lists no RC4, 3DES, DES, IDEA or
-//!    SEED suite at all — so the exclusion holds without spending cipher
+//!    SEED suite at all), so the exclusion holds without spending cipher
 //!    list width on it. `DEFAULT` does contain the PSK and SRP suites;
 //!    they are inert here, because completing one needs a pre-shared key
 //!    configured on both ends and neither end has one, so a listener that
@@ -113,9 +113,7 @@
 
 use std::pin::Pin;
 
-use openssl::ssl::{
-    SslConnector, SslConnectorBuilder, SslMethod, SslVerifyMode, SslVersion,
-};
+use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod, SslVerifyMode, SslVersion};
 use rdp_pdu::asn1::der;
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_openssl::SslStream;
@@ -127,7 +125,7 @@ use crate::{BoxedStream, Result, Stream, TransportError, TrustDecision};
 
 /// The cipher list this backend puts on the wire.
 ///
-/// `DEFAULT` as the vendored OpenSSL enables it — the broadest list in the
+/// `DEFAULT` as the vendored OpenSSL enables it: the broadest list in the
 /// build, and the one with a checked answer against a real Server 2012 RDP
 /// listener (the four-suite list from the original plan was reset by that
 /// server on every probe; see the module comment, item 3). Security level
@@ -161,7 +159,7 @@ fn client_context() -> Result<SslConnectorBuilder> {
     // Verification is `decide_certificate`'s job, not OpenSSL's: one root
     // set and one trust ladder across both backends. An OpenSSL chain
     // check alongside it would be a second, divergent opinion about the
-    // same certificate. Handshake signatures are unaffected — OpenSSL
+    // same certificate. Handshake signatures are unaffected. OpenSSL
     // verifies those unconditionally, and they are not a trust decision.
     builder.set_verify(SslVerifyMode::NONE);
 
@@ -172,7 +170,7 @@ fn client_context() -> Result<SslConnectorBuilder> {
 /// `Display` already prints the underlying I/O error for a reset or an
 /// EOF, so the log line says "connection reset by peer" rather than an
 /// error stack hex code. Generic because the handshake returns two error
-/// types — `ErrorStack` from setup, `ssl::Error` from the handshake.
+/// types: `ErrorStack` from setup, `ssl::Error` from the handshake.
 fn tls_error<E: std::fmt::Display>(e: E) -> TransportError {
     TransportError::Tls(e.to_string())
 }
@@ -190,8 +188,8 @@ fn tls_error<E: std::fmt::Display>(e: E) -> TransportError {
 /// # Errors
 ///
 /// [`TransportError::CertificateMismatch`] when a pin was supplied and the
-/// peer presented a different key — the handshake is dropped, never
-/// returned — [`TransportError::Tls`] for anything the handshake reports.
+/// peer presented a different key (the handshake is dropped, never
+/// returned), and [`TransportError::Tls`] for anything the handshake reports.
 pub async fn upgrade_with_identity<S: Stream + 'static>(
     stream: S,
     server_name: &str,
@@ -203,7 +201,7 @@ pub async fn upgrade_with_identity<S: Stream + 'static>(
     // Hostname checking is not this layer's: `decide_certificate` runs
     // webpki's chain-and-name verification with the same root set the
     // rustls path uses, so one backend cannot accept a name the other
-    // rejects. SNI is unaffected — `into_ssl` still sends it for a
+    // rejects. SNI is unaffected: `into_ssl` still sends it for a
     // non-IP `server_name`, exactly as rustls does.
     config.set_verify_hostname(false);
     let ssl = config.into_ssl(server_name).map_err(tls_error)?;
@@ -238,10 +236,10 @@ pub async fn upgrade_with_identity<S: Stream + 'static>(
     let name = ServerName::try_from(server_name.to_string())
         .map_err(|_| TransportError::Tls(format!("invalid server name: {server_name}")))?;
     let ca = ca_verifier(ensure_provider())?;
-    let decision =
-        decide_certificate(&ca, &leaf_der, &intermediates, &name, UnixTime::now(), pin).map_err(
-            |MalformedCertificate| TransportError::Tls("malformed server certificate".into()),
-        )?;
+    let decision = decide_certificate(&ca, &leaf_der, &intermediates, &name, UnixTime::now(), pin)
+        .map_err(|MalformedCertificate| {
+            TransportError::Tls("malformed server certificate".into())
+        })?;
     let decision = match decision {
         // A pin was supplied and differs: abort here, before the stream
         // is handed to anyone, exactly as the rustls verifier does.
@@ -286,7 +284,7 @@ mod tests {
     use openssl::pkey::{PKey, Private};
     use openssl::rsa::Rsa;
     use openssl::ssl::{Ssl, SslAcceptor, SslOptions};
-    use openssl::x509::{X509, X509NameBuilder};
+    use openssl::x509::{X509NameBuilder, X509};
     use sha2::{Digest, Sha256};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -312,7 +310,12 @@ mod tests {
         let mut builder = X509::builder().expect("x509");
         builder.set_version(2).expect("v3");
         builder
-            .set_serial_number(&BigNum::from_u32(1).expect("bn").to_asn1_integer().expect("sn"))
+            .set_serial_number(
+                &BigNum::from_u32(1)
+                    .expect("bn")
+                    .to_asn1_integer()
+                    .expect("sn"),
+            )
             .expect("serial");
         builder.set_subject_name(&name).expect("subject");
         builder.set_issuer_name(&name).expect("issuer");
@@ -345,7 +348,7 @@ mod tests {
     }
 
     /// Accept exactly one TLS connection and report the version the
-    /// handshake settled on — or the error, for the tests that expect the
+    /// handshake settled on, or the error, for the tests that expect the
     /// server side to refuse too.
     fn spawn_server(
         acceptor: SslAcceptor,
@@ -391,13 +394,10 @@ mod tests {
         );
 
         let stream = TcpStream::connect(addr).await.expect("connect");
-        let up = tokio::time::timeout(
-            BUDGET,
-            upgrade_with_identity(stream, "127.0.0.1", None),
-        )
-        .await
-        .expect("the handshake hung")
-        .expect("the handshake failed");
+        let up = tokio::time::timeout(BUDGET, upgrade_with_identity(stream, "127.0.0.1", None))
+            .await
+            .expect("the handshake hung")
+            .expect("the handshake failed");
 
         // The identity material is the server's bytes, octet for octet.
         let der = cert.to_der().expect("der");
@@ -487,22 +487,21 @@ mod tests {
     }
 
     /// The point of this backend: a host whose listener speaks only TLS
-    /// 1.0 — rustls refuses such a host by design, this one connects.
+    /// 1.0. rustls refuses such a host by design, this one connects.
     #[tokio::test]
     async fn reaches_a_server_that_offers_only_tls10() {
         let (cert, key) = self_signed();
         let (listener, addr) = bound().await;
-        let server =
-            spawn_server(acceptor(&cert, &key, SslVersion::TLS1, SslVersion::TLS1), listener);
+        let server = spawn_server(
+            acceptor(&cert, &key, SslVersion::TLS1, SslVersion::TLS1),
+            listener,
+        );
 
         let stream = TcpStream::connect(addr).await.expect("connect");
-        let up = tokio::time::timeout(
-            BUDGET,
-            upgrade_with_identity(stream, "127.0.0.1", None),
-        )
-        .await
-        .expect("the handshake hung")
-        .expect("TLS 1.0 must be reachable");
+        let up = tokio::time::timeout(BUDGET, upgrade_with_identity(stream, "127.0.0.1", None))
+            .await
+            .expect("the handshake hung")
+            .expect("TLS 1.0 must be reachable");
         assert!(matches!(up.decision, TrustDecision::Unknown { .. }));
         assert_eq!(server.await.expect("join").expect("server"), "TLSv1");
     }
@@ -520,13 +519,10 @@ mod tests {
         );
 
         let stream = TcpStream::connect(addr).await.expect("connect");
-        let err = tokio::time::timeout(
-            BUDGET,
-            upgrade_with_identity(stream, "127.0.0.1", None),
-        )
-        .await
-        .expect("the handshake hung")
-        .expect_err("a TLS 1.3-only server must not be reached");
+        let err = tokio::time::timeout(BUDGET, upgrade_with_identity(stream, "127.0.0.1", None))
+            .await
+            .expect("the handshake hung")
+            .expect_err("a TLS 1.3-only server must not be reached");
         assert!(matches!(err, TransportError::Tls(_)), "got {err:?}");
 
         assert!(

@@ -405,7 +405,7 @@ impl ServerCertVerifier for TofuVerifier {
         // The ladder itself lives in `decide_certificate` so the legacy backend
         // runs the identical sequence over the identical bytes (PRDRDP/03
         // §4.7.1). `ocsp_response` is dropped there because neither rustls nor
-        // webpki performs OCSP checking — it never reached a check here either.
+        // webpki performs OCSP checking; it never reached a check here either.
         let decision = decide_certificate(
             &self.webpki,
             end_entity,
