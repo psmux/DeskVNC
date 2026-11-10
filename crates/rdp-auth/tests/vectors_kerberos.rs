@@ -458,7 +458,7 @@ fn aes_cts_matches_every_vector_in_rfc_3962_appendix_b() {
 /// not computed here, and it agrees with the independent measurement PRDRDP/11
 /// §3.9.2 recorded when it opened the finding.
 ///
-/// This is the case `cts` 0.6.0 answers wrongly, which the second half of this
+/// This is the case `cts` 0.7.0 answers wrongly, which the second half of this
 /// test asserts directly. If `cts` ever grows the special case, that assertion
 /// fails, and the right response is to delete the branch in `crypto.rs` and
 /// this half of the test, not to loosen either.
@@ -479,20 +479,20 @@ fn the_single_block_case_of_rfc_3962_section_5_is_plain_aes() {
     assert_eq!(buf, plain);
 
     // The branch is load bearing: `cts` alone gives a different answer.
-    // `CbcCs3Enc` swaps the last two ciphertext blocks only when the tail is
+    // `CbcCs3` swaps the last two ciphertext blocks only when the tail is
     // empty and there is more than one block, so a single block input falls
     // into the stealing branch and is encrypted twice
-    // (`cts-0.6.0/src/cbc_cs3_enc.rs`, `RustCrypto/block-modes` issue 77,
+    // (`cts-0.7.0/src/cbc_cs3.rs`, `RustCrypto/block-modes` issue 77,
     // PRDRDP/11 §3.9.2).
-    use cts::{CbcCs3Enc, Encrypt, KeyIvInit};
+    use cts::{CbcCs3, Encrypt, KeyIvInit};
     let mut through_cts = plain.clone();
-    CbcCs3Enc::<aes::Aes128>::new_from_slices(&hex(CTS_KEY), &[0u8; BLOCK_LEN])
+    CbcCs3::<aes::Aes128>::new_from_slices(&hex(CTS_KEY), &[0u8; BLOCK_LEN])
         .expect("a 16 octet key")
         .encrypt(&mut through_cts)
         .expect("one block is not shorter than one block");
     assert_ne!(
         through_cts, expected,
-        "cts 0.6.0 now handles the single block case of RFC 3962 §5. Delete \
+        "cts 0.7.0 now handles the single block case of RFC 3962 §5. Delete \
          the length dispatch in kerberos/crypto.rs and this assertion with it."
     );
 }

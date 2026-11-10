@@ -13,23 +13,9 @@
 ignore = [
     # --- Accepted vulnerabilities --------------------------------------------
 
-    # Marvin timing side-channel in `rsa`. There is still no fixed release:
-    # the advisory lists `patched = []`, and 0.10.0-rc carries it too, so
-    # taking the newest published version does not clear this.
-    #
-    # We are on rsa 0.10.0-rc.18, a RELEASE CANDIDATE, chosen deliberately: it
-    # is the only version whose rand_core generation matches rand 0.10, and it
-    # collapses what was previously two rsa copies in the tree (0.9 for RA2,
-    # 0.10-rc via ssh-key) down to one. Weigh that against running a release
-    # candidate in a security path when deciding whether to pin back to 0.9.
-    #
-    # Exposure is unchanged: RA2 performs a single private-key decryption per
-    # connection with no attacker-controlled retry, so the repeated-measurement
-    # oracle a Marvin attack needs cannot practically be built. The ssh-key
-    # path signs during publickey auth, which is more exposed in principle but
-    # still needs a hostile server and very many attempts.
-    # See the module comment in crates/vnc-core/src/security/ra2.rs.
-    "RUSTSEC-2023-0071",
+    # None at present. RUSTSEC-2023-0071 (Marvin, `rsa`) was listed here
+    # while the tree ran rsa 0.10.0-rc.18; the advisory lists 0.10.0 as
+    # patched and the tree is on 0.10.0, so the entry is gone.
 
     # --- Unmaintained transitive dependencies --------------------------------
     # None of these are selected by this project.

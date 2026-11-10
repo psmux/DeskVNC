@@ -38,7 +38,7 @@
 //! not something a client can change.
 //!
 use aes::Aes128;
-use cipher::{block_padding::NoPadding, BlockEncryptMut, KeyInit};
+use cipher::{block_padding::NoPadding, BlockModeEncrypt, KeyInit};
 use md5::{Digest, Md5};
 use num_bigint_dig::BigUint;
 use rand::Rng;
@@ -126,7 +126,7 @@ pub(crate) async fn handshake(
     let mut blob = credentials_blob(&username, &password);
     let mut ciphertext = [0u8; CREDENTIALS_LEN];
     Aes128EcbEnc::new(&aes_key.into())
-        .encrypt_padded_b2b_mut::<NoPadding>(&blob, &mut ciphertext)
+        .encrypt_padded_b2b::<NoPadding>(&blob, &mut ciphertext)
         .map_err(|_| VncError::Other("Apple DH: credential block was not block-aligned".into()))?;
     blob.zeroize();
     aes_key.zeroize();
@@ -205,6 +205,22 @@ fn write_field(field: &mut [u8], value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FIPS-197 appendix C.1 through the same `ecb` type and padding call the
+    /// credential encryption uses.
+    #[test]
+    fn aes_ecb_matches_fips_197() {
+        let key: [u8; 16] = hex::decode("000102030405060708090a0b0c0d0e0f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plain = hex::decode("00112233445566778899aabbccddeeff").unwrap();
+        let mut out = [0u8; 16];
+        Aes128EcbEnc::new(&key.into())
+            .encrypt_padded_b2b::<NoPadding>(&plain, &mut out)
+            .unwrap();
+        assert_eq!(hex::encode(out), "69c4e0d86a7b0430d8cdb78070b4c55a");
+    }
 
     #[test]
     fn pads_to_the_field_width() {

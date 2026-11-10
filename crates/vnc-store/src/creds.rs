@@ -386,7 +386,7 @@ impl CredentialStore {
         let cipher = XChaCha20Poly1305::new((&*vault.key).into());
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: plaintext.as_slice(),
                     aad: &header,
@@ -468,7 +468,7 @@ fn open_vault(bytes: &[u8], master_password: &str) -> Result<Vault> {
     let cipher = XChaCha20Poly1305::new((&*key).into());
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: ciphertext,
                 aad: header,
@@ -839,6 +839,38 @@ mod tests {
         store.delete("host-1").unwrap();
         assert_eq!(crate::models::zeroize_calls() - before, 1);
         assert!(store.load("host-1").unwrap().is_none());
+    }
+
+    /// A credential file written by an earlier build still opens. The bytes
+    /// were produced outside this crate with argon2 0.5.3 and
+    /// chacha20poly1305 0.10.1, the versions DeskVNC shipped before the
+    /// move to argon2 0.6 and chacha20poly1305 0.11: Argon2id with m=8, t=1,
+    /// p=1, salt 0x11 x16, nonce 0x22 x24, and the header as AAD, exactly as
+    /// `write_vault` lays it out. A KDF or AEAD upgrade that changed a single
+    /// output byte would lock every existing user out of their vault, and the
+    /// round trip tests above cannot see that because they write and read
+    /// with the same build.
+    #[test]
+    fn a_vault_written_by_the_previous_crypto_crates_still_opens() {
+        const KEY: &str = "60ff1f9d21b21b002c061b8f0429acd03583bd3da3d4f1261e5dcd03bafb5aef";
+        const FILE: &str = "445643560108000000010000000100000011111111111111111111111111111111\
+            2222222222222222222222222222222222222222222222221d6d7f919f205f912cce0a0104f66af0af53\
+            3e73035f53a0c388d7f22f19240fc3ba18a8ca2a6798cae06e26eca78b42db51dd2b2203da22f563cfbe\
+            c07f25432acb95b87e57b64b983aacb4e51f70796460424d0f8243";
+        let password = "correct horse battery staple";
+
+        let key = derive_key(password, &[0x11; SALT_LEN], 8, 1, 1).unwrap();
+        assert_eq!(hex::encode(*key), KEY);
+
+        let vault = open_vault(&hex::decode(FILE).unwrap(), password).unwrap();
+        assert_eq!(hex::encode(*vault.key), KEY);
+        let entry = &vault.entries["host-1"];
+        assert_eq!(entry.vnc_password.as_deref(), Some("vnc-pass-123"));
+        assert_eq!(entry.rdp_user.as_deref(), Some("rdp-user-sentinel"));
+        assert!(matches!(
+            open_vault(&hex::decode(FILE).unwrap(), "wrong"),
+            Err(Error::InvalidMasterPassword)
+        ));
     }
 
     #[test]

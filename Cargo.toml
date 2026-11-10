@@ -93,43 +93,47 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 zune-jpeg = "0.5"
 
 # crypto
-des = "0.8"
-cbc = "0.1"
-ecb = "0.1"
-cipher = "0.4"
-aes = "0.8"
-eax = "0.5"
-sha1 = "0.10"
-md4 = "0.10"
-hmac = "0.12"
-rc4 = "0.1"
+des = "0.9"
+cbc = "0.2"
+ecb = "0.2"
+cipher = "0.5"
+aes = "0.9"
+eax = "0.6"
+sha1 = "0.11"
+md4 = "0.11"
+hmac = "0.13"
+rc4 = "0.2"
 subtle = "2"
 # Kerberos only, behind rdp-auth's `kerberos` feature and nothing else.
 # `cts` is CBC with ciphertext stealing (RFC 3962 §5). Read the module comment
 # on crates/rdp-auth/src/kerberos/crypto.rs before touching how it is called:
 # its single block case is wrong, and wrong in a way that round trips against
 # itself, so the length dispatch around it is load bearing.
-cts = "0.6.0"
-pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
-sha2 = "0.10"
-md-5 = "0.10"
-rsa = "0.10.0-rc.18"
-num-bigint-dig = "0.8"
+cts = "0.7"
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+sha2 = "0.11"
+md-5 = "0.11"
+rsa = { version = "0.10", features = ["pkcs1v15"] }
+num-bigint-dig = "0.9"
 rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
-argon2 = "0.5"
-chacha20poly1305 = "0.10"
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
 
 # tls / ssh
-russh = "0.62"
-russh-sftp = "2.3"
+russh = "0.65"
+russh-sftp = "3"
 rustls = "0.23"
 # Legacy TLS backend, optional and off by default (AGENT_BRIEF V3-B, PRDRDP/10
 # P0.6). Only vnc-transport may name these, which crates/rdp-pdu/tests/
-# workspace_rules.rs enforces. `=300.5.5` is openssl-src's newest build of
-# OpenSSL 3.5, the LTS branch supported to 2030-04-08; the default `vendored`
-# resolution picks the 3.6 branch, which goes end of life on 2026-11-01. Moving
-# this pin is an advisory policy decision, never a `cargo update`.
+# workspace_rules.rs enforces. `=300.5.5` builds OpenSSL 3.5.5 from the 3.5 LTS
+# branch, supported to 2030-04-08. As of 2026-11-10 it is still the newest
+# build openssl-sys can use: openssl-sys 0.9.118 accepts openssl-src ^300 only,
+# the 300.x line ends at 300.6.1 (OpenSSL 3.6, end of life 2026-11-01), and
+# openssl-src moved on to 400.x (OpenSSL 4.0) without publishing the later 3.5
+# patch releases. Move this to the next 300.5.x build the day one is published,
+# or to 400.x once openssl-sys accepts it. Moving this pin is an advisory
+# policy decision, never a `cargo update`.
 openssl = { version = "0.10.81", features = ["vendored"] }
 openssl-src = "=300.5.5"
 tokio-openssl = "0.6"
@@ -162,7 +166,7 @@ boundary-codes = { path = "crates/boundary-codes" }
 boundary-platform = { path = "crates/boundary-platform" }
 boundary-provision = { path = "crates/boundary-provision" }
 iroh = "1.2"
-getrandom = "0.3"
+getrandom = "0.4"
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 fast_image_resize = "6"
@@ -173,7 +177,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 bytes = "1"
 byteorder = "1"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 parking_lot = "0.13"
 
 [profile.release]
@@ -200,3 +204,7 @@ opt-level = 3
 netdev = { path = "patches/netdev-0.47.0" }
 netdev-046 = { path = "patches/netdev-0.46.3", package = "netdev" }
 netwatch = { path = "patches/netwatch-0.19.3" }
+# russh 0.65.1 pins rsa =0.10.0-rc.18 and ssh-key =0.7.0-rc.11, which Cargo
+# cannot hold next to the rsa 0.10.0 vnc-core uses. The copy carries upstream
+# russh PR 821; see patches/README.md.
+russh = { path = "patches/russh-0.65.1" }

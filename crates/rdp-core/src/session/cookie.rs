@@ -39,7 +39,7 @@
 
 use std::time::{Duration, Instant};
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
 use rdp_pdu::rdp::client_info::{ArcClientPrivatePacket, ArcServerPrivatePacket};
 use zeroize::Zeroize;
@@ -134,7 +134,7 @@ pub fn security_verifier(arc_random_bits: &[u8; 16], client_random: &[u8]) -> [u
     // `new_from_slice` on a sixteen byte key cannot fail: `Hmac` accepts any
     // key length, padding or hashing it per RFC 2104 §2, which is the library's
     // job and not ours.
-    let mut mac = <Hmac<Md5> as Mac>::new_from_slice(arc_random_bits)
+    let mut mac = <Hmac<Md5> as KeyInit>::new_from_slice(arc_random_bits)
         .expect("hmac accepts a key of any length (RFC 2104 section 2)");
     mac.update(client_random);
     mac.finalize().into_bytes().into()
