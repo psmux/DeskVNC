@@ -99,7 +99,7 @@ export function AddComputer({ initial }: { initial: WizardState }) {
             {s.step === "how" || s.step === "done" || (s.mode === "edit" && s.step === "where") ? <IconClose /> : <IconBack />}
           </IconButton>
           <div className="flex-1">
-            <p className="text-center text-base font-semibold">{title}</p>
+            <p className="text-center text-subhead font-semibold">{title}</p>
             {s.step !== "done" && (
               <div className="mx-auto mt-2 flex max-w-[12rem] gap-1.5" aria-label={`Step ${stepIndex + 1} of ${STEPS.length}`}>
                 {STEPS.map((st, i) => (
@@ -179,8 +179,8 @@ function StepTitle({ title, subtitle, art }: { title: string; subtitle?: ReactNo
   return (
     <div className="mb-5 text-center">
       {art && <div className="mx-auto mb-1 w-40">{art}</div>}
-      <h2 className="text-[1.75rem] font-semibold leading-tight">{title}</h2>
-      {subtitle && <p className="mx-auto mt-2 max-w-md text-lg text-ink-dim">{subtitle}</p>}
+      <h2 className="text-title2">{title}</h2>
+      {subtitle && <p className="mx-auto mt-2 max-w-md text-subhead text-ink-dim">{subtitle}</p>}
     </div>
   );
 }
@@ -209,8 +209,8 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
           >
             <ProtocolScene protocol={p} className="h-24 w-32 shrink-0" />
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-2 text-lg font-semibold leading-tight">{PROTOCOL_TITLE[p]}</span>
-              <span className="mt-1 block text-base leading-snug text-ink-dim">{PROTOCOL_HINT[p]}</span>
+              <span className="flex items-center gap-2 text-headline">{PROTOCOL_TITLE[p]}</span>
+              <span className="mt-1 block text-footnote text-ink-dim">{PROTOCOL_HINT[p]}</span>
             </span>
             <IconChevron className="shrink-0 text-ink-dim" />
           </motion.button>
@@ -229,7 +229,7 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
         <IconLink size={20} />
         Got a link? Paste it
       </button>
-      {pasteNote && <p className="mt-2 text-center text-sm text-ink-dim">{pasteNote}</p>}
+      {pasteNote && <p className="mt-2 text-center text-footnote text-ink-dim">{pasteNote}</p>}
     </div>
   );
 }
@@ -315,7 +315,7 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
 
       <div className="mt-6">
         <div className="mb-3 flex items-center gap-2 px-1">
-          <span className="text-sm font-semibold text-ink-dim">Found nearby</span>
+          <span className="text-footnote font-semibold text-ink-dim">Found nearby</span>
           {app.scanning && <span className="h-2 w-2 rounded-full bg-accent dv-blink" />}
         </div>
         <div className="flex flex-col gap-2">
@@ -359,11 +359,11 @@ function FoundRow({ item, picked, onPick }: { item: FoundComputer; picked: boole
     >
       <OsArt os={item.os} className="h-12 w-16 shrink-0" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-lg font-semibold">{item.name ?? "A computer"}</span>
-        <span className="block truncate text-sm text-ink-dim">{item.address}</span>
+        <span className="block truncate text-headline">{item.name ?? "A computer"}</span>
+        <span className="block truncate text-footnote tabular-nums text-ink-dim">{item.address}</span>
       </span>
       {picked ? (
-        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent-fill text-accent-ink">
           <IconCheck size={18} />
         </span>
       ) : (
@@ -382,13 +382,13 @@ function StepLook({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<Pa
       <StepTitle title="Make it yours" subtitle="A name, a picture and a colour, so you spot it in a second." />
       <motion.div layout className="mx-auto mb-6 flex max-w-xs flex-col items-center rounded-[14px] border border-line bg-surface-2 p-4">
         <OsArt os={s.os} backdrop={false} className="h-28" />
-        <p className="mt-1 flex max-w-full items-center gap-2 text-lg font-semibold">
+        <p className="mt-1 flex max-w-full items-center gap-2 text-headline">
           <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: sw.main }} aria-hidden />
           <span className="truncate">{s.name || "Your computer"}</span>
         </p>
       </motion.div>
       <Field label="Name" value={s.name} placeholder="Like Studio PC or Mum's laptop" maxLength={60} onChange={(e) => dispatch({ type: "name", text: e.target.value })} />
-      <p className="mb-2 mt-6 px-1 text-sm font-semibold text-ink-dim">Picture</p>
+      <p className="mb-2 mt-6 px-1 text-footnote font-semibold text-ink-dim">Picture</p>
       <div className="grid grid-cols-5 gap-2">
         {OS_CHOICES.map((o) => (
           <button
@@ -402,11 +402,11 @@ function StepLook({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<Pa
             className={`flex min-h-20 flex-col items-center justify-center rounded-[10px] border bg-surface p-1 ${s.os === o.os ? "border-accent ring-1 ring-accent" : "border-line"}`}
           >
             <OsArt os={o.os} backdrop={false} className="h-11 w-full" />
-            <span className="text-xs font-medium">{o.label}</span>
+            <span className="text-caption font-medium">{o.label}</span>
           </button>
         ))}
       </div>
-      <p className="mb-2 mt-6 px-1 text-sm font-semibold text-ink-dim">Colour</p>
+      <p className="mb-2 mt-6 px-1 text-footnote font-semibold text-ink-dim">Colour</p>
       <div className="flex flex-wrap gap-3">
         {SWATCHES.map((c) => (
           <button
@@ -468,7 +468,7 @@ function StepSignIn({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<
           </span>
           <div className="flex-1">
             <p className="font-semibold">Remember on this phone</p>
-            <p className="text-sm text-ink-dim">Locked away in the phone's keychain, never in a plain file.</p>
+            <p className="text-footnote text-ink-dim">Locked away in the phone's keychain, never in a plain file.</p>
           </div>
           <Toggle on={s.remember} onChange={(on) => dispatch({ type: "remember", on })} label="Remember on this phone" />
         </div>
@@ -485,8 +485,8 @@ function StepDone({ name, edit, onConnect, onDone }: { name: string; edit: boole
       <motion.div initial={{ scale: 0.6, rotate: -8 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 260, damping: 14 }} className="w-60">
         <SceneSaved />
       </motion.div>
-      <h2 className="mt-2 text-[1.75rem] font-semibold">{edit ? "Changes saved" : `${name} is ready`}</h2>
-      <p className="mt-2 text-lg text-ink-dim">{edit ? "Everything is up to date." : "It is on your list now. Connect whenever you like."}</p>
+      <h2 className="mt-2 text-title2">{edit ? "Changes saved" : `${name} is ready`}</h2>
+      <p className="mt-2 text-subhead text-ink-dim">{edit ? "Everything is up to date." : "It is on your list now. Connect whenever you like."}</p>
       <div className="mt-8 flex w-full max-w-sm flex-col gap-3">
         <Button size="xl" block icon={<IconPlay />} onClick={onConnect}>
           Connect now

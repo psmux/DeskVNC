@@ -16,8 +16,15 @@
  *   --dv-ink-dim    secondary text             (desktop --text-secondary)
  *   --dv-ink-faint  tertiary text              (desktop --text-tertiary)
  *   --dv-accent     the one action colour      (desktop --accent)
- *   --dv-accent-ink text on the accent         (desktop --accent-fg)
+ *   --dv-accent-fill  filled buttons and other solid accent shapes
+ *   --dv-accent-ink text on the accent fill    (desktop --accent-fg)
  *   --dv-ok / --dv-warn / --dv-danger          status only, never decoration
+ *
+ * In the dark theme the fill is the light theme's blue, one step deeper than
+ * the accent, with white text on it: 4.6:1, where white on the lighter dark
+ * accent is 3:1 and the desktop's near black text on it reads as a disabled
+ * or inverted button at phone sizes. Text, icons and rings keep the lighter
+ * accent, which is what stays readable on the dark page.
  *
  * --dv-vnc, --dv-rdp and --dv-boundary used to be three loud colours. They
  * stay as names so older code keeps working, and all point at the accent:
@@ -38,6 +45,7 @@
   --dv-ink-dim: #4c5361;
   --dv-ink-faint: #878e9b;
   --dv-accent: #2f6fe4;
+  --dv-accent-fill: #2f6fe4;
   --dv-accent-ink: #ffffff;
   /* The accent at 12% over the surface, solid so stacked art stays clean. */
   --dv-accent-soft: #e6eefc;
@@ -73,7 +81,8 @@
     --dv-ink-dim: #a4aab6;
     --dv-ink-faint: #757c89;
     --dv-accent: #5b95f5;
-    --dv-accent-ink: #0b1220;
+    --dv-accent-fill: #2f6fe4;
+    --dv-accent-ink: #ffffff;
     --dv-accent-soft: #243045;
     --dv-ok: #3fc873;
     --dv-ok-soft: rgba(63, 200, 115, 0.14);
@@ -106,7 +115,8 @@
   --dv-ink-dim: #a4aab6;
   --dv-ink-faint: #757c89;
   --dv-accent: #5b95f5;
-  --dv-accent-ink: #0b1220;
+  --dv-accent-fill: #2f6fe4;
+  --dv-accent-ink: #ffffff;
   --dv-accent-soft: #243045;
   --dv-ok: #3fc873;
   --dv-ok-soft: rgba(63, 200, 115, 0.14);

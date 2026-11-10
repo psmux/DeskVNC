@@ -64,8 +64,8 @@ export function Computers() {
         <ScreenHeader title="Your computers" />
         <div className="mx-auto flex max-w-md flex-col items-center px-6 pb-6 text-center">
           <SceneEmptyDesk className="w-72 max-w-full" />
-          <h2 className="mt-2 text-2xl font-semibold">No computers yet</h2>
-          <p className="mt-2 text-lg text-ink-dim">Add the computers you want to reach from this phone. It only takes a minute.</p>
+          <h2 className="mt-2 text-title2">No computers yet</h2>
+          <p className="mt-2 text-subhead text-ink-dim">Add the computers you want to reach from this phone. It only takes a minute.</p>
           <div className="mt-6 flex w-full flex-col gap-3">
             <Button size="xl" block icon={<RadarMini />} onClick={() => app.setTab("nearby")}>
               Find computers nearby
@@ -87,22 +87,22 @@ export function Computers() {
       <ScreenHeader
         title="Your computers"
         action={
-          <IconButton label="Add a computer" className="!border-transparent !bg-accent !text-accent-ink" onClick={() => app.openWizard()}>
+          <IconButton label="Add a computer" className="!border-transparent !bg-accent-fill !text-accent-ink" onClick={() => app.openWizard()}>
             <IconPlus size={24} />
           </IconButton>
         }
       />
       {app.hosts.length > 3 && (
         <div className="px-4 pb-4 tab:px-8">
-          <label className="flex min-h-14 items-center gap-3 rounded-[10px] border border-line bg-surface px-4 focus-within:ring-2 focus-within:ring-accent">
-            <IconSearch className="text-ink-dim" />
+          <label className="flex min-h-11 items-center gap-2 rounded-[10px] border border-line bg-surface px-3 focus-within:ring-2 focus-within:ring-accent">
+            <IconSearch size={18} className="text-ink-faint" />
             <input
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search your computers"
               aria-label="Search your computers"
-              className="min-w-0 flex-1 bg-transparent py-3 text-lg outline-none placeholder:text-ink-dim/70"
+              className="min-w-0 flex-1 bg-transparent py-2 text-body outline-none placeholder:text-ink-faint"
             />
             {query && (
               <button type="button" aria-label="Clear search" className="flex h-10 w-10 items-center justify-center text-ink-dim" onClick={() => setQuery("")}>
@@ -129,7 +129,7 @@ export function Computers() {
         {query && list.length === 0 && (
           <div className="col-span-full flex flex-col items-center py-10 text-center">
             <SearchEmpty />
-            <p className="mt-3 text-lg font-semibold">Nothing called "{query}"</p>
+            <p className="mt-3 text-headline">Nothing called "{query}"</p>
             <Button variant="ghost" size="md" onClick={() => setQuery("")}>
               Show them all
             </Button>

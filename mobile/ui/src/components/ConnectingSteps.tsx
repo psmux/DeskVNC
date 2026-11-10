@@ -81,8 +81,8 @@ export function ConnectingSteps({ steps, current, title, os = "unknown", subtitl
           {art}
         </motion.div>
       </AnimatePresence>
-      <h2 className="mt-2 text-2xl font-semibold leading-tight">{title}</h2>
-      {subtitle && <p className="mt-2 text-base text-ink-dim">{subtitle}</p>}
+      <h2 className="mt-2 text-title2">{title}</h2>
+      {subtitle && <p className="mt-2 text-subhead text-ink-dim">{subtitle}</p>}
       <ol className="mt-6 w-full space-y-2 text-left">
         {steps.map((s, i) => {
           const done = i < at || (s === "connected" && current === "connected");
@@ -94,11 +94,11 @@ export function ConnectingSteps({ steps, current, title, os = "unknown", subtitl
               aria-current={now ? "step" : undefined}
             >
               <span
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${done ? "bg-ok text-white" : now ? "bg-accent text-accent-ink" : "bg-surface-2 text-ink-dim"}`}
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-footnote font-semibold ${done ? "bg-ok text-white" : now ? "bg-accent-fill text-accent-ink" : "bg-surface-2 text-ink-dim"}`}
               >
                 {done ? <IconCheck size={20} /> : now ? <span className="h-3 w-3 rounded-full bg-accent-ink dv-blink" /> : i + 1}
               </span>
-              <span className={`text-lg ${now ? "font-semibold" : done ? "font-medium text-ink" : "text-ink-dim"}`}>{LABELS[s]}</span>
+              <span className={`text-body ${now ? "font-semibold" : done ? "font-medium text-ink" : "text-ink-dim"}`}>{LABELS[s]}</span>
             </li>
           );
         })}

@@ -50,8 +50,8 @@ export function Nearby() {
           {nothing ? (
             <div className="flex flex-col items-center text-center">
               <SceneSleepyRadar className="w-64" />
-              <h2 className="text-2xl font-semibold">Nothing found nearby</h2>
-              <p className="mt-2 text-lg text-ink-dim">Make sure your phone is on the same Wi-Fi as the computer, and that screen sharing or Remote Desktop is turned on there.</p>
+              <h2 className="text-title2">Nothing found nearby</h2>
+              <p className="mt-2 text-subhead text-ink-dim">Make sure your phone is on the same Wi-Fi as the computer, and that screen sharing or Remote Desktop is turned on there.</p>
             </div>
           ) : (
             <Radar
@@ -97,10 +97,10 @@ export function Nearby() {
                   <div className="flex items-center gap-3">
                     <span className="flex h-20 w-24 shrink-0 items-center justify-center rounded-[10px] bg-surface-2"><OsArt os={f.os} backdrop={false} className="h-16 w-20" /></span>
                     <div className="min-w-0 flex-1">
-                      <h3 className="truncate text-lg font-semibold">{host?.name ?? f.name ?? "A computer"}</h3>
+                      <h3 className="truncate text-headline">{host?.name ?? f.name ?? "A computer"}</h3>
                       <ProtocolBadge protocol={f.protocol} className="mt-1" />
                       {host && (
-                        <p className="mt-1.5 flex items-center gap-1 text-sm font-medium text-ok">
+                        <p className="mt-1.5 flex items-center gap-1 text-footnote font-medium text-ok">
                           <IconCheck size={16} /> On your list
                         </p>
                       )}
@@ -110,7 +110,7 @@ export function Nearby() {
                     <Button
                       size="lg"
                       className="flex-1"
-                      icon={<IconPlay size={20} />}
+                      icon={<IconPlay size={12} />}
                       onClick={() =>
                         host
                           ? app.connect({ kind: "saved", hostId: host.id }, host.name)
@@ -120,7 +120,7 @@ export function Nearby() {
                       Connect
                     </Button>
                     {!host && (
-                      <Button variant="soft" size="lg" icon={<IconPlus size={20} />} onClick={() => app.openWizard(wizardFromFound(f))}>
+                      <Button variant="soft" size="lg" icon={<IconPlus size={18} />} onClick={() => app.openWizard(wizardFromFound(f))}>
                         Save
                       </Button>
                     )}

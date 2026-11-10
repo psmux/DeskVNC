@@ -41,7 +41,7 @@ export function ProtocolIcon({ protocol, size = 24, ...rest }: ArtProps & { prot
   const s = { stroke: "var(--dv-accent-ink)", strokeWidth: 2.2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, fill: "none" };
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden {...rest}>
-      <circle cx="12" cy="12" r="12" fill={protocolColor(protocol)} />
+      <circle cx="12" cy="12" r="12" fill="var(--dv-accent-fill)" />
       {protocol === "rdp" && (
         <g {...s}>
           <rect x="5.5" y="6.5" width="13" height="10" rx="1.8" />

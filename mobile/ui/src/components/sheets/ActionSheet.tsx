@@ -23,13 +23,13 @@ export function ActionSheet({ open, title, art, actions, onClose }: { open: bool
               onClose();
               a.onPick();
             }}
-            className={`flex min-h-16 items-center gap-4 rounded-[10px] px-5 text-left text-lg font-semibold active:scale-[0.98] ${a.danger ? "bg-danger-soft text-danger" : "bg-surface-2 text-ink"}`}
+            className={`flex min-h-[3.25rem] items-center gap-3 rounded-[10px] px-4 text-left text-body font-medium active:scale-[0.98] ${a.danger ? "bg-danger-soft text-danger" : "bg-surface-2 text-ink"}`}
           >
             <span className="flex h-10 w-10 items-center justify-center rounded-full bg-surface">{a.icon}</span>
             {a.label}
           </button>
         ))}
-        <button type="button" onClick={onClose} className="mt-1 min-h-14 rounded-[10px] text-lg font-semibold text-ink-dim">
+        <button type="button" onClick={onClose} className="mt-1 min-h-12 rounded-[10px] text-body font-semibold text-ink-dim">
           Cancel
         </button>
       </div>
@@ -64,11 +64,11 @@ export function ConfirmSheet({
             onClose();
             onConfirm();
           }}
-          className="min-h-14 rounded-[10px] bg-danger text-lg font-semibold text-white active:scale-[0.98]"
+          className="min-h-[3.125rem] rounded-xl bg-danger text-headline text-white active:scale-[0.98]"
         >
           {confirm}
         </button>
-        <button type="button" onClick={onClose} className="min-h-14 rounded-[10px] bg-surface-2 text-lg font-semibold">
+        <button type="button" onClick={onClose} className="min-h-[3.125rem] rounded-xl bg-surface-2 text-headline">
           Keep it
         </button>
       </div>

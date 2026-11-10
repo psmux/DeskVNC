@@ -74,6 +74,13 @@ export class FakeDesktop {
 
   private wallpaper: [string, string, string, string];
   private terminalLines: string[] = [];
+  /**
+   * Card pictures are shown at about a third of their size, where real text
+   * would come out as four pixel smudges. They draw every label as a soft
+   * bar the width of its text instead, the way a design mock greeks copy, so
+   * the picture reads as windows and content rather than as noise.
+   */
+  private greek = false;
 
   constructor(
     style: DesktopStyle,
@@ -101,6 +108,7 @@ export class FakeDesktop {
     // Card pictures sit under a badge in the top corner, so their windows
     // start a little lower and end a little shorter to stay in view.
     const card = (opts.scene ?? "try") !== "try";
+    this.greek = card;
     const win = (id: WinKind, title: string, x: number, y: number, w: number, h: number): Win => ({
       id,
       title,
@@ -322,7 +330,7 @@ export class FakeDesktop {
       ctx.fill();
       ctx.fillStyle = "#fff";
       ctx.textBaseline = "middle";
-      ctx.fillText(this.toast.text, tx + 24 * s, ty + 26 * s);
+      this.label(this.toast.text, tx + 24 * s, ty + 26 * s);
       ctx.textBaseline = "alphabetic";
     } else if (this.toast) {
       this.toast = null;
@@ -356,6 +364,38 @@ export class FakeDesktop {
     ctx.closePath();
   }
 
+  /** fillText, or on a card picture a rounded bar where the text would be. */
+  private label(text: string, x: number, y: number, maxWidth?: number): void {
+    const { ctx } = this;
+    if (!this.greek) {
+      if (maxWidth === undefined) ctx.fillText(text, x, y);
+      else ctx.fillText(text, x, y, maxWidth);
+      return;
+    }
+    // A menu bar written as words with wide gaps becomes one bar per word.
+    const parts = text.split(/ {2,}/);
+    if (parts.length > 1 && ctx.textAlign === "left") {
+      let at = x;
+      for (const part of parts) {
+        this.label(part, at, y);
+        at += ctx.measureText(part + "    ").width;
+      }
+      return;
+    }
+    const px = Number(/(\d+(?:\.\d+)?)px/.exec(ctx.font)?.[1] ?? 16);
+    let w = ctx.measureText(text.trim()).width * 0.82;
+    if (maxWidth !== undefined) w = Math.min(w, maxWidth);
+    if (w <= 0) return;
+    const h = Math.max(3, px * 0.5);
+    const align = ctx.textAlign;
+    const left = align === "center" ? x - w / 2 : align === "right" || align === "end" ? x - w : x;
+    ctx.save();
+    ctx.globalAlpha *= 0.42;
+    this.round(left, y - px * 0.36 - h / 2, w, h, h / 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   private clock(): string {
     const d = new Date();
     return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -384,16 +424,16 @@ export class FakeDesktop {
       }
       ctx.fillStyle = "#1a1d23";
       ctx.textAlign = "right";
-      ctx.fillText(this.clock(), W - 40 * s, H - 12 * s - barH / 2 + 6 * s);
+      this.label(this.clock(), W - 40 * s, H - 12 * s - barH / 2 + 6 * s);
       ctx.textAlign = "left";
-      ctx.fillText(this.style === "demo" ? "Demo computer" : this.name, 40 * s, H - 12 * s - barH / 2 + 6 * s);
+      this.label(this.style === "demo" ? "Demo computer" : this.name, 40 * s, H - 12 * s - barH / 2 + 6 * s);
     } else if (this.style === "mac") {
       ctx.fillStyle = "rgba(244,245,247,0.8)";
       ctx.fillRect(0, 0, W, 30 * s);
       ctx.fillStyle = "#1a1d23";
-      ctx.fillText("●  Desk    File    Edit    View    Window", 18 * s, 21 * s);
+      this.label("●  Desk    File    Edit    View    Window", 18 * s, 21 * s);
       ctx.textAlign = "right";
-      ctx.fillText(this.clock(), W - 18 * s, 21 * s);
+      this.label(this.clock(), W - 18 * s, 21 * s);
       ctx.textAlign = "left";
       const size = 52 * s;
       const gap = 12 * s;
@@ -412,9 +452,9 @@ export class FakeDesktop {
       ctx.fillStyle = "rgba(12,14,18,0.85)";
       ctx.fillRect(0, 0, W, 32 * s);
       ctx.fillStyle = "#e9ebef";
-      ctx.fillText("Apps", 18 * s, 22 * s);
+      this.label("Apps", 18 * s, 22 * s);
       ctx.textAlign = "center";
-      ctx.fillText(this.clock(), W / 2, 22 * s);
+      this.label(this.clock(), W / 2, 22 * s);
       ctx.textAlign = "left";
       ctx.fillStyle = "rgba(12,14,18,0.6)";
       this.round(10 * s, 120 * s, 64 * s, icons.length * 58 * s + 14 * s, 18 * s);
@@ -438,7 +478,7 @@ export class FakeDesktop {
       });
       ctx.fillStyle = "#1a1d23";
       ctx.textAlign = "right";
-      ctx.fillText(this.clock(), W - 16 * s, 24 * s);
+      this.label(this.clock(), W - 16 * s, 24 * s);
       ctx.textAlign = "left";
     }
   }
@@ -489,7 +529,7 @@ export class FakeDesktop {
     ctx.fillStyle = dark ? "#e9ebef" : "#1a1d23";
     ctx.font = `600 ${16 * s}px ${FONT}`;
     ctx.textAlign = this.style === "mac" || this.style === "demo" ? "center" : "left";
-    ctx.fillText(w.title, this.style === "mac" || this.style === "demo" ? w.x + w.w / 2 : w.x + 18 * s, w.y + th / 2 + 6 * s);
+    this.label(w.title, this.style === "mac" || this.style === "demo" ? w.x + w.w / 2 : w.x + 18 * s, w.y + th / 2 + 6 * s);
     ctx.textAlign = "left";
 
     const ink = dark ? "#e9ebef" : "#1a1d23";
@@ -505,7 +545,7 @@ export class FakeDesktop {
       const lineH = 28 * s;
       const maxLines = Math.floor((w.h - th - 30 * s) / lineH);
       const shown = lines.slice(-maxLines);
-      shown.forEach((line, i) => ctx.fillText(line, w.x + 24 * s, w.y + th + 34 * s + i * lineH));
+      shown.forEach((line, i) => this.label(line, w.x + 24 * s, w.y + th + 34 * s + i * lineH));
       // Caret after the last character.
       const last = shown[shown.length - 1] ?? "";
       const cx = w.x + 24 * s + ctx.measureText(last).width + 2 * s;
@@ -524,10 +564,10 @@ export class FakeDesktop {
       ctx.fillStyle = "#fff";
       ctx.font = `700 ${24 * s}px ${FONT}`;
       ctx.textAlign = "center";
-      ctx.fillText("Press me", b.x + b.w / 2, b.y + b.h / 2 + 8 * s);
+      this.label("Press me", b.x + b.w / 2, b.y + b.h / 2 + 8 * s);
       ctx.fillStyle = dim;
       ctx.font = `${17 * s}px ${FONT}`;
-      ctx.fillText(
+      this.label(
         this.presses === 0 ? "Tap the button to see it react" : `Pressed ${this.presses} ${this.presses === 1 ? "time" : "times"}`,
         w.x + w.w / 2,
         b.y + b.h + 44 * s,
@@ -642,7 +682,7 @@ export class FakeDesktop {
         ctx.fill();
         ctx.fillStyle = "#fff";
         ctx.font = `600 ${16 * s}px ${FONT}`;
-        ctx.fillText(name, bodyX + 14 * s, y + rowH / 2 + 6 * s);
+        this.label(name, bodyX + 14 * s, y + rowH / 2 + 6 * s);
         ctx.fillStyle = line;
         this.round(bodyX + 124 * s, y + 6 * s, bodyW - 124 * s, rowH - 12 * s, 6 * s);
         ctx.fill();
@@ -672,9 +712,9 @@ export class FakeDesktop {
       ctx.fill();
       ctx.fillStyle = dim;
       ctx.font = `600 ${18 * s}px ${FONT}`;
-      ctx.fillText("1:42 / 3:58", bodyX, cy + 6 * s);
+      this.label("1:42 / 3:58", bodyX, cy + 6 * s);
       ctx.textAlign = "right";
-      ctx.fillText("Sunday song, take 3", bodyX + bodyW, cy + 6 * s);
+      this.label("Sunday song, take 3", bodyX + bodyW, cy + 6 * s);
       ctx.textAlign = "left";
     } else if (w.id === "gallery") {
       const cols = 4;
@@ -705,7 +745,7 @@ export class FakeDesktop {
           ctx.font = `${r === 0 ? 600 : 400} ${14 * s}px ${FONT}`;
           const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
           const text = r === 0 ? heads[c] : c === 0 ? months[r - 1] : String(Math.round(120 + 880 * this.wobble(r * 7 + c, 2)));
-          ctx.fillText(text, x + 8 * s, y + rh / 2 + 5 * s);
+          this.label(text, x + 8 * s, y + rh / 2 + 5 * s);
         }
       }
       // A little bar chart under the table.
@@ -723,7 +763,7 @@ export class FakeDesktop {
       ctx.font = `600 ${15 * s}px ${FONT}`;
       days.forEach((d, i) => {
         ctx.fillStyle = i === 2 ? ACCENT : dim;
-        ctx.fillText(d, bodyX + i * cw + 8 * s, bodyY + 14 * s);
+        this.label(d, bodyX + i * cw + 8 * s, bodyY + 14 * s);
         ctx.fillStyle = line;
         ctx.fillRect(bodyX + i * cw, bodyY + 26 * s, 1, bodyH - 26 * s);
       });
@@ -745,7 +785,7 @@ export class FakeDesktop {
         ctx.fill();
         ctx.fillStyle = "#fff";
         ctx.font = `600 ${14 * s}px ${FONT}`;
-        ctx.fillText(label, bodyX + d * cw + 13 * s, top + span * y0 + 20 * s, cw - 24 * s);
+        this.label(label, bodyX + d * cw + 13 * s, top + span * y0 + 20 * s, cw - 24 * s);
       }
     } else if (w.id === "terminal") {
       ctx.fillStyle = "#14171c";
@@ -755,7 +795,7 @@ export class FakeDesktop {
       const lines = w.title === "backups" ? this.terminalLines.slice(0, 3) : this.terminalLines;
       lines.forEach((l, i) => {
         ctx.fillStyle = l.startsWith("$") ? "#7fb0f9" : "#c9ced6";
-        ctx.fillText(l, bodyX, bodyY + 14 * s + i * 28 * s);
+        this.label(l, bodyX, bodyY + 14 * s + i * 28 * s);
       });
     } else if (w.id === "chart") {
       const n = 24;
@@ -794,7 +834,7 @@ export class FakeDesktop {
       ctx.fill();
       ctx.fillStyle = ink;
       ctx.font = `700 ${30 * s}px ${FONT}`;
-      ctx.fillText(w.title.startsWith("Green") ? "22.6\u00B0" : w.title.startsWith("Export") ? "3 of 8" : "62%", bodyX + 6 * s, bodyY + 34 * s);
+      this.label(w.title.startsWith("Green") ? "22.6\u00B0" : w.title.startsWith("Export") ? "3 of 8" : "62%", bodyX + 6 * s, bodyY + 34 * s);
     }
   }
 

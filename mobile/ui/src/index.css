@@ -6,6 +6,55 @@
   --breakpoint-tab: 37.5rem;
 }
 
+/*
+ * The type scale. One set of names for every screen, the session included
+ * (session.css reads the same variables).
+ *
+ * Sizes are in rem so they follow the size the person picked on the phone.
+ * On iOS the root is the Dynamic Type body size (17 px at the default
+ * setting), which makes these the iOS text styles exactly: large title 34,
+ * title 1 28, title 2 22, title 3 20, headline and body 17, callout 16,
+ * subhead 15, footnote 13, caption 12 and caption 2 11. Elsewhere the root
+ * is 16 px and the same names land on Material 3's sizes give or take a
+ * pixel (32, 26, 21, 19, 16, 15, 14, 12, 11, 10).
+ *
+ * The system face already tracks itself by size on Apple platforms, so only
+ * the two biggest styles pull in a touch, for Roboto's sake as much as
+ * anything. Weights stay in three steps: 400 to read, 600 to label, 700
+ * for the one title on a screen.
+ */
+@theme static {
+  --text-large-title: 2rem;
+  --text-large-title--line-height: 1.2;
+  --text-large-title--letter-spacing: -0.012em;
+  --text-large-title--font-weight: 700;
+  --text-title1: 1.647rem;
+  --text-title1--line-height: 1.22;
+  --text-title1--letter-spacing: -0.008em;
+  --text-title1--font-weight: 700;
+  --text-title2: 1.294rem;
+  --text-title2--line-height: 1.27;
+  --text-title2--font-weight: 600;
+  --text-title3: 1.176rem;
+  --text-title3--line-height: 1.25;
+  --text-title3--font-weight: 600;
+  --text-headline: 1rem;
+  --text-headline--line-height: 1.3;
+  --text-headline--font-weight: 600;
+  --text-body: 1rem;
+  --text-body--line-height: 1.35;
+  --text-callout: 0.941rem;
+  --text-callout--line-height: 1.35;
+  --text-subhead: 0.882rem;
+  --text-subhead--line-height: 1.34;
+  --text-footnote: 0.765rem;
+  --text-footnote--line-height: 1.38;
+  --text-caption: 0.706rem;
+  --text-caption--line-height: 1.34;
+  --text-caption2: 0.647rem;
+  --text-caption2--line-height: 1.28;
+}
+
 @theme inline {
   --color-bg: var(--dv-bg);
   --color-surface: var(--dv-surface);
@@ -19,6 +68,7 @@
   --color-accent: var(--dv-accent);
   --color-accent-ink: var(--dv-accent-ink);
   --color-accent-soft: var(--dv-accent-soft);
+  --color-accent-fill: var(--dv-accent-fill);
   --color-vnc: var(--dv-vnc);
   --color-vnc-soft: var(--dv-vnc-soft);
   --color-rdp: var(--dv-rdp);
@@ -34,8 +84,10 @@
   --color-scrim: var(--dv-scrim);
   --shadow-card: var(--dv-shadow);
   --shadow-lift: var(--dv-shadow-lg);
-  /* The desktop app's stack: the system face, not the rounded one. */
+  /* The desktop app's stacks: the system face, not the rounded one. SF Pro
+     on Apple devices, Roboto on Android, nothing downloaded. */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Roboto Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 /* Dynamic Type: on iOS the body font follows the size the person chose in
@@ -63,6 +115,9 @@ body {
   background: var(--dv-bg);
   color: var(--dv-ink);
   font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+  text-rendering: optimizeLegibility;
   overscroll-behavior: none;
   -webkit-font-smoothing: antialiased;
   -webkit-user-select: none;

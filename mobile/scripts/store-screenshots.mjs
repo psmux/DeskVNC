@@ -40,6 +40,16 @@ const LABELS = {
 const SEEN_STORAGE = { "deskvnc.session.coach.trackpad": "1", "deskvnc.session.coach.direct": "1" };
 
 const READY_SELECTOR = "#root > *";
+// On iOS the app's root size is the Dynamic Type body size, 17 px at the
+// default setting (index.css). Chromium does not know -apple-system-body, so
+// the Apple shots set it, or every rem would come out a sixteenth too small.
+const IOS_TEXT_SIZE = () => {
+  document.addEventListener("DOMContentLoaded", () => {
+    const st = document.createElement("style");
+    st.textContent = "html{font-size:17px}";
+    document.head.append(st);
+  });
+};
 const SETTLE_MS = 900;
 
 // The shots, in store order. The first two or three are what most people see
@@ -235,6 +245,7 @@ async function main() {
           await ctx.addInitScript((seen) => {
             for (const [k, v] of Object.entries(seen)) localStorage.setItem(k, v);
           }, SEEN_STORAGE);
+          if (/^(iphone|ipad)/.test(key)) await ctx.addInitScript(IOS_TEXT_SIZE);
           const page = await ctx.newPage();
           await page.goto(`${o.base}/?${BASE_QUERY}&tab=${shot.tab}`, { waitUntil: "networkidle" });
           await page.waitForSelector(READY_SELECTOR, { timeout: 15000 });

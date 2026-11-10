@@ -47,15 +47,15 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
       }
     >
       <div className="flex flex-col gap-3">
-        <button type="button" className="min-h-12 text-center text-base font-semibold text-accent" onClick={() => setDetails((v) => !v)}>
+        <button type="button" className="min-h-12 text-center text-subhead font-semibold text-accent" onClick={() => setDetails((v) => !v)}>
           {details ? "Hide details" : "More details"}
         </button>
         {details && prompt && (
-          <div className="rounded-[10px] bg-surface-2 p-4 text-sm">
+          <div className="rounded-[10px] bg-surface-2 p-4 text-footnote">
             <p className="text-ink-dim">Name on its certificate</p>
             <p className="mb-3 break-all font-medium">{prompt.subject}</p>
             <p className="text-ink-dim">Fingerprint</p>
-            <p className="break-all font-mono text-xs leading-relaxed">{formatFingerprint(prompt.fingerprint)}</p>
+            <p className="break-all font-mono text-caption leading-relaxed">{formatFingerprint(prompt.fingerprint)}</p>
           </div>
         )}
         {change ? (
@@ -64,7 +64,7 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
             <Button size="xl" block onClick={() => onAnswer(false)}>
               No, stop
             </Button>
-            <button type="button" className="min-h-12 text-center text-[15px] font-semibold text-danger" onClick={() => onAnswer(true)}>
+            <button type="button" className="min-h-12 text-center text-subhead font-semibold text-danger" onClick={() => onAnswer(true)}>
               I expected this, connect anyway
             </button>
           </>

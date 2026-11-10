@@ -1,5 +1,6 @@
 /**
- * Buttons. Every one is at least 48 px tall and gives a small haptic tap.
+ * Buttons. md is 40 px, lg 44 px (the touch minimum) and xl 50 px, the
+ * height of a full width call to action on iOS. Each gives a small haptic tap.
  * `variant`: primary (the one obvious action), soft, ghost, danger.
  */
 import type { ButtonHTMLAttributes, ReactNode } from "react";
@@ -17,9 +18,9 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const SIZES = {
-  md: "min-h-12 px-5 text-base gap-2 rounded-[10px]",
-  lg: "min-h-14 px-6 text-lg gap-2.5 rounded-[10px]",
-  xl: "min-h-14 px-7 text-lg gap-3 rounded-xl",
+  md: "min-h-10 px-4 text-subhead gap-1.5 rounded-[9px]",
+  lg: "min-h-11 px-5 text-subhead gap-2 rounded-[10px]",
+  xl: "min-h-[3.125rem] px-6 text-headline gap-2 rounded-xl",
 };
 
 export function Button({ variant = "primary", size = "lg", icon, tone, block, className = "", children, onClick, style, ...rest }: Props) {
@@ -30,7 +31,7 @@ export function Button({ variant = "primary", size = "lg", icon, tone, block, cl
     danger: "bg-danger-soft text-danger active:brightness-95",
     plain: "border border-line bg-surface text-ink active:brightness-95",
   };
-  const bg = variant === "primary" ? { background: tone ?? "var(--dv-accent)" } : undefined;
+  const bg = variant === "primary" ? { background: tone ?? "var(--dv-accent-fill)" } : undefined;
   return (
     <button
       type="button"
@@ -42,20 +43,21 @@ export function Button({ variant = "primary", size = "lg", icon, tone, block, cl
       }}
       {...rest}
     >
-      {icon}
+      {/* Icons follow the label size, so a 24 px glyph never shouts beside 15 px text. */}
+      {icon && <span className="inline-flex shrink-0 [&>svg]:h-[1.15em] [&>svg]:w-[1.15em]">{icon}</span>}
       {children}
     </button>
   );
 }
 
-/** A round icon button, 48 px. */
+/** A round icon button, 44 px. */
 export function IconButton({ label, children, className = "", onClick, ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
   return (
     <button
       type="button"
       aria-label={label}
       title={label}
-      className={`inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-line bg-surface text-ink transition-transform active:scale-90 ${className}`}
+      className={`inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-surface text-ink transition-transform active:scale-90 ${className}`}
       onClick={(e) => {
         haptic("tap");
         onClick?.(e);

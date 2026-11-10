@@ -17,33 +17,33 @@ export function Field({ label, hint, error, icon, trailing, type, className = ""
   const secret = type === "password";
   return (
     <div className={className}>
-      <label htmlFor={id} className="mb-2 block px-1 text-sm font-semibold text-ink-dim">
+      <label htmlFor={id} className="mb-1.5 block px-1 text-footnote font-medium text-ink-dim">
         {label}
       </label>
       <div
-        className={`flex min-h-14 items-center gap-3 rounded-[10px] border bg-surface-2 px-4 transition-colors focus-within:border-accent focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/25 ${error ? "border-danger" : "border-line"}`}
+        className={`flex min-h-12 items-center gap-3 rounded-[10px] border bg-surface-2 px-3.5 transition-colors focus-within:border-accent focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/25 ${error ? "border-danger" : "border-line"}`}
       >
         {icon && <span className="text-ink-dim">{icon}</span>}
         <input
           id={id}
           type={secret && show ? "text" : type}
-          className="min-w-0 flex-1 bg-transparent py-3 text-lg text-ink outline-none placeholder:text-ink-faint"
+          className="min-w-0 flex-1 bg-transparent py-2.5 text-body text-ink outline-none placeholder:text-ink-faint"
           aria-invalid={!!error}
           {...rest}
         />
         {secret && (
-          <button type="button" className="-mr-2 flex h-12 w-12 items-center justify-center text-ink-dim" aria-label={show ? "Hide password" : "Show password"} onClick={() => setShow((v) => !v)}>
+          <button type="button" className="-mr-2 flex h-11 w-11 items-center justify-center text-ink-dim" aria-label={show ? "Hide password" : "Show password"} onClick={() => setShow((v) => !v)}>
             <IconEye off={show} />
           </button>
         )}
         {trailing}
       </div>
       {error ? (
-        <p role="alert" className="mt-2 px-1 text-sm font-medium text-danger">
+        <p role="alert" className="mt-1.5 px-1 text-footnote font-medium text-danger">
           {error}
         </p>
       ) : hint ? (
-        <p className="mt-2 px-1 text-sm text-ink-dim">{hint}</p>
+        <p className="mt-1.5 px-1 text-footnote text-ink-dim">{hint}</p>
       ) : null}
     </div>
   );
@@ -60,9 +60,9 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (on: bo
         haptic("select");
         onChange(!on);
       }}
-      className={`relative h-9 w-16 shrink-0 rounded-full transition-colors ${on ? "bg-accent" : "bg-line-strong"}`}
+      className={`relative h-[1.9375rem] w-[3.1875rem] shrink-0 rounded-full transition-colors ${on ? "bg-accent-fill" : "bg-line-strong"}`}
     >
-      <span className={`absolute top-1 h-7 w-7 rounded-full bg-white shadow transition-[left] duration-200 ${on ? "left-8" : "left-1"}`} />
+      <span className={`absolute top-[2px] h-[1.6875rem] w-[1.6875rem] rounded-full bg-white shadow transition-[left] duration-200 ${on ? "left-[calc(100%-1.6875rem-2px)]" : "left-[2px]"}`} />
     </button>
   );
 }
@@ -93,7 +93,7 @@ export function Segmented<T extends string>({
               haptic("select");
               onChange(o.value);
             }}
-            className={`flex min-h-12 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-sm font-medium transition-all ${on ? "bg-surface text-ink shadow-card" : "text-ink-dim"}`}
+            className={`flex min-h-12 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-footnote font-medium transition-all ${on ? "bg-surface text-ink shadow-card" : "text-ink-dim"}`}
           >
             {o.art}
             {o.label}

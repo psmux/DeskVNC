@@ -69,7 +69,7 @@ export function CredentialSheet({ open, request, hostName, onSubmit, onCancel }:
           hint={request?.truncatesPassword && !truncating ? `Only the first ${VNC_PASSWORD_LIMIT} characters count for this kind of computer.` : undefined}
         />
         {truncating && (
-          <p id="dv-trunc-warning" className="rounded-[10px] border border-warn/40 bg-warn-soft px-4 py-3 text-[15px] leading-snug">
+          <p id="dv-trunc-warning" className="rounded-[10px] border border-warn/40 bg-warn-soft px-4 py-3 text-subhead">
             This computer only reads the first {VNC_PASSWORD_LIMIT} characters of a password. We send them all, but only the first{" "}
             {VNC_PASSWORD_LIMIT} count.
           </p>
@@ -78,7 +78,7 @@ export function CredentialSheet({ open, request, hostName, onSubmit, onCancel }:
           <IconLock className="text-ink-dim" />
           <div className="flex-1">
             <p className="font-semibold">Remember on this phone</p>
-            <p className="text-sm text-ink-dim">Kept safely in the phone's keychain.</p>
+            <p className="text-footnote text-ink-dim">Kept safely in the phone's keychain.</p>
           </div>
           <Toggle on={save} onChange={setSave} label="Remember on this phone" />
         </div>

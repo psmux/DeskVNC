@@ -31,6 +31,16 @@ const DEVICES = {
   land1024: { view: [1024, 768], scale: 2 },
 };
 const MAIN = new Set(["01-welcome", "03-computers", "06-nearby-done", "07-help", "10-add-how", "15-settings", "17-session-demo"]);
+// On iOS the app's root size is the Dynamic Type body size, 17 px at the
+// default setting (index.css). Chromium does not know -apple-system-body, so
+// the Apple shots set it, or every rem would come out a sixteenth too small.
+const IOS_TEXT_SIZE = () => {
+  document.addEventListener("DOMContentLoaded", () => {
+    const st = document.createElement("style");
+    st.textContent = "html{font-size:17px}";
+    document.head.append(st);
+  });
+};
 const COACH_SEEN = { "deskvnc.session.coach.trackpad": "1", "deskvnc.session.coach.direct": "1" };
 const button = (page, name) => page.getByRole("button", { name, exact: false }).first();
 
@@ -208,6 +218,7 @@ async function main() {
             await page.addInitScript((kv) => {
               for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v);
             }, seen);
+            if (dev === "iphone" || dev === "ipad") await page.addInitScript(IOS_TEXT_SIZE);
             const url = `${o.base}/?mock=1&reset=1&theme=${theme}${shot.q ? `&${shot.q}` : ""}`;
             const file = join(OUT, `${dev}-${theme}-${shot.name}.png`);
             try {

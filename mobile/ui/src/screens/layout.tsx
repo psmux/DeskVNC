@@ -9,10 +9,10 @@ import { haptic } from "../lib/haptics";
 
 export function ScreenHeader({ title, subtitle, action }: { title: string; subtitle?: ReactNode; action?: ReactNode }) {
   return (
-    <header className="flex items-end gap-3 px-5 pb-4 pt-4 tab:px-8 tab:pt-8">
+    <header className="flex items-end gap-3 px-5 pb-3 pt-3 tab:px-8 tab:pt-8">
       <div className="min-w-0 flex-1">
-        <h1 className="text-[2rem] font-bold leading-tight tracking-tight tab:text-[2.4rem]">{title}</h1>
-        {subtitle && <p className="mt-1 text-base text-ink-dim">{subtitle}</p>}
+        <h1 className="text-large-title">{title}</h1>
+        {subtitle && <p className="mt-1 text-subhead text-ink-dim">{subtitle}</p>}
       </div>
       {action}
     </header>

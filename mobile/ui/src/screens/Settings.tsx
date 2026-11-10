@@ -28,7 +28,7 @@ const LICENCES: { name: string; licence: string }[] = [
 function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="mb-6">
-      <h2 className="mb-2 px-2 text-xs font-semibold uppercase tracking-wider text-ink-faint">{title}</h2>
+      <h2 className="mb-2 px-2 text-caption font-semibold uppercase tracking-[0.06em] text-ink-faint">{title}</h2>
       <div className="overflow-hidden rounded-[14px] border border-line bg-surface">{children}</div>
     </section>
   );
@@ -37,15 +37,15 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 function Row({ icon, title, detail, trailing, onClick }: { icon: ReactNode; title: string; detail?: string; trailing?: ReactNode; onClick?: () => void }) {
   const inner = (
     <>
-      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] text-accent">{icon}</span>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] text-accent">{icon}</span>
       <span className="min-w-0 flex-1">
-        <span className="block text-base font-semibold">{title}</span>
-        {detail && <span className="block text-sm text-ink-dim">{detail}</span>}
+        <span className="block text-body">{title}</span>
+        {detail && <span className="block text-footnote text-ink-dim">{detail}</span>}
       </span>
       {trailing}
     </>
   );
-  const cls = "flex min-h-[4.25rem] w-full items-center gap-4 border-b border-line px-4 py-2 text-left last:border-b-0";
+  const cls = "flex min-h-[3.75rem] w-full items-center gap-3 border-b border-line px-4 py-2.5 text-left last:border-b-0";
   return onClick ? (
     <button
       type="button"
@@ -155,8 +155,8 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
                   className={`flex flex-col items-center rounded-[10px] border-2 p-3 text-center transition-colors ${on ? "border-accent bg-accent-soft" : "border-line bg-surface-2"}`}
                 >
                   <SceneTouchMode mode={o.value} className="h-20" />
-                  <span className="mt-1 text-base font-semibold">{o.title}</span>
-                  <span className="mt-0.5 text-sm leading-snug text-ink-dim">{o.text}</span>
+                  <span className="mt-1 text-subhead font-semibold">{o.title}</span>
+                  <span className="mt-0.5 text-footnote text-ink-dim">{o.text}</span>
                 </button>
               );
             })}
@@ -174,7 +174,7 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
                 { value: "quality", label: "Sharper" },
               ]}
             />
-            <p className="mt-2 px-1 text-sm text-ink-dim">Automatic picks for you. Faster helps on a weak connection.</p>
+            <p className="mt-2 px-1 text-footnote text-ink-dim">Automatic picks for you. Faster helps on a weak connection.</p>
           </div>
         </Group>
 
@@ -289,7 +289,7 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           {LICENCES.map((l) => (
             <li key={l.name} className="flex min-h-14 items-center justify-between gap-3 px-4 py-2">
               <span className="font-semibold">{l.name}</span>
-              <span className="text-right text-sm text-ink-dim">{l.licence}</span>
+              <span className="text-right text-footnote text-ink-dim">{l.licence}</span>
             </li>
           ))}
         </ul>

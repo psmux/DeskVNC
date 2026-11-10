@@ -28,10 +28,10 @@ export function TabBar({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void
               aria-current={on ? "page" : undefined}
               className="flex min-h-16 flex-1 flex-col items-center justify-center gap-0.5 pb-1.5 pt-2"
             >
-              <span className={`flex h-9 w-16 items-center justify-center rounded-full transition-colors ${on ? "bg-accent-soft" : ""}`}>
-                <TabIcon tab={t.key} active={on} size={30} />
+              <span className={`flex h-8 w-14 items-center justify-center rounded-full transition-colors ${on ? "bg-accent-soft" : ""}`}>
+                <TabIcon tab={t.key} active={on} size={26} />
               </span>
-              <span className={`text-xs font-medium ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
+              <span className={`text-caption2 font-medium ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
             </button>
           );
         })}
@@ -61,8 +61,8 @@ export function SideRail({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => vo
             aria-current={on ? "page" : undefined}
             className={`flex w-24 shrink-0 flex-col items-center gap-1 rounded-[14px] py-3 transition-colors first-of-type:mt-3 ${on ? "bg-accent-soft" : "active:bg-surface-2"}`}
           >
-            <TabIcon tab={t.key} active={on} size={36} />
-            <span className={`text-sm font-medium ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
+            <TabIcon tab={t.key} active={on} size={30} />
+            <span className={`text-caption font-medium ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
           </button>
         );
       })}

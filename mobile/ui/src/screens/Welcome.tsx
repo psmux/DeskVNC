@@ -45,7 +45,7 @@ export function Welcome({ onDone }: { onDone: () => void }) {
     <motion.div className="pt-safe pb-safe pl-safe pr-safe fixed inset-0 z-50 flex flex-col bg-bg" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       <div className="flex justify-end px-4 pt-3">
         {!last && (
-          <button type="button" className="min-h-12 rounded-full px-5 text-lg font-semibold text-ink-dim" onClick={onDone}>
+          <button type="button" className="min-h-11 rounded-full px-4 text-body text-ink-dim" onClick={onDone}>
             Skip
           </button>
         )}
@@ -66,8 +66,8 @@ export function Welcome({ onDone }: { onDone: () => void }) {
             onDragEnd={swipe}
           >
             <div className="w-full max-w-[22rem]">{card.art}</div>
-            <h1 className="mt-4 text-[1.75rem] font-semibold leading-tight tracking-tight">{card.title}</h1>
-            <p className="mt-3 text-lg leading-relaxed text-ink-dim">{card.text}</p>
+            <h1 className="mt-4 text-title1">{card.title}</h1>
+            <p className="mt-3 text-body leading-[1.45] text-ink-dim">{card.text}</p>
           </motion.div>
         </AnimatePresence>
       </div>
