@@ -138,7 +138,7 @@ netdev = "0.45"
 mac_address = "1"
 
 # storage
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 keyring = "4"
 directories = "6"
 
