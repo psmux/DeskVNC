@@ -114,7 +114,7 @@ pub(crate) fn screen_asleep() -> bool {
             .await
             .ok()
             .and_then(|reply| {
-                let value: ashpd::zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+                let value: ashpd::zbus::OwnedVariant = reply.body().deserialize().ok()?;
                 bool::try_from(value).ok()
             })
             .unwrap_or(false)
@@ -422,8 +422,9 @@ impl Watch {
 
 /// The session's object path, which the portal's clipboard signals name.
 fn session_path<T: ashpd::desktop::SessionPortal>(session: &Session<T>) -> Option<String> {
-    use ashpd::zbus::zvariant::{LE, OwnedObjectPath, serialized::Context, to_bytes};
-    let bytes = to_bytes(Context::new_dbus(LE, 0), session).ok()?;
+    use ashpd::zbus::OwnedObjectPath;
+    use ashpd::zbus::wire::{LE, serialized::Context, to_bytes};
+    let bytes = to_bytes(Context::new(LE, 0), session).ok()?;
     let (path, _): (OwnedObjectPath, _) = bytes.deserialize().ok()?;
     Some(path.as_str().to_owned())
 }
