@@ -7,10 +7,10 @@
 
 use std::sync::Mutex;
 
-use jni::objects::{GlobalRef, JObject, JValue};
-use jni::JavaVM;
+use jni::objects::{Global, JObject};
+use jni::{jni_sig, jni_str, JValue, JavaVM};
 
-static LOCK: Mutex<Option<GlobalRef>> = Mutex::new(None);
+static LOCK: Mutex<Option<Global<JObject<'static>>>> = Mutex::new(None);
 
 /// Hold (`true`) or release (`false`) the lock. Failures are logged and
 /// otherwise ignored: without the lock the TCP sweep still works, only the
@@ -21,57 +21,65 @@ pub fn multicast_lock(hold: bool) {
     }
 }
 
+/// Why taking or letting go of the lock failed, as text for the log.
+struct Failure(String);
+
+impl From<jni::errors::Error> for Failure {
+    fn from(error: jni::errors::Error) -> Self {
+        Failure(error.to_string())
+    }
+}
+
 fn set(hold: bool) -> Result<(), String> {
     let mut slot = LOCK.lock().map_err(|_| "lock poisoned")?;
     let ctx = ndk_context::android_context();
     // SAFETY: `ndk-context` hands out the process's JavaVM pointer, which
     // Tauri set at start and which lives as long as the process.
-    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
-    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-    if !hold {
-        if let Some(lock) = slot.take() {
-            env.call_method(lock.as_obj(), "release", "()V", &[])
-                .map_err(|e| e.to_string())?;
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
+    vm.attach_current_thread(|env| -> Result<(), Failure> {
+        if !hold {
+            if let Some(lock) = slot.take() {
+                env.call_method(lock.as_obj(), jni_str!("release"), jni_sig!("()V"), &[])?;
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
-    if slot.is_some() {
-        return Ok(());
-    }
-    // SAFETY: the context pointer is the activity Tauri registered, a live
-    // global reference for the life of the process.
-    let context = unsafe { JObject::from_raw(ctx.context().cast()) };
-    let name = env.new_string("wifi").map_err(|e| e.to_string())?;
-    let wifi = env
-        .call_method(
-            &context,
-            "getSystemService",
-            "(Ljava/lang/String;)Ljava/lang/Object;",
-            &[JValue::Object(&name)],
-        )
-        .and_then(|v| v.l())
-        .map_err(|e| e.to_string())?;
-    if wifi.is_null() {
-        return Err("no Wi-Fi service".into());
-    }
-    let tag = env
-        .new_string("DeskVNC discovery")
-        .map_err(|e| e.to_string())?;
-    let lock = env
-        .call_method(
-            &wifi,
-            "createMulticastLock",
-            "(Ljava/lang/String;)Landroid/net/wifi/WifiManager$MulticastLock;",
-            &[JValue::Object(&tag)],
-        )
-        .and_then(|v| v.l())
-        .map_err(|e| e.to_string())?;
-    env.call_method(&lock, "setReferenceCounted", "(Z)V", &[JValue::Bool(0)])
-        .map_err(|e| e.to_string())?;
-    env.call_method(&lock, "acquire", "()V", &[])
-        .map_err(|e| e.to_string())?;
-    *slot = Some(env.new_global_ref(lock).map_err(|e| e.to_string())?);
-    // `context` is borrowed from ndk-context, not ours to delete.
-    std::mem::forget(context);
-    Ok(())
+        if slot.is_some() {
+            return Ok(());
+        }
+        // SAFETY: the context pointer is the activity Tauri registered, a
+        // live global reference for the life of the process. `JObject` has no
+        // drop of its own, so wrapping it never deletes that reference.
+        let context = unsafe { JObject::from_raw(env, ctx.context().cast()) };
+        let name = env.new_string("wifi")?;
+        let wifi = env
+            .call_method(
+                &context,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        if wifi.is_null() {
+            return Err(Failure("no Wi-Fi service".into()));
+        }
+        let tag = env.new_string("DeskVNC discovery")?;
+        let lock = env
+            .call_method(
+                &wifi,
+                jni_str!("createMulticastLock"),
+                jni_sig!("(Ljava/lang/String;)Landroid/net/wifi/WifiManager$MulticastLock;"),
+                &[JValue::Object(&tag)],
+            )?
+            .l()?;
+        env.call_method(
+            &lock,
+            jni_str!("setReferenceCounted"),
+            jni_sig!("(Z)V"),
+            &[JValue::Bool(false)],
+        )?;
+        env.call_method(&lock, jni_str!("acquire"), jni_sig!("()V"), &[])?;
+        *slot = Some(env.new_global_ref(lock)?);
+        Ok(())
+    })
+    .map_err(|Failure(error)| error)
 }
