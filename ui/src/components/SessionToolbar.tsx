@@ -61,9 +61,10 @@ const clamp = (v: number, lo: number, hi: number): number =>
 /**
  * Stored positions predate free placement and carry only `{edge, ratio}`, so
  * anything missing is filled from the default rather than trusted: a `NaN`
- * left over from an older shape would put the toolbar nowhere at all.
+ * left over from an older shape would put the toolbar nowhere at all. Junk
+ * that is not JSON, or not an object, gives the default too.
  */
-function readPos(): ToolbarPos {
+export function readPos(): ToolbarPos {
   try {
     const raw = localStorage.getItem(POS_KEY);
     if (raw) {
@@ -74,8 +75,10 @@ function readPos(): ToolbarPos {
           : p.edge === null
             ? null
             : DEFAULT_POS.edge;
+      // Every stored number is a fraction of the window, so anything outside
+      // 0..1 is pulled back to the nearest edge rather than trusted.
       const num = (v: unknown, fallback: number): number =>
-        typeof v === "number" && Number.isFinite(v) ? v : fallback;
+        typeof v === "number" && Number.isFinite(v) ? clamp(v, 0, 1) : fallback;
       return {
         edge,
         ratio: num(p.ratio, DEFAULT_POS.ratio),
@@ -461,8 +464,12 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       const dRight = b.maxX - left;
       const nearest = Math.min(dTop, dBottom, dLeft, dRight);
 
+      // Fractions of a window that has no size yet would be NaN or Infinity.
+      const x = W > 0 ? clamp(left / W, 0, 1) : DEFAULT_POS.x;
+      const y = H > 0 ? clamp(top / H, 0, 1) : DEFAULT_POS.y;
+
       if (nearest > SNAP_PX) {
-        setPos({ edge: null, ratio: 0, x: left / W, y: top / H });
+        setPos({ edge: null, ratio: 0, x, y });
         return;
       }
       let edge: Edge = "top";
@@ -473,7 +480,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
       const span = edge === "top" || edge === "bottom" ? W : H - insetTop;
       const centre =
         edge === "top" || edge === "bottom" ? left + w / 2 : top + h / 2 - insetTop;
-      setPos({ edge, ratio: clamp(span > 0 ? centre / span : 0.5, 0, 1), x: left / W, y: top / H });
+      setPos({ edge, ratio: clamp(span > 0 ? centre / span : 0.5, 0, 1), x, y });
     };
 
     const up = (): void => {
@@ -525,7 +532,20 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         left = clamp(pos.x * W, b.minX, b.maxX);
         top = clamp(pos.y * H, b.minY, b.maxY);
     }
-    return { position: "fixed", zIndex: 30, left: origin.x + left, top: origin.y + top };
+    // `max-content` keeps the toolbar's width from depending on where it sits.
+    // With an automatic width a fixed box only gets the room between `left`
+    // and the right side of the window, and this bar wraps to fit it. Docked
+    // right, `left` is the window width less the measured width, so each
+    // measurement handed the bar a little more room, it grew into it, was
+    // measured again, and React gave up after fifty rounds with error #185
+    // (issue #35). The inner `maxWidth` still folds it in a narrow window.
+    return {
+      position: "fixed",
+      zIndex: 30,
+      left: origin.x + left,
+      top: origin.y + top,
+      width: "max-content",
+    };
   }, [pos, viewport, size, insetTop, bounds, origin]);
 
   // Floating toolbars open their menus downwards unless they sit low enough

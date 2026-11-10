@@ -47,12 +47,11 @@ tokio-openssl = { workspace = true, optional = true }
 
 [features]
 default = []
-# Vendored OpenSSL, built with TLS 1.0 and 1.1 enabled, for hosts that only
-# offer those (Windows 7 SP1 / Server 2008 R2 and similar). Off by default:
-# phase 0 ships only the dependency, the build configuration and CI, and a
-# stub upgrade path (`tls_legacy::upgrade`) that returns "not implemented".
-# No TLS 1.0 connection is made anywhere behind this feature yet; that is
-# phase 1b (PRDRDP/10 P0.6).
+# Vendored OpenSSL, TLS 1.0 through 1.2, for hosts rustls cannot reach
+# (Windows 7 SP1 / Server 2008 R2 and similar, and servers that offer only
+# CBC cipher suites). Off by default: a default build compiles no OpenSSL
+# at all. With it on, `tls_legacy` performs the real handshake and
+# `TlsBackend::Legacy` selects it (phase 1b, PRDRDP/10 P0.6).
 #
 # Vendored rather than the system library: Debian/Ubuntu set `MinProtocol`
 # in openssl.cnf, RHEL applies crypto policies, and recent Windows disables

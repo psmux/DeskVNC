@@ -130,6 +130,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The desktop app builds rdp-core with `legacy-tls`, which compiles the
+      # vendored OpenSSL. NASM is not on the Windows runner image, and without
+      # it openssl-src quietly builds a no-asm libcrypto that differs from the
+      # one CI tests (ci.yml, legacy-tls job). `OPENSSL_RUST_USE_NASM=1` makes
+      # a missing NASM fail the build instead.
+      - name: Install NASM for the vendored OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install nasm -y
+          echo "OPENSSL_RUST_USE_NASM=1" >> "$GITHUB_ENV"
+
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |

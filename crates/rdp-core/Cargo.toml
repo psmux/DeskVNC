@@ -63,6 +63,13 @@ kerberos = ["rdp-auth/kerberos"]
 progressive = ["rdp-codecs/progressive"]
 # MS-RDPEA audio playback. Phase 2 (D10).
 audio = []
+# The OpenSSL legacy TLS backend (V3-B, PRDRDP/03 §4.7.2), forwarded to
+# `vnc-transport`, the only crate that may name `openssl` (PRDRDP/00 R55).
+# On: a host profile's `legacy_tls` flag selects `TlsBackend::Legacy` and
+# the handshake happens. Off (the default): the same flag is refused with
+# `RdpError::LegacyTlsUnavailable` before a socket is opened, so a user
+# who turned it on sees the switch did nothing rather than a mystery.
+legacy-tls = ["vnc-transport/legacy-tls"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

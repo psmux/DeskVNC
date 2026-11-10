@@ -88,7 +88,8 @@ pub async fn open_stream(
 /// offering nothing above TLS 1.1 the attempt fails rather than downgrading
 /// (AGENT_BRIEF V3-B). The selection is made here, before the socket is
 /// touched, and nothing the server says is an input to it (PRDRDP/03 §4.7.2).
-/// This crate does not enable `vnc-transport`'s `legacy-tls` feature, so
+/// This crate's `legacy-tls` feature (forwarded to `vnc-transport`, the only
+/// crate that may name `openssl`) is what can honour the flag; without it
 /// `TlsBackend::Legacy` does not exist in this build and the flag is refused
 /// with a message rather than silently ignored.
 ///
@@ -105,21 +106,20 @@ pub async fn upgrade_tls(
     pins: &CertPins,
     legacy_tls: bool,
 ) -> Result<TlsUpgrade> {
-    if legacy_tls {
-        // Silently ignoring the setting would mean a user who turned it on to
-        // reach a Server 2008 R2 host sees the same failure with no clue that
-        // the switch did nothing.
-        return Err(RdpError::LegacyTlsUnavailable(server_name.to_owned()));
-    }
+    // The profile named this backend, so the choice is the user's and not
+    // a downgrade the server triggered. Silently ignoring the setting
+    // would mean a user who turned it on to reach a Server 2008 R2 host
+    // sees the same failure with no clue that the switch did nothing.
+    let backend = match legacy_tls {
+        #[cfg(feature = "legacy-tls")]
+        true => vnc_transport::TlsBackend::Legacy,
+        #[cfg(not(feature = "legacy-tls"))]
+        true => return Err(RdpError::LegacyTlsUnavailable(server_name.to_owned())),
+        false => vnc_transport::TlsBackend::Modern,
+    };
 
     let pin = pins.for_scheme(remote_core::PinScheme::RdpTls);
-    Ok(vnc_transport::tls::upgrade_with_identity(
-        stream,
-        server_name,
-        pin,
-        vnc_transport::TlsBackend::Modern,
-    )
-    .await?)
+    Ok(vnc_transport::tls::upgrade_with_identity(stream, server_name, pin, backend).await?)
 }
 
 /// Wrap `fut` in `limit`, reporting a timeout against `stage` so the message
@@ -148,3 +148,61 @@ pub async fn with_timeout<T>(
 pub const X224_TIMEOUT: Duration = Duration::from_secs(15);
 /// The MCS connect and channel connection phases (PRDRDP/03 §3.3).
 pub const MCS_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    /// A stream with no server behind it: the other end dropped, so a
+    /// handshake reading from it gets an EOF instead of hanging.
+    fn dead_stream() -> BoxedStream {
+        let (a, b) = duplex(64);
+        drop(b);
+        Box::pin(a)
+    }
+
+    /// Without the feature the flag cannot be honoured, and refusing it by
+    /// name is the contract: a user who turned it on must learn the switch
+    /// did nothing, not see the same failure as if it were off
+    /// (AGENT_BRIEF V3-B).
+    #[cfg(not(feature = "legacy-tls"))]
+    #[tokio::test]
+    async fn the_legacy_flag_is_refused_when_the_build_has_no_backend() {
+        let err = upgrade_tls(dead_stream(), "host.example", &CertPins::default(), true)
+            .await
+            .expect_err("no backend exists for the flag in this build");
+        assert!(
+            matches!(err, RdpError::LegacyTlsUnavailable(ref host) if host == "host.example"),
+            "expected LegacyTlsUnavailable, got {err:?}"
+        );
+    }
+
+    /// With the feature the same flag reaches the OpenSSL handshake: the
+    /// refusal must be gone, and whatever a serverless stream reports
+    /// instead is the backend's own answer.
+    #[cfg(feature = "legacy-tls")]
+    #[tokio::test]
+    async fn the_legacy_flag_reaches_the_backend_when_the_build_has_one() {
+        let err = upgrade_tls(dead_stream(), "host.example", &CertPins::default(), true)
+            .await
+            .expect_err("a stream with no server cannot complete a handshake");
+        assert!(
+            !matches!(err, RdpError::LegacyTlsUnavailable(_)),
+            "the flag must select the backend, not be refused: {err:?}"
+        );
+    }
+
+    /// The default path never selects the legacy backend, feature or no
+    /// feature: `legacy_tls: false` is Modern in every build.
+    #[tokio::test]
+    async fn the_modern_path_never_selects_the_legacy_backend() {
+        let err = upgrade_tls(dead_stream(), "host.example", &CertPins::default(), false)
+            .await
+            .expect_err("a stream with no server cannot complete a handshake");
+        assert!(
+            !matches!(err, RdpError::LegacyTlsUnavailable(_)),
+            "the modern path must not be refused as legacy: {err:?}"
+        );
+    }
+}
