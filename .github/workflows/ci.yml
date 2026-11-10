@@ -89,9 +89,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     # PRDRDP/10 P0.6: the vendored OpenSSL backend behind `vnc-transport`'s
     # `legacy-tls` feature, off by default (V3-B). This job is deliberately
-    # separate from `rust` above and scoped to `-p vnc-transport` only: it
-    # is the one crate that names the feature (PRDRDP/12 §2.5's
-    # `only_vnc_transport_names_openssl`), and keeping it its own job means
+    # separate from `rust` above and scoped to `-p vnc-transport`, the one
+    # crate that names OpenSSL (PRDRDP/12 §2.5's
+    # `only_vnc_transport_names_openssl`), plus `-p rdp-core`, whose
+    # `legacy-tls` feature forwards to it and selects the backend from the
+    # host profile. The `rust` job tests rdp-core with the feature off, this
+    # one with it on. Keeping it its own job means
     # a toolchain failure here (Perl, make, or the Windows NASM path,
     # PRDRDP/11 §3.10.3) is legible on its own line rather than buried in
     # the six-crate `rust` job.
@@ -123,17 +126,29 @@ jobs:
       - name: Build (legacy-tls)
         env:
           OPENSSL_RUST_USE_NASM: ${{ matrix.os == 'windows-latest' && '1' || '' }}
-        run: cargo build -p vnc-transport --features legacy-tls
+          # The Windows release links the C runtime statically (release.yml),
+          # and the desktop app turns this feature on, so the vendored
+          # OpenSSL has to link under the same flag. Only Windows reads it.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build -p vnc-transport -p rdp-core --features vnc-transport/legacy-tls,rdp-core/legacy-tls
 
       - name: Test (legacy-tls)
         env:
           OPENSSL_RUST_USE_NASM: ${{ matrix.os == 'windows-latest' && '1' || '' }}
-        run: cargo test -p vnc-transport --features legacy-tls
+          # The Windows release links the C runtime statically (release.yml),
+          # and the desktop app turns this feature on, so the vendored
+          # OpenSSL has to link under the same flag. Only Windows reads it.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo test -p vnc-transport -p rdp-core --features vnc-transport/legacy-tls,rdp-core/legacy-tls
 
       - name: Clippy (legacy-tls)
         env:
           OPENSSL_RUST_USE_NASM: ${{ matrix.os == 'windows-latest' && '1' || '' }}
-        run: cargo clippy -p vnc-transport --features legacy-tls --all-targets -- -D warnings
+          # The Windows release links the C runtime statically (release.yml),
+          # and the desktop app turns this feature on, so the vendored
+          # OpenSSL has to link under the same flag. Only Windows reads it.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo clippy -p vnc-transport -p rdp-core --features vnc-transport/legacy-tls,rdp-core/legacy-tls --all-targets -- -D warnings
 
   frontend:
     name: Frontend
