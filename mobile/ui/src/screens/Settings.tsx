@@ -117,7 +117,7 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
   return (
     <ScreenScroll>
       <ScreenHeader title="Settings" />
-      <div className="mx-auto max-w-2xl px-4 pb-8 tab:px-8">
+      <div className="mx-auto max-w-2xl px-4 pb-8 pt-3 tab:px-8">
         <Group title="Looks">
           <div className="p-3">
             <Segmented<ThemeChoice>

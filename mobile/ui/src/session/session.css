@@ -670,6 +670,7 @@
   flex: 1;
   margin: 0;
   font-size: var(--text-title2, 22px);
+  font-weight: 600;
   line-height: 1.27;
 }
 
@@ -1246,6 +1247,7 @@
 .dv-s-reconnect-card h2 {
   margin: 0;
   font-size: var(--text-title2, 22px);
+  font-weight: 600;
 }
 
 .dv-s-reconnect-card .dv-s-connect-art {
@@ -1289,6 +1291,7 @@
 .dv-s-coach-card h2 {
   margin: 0 0 4px;
   font-size: var(--text-title2, 22px);
+  font-weight: 600;
 }
 
 .dv-s-tips {

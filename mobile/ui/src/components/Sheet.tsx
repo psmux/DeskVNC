@@ -58,7 +58,7 @@ export function Sheet({ open, onClose, children, art, title, subtitle, dismissib
             </div>
             <div className="pb-6">
               {art && <div className="mx-auto mb-2 w-44">{art}</div>}
-              {title && <h2 className="text-center text-title2">{title}</h2>}
+              {title && <h2 className="text-balance text-center text-title2">{title}</h2>}
               {subtitle && <p className="mx-auto mt-2 max-w-sm text-center text-subhead text-ink-dim">{subtitle}</p>}
               <div className={title ? "mt-5" : ""}>{children}</div>
             </div>

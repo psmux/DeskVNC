@@ -179,7 +179,7 @@ function StepTitle({ title, subtitle, art }: { title: string; subtitle?: ReactNo
   return (
     <div className="mb-5 text-center">
       {art && <div className="mx-auto mb-1 w-40">{art}</div>}
-      <h2 className="text-title2">{title}</h2>
+      <h2 className="text-balance text-title2">{title}</h2>
       {subtitle && <p className="mx-auto mt-2 max-w-md text-subhead text-ink-dim">{subtitle}</p>}
     </div>
   );
@@ -207,7 +207,7 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
             aria-pressed={s.protocol === p}
             className={`flex items-center gap-3 rounded-[14px] border bg-surface p-3 pr-4 text-left shadow-card transition-transform active:scale-[0.98] ${s.protocol === p ? "border-accent ring-1 ring-accent" : "border-line"}`}
           >
-            <ProtocolScene protocol={p} className="h-24 w-32 shrink-0" />
+            <ProtocolScene protocol={p} className="h-20 w-24 shrink-0 min-[400px]:h-24 min-[400px]:w-32" />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-2 text-headline">{PROTOCOL_TITLE[p]}</span>
               <span className="mt-1 block text-footnote text-ink-dim">{PROTOCOL_HINT[p]}</span>
@@ -218,7 +218,7 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
       </div>
       <button
         type="button"
-        className="mx-auto mt-6 flex min-h-12 items-center gap-2 rounded-full border border-line bg-surface-2 px-5 font-medium text-accent"
+        className="mx-auto mt-6 flex min-h-11 items-center gap-2 rounded-full border border-line bg-surface-2 px-4 text-subhead font-medium text-accent"
         onClick={async () => {
           const text = (await readClipboard()).trim();
           if (!text) return setPasteNote("Copy a link like rdp://office-pc first, then tap here.");
