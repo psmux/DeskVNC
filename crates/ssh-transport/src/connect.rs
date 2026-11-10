@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::{HashAlg, PrivateKey, PublicKey};
+use russh::keys::{HashAlg, PrivateKey};
 
 use crate::config::{resolver_host, SshAuth, SshConfig};
 use crate::error::{Error, Result};
@@ -120,15 +120,20 @@ pub struct ClientHandler {
     decision: Arc<Mutex<Option<HostKeyDecision>>>,
 }
 
-// russh 0.62 declares `Handler` with return-position `impl Future` rather than
+// russh declares `Handler` with return-position `impl Future` rather than
 // `#[async_trait]`, so a plain `async fn` in the impl is what matches now.
 impl russh::client::Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
+        // Since russh 0.65 a server may present a host certificate. Trust on
+        // first use is about the host's own key, so the decision and the
+        // fingerprint are over that key whether or not a certificate came
+        // wrapped around it; a plain key is fingerprinted exactly as before.
+        let server_public_key = server_key.public_key();
         let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         let key_type = server_public_key.algorithm().as_str().to_string();
         let decision = self

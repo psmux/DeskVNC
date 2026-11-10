@@ -43,7 +43,7 @@
 //! `argon2`) is already in the dependency graph via russh, so this adds no
 //! new third-party code to the build, only workspace crates that were
 //! already being compiled.
-use aes::cipher::{BlockDecryptMut, KeyIvInit};
+use aes::cipher::{BlockModeDecrypt, KeyInit, KeyIvInit};
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use russh::keys::ssh_encoding::Decode;
@@ -446,11 +446,11 @@ fn decrypt_cbc(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(), PpkError> {
     }
     let cipher = Aes256CbcDec::new_from_slices(key, iv)
         .map_err(|_| PpkError::Malformed("bad AES key or IV length".into()))?;
-    // `decrypt_padded_mut` would insist on a padding scheme; PuTTY's blob has
+    // `decrypt_padded` would insist on a padding scheme; PuTTY's blob has
     // none, so the blocks are walked directly.
     use aes::cipher::block_padding::NoPadding;
     cipher
-        .decrypt_padded_mut::<NoPadding>(data)
+        .decrypt_padded::<NoPadding>(data)
         .map_err(|_| PpkError::Malformed("private blob failed to decrypt".into()))?;
     Ok(())
 }
@@ -475,12 +475,12 @@ fn verify_mac(
     put_string(&mut data, private_plain);
 
     let ok = if file.version == 2 {
-        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(mac_key)
+        let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(mac_key)
             .map_err(|_| PpkError::Malformed("bad MAC key length".into()))?;
         mac.update(&data);
         mac.verify_slice(&file.mac).is_ok()
     } else {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(mac_key)
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(mac_key)
             .map_err(|_| PpkError::Malformed("bad MAC key length".into()))?;
         mac.update(&data);
         mac.verify_slice(&file.mac).is_ok()
