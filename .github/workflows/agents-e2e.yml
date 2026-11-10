@@ -83,6 +83,10 @@ jobs:
 
       - name: Build the app bundle
         shell: bash
+        # The repository holds two Tauri apps, and the CLI takes the first
+        # tauri.conf.json it finds, which is the phone app's under mobile/.
+        env:
+          TAURI_APP_PATH: src-tauri
         run: npx --yes @tauri-apps/cli@^2 build --debug --bundles ${{ matrix.bundle }} --config src-tauri/tauri.release.conf.json
 
       - name: Install the app
