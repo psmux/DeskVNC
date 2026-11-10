@@ -43,6 +43,7 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "patches/**"
       - ".github/workflows/mobile-ios.yml"
   pull_request:
     paths: *mobile_paths
