@@ -15,10 +15,12 @@
   --s-boundary: var(--dv-boundary, #19b8a6);
   --s-danger: var(--dv-danger, #ff5a5f);
   --s-ok: var(--dv-ok, #2fc97a);
-  --s-warn: #f6a723;
+  --s-warn: var(--dv-warn, #e3a13c);
   --s-line: var(--dv-line, rgba(160, 175, 210, 0.22));
-  --s-hand: #ffd8b5;
-  --s-hand-line: #7c4f33;
+  /* The coach finger: a neutral glove, not a skin tone, like the rest of the art. */
+  --s-hand: #e9ebef;
+  --s-hand-line: #4c5361;
+  --s-accent-ink: var(--dv-accent-ink, #fff);
   --s-safe-t: env(safe-area-inset-top, 0px);
   --s-safe-r: env(safe-area-inset-right, 0px);
   --s-safe-b: env(safe-area-inset-bottom, 0px);
@@ -277,7 +279,7 @@
 
 .dv-s-tool.is-on .dv-s-tool-icon {
   background: var(--s-accent);
-  color: #fff;
+  color: var(--s-accent-ink);
   border-color: transparent;
 }
 
@@ -574,15 +576,15 @@
 
 .dv-s-key.is-once {
   background: var(--s-accent);
-  color: #fff;
+  color: var(--s-accent-ink);
   border-color: transparent;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--s-accent) 35%, transparent);
 }
 
 .dv-s-key.is-locked {
   background: var(--s-accent);
-  color: #fff;
-  border-color: #fff;
+  color: var(--s-accent-ink);
+  border-color: var(--s-accent-ink);
 }
 
 .dv-s-key-lock {
@@ -593,7 +595,7 @@
   height: 3px;
   margin-left: -7px;
   border-radius: 2px;
-  background: #fff;
+  background: var(--s-accent-ink);
 }
 
 /* ---------------------------------------------------------------- sheets */
@@ -811,7 +813,7 @@
   border: 0;
   border-radius: 18px;
   background: var(--s-accent);
-  color: #fff !important;
+  color: var(--s-accent-ink) !important;
   font-size: 18px !important;
   font-weight: 700;
   box-shadow: 0 8px 22px color-mix(in srgb, var(--s-accent) 40%, transparent);
@@ -1005,7 +1007,7 @@
 .dv-s-pill.is-primary {
   background: var(--s-accent);
   border-color: transparent;
-  color: #fff !important;
+  color: var(--s-accent-ink) !important;
 }
 
 .dv-s-pill:disabled {

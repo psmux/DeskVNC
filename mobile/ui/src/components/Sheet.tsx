@@ -39,7 +39,7 @@ export function Sheet({ open, onClose, children, art, title, subtitle, dismissib
             onClick={() => dismissible && onClose?.()}
           />
           <motion.div
-            className="relative max-h-[92dvh] w-full overflow-y-auto rounded-t-[2rem] bg-surface px-5 pb-safe shadow-lift tab:max-w-lg tab:rounded-[2rem] tab:pb-0"
+            className="relative max-h-[92dvh] w-full overflow-y-auto rounded-t-[18px] bg-surface px-5 pb-safe shadow-lift tab:max-w-lg tab:rounded-[18px] tab:pb-0"
             initial={{ y: "100%" }}
             animate={{ y: 0 }}
             exit={{ y: "100%" }}
@@ -58,7 +58,7 @@ export function Sheet({ open, onClose, children, art, title, subtitle, dismissib
             </div>
             <div className="pb-6">
               {art && <div className="mx-auto mb-2 w-44">{art}</div>}
-              {title && <h2 className="text-center text-2xl font-bold leading-tight">{title}</h2>}
+              {title && <h2 className="text-center text-2xl font-semibold leading-tight">{title}</h2>}
               {subtitle && <p className="mx-auto mt-2 max-w-sm text-center text-base text-ink-dim">{subtitle}</p>}
               <div className={title ? "mt-5" : ""}>{children}</div>
             </div>

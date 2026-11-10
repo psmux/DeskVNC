@@ -64,7 +64,7 @@ export function Computers() {
         <ScreenHeader title="Your computers" />
         <div className="mx-auto flex max-w-md flex-col items-center px-6 pb-6 text-center">
           <SceneEmptyDesk className="w-72 max-w-full" />
-          <h2 className="mt-2 text-2xl font-bold">No computers yet</h2>
+          <h2 className="mt-2 text-2xl font-semibold">No computers yet</h2>
           <p className="mt-2 text-lg text-ink-dim">Add the computers you want to reach from this phone. It only takes a minute.</p>
           <div className="mt-6 flex w-full flex-col gap-3">
             <Button size="xl" block icon={<RadarMini />} onClick={() => app.setTab("nearby")}>
@@ -87,14 +87,14 @@ export function Computers() {
       <ScreenHeader
         title="Your computers"
         action={
-          <IconButton label="Add a computer" className="!bg-accent !text-white" onClick={() => app.openWizard()}>
-            <IconPlus size={26} />
+          <IconButton label="Add a computer" className="!border-transparent !bg-accent !text-accent-ink" onClick={() => app.openWizard()}>
+            <IconPlus size={24} />
           </IconButton>
         }
       />
       {app.hosts.length > 3 && (
         <div className="px-4 pb-4 tab:px-8">
-          <label className="flex min-h-14 items-center gap-3 rounded-2xl bg-surface px-4 shadow-card focus-within:ring-2 focus-within:ring-accent">
+          <label className="flex min-h-14 items-center gap-3 rounded-[10px] border border-line bg-surface px-4 focus-within:ring-2 focus-within:ring-accent">
             <IconSearch className="text-ink-dim" />
             <input
               type="search"
@@ -141,7 +141,7 @@ export function Computers() {
       <ActionSheet
         open={!!menuFor}
         onClose={() => setMenuFor(null)}
-        art={menuFor ? <OsArt os={menuFor.os} color={menuFor.color} /> : undefined}
+        art={menuFor ? <OsArt os={menuFor.os} /> : undefined}
         title={menuFor?.name}
         actions={
           menuFor
@@ -161,7 +161,7 @@ export function Computers() {
       <ConfirmSheet
         open={!!deleting}
         onClose={() => setDeleting(null)}
-        art={deleting ? <OsArt os={deleting.os} color={deleting.color} /> : undefined}
+        art={deleting ? <OsArt os={deleting.os} /> : undefined}
         title={`Delete ${deleting?.name ?? ""}?`}
         subtitle="It leaves this phone, along with any saved password. The computer itself is not touched."
         confirm="Delete"

@@ -1,14 +1,18 @@
 import type { Protocol } from "../api/contract";
-import { PROTOCOL_LABEL, ProtocolIcon, protocolColor, protocolSoft } from "../art/ProtocolArt";
+import { PROTOCOL_LABEL, ProtocolIcon } from "../art/ProtocolArt";
 
-/** The protocol as a coloured pill with its icon. `solid` for over pictures. */
+/**
+ * The protocol as a quiet chip with its icon. The same neutral look for all
+ * three ways in; the icon tells them apart. `solid` for over pictures.
+ */
 export function ProtocolBadge({ protocol, solid = false, className = "" }: { protocol: Protocol; solid?: boolean; className?: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full py-1 pl-1 pr-3 text-sm font-semibold ${className}`}
-      style={solid ? { background: "rgba(255,255,255,0.92)", color: protocolColor(protocol) } : { background: protocolSoft(protocol), color: protocolColor(protocol) }}
+      className={`inline-flex items-center gap-1.5 rounded-full py-0.5 pl-0.5 pr-2.5 text-[13px] font-medium text-ink ${
+        solid ? "bg-surface/90 shadow-card backdrop-blur" : "border border-line bg-surface-2"
+      } ${className}`}
     >
-      <ProtocolIcon protocol={protocol} size={22} />
+      <ProtocolIcon protocol={protocol} size={20} />
       {PROTOCOL_LABEL[protocol]}
     </span>
   );

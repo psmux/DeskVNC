@@ -66,7 +66,7 @@ export function Welcome({ onDone }: { onDone: () => void }) {
             onDragEnd={swipe}
           >
             <div className="w-full max-w-[22rem]">{card.art}</div>
-            <h1 className="mt-4 text-[2rem] font-extrabold leading-tight tracking-tight">{card.title}</h1>
+            <h1 className="mt-4 text-[1.75rem] font-semibold leading-tight tracking-tight">{card.title}</h1>
             <p className="mt-3 text-lg leading-relaxed text-ink-dim">{card.text}</p>
           </motion.div>
         </AnimatePresence>

@@ -17,18 +17,18 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const SIZES = {
-  md: "min-h-12 px-5 text-base gap-2 rounded-2xl",
-  lg: "min-h-14 px-6 text-lg gap-2.5 rounded-[1.25rem]",
-  xl: "min-h-16 px-7 text-xl gap-3 rounded-[1.5rem]",
+  md: "min-h-12 px-5 text-base gap-2 rounded-[10px]",
+  lg: "min-h-14 px-6 text-lg gap-2.5 rounded-[10px]",
+  xl: "min-h-14 px-7 text-lg gap-3 rounded-xl",
 };
 
 export function Button({ variant = "primary", size = "lg", icon, tone, block, className = "", children, onClick, style, ...rest }: Props) {
   const look: Record<Variant, string> = {
-    primary: "text-white shadow-card active:brightness-95",
-    soft: "bg-surface-2 text-ink active:brightness-95",
+    primary: "text-accent-ink active:brightness-95",
+    soft: "border border-line bg-surface-2 text-ink active:brightness-95",
     ghost: "bg-transparent text-accent active:bg-surface-2",
     danger: "bg-danger-soft text-danger active:brightness-95",
-    plain: "bg-surface text-ink shadow-card active:brightness-95",
+    plain: "border border-line bg-surface text-ink active:brightness-95",
   };
   const bg = variant === "primary" ? { background: tone ?? "var(--dv-accent)" } : undefined;
   return (
@@ -55,7 +55,7 @@ export function IconButton({ label, children, className = "", onClick, ...rest }
       type="button"
       aria-label={label}
       title={label}
-      className={`inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-surface text-ink shadow-card transition-transform active:scale-90 ${className}`}
+      className={`inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-line bg-surface text-ink transition-transform active:scale-90 ${className}`}
       onClick={(e) => {
         haptic("tap");
         onClick?.(e);

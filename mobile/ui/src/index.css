@@ -13,6 +13,9 @@
   --color-line: var(--dv-line);
   --color-ink: var(--dv-ink);
   --color-ink-dim: var(--dv-ink-dim);
+  --color-ink-faint: var(--dv-ink-faint);
+  --color-raised: var(--dv-raised);
+  --color-line-strong: var(--dv-line-strong);
   --color-accent: var(--dv-accent);
   --color-accent-ink: var(--dv-accent-ink);
   --color-accent-soft: var(--dv-accent-soft);
@@ -26,9 +29,13 @@
   --color-danger-soft: var(--dv-danger-soft);
   --color-ok: var(--dv-ok);
   --color-ok-soft: var(--dv-ok-soft);
+  --color-warn: var(--dv-warn);
+  --color-warn-soft: var(--dv-warn-soft);
+  --color-scrim: var(--dv-scrim);
   --shadow-card: var(--dv-shadow);
   --shadow-lift: var(--dv-shadow-lg);
-  --font-sans: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* The desktop app's stack: the system face, not the rounded one. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 /* Dynamic Type: on iOS the body font follows the size the person chose in

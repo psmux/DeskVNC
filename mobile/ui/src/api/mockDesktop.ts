@@ -1,16 +1,18 @@
 /**
- * A pleasant, clearly invented desktop drawn on a canvas. The mock Api and the
+ * A plain, clearly invented desktop drawn on a canvas. The mock Api and the
  * demo computer stream it as RGBA frames, and it reacts to taps, drags and
  * typing so anyone trying the app sees their input land.
  *
  * Nothing here is a real product: the windows, icons and wallpaper are made
- * up, in four loose styles that hint at each kind of computer.
+ * up, in four loose styles that hint at each kind of computer. The palette is
+ * kept to blue grays and the app's one blue, so a card picture sits quietly
+ * in the library the way a real screenshot does.
  */
 import type { HostOs } from "./contract";
 
 export type DesktopStyle = "windows" | "mac" | "linux" | "raspberry" | "demo";
 
-type WinKind = "notes" | "hello" | "photos" | "weather" | "music" | "sheet" | "calendar" | "terminal" | "chart" | "gallery";
+type WinKind = "notes" | "hello" | "photos" | "music" | "sheet" | "calendar" | "terminal" | "chart" | "gallery";
 
 /**
  * Which windows are open. `try` is the interactive one every live session
@@ -37,12 +39,17 @@ const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, 
 
 const WALLPAPERS: Record<DesktopStyle, [string, string, string, string]> = {
   // sky top, sky bottom, near hill, far hill
-  windows: ["#7fb2ff", "#d7e6ff", "#4c7ee8", "#93b4f5"],
-  mac: ["#ffb199", "#ffe2c7", "#e46b7c", "#f7a08f"],
-  linux: ["#2c3550", "#56607f", "#1d8c7a", "#2fb39b"],
-  raspberry: ["#a8e6b8", "#effbe9", "#3fa45b", "#86cf8b"],
-  demo: ["#b9a7ff", "#fbe3ff", "#7c5cff", "#c19bff"],
+  windows: ["#3f6fc4", "#9db8e6", "#24509e", "#5f86cc"],
+  mac: ["#7d8aa0", "#c9d1de", "#4f5b70", "#8f9bb0"],
+  linux: ["#1d222c", "#38414f", "#262d3a", "#323b4a"],
+  raspberry: ["#5f6f86", "#b4bfcf", "#3e4a5c", "#76849a"],
+  demo: ["#5a83cf", "#c2d3ef", "#2f5cb0", "#7b9bd8"],
 };
+
+/** The app's accent, for the one coloured thing in a window. */
+const ACCENT = "#2f6fe4";
+/** Quiet blue grays for everything else that needs a tone. */
+const TONES = ["#2f6fe4", "#5b7fb8", "#8aa1c4", "#6b7689", "#a3adbd", "#43516a"];
 
 export function styleForOs(os: HostOs): DesktopStyle {
   return os === "unknown" ? "demo" : os;
@@ -105,7 +112,7 @@ export class FakeDesktop {
     const left = style === "linux" ? 100 : 60;
     switch (opts.scene ?? "try") {
       case "studio":
-        this.wins = [win("weather", "Weather", 880, 10, 340, 170), win("music", "Track mixer", 60, 40, 780, 470)];
+        this.wins = [win("chart", "Export queue", 880, 10, 340, 250), win("music", "Track mixer", 60, 40, 780, 470)];
         break;
       case "family":
         this.wins = [win("notes", "Shopping list", 820, 300, 380, 260), win("gallery", "Summer by the sea", 80, 20, 700, 520)];
@@ -139,8 +146,7 @@ export class FakeDesktop {
         break;
       default:
         this.wins = [
-          win("photos", "Holiday photos", 700, 210, 470, 330),
-          win("weather", "Weather", 830, 10, 340, 170),
+          win("photos", "Photos", 700, 210, 470, 330),
           win("hello", "Try me", 90, 380, 380, 220),
           win("notes", "Notes", 70, 10, 560, 330),
         ];
@@ -279,18 +285,12 @@ export class FakeDesktop {
     sky.addColorStop(1, skyBottom);
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = this.style === "linux" ? "rgba(255,240,200,0.85)" : "rgba(255,255,255,0.75)";
-    ctx.beginPath();
-    ctx.arc(W * 0.58, H * 0.3, 70 * s, 0, Math.PI * 2);
-    ctx.fill();
-    if (this.style === "linux") {
-      ctx.fillStyle = "rgba(255,255,255,0.7)";
-      for (let i = 0; i < 40; i++) {
-        const px = (i * 97.3) % W;
-        const py = ((i * 53.1) % (H * 0.5)) + 10;
-        ctx.fillRect(px, py, 2 * s, 2 * s);
-      }
-    }
+    // A soft light in the sky, barely there.
+    const glow = ctx.createRadialGradient(W * 0.62, H * 0.28, 0, W * 0.62, H * 0.28, W * 0.45);
+    glow.addColorStop(0, "rgba(255,255,255,0.22)");
+    glow.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
     this.hill(far, H * 0.62, 0.9, 1.3);
     this.hill(near, H * 0.74, 1.4, 0.6);
 
@@ -303,12 +303,12 @@ export class FakeDesktop {
     this.ripples = this.ripples.filter((r) => now - r.start < 600);
     for (const r of this.ripples) {
       const t = (now - r.start) / 600;
-      ctx.strokeStyle = `rgba(124,92,255,${1 - t})`;
+      ctx.strokeStyle = `rgba(47,111,228,${1 - t})`;
       ctx.lineWidth = 4 * s;
       ctx.beginPath();
       ctx.arc(r.x, r.y, (12 + 40 * t) * s, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.fillStyle = `rgba(124,92,255,${0.35 * (1 - t)})`;
+      ctx.fillStyle = `rgba(47,111,228,${0.3 * (1 - t)})`;
       ctx.fill();
     }
 
@@ -317,8 +317,8 @@ export class FakeDesktop {
       const tw = ctx.measureText(this.toast.text).width + 48 * s;
       const tx = W / 2 - tw / 2;
       const ty = H - 150 * s;
-      ctx.fillStyle = "rgba(28,26,46,0.88)";
-      this.round(tx, ty, tw, 52 * s, 26 * s);
+      ctx.fillStyle = "rgba(26,29,35,0.88)";
+      this.round(tx, ty, tw, 52 * s, 10 * s);
       ctx.fill();
       ctx.fillStyle = "#fff";
       ctx.textBaseline = "middle";
@@ -364,13 +364,13 @@ export class FakeDesktop {
   private chrome(_now: number): void {
     const { ctx, width: W, height: H } = this;
     const s = W / 1280;
-    const icons = ["#ff8a65", "#ffd54f", "#4fc3f7", "#81c784", "#ba68c8", "#f06292"];
+    const icons = TONES;
     ctx.font = `600 ${16 * s}px ${FONT}`;
     if (this.style === "windows" || this.style === "demo") {
       // A floating bar along the bottom with app tiles in the middle.
       const barH = 64 * s;
-      ctx.fillStyle = "rgba(255,255,255,0.72)";
-      this.round(16 * s, H - barH - 12 * s, W - 32 * s, barH, 20 * s);
+      ctx.fillStyle = "rgba(244,245,247,0.86)";
+      this.round(16 * s, H - barH - 12 * s, W - 32 * s, barH, 12 * s);
       ctx.fill();
       const n = icons.length;
       const size = 40 * s;
@@ -378,19 +378,19 @@ export class FakeDesktop {
       let x = W / 2 - (n * size + (n - 1) * gap) / 2;
       for (const c of icons) {
         ctx.fillStyle = c;
-        this.round(x, H - barH - 12 * s + (barH - size) / 2, size, size, 12 * s);
+        this.round(x, H - barH - 12 * s + (barH - size) / 2, size, size, 8 * s);
         ctx.fill();
         x += size + gap;
       }
-      ctx.fillStyle = "#1c1a2e";
+      ctx.fillStyle = "#1a1d23";
       ctx.textAlign = "right";
       ctx.fillText(this.clock(), W - 40 * s, H - 12 * s - barH / 2 + 6 * s);
       ctx.textAlign = "left";
       ctx.fillText(this.style === "demo" ? "Demo computer" : this.name, 40 * s, H - 12 * s - barH / 2 + 6 * s);
     } else if (this.style === "mac") {
-      ctx.fillStyle = "rgba(255,255,255,0.6)";
+      ctx.fillStyle = "rgba(244,245,247,0.8)";
       ctx.fillRect(0, 0, W, 30 * s);
-      ctx.fillStyle = "#1c1a2e";
+      ctx.fillStyle = "#1a1d23";
       ctx.fillText("●  Desk    File    Edit    View    Window", 18 * s, 21 * s);
       ctx.textAlign = "right";
       ctx.fillText(this.clock(), W - 18 * s, 21 * s);
@@ -398,50 +398,45 @@ export class FakeDesktop {
       const size = 52 * s;
       const gap = 12 * s;
       const total = icons.length * size + (icons.length - 1) * gap + 28 * s;
-      ctx.fillStyle = "rgba(255,255,255,0.5)";
-      this.round(W / 2 - total / 2, H - size - 34 * s, total, size + 24 * s, 24 * s);
+      ctx.fillStyle = "rgba(244,245,247,0.6)";
+      this.round(W / 2 - total / 2, H - size - 34 * s, total, size + 24 * s, 16 * s);
       ctx.fill();
       let x = W / 2 - total / 2 + 14 * s;
       for (const c of icons) {
         ctx.fillStyle = c;
-        this.round(x, H - size - 22 * s, size, size, 14 * s);
+        this.round(x, H - size - 22 * s, size, size, 10 * s);
         ctx.fill();
         x += size + gap;
       }
     } else if (this.style === "linux") {
-      ctx.fillStyle = "rgba(15,18,30,0.85)";
+      ctx.fillStyle = "rgba(12,14,18,0.85)";
       ctx.fillRect(0, 0, W, 32 * s);
-      ctx.fillStyle = "#e8ecff";
+      ctx.fillStyle = "#e9ebef";
       ctx.fillText("Apps", 18 * s, 22 * s);
       ctx.textAlign = "center";
       ctx.fillText(this.clock(), W / 2, 22 * s);
       ctx.textAlign = "left";
-      ctx.fillStyle = "rgba(15,18,30,0.6)";
+      ctx.fillStyle = "rgba(12,14,18,0.6)";
       this.round(10 * s, 120 * s, 64 * s, icons.length * 58 * s + 14 * s, 18 * s);
       ctx.fill();
       icons.forEach((c, i) => {
         ctx.fillStyle = c;
-        this.round(20 * s, 132 * s + i * 58 * s, 44 * s, 44 * s, 12 * s);
+        this.round(20 * s, 132 * s + i * 58 * s, 44 * s, 44 * s, 8 * s);
         ctx.fill();
       });
     } else {
-      // raspberry: a plain top panel with a berry dot.
-      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      // raspberry: a plain top panel with a menu button.
+      ctx.fillStyle = "rgba(244,245,247,0.9)";
       ctx.fillRect(0, 0, W, 36 * s);
-      ctx.fillStyle = "#d6336c";
-      ctx.beginPath();
-      ctx.arc(22 * s, 18 * s, 10 * s, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#3fa45b";
-      ctx.beginPath();
-      ctx.ellipse(22 * s, 7 * s, 7 * s, 3 * s, 0, 0, Math.PI * 2);
+      ctx.fillStyle = ACCENT;
+      this.round(12 * s, 8 * s, 22 * s, 20 * s, 5 * s);
       ctx.fill();
       icons.slice(0, 4).forEach((c, i) => {
         ctx.fillStyle = c;
         this.round(46 * s + i * 34 * s, 7 * s, 24 * s, 22 * s, 6 * s);
         ctx.fill();
       });
-      ctx.fillStyle = "#1c1a2e";
+      ctx.fillStyle = "#1a1d23";
       ctx.textAlign = "right";
       ctx.fillText(this.clock(), W - 16 * s, 24 * s);
       ctx.textAlign = "left";
@@ -451,25 +446,25 @@ export class FakeDesktop {
   private window(w: Win): void {
     const { ctx } = this;
     const s = this.width / 1280;
-    const r = 16 * s;
+    const r = 10 * s;
     const th = this.titleHeight();
     const dark = this.style === "linux";
     ctx.save();
-    ctx.shadowColor = "rgba(20,10,60,0.28)";
+    ctx.shadowColor = "rgba(15,18,24,0.3)";
     ctx.shadowBlur = 30 * s;
     ctx.shadowOffsetY = 10 * s;
-    ctx.fillStyle = dark ? "#262b3d" : "#ffffff";
+    ctx.fillStyle = dark ? "#22262f" : "#ffffff";
     this.round(w.x, w.y, w.w, w.h, r);
     ctx.fill();
     ctx.restore();
     // Title bar.
-    ctx.fillStyle = dark ? "#1c2030" : "#f3f1fb";
+    ctx.fillStyle = dark ? "#1a1d24" : "#eceef1";
     ctx.save();
     this.round(w.x, w.y, w.w, w.h, r);
     ctx.clip();
     ctx.fillRect(w.x, w.y, w.w, th);
     ctx.restore();
-    const dots = ["#ff6b6b", "#ffc145", "#3ccf7a"];
+    const dots = ["#c4c9d2", "#c4c9d2", "#c4c9d2"];
     if (this.style === "mac" || this.style === "demo") {
       dots.forEach((c, i) => {
         ctx.fillStyle = c;
@@ -478,7 +473,7 @@ export class FakeDesktop {
         ctx.fill();
       });
     } else {
-      ctx.strokeStyle = dark ? "#9aa3c0" : "#6b6880";
+      ctx.strokeStyle = dark ? "#a4aab6" : "#4c5361";
       ctx.lineWidth = 2 * s;
       const cx = w.x + w.w - 24 * s;
       const cy = w.y + th / 2;
@@ -491,14 +486,14 @@ export class FakeDesktop {
       ctx.lineTo(cx - 36 * s, cy);
       ctx.stroke();
     }
-    ctx.fillStyle = dark ? "#e8ecff" : "#1c1a2e";
+    ctx.fillStyle = dark ? "#e9ebef" : "#1a1d23";
     ctx.font = `600 ${16 * s}px ${FONT}`;
     ctx.textAlign = this.style === "mac" || this.style === "demo" ? "center" : "left";
     ctx.fillText(w.title, this.style === "mac" || this.style === "demo" ? w.x + w.w / 2 : w.x + 18 * s, w.y + th / 2 + 6 * s);
     ctx.textAlign = "left";
 
-    const ink = dark ? "#e8ecff" : "#1c1a2e";
-    const dim = dark ? "#9aa3c0" : "#6b6880";
+    const ink = dark ? "#e9ebef" : "#1a1d23";
+    const dim = dark ? "#a4aab6" : "#4c5361";
     if (w.id === "notes") {
       ctx.save();
       ctx.beginPath();
@@ -516,15 +511,15 @@ export class FakeDesktop {
       const cx = w.x + 24 * s + ctx.measureText(last).width + 2 * s;
       const cy = w.y + th + 34 * s + (shown.length - 1) * lineH;
       if (Math.floor(performance.now() / 500) % 2 === 0) {
-        ctx.fillStyle = "#7c5cff";
+        ctx.fillStyle = ACCENT;
         ctx.fillRect(cx, cy - 20 * s, 3 * s, 26 * s);
       }
       ctx.restore();
     } else if (w.id === "hello") {
       const b = this.helloButton(w);
-      const hue = (this.presses * 47) % 360;
-      ctx.fillStyle = this.presses === 0 ? "#7c5cff" : `hsl(${hue} 80% 58%)`;
-      this.round(b.x, b.y, b.w, b.h, b.h / 2);
+      // Each press steps the button one shade darker and back, so a tap shows.
+      ctx.fillStyle = this.presses % 2 === 0 ? ACCENT : "#2459bd";
+      this.round(b.x, b.y, b.w, b.h, 10 * s);
       ctx.fill();
       ctx.fillStyle = "#fff";
       ctx.font = `700 ${24 * s}px ${FONT}`;
@@ -544,12 +539,12 @@ export class FakeDesktop {
       const cw = (w.w - pad * 4) / 3;
       const ch = (w.h - th - pad * 3) / 2;
       const scenes = [
-        ["#ffcf70", "#ff8a65"],
-        ["#8fd3ff", "#3b82f6"],
-        ["#b5f2c2", "#3fbf5f"],
-        ["#ffc2dc", "#f0508c"],
-        ["#d9ccff", "#7c5cff"],
-        ["#fff0a8", "#f5b52e"],
+        ["#c9d6ec", "#6f8fc6"],
+        ["#d5dbe4", "#8792a6"],
+        ["#bfd0ee", "#4f78c2"],
+        ["#dde2ea", "#9aa5b8"],
+        ["#c6d3e8", "#5d7bb0"],
+        ["#d2d8e2", "#7b879c"],
       ];
       scenes.forEach(([a, b], i) => {
         const x = w.x + pad + (i % 3) * (cw + pad);
@@ -558,42 +553,22 @@ export class FakeDesktop {
         g.addColorStop(0, a);
         g.addColorStop(1, b);
         ctx.fillStyle = g;
-        this.round(x, y, cw, ch, 12 * s);
+        this.round(x, y, cw, ch, 6 * s);
         ctx.fill();
-        // A little mountain and sun in every picture.
-        ctx.fillStyle = "rgba(255,255,255,0.8)";
-        ctx.beginPath();
-        ctx.arc(x + cw * 0.72, y + ch * 0.3, ch * 0.12, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = "rgba(0,0,0,0.18)";
+        // A plain landscape shape in every picture.
+        ctx.fillStyle = "rgba(0,0,0,0.14)";
         ctx.beginPath();
         ctx.moveTo(x + cw * 0.08, y + ch * 0.92);
         ctx.lineTo(x + cw * 0.38, y + ch * 0.45);
         ctx.lineTo(x + cw * 0.62, y + ch * 0.92);
         ctx.fill();
         if (i === this.selectedPhoto) {
-          ctx.strokeStyle = "#7c5cff";
+          ctx.strokeStyle = ACCENT;
           ctx.lineWidth = 5 * s;
-          this.round(x, y, cw, ch, 12 * s);
+          this.round(x, y, cw, ch, 6 * s);
           ctx.stroke();
         }
       });
-    } else if (w.id === "weather") {
-      ctx.fillStyle = "#ffc145";
-      ctx.beginPath();
-      ctx.arc(w.x + 70 * s, w.y + th + 62 * s, 34 * s, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = dark ? "#e8ecff" : "#ffffff";
-      ctx.beginPath();
-      ctx.arc(w.x + 92 * s, w.y + th + 86 * s, 22 * s, 0, Math.PI * 2);
-      ctx.arc(w.x + 118 * s, w.y + th + 80 * s, 26 * s, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = ink;
-      ctx.font = `700 ${44 * s}px ${FONT}`;
-      ctx.fillText("21°", w.x + 170 * s, w.y + th + 70 * s);
-      ctx.fillStyle = dim;
-      ctx.font = `${17 * s}px ${FONT}`;
-      ctx.fillText("Mostly sunny", w.x + 172 * s, w.y + th + 102 * s);
     } else {
       this.extraWindow(w, { s, th, ink, dim, dark });
     }
@@ -609,14 +584,14 @@ export class FakeDesktop {
     const { ctx } = this;
     const s = this.width / 1280;
     const scenes = [
-      ["#8fd3ff", "#3b82f6", "#ffe08a"],
-      ["#ffcf70", "#ff8a65", "#fff3c4"],
-      ["#b5f2c2", "#3fbf5f", "#ffffff"],
-      ["#ffc2dc", "#f0508c", "#fff0f6"],
-      ["#d9ccff", "#7c5cff", "#fff7d1"],
-      ["#a7f3e4", "#14b8a6", "#fffbe6"],
-      ["#fff0a8", "#f5b52e", "#ffffff"],
-      ["#c9d6ff", "#5b7cfa", "#ffe8f0"],
+      ["#c9d6ec", "#5d7bb0", "rgba(255,255,255,0.35)"],
+      ["#d5dbe4", "#7b879c", "rgba(255,255,255,0.3)"],
+      ["#bfd0ee", "#4f78c2", "rgba(255,255,255,0.35)"],
+      ["#dde2ea", "#8a95a8", "rgba(255,255,255,0.3)"],
+      ["#c6d3e8", "#6684b8", "rgba(255,255,255,0.35)"],
+      ["#d2d8e2", "#6b7689", "rgba(255,255,255,0.3)"],
+      ["#cbd7ea", "#5a78ab", "rgba(255,255,255,0.35)"],
+      ["#d9dee6", "#8792a6", "rgba(255,255,255,0.3)"],
     ][i % 8];
     const g = ctx.createLinearGradient(x, y, x, y + h);
     g.addColorStop(0, scenes[0]);
@@ -654,22 +629,22 @@ export class FakeDesktop {
     const bodyY = w.y + th + 16 * s;
     const bodyW = w.w - 36 * s;
     const bodyH = w.h - th - 32 * s;
-    const line = dark ? "#3a4058" : "#ece9f6";
+    const line = dark ? "#2c313b" : "#eceef1";
 
     if (w.id === "music") {
-      const colors = ["#7c5cff", "#f0508c", "#14b8a6", "#f5b52e"];
+      const colors = ["#2f6fe4", "#5b7fb8", "#6b7689", "#8aa1c4"];
       const names = ["Vocals", "Guitar", "Drums", "Keys"];
       const rowH = (bodyH - 70 * s) / 4;
       names.forEach((name, r) => {
         const y = bodyY + r * rowH;
         ctx.fillStyle = colors[r];
-        this.round(bodyX, y + 6 * s, 110 * s, rowH - 12 * s, 10 * s);
+        this.round(bodyX, y + 6 * s, 110 * s, rowH - 12 * s, 6 * s);
         ctx.fill();
         ctx.fillStyle = "#fff";
         ctx.font = `600 ${16 * s}px ${FONT}`;
         ctx.fillText(name, bodyX + 14 * s, y + rowH / 2 + 6 * s);
         ctx.fillStyle = line;
-        this.round(bodyX + 124 * s, y + 6 * s, bodyW - 124 * s, rowH - 12 * s, 10 * s);
+        this.round(bodyX + 124 * s, y + 6 * s, bodyW - 124 * s, rowH - 12 * s, 6 * s);
         ctx.fill();
         // A waveform of thin bars.
         ctx.fillStyle = colors[r];
@@ -682,10 +657,10 @@ export class FakeDesktop {
         }
       });
       // Playhead and transport.
-      ctx.fillStyle = "#ff4d4d";
+      ctx.fillStyle = dark ? "#e9ebef" : "#1a1d23";
       ctx.fillRect(bodyX + 124 * s + (bodyW - 124 * s) * 0.42, bodyY, 3 * s, rowH * 4);
       const cy = bodyY + rowH * 4 + 34 * s;
-      ctx.fillStyle = "#7c5cff";
+      ctx.fillStyle = ACCENT;
       ctx.beginPath();
       ctx.arc(w.x + w.w / 2, cy, 24 * s, 0, Math.PI * 2);
       ctx.fill();
@@ -714,16 +689,6 @@ export class FakeDesktop {
         if (i === 0) this.photo(bodyX, bodyY, cw * 2 + gap, ch * 2 + gap, 0);
         else if (!(r < 2 && c < 2)) this.photo(bodyX + c * (cw + gap), bodyY + r * (ch + gap), cw, ch, i);
       }
-      ctx.fillStyle = "#f0508c";
-      ctx.beginPath();
-      const hx = bodyX + 24 * s;
-      const hy = bodyY + 24 * s;
-      ctx.arc(hx - 6 * s, hy, 8 * s, 0, Math.PI * 2);
-      ctx.arc(hx + 6 * s, hy, 8 * s, 0, Math.PI * 2);
-      ctx.moveTo(hx - 14 * s, hy + 3 * s);
-      ctx.lineTo(hx, hy + 18 * s);
-      ctx.lineTo(hx + 14 * s, hy + 3 * s);
-      ctx.fill();
     } else if (w.id === "sheet") {
       const cols = 5;
       const rows = 9;
@@ -734,9 +699,9 @@ export class FakeDesktop {
         for (let c = 0; c < cols; c++) {
           const x = bodyX + c * cw;
           const y = bodyY + r * rh;
-          ctx.fillStyle = r === 0 ? "#7c5cff" : r % 2 ? (dark ? "#2c3247" : "#f7f5fd") : dark ? "#262b3d" : "#ffffff";
+          ctx.fillStyle = r === 0 ? (dark ? "#2c313b" : "#e1e6ee") : r % 2 ? (dark ? "#262a33" : "#f6f7f9") : dark ? "#22262f" : "#ffffff";
           ctx.fillRect(x, y, cw - 1, rh - 1);
-          ctx.fillStyle = r === 0 ? "#fff" : c === 0 ? ink : dim;
+          ctx.fillStyle = r === 0 ? ink : c === 0 ? ink : dim;
           ctx.font = `${r === 0 ? 600 : 400} ${14 * s}px ${FONT}`;
           const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"];
           const text = r === 0 ? heads[c] : c === 0 ? months[r - 1] : String(Math.round(120 + 880 * this.wobble(r * 7 + c, 2)));
@@ -748,7 +713,7 @@ export class FakeDesktop {
       const chartH = bodyH * 0.3;
       for (let b = 0; b < 8; b++) {
         const v = 0.3 + 0.7 * this.wobble(b, 9);
-        ctx.fillStyle = b === 7 ? "#14b8a6" : "#c4b5fd";
+        ctx.fillStyle = b === 7 ? ACCENT : dark ? "#4a515e" : "#c9d3e4";
         this.round(bodyX + b * (bodyW / 8) + 8 * s, chartY + chartH * (1 - v), bodyW / 8 - 16 * s, chartH * v, 6 * s);
         ctx.fill();
       }
@@ -757,39 +722,39 @@ export class FakeDesktop {
       const cw = bodyW / days.length;
       ctx.font = `600 ${15 * s}px ${FONT}`;
       days.forEach((d, i) => {
-        ctx.fillStyle = i === 2 ? "#7c5cff" : dim;
+        ctx.fillStyle = i === 2 ? ACCENT : dim;
         ctx.fillText(d, bodyX + i * cw + 8 * s, bodyY + 14 * s);
         ctx.fillStyle = line;
         ctx.fillRect(bodyX + i * cw, bodyY + 26 * s, 1, bodyH - 26 * s);
       });
       const events: [number, number, number, string, string][] = [
-        [0, 0.05, 0.18, "#3b82f6", "Team call"],
-        [0, 0.5, 0.2, "#14b8a6", "Lunch"],
-        [1, 0.2, 0.3, "#f0508c", "Dentist"],
-        [2, 0.08, 0.16, "#f5b52e", "Delivery"],
-        [2, 0.42, 0.34, "#7c5cff", "Workshop"],
-        [3, 0.3, 0.2, "#3b82f6", "Review"],
-        [4, 0.12, 0.22, "#14b8a6", "Gym"],
-        [4, 0.6, 0.24, "#f97a3c", "Pizza night"],
+        [0, 0.05, 0.18, "#2f6fe4", "Team call"],
+        [0, 0.5, 0.2, "#6b7689", "Lunch"],
+        [1, 0.2, 0.3, "#5b7fb8", "Planning"],
+        [2, 0.08, 0.16, "#6b7689", "Delivery"],
+        [2, 0.42, 0.34, "#2f6fe4", "Workshop"],
+        [3, 0.3, 0.2, "#5b7fb8", "Review"],
+        [4, 0.12, 0.22, "#6b7689", "Gym"],
+        [4, 0.6, 0.24, "#5b7fb8", "Wrap up"],
       ];
       const top = bodyY + 30 * s;
       const span = bodyH - 30 * s;
       for (const [d, y0, hh, c, label] of events) {
         ctx.fillStyle = c;
-        this.round(bodyX + d * cw + 5 * s, top + span * y0, cw - 10 * s, span * hh, 8 * s);
+        this.round(bodyX + d * cw + 5 * s, top + span * y0, cw - 10 * s, span * hh, 5 * s);
         ctx.fill();
         ctx.fillStyle = "#fff";
         ctx.font = `600 ${14 * s}px ${FONT}`;
         ctx.fillText(label, bodyX + d * cw + 13 * s, top + span * y0 + 20 * s, cw - 24 * s);
       }
     } else if (w.id === "terminal") {
-      ctx.fillStyle = "#151a28";
+      ctx.fillStyle = "#14171c";
       this.round(w.x + 4 * s, w.y + th, w.w - 8 * s, w.h - th - 4 * s, 12 * s);
       ctx.fill();
       ctx.font = `${17 * s}px ui-monospace, Menlo, Consolas, monospace`;
       const lines = w.title === "backups" ? this.terminalLines.slice(0, 3) : this.terminalLines;
       lines.forEach((l, i) => {
-        ctx.fillStyle = l.startsWith("$") ? "#3ddc8f" : "#d6dcf5";
+        ctx.fillStyle = l.startsWith("$") ? "#7fb0f9" : "#c9ced6";
         ctx.fillText(l, bodyX, bodyY + 14 * s + i * 28 * s);
       });
     } else if (w.id === "chart") {
@@ -808,28 +773,28 @@ export class FakeDesktop {
         ctx.stroke();
       }
       const grad = ctx.createLinearGradient(0, bodyY, 0, bodyY + bodyH);
-      grad.addColorStop(0, "rgba(20,184,166,0.45)");
-      grad.addColorStop(1, "rgba(20,184,166,0)");
+      grad.addColorStop(0, "rgba(47,111,228,0.3)");
+      grad.addColorStop(1, "rgba(47,111,228,0)");
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.moveTo(pts[0][0], bodyY + bodyH);
       pts.forEach(([x, y]) => ctx.lineTo(x, y));
       ctx.lineTo(pts[n - 1][0], bodyY + bodyH);
       ctx.fill();
-      ctx.strokeStyle = "#14b8a6";
-      ctx.lineWidth = 4 * s;
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 3 * s;
       ctx.lineJoin = "round";
       ctx.beginPath();
       pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
       ctx.stroke();
       const [lx, ly] = pts[n - 1];
-      ctx.fillStyle = "#14b8a6";
+      ctx.fillStyle = ACCENT;
       ctx.beginPath();
-      ctx.arc(lx, ly, 7 * s, 0, Math.PI * 2);
+      ctx.arc(lx, ly, 6 * s, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = ink;
       ctx.font = `700 ${30 * s}px ${FONT}`;
-      ctx.fillText(w.title.startsWith("Green") ? "22.6\u00B0" : "62%", bodyX + 6 * s, bodyY + 34 * s);
+      ctx.fillText(w.title.startsWith("Green") ? "22.6\u00B0" : w.title.startsWith("Export") ? "3 of 8" : "62%", bodyX + 6 * s, bodyY + 34 * s);
     }
   }
 

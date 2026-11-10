@@ -52,11 +52,10 @@ interface Props {
   title: string;
   /** For the reach and sign in picture. */
   os?: Parameters<typeof OsArt>[0]["os"];
-  color?: string;
   subtitle?: string;
 }
 
-export function ConnectingSteps({ steps, current, title, os = "unknown", color, subtitle }: Props) {
+export function ConnectingSteps({ steps, current, title, os = "unknown", subtitle }: Props) {
   const at = Math.max(0, steps.indexOf(current));
   const art =
     current === "lookup" ? (
@@ -66,7 +65,7 @@ export function ConnectingSteps({ steps, current, title, os = "unknown", color, 
     ) : current === "connected" ? (
       <SceneConnected />
     ) : (
-      <OsArt os={os} color={color} className="dv-float" />
+      <OsArt os={os} />
     );
   return (
     <div className="mx-auto flex w-full max-w-md flex-col items-center px-6 text-center">
@@ -82,7 +81,7 @@ export function ConnectingSteps({ steps, current, title, os = "unknown", color, 
           {art}
         </motion.div>
       </AnimatePresence>
-      <h2 className="mt-2 text-2xl font-bold leading-tight">{title}</h2>
+      <h2 className="mt-2 text-2xl font-semibold leading-tight">{title}</h2>
       {subtitle && <p className="mt-2 text-base text-ink-dim">{subtitle}</p>}
       <ol className="mt-6 w-full space-y-2 text-left">
         {steps.map((s, i) => {
@@ -91,15 +90,15 @@ export function ConnectingSteps({ steps, current, title, os = "unknown", color, 
           return (
             <li
               key={s}
-              className={`flex min-h-14 items-center gap-4 rounded-2xl px-4 transition-colors ${now ? "bg-surface shadow-card" : ""}`}
+              className={`flex min-h-14 items-center gap-4 rounded-[10px] px-4 transition-colors ${now ? "border border-line bg-surface" : ""}`}
               aria-current={now ? "step" : undefined}
             >
               <span
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${done ? "bg-ok text-white" : now ? "bg-accent text-white" : "bg-surface-2 text-ink-dim"}`}
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${done ? "bg-ok text-white" : now ? "bg-accent text-accent-ink" : "bg-surface-2 text-ink-dim"}`}
               >
-                {done ? <IconCheck size={20} /> : now ? <span className="h-3 w-3 rounded-full bg-white dv-blink" /> : i + 1}
+                {done ? <IconCheck size={20} /> : now ? <span className="h-3 w-3 rounded-full bg-accent-ink dv-blink" /> : i + 1}
               </span>
-              <span className={`text-lg ${now ? "font-bold" : done ? "font-medium text-ink" : "text-ink-dim"}`}>{LABELS[s]}</span>
+              <span className={`text-lg ${now ? "font-semibold" : done ? "font-medium text-ink" : "text-ink-dim"}`}>{LABELS[s]}</span>
             </li>
           );
         })}

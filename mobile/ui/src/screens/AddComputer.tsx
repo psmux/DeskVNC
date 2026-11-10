@@ -9,7 +9,7 @@ import { api } from "../api";
 import type { FoundComputer, HostOs, Protocol } from "../api/contract";
 import { IconBack, IconCheck, IconChevron, IconClose, IconLink, IconLock, IconPaste, IconPlay } from "../art/Icons";
 import { OsArt } from "../art/OsArt";
-import { PROTOCOL_HINT, PROTOCOL_TITLE, ProtocolIcon, ProtocolScene, protocolColor } from "../art/ProtocolArt";
+import { PROTOCOL_HINT, PROTOCOL_TITLE, ProtocolIcon, ProtocolScene } from "../art/ProtocolArt";
 import { SceneKey, SceneSaved } from "../art/Scenes";
 import { Button, IconButton } from "../components/Button";
 import { Field, Toggle } from "../components/Field";
@@ -99,7 +99,7 @@ export function AddComputer({ initial }: { initial: WizardState }) {
             {s.step === "how" || s.step === "done" || (s.mode === "edit" && s.step === "where") ? <IconClose /> : <IconBack />}
           </IconButton>
           <div className="flex-1">
-            <p className="text-center text-base font-bold">{title}</p>
+            <p className="text-center text-base font-semibold">{title}</p>
             {s.step !== "done" && (
               <div className="mx-auto mt-2 flex max-w-[12rem] gap-1.5" aria-label={`Step ${stepIndex + 1} of ${STEPS.length}`}>
                 {STEPS.map((st, i) => (
@@ -146,7 +146,7 @@ export function AddComputer({ initial }: { initial: WizardState }) {
         <div className="pb-safe pl-safe pr-safe border-t border-line bg-surface/90 backdrop-blur-xl">
           <div className="mx-auto max-w-2xl px-5 py-3">
             {(s.error || saveError) && (
-              <p role="alert" className="mb-3 rounded-2xl bg-danger-soft px-4 py-3 text-center font-medium text-danger">
+              <p role="alert" className="mb-3 rounded-[10px] bg-danger-soft px-4 py-3 text-center font-medium text-danger">
                 {saveError ?? s.error}
               </p>
             )}
@@ -179,7 +179,7 @@ function StepTitle({ title, subtitle, art }: { title: string; subtitle?: ReactNo
   return (
     <div className="mb-5 text-center">
       {art && <div className="mx-auto mb-1 w-40">{art}</div>}
-      <h2 className="text-[1.75rem] font-extrabold leading-tight">{title}</h2>
+      <h2 className="text-[1.75rem] font-semibold leading-tight">{title}</h2>
       {subtitle && <p className="mx-auto mt-2 max-w-md text-lg text-ink-dim">{subtitle}</p>}
     </div>
   );
@@ -205,12 +205,11 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
               pick(p);
             }}
             aria-pressed={s.protocol === p}
-            className="flex items-center gap-3 rounded-[1.75rem] border-2 bg-surface p-3 pr-4 text-left shadow-card transition-transform active:scale-[0.98]"
-            style={{ borderColor: s.protocol === p ? protocolColor(p) : "transparent" }}
+            className={`flex items-center gap-3 rounded-[14px] border bg-surface p-3 pr-4 text-left shadow-card transition-transform active:scale-[0.98] ${s.protocol === p ? "border-accent ring-1 ring-accent" : "border-line"}`}
           >
             <ProtocolScene protocol={p} className="h-24 w-32 shrink-0" />
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-2 text-xl font-bold leading-tight">{PROTOCOL_TITLE[p]}</span>
+              <span className="flex items-center gap-2 text-lg font-semibold leading-tight">{PROTOCOL_TITLE[p]}</span>
               <span className="mt-1 block text-base leading-snug text-ink-dim">{PROTOCOL_HINT[p]}</span>
             </span>
             <IconChevron className="shrink-0 text-ink-dim" />
@@ -219,7 +218,7 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
       </div>
       <button
         type="button"
-        className="mx-auto mt-6 flex min-h-12 items-center gap-2 rounded-full bg-surface-2 px-5 font-semibold text-accent"
+        className="mx-auto mt-6 flex min-h-12 items-center gap-2 rounded-full border border-line bg-surface-2 px-5 font-medium text-accent"
         onClick={async () => {
           const text = (await readClipboard()).trim();
           if (!text) return setPasteNote("Copy a link like rdp://office-pc first, then tap here.");
@@ -324,7 +323,7 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
             <FoundRow key={`${f.address}:${f.port}`} item={f} picked={s.address === f.address && s.port === f.port} onPick={() => dispatch({ type: "found", item: f })} />
           ))}
           {suggestions.length === 0 && (
-            <p className="rounded-2xl bg-surface-2 px-4 py-4 text-center text-ink-dim">{app.scanning ? "Looking around your network…" : "Nothing found nearby. Typing the address works just as well."}</p>
+            <p className="rounded-[10px] bg-surface-2 px-4 py-4 text-center text-ink-dim">{app.scanning ? "Looking around your network…" : "Nothing found nearby. Typing the address works just as well."}</p>
           )}
         </div>
       </div>
@@ -356,7 +355,7 @@ function FoundRow({ item, picked, onPick }: { item: FoundComputer; picked: boole
         haptic("select");
         onPick();
       }}
-      className={`flex min-h-16 items-center gap-3 rounded-2xl border-2 bg-surface p-2 pr-4 text-left shadow-card transition-transform active:scale-[0.98] ${picked ? "border-accent" : "border-transparent"}`}
+      className={`flex min-h-16 items-center gap-3 rounded-[10px] border bg-surface p-2 pr-4 text-left transition-transform active:scale-[0.98] ${picked ? "border-accent ring-1 ring-accent" : "border-line"}`}
     >
       <OsArt os={item.os} className="h-12 w-16 shrink-0" />
       <span className="min-w-0 flex-1">
@@ -364,7 +363,7 @@ function FoundRow({ item, picked, onPick }: { item: FoundComputer; picked: boole
         <span className="block truncate text-sm text-ink-dim">{item.address}</span>
       </span>
       {picked ? (
-        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white">
+        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink">
           <IconCheck size={18} />
         </span>
       ) : (
@@ -381,9 +380,12 @@ function StepLook({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<Pa
   return (
     <div>
       <StepTitle title="Make it yours" subtitle="A name, a picture and a colour, so you spot it in a second." />
-      <motion.div layout className="mx-auto mb-6 flex max-w-xs flex-col items-center rounded-[1.75rem] p-4 shadow-card" style={{ background: `linear-gradient(160deg, ${sw.soft}, ${sw.main}55)` }}>
-        <OsArt os={s.os} color={s.color} backdrop={false} className="h-28" />
-        <p className="mt-1 max-w-full truncate text-xl font-bold text-[#1c1a2e]">{s.name || "Your computer"}</p>
+      <motion.div layout className="mx-auto mb-6 flex max-w-xs flex-col items-center rounded-[14px] border border-line bg-surface-2 p-4">
+        <OsArt os={s.os} backdrop={false} className="h-28" />
+        <p className="mt-1 flex max-w-full items-center gap-2 text-lg font-semibold">
+          <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: sw.main }} aria-hidden />
+          <span className="truncate">{s.name || "Your computer"}</span>
+        </p>
       </motion.div>
       <Field label="Name" value={s.name} placeholder="Like Studio PC or Mum's laptop" maxLength={60} onChange={(e) => dispatch({ type: "name", text: e.target.value })} />
       <p className="mb-2 mt-6 px-1 text-sm font-semibold text-ink-dim">Picture</p>
@@ -397,10 +399,10 @@ function StepLook({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<Pa
               haptic("select");
               dispatch({ type: "os", os: o.os });
             }}
-            className={`flex min-h-20 flex-col items-center justify-center rounded-2xl border-2 bg-surface p-1 shadow-card ${s.os === o.os ? "border-accent" : "border-transparent"}`}
+            className={`flex min-h-20 flex-col items-center justify-center rounded-[10px] border bg-surface p-1 ${s.os === o.os ? "border-accent ring-1 ring-accent" : "border-line"}`}
           >
-            <OsArt os={o.os} color={s.color} backdrop={false} className="h-11 w-full" />
-            <span className="text-xs font-semibold">{o.label}</span>
+            <OsArt os={o.os} backdrop={false} className="h-11 w-full" />
+            <span className="text-xs font-medium">{o.label}</span>
           </button>
         ))}
       </div>
@@ -416,10 +418,11 @@ function StepLook({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<Pa
               haptic("select");
               dispatch({ type: "color", color: c.key });
             }}
-            className="flex h-12 w-12 items-center justify-center rounded-full transition-transform active:scale-90"
-            style={{ background: c.main, boxShadow: s.color === c.key ? `0 0 0 3px var(--dv-bg), 0 0 0 6px ${c.main}` : undefined }}
+            className={`flex h-12 w-12 items-center justify-center rounded-full border transition-transform active:scale-90 ${s.color === c.key ? "border-line-strong bg-surface" : "border-transparent"}`}
           >
-            {s.color === c.key && <IconCheck size={22} className="text-white" />}
+            <span className="flex h-7 w-7 items-center justify-center rounded-full text-white" style={{ background: c.main }}>
+              {s.color === c.key && <IconCheck size={16} strokeWidth={2.6} />}
+            </span>
           </button>
         ))}
       </div>
@@ -459,7 +462,7 @@ function StepSignIn({ s, dispatch }: { s: WizardState; dispatch: React.Dispatch<
             It asks for a user name too
           </button>
         )}
-        <div className="flex items-center gap-3 rounded-2xl bg-surface p-4 shadow-card">
+        <div className="flex items-center gap-3 rounded-[10px] border border-line bg-surface p-4">
           <span className="flex h-11 w-11 items-center justify-center rounded-full bg-ok-soft text-ok">
             <IconLock />
           </span>
@@ -482,7 +485,7 @@ function StepDone({ name, edit, onConnect, onDone }: { name: string; edit: boole
       <motion.div initial={{ scale: 0.6, rotate: -8 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring", stiffness: 260, damping: 14 }} className="w-60">
         <SceneSaved />
       </motion.div>
-      <h2 className="mt-2 text-[1.75rem] font-extrabold">{edit ? "Changes saved" : `${name} is ready`}</h2>
+      <h2 className="mt-2 text-[1.75rem] font-semibold">{edit ? "Changes saved" : `${name} is ready`}</h2>
       <p className="mt-2 text-lg text-ink-dim">{edit ? "Everything is up to date." : "It is on your list now. Connect whenever you like."}</p>
       <div className="mt-8 flex w-full max-w-sm flex-col gap-3">
         <Button size="xl" block icon={<IconPlay />} onClick={onConnect}>

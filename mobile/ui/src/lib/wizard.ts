@@ -70,7 +70,7 @@ export function newWizard(protocol: Protocol | null = null): WizardState {
     nameTouched: false,
     os: "unknown",
     osTouched: false,
-    color: "violet",
+    color: "blue",
     colorTouched: false,
     username: "",
     password: "",

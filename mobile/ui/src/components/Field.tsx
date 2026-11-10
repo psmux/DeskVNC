@@ -21,13 +21,13 @@ export function Field({ label, hint, error, icon, trailing, type, className = ""
         {label}
       </label>
       <div
-        className={`flex min-h-14 items-center gap-3 rounded-2xl border-2 bg-surface-2 px-4 transition-colors focus-within:border-accent focus-within:bg-surface ${error ? "border-danger" : "border-transparent"}`}
+        className={`flex min-h-14 items-center gap-3 rounded-[10px] border bg-surface-2 px-4 transition-colors focus-within:border-accent focus-within:bg-surface focus-within:ring-2 focus-within:ring-accent/25 ${error ? "border-danger" : "border-line"}`}
       >
         {icon && <span className="text-ink-dim">{icon}</span>}
         <input
           id={id}
           type={secret && show ? "text" : type}
-          className="min-w-0 flex-1 bg-transparent py-3 text-lg text-ink outline-none placeholder:text-ink-dim/60"
+          className="min-w-0 flex-1 bg-transparent py-3 text-lg text-ink outline-none placeholder:text-ink-faint"
           aria-invalid={!!error}
           {...rest}
         />
@@ -60,7 +60,7 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (on: bo
         haptic("select");
         onChange(!on);
       }}
-      className={`relative h-9 w-16 shrink-0 rounded-full transition-colors ${on ? "bg-ok" : "bg-line"}`}
+      className={`relative h-9 w-16 shrink-0 rounded-full transition-colors ${on ? "bg-accent" : "bg-line-strong"}`}
     >
       <span className={`absolute top-1 h-7 w-7 rounded-full bg-white shadow transition-[left] duration-200 ${on ? "left-8" : "left-1"}`} />
     </button>
@@ -80,7 +80,7 @@ export function Segmented<T extends string>({
   label: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="flex gap-2 rounded-[1.25rem] bg-surface-2 p-1.5">
+    <div role="radiogroup" aria-label={label} className="flex gap-1.5 rounded-[10px] border border-line bg-surface-2 p-1">
       {options.map((o) => {
         const on = o.value === value;
         return (
@@ -93,7 +93,7 @@ export function Segmented<T extends string>({
               haptic("select");
               onChange(o.value);
             }}
-            className={`flex min-h-12 flex-1 flex-col items-center justify-center gap-1 rounded-2xl px-2 py-2 text-sm font-semibold transition-all ${on ? "bg-surface text-accent shadow-card" : "text-ink-dim"}`}
+            className={`flex min-h-12 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-sm font-medium transition-all ${on ? "bg-surface text-ink shadow-card" : "text-ink-dim"}`}
           >
             {o.art}
             {o.label}

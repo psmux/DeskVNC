@@ -121,10 +121,10 @@ export function Help() {
     <ScreenScroll>
       <ScreenHeader title="Help someone" />
       <div className="mx-auto max-w-md px-4 pb-6 @3xl:grid @3xl:max-w-4xl @3xl:grid-cols-2 @3xl:items-start @3xl:gap-10 @3xl:px-8">
-        <section className="mb-4 flex items-center gap-2 rounded-[1.75rem] bg-surface p-2 pr-4 shadow-card @3xl:flex-col @3xl:p-6 @3xl:text-center">
+        <section className="mb-4 flex items-center gap-2 rounded-[14px] border border-line bg-surface p-2 pr-4 shadow-card @3xl:flex-col @3xl:p-6 @3xl:text-center">
           <ProtocolScene protocol="boundary" className="h-20 w-24 shrink-0 @3xl:h-auto @3xl:w-64" />
           <div>
-            <h2 className="text-lg font-bold leading-tight @3xl:text-2xl">Ask them for their code</h2>
+            <h2 className="text-lg font-semibold leading-tight @3xl:text-2xl">Ask them for their code</h2>
             <p className="mt-1 text-base leading-snug text-ink-dim @3xl:text-lg">
               They open DeskVNC Support, press Get a code and read you 12 numbers.
             </p>
@@ -133,7 +133,7 @@ export function Help() {
 
         <div className="mx-auto w-full max-w-md">
           {phase.kind === "error" && (
-            <div role="alert" className="mb-4 flex items-start gap-3 rounded-2xl bg-danger-soft p-4 text-danger">
+            <div role="alert" className="mb-4 flex items-start gap-3 rounded-[10px] bg-danger-soft p-4 text-danger">
               <p className="flex-1 font-medium">{phase.message}</p>
               <button type="button" aria-label="Dismiss" className="-m-2 flex h-11 w-11 items-center justify-center" onClick={() => setPhase({ kind: "enter" })}>
                 <IconClose size={20} />
@@ -142,12 +142,12 @@ export function Help() {
           )}
 
           {invitation ? (
-            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="flex items-center gap-3 rounded-[1.5rem] border-2 border-boundary bg-boundary-soft p-4">
-              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-boundary text-white">
+            <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="flex items-center gap-3 rounded-[14px] border border-accent bg-accent-soft p-4">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-accent text-accent-ink">
                 <IconPaste />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="text-lg font-bold">Invitation pasted</p>
+                <p className="text-lg font-semibold">Invitation pasted</p>
                 <p className="truncate text-sm text-ink-dim">Ready to connect</p>
               </div>
               <button type="button" aria-label="Remove invitation" className="flex h-12 w-12 items-center justify-center rounded-full text-ink-dim" onClick={() => setInvitation(null)}>
@@ -162,7 +162,7 @@ export function Help() {
 
           <div className="mt-3 flex items-center justify-center gap-2 text-base">
             <span className="text-ink-dim">They will see</span>
-            <button type="button" onClick={() => setAskName(true)} className="inline-flex min-h-11 items-center gap-1.5 rounded-full bg-surface-2 px-4 font-semibold">
+            <button type="button" onClick={() => setAskName(true)} className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-4 font-medium">
               {prefs.helperName || "your name"}
               <IconEdit size={16} className="text-ink-dim" />
             </button>
@@ -205,7 +205,7 @@ function CodeBoxes({ digits }: { digits: string }) {
             return (
               <div
                 key={i}
-                className={`relative flex h-14 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-xl text-[1.6rem] font-extrabold tabular-nums transition-colors @md:h-16 @md:text-3xl ${d ? "bg-boundary text-white shadow-card" : current ? "border-2 border-boundary bg-surface" : "bg-surface-2"}`}
+                className={`relative flex h-14 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-[10px] text-[1.6rem] font-semibold tabular-nums transition-colors @md:h-16 @md:text-3xl ${d ? "border border-line-strong bg-surface text-ink" : current ? "border-2 border-accent bg-surface" : "border border-line bg-surface-2"}`}
               >
                 <AnimatePresence>
                   {d && (
@@ -214,7 +214,7 @@ function CodeBoxes({ digits }: { digits: string }) {
                     </motion.span>
                   )}
                 </AnimatePresence>
-                {current && <span className="absolute bottom-2 h-1 w-3 rounded-full bg-boundary dv-blink" />}
+                {current && <span className="absolute bottom-2 h-1 w-3 rounded-full bg-accent dv-blink" />}
               </div>
             );
           })}
@@ -225,11 +225,11 @@ function CodeBoxes({ digits }: { digits: string }) {
 }
 
 function Keypad({ onDigit, onErase, onPaste, disabled }: { onDigit: (d: string) => void; onErase: () => void; onPaste: () => void; disabled: boolean }) {
-  const key = "flex min-h-14 [@media(min-height:860px)]:min-h-16 items-center justify-center rounded-[1.25rem] text-[1.75rem] font-bold transition-transform active:scale-90 active:bg-accent-soft disabled:opacity-40 @md:min-h-[4.5rem]";
+  const key = "flex min-h-14 [@media(min-height:860px)]:min-h-16 items-center justify-center rounded-[10px] text-[1.6rem] font-medium transition-transform active:scale-95 active:bg-accent-soft disabled:opacity-40 @md:min-h-[4.5rem]";
   return (
     <div className="mt-4 grid grid-cols-3 gap-2" aria-label="Number pad">
       {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => (
-        <button key={d} type="button" disabled={disabled} className={`${key} bg-surface shadow-card`} onClick={() => onDigit(d)}>
+        <button key={d} type="button" disabled={disabled} className={`${key} border border-line bg-surface`} onClick={() => onDigit(d)}>
           {d}
         </button>
       ))}
@@ -237,7 +237,7 @@ function Keypad({ onDigit, onErase, onPaste, disabled }: { onDigit: (d: string) 
         <IconPaste size={26} />
         <span className="text-sm font-semibold">Paste</span>
       </button>
-      <button type="button" disabled={disabled} className={`${key} bg-surface shadow-card`} onClick={() => onDigit("0")}>
+      <button type="button" disabled={disabled} className={`${key} border border-line bg-surface`} onClick={() => onDigit("0")}>
         0
       </button>
       <button type="button" disabled={disabled} className={`${key} bg-surface-2 text-ink-dim`} onClick={onErase} aria-label="Delete last number">
@@ -259,11 +259,10 @@ export function NameSheet({ open, initial, onClose, onSave }: { open: boolean; i
       title="What is your name?"
       subtitle="They see it on their screen before they let you in, so use a name they know."
       art={
-        <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-boundary-soft text-5xl" aria-hidden>
-          <svg viewBox="0 0 48 48" width="64" height="64">
-            <circle cx="24" cy="18" r="9" fill="#ffd0b5" stroke="var(--dv-art-line)" strokeWidth={2.5} />
-            <path d="M9 42a15 13 0 0 1 30 0Z" fill="var(--dv-boundary)" stroke="var(--dv-art-line)" strokeWidth={2.5} strokeLinejoin="round" />
-            <path d="M16 15q8-9 16 0" fill="#6b4226" />
+        <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-[var(--dv-art-backdrop)]" aria-hidden>
+          <svg viewBox="0 0 48 48" width="56" height="56" fill="none" stroke="var(--dv-accent)" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="24" cy="18" r="8" fill="var(--dv-accent-soft)" />
+            <path d="M10 41a14 12 0 0 1 28 0" fill="var(--dv-accent-soft)" />
           </svg>
         </div>
       }

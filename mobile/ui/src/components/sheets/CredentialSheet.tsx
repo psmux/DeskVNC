@@ -53,7 +53,7 @@ export function CredentialSheet({ open, request, hostName, onSubmit, onCancel }:
         }}
       >
         {(request?.error || (request?.attempt ?? 1) > 1) && (
-          <p role="alert" className="rounded-2xl bg-danger-soft px-4 py-3 text-center font-medium text-danger">
+          <p role="alert" className="rounded-[10px] bg-danger-soft px-4 py-3 text-center font-medium text-danger">
             That did not work. Check the {needsUser ? "name and password" : "password"} and try again.
           </p>
         )}
@@ -69,12 +69,12 @@ export function CredentialSheet({ open, request, hostName, onSubmit, onCancel }:
           hint={request?.truncatesPassword && !truncating ? `Only the first ${VNC_PASSWORD_LIMIT} characters count for this kind of computer.` : undefined}
         />
         {truncating && (
-          <p id="dv-trunc-warning" className="rounded-2xl border border-boundary/40 bg-boundary-soft px-4 py-3 text-[15px] leading-snug">
+          <p id="dv-trunc-warning" className="rounded-[10px] border border-warn/40 bg-warn-soft px-4 py-3 text-[15px] leading-snug">
             This computer only reads the first {VNC_PASSWORD_LIMIT} characters of a password. We send them all, but only the first{" "}
             {VNC_PASSWORD_LIMIT} count.
           </p>
         )}
-        <div className="flex items-center gap-3 rounded-2xl bg-surface-2 px-4 py-3">
+        <div className="flex items-center gap-3 rounded-[10px] bg-surface-2 px-4 py-3">
           <IconLock className="text-ok" />
           <div className="flex-1">
             <p className="font-semibold">Remember on this phone</p>

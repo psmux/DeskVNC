@@ -51,7 +51,7 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
           {details ? "Hide details" : "More details"}
         </button>
         {details && prompt && (
-          <div className="rounded-2xl bg-surface-2 p-4 text-sm">
+          <div className="rounded-[10px] bg-surface-2 p-4 text-sm">
             <p className="text-ink-dim">Name on its certificate</p>
             <p className="mb-3 break-all font-medium">{prompt.subject}</p>
             <p className="text-ink-dim">Fingerprint</p>

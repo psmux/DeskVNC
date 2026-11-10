@@ -28,8 +28,8 @@ const LICENCES: { name: string; licence: string }[] = [
 function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="mb-6">
-      <h2 className="mb-2 px-2 text-sm font-bold uppercase tracking-wider text-ink-dim">{title}</h2>
-      <div className="overflow-hidden rounded-[1.5rem] bg-surface shadow-card">{children}</div>
+      <h2 className="mb-2 px-2 text-xs font-semibold uppercase tracking-wider text-ink-faint">{title}</h2>
+      <div className="overflow-hidden rounded-[14px] border border-line bg-surface">{children}</div>
     </section>
   );
 }
@@ -37,9 +37,9 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 function Row({ icon, title, detail, trailing, onClick }: { icon: ReactNode; title: string; detail?: string; trailing?: ReactNode; onClick?: () => void }) {
   const inner = (
     <>
-      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-white">{icon}</span>
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] text-accent">{icon}</span>
       <span className="min-w-0 flex-1">
-        <span className="block text-lg font-semibold">{title}</span>
+        <span className="block text-base font-semibold">{title}</span>
         {detail && <span className="block text-sm text-ink-dim">{detail}</span>}
       </span>
       {trailing}
@@ -62,9 +62,10 @@ function Row({ icon, title, detail, trailing, onClick }: { icon: ReactNode; titl
   );
 }
 
-function Swatch({ bg, children }: { bg: string; children: ReactNode }) {
+/** A row's icon tile: the accent line icon on the inset gray, like the desktop sidebar. */
+function Swatch({ children }: { children: ReactNode }) {
   return (
-    <span className="flex h-11 w-11 items-center justify-center rounded-2xl" style={{ background: bg }}>
+    <span className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-surface-2 text-accent">
       {children}
     </span>
   );
@@ -73,16 +74,16 @@ function Swatch({ bg, children }: { bg: string; children: ReactNode }) {
 function ThemeArt({ mode }: { mode: ThemeChoice }) {
   const light = (
     <g>
-      <rect x="2" y="2" width="36" height="26" rx="5" fill="#f5f3fc" stroke="#c9c3e6" strokeWidth={1.5} />
-      <rect x="7" y="8" width="16" height="4" rx="2" fill="#6c4df6" />
-      <rect x="7" y="16" width="24" height="3" rx="1.5" fill="#c9c3e6" />
+      <rect x="2" y="2" width="36" height="26" rx="4" fill="#f4f5f7" stroke="#c9ced6" strokeWidth={1.5} />
+      <rect x="7" y="8" width="16" height="4" rx="1.5" fill="#2f6fe4" />
+      <rect x="7" y="16" width="24" height="3" rx="1.5" fill="#c9ced6" />
     </g>
   );
   const dark = (
     <g>
-      <rect x="2" y="2" width="36" height="26" rx="5" fill="#1d1b28" stroke="#35314a" strokeWidth={1.5} />
-      <rect x="7" y="8" width="16" height="4" rx="2" fill="#8f78ff" />
-      <rect x="7" y="16" width="24" height="3" rx="1.5" fill="#35314a" />
+      <rect x="2" y="2" width="36" height="26" rx="4" fill="#1a1d24" stroke="#3a404b" strokeWidth={1.5} />
+      <rect x="7" y="8" width="16" height="4" rx="1.5" fill="#5b95f5" />
+      <rect x="7" y="16" width="24" height="3" rx="1.5" fill="#3a404b" />
     </g>
   );
   return (
@@ -151,10 +152,10 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
                     haptic("select");
                     setPrefs({ touchMode: o.value });
                   }}
-                  className={`flex flex-col items-center rounded-[1.25rem] border-2 p-3 text-center transition-colors ${on ? "border-accent bg-accent-soft" : "border-transparent bg-surface-2"}`}
+                  className={`flex flex-col items-center rounded-[10px] border-2 p-3 text-center transition-colors ${on ? "border-accent bg-accent-soft" : "border-line bg-surface-2"}`}
                 >
                   <SceneTouchMode mode={o.value} className="h-20" />
-                  <span className="mt-1 text-lg font-bold">{o.title}</span>
+                  <span className="mt-1 text-base font-semibold">{o.title}</span>
                   <span className="mt-0.5 text-sm leading-snug text-ink-dim">{o.text}</span>
                 </button>
               );
@@ -180,8 +181,8 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
         <Group title="Feel">
           <Row
             icon={
-              <Swatch bg="var(--dv-accent)">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" aria-hidden>
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden>
                   <rect x="8" y="4" width="8" height="16" rx="2" />
                   <path d="M4 9v6M20 9v6" />
                 </svg>
@@ -193,8 +194,8 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           />
           <Row
             icon={
-              <Swatch bg="linear-gradient(135deg,#7c5cff,#ff7aa8)">
-                <IconPlay size={20} className="text-white" />
+              <Swatch>
+                <IconPlay size={18} />
               </Swatch>
             }
             title="Show the demo computer"
@@ -203,8 +204,8 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           />
           <Row
             icon={
-              <Swatch bg="var(--dv-boundary)">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" aria-hidden>
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden>
                   <circle cx="12" cy="8.5" r="3.5" />
                   <path d="M5 20a7 6 0 0 1 14 0" />
                 </svg>
@@ -217,11 +218,11 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           />
           <Row
             icon={
-              <Swatch bg="var(--dv-vnc)">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <rect x="4" y="5" width="16" height="12" rx="2" />
                   <path d="M9 21h6" />
-                  <path d="M10 9l4 2-4 2Z" fill="#fff" />
+                  <path d="M10 9l4 2-4 2Z" fill="currentColor" />
                 </svg>
               </Swatch>
             }
@@ -234,10 +235,10 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
         <Group title="About">
           <Row
             icon={
-              <Swatch bg="var(--dv-accent)">
+              <Swatch>
                 <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden>
-                  <rect x="4" y="6" width="24" height="16" rx="3.5" fill="#fff" />
-                  <path d="M12 27h8M16 22v5" stroke="#fff" strokeWidth={2.4} strokeLinecap="round" />
+                  <rect x="4" y="6" width="24" height="16" rx="3" fill="none" stroke="currentColor" strokeWidth={2.4} />
+                  <path d="M12 27h8M16 22v5" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" />
                 </svg>
               </Swatch>
             }
@@ -246,8 +247,8 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           />
           <Row
             icon={
-              <Swatch bg="var(--dv-ok)">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <path d="M12 3l7 3v5c0 5-3 8.5-7 10-4-1.5-7-5-7-10V6Z" />
                   <path d="M9 12l2 2 4-4" />
                 </svg>
@@ -260,8 +261,8 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           />
           <Row
             icon={
-              <Swatch bg="var(--dv-rdp)">
-                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <path d="M6 3h9l4 4v14H6Z" />
                   <path d="M9 12h7M9 16h5" />
                 </svg>
@@ -284,7 +285,7 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
         }}
       />
       <Sheet open={licences} onClose={() => setLicences(false)} title="Open source licences" subtitle="DeskVNC is built on the work of these projects. Thank you.">
-        <ul className="divide-y divide-line rounded-2xl bg-surface-2">
+        <ul className="divide-y divide-line rounded-[10px] bg-surface-2">
           {LICENCES.map((l) => (
             <li key={l.name} className="flex min-h-14 items-center justify-between gap-3 px-4 py-2">
               <span className="font-semibold">{l.name}</span>

@@ -31,7 +31,7 @@ export function TabBar({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void
               <span className={`flex h-9 w-16 items-center justify-center rounded-full transition-colors ${on ? "bg-accent-soft" : ""}`}>
                 <TabIcon tab={t.key} active={on} size={30} />
               </span>
-              <span className={`text-xs font-semibold ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
+              <span className={`text-xs font-medium ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
             </button>
           );
         })}
@@ -43,11 +43,12 @@ export function TabBar({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void
 export function SideRail({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => void }) {
   return (
     <nav className="pt-safe pb-safe pl-safe hidden w-28 shrink-0 flex-col items-center gap-2 overflow-y-auto border-r border-line bg-surface tab:flex" aria-label="Main">
-      <div className="mb-4 mt-6 flex h-14 w-14 shrink-0 [@media(max-height:560px)]:hidden items-center justify-center rounded-2xl bg-accent text-white shadow-card">
+      {/* The app icon, drawn the way the desktop and phone icons are. */}
+      <div className="mb-4 mt-6 flex h-14 w-14 shrink-0 [@media(max-height:560px)]:hidden items-center justify-center rounded-[14px] bg-[linear-gradient(180deg,#1d62d9,#1447ad)] shadow-card">
         <svg viewBox="0 0 32 32" width="34" height="34" aria-hidden>
-          <rect x="4" y="6" width="24" height="16" rx="3.5" fill="#fff" />
-          <path d="M8 18q4-5 8-2t8-2v4H8Z" fill="var(--dv-accent)" opacity={0.6} />
-          <path d="M12 27h8M16 22v5" stroke="#fff" strokeWidth={2.4} strokeLinecap="round" />
+          <rect x="4" y="6" width="24" height="16" rx="1.5" fill="#fff" />
+          <rect x="6" y="8" width="20" height="12" rx="0.5" fill="#3c82f5" />
+          <path d="M16 22v4M11.5 27h9" stroke="#fff" strokeWidth={2.2} strokeLinecap="round" />
         </svg>
       </div>
       {TABS.map((t) => {
@@ -58,10 +59,10 @@ export function SideRail({ tab, onTab }: { tab: TabKey; onTab: (t: TabKey) => vo
             type="button"
             onClick={() => onTab(t.key)}
             aria-current={on ? "page" : undefined}
-            className={`flex w-24 shrink-0 flex-col items-center gap-1 rounded-3xl py-3 transition-colors first-of-type:mt-3 ${on ? "bg-accent-soft" : "active:bg-surface-2"}`}
+            className={`flex w-24 shrink-0 flex-col items-center gap-1 rounded-[14px] py-3 transition-colors first-of-type:mt-3 ${on ? "bg-accent-soft" : "active:bg-surface-2"}`}
           >
             <TabIcon tab={t.key} active={on} size={36} />
-            <span className={`text-sm font-semibold ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
+            <span className={`text-sm font-medium ${on ? "text-accent" : "text-ink-dim"}`}>{t.label}</span>
           </button>
         );
       })}

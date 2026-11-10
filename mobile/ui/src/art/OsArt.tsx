@@ -1,34 +1,29 @@
 /**
- * A friendly picture of each kind of computer, used when there is no live
- * screenshot yet. Drawn from scratch in a generic style: no real logos.
+ * A plain picture of each kind of computer, used when there is no live
+ * screenshot yet. Gray line work, a blue gray screen, one window. The kind
+ * shows in the shape and the furniture (a taskbar, a menu bar and dock, a
+ * terminal, a board), never in a logo or a colour.
  */
 import type { HostOs } from "../api/contract";
-import { swatch } from "../theme/palette";
-import { Ground, LINE, PAPER, Sparkle, stroke, type ArtProps } from "./common";
+import { ACCENT, BACKDROP, Ground, LINE, MID, MiniWindow, PAPER, SHADE, ScreenGradient, stroke, type ArtProps } from "./common";
 
 interface Props extends ArtProps {
   os: HostOs | "demo";
-  /** A palette key from theme/palette.ts, tints the wallpaper. */
-  color?: string;
-  /** Draw the backdrop blob behind the device. */
+  /** Draw the soft backdrop circle behind the device. */
   backdrop?: boolean;
 }
 
-export function OsArt({ os, color, backdrop = true, size, ...rest }: Props) {
-  const sw = swatch(color);
-  const id = `os-${os}-${sw.key}`;
+export function OsArt({ os, backdrop = true, size, ...rest }: Props) {
+  const id = `os-${os}`;
   return (
     <svg viewBox="0 0 160 120" width={size} role="img" aria-label={label(os)} {...rest}>
       <defs>
-        <linearGradient id={`${id}-sky`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor={sw.main} />
-          <stop offset="1" stopColor={sw.soft} />
-        </linearGradient>
+        <ScreenGradient id={`${id}-screen`} />
       </defs>
-      {backdrop && <path d="M22 70c-6-30 22-52 56-54 34-2 66 12 66 46 0 34-30 46-64 46S28 100 22 70Z" fill={sw.soft} opacity={0.9} />}
+      {backdrop && <circle cx="80" cy="60" r="54" fill={BACKDROP} />}
       {os === "windows" && <Windows id={id} />}
       {os === "mac" && <Mac id={id} />}
-      {os === "linux" && <Linux id={id} />}
+      {os === "linux" && <Linux />}
       {os === "raspberry" && <Raspberry />}
       {os === "unknown" && <Unknown id={id} />}
       {os === "demo" && <Demo id={id} />}
@@ -53,80 +48,60 @@ function label(os: Props["os"]): string {
   }
 }
 
-function Hills({ x, y, w, h }: { x: number; y: number; w: number; h: number }) {
+/** A monitor on a stand, with whatever is on its screen drawn by the caller. */
+function Monitor({ id, children, chin = false }: { id: string; children?: React.ReactNode; chin?: boolean }) {
   return (
     <g>
-      <path d={`M${x} ${y + h * 0.72} q${w * 0.25} ${-h * 0.3} ${w * 0.5} ${-h * 0.08} t${w * 0.5} ${-h * 0.06} V${y + h} H${x}Z`} fill="#ffffff" opacity={0.55} />
-      <path d={`M${x} ${y + h * 0.86} q${w * 0.3} ${-h * 0.22} ${w * 0.6} ${-h * 0.04} t${w * 0.4} ${-h * 0.1} V${y + h} H${x}Z`} fill="#ffffff" opacity={0.8} />
+      <Ground cx={80} cy={108} rx={38} />
+      <path d="M70 94h20l3 12H67Z" fill={PAPER} {...stroke} />
+      <rect x="20" y="20" width="120" height={chin ? 80 : 76} rx="6" fill={PAPER} {...stroke} />
+      <rect x="26" y="26" width="108" height="62" rx="2" fill={`url(#${id}-screen)`} />
+      {children}
     </g>
   );
 }
 
 function Windows({ id }: { id: string }) {
   return (
-    <g>
-      <Ground cx={80} cy={108} rx={36} />
-      <path d="M70 92h20l4 14H66Z" fill={PAPER} {...stroke} />
-      <rect x="22" y="22" width="116" height="74" rx="9" fill={PAPER} {...stroke} />
-      <rect x="29" y="29" width="102" height="57" rx="4" fill={`url(#${id}-sky)`} />
-      <Hills x={29} y={29} w={102} h={57} />
-      {/* A floating bar with four little app tiles in the middle. */}
-      <rect x="52" y="76" width="56" height="8" rx="4" fill="#ffffff" opacity={0.9} />
-      {["#2f78f0", "#20b26b", "#ffc145", "#f0508c"].map((c, i) => (
-        <rect key={c} x={60 + i * 11} y={78} width={6} height={4} rx={1.5} fill={c} />
+    <Monitor id={id}>
+      <MiniWindow x={36} y={34} w={48} h={34} lines={3} accent />
+      <MiniWindow x={78} y={44} w={44} h={30} lines={2} />
+      {/* A taskbar along the bottom, a few square buttons in the middle. */}
+      <rect x="26" y="81" width="108" height="7" fill={PAPER} opacity={0.85} />
+      {[0, 1, 2, 3].map((i) => (
+        <rect key={i} x={66 + i * 8} y={83} width={5} height={3} rx={1} fill={i === 0 ? ACCENT : MID} />
       ))}
-      <rect x="40" y="38" width="38" height="26" rx="3" fill="#ffffff" opacity={0.95} />
-      <rect x="44" y="44" width="22" height="3" rx="1.5" fill={LINE} opacity={0.3} />
-      <rect x="44" y="50" width="28" height="3" rx="1.5" fill={LINE} opacity={0.2} />
-      <rect x="44" y="56" width="16" height="3" rx="1.5" fill={LINE} opacity={0.2} />
-    </g>
+    </Monitor>
   );
 }
 
 function Mac({ id }: { id: string }) {
   return (
-    <g>
-      <Ground cx={80} cy={108} rx={34} />
-      <path d="M68 94h24l3 12H65Z" fill={PAPER} {...stroke} />
-      <rect x="20" y="18" width="120" height="80" rx="10" fill={PAPER} {...stroke} />
-      <rect x="27" y="25" width="106" height="58" rx="4" fill={`url(#${id}-sky)`} />
-      <Hills x={27} y={25} w={106} h={58} />
-      <rect x="27" y="25" width="106" height="6" fill="#ffffff" opacity={0.7} />
-      <circle cx="32" cy="28" r="1.6" fill={LINE} />
-      <rect x="54" y="72" width="52" height="9" rx="4.5" fill="#ffffff" opacity={0.75} />
-      {["#ff8a65", "#ffc145", "#4fc3f7", "#81c784", "#ba68c8"].map((c, i) => (
-        <rect key={c} x={58 + i * 9.5} y={74} width={6.5} height={5} rx={1.6} fill={c} />
+    <Monitor id={id} chin>
+      {/* Menu bar, a window, and a dock. */}
+      <rect x="26" y="26" width="108" height="5" fill={PAPER} opacity={0.85} />
+      <MiniWindow x={42} y={37} w={60} h={34} lines={3} accent />
+      <rect x="58" y="77" width="44" height="7" rx="3" fill={PAPER} opacity={0.85} />
+      {[0, 1, 2, 3, 4].map((i) => (
+        <rect key={i} x={61 + i * 8} y={79} width={5} height={3} rx={1} fill={i === 2 ? ACCENT : MID} />
       ))}
-      {/* The chin, with a little face that suits a friendly app. */}
-      <path d="M21 83h118v5a10 10 0 0 1-10 10H31a10 10 0 0 1-10-10Z" fill="#e9e5f7" {...stroke} />
-      <circle cx="80" cy="90.5" r="2.4" fill={LINE} opacity={0.5} />
-    </g>
+      <path d="M21 88h118" stroke={LINE} strokeWidth={1.5} opacity={0.5} />
+    </Monitor>
   );
 }
 
-function Linux({ id }: { id: string }) {
+function Linux() {
   return (
     <g>
-      <Ground cx={80} cy={108} rx={36} />
-      <path d="M70 92h20l4 14H66Z" fill={PAPER} {...stroke} />
-      <rect x="22" y="26" width="116" height="70" rx="9" fill={PAPER} {...stroke} />
-      <rect x="29" y="33" width="102" height="53" rx="4" fill="#232a40" />
-      <rect x="29" y="33" width="102" height="53" rx="4" fill={`url(#${id}-sky)`} opacity={0.25} />
-      <path d="M38 46l8 6-8 6" fill="none" stroke="#3ddc8f" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
-      <rect x="50" y="56" width="14" height="3.5" rx="1.75" fill="#3ddc8f" className="dv-blink" />
-      <rect x="38" y="66" width="44" height="3" rx="1.5" fill="#ffffff" opacity={0.35} />
-      <rect x="38" y="73" width="30" height="3" rx="1.5" fill="#ffffff" opacity={0.25} />
-      {/* A small penguin friend sitting on the corner of the screen. */}
-      <g transform="translate(104 4)">
-        <ellipse cx="14" cy="22" rx="11" ry="13" fill="#2b2d42" {...stroke} />
-        <ellipse cx="14" cy="25" rx="7" ry="9" fill="#ffffff" />
-        <circle cx="10.5" cy="15" r="2.6" fill="#ffffff" />
-        <circle cx="17.5" cy="15" r="2.6" fill="#ffffff" />
-        <circle cx="11" cy="15.4" r="1.2" fill={LINE} />
-        <circle cx="17" cy="15.4" r="1.2" fill={LINE} />
-        <path d="M11 19.5l3 2.6 3-2.6Z" fill="#ffb02e" stroke={LINE} strokeWidth={1.4} strokeLinejoin="round" />
-        <path d="M6 33.5h6M16 33.5h6" stroke="#ffb02e" strokeWidth={3.4} strokeLinecap="round" />
-      </g>
+      <Ground cx={80} cy={108} rx={38} />
+      <path d="M70 94h20l3 12H67Z" fill={PAPER} {...stroke} />
+      <rect x="20" y="20" width="120" height="76" rx="6" fill={PAPER} {...stroke} />
+      <rect x="26" y="26" width="108" height="62" rx="2" fill="#1f242d" />
+      <path d="M36 40l6 4.5-6 4.5" fill="none" stroke={ACCENT} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="46" y="47" width="10" height="2.6" rx="1.3" fill={ACCENT} className="dv-blink" />
+      <rect x="36" y="58" width="56" height="2.4" rx="1.2" fill="#ffffff" opacity={0.35} />
+      <rect x="36" y="65" width="40" height="2.4" rx="1.2" fill="#ffffff" opacity={0.25} />
+      <rect x="36" y="72" width="64" height="2.4" rx="1.2" fill="#ffffff" opacity={0.25} />
     </g>
   );
 }
@@ -134,70 +109,37 @@ function Linux({ id }: { id: string }) {
 function Raspberry() {
   return (
     <g>
-      <Ground cx={80} cy={106} rx={44} />
-      {/* A little green board. */}
-      <rect x="24" y="44" width="112" height="56" rx="7" fill="#3fbf5f" {...stroke} />
-      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) => (
-        <rect key={i} x={36 + i * 7} y={48} width={3.6} height={6} rx={1} fill="#ffd36b" />
+      <Ground cx={80} cy={104} rx={46} />
+      {/* A small single board computer, seen from above. */}
+      <rect x="26" y="36" width="108" height="62" rx="5" fill={PAPER} {...stroke} />
+      {Array.from({ length: 13 }, (_, i) => (
+        <rect key={i} x={40 + i * 6.6} y={40} width={3.4} height={5} rx={0.8} fill={MID} />
       ))}
-      <rect x="44" y="64" width="26" height="22" rx="3" fill="#2b2d42" />
-      <rect x="78" y="70" width="18" height="12" rx="2" fill="#2b2d42" opacity={0.85} />
-      <rect x="104" y="60" width="26" height="16" rx="2" fill="#c9d1dc" stroke={LINE} strokeWidth={2} />
-      <rect x="104" y="80" width="26" height="14" rx="2" fill="#c9d1dc" stroke={LINE} strokeWidth={2} />
-      <circle cx="31" cy="51" r="2.5" fill={PAPER} stroke={LINE} strokeWidth={1.5} />
-      <circle cx="31" cy="93" r="2.5" fill={PAPER} stroke={LINE} strokeWidth={1.5} />
-      {/* A raspberry sitting on top, with leaves and a smile. */}
-      <g transform="translate(62 2)" className="dv-float">
-        <path d="M18 8c-6-6-14-4-15 1 6 0 10 2 15 5 5-3 9-5 15-5-1-5-9-7-15-1Z" fill="#3fa45b" {...stroke} />
-        <path d="M18 12c12 0 17 9 15 18-2 10-9 16-15 16S5 40 3 30C1 21 6 12 18 12Z" fill="#e8436f" {...stroke} />
-        {[
-          [11, 20],
-          [18, 18],
-          [25, 20],
-          [8, 28],
-          [28, 28],
-          [12, 36],
-          [24, 36],
-        ].map(([x, y]) => (
-          <circle key={`${x}-${y}`} cx={x} cy={y} r={2.3} fill="#ff8fb0" />
-        ))}
-        <circle cx="14" cy="27" r="1.6" fill={LINE} />
-        <circle cx="22" cy="27" r="1.6" fill={LINE} />
-        <path d="M15 31.5q3 2.5 6 0" fill="none" stroke={LINE} strokeWidth={1.6} strokeLinecap="round" />
-      </g>
+      <rect x="44" y="56" width="26" height="24" rx="2.5" fill={SHADE} stroke={LINE} strokeWidth={1.5} />
+      <rect x="51" y="63" width="12" height="10" rx="1.5" fill={ACCENT} />
+      <rect x="78" y="62" width="18" height="12" rx="2" fill={SHADE} stroke={LINE} strokeWidth={1.5} />
+      <rect x="106" y="52" width="24" height="16" rx="2" fill={SHADE} stroke={LINE} strokeWidth={1.5} />
+      <rect x="106" y="74" width="24" height="16" rx="2" fill={SHADE} stroke={LINE} strokeWidth={1.5} />
+      <circle cx="33" cy="43" r="2.2" fill="none" stroke={LINE} strokeWidth={1.5} />
+      <circle cx="33" cy="91" r="2.2" fill="none" stroke={LINE} strokeWidth={1.5} />
     </g>
   );
 }
 
 function Unknown({ id }: { id: string }) {
   return (
-    <g>
-      <Ground cx={80} cy={108} rx={36} />
-      <path d="M70 92h20l4 14H66Z" fill={PAPER} {...stroke} />
-      <rect x="22" y="22" width="116" height="74" rx="9" fill={PAPER} {...stroke} />
-      <rect x="29" y="29" width="102" height="57" rx="4" fill={`url(#${id}-sky)`} />
-      <circle cx="68" cy="52" r="3.4" fill={LINE} />
-      <circle cx="92" cy="52" r="3.4" fill={LINE} />
-      <path d="M68 64q12 10 24 0" fill="none" stroke={LINE} strokeWidth={3.2} strokeLinecap="round" />
-      <circle cx="60" cy="61" r="4" fill="#ff8fb0" opacity={0.6} />
-      <circle cx="100" cy="61" r="4" fill="#ff8fb0" opacity={0.6} />
-    </g>
+    <Monitor id={id}>
+      <MiniWindow x={50} y={38} w={60} h={38} lines={3} />
+    </Monitor>
   );
 }
 
 function Demo({ id }: { id: string }) {
   return (
-    <g>
-      <Ground cx={80} cy={108} rx={36} />
-      <path d="M70 92h20l4 14H66Z" fill={PAPER} {...stroke} />
-      <rect x="22" y="22" width="116" height="74" rx="9" fill={PAPER} {...stroke} />
-      <rect x="29" y="29" width="102" height="57" rx="4" fill={`url(#${id}-sky)`} />
-      <Hills x={29} y={29} w={102} h={57} />
-      <circle cx="80" cy="55" r="15" fill="#ffffff" {...stroke} />
-      <path d="M75 47.5v15l12-7.5Z" fill="#7c5cff" stroke={LINE} strokeWidth={2.2} strokeLinejoin="round" />
-      <Sparkle x={30} y={20} r={7} />
-      <Sparkle x={140} y={34} r={5} fill="#7cd8ff" />
-      <Sparkle x={134} y={98} r={4} fill="#ff8fb0" />
-    </g>
+    <Monitor id={id}>
+      <MiniWindow x={34} y={34} w={44} h={30} lines={2} />
+      <circle cx="98" cy="58" r="13" fill={PAPER} />
+      <path d="M94 51.5v13l10.5-6.5Z" fill={ACCENT} />
+    </Monitor>
   );
 }

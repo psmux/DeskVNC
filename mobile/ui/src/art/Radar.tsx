@@ -5,7 +5,7 @@
  */
 import { AnimatePresence, motion } from "motion/react";
 import type { HostOs, Protocol } from "../api/contract";
-import { LINE, PAPER, stroke } from "./common";
+import { BACKDROP, LINE, MID, PAPER, stroke } from "./common";
 import { protocolColor } from "./ProtocolArt";
 
 export interface Blip {
@@ -32,23 +32,19 @@ export function Radar({ blips, scanning, onBlip, className }: { blips: Blip[]; s
   return (
     <svg viewBox="0 0 300 300" className={className} role="img" aria-label={scanning ? "Looking for computers" : "Radar"}>
       <defs>
-        <radialGradient id="radar-bg" cx="0.5" cy="0.5" r="0.5">
-          <stop offset="0" stopColor="var(--dv-accent)" stopOpacity={0.22} />
-          <stop offset="1" stopColor="var(--dv-accent)" stopOpacity={0.05} />
-        </radialGradient>
         <linearGradient id="radar-sweep" x1="0" y1="0" x2="1" y2="0">
           <stop offset="0" stopColor="var(--dv-accent)" stopOpacity={0} />
-          <stop offset="1" stopColor="var(--dv-accent)" stopOpacity={0.55} />
+          <stop offset="1" stopColor="var(--dv-accent)" stopOpacity={0.35} />
         </linearGradient>
       </defs>
-      <circle cx={C} cy={C} r={R} fill="url(#radar-bg)" stroke="var(--dv-accent)" strokeOpacity={0.35} strokeWidth={2} />
+      <circle cx={C} cy={C} r={R} fill={BACKDROP} stroke={MID} strokeWidth={1.5} />
       {[0.33, 0.66].map((f) => (
-        <circle key={f} cx={C} cy={C} r={R * f} fill="none" stroke="var(--dv-accent)" strokeOpacity={0.25} strokeWidth={2} strokeDasharray="4 8" />
+        <circle key={f} cx={C} cy={C} r={R * f} fill="none" stroke={MID} strokeWidth={1.5} strokeDasharray="3 6" />
       ))}
       {scanning && (
         <g className="dv-spin" style={{ transformOrigin: `${C}px ${C}px`, transformBox: "view-box" }}>
           <path d={`M${C} ${C} L${C + R} ${C} A${R} ${R} 0 0 0 ${C + R * Math.cos(-0.9)} ${C + R * Math.sin(-0.9)} Z`} fill="url(#radar-sweep)" />
-          <path d={`M${C} ${C} L${C + R} ${C}`} stroke="var(--dv-accent)" strokeWidth={3} strokeLinecap="round" />
+          <path d={`M${C} ${C} L${C + R} ${C}`} stroke="var(--dv-accent)" strokeWidth={2} strokeLinecap="round" />
         </g>
       )}
       {scanning &&
@@ -60,16 +56,17 @@ export function Radar({ blips, scanning, onBlip, className }: { blips: Blip[]; s
             r={40}
             fill="none"
             stroke="var(--dv-accent)"
-            strokeWidth={2}
+            strokeWidth={1.5}
+            strokeOpacity={0.6}
             className="dv-pulse"
             style={{ animationDelay: `${d}s` }}
           />
         ))}
       {/* You are here. */}
       <g transform={`translate(${C - 15} ${C - 26})`}>
-        <rect x="0" y="0" width="30" height="52" rx="7" fill={PAPER} {...stroke} />
-        <rect x="4" y="7" width="22" height="38" rx="3" fill="var(--dv-accent)" />
-        <rect x="11" y="2.5" width="8" height="2" rx="1" fill={LINE} />
+        <rect x="0" y="0" width="30" height="52" rx="6" fill={PAPER} {...stroke} />
+        <rect x="4" y="7" width="22" height="38" rx="2.5" fill="var(--dv-accent-soft)" />
+        <rect x="11" y="3" width="8" height="1.6" rx="0.8" fill={LINE} opacity={0.6} />
       </g>
       <AnimatePresence>
         {blips.map((b, i) => {
@@ -89,9 +86,8 @@ export function Radar({ blips, scanning, onBlip, className }: { blips: Blip[]; s
               style={{ originX: `${x}px`, originY: `${y}px`, cursor: onBlip ? "pointer" : undefined }}
               onClick={() => onBlip?.(b.key)}
             >
-              <circle cx={x} cy={y} r={16} fill={protocolColor(b.protocol)} opacity={0.22} />
-              <circle cx={x} cy={y} r={10} fill={protocolColor(b.protocol)} stroke={LINE} strokeWidth={2.5} />
-              <circle cx={x - 3} cy={y - 3} r={2.5} fill="#fff" opacity={0.7} />
+              <circle cx={x} cy={y} r={15} fill={protocolColor(b.protocol)} opacity={0.16} />
+              <circle cx={x} cy={y} r={8} fill={protocolColor(b.protocol)} stroke={PAPER} strokeWidth={2.5} />
             </motion.g>
           );
         })}

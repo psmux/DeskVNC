@@ -37,13 +37,13 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className="@container overflow-hidden rounded-[1.75rem] bg-surface shadow-card"
+      className="@container overflow-hidden rounded-[14px] border border-line bg-surface shadow-card"
       onContextMenu={(e) => {
         e.preventDefault();
         onMenu();
       }}
     >
-      <div className="relative aspect-[16/9] w-full overflow-hidden" style={{ background: `linear-gradient(160deg, ${sw.soft}, ${sw.main}33)` }}>
+      <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-line bg-surface-2">
         <button
           type="button"
           className="absolute inset-0 block h-full w-full"
@@ -56,15 +56,15 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
           {thumb ? (
             <img src={thumb} alt="" className="h-full w-full object-cover" draggable={false} />
           ) : (
-            <OsArt os={host.os} color={host.color} className="mx-auto h-full py-3" backdrop={false} />
+            <OsArt os={host.os} className="mx-auto h-full py-4" backdrop={false} />
           )}
         </button>
         <span className="pointer-events-none absolute left-3 top-3">
           <ProtocolBadge protocol={host.protocol} solid />
         </span>
         {online !== null && (
-          <span className="pointer-events-none absolute bottom-3 left-3 inline-flex items-center gap-2 rounded-full bg-black/55 px-3 py-1.5 text-sm font-semibold text-white backdrop-blur">
-            <span className={`h-2.5 w-2.5 rounded-full ${online ? "bg-[#3ddc8f] shadow-[0_0_0_3px_rgba(61,220,143,0.35)]" : "bg-white/50"}`} />
+          <span className="pointer-events-none absolute bottom-3 left-3 inline-flex items-center gap-2 rounded-full bg-black/60 px-2.5 py-1 text-[13px] font-medium text-white backdrop-blur">
+            <span className={`h-2 w-2 rounded-full ${online ? "bg-[#3fc873]" : "bg-white/50"}`} />
             {online ? "Nearby now" : "Not seen nearby"}
           </span>
         )}
@@ -75,8 +75,8 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
           aria-pressed={host.favorite}
           className="absolute right-1.5 top-1.5 flex h-12 w-12 items-center justify-center rounded-full"
         >
-          <span className={`flex h-10 w-10 items-center justify-center rounded-full backdrop-blur ${host.favorite ? "bg-[#ffb520] text-white" : "bg-black/35 text-white"}`}>
-            <IconStar filled={host.favorite} size={22} />
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur">
+            <IconStar filled={host.favorite} size={17} strokeWidth={1.8} />
           </span>
         </button>
       </div>
@@ -84,8 +84,11 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
       <div className="flex flex-col gap-3 p-4 pl-5 @[21rem]:flex-row @[21rem]:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-1">
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-xl font-bold leading-tight">{host.name}</h3>
-          <p className="mt-0.5 truncate text-sm text-ink-dim">{usedAgo(host.lastConnectedAt)}</p>
+          <h3 className="flex items-center gap-2 text-lg font-semibold leading-tight">
+            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: sw.main }} aria-hidden />
+            <span className="truncate">{host.name}</span>
+          </h3>
+          <p className="mt-0.5 truncate pl-[1.125rem] text-sm text-ink-dim">{usedAgo(host.lastConnectedAt)}</p>
         </div>
         <button
           type="button"
@@ -105,10 +108,9 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
             haptic("tap");
             onConnect();
           }}
-          className="inline-flex min-h-14 shrink-0 items-center justify-center gap-2 rounded-[1.25rem] px-5 text-lg font-bold text-white shadow-card transition-transform active:scale-95"
-          style={{ background: sw.deep }}
+          className="inline-flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-[10px] bg-accent px-5 text-base font-semibold text-accent-ink transition-transform active:scale-[0.98]"
         >
-          <IconPlay size={20} />
+          <IconPlay size={16} />
           Connect
         </button>
       </div>
@@ -123,15 +125,16 @@ export function DemoCard({ onConnect, onHide }: { onConnect: () => void; onHide?
       layout
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
-      className="relative overflow-hidden rounded-[1.75rem] text-white shadow-card"
-      style={{ background: "linear-gradient(135deg, #7c5cff 0%, #b45cff 55%, #ff7aa8 100%)" }}
+      className="relative overflow-hidden rounded-[14px] border border-line bg-surface shadow-card"
     >
-      <div className="flex items-center gap-2 p-4 pr-3">
-        <OsArt os="demo" color="violet" backdrop={false} className="h-24 w-32 shrink-0 drop-shadow-lg" />
+      <div className="flex items-center gap-3 p-4 pr-3">
+        <span className="flex h-20 w-28 shrink-0 items-center justify-center rounded-[10px] bg-surface-2">
+          <OsArt os="demo" backdrop={false} className="h-16 w-24" />
+        </span>
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-bold uppercase tracking-wider text-white/75">Try it out</p>
-          <h3 className="text-xl font-bold leading-tight">Demo computer</h3>
-          <p className="mt-1 text-sm leading-snug text-white/85">A pretend desktop to practise on. Nothing to set up.</p>
+          <p className="text-xs font-semibold uppercase tracking-wider text-ink-faint">Try it out</p>
+          <h3 className="text-lg font-semibold leading-tight">Demo computer</h3>
+          <p className="mt-1 text-sm leading-snug text-ink-dim">A pretend desktop to practise on. Nothing to set up.</p>
         </div>
       </div>
       <div className="flex gap-2 px-4 pb-4">
@@ -141,16 +144,16 @@ export function DemoCard({ onConnect, onHide }: { onConnect: () => void; onHide?
             haptic("tap");
             onConnect();
           }}
-          className="inline-flex min-h-14 flex-1 items-center justify-center gap-2 rounded-[1.25rem] bg-white text-lg font-bold text-[#5b3fd9] shadow-card transition-transform active:scale-95"
+          className="inline-flex min-h-12 flex-1 items-center justify-center gap-2 rounded-[10px] bg-accent text-base font-semibold text-accent-ink transition-transform active:scale-[0.98]"
         >
-          <IconPlay size={20} />
+          <IconPlay size={16} />
           Try the demo
         </button>
         {onHide && (
           <button
             type="button"
             onClick={onHide}
-            className="min-h-14 rounded-[1.25rem] bg-white/20 px-4 text-base font-semibold transition-transform active:scale-95"
+            className="min-h-12 rounded-[10px] border border-line bg-surface-2 px-4 text-base font-medium transition-transform active:scale-[0.98]"
           >
             Hide
           </button>

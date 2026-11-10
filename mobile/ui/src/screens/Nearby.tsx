@@ -50,7 +50,7 @@ export function Nearby() {
           {nothing ? (
             <div className="flex flex-col items-center text-center">
               <SceneSleepyRadar className="w-64" />
-              <h2 className="text-2xl font-bold">Nothing found nearby</h2>
+              <h2 className="text-2xl font-semibold">Nothing found nearby</h2>
               <p className="mt-2 text-lg text-ink-dim">Make sure your phone is on the same Wi-Fi as the computer, and that screen sharing or Remote Desktop is turned on there.</p>
             </div>
           ) : (
@@ -92,15 +92,15 @@ export function Nearby() {
                   initial={{ opacity: 0, scale: 0.85, y: 20 }}
                   animate={{ opacity: 1, scale: 1, y: 0 }}
                   transition={{ type: "spring", stiffness: 380, damping: 26 }}
-                  className={`rounded-[1.75rem] border-2 bg-surface p-4 shadow-card ${highlight === k ? "border-accent" : "border-transparent"}`}
+                  className={`rounded-[14px] border bg-surface p-4 shadow-card ${highlight === k ? "border-accent ring-1 ring-accent" : "border-line"}`}
                 >
                   <div className="flex items-center gap-3">
-                    <OsArt os={f.os} className="h-20 w-24 shrink-0" />
+                    <span className="flex h-20 w-24 shrink-0 items-center justify-center rounded-[10px] bg-surface-2"><OsArt os={f.os} backdrop={false} className="h-16 w-20" /></span>
                     <div className="min-w-0 flex-1">
-                      <h3 className="truncate text-xl font-bold">{host?.name ?? f.name ?? "A computer"}</h3>
+                      <h3 className="truncate text-lg font-semibold">{host?.name ?? f.name ?? "A computer"}</h3>
                       <ProtocolBadge protocol={f.protocol} className="mt-1" />
                       {host && (
-                        <p className="mt-1.5 flex items-center gap-1 text-sm font-semibold text-ok">
+                        <p className="mt-1.5 flex items-center gap-1 text-sm font-medium text-ok">
                           <IconCheck size={16} /> On your list
                         </p>
                       )}
