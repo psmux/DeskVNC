@@ -13,7 +13,9 @@
 //!   cargo run -p rdp-core --example rdp_probe
 //! ```
 //!
-//! `RDP_DOMAIN` and `RDP_PORT` are optional. `RDP_CLIP=some text` puts that
+//! `RDP_DOMAIN` and `RDP_PORT` are optional. `RDP_LEGACY_TLS=1` selects
+//! the OpenSSL legacy-TLS backend (this crate's `legacy-tls` feature), the
+//! way a host profile's `legacyTls` switch does. `RDP_CLIP=some text` puts that
 //! text on the server's clipboard once the picture is up, and every clipboard
 //! text the server offers back is printed, which is how clipboard sharing is
 //! checked against a real server. `RDP_SECS` sets how long the probe runs, and `RDP_RESIZE_AFTER=WxH` asks for a second size after the first reactivation. `RUST_LOG` defaults to a level
@@ -60,6 +62,15 @@ async fn main() {
             width: w,
             height: h,
         };
+    }
+    // `RDP_LEGACY_TLS=1` asks for the OpenSSL legacy backend the way a host
+    // profile's `legacyTls` switch does, so the probe can reach a TLS 1.0
+    // listener (or a server that offers only CBC suites) without a profile
+    // in the way. Requires this crate's `legacy-tls` feature; without it
+    // the probe reports the refusal the viewer would.
+    if std::env::var("RDP_LEGACY_TLS").as_deref() == Ok("1") {
+        options.rdp_mut().legacy_tls = true;
+        println!("legacy TLS backend requested (RDP_LEGACY_TLS=1)");
     }
     // `RDP_GATEWAY=gateway.example:443` sends the connection through an RD
     // Gateway, signing in to it with the same account. `RDP_GATEWAY_TRANSPORT=http`
