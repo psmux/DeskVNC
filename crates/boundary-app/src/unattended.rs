@@ -401,7 +401,7 @@ impl Unattended {
         };
         let mut decision = None;
         egui::Window::new("Approve this helper?")
-            .id(egui::Id::new("unattended ask"))
+            .id(egui::Id::unique("unattended ask"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

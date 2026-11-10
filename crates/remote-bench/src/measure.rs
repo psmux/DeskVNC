@@ -307,7 +307,11 @@ fn cpu_sampler(watch: Vec<String>) -> Arc<Mutex<Vec<(Instant, CpuSample)>>> {
     let kept = samples.clone();
     std::thread::spawn(move || {
         use sysinfo::{ProcessesToUpdate, System};
-        let mut sys = System::new();
+        // sysinfo 0.40 reports a platform it cannot read as an error; the
+        // run then simply carries no CPU samples.
+        let Ok(mut sys) = System::new() else {
+            return;
+        };
         let me = sysinfo::get_current_pid().ok();
         loop {
             sys.refresh_processes(ProcessesToUpdate::All, true);
@@ -906,7 +910,7 @@ pub async fn run(
     bench.offset = offset;
     eprintln!("stage clock offset {offset} ms over a {rtt:.2} ms round trip");
 
-    let load_1m = sysinfo::System::load_average().one;
+    let load_1m = sysinfo::System::load_average().map_or(0.0, |l| l.one);
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     if load_1m > 0.5 * cpus as f64 {
         eprintln!(

@@ -39,14 +39,15 @@ mod imp {
             let menu = Menu::new();
             menu.append_items(&[&status, &PredefinedMenuItem::separator(), &show, &quit])
                 .ok()?;
-            let icon = TrayIconBuilder::new()
+            let builder = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
-                .with_tooltip("DeskVNC Support")
-                .with_icon(picture()?)
-                // macOS draws a template icon in the menu bar's own colour.
-                .with_icon_as_template(cfg!(target_os = "macos"))
-                .build()
-                .ok()?;
+                .with_tooltip("DeskVNC Support");
+            // macOS draws a template icon in the menu bar's own colour.
+            #[cfg(target_os = "macos")]
+            let builder = builder.with_icon_templated(picture()?);
+            #[cfg(not(target_os = "macos"))]
+            let builder = builder.with_icon(picture()?);
+            let icon = builder.build().ok()?;
             // The window draws only when something happens, so a pick from
             // the menu has to wake it as well as be passed on.
             let (send, picks) = std::sync::mpsc::channel();
