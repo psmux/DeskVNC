@@ -2271,7 +2271,6 @@ dependencies = [
  "image",
  "jni 0.21.1",
  "keyring-core",
- "libc",
  "limb-core",
  "ndk-context",
  "parking_lot",
@@ -5075,9 +5074,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libdbus-sys"
@@ -5734,8 +5733,28 @@ dependencies = [
 [[package]]
 name = "netdev"
 version = "0.46.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3c52c2584961c68f5a6e3356797344061f818c93b8acc9cd6d7e284795e563e"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "dlopen2",
+ "ipnet",
+ "jni 0.21.1",
+ "libc",
+ "mac-addr",
+ "ndk-context",
+ "netlink-packet-core 0.9.0",
+ "netlink-packet-route 0.33.0",
+ "netlink-sys 0.9.0",
+ "objc2-core-foundation",
+ "objc2-system-configuration",
+ "once_cell",
+ "plist",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "netdev"
+version = "0.47.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -5837,8 +5856,6 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -10888,7 +10905,7 @@ dependencies = [
  "hex",
  "mac_address",
  "mdns-sd",
- "netdev 0.45.1",
+ "netdev 0.47.0",
  "parking_lot",
  "rand 0.10.3",
  "rdp-pdu",

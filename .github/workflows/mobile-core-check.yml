@@ -19,6 +19,7 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "patches/**"
       - ".github/workflows/mobile-core-check.yml"
 
 concurrency:

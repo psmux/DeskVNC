@@ -57,6 +57,8 @@ exclude = [
     "crates/rdp-pdu/fuzz",
     "crates/rdp-codecs/fuzz",
     "crates/rdp-auth/fuzz",
+    # Patched copies of crates.io crates, see [patch.crates-io] below.
+    "patches",
 ]
 
 [workspace.package]
@@ -137,7 +139,7 @@ webpki-roots = "1"
 
 # discovery
 mdns-sd = "0.20"
-netdev = "0.45"
+netdev = "0.47"
 mac_address = "1"
 
 # storage
@@ -185,3 +187,16 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# iOS builds with the current libc. libc 0.2.190 and later declare the
+# routing socket constants and `in6_ifreq` for macOS only, although iOS has
+# the same kernel definitions. netdev and netwatch still expect them on iOS,
+# so these copies carry a small fix each (search for "DeskVNC patch").
+# netwatch 0.19.3 is the newest release iroh 1.4.1 accepts, and it pulls
+# netdev 0.46; our own crates use netdev 0.47. Drop an entry once its crate
+# ships a release that builds for iOS against the current libc.
+# patches/README.md has the details.
+[patch.crates-io]
+netdev = { path = "patches/netdev-0.47.0" }
+netdev-046 = { path = "patches/netdev-0.46.3", package = "netdev" }
+netwatch = { path = "patches/netwatch-0.19.3" }

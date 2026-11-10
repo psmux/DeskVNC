@@ -56,11 +56,10 @@ Xcode project):
 
 ## Things that differ from the desktop, and why
 
-* libc is pinned to 0.2.189 (in this crate's iOS dependencies, which pins
-  the whole workspace). 0.2.190 and 0.2.191 declare `in6_ifreq` and the
-  routing socket constants for macOS only, and netdev (via vnc-discovery and
-  iroh's netwatch) and netwatch then fail to compile for iOS. Lift the pin
-  once those crates and libc agree.
+* libc stays on the current release. Since 0.2.190 it declares
+  `in6_ifreq` and the routing socket constants for macOS only, which broke
+  netdev and netwatch on iOS, so the workspace patches those two crates
+  (see `patches/README.md` at the repo root) instead of holding libc back.
 * Boundary progress: `boundary-driver` reports each step as `authenticating`
   with a sentence. The phone turns the two waiting sentences into
   `method: "approval"` and the earlier steps into `connecting`.

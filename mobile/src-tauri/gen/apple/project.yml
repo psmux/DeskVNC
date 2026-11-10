@@ -92,6 +92,8 @@ targets:
       - sdk: Security.framework
       # netdev and iroh's DNS resolver read the network setup through it.
       - sdk: SystemConfiguration.framework
+      # netdev 0.47 reads the DNS servers with res_ninit and res_getservers.
+      - sdk: libresolv.tbd
       - sdk: UIKit.framework
       - sdk: WebKit.framework
     preBuildScripts:
