@@ -9,6 +9,8 @@ name: Mobile Android
 #   workflow_dispatch  the same, on demand, on any branch
 #   push tag mobile-v* the same, signed with the upload key, and sent to the
 #                      Google Play internal track when the Play secret exists
+#   workflow_call      from release.yml on a desktop v* tag, which attaches
+#                      the signed APK to the GitHub release
 #
 # Signing: with ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
 # ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD set, the AAB and APK are signed
@@ -18,6 +20,7 @@ name: Mobile Android
 # throwaway debug key made in this job, so it still installs for testing.
 on:
   workflow_dispatch:
+  workflow_call:
   push:
     # main, and the phone app's own branches while it is being built
     # (workflow_dispatch only works once a workflow is on the default branch).
@@ -135,7 +138,7 @@ jobs:
       - name: Put the phone icons in the Android project
         run: mobile/icons/build-icons.sh --install-only
 
-      # Version name from the tag (mobile-v1.2.3 gives 1.2.3), otherwise from
+      # Version name from the tag (mobile-v1.2.3 or v1.2.3 gives 1.2.3), otherwise from
       # tauri.conf.json. versionCode is the run number, which only grows, so
       # every upload to Play is higher than the one before it.
       - name: Work out the version
@@ -144,7 +147,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # mobile-v1.2.3 here, or v1.2.3 when release.yml calls this
             name=${GITHUB_REF_NAME#mobile-v}
+            name=${name#v}
           else
             name=$(node -p "require('./mobile/src-tauri/tauri.conf.json').version")
           fi
@@ -236,7 +241,7 @@ jobs:
           retention-days: 30
 
       - name: Upload to the Google Play internal track
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'mobile-v')
         shell: bash
         env:
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}

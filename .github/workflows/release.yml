@@ -50,6 +50,8 @@ jobs:
           **Windows** is signed by Open Source Developer Godwin Josh (Certum). A new certificate may still get one SmartScreen prompt until it builds reputation: choose **More info** then **Run anyway**.
           **Linux** packages are unsigned. There are x64 and ARM64 (Raspberry Pi 4 or 5, 64-bit OS) builds.
 
+          **Android**: the phone app is attached as `DeskVNC-Android-<version>.apk`. Download it on the phone and open it to install (Android asks once to allow installs from your browser). The iPhone and iPad app is coming to the App Store.
+
           **DeskVNC Support** is also attached, for macOS, Windows and Linux,
           for people who need to receive help. Download it on the computer being
           supported, press Get a code, and share the code or invitation. On
@@ -744,12 +746,54 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The phone app. Every release carries the Android APK next to the desktop
+  # installers, built by the same workflow the phone app uses on its own and
+  # signed with the upload key, so a newer release installs over an older one.
+  android:
+    name: Android app
+    needs: draft
+    uses: ./.github/workflows/mobile-android.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
+  android-release:
+    name: Attach the Android app
+    needs: [draft, android]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deskvnc-android-*
+          path: android
+          merge-multiple: true
+      - name: Upload the APK to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -la android
+          # Only an APK signed with the upload key goes on a release. One
+          # signed with a throwaway key could never be updated in place.
+          apk=$(find android -name '*.apk' ! -name '*debug-signed*' | head -n1)
+          if [ -z "$apk" ]; then
+            echo "::error::No APK signed with the upload key. Set ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS (mobile/scripts/set-mobile-secrets.sh)."
+            exit 1
+          fi
+          out="DeskVNC-Android-${GITHUB_REF_NAME#v}.apk"
+          cp "$apk" "$out"
+          gh release upload "$GITHUB_REF_NAME" "$out" --repo "$GITHUB_REPOSITORY" --clobber
+
   # Publishing is its own job so it waits for every platform. Flipping the
   # draft from inside the matrix would race: the first job to finish would
   # publish a release the other two were still uploading to.
   publish:
     name: Publish the release
-    needs: [build, support-linux]
+    needs: [build, support-linux, android-release]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -768,7 +812,7 @@ jobs:
           # Name the platforms rather than counting files, so a partial upload
           # is caught here instead of by whoever downloads the gap.
           missing=0
-          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' 'DeskVNC-Support-Linux-x86_64.tar.gz' 'DeskVNC-Support-Linux-aarch64.tar.gz' '.dmg' '.msi' '-setup.exe' '_amd64.deb' '_arm64.deb' '_amd64.AppImage' '_aarch64.AppImage'; do
+          for want in 'DeskVNC-Support-macOS.zip' 'DeskVNC-Support-Windows.zip' 'DeskVNC-Support-Linux-x86_64.tar.gz' 'DeskVNC-Support-Linux-aarch64.tar.gz' '.dmg' '.msi' '-setup.exe' '_amd64.deb' '_arm64.deb' '_amd64.AppImage' '_aarch64.AppImage' 'DeskVNC-Android-'; do
             if ! grep -qF "$want" /tmp/assets.txt; then
               echo "::error::release $TAG is missing an asset matching '$want'"
               missing=1

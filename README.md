@@ -280,6 +280,27 @@ exactly that. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 For security issues, please do not open a public issue. See
 [SECURITY.md](SECURITY.md).
 
+## On your desktop and on your phone
+
+DeskVNC runs on Windows, macOS and Linux, and as a phone app on Android,
+iPhone and iPad. The phone app reaches the same machines over VNC, RDP or a
+Boundary code, so you can check on a computer from the sofa or help someone
+across town without opening a laptop.
+
+![DeskVNC on a Mac and on an iPhone, showing the same kind of host library](docs/images/desktop-and-phone.png)
+
+<sub>Left: the desktop app on macOS. Right: the phone app on an iPhone.</sub>
+
+| Your computers | In a session | Help someone | On Android |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/images/phone-computers.png" width="200" alt="The phone app's list of saved computers with live previews"> | <img src="docs/images/phone-session.png" width="200" alt="A remote desktop on the phone, with the session menu open"> | <img src="docs/images/phone-help.png" width="200" alt="Typing someone's 12 digit Boundary code on the phone"> | <img src="docs/images/phone-android.png" width="200" alt="The same list of computers on an Android phone"> |
+| Every saved computer with a picture of its screen. One tap connects. | Keyboard, trackpad mode, special keys and quality, a tap away. | Type the code from DeskVNC Support and you are on their screen once they approve. | The same app on Android phones and tablets. |
+
+**Get the phone app.** Every [release](https://github.com/psmux/DeskVNC/releases/latest)
+carries the Android app as an `.apk` next to the desktop installers: download
+it on the phone and open it to install. The iPhone and iPad app is on its way
+to the App Store. Google Play will follow.
+
 ## License
 
 Licensed under either of

@@ -114,6 +114,23 @@ menu entry at that copy. It needs no administrator, and the folder you unpacked
 the tarball into can be deleted afterwards. Run it again from a newer tarball to
 update the installed copy.
 
+## Android
+
+Every release carries the phone app as `DeskVNC-Android-<version>.apk`.
+
+1. Open the [latest release](https://github.com/psmux/DeskVNC/releases/latest)
+   on the phone and tap the `.apk` to download it.
+2. Open the downloaded file. The first time, Android asks you to allow
+   installs from your browser or file manager. Allow it, then go back and
+   tap **Install**.
+3. To update, install the newer release's `.apk` the same way. It installs
+   over the old one and keeps your saved computers.
+
+Every release APK is signed with the same key, so updates install in place.
+Its SHA-256 is in `SHA256SUMS.txt` on the release, like the desktop files.
+
+The iPhone and iPad app is coming to the App Store.
+
 ## Verifying a download
 
 Every release lists SHA-256 checksums.
