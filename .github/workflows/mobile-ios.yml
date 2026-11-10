@@ -66,7 +66,7 @@ jobs:
       HAS_MANUAL_SIGNING: ${{ secrets.APPLE_DIST_CERT_P12_BASE64 != '' && secrets.APPLE_DIST_CERT_PASSWORD != '' && secrets.APPLE_PROVISIONING_PROFILE_BASE64 != '' && secrets.APPLE_TEAM_ID != '' }}
       HAS_ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY_ID != '' && secrets.APP_STORE_CONNECT_ISSUER_ID != '' && secrets.APP_STORE_CONNECT_KEY_P8_BASE64 != '' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check the phone app crate exists
         shell: bash
@@ -107,7 +107,7 @@ jobs:
           cargo tauri --version
           command -v xcodegen >/dev/null || brew install xcodegen
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -227,7 +227,7 @@ jobs:
           fi
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deskvnc-ios-${{ steps.version.outputs.name }}-${{ steps.version.outputs.build }}-${{ steps.version.outputs.mode }}
           path: dist/

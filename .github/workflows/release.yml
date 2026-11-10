@@ -126,7 +126,7 @@ jobs:
           echo "::error::Windows signing is not configured, and a release must be signed."
           exit 1
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -189,7 +189,7 @@ jobs:
         with:
           key: ${{ matrix.bundle-target }}
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -321,7 +321,7 @@ jobs:
       # Windows is signed by the two steps above when the Certum secrets are
       # set, and Linux is unsigned. The macOS secrets come from
       # scripts/setup-github-signing-secrets.sh.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           DESKVNC_REQUIRE_CLEAN: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -443,7 +443,7 @@ jobs:
 
       - name: Upload the DeskVNC Support recipient app artifact
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deskvnc-support-macos
           path: |
@@ -483,7 +483,7 @@ jobs:
 
       - name: Upload the Windows DeskVNC Support artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deskvnc-support-windows
           path: |
@@ -640,7 +640,7 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum ./*; else shasum -a 256 ./*; fi \
             | tee "SHA256SUMS-${{ matrix.artifact }}.txt"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deskvncviewer-${{ matrix.artifact }}
           path: dist/*
@@ -675,7 +675,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Linux system dependencies
         run: |
@@ -737,7 +737,7 @@ jobs:
             gh release upload "${GITHUB_REF_NAME}" DeskVNC-Support-Linux-${{ matrix.arch }}.tar.gz ${{ matrix.sums }} --clobber
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deskvnc-support-linux-${{ matrix.arch }}
           path: |
@@ -765,7 +765,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: deskvnc-android-*
           path: android

@@ -45,7 +45,7 @@ jobs:
             label: macOS (app)
             bundle: app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -61,7 +61,7 @@ jobs:
         with:
           key: agents-e2e
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -131,7 +131,8 @@ jobs:
           set -euo pipefail
           # The runner's own PATH has setup-node's node on it, which a person
           # does not. Take it away so only what nvm installed is found.
-          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v hostedtoolcache | paste -sd: -)
+          PATH=$(echo "$PATH" | tr ':' '\n' | grep -v hostedtoolcache | paste -sd: -)
+          export PATH
           if [ "$RUNNER_OS" = "Linux" ]; then
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             export DISPLAY=:99
@@ -156,7 +157,7 @@ jobs:
           fi
           cd "$(mktemp -d)"
           opencode run -m opencode/muse-spark-1.3-contributor-free             "On my computer called mock, use the deskvnc tools: open it, look at the screen, and tell me the colour of each quarter of the screen. Then close it."             2>&1 | tee "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt"
-          answer=$(tr 'A-Z' 'a-z' < "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt")
+          answer=$(tr '[:upper:]' '[:lower:]' < "$GITHUB_WORKSPACE/agent-e2e/model-answer.txt")
           for colour in red green blue yellow; do
             echo "$answer" | grep -q "$colour" || { echo "the answer does not name $colour"; exit 1; }
           done
@@ -164,7 +165,7 @@ jobs:
 
       - name: Keep what the run saw
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-e2e-${{ matrix.os }}-${{ matrix.bundle }}
           path: |
