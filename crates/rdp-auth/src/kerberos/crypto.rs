@@ -9,9 +9,8 @@
 //! ## Nothing here computes anything
 //!
 //! AES is `aes::Aes128` and `aes::Aes256`. CBC is `cbc::Encryptor` and
-//! `cbc::Decryptor`. Ciphertext stealing is `cts::CbcCs3Enc` and
-//! `cts::CbcCs3Dec`. PBKDF2 is `pbkdf2::pbkdf2_hmac`. HMAC-SHA1 is
-//! `hmac::Hmac<sha1::Sha1>`. The confounder is `rand::rng()`. What this file
+//! `cbc::Decryptor`. Ciphertext stealing is `cts::CbcCs3`. PBKDF2 is
+//! `pbkdf2::pbkdf2_hmac`. HMAC-SHA1 is `hmac::Hmac<sha1::Sha1>`. The confounder is `rand::rng()`. What this file
 //! owns is which buffer goes into which call, in which order, and with which
 //! key usage number (AGENT_BRIEF V3-A, PRDRDP/14 §2.10).
 //!
@@ -26,16 +25,16 @@
 //! RFC 3962 §5: "Ciphertext stealing, as defined in [RC5], assumes that more
 //! than one block of plain text is available. If exactly one block is to be
 //! encrypted, that block is simply encrypted with AES (also known as ECB
-//! mode)." `cts` 0.6.0 does not implement that case. `CbcCs3Enc` swaps the
+//! mode)." `cts` 0.7.0 does not implement that case. `CbcCs3` swaps the
 //! last two ciphertext blocks only when the tail is empty **and** there is
-//! more than one block (`cts-0.6.0/src/cbc_cs3_enc.rs`, the condition
+//! more than one block (`cts-0.7.0/src/cbc_cs3.rs`, the condition
 //! `if tail.is_empty() && blocks.len() > 1`); a single block input takes the
 //! other branch and is encrypted a second time.
 //!
 //! **Read the next paragraph before deleting the branch in
-//! [`encrypt_raw`].** `CbcCs3Dec` is the exact inverse of `CbcCs3Enc`,
-//! including the part that is wrong: it decrypts a single block twice as
-//! well. So `cts` round trips against itself perfectly, and every test anyone
+//! [`encrypt_raw`].** `CbcCs3` decryption is the exact inverse of its
+//! encryption, including the part that is wrong: it decrypts a single block
+//! twice as well. So `cts` round trips against itself perfectly, and every test anyone
 //! can write inside this process passes, while the octets that go out on the
 //! wire are not the octets RFC 3962 §5 defines. The defect is invisible to
 //! encrypt-then-decrypt testing and visible only against a second
@@ -67,10 +66,9 @@
 //! padding a protocol may not rely on.
 
 use aes::{Aes128, Aes256};
-use cipher::generic_array::GenericArray;
-use cipher::{BlockCipher, BlockDecrypt, BlockDecryptMut, BlockEncrypt, BlockEncryptMut, KeyInit};
-use cipher::{KeyIvInit, KeySizeUser};
-use cts::{CbcCs3Dec, CbcCs3Enc, Decrypt, Encrypt};
+use cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt};
+use cipher::{KeyInit, KeyIvInit};
+use cts::{CbcCs3, Decrypt, Encrypt};
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use sha1::Sha1;
@@ -449,7 +447,7 @@ pub fn decrypt_raw(key: &Key, iv: &[u8; BLOCK_LEN], buf: &mut [u8]) -> Result<()
 /// a call into a library and neither computes anything.
 fn encrypt_raw_with<C>(key: &[u8], iv: &[u8; BLOCK_LEN], buf: &mut [u8]) -> Result<(), AuthError>
 where
-    C: BlockCipher + BlockEncrypt + KeyInit + KeySizeUser,
+    C: BlockCipherEncrypt + KeyInit,
 {
     match buf.len() {
         n if n < BLOCK_LEN => Err(AuthError::MalformedMessage(
@@ -461,10 +459,12 @@ where
             // RFC 3961 §5.3 puts around it, that is one CBC block.
             let mut cipher = cbc::Encryptor::<C>::new_from_slices(key, iv)
                 .map_err(|_| AuthError::MalformedMessage("AES key length"))?;
-            cipher.encrypt_block_mut(GenericArray::from_mut_slice(buf));
+            let block = <&mut Block<C>>::try_from(buf)
+                .map_err(|_| AuthError::MalformedMessage("AES block length"))?;
+            cipher.encrypt_block(block);
             Ok(())
         }
-        _ => CbcCs3Enc::<C>::new_from_slices(key, iv)
+        _ => CbcCs3::<C>::new_from_slices(key, iv)
             .map_err(|_| AuthError::MalformedMessage("AES key length"))?
             .encrypt(buf)
             .map_err(|_| AuthError::MalformedMessage("AES-CTS input length")),
@@ -476,7 +476,7 @@ where
 /// not decrypt here, which is the failure the round trip tests catch.
 fn decrypt_raw_with<C>(key: &[u8], iv: &[u8; BLOCK_LEN], buf: &mut [u8]) -> Result<(), AuthError>
 where
-    C: BlockCipher + BlockDecrypt + BlockEncrypt + KeyInit + KeySizeUser,
+    C: BlockCipherDecrypt + BlockCipherEncrypt + KeyInit,
 {
     match buf.len() {
         n if n < BLOCK_LEN => Err(AuthError::MalformedMessage(
@@ -485,10 +485,12 @@ where
         BLOCK_LEN => {
             let mut cipher = cbc::Decryptor::<C>::new_from_slices(key, iv)
                 .map_err(|_| AuthError::MalformedMessage("AES key length"))?;
-            cipher.decrypt_block_mut(GenericArray::from_mut_slice(buf));
+            let block = <&mut Block<C>>::try_from(buf)
+                .map_err(|_| AuthError::MalformedMessage("AES block length"))?;
+            cipher.decrypt_block(block);
             Ok(())
         }
-        _ => CbcCs3Dec::<C>::new_from_slices(key, iv)
+        _ => CbcCs3::<C>::new_from_slices(key, iv)
             .map_err(|_| AuthError::MalformedMessage("AES key length"))?
             .decrypt(buf)
             .map_err(|_| AuthError::MalformedMessage("AES-CTS input length")),
@@ -753,7 +755,7 @@ pub fn verify_checksum(
 /// `expect` is unreachable.
 fn truncated_hmac(key: &Key, message: &[u8]) -> [u8; CHECKSUM_LEN] {
     let mut mac =
-        <HmacSha1 as Mac>::new_from_slice(key.octets()).expect("HMAC accepts any key length");
+        <HmacSha1 as KeyInit>::new_from_slice(key.octets()).expect("HMAC accepts any key length");
     mac.update(message);
     let full = mac.finalize().into_bytes();
     let mut out = [0u8; CHECKSUM_LEN];

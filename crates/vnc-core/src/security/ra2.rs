@@ -56,13 +56,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use aes::{Aes128, Aes256};
-use eax::aead::generic_array::GenericArray;
-use eax::aead::{AeadInPlace, KeyInit};
+use eax::aead::{AeadInOut, KeyInit};
 use eax::Eax;
 use rand::Rng;
 use rsa::pkcs8::EncodePublicKey;
 use rsa::traits::PublicKeyParts;
-use rsa::{BoxedUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{BoxedUint, Pkcs1v15Encrypt, PrivateKey, PublicKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -184,8 +183,8 @@ pub(crate) struct Ra2Cipher {
 impl Ra2Cipher {
     fn new(key: &[u8]) -> Result<Self> {
         let aead = match key.len() {
-            16 => Aead::A128(Box::new(Eax::<Aes128>::new(GenericArray::from_slice(key)))),
-            32 => Aead::A256(Box::new(Eax::<Aes256>::new(GenericArray::from_slice(key)))),
+            16 => Aead::A128(Box::new(Eax::<Aes128>::new_from_slice(key).expect("a 16 byte key"))),
+            32 => Aead::A256(Box::new(Eax::<Aes256>::new_from_slice(key).expect("a 32 byte key"))),
             n => {
                 return Err(VncError::Other(format!(
                     "invalid RA2 session key length {n}"
@@ -212,10 +211,10 @@ impl Ra2Cipher {
         let mut body = plaintext.to_vec();
         let tag = match &self.aead {
             Aead::A128(c) => {
-                c.encrypt_in_place_detached(GenericArray::from_slice(&nonce), &header, &mut body)
+                c.encrypt_inout_detached((&nonce).into(), &header, body.as_mut_slice().into())
             }
             Aead::A256(c) => {
-                c.encrypt_in_place_detached(GenericArray::from_slice(&nonce), &header, &mut body)
+                c.encrypt_inout_detached((&nonce).into(), &header, body.as_mut_slice().into())
             }
         }
         .map_err(|_| VncError::Other("RA2 encryption failed".into()))?;
@@ -234,20 +233,21 @@ impl Ra2Cipher {
             return Err(VncError::Protocol("truncated RA2 frame".into()));
         }
         let (ciphertext, tag) = body.split_at(body.len() - MAC_LEN);
+        let tag: &[u8; MAC_LEN] = tag.try_into().expect("split at MAC_LEN from the end");
         let nonce = self.next_nonce();
         let mut out = ciphertext.to_vec();
         let ok = match &self.aead {
-            Aead::A128(c) => c.decrypt_in_place_detached(
-                GenericArray::from_slice(&nonce),
+            Aead::A128(c) => c.decrypt_inout_detached(
+                (&nonce).into(),
                 &header,
-                &mut out,
-                GenericArray::from_slice(tag),
+                out.as_mut_slice().into(),
+                tag.into(),
             ),
-            Aead::A256(c) => c.decrypt_in_place_detached(
-                GenericArray::from_slice(&nonce),
+            Aead::A256(c) => c.decrypt_inout_detached(
+                (&nonce).into(),
                 &header,
-                &mut out,
-                GenericArray::from_slice(tag),
+                out.as_mut_slice().into(),
+                tag.into(),
             ),
         };
         if ok.is_err() {
@@ -313,7 +313,7 @@ async fn recv_frame(stream: &mut BoxedStream, cipher: &mut Ra2Cipher) -> Result<
 /// ## Why this is still the authenticated key
 ///
 /// `key` is not a re-parse of some other message: it is the very
-/// `RsaPublicKey` this handshake goes on to use, and it is derived from the
+/// `PublicKey` this handshake goes on to use, and it is derived from the
 /// same bytes that end up in `server_public_blob`. Those bytes are authenticated
 /// twice over, later in the handshake:
 ///
@@ -327,7 +327,7 @@ async fn recv_frame(stream: &mut BoxedStream, cipher: &mut Ra2Cipher) -> Result<
 /// Canonicalisation does not weaken that: it is a deterministic function of
 /// `(n, e)`, so equal blobs give equal fingerprints, and the fingerprint cannot
 /// be made to describe a key other than the one actually in use.
-fn key_fingerprint(key: &RsaPublicKey) -> Result<String> {
+fn key_fingerprint(key: &PublicKey) -> Result<String> {
     let spki = key
         .to_public_key_der()
         .map_err(|e| VncError::Protocol(format!("RA2 server key could not be encoded: {e}")))?;
@@ -342,7 +342,7 @@ fn key_fingerprint(key: &RsaPublicKey) -> Result<String> {
 /// `TrustDecision::Changed` is returned rather than raised; the caller turns it
 /// into `VncError::CertificateMismatch`, which `needs_user_action()` marks as
 /// terminal so the reconnect loop never retries into a suspected interceptor.
-fn evaluate_trust(key: &RsaPublicKey, bits: u32, pin: Option<&str>) -> Result<TrustDecision> {
+fn evaluate_trust(key: &PublicKey, bits: u32, pin: Option<&str>) -> Result<TrustDecision> {
     let fingerprint = key_fingerprint(key)?;
     let actual = normalize_fingerprint(&fingerprint);
 
@@ -393,7 +393,7 @@ pub(crate) async fn handshake(
     let server_n = read_bytes_max(&mut stream, server_bytes, 1024, "RA2 server modulus").await?;
     let server_e = read_bytes_max(&mut stream, server_bytes, 1024, "RA2 server exponent").await?;
 
-    let server_key = RsaPublicKey::new(
+    let server_key = PublicKey::new(
         BoxedUint::from_be_slice_vartime(&server_n),
         BoxedUint::from_be_slice_vartime(&server_e),
     )
@@ -441,7 +441,7 @@ pub(crate) async fn handshake(
     // RSA keygen is hundreds of milliseconds of pure CPU; keep it off the
     // reactor thread.
     let client_key =
-        tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), CLIENT_KEY_BITS))
+        tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), CLIENT_KEY_BITS))
             .await
             .map_err(|e| VncError::Other(format!("RSA key generation task failed: {e}")))?
             .map_err(|e| VncError::Other(format!("could not generate an RSA key: {e}")))?;
@@ -993,7 +993,7 @@ mod tests {
     async fn full_handshake_against_a_simulated_server() {
         // One key for the whole test: it stands in for a single server that the
         // client meets repeatedly, which is what pinning is about.
-        let server_key = tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), 2048))
+        let server_key = tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 2048))
             .await
             .unwrap()
             .unwrap();
@@ -1030,7 +1030,7 @@ mod tests {
                 // Client public key.
                 let mut client_blob = vec![0u8; 4 + 512];
                 server_side.read_exact(&mut client_blob).await.unwrap();
-                let client_pub = RsaPublicKey::new(
+                let client_pub = PublicKey::new(
                     BoxedUint::from_be_slice_vartime(&client_blob[4..260]),
                     BoxedUint::from_be_slice_vartime(&client_blob[260..516]),
                 )
@@ -1148,10 +1148,10 @@ mod tests {
 
     /// A syntactically valid RSA public key. `n` must be odd and larger than
     /// `e`; nothing here needs it to be a real product of primes.
-    fn test_key(seed: u8) -> RsaPublicKey {
+    fn test_key(seed: u8) -> PublicKey {
         let mut n = vec![seed | 0x80; 256];
         n[255] |= 1;
-        RsaPublicKey::new(
+        PublicKey::new(
             BoxedUint::from_be_slice_vartime(&n),
             BoxedUint::from(65537u32),
         )
@@ -1237,7 +1237,7 @@ mod tests {
 
         // As sent by an honest 2048-bit server.
         let tight =
-            RsaPublicKey::new(BoxedUint::from_be_slice_vartime(&n), BoxedUint::from(e)).unwrap();
+            PublicKey::new(BoxedUint::from_be_slice_vartime(&n), BoxedUint::from(e)).unwrap();
 
         // The same key claiming 2056 bits, with a leading zero byte on the
         // modulus, and an exponent padded out to full width, which is what
@@ -1245,7 +1245,7 @@ mod tests {
         let mut padded_n = vec![0u8];
         padded_n.extend_from_slice(&n);
         let padded_e = left_pad(&e.to_be_bytes(), 257);
-        let loose = RsaPublicKey::new(
+        let loose = PublicKey::new(
             BoxedUint::from_be_slice_vartime(&padded_n),
             BoxedUint::from_be_slice_vartime(&padded_e),
         )

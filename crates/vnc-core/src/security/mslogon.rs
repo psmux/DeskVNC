@@ -22,7 +22,7 @@
 //! supported for compatibility with existing UltraVNC deployments, not because
 //! it is sound. The session that follows is unencrypted.
 
-use cipher::{BlockEncrypt, KeyInit};
+use cipher::{BlockCipherEncrypt, KeyInit};
 use des::Des;
 use num_bigint_dig::BigUint;
 use rand::Rng;
@@ -151,7 +151,7 @@ fn des_cbc_encrypt(buf: &mut [u8], secret: &[u8; DH_BYTES]) {
         }
         let mut block = [0u8; 8];
         block.copy_from_slice(chunk);
-        cipher.encrypt_block(block.as_mut_slice().into());
+        cipher.encrypt_block((&mut block).into());
         chunk.copy_from_slice(&block);
         prev = block;
     }
@@ -229,7 +229,7 @@ mod tests {
 
     // Test-only inverse of `des_cbc_encrypt`.
     fn des_cbc_decrypt(buf: &[u8], secret: &[u8; 8]) -> Vec<u8> {
-        use cipher::BlockDecrypt;
+        use cipher::BlockCipherDecrypt;
         let mut key = [0u8; 8];
         for (dst, src) in key.iter_mut().zip(secret.iter()) {
             *dst = super::super::vnc_auth::mirror_byte(*src);
@@ -241,7 +241,7 @@ mod tests {
             let mut block = [0u8; 8];
             block.copy_from_slice(chunk);
             let saved = block;
-            cipher.decrypt_block(block.as_mut_slice().into());
+            cipher.decrypt_block((&mut block).into());
             for (b, p) in block.iter_mut().zip(prev.iter()) {
                 *b ^= *p;
             }

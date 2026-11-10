@@ -29,7 +29,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use aes::cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
 use parking_lot::Mutex;
 use rand::Rng;
@@ -85,9 +85,9 @@ pub fn unwrap_rekey(wrap_key: &[u8; 16], payload: &[u8]) -> Result<ContentKeys> 
         )));
     }
     let generation = u32::from_be_bytes(payload[..4].try_into().expect("four bytes"));
-    let cipher = Aes128::new(GenericArray::from_slice(wrap_key));
-    let mut key = GenericArray::clone_from_slice(&payload[4..20]);
-    let mut iv = GenericArray::clone_from_slice(&payload[20..36]);
+    let cipher = Aes128::new(wrap_key.into());
+    let mut key = aes::Block::try_from(&payload[4..20]).expect("sixteen bytes");
+    let mut iv = aes::Block::try_from(&payload[20..36]).expect("sixteen bytes");
     cipher.decrypt_block(&mut key);
     cipher.decrypt_block(&mut iv);
     let out = ContentKeys {
@@ -113,7 +113,7 @@ pub struct Direction {
 impl Direction {
     pub fn new(keys: &ContentKeys, seq: u32) -> Self {
         Self {
-            cipher: Aes128::new(GenericArray::from_slice(&keys.key)),
+            cipher: Aes128::new((&keys.key).into()),
             chain: keys.iv,
             seq,
         }
@@ -161,7 +161,7 @@ impl Direction {
                 *b ^= c;
             }
             self.cipher
-                .encrypt_block(GenericArray::from_mut_slice(&mut block[..]));
+                .encrypt_block(block.into());
             self.chain = *block;
         }
         Ok(out)
@@ -180,7 +180,7 @@ impl Direction {
         for block in plain.as_chunks_mut::<BLOCK>().0 {
             let next_chain = *block;
             self.cipher
-                .decrypt_block(GenericArray::from_mut_slice(&mut block[..]));
+                .decrypt_block(block.into());
             for (b, c) in block.iter_mut().zip(self.chain.iter()) {
                 *b ^= c;
             }
@@ -463,11 +463,11 @@ impl AsyncWrite for RecordStream {
 
 /// Wrap `keys` the way a server does, for tests and the fake server.
 pub fn wrap_rekey(wrap_key: &[u8; 16], keys: &ContentKeys) -> [u8; REKEY_LEN] {
-    let cipher = Aes128::new(GenericArray::from_slice(wrap_key));
+    let cipher = Aes128::new(wrap_key.into());
     let mut out = [0u8; REKEY_LEN];
     out[..4].copy_from_slice(&keys.generation.to_be_bytes());
-    let mut k = GenericArray::clone_from_slice(&keys.key);
-    let mut v = GenericArray::clone_from_slice(&keys.iv);
+    let mut k = aes::Block::from(keys.key);
+    let mut v = aes::Block::from(keys.iv);
     cipher.encrypt_block(&mut k);
     cipher.encrypt_block(&mut v);
     out[4..20].copy_from_slice(&k);
@@ -526,12 +526,12 @@ mod tests {
         let second = tx.seal(b"two").unwrap();
 
         // Decrypt the second record by hand with the first's last block as IV.
-        let cipher = Aes128::new(GenericArray::from_slice(&k.key));
+        let cipher = Aes128::new((&k.key).into());
         let mut chain: [u8; 16] = first[first.len() - 16..].try_into().unwrap();
         let mut plain = second[2..].to_vec();
         for block in plain.as_chunks_mut::<16>().0 {
             let saved = *block;
-            cipher.decrypt_block(GenericArray::from_mut_slice(&mut block[..]));
+            cipher.decrypt_block(block.into());
             for (b, c) in block.iter_mut().zip(chain.iter()) {
                 *b ^= c;
             }
@@ -551,12 +551,12 @@ mod tests {
         let k = keys(5);
         let mut tx = Direction::new(&k, 41);
         let rec = tx.seal(b"hello").unwrap();
-        let cipher = Aes128::new(GenericArray::from_slice(&k.key));
+        let cipher = Aes128::new((&k.key).into());
         let mut chain = k.iv;
         let mut plain = rec[2..].to_vec();
         for block in plain.as_chunks_mut::<16>().0 {
             let saved = *block;
-            cipher.decrypt_block(GenericArray::from_mut_slice(&mut block[..]));
+            cipher.decrypt_block(block.into());
             for (b, c) in block.iter_mut().zip(chain.iter()) {
                 *b ^= c;
             }

@@ -16,7 +16,7 @@
 //! to obfuscate stored passwords is `e84ad660c4721ae0`, which is exactly the
 //! byte-reversed form of the ASCII-ish bytes `17 52 6b 06 23 4e 58 07`.
 
-use cipher::{BlockEncrypt, KeyInit};
+use cipher::{BlockCipherEncrypt, KeyInit};
 use des::Des;
 use zeroize::Zeroize;
 
@@ -56,7 +56,7 @@ pub fn des_key_from_password(password: &str) -> [u8; 8] {
 /// Encrypt one 8-byte block with DES-ECB under an already-mirrored key.
 fn des_ecb_block(key: &[u8; 8], block: &mut [u8; 8]) {
     let cipher = Des::new_from_slice(key).expect("DES key is exactly 8 bytes");
-    cipher.encrypt_block(block.as_mut_slice().into());
+    cipher.encrypt_block(block.into());
 }
 
 /// The full VNC-auth response: both halves of the challenge, encrypted

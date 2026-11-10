@@ -1404,7 +1404,7 @@ fn take_one(counter: &AtomicUsize) -> bool {
 /// encrypted credentials and the client's public value, and decrypt them
 /// with `MD5(shared secret)` in AES-128-ECB. Returns the user and password.
 async fn apple_dh_server(stream: &mut TcpStream) -> std::io::Result<(String, String)> {
-    use aes::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
+    use aes::cipher::{BlockCipherDecrypt, KeyInit};
     use md5::{Digest, Md5};
     use num_bigint_dig::BigUint;
 
@@ -1431,10 +1431,10 @@ async fn apple_dh_server(stream: &mut TcpStream) -> std::io::Result<(String, Str
     let client_public = BigUint::from_bytes_be(&answer[128..]);
     let shared = client_public.modpow(&private, &prime);
     let key = Md5::digest(pad(&shared));
-    let cipher = aes::Aes128::new(GenericArray::from_slice(&key));
+    let cipher = aes::Aes128::new(&key);
     let mut blob = answer[..128].to_vec();
     for block in blob.chunks_mut(16) {
-        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+        cipher.decrypt_block(block.try_into().expect("sixteen bytes"));
     }
     let field = |f: &[u8]| {
         let end = f.iter().position(|b| *b == 0).unwrap_or(f.len());

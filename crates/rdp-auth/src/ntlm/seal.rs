@@ -51,7 +51,7 @@
 //! CredSSP reaches message 4 and then fails, this file and the sequence
 //! numbers are where to look.
 
-use rc4::{consts::U16, KeyInit, Rc4, StreamCipher};
+use rc4::{KeyInit, Rc4, StreamCipher};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -79,10 +79,10 @@ pub struct NtlmSession {
     server_signing: Zeroizing<[u8; 16]>,
     /// Persistent RC4 keystream, client to server. Never re-created
     /// (MS-NLMP 3.4.4.2).
-    client_sealing: Rc4<U16>,
+    client_sealing: Rc4,
     /// Persistent RC4 keystream, server to client. Never re-created
     /// (MS-NLMP 3.4.4.2).
-    server_sealing: Rc4<U16>,
+    server_sealing: Rc4,
     send_seq: u32,
     recv_seq: u32,
     /// Whether the checksum is RC4 encrypted, MS-NLMP 3.4.4.1.
@@ -111,8 +111,8 @@ impl NtlmSession {
         NtlmSession {
             client_signing: sign_key(exported_session_key, Direction::ClientToServer),
             server_signing: sign_key(exported_session_key, Direction::ServerToClient),
-            client_sealing: Rc4::<U16>::new((&*client_seal).into()),
-            server_sealing: Rc4::<U16>::new((&*server_seal).into()),
+            client_sealing: Rc4::new_from_slice(&client_seal[..]).expect("RC4 takes keys of 1 to 256 bytes"),
+            server_sealing: Rc4::new_from_slice(&server_seal[..]).expect("RC4 takes keys of 1 to 256 bytes"),
             send_seq: 0,
             recv_seq: 0,
             key_exch: negotiated_flags & flags::NEGOTIATE_KEY_EXCH != 0,

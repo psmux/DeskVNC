@@ -34,7 +34,7 @@
 use md5::{Digest, Md5};
 use num_bigint_dig::BigUint;
 use rand::Rng;
-use rc4::{consts::U16, KeyInit, Rc4, StreamCipher};
+use rc4::{KeyInit, Rc4, StreamCipher};
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -268,7 +268,7 @@ impl LicensingKeys {
     #[must_use]
     pub fn rc4(&self, data: &[u8]) -> Vec<u8> {
         let mut out = data.to_vec();
-        Rc4::<U16>::new((&self.encryption_key).into()).apply_keystream(&mut out);
+        Rc4::new_from_slice(&self.encryption_key[..]).expect("RC4 takes keys of 1 to 256 bytes").apply_keystream(&mut out);
         out
     }
 

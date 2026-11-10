@@ -38,7 +38,7 @@
 //! not something a client can change.
 //!
 use aes::Aes128;
-use cipher::{block_padding::NoPadding, BlockEncryptMut, KeyInit};
+use cipher::{block_padding::NoPadding, BlockModeEncrypt, KeyInit};
 use md5::{Digest, Md5};
 use num_bigint_dig::BigUint;
 use rand::Rng;
@@ -126,7 +126,7 @@ pub(crate) async fn handshake(
     let mut blob = credentials_blob(&username, &password);
     let mut ciphertext = [0u8; CREDENTIALS_LEN];
     Aes128EcbEnc::new(&aes_key.into())
-        .encrypt_padded_b2b_mut::<NoPadding>(&blob, &mut ciphertext)
+        .encrypt_padded_b2b::<NoPadding>(&blob, &mut ciphertext)
         .map_err(|_| VncError::Other("Apple DH: credential block was not block-aligned".into()))?;
     blob.zeroize();
     aes_key.zeroize();
