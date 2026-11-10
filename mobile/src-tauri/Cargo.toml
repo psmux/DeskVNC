@@ -56,7 +56,7 @@ apple-native-keyring-store = { version = "1", features = ["protected"] }
 android-native-keyring-store = "1"
 # The Wi-Fi multicast lock for discovery, through the activity Tauri hands
 # to `ndk-context` at start.
-jni = "0.21"
+jni = "0.22"
 ndk-context = "0.1"
 
 [dev-dependencies]

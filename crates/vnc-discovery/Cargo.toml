@@ -39,7 +39,7 @@ rand = { workspace = true }
 # resolver stack. The mDNS, LLMNR and NetBIOS rungs of the resolution ladder
 # are hand-rolled in `dnsmsg.rs`/`netbios.rs` precisely so that no full DNS
 # implementation has to be pulled in (PRD/04 §6).
-dns-lookup = "3"
+dns-lookup = "4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

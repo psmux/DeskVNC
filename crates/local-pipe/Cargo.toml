@@ -13,7 +13,7 @@ description = "The Windows named pipe the agent plane and the dvv holder listen 
 # copied into the application and into dvv.
 [target.'cfg(windows)'.dependencies]
 tokio = { workspace = true, features = ["net"] }
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",

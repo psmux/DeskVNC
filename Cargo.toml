@@ -138,12 +138,12 @@ rustls-pki-types = "1"
 webpki-roots = "1"
 
 # discovery
-mdns-sd = "0.20"
+mdns-sd = "0.21"
 netdev = "0.47"
 mac_address = "1"
 
 # storage
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 keyring = "4"
 directories = "6"
 
@@ -151,7 +151,7 @@ directories = "6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 xcap = "0.9.8"
 enigo = "0.6.1"
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
 async-trait = "0.1"
 tempfile = "3"
 if-addrs = "0.15"
@@ -168,13 +168,13 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 fast_image_resize = "6"
 
 # misc
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 bytes = "1"
 byteorder = "1"
 hex = "0.4"
 base64 = "0.22"
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 [profile.release]
 opt-level = 3

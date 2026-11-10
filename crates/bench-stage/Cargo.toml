@@ -21,7 +21,7 @@ window = ["dep:winit", "dep:softbuffer", "dep:sysinfo"]
 # that follows damage (xrdp, Windows RDP) resend the whole screen.
 winit = { version = "0.30.13", optional = true }
 softbuffer = { version = "0.4.8", optional = true }
-sysinfo = { version = "0.39", optional = true, default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", optional = true, default-features = false, features = ["system"] }
 
 [[bin]]
 name = "bench-stage"
