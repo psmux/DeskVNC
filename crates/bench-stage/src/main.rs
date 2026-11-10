@@ -73,7 +73,9 @@ fn control(addr: String, shared: Arc<Mutex<Shared>>, size: (u32, u32)) {
             if let Ok(mut report) = stream.try_clone() {
                 let shared = shared.clone();
                 std::thread::spawn(move || {
-                    let mut sys = sysinfo::System::new();
+                    let Ok(mut sys) = sysinfo::System::new() else {
+                        return;
+                    };
                     loop {
                         std::thread::sleep(Duration::from_secs(1));
                         sys.refresh_cpu_usage();

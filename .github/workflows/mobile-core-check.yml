@@ -1,0 +1,122 @@
+name: Mobile core check
+
+# Throwaway check for the phone app's Rust crate while it is built on the
+# mobile-core branch: does deskvnc-mobile compile for iOS and Android, and
+# what do `tauri ios init` and `tauri android init` generate. The real build
+# and signing live in mobile-ios.yml and mobile-android.yml; delete this file
+# once those are merged.
+on:
+  workflow_dispatch:
+    inputs:
+      init:
+        description: "Also run tauri ios init and android init and upload the generated projects"
+        type: boolean
+        default: false
+  push:
+    branches: [mobile-core]
+    paths:
+      - "mobile/src-tauri/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "patches/**"
+      - ".github/workflows/mobile-core-check.yml"
+
+concurrency:
+  group: mobile-core-check-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios:
+    name: iOS targets
+    runs-on: macos-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mobile-core-ios
+      - name: Placeholder frontend
+        # tauri::generate_context! needs frontendDist to exist. The UI is
+        # built by its own workflow; this only proves the Rust side.
+        run: |
+          mkdir -p mobile/ui/dist
+          [ -f mobile/ui/dist/index.html ] || echo '<!doctype html><title>DeskVNC</title>' > mobile/ui/dist/index.html
+      - name: Build for an iPhone
+        run: cargo build -p deskvnc-mobile --lib --target aarch64-apple-ios
+      - name: Build for the simulator
+        run: cargo build -p deskvnc-mobile --lib --target aarch64-apple-ios-sim
+      - name: Unit tests on the host
+        run: cargo test -p deskvnc-mobile
+
+  android:
+    name: Android targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mobile-core-android
+      - name: Placeholder frontend
+        run: |
+          mkdir -p mobile/ui/dist
+          [ -f mobile/ui/dist/index.html ] || echo '<!doctype html><title>DeskVNC</title>' > mobile/ui/dist/index.html
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build for Android
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -P 26 build -p deskvnc-mobile --lib
+
+  init:
+    name: Generate the native projects
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.init }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install the Tauri CLI and XcodeGen
+        run: |
+          command -v cargo-tauri >/dev/null || cargo binstall --no-confirm --locked --targets aarch64-apple-darwin "tauri-cli@^2"
+          cargo tauri --version
+          command -v xcodegen >/dev/null || brew install xcodegen
+      - name: cargo tauri ios init and android init
+        # From mobile, the folder the mobile workflows run the CLI in, so the
+        # generated projects call `cargo tauri` the way those builds do.
+        working-directory: mobile
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          rm -rf src-tauri/gen/apple src-tauri/gen/android
+          cargo tauri ios init --ci --skip-targets-install
+          cargo tauri android init --ci --skip-targets-install
+          ls -la src-tauri/gen src-tauri/gen/apple src-tauri/gen/android
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mobile-gen
+          path: mobile/src-tauri/gen
+          include-hidden-files: true

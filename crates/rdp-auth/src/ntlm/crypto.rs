@@ -20,7 +20,7 @@ use hmac::{Hmac, Mac};
 use md4::Md4;
 use md5::{Digest, Md5};
 use rand::Rng;
-use rc4::{consts::U16, KeyInit, Rc4, StreamCipher};
+use rc4::{KeyInit, Rc4, StreamCipher};
 use zeroize::Zeroizing;
 
 use super::flags;
@@ -107,7 +107,8 @@ pub fn ntowf_v2(password: &str, user: &str, domain: &str) -> Zeroizing<[u8; 16]>
     let mut identity = unicode(&user.to_uppercase());
     identity.extend_from_slice(&unicode(domain));
 
-    let mut mac = <HmacMd5 as Mac>::new_from_slice(&*nt_hash).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacMd5 as KeyInit>::new_from_slice(&*nt_hash).expect("HMAC accepts any key length");
     mac.update(&identity);
     Zeroizing::new(mac.finalize().into_bytes().into())
 }
@@ -159,7 +160,7 @@ pub fn nt_proof_str(
     temp: &[u8],
 ) -> Zeroizing<[u8; 16]> {
     let mut mac =
-        <HmacMd5 as Mac>::new_from_slice(response_key_nt).expect("HMAC accepts any key length");
+        <HmacMd5 as KeyInit>::new_from_slice(response_key_nt).expect("HMAC accepts any key length");
     mac.update(server_challenge);
     mac.update(temp);
     Zeroizing::new(mac.finalize().into_bytes().into())
@@ -198,7 +199,7 @@ pub fn lm_challenge_response_v2(
     client_challenge: &[u8; 8],
 ) -> Zeroizing<[u8; 24]> {
     let mut mac =
-        <HmacMd5 as Mac>::new_from_slice(response_key_lm).expect("HMAC accepts any key length");
+        <HmacMd5 as KeyInit>::new_from_slice(response_key_lm).expect("HMAC accepts any key length");
     mac.update(server_challenge);
     mac.update(client_challenge);
     let checksum = mac.finalize().into_bytes();
@@ -215,7 +216,7 @@ pub fn session_base_key(
     nt_proof_str: &[u8; 16],
 ) -> Zeroizing<[u8; 16]> {
     let mut mac =
-        <HmacMd5 as Mac>::new_from_slice(response_key_nt).expect("HMAC accepts any key length");
+        <HmacMd5 as KeyInit>::new_from_slice(response_key_nt).expect("HMAC accepts any key length");
     mac.update(nt_proof_str);
     Zeroizing::new(mac.finalize().into_bytes().into())
 }
@@ -243,7 +244,7 @@ pub fn key_exchange_key(session_base_key: &[u8; 16]) -> Zeroizing<[u8; 16]> {
 #[must_use]
 pub fn rc4k(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
     let mut buf = *data;
-    let mut handle = Rc4::<U16>::new(key.into());
+    let mut handle = Rc4::new_from_slice(key).expect("RC4 takes keys of 1 to 256 bytes");
     handle.apply_keystream(&mut buf);
     buf
 }
@@ -290,7 +291,7 @@ pub fn sign_key(exported_session_key: &[u8; 16], direction: Direction) -> Zeroiz
 ///
 /// The truncation applies to the input of the hash and never to the key that
 /// reaches RC4: MD5 outputs 16 bytes whatever went in, so the handle is
-/// `Rc4<U16>` in every case.
+/// keyed with 16 bytes in every case.
 #[must_use]
 pub fn seal_key(
     exported_session_key: &[u8; 16],
@@ -337,7 +338,7 @@ pub fn mic(
     challenge: &[u8],
     authenticate_with_zero_mic: &[u8],
 ) -> [u8; 16] {
-    let mut mac = <HmacMd5 as Mac>::new_from_slice(exported_session_key)
+    let mut mac = <HmacMd5 as KeyInit>::new_from_slice(exported_session_key)
         .expect("HMAC accepts any key length");
     mac.update(negotiate);
     mac.update(challenge);
@@ -352,7 +353,7 @@ pub fn mic(
 #[must_use]
 pub fn mac_checksum(signing_key: &[u8; 16], seq_num: u32, message: &[u8]) -> [u8; 8] {
     let mut mac =
-        <HmacMd5 as Mac>::new_from_slice(signing_key).expect("HMAC accepts any key length");
+        <HmacMd5 as KeyInit>::new_from_slice(signing_key).expect("HMAC accepts any key length");
     mac.update(&seq_num.to_le_bytes());
     mac.update(message);
     let full = mac.finalize().into_bytes();

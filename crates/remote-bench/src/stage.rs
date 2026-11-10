@@ -63,7 +63,9 @@ pub fn dial(addr: String, offscreen: Arc<Mutex<Offscreen>>) {
             let _ = writeln!(out, "hello {} {}", size.0, size.1);
             if let Ok(mut cpu_out) = stream.try_clone() {
                 std::thread::spawn(move || {
-                    let mut sys = sysinfo::System::new();
+                    let Ok(mut sys) = sysinfo::System::new() else {
+                        return;
+                    };
                     loop {
                         std::thread::sleep(Duration::from_secs(1));
                         sys.refresh_cpu_usage();

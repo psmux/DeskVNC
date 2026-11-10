@@ -2349,12 +2349,12 @@ async fn run_viewer(
     result
 }
 /// What a helper reads while the person they invited decides.
-pub(crate) const ATTENDED_WAIT: &str = "Waiting for the person to approve sharing";
+pub const ATTENDED_WAIT: &str = "Waiting for the person to approve sharing";
 /// What a helper reads while an unattended computer checks it. A paired
 /// helper or the right password is let straight in, and only an unknown
 /// helper is put to whoever is at the computer, so this does not say a
 /// person has to approve.
-pub(crate) const UNATTENDED_WAIT: &str = "Waiting for the computer to let you in";
+pub const UNATTENDED_WAIT: &str = "Waiting for the computer to let you in";
 
 /// The helper's side of a session once its request is on the wire: wait to
 /// be let in, saying `waiting` meanwhile, then show screens, send input and

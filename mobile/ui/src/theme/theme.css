@@ -1,0 +1,148 @@
+/*
+ * Theme tokens. Every colour in the app comes from one of these, so the
+ * session screen and the sheets look the same whoever wrote them.
+ *
+ * The values are the desktop app's (ui/src/styles/index.css): the same
+ * neutral grays, the same single blue accent, the same status colours and
+ * shadows, in both themes. Change them there first and copy them here.
+ *
+ *   --dv-bg         page background            (desktop --bg-canvas)
+ *   --dv-surface    cards and sheets           (desktop --bg-surface)
+ *   --dv-raised     a surface above a surface  (desktop --bg-surface-raised)
+ *   --dv-surface-2  wells, fields, pressed     (desktop --bg-inset)
+ *   --dv-line       hairlines                  (desktop --border-subtle)
+ *   --dv-line-strong                           (desktop --border-strong)
+ *   --dv-ink        main text                  (desktop --text-primary)
+ *   --dv-ink-dim    secondary text             (desktop --text-secondary)
+ *   --dv-ink-faint  tertiary text              (desktop --text-tertiary)
+ *   --dv-accent     the one action colour      (desktop --accent)
+ *   --dv-accent-fill  filled buttons and other solid accent shapes
+ *   --dv-accent-ink text on the accent fill    (desktop --accent-fg)
+ *   --dv-ok / --dv-warn / --dv-danger          status only, never decoration
+ *
+ * In the dark theme the fill is the light theme's blue, one step deeper than
+ * the accent, with white text on it: 4.6:1, where white on the lighter dark
+ * accent is 3:1 and the desktop's near black text on it reads as a disabled
+ * or inverted button at phone sizes. Text, icons and rings keep the lighter
+ * accent, which is what stays readable on the dark page.
+ *
+ * --dv-vnc, --dv-rdp and --dv-boundary used to be three loud colours. They
+ * stay as names so older code keeps working, and all point at the accent:
+ * the icon tells the ways apart, the colour does not.
+ *
+ * Light by default, dark when the system says so, and either one forced by
+ * data-theme on <html> (Settings writes it).
+ */
+:root {
+  color-scheme: light;
+  --dv-bg: #f4f5f7;
+  --dv-surface: #ffffff;
+  --dv-raised: #ffffff;
+  --dv-surface-2: #eceef1;
+  --dv-line: rgba(22, 26, 34, 0.1);
+  --dv-line-strong: rgba(22, 26, 34, 0.24);
+  --dv-ink: #1a1d23;
+  --dv-ink-dim: #4c5361;
+  --dv-ink-faint: #878e9b;
+  --dv-accent: #2f6fe4;
+  --dv-accent-fill: #2f6fe4;
+  --dv-accent-ink: #ffffff;
+  /* The accent at 12% over the surface, solid so stacked art stays clean. */
+  --dv-accent-soft: #e6eefc;
+  --dv-ok: #178745;
+  --dv-ok-soft: rgba(23, 135, 69, 0.12);
+  --dv-warn: #a06a00;
+  --dv-warn-soft: rgba(160, 106, 0, 0.12);
+  --dv-danger: #cc3a30;
+  --dv-danger-soft: rgba(204, 58, 48, 0.1);
+  --dv-scrim: rgba(18, 20, 26, 0.55);
+  --dv-shadow: 0 1px 2px rgba(15, 18, 24, 0.06), 0 4px 14px rgba(15, 18, 24, 0.07);
+  --dv-shadow-lg: 0 2px 6px rgba(15, 18, 24, 0.1), 0 12px 40px rgba(15, 18, 24, 0.18);
+  /* Illustrations: gray line work on white paper, blue for what matters. */
+  --dv-art-line: #4c5361;
+  --dv-art-paper: #ffffff;
+  --dv-art-shade: #eceef1;
+  --dv-art-mid: #c9ced6;
+  --dv-art-backdrop: #e9ebef;
+  --dv-art-screen-top: #d9e4f8;
+  --dv-art-screen-bottom: #b7cbef;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --dv-bg: #111318;
+    --dv-surface: #1a1d24;
+    --dv-raised: #22262f;
+    --dv-surface-2: #0c0e12;
+    --dv-line: rgba(255, 255, 255, 0.09);
+    --dv-line-strong: rgba(255, 255, 255, 0.2);
+    --dv-ink: #e9ebef;
+    --dv-ink-dim: #a4aab6;
+    --dv-ink-faint: #757c89;
+    --dv-accent: #5b95f5;
+    --dv-accent-fill: #2f6fe4;
+    --dv-accent-ink: #ffffff;
+    --dv-accent-soft: #243045;
+    --dv-ok: #3fc873;
+    --dv-ok-soft: rgba(63, 200, 115, 0.14);
+    --dv-warn: #e3a13c;
+    --dv-warn-soft: rgba(227, 161, 60, 0.14);
+    --dv-danger: #ee6055;
+    --dv-danger-soft: rgba(238, 96, 85, 0.13);
+    --dv-scrim: rgba(8, 10, 14, 0.6);
+    --dv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.35);
+    --dv-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.55);
+    --dv-art-line: #a4aab6;
+    --dv-art-paper: #2a2f38;
+    --dv-art-shade: #353b46;
+    --dv-art-mid: #5a6271;
+    --dv-art-backdrop: #1e2229;
+    --dv-art-screen-top: #2a3a57;
+    --dv-art-screen-bottom: #1f2c44;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --dv-bg: #111318;
+  --dv-surface: #1a1d24;
+  --dv-raised: #22262f;
+  --dv-surface-2: #0c0e12;
+  --dv-line: rgba(255, 255, 255, 0.09);
+  --dv-line-strong: rgba(255, 255, 255, 0.2);
+  --dv-ink: #e9ebef;
+  --dv-ink-dim: #a4aab6;
+  --dv-ink-faint: #757c89;
+  --dv-accent: #5b95f5;
+  --dv-accent-fill: #2f6fe4;
+  --dv-accent-ink: #ffffff;
+  --dv-accent-soft: #243045;
+  --dv-ok: #3fc873;
+  --dv-ok-soft: rgba(63, 200, 115, 0.14);
+  --dv-warn: #e3a13c;
+  --dv-warn-soft: rgba(227, 161, 60, 0.14);
+  --dv-danger: #ee6055;
+  --dv-danger-soft: rgba(238, 96, 85, 0.13);
+  --dv-scrim: rgba(8, 10, 14, 0.6);
+  --dv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.35);
+  --dv-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.55);
+  --dv-art-line: #a4aab6;
+  --dv-art-paper: #2a2f38;
+  --dv-art-shade: #353b46;
+  --dv-art-mid: #5a6271;
+  --dv-art-backdrop: #1e2229;
+  --dv-art-screen-top: #2a3a57;
+  --dv-art-screen-bottom: #1f2c44;
+}
+
+/* The three ways to connect share the accent. Defined once, after both
+   themes, so they follow whichever accent won. */
+:root {
+  --dv-rdp: var(--dv-accent);
+  --dv-rdp-soft: var(--dv-accent-soft);
+  --dv-vnc: var(--dv-accent);
+  --dv-vnc-soft: var(--dv-accent-soft);
+  --dv-boundary: var(--dv-accent);
+  --dv-boundary-soft: var(--dv-accent-soft);
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hosts-thumbnail"
+description = "Enables the hosts_thumbnail command without any pre-configured scope."
+commands.allow = ["hosts_thumbnail"]
+
+[[permission]]
+identifier = "deny-hosts-thumbnail"
+description = "Denies the hosts_thumbnail command without any pre-configured scope."
+commands.deny = ["hosts_thumbnail"]

@@ -19,13 +19,13 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes::cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
 use num_bigint_dig::BigUint;
 use parking_lot::Mutex;
 use rand::Rng;
 use rsa::pkcs8::EncodePublicKey;
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
+use rsa::{Pkcs1v15Encrypt, PrivateKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -223,12 +223,12 @@ impl Dir {
         h.update(&plain);
         plain.extend_from_slice(&h.finalize());
         self.seq += 1;
-        let aes = Aes128::new(GenericArray::from_slice(&self.key));
+        let aes = Aes128::new((&self.key).into());
         for block in plain.as_chunks_mut::<16>().0 {
             for (b, c) in block.iter_mut().zip(self.chain) {
                 *b ^= c;
             }
-            aes.encrypt_block(GenericArray::from_mut_slice(&mut block[..]));
+            aes.encrypt_block(block.into());
             self.chain = *block;
         }
         let mut out = (plain.len() as u16).to_be_bytes().to_vec();
@@ -237,12 +237,12 @@ impl Dir {
     }
 
     fn open(&mut self, cipher: &[u8]) -> Option<Vec<u8>> {
-        let aes = Aes128::new(GenericArray::from_slice(&self.key));
+        let aes = Aes128::new((&self.key).into());
         let mut plain = cipher.to_vec();
         let mut chain = self.chain;
         for block in plain.as_chunks_mut::<16>().0 {
             let saved = *block;
-            aes.decrypt_block(GenericArray::from_mut_slice(&mut block[..]));
+            aes.decrypt_block(block.into());
             for (b, c) in block.iter_mut().zip(chain) {
                 *b ^= c;
             }
@@ -265,10 +265,10 @@ impl Dir {
 /// Wrap a content key and IV for a rekey: `u32 generation`, then each value
 /// AES encrypted on its own under the wrap key.
 fn rekey_payload(wrap: &[u8; 16], generation: u32, key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
-    let aes = Aes128::new(GenericArray::from_slice(wrap));
+    let aes = Aes128::new(wrap.into());
     let mut out = generation.to_be_bytes().to_vec();
     for v in [key, iv] {
-        let mut b = GenericArray::clone_from_slice(v);
+        let mut b = aes::Block::from(*v);
         aes.encrypt_block(&mut b);
         out.extend_from_slice(&b);
     }
@@ -445,7 +445,7 @@ impl FakeMac {
         let s2 = seen.clone();
         let key = if login == Login::Rsa33 {
             Some(
-                tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
+                tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 2048).unwrap())
                     .await
                     .unwrap(),
             )
@@ -478,10 +478,9 @@ impl RedialMac {
             short_session: true,
             ..Seen::default()
         }));
-        let key =
-            tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
-                .await
-                .unwrap();
+        let key = tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 2048).unwrap())
+            .await
+            .unwrap();
         let drop = Arc::new(tokio::sync::Notify::new());
         let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (s2, d2, c2) = (seen.clone(), drop.clone(), connections.clone());
@@ -562,7 +561,7 @@ async fn serve_busy(s: &mut TcpStream, tx: &mut Dir, rx: &mut Dir, seen: &Arc<Mu
 async fn serve(
     s: &mut TcpStream,
     login: Login,
-    key: Option<RsaPrivateKey>,
+    key: Option<PrivateKey>,
     password: &str,
     seen: Arc<Mutex<Seen>>,
 ) {
@@ -1581,7 +1580,7 @@ mod live_must_confirm {
     /// Confirmed on a real Mac (`00 00 01 2d 00 01 00 00 01 26 30 82 ...`).
     #[test]
     fn host_key_reply_tag_is_little_endian() {
-        let key = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let key = PrivateKey::new(&mut rand::rng(), 2048).unwrap();
         let der = key.to_public_key().to_public_key_der().unwrap();
         let mut body = vec![0, 1, 0, 0];
         body.extend_from_slice(&(der.as_bytes().len() as u16).to_be_bytes());

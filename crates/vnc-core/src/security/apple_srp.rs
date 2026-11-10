@@ -57,7 +57,7 @@ use num_bigint_dig::BigUint;
 use rand::Rng;
 use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
 use rsa::traits::PublicKeyParts;
-use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+use rsa::{Pkcs1v15Encrypt, PublicKey};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroize;
@@ -643,16 +643,16 @@ fn refused(status: u32, what: &str) -> VncError {
 }
 
 /// Parse the host key reply's body (everything after its u32 length).
-pub fn parse_key_reply(body: &[u8]) -> Result<RsaPublicKey> {
+pub fn parse_key_reply(body: &[u8]) -> Result<PublicKey> {
     let mut c = Cursor::new(body, "RSA host key reply");
     let tag = c.take(4)?;
     if tag != [0, 1, 0, 0] {
         tracing::debug!(?tag, "unexpected RSA host key reply tag");
     }
     let der = c.lv16()?;
-    let key = RsaPublicKey::from_public_key_der(der)
+    let key = PublicKey::from_public_key_der(der)
         .map_err(|e| VncError::Protocol(format!("the Mac's RSA host key did not parse: {e}")))?;
-    let bits = key.n().bits();
+    let bits = key.n().bit_width();
     if !(2048..=8192).contains(&bits) {
         return Err(VncError::Protocol(format!(
             "the Mac's RSA host key is {bits} bits; 2048 or more is required"
@@ -662,17 +662,20 @@ pub fn parse_key_reply(body: &[u8]) -> Result<RsaPublicKey> {
 }
 
 /// SHA-256 over the host key's DER SubjectPublicKeyInfo.
-pub fn host_key_fingerprint(key: &RsaPublicKey) -> Result<String> {
+pub fn host_key_fingerprint(key: &PublicKey) -> Result<String> {
     let spki = key
         .to_public_key_der()
         .map_err(|e| VncError::Protocol(format!("RSA host key could not be encoded: {e}")))?;
     Ok(format_fingerprint(&Sha256::digest(spki.as_bytes())))
 }
 
-fn evaluate_trust(key: &RsaPublicKey, pin: Option<&str>) -> Result<TrustDecision> {
+fn evaluate_trust(key: &PublicKey, pin: Option<&str>) -> Result<TrustDecision> {
     let fingerprint = host_key_fingerprint(key)?;
     let actual = normalize_fingerprint(&fingerprint);
-    let subject = format!("macOS Screen Sharing host key ({}-bit RSA)", key.n().bits());
+    let subject = format!(
+        "macOS Screen Sharing host key ({}-bit RSA)",
+        key.n().bit_width()
+    );
     Ok(
         match pin.map(normalize_fingerprint).filter(|p| !p.is_empty()) {
             Some(expected) if expected == actual => TrustDecision::PinnedMatch,
@@ -693,7 +696,7 @@ fn evaluate_trust(key: &RsaPublicKey, pin: Option<&str>) -> Result<TrustDecision
 // Handshakes
 // ---------------------------------------------------------------------------
 
-async fn read_key_reply(stream: &mut BoxedStream) -> Result<RsaPublicKey> {
+async fn read_key_reply(stream: &mut BoxedStream) -> Result<PublicKey> {
     let len = read_u32(stream).await? as usize;
     let body = read_bytes_max(stream, len, MAX_FRAME, "RSA host key reply").await?;
     parse_key_reply(&body)

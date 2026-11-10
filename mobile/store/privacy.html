@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeskVNC privacy policy</title>
+<!-- Generated from mobile/store/privacy-policy.md by mobile/scripts/privacy-html.mjs. Edit the Markdown. -->
+<style>
+  :root { color-scheme: light dark; --fg: #1b1f24; --muted: #57606a; --bg: #ffffff; --link: #1d62d9; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --muted: #9da7b3; --bg: #0d1117; --link: #6ea8ff; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 24px; }
+  h2 { font-size: 20px; margin: 32px 0 8px; }
+  a { color: var(--link); overflow-wrap: anywhere; }
+  li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>DeskVNC privacy policy</h1>
+<p>Effective 10 November 2026. This covers the DeskVNC app for iPhone, iPad and Android phones and tablets.</p>
+<h2>The short version</h2>
+<p>DeskVNC collects nothing about you. There is no account, no analytics, no advertising and no tracking. The app talks to the computers you tell it to connect to, and to the Boundary services only when you use a Boundary code or when a direct path to a computer fails.</p>
+<h2>What stays on your device</h2>
+<ul>
+  <li>The list of computers you save: names, addresses, ports, user names, the colour and artwork you pick for each card.</li>
+  <li>A small picture of each computer's screen from your last session, used on its card.</li>
+  <li>Passwords you choose to save. These go into the iOS Keychain or the Android Keystore, which the operating system encrypts. They are never written to the app's own files and never leave the device except to log in to the computer they belong to.</li>
+  <li>Your settings.</li>
+</ul>
+<p>Deleting a computer from the app deletes its picture and saved password. Deleting the app removes its files. iOS keeps Keychain entries after an app is removed, so DeskVNC clears any it finds left over the first time it starts after a new install (check with the app's current build). None of it is backed up to us, because we have no server that holds it.</p>
+<h2>Where the app connects</h2>
+<ul>
+  <li>To the computers you connect to, over VNC or RDP, directly from your phone. What you see and type in a session goes between your phone and that computer.</li>
+  <li>When you press Nearby, the app looks for computers on your local network. It does not report what it finds to anyone.</li>
+  <li>When you enter a Boundary code, the app asks the Boundary code service which invitation the code stands for. A code works once and expires.</li>
+  <li>For a Boundary session, the app first tries to reach the other computer directly. If the networks between you do not allow that, the session passes through the Boundary relay. The relay forwards encrypted traffic between the two ends. It does not keep the contents of sessions. Like any internet service it sees the network addresses of both ends while the session is open.</li>
+</ul>
+<p>None of these services ask for your name, email address or any other personal detail. We do not sell or share data, because we do not hold any.</p>
+<h2>Permissions the app asks for</h2>
+<ul>
+  <li>Local network (iOS) so Nearby can find computers on your Wi-Fi and so you can connect to them. On Android this is the ordinary network permission.</li>
+  <li>Nothing else. The app does not use your location, contacts, photos, camera, microphone or the Android Accessibility service.</li>
+</ul>
+<h2>Children</h2>
+<p>DeskVNC is a tool for adults who manage their own computers. It is not aimed at children and does not knowingly collect anything from them; it collects nothing from anyone.</p>
+<h2>Changes</h2>
+<p>If this policy changes, the new version will be posted at <a href="https://deskvnc.ripeflow.com/privacy">https://deskvnc.ripeflow.com/privacy</a> with a new effective date. The history of this file is public in the DeskVNC repository on GitHub.</p>
+<h2>Contact</h2>
+<p>Write to support@ripeflow.com, or open an issue at <a href="https://github.com/psmux/DeskVNC/issues">https://github.com/psmux/DeskVNC/issues</a>.</p>
+</main>
+</body>
+</html>

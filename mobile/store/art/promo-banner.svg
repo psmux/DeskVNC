@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- Link preview and announcement image for the site and release notes,
+       1200 x 630 (the size Open Graph cards use). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1D62D9"/>
+      <stop offset="1" stop-color="#1447AD"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C82F5"/>
+      <stop offset="1" stop-color="#2E6BD6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g transform="translate(80 120)">
+    <rect width="132" height="132" rx="30" fill="#FFFFFF" opacity="0.12"/>
+    <g transform="scale(0.129)">
+      <rect x="212" y="244" width="600" height="404" rx="36" fill="#FFFFFF"/>
+      <rect x="262" y="294" width="500" height="304" rx="10" fill="#3C82F5"/>
+      <rect x="452" y="648" width="120" height="96" fill="#FFFFFF"/>
+      <rect x="340" y="736" width="344" height="58" rx="29" fill="#FFFFFF"/>
+    </g>
+  </g>
+  <text x="80" y="340" fill="#FFFFFF" font-family="-apple-system, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="76" font-weight="700">DeskVNC on your phone</text>
+  <text x="80" y="404" fill="#DCE7FB" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="30" font-weight="500">Reach your Windows PC, Mac or Linux box over VNC or RDP.</text>
+  <text x="80" y="450" fill="#DCE7FB" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="30" font-weight="500">Help someone with a twelve digit code. No account.</text>
+  <text x="80" y="552" fill="#FFFFFF" opacity="0.8" font-family="-apple-system, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26">deskvnc.ripeflow.com</text>
+  <g transform="translate(1000 70)">
+    <rect x="0" y="0" width="170" height="290" rx="28" fill="#0B1220"/>
+    <rect x="10" y="10" width="150" height="280" rx="20" fill="url(#screen)"/>
+    <rect x="26" y="44" width="100" height="60" rx="6" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="26" y="44" width="100" height="12" rx="6" fill="#DCE7FB"/>
+    <rect x="86" y="120" width="58" height="64" rx="6" fill="#FFFFFF" opacity="0.55"/>
+  </g>
+</svg>

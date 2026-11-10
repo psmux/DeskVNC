@@ -24,7 +24,6 @@ use ashpd::desktop::screencast::{
     StartCastOptions, Stream as PortalStream,
 };
 use ashpd::desktop::{PersistMode, Request, Session};
-use ashpd::enumflags2::BitFlags;
 use boundary_session::Button;
 use std::future::Future;
 use std::os::fd::OwnedFd;
@@ -115,7 +114,7 @@ pub(crate) fn screen_asleep() -> bool {
             .await
             .ok()
             .and_then(|reply| {
-                let value: ashpd::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+                let value: ashpd::zbus::OwnedVariant = reply.body().deserialize().ok()?;
                 bool::try_from(value).ok()
             })
             .unwrap_or(false)
@@ -230,7 +229,7 @@ pub(crate) struct Remote {
     size: Mutex<Option<(f64, f64)>>,
     /// What the person allowed. GNOME's prompt shares the screen alone
     /// unless "Allow Remote Interaction" is switched on.
-    granted: BitFlags<DeviceType>,
+    granted: DeviceType,
     /// When the compositor takes events. GNOME dropped everything sent in
     /// about the first second after the session started.
     ready: Instant,
@@ -423,8 +422,9 @@ impl Watch {
 
 /// The session's object path, which the portal's clipboard signals name.
 fn session_path<T: ashpd::desktop::SessionPortal>(session: &Session<T>) -> Option<String> {
-    use ashpd::zvariant::{LE, OwnedObjectPath, serialized::Context, to_bytes};
-    let bytes = to_bytes(Context::new_dbus(LE, 0), session).ok()?;
+    use ashpd::zbus::OwnedObjectPath;
+    use ashpd::zbus::wire::{LE, serialized::Context, to_bytes};
+    let bytes = to_bytes(Context::new(LE, 0), session).ok()?;
     let (path, _): (OwnedObjectPath, _) = bytes.deserialize().ok()?;
     Some(path.as_str().to_owned())
 }
@@ -586,7 +586,7 @@ impl Remote {
         Ok(())
     }
     pub fn move_to(&self, x: f32, y: f32) -> Result<()> {
-        self.settle(DeviceType::Pointer)?;
+        self.settle(DeviceType::POINTER)?;
         let (w, h) = self
             .size
             .lock()
@@ -608,7 +608,7 @@ impl Remote {
             Button::Right => 0x111,
             Button::Middle => 0x112,
         };
-        self.settle(DeviceType::Pointer)?;
+        self.settle(DeviceType::POINTER)?;
         block_on(self.portal.notify_pointer_button(
             &self.session,
             code,
@@ -617,7 +617,7 @@ impl Remote {
         ))
     }
     pub fn keysym(&self, keysym: u32, down: bool) -> Result<()> {
-        self.settle(DeviceType::Keyboard)?;
+        self.settle(DeviceType::KEYBOARD)?;
         // GNOME makes its virtual keyboard on the first key and drops the
         // keys that come in the next moment, which lost the first three to
         // ten characters typed. A Shift tap first takes that loss.
@@ -651,7 +651,7 @@ impl Remote {
         Ok(())
     }
     pub fn scroll(&self, lines: i32) -> Result<()> {
-        self.settle(DeviceType::Pointer)?;
+        self.settle(DeviceType::POINTER)?;
         block_on(self.portal.notify_pointer_axis_discrete(
             &self.session,
             Axis::Vertical,
@@ -739,8 +739,8 @@ impl Drop for Screen {
 
 /// What the inhibit asks the desktop to hold off: going idle, which blanks
 /// the screen and on GNOME takes the shared screen away from the helper.
-fn awake_flags() -> BitFlags<InhibitFlags> {
-    BitFlags::from_flag(InhibitFlags::Idle)
+fn awake_flags() -> InhibitFlags {
+    InhibitFlags::IDLE
 }
 /// gnome-session's flag for the same thing.
 const GNOME_IDLE: u32 = 8;
@@ -865,12 +865,12 @@ fn gone(node: u32, seen: Seen) -> Option<String> {
 async fn cursor(cast: &Screencast) -> CursorMode {
     // DeskVNC draws its own pointer, which moves with no lag at all.
     match cast.available_cursor_modes().await {
-        Ok(modes) if modes.contains(CursorMode::Hidden) => CursorMode::Hidden,
-        _ => CursorMode::Embedded,
+        Ok(modes) if modes.contains(CursorMode::HIDDEN) => CursorMode::HIDDEN,
+        _ => CursorMode::EMBEDDED,
     }
 }
-fn sources() -> BitFlags<SourceType> {
-    BitFlags::from_flag(SourceType::Monitor)
+fn sources() -> SourceType {
+    SourceType::MONITOR
 }
 
 /// What to do with a grant the portal started a session on.
@@ -891,8 +891,8 @@ enum Grant {
 /// helpers with control included. The portal says in its Start answer which
 /// devices it granted, and Support always asks for the pointer and keyboard,
 /// so a restored grant without them is the wrong one.
-fn grant(restored: bool, granted: BitFlags<DeviceType>) -> Grant {
-    if granted.contains(DeviceType::Pointer | DeviceType::Keyboard) {
+fn grant(restored: bool, granted: DeviceType) -> Grant {
+    if granted.contains(DeviceType::POINTER | DeviceType::KEYBOARD) {
         Grant::Keep
     } else if restored {
         Grant::Again
@@ -903,7 +903,7 @@ fn grant(restored: bool, granted: BitFlags<DeviceType>) -> Grant {
 
 /// Whether a grant takes any input. GNOME grants the pointer and keyboard
 /// together or neither; a portal that grants one alone still takes that one.
-fn controls(granted: BitFlags<DeviceType>) -> bool {
+fn controls(granted: DeviceType) -> bool {
     !granted.is_empty()
 }
 
@@ -937,7 +937,7 @@ async fn remote_with(
         .available_device_types()
         .await
         .map_err(|_| unavailable())?;
-    if !devices.contains(DeviceType::Pointer) || !devices.contains(DeviceType::Keyboard) {
+    if !devices.contains(DeviceType::POINTER) || !devices.contains(DeviceType::KEYBOARD) {
         return Err(unavailable());
     }
     let cast = Screencast::new().await?;
@@ -946,7 +946,7 @@ async fn remote_with(
         .select_devices(
             &session,
             SelectDevicesOptions::default()
-                .set_devices(DeviceType::Pointer | DeviceType::Keyboard)
+                .set_devices(DeviceType::POINTER | DeviceType::KEYBOARD)
                 .set_persist_mode(PersistMode::ExplicitlyRevoked)
                 .set_restore_token(token),
         )
@@ -1343,9 +1343,9 @@ mod tests {
     #[test]
     fn a_grant_without_devices_takes_no_input() {
         // What GNOME 50 answered with Allow Remote Interaction off.
-        assert!(!controls(BitFlags::empty()));
-        assert!(controls(DeviceType::Pointer | DeviceType::Keyboard));
-        assert!(controls(BitFlags::from_flag(DeviceType::Keyboard)));
+        assert!(!controls(DeviceType::empty()));
+        assert!(controls(DeviceType::POINTER | DeviceType::KEYBOARD));
+        assert!(controls(DeviceType::KEYBOARD));
     }
 
     #[test]
@@ -1377,13 +1377,10 @@ mod tests {
     fn a_remembered_grant_without_control_is_asked_again() {
         // What GNOME 50 answered when a token saved with Allow Remote
         // Interaction off was restored: devices 0, and no prompt shown.
-        let none = BitFlags::<DeviceType>::empty();
-        let both = DeviceType::Pointer | DeviceType::Keyboard;
+        let none = DeviceType::empty();
+        let both = DeviceType::POINTER | DeviceType::KEYBOARD;
         assert_eq!(grant(true, none), Grant::Again);
-        assert_eq!(
-            grant(true, BitFlags::from_flag(DeviceType::Pointer)),
-            Grant::Again
-        );
+        assert_eq!(grant(true, DeviceType::POINTER), Grant::Again);
         // A token saved with it on came back with devices 3.
         assert_eq!(grant(true, both), Grant::Keep);
         assert_eq!(grant(false, both), Grant::Keep);
@@ -1555,8 +1552,8 @@ mod tests {
     fn a_shared_screen_holds_off_idle_and_nothing_else() {
         // Idle blanking took the screen away from a helper who only watched.
         // Suspend and logout stay the person's own business.
-        assert_eq!(awake_flags(), BitFlags::from_flag(InhibitFlags::Idle));
-        assert_eq!(GNOME_IDLE, InhibitFlags::Idle as u32);
+        assert_eq!(awake_flags(), InhibitFlags::IDLE);
+        assert_eq!(GNOME_IDLE, InhibitFlags::IDLE.bits());
     }
 
     #[test]

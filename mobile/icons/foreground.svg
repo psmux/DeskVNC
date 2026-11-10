@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="432" height="432" viewBox="0 0 1024 1024">
+  <!-- Android adaptive icon foreground, 108 dp canvas. The launcher masks it
+       to a circle or squircle and may move it, so the glyph stays inside the
+       middle 66 dp (the safe zone), which is 626 units of 1024 here. -->
+  <g transform="translate(512 512) scale(0.74) translate(-512 -519)">
+    <rect x="212" y="244" width="600" height="404" rx="36" fill="#FFFFFF"/>
+    <rect x="262" y="294" width="500" height="304" rx="10" fill="#3C82F5"/>
+    <rect x="452" y="648" width="120" height="96" fill="#FFFFFF"/>
+    <rect x="340" y="736" width="344" height="58" rx="29" fill="#FFFFFF"/>
+    <path d="M560 360 L560 548 L604 506 L634 572 L666 558 L636 494 L696 490 Z"
+          fill="#FFFFFF" stroke="#1447AD" stroke-width="14" stroke-linejoin="round"/>
+  </g>
+</svg>

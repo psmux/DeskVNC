@@ -34,7 +34,7 @@
 use md5::{Digest, Md5};
 use num_bigint_dig::BigUint;
 use rand::Rng;
-use rc4::{consts::U16, KeyInit, Rc4, StreamCipher};
+use rc4::{KeyInit, Rc4, StreamCipher};
 use sha1::Sha1;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -268,7 +268,9 @@ impl LicensingKeys {
     #[must_use]
     pub fn rc4(&self, data: &[u8]) -> Vec<u8> {
         let mut out = data.to_vec();
-        Rc4::<U16>::new((&self.encryption_key).into()).apply_keystream(&mut out);
+        Rc4::new_from_slice(&self.encryption_key[..])
+            .expect("RC4 takes keys of 1 to 256 bytes")
+            .apply_keystream(&mut out);
         out
     }
 
@@ -328,6 +330,24 @@ mod tests {
 
     use super::*;
     use num_bigint_dig::ModInverse;
+
+    /// Known answer for the licensing RC4 and MAC under the 5.1.2 keys,
+    /// recorded from the rc4 0.1 / md-5 0.10 / sha1 0.10 build before the
+    /// move to rc4 0.2 / md-5 0.11 / sha1 0.11.
+    #[test]
+    fn rc4_and_mac_match_the_bytes_the_previous_crypto_crates_produced() {
+        let (pm, cr, sr) = spec_inputs();
+        let keys = LicensingKeys::derive(&pm, &cr, &sr);
+        let data = b"MS-RDPELE licensing blob";
+        assert_eq!(
+            hex::encode(keys.rc4(data)),
+            "a6c448eb43e31d6b995bad82da8efb388f91232884947c60"
+        );
+        assert_eq!(
+            hex::encode(keys.mac(data)),
+            "d6af9bfc458de9567d32811ec8bf0c3a"
+        );
+    }
 
     fn h<const N: usize>(s: &str) -> [u8; N] {
         let v = hex::decode(s).unwrap();

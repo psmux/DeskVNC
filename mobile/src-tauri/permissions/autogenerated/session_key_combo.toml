@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-session-key-combo"
+description = "Enables the session_key_combo command without any pre-configured scope."
+commands.allow = ["session_key_combo"]
+
+[[permission]]
+identifier = "deny-session-key-combo"
+description = "Denies the session_key_combo command without any pre-configured scope."
+commands.deny = ["session_key_combo"]
