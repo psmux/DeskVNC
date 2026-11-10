@@ -197,7 +197,7 @@ function frameHtml(png, device, caption, landscape = false) {
   return `<!doctype html><html><head><style>
   html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden}
   body{background:linear-gradient(180deg,#1D62D9 0%,#1447AD 100%);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,sans-serif;color:#fff}
-  .cap{position:absolute;left:${cap.left}px;top:${cap.top}px;width:${cap.width}px;height:${cap.height}px;display:flex;align-items:center;justify-content:${cap.align === "left" ? "flex-start" : "center"};text-align:${cap.align};font-weight:700;font-size:${cap.size}px;line-height:1.15;letter-spacing:-0.01em}
+  .cap{position:absolute;left:${cap.left}px;top:${cap.top}px;width:${cap.width}px;height:${cap.height}px;display:flex;align-items:center;justify-content:${cap.align === "left" ? "flex-start" : "center"};text-align:${cap.align};font-weight:700;font-size:${cap.size}px;line-height:1.15;letter-spacing:-0.01em;text-wrap:balance}
   .dev{position:absolute;left:${devLeft}px;top:${devTop}px;padding:${bezel}px;border-radius:${radius + bezel}px;background:#0b1220;box-shadow:0 ${Math.round(short * 0.02)}px ${Math.round(short * 0.06)}px rgba(0,0,0,.35)}
   .dev img{display:block;width:${sw}px;height:${sh}px;border-radius:${radius}px}
   </style></head><body><div class="cap">${caption}</div><div class="dev"><img src="data:image/png;base64,${png.toString("base64")}"></div></body></html>`;
