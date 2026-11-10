@@ -85,9 +85,9 @@
     --dv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.35);
     --dv-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.55);
     --dv-art-line: #a4aab6;
-    --dv-art-paper: #22262f;
-    --dv-art-shade: #2c313b;
-    --dv-art-mid: #4a515e;
+    --dv-art-paper: #2a2f38;
+    --dv-art-shade: #353b46;
+    --dv-art-mid: #5a6271;
     --dv-art-backdrop: #1e2229;
     --dv-art-screen-top: #2a3a57;
     --dv-art-screen-bottom: #1f2c44;
@@ -118,9 +118,9 @@
   --dv-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.35);
   --dv-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.55);
   --dv-art-line: #a4aab6;
-  --dv-art-paper: #22262f;
-  --dv-art-shade: #2c313b;
-  --dv-art-mid: #4a515e;
+  --dv-art-paper: #2a2f38;
+  --dv-art-shade: #353b46;
+  --dv-art-mid: #5a6271;
   --dv-art-backdrop: #1e2229;
   --dv-art-screen-top: #2a3a57;
   --dv-art-screen-bottom: #1f2c44;

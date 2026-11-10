@@ -75,7 +75,7 @@ export function CredentialSheet({ open, request, hostName, onSubmit, onCancel }:
           </p>
         )}
         <div className="flex items-center gap-3 rounded-[10px] bg-surface-2 px-4 py-3">
-          <IconLock className="text-ok" />
+          <IconLock className="text-ink-dim" />
           <div className="flex-1">
             <p className="font-semibold">Remember on this phone</p>
             <p className="text-sm text-ink-dim">Kept safely in the phone's keychain.</p>

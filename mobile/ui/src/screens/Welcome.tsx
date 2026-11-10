@@ -83,7 +83,7 @@ export function Welcome({ onDone }: { onDone: () => void }) {
               onClick={() => go(n)}
               className="flex h-8 items-center justify-center px-1"
             >
-              <span className={`block h-2.5 rounded-full transition-all duration-300 ${n === i ? "w-8 bg-accent" : "w-2.5 bg-line"}`} />
+              <span className={`block h-2.5 rounded-full transition-all duration-300 ${n === i ? "w-8 bg-accent" : "w-2.5 bg-line-strong"}`} />
             </button>
           ))}
         </div>

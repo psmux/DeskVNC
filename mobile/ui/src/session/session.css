@@ -1094,7 +1094,7 @@
   gap: 18px;
   padding: calc(var(--s-safe-t) + 24px) calc(var(--s-safe-r) + 24px) calc(var(--s-safe-b) + 24px) calc(var(--s-safe-l) + 24px);
   background:
-    radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--s-accent) 20%, transparent), transparent 60%),
+    radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--s-accent) 8%, transparent), transparent 60%),
     var(--s-bg);
   text-align: center;
 }
