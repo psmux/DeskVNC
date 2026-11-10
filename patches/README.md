@@ -22,3 +22,18 @@ Linux and Android builds compile the same code as the published crates.
 Remove a folder and its `[patch.crates-io]` line once the upstream crate
 builds for iOS against the current libc. To check:
 `cargo check --target aarch64-apple-ios -p deskvnc-mobile`.
+
+## russh
+
+`russh-0.65.1` is a different case. The published crate pins
+`rsa = "=0.10.0-rc.18"`, `pkcs1 = "=0.8.0-rc.4"` and
+`ssh-key = "=0.7.0-rc.11"`. A prerelease and the final 0.10.0 are the same
+semver line to Cargo, so it will not put both in one graph, and vnc-core
+(RA2 and Apple RSA logins) is on rsa 0.10.0. The copy applies upstream
+russh PR 821 (Eugeny/russh, commit e82790e) and nothing else:
+`Cargo.toml` and `Cargo.toml.orig` take rsa 0.10, pkcs1 0.8 and ssh-key
+0.7.0-rc.12, `src/keys/format/mod.rs` and `src/keys/format/pkcs8.rs` use
+`rsa::PrivateKey` and `pkcs1::RsaPrivateKeyRef`, and `src/keys/key.rs`
+updates one test for ssh-key rc.12 refusing a certificate as a CA key.
+The published `Cargo.lock` is left out. Remove the folder and its
+`[patch.crates-io]` line once a russh release accepts rsa 0.10.
