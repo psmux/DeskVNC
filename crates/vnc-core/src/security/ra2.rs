@@ -48,9 +48,10 @@
 //! has not been validated on the wire. If a live server stalls at the hash
 //! exchange, that is the line to flip.
 //!
-//! `rsa` 0.9 carries RUSTSEC-2023-0071 (Marvin timing attack). We perform one
-//! private-key decryption per connection with no attacker-controlled retry, so
-//! the practical risk is low; tracked in the security review.
+//! The private-key decryption is `rsa` 0.10.0, the first release outside
+//! RUSTSEC-2023-0071 (Marvin timing attack): it runs on `crypto-bigint` with
+//! constant time blinding. It happens once per connection in any case, with no
+//! attacker-controlled retry.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
