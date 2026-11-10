@@ -672,7 +672,10 @@ pub fn host_key_fingerprint(key: &PublicKey) -> Result<String> {
 fn evaluate_trust(key: &PublicKey, pin: Option<&str>) -> Result<TrustDecision> {
     let fingerprint = host_key_fingerprint(key)?;
     let actual = normalize_fingerprint(&fingerprint);
-    let subject = format!("macOS Screen Sharing host key ({}-bit RSA)", key.n().bit_width());
+    let subject = format!(
+        "macOS Screen Sharing host key ({}-bit RSA)",
+        key.n().bit_width()
+    );
     Ok(
         match pin.map(normalize_fingerprint).filter(|p| !p.is_empty()) {
             Some(expected) if expected == actual => TrustDecision::PinnedMatch,

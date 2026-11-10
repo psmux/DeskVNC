@@ -107,7 +107,8 @@ pub fn ntowf_v2(password: &str, user: &str, domain: &str) -> Zeroizing<[u8; 16]>
     let mut identity = unicode(&user.to_uppercase());
     identity.extend_from_slice(&unicode(domain));
 
-    let mut mac = <HmacMd5 as KeyInit>::new_from_slice(&*nt_hash).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacMd5 as KeyInit>::new_from_slice(&*nt_hash).expect("HMAC accepts any key length");
     mac.update(&identity);
     Zeroizing::new(mac.finalize().into_bytes().into())
 }

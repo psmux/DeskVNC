@@ -111,8 +111,10 @@ impl NtlmSession {
         NtlmSession {
             client_signing: sign_key(exported_session_key, Direction::ClientToServer),
             server_signing: sign_key(exported_session_key, Direction::ServerToClient),
-            client_sealing: Rc4::new_from_slice(&client_seal[..]).expect("RC4 takes keys of 1 to 256 bytes"),
-            server_sealing: Rc4::new_from_slice(&server_seal[..]).expect("RC4 takes keys of 1 to 256 bytes"),
+            client_sealing: Rc4::new_from_slice(&client_seal[..])
+                .expect("RC4 takes keys of 1 to 256 bytes"),
+            server_sealing: Rc4::new_from_slice(&server_seal[..])
+                .expect("RC4 takes keys of 1 to 256 bytes"),
             send_seq: 0,
             recv_seq: 0,
             key_exch: negotiated_flags & flags::NEGOTIATE_KEY_EXCH != 0,

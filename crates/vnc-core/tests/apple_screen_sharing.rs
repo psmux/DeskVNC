@@ -478,10 +478,9 @@ impl RedialMac {
             short_session: true,
             ..Seen::default()
         }));
-        let key =
-            tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 2048).unwrap())
-                .await
-                .unwrap();
+        let key = tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 2048).unwrap())
+            .await
+            .unwrap();
         let drop = Arc::new(tokio::sync::Notify::new());
         let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (s2, d2, c2) = (seen.clone(), drop.clone(), connections.clone());

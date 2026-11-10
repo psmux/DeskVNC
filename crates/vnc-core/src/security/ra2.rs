@@ -183,8 +183,12 @@ pub(crate) struct Ra2Cipher {
 impl Ra2Cipher {
     fn new(key: &[u8]) -> Result<Self> {
         let aead = match key.len() {
-            16 => Aead::A128(Box::new(Eax::<Aes128>::new_from_slice(key).expect("a 16 byte key"))),
-            32 => Aead::A256(Box::new(Eax::<Aes256>::new_from_slice(key).expect("a 32 byte key"))),
+            16 => Aead::A128(Box::new(
+                Eax::<Aes128>::new_from_slice(key).expect("a 16 byte key"),
+            )),
+            32 => Aead::A256(Box::new(
+                Eax::<Aes256>::new_from_slice(key).expect("a 32 byte key"),
+            )),
             n => {
                 return Err(VncError::Other(format!(
                     "invalid RA2 session key length {n}"
@@ -794,6 +798,37 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Known answer for the EAX framing, recorded from the eax 0.5 / aes 0.8
+    /// build before the move to eax 0.6 / aes 0.9. Round trips cannot catch a
+    /// change that both directions share (a nonce or AAD passed differently),
+    /// a frame from the old build can.
+    #[test]
+    fn frames_match_the_bytes_the_previous_crypto_crates_produced() {
+        let mut a128 = Ra2Cipher::new(&[0x11; 16]).unwrap();
+        let first = a128.seal(b"RA2 frame one").unwrap();
+        let second = a128.seal(b"RA2 frame two").unwrap();
+        assert_eq!(
+            hex::encode(&first),
+            "000db12c18aad5f6c6451dfab09cdde8b5b3541cc48caef02f64510178b01d"
+        );
+        assert_eq!(
+            hex::encode(&second),
+            "000d3725ad94e336385801f0edd513054c94908e2616a53abb726aa906b900"
+        );
+        let mut a256 = Ra2Cipher::new(&[0x22; 32]).unwrap();
+        let frame = a256.seal(b"RA2 with a 256 bit key").unwrap();
+        assert_eq!(
+            hex::encode(&frame),
+            "00167c8020264c631c2e33d23d8896443d65a40e967c2259d8ff0ae89dbc96eb7cfdb7dbd52cb970"
+        );
+        let mut rx = Ra2Cipher::new(&[0x22; 32]).unwrap();
+        let header = [frame[0], frame[1]];
+        assert_eq!(
+            rx.open(header, &frame[2..]).unwrap(),
+            b"RA2 with a 256 bit key"
+        );
+    }
     use crate::types::CertPins;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

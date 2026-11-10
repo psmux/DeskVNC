@@ -161,6 +161,18 @@ fn des_cbc_encrypt(buf: &mut [u8], secret: &[u8; DH_BYTES]) {
 mod tests {
     use super::*;
 
+    /// Known answer for the DES-CBC of MS-Logon II, recorded from the des 0.8
+    /// build before the move to des 0.9.
+    #[test]
+    fn cbc_matches_the_bytes_the_previous_crypto_crates_produced() {
+        let mut buf: Vec<u8> = (0u8..32).collect();
+        des_cbc_encrypt(&mut buf, &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(
+            hex::encode(&buf),
+            "acaae6446c2dc80484ea4753040fe409f2f00b7f844ecc0758067744c698672a"
+        );
+    }
+
     #[test]
     fn fixed_width_conversion() {
         assert_eq!(fixed_be(&BigUint::from(1u32)), [0, 0, 0, 0, 0, 0, 0, 1]);

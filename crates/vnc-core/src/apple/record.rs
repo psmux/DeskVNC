@@ -160,8 +160,7 @@ impl Direction {
             for (b, c) in block.iter_mut().zip(self.chain.iter()) {
                 *b ^= c;
             }
-            self.cipher
-                .encrypt_block(block.into());
+            self.cipher.encrypt_block(block.into());
             self.chain = *block;
         }
         Ok(out)
@@ -179,8 +178,7 @@ impl Direction {
         let mut plain = cipher.to_vec();
         for block in plain.as_chunks_mut::<BLOCK>().0 {
             let next_chain = *block;
-            self.cipher
-                .decrypt_block(block.into());
+            self.cipher.decrypt_block(block.into());
             for (b, c) in block.iter_mut().zip(self.chain.iter()) {
                 *b ^= c;
             }
@@ -478,6 +476,40 @@ pub fn wrap_rekey(wrap_key: &[u8; 16], keys: &ContentKeys) -> [u8; REKEY_LEN] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Known answer for the record layer and the rekey wrap, recorded from
+    /// the aes 0.8 / sha1 0.10 build before the move to aes 0.9 / sha1 0.11.
+    /// A ten byte body needs no filler, so the record is deterministic.
+    #[test]
+    fn records_match_the_bytes_the_previous_crypto_crates_produced() {
+        let k = ContentKeys {
+            generation: 7,
+            key: [0x2b; 16],
+            iv: [0x3c; 16],
+        };
+        assert_eq!(Direction::filler_len(10), 0);
+        let mut tx = Direction::new(&k, 5);
+        let one = tx.seal(&[0x5a; 10]).unwrap();
+        let two = tx.seal(&[0xa5; 10]).unwrap();
+        assert_eq!(
+            hex::encode(&one),
+            "00208f3350d1f7cd4114ced7b463d1709f4fcd5cd256f4ff285444208dea55659b4c"
+        );
+        assert_eq!(
+            hex::encode(&two),
+            "0020270394f014fe9701bfcbb4c5e7e93e4d1985a7073bc51fee4adf932869c3e861"
+        );
+        let wrapped = wrap_rekey(&[0x4d; 16], &k);
+        assert_eq!(
+            hex::encode(wrapped),
+            "000000072ddde8ed1b216225e7b190aa4e4bd6fbf1162f7d8ecfc5d1664326df1e62839e"
+        );
+        let back = unwrap_rekey(&[0x4d; 16], &wrapped).unwrap();
+        assert_eq!(
+            (back.generation, back.key, back.iv),
+            (7, [0x2b; 16], [0x3c; 16])
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn keys(seed: u8) -> ContentKeys {

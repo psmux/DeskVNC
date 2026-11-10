@@ -625,3 +625,16 @@ fn get_string<'a>(input: &mut &'a [u8]) -> Result<&'a [u8], PpkError> {
     *input = rest;
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Known answer for the AES-256-CBC of an encrypted PPK blob, recorded
+    /// from the aes 0.8 / cbc 0.1 build before the move to aes 0.9 / cbc 0.2.
+    #[test]
+    fn cbc_matches_the_bytes_the_previous_crypto_crates_produced() {
+        let mut data: Vec<u8> = (0u8..48).collect();
+        decrypt_cbc(&mut data, &[0x61; 32], &[0x62; 16]).unwrap();
+        assert_eq!(hex::encode(&data), "298628ab66d262bf26c89453abc5d5092b65bf323a0532e6113bf074ceb01c33d74f6e3d236555b36fbb1397b0c6b3c9");
+    }
+}

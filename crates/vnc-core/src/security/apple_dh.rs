@@ -206,6 +206,22 @@ fn write_field(field: &mut [u8], value: &str) {
 mod tests {
     use super::*;
 
+    /// FIPS-197 appendix C.1 through the same `ecb` type and padding call the
+    /// credential encryption uses.
+    #[test]
+    fn aes_ecb_matches_fips_197() {
+        let key: [u8; 16] = hex::decode("000102030405060708090a0b0c0d0e0f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plain = hex::decode("00112233445566778899aabbccddeeff").unwrap();
+        let mut out = [0u8; 16];
+        Aes128EcbEnc::new(&key.into())
+            .encrypt_padded_b2b::<NoPadding>(&plain, &mut out)
+            .unwrap();
+        assert_eq!(hex::encode(out), "69c4e0d86a7b0430d8cdb78070b4c55a");
+    }
+
     #[test]
     fn pads_to_the_field_width() {
         assert_eq!(left_pad(&[1, 2], 4), vec![0, 0, 1, 2]);
