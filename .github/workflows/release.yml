@@ -323,6 +323,10 @@ jobs:
       # scripts/setup-github-signing-secrets.sh.
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
+          # The repository holds two Tauri apps since the phone app arrived.
+          # Name the desktop one, or the CLI may pick mobile/src-tauri.
+          TAURI_APP_PATH: src-tauri
+          TAURI_FRONTEND_PATH: ui
           DESKVNC_REQUIRE_CLEAN: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
