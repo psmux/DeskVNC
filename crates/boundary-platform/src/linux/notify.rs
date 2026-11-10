@@ -6,7 +6,7 @@
 //! notification lives on its own thread, which closes it by the ID the
 //! server gave it once the [`Notification`] is dropped.
 use ashpd::zbus;
-use ashpd::zvariant::Value;
+use ashpd::zbus::zvariant::Value;
 use std::collections::HashMap;
 use std::sync::mpsc;
 

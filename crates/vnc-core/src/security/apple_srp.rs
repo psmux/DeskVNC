@@ -652,7 +652,7 @@ pub fn parse_key_reply(body: &[u8]) -> Result<RsaPublicKey> {
     let der = c.lv16()?;
     let key = RsaPublicKey::from_public_key_der(der)
         .map_err(|e| VncError::Protocol(format!("the Mac's RSA host key did not parse: {e}")))?;
-    let bits = key.n().bits();
+    let bits = key.n().bit_width();
     if !(2048..=8192).contains(&bits) {
         return Err(VncError::Protocol(format!(
             "the Mac's RSA host key is {bits} bits; 2048 or more is required"
@@ -672,7 +672,10 @@ pub fn host_key_fingerprint(key: &RsaPublicKey) -> Result<String> {
 fn evaluate_trust(key: &RsaPublicKey, pin: Option<&str>) -> Result<TrustDecision> {
     let fingerprint = host_key_fingerprint(key)?;
     let actual = normalize_fingerprint(&fingerprint);
-    let subject = format!("macOS Screen Sharing host key ({}-bit RSA)", key.n().bits());
+    let subject = format!(
+        "macOS Screen Sharing host key ({}-bit RSA)",
+        key.n().bit_width()
+    );
     Ok(
         match pin.map(normalize_fingerprint).filter(|p| !p.is_empty()) {
             Some(expected) if expected == actual => TrustDecision::PinnedMatch,
