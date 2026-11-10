@@ -49,8 +49,8 @@
 //! exchange, that is the line to flip.
 //!
 //! The private-key decryption is `rsa` 0.10.0, the first release outside
-//! RUSTSEC-2023-0071 (Marvin timing attack): it runs on `crypto-bigint` with
-//! constant time blinding. It happens once per connection in any case, with no
+//! RUSTSEC-2023-0071 (Marvin timing attack): it moved to `crypto-bigint` and
+//! the constant time mitigations the advisory asks for. It happens once per connection in any case, with no
 //! attacker-controlled retry.
 
 use std::pin::Pin;
