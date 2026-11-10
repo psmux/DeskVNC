@@ -8,6 +8,34 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.36.0] (2026-11-11)
+
+### Added
+
+* DeskVNC for phones. An Android app is attached to every release as
+  `DeskVNC-Android-<version>.apk`, signed with the same key each time so a new
+  copy installs over the old one. It connects to VNC, RDP and Boundary
+  computers and uses the same look as the desktop app. The iPhone app goes
+  through the App Store. See docs/INSTALL.md.
+* RDP can reach older servers such as Windows Server 2008 R2 and 2012 that
+  only offer TLS 1.0 or CBC cipher suites. Turn on legacy TLS for that host;
+  nothing the server says can switch it on. The same certificate checks and
+  pins apply. Thanks to quenode (#36).
+
+### Fixed
+
+* Dragging the floating toolbar to the right edge of the window broke every
+  session after that with "Minified React error #185", because the toolbar
+  kept growing into the room it was given. Its width no longer depends on
+  where it sits, and a saved position from 0.35.3 opens normally (#35).
+
+### Changed
+
+* Dependencies moved to their latest releases, among them the RustCrypto
+  crates, rsa 0.10, russh 0.65, rusqlite 0.41 (fixes RUSTSEC-2026-0459),
+  eframe 0.37 and windows 0.62. Stored passwords and keys read back byte for
+  byte.
+
 ## [0.35.3] (2026-11-09)
 
 ### Fixed
