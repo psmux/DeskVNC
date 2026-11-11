@@ -18,7 +18,7 @@ async fn a_session_the_person_ended_leaves_limbs_when_status_says_gone() {
 
     // The control: an open limb is listed and its status answers.
     let listed = client.tool("dvv_limbs", json!({})).await;
-    assert_eq!(structured(&listed)["limbs"][0]["limbId"], limb, "{listed}");
+    assert_eq!(structured(&listed)["limbs"][0]["limb_id"], limb, "{listed}");
     let status = client.tool("dvv_status", json!({ "limbId": limb })).await;
     assert_eq!(error_code(&status), None, "{status}");
 
@@ -44,6 +44,6 @@ async fn listed_ids(client: &mut Client) -> Vec<String> {
         .as_array()
         .expect("a list")
         .iter()
-        .filter_map(|card| card["limbId"].as_str().map(str::to_string))
+        .filter_map(|card| card["limb_id"].as_str().map(str::to_string))
         .collect()
 }
