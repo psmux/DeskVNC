@@ -102,11 +102,27 @@ pub enum Button {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Input {
-    Move { x: f32, y: f32 },
-    Button { button: Button, down: bool },
-    Key { key: Key, down: bool },
+    Move {
+        x: f32,
+        y: f32,
+    },
+    Button {
+        button: Button,
+        down: bool,
+    },
+    Key {
+        key: Key,
+        down: bool,
+    },
     Text(String),
-    Scroll { lines: i32 },
+    /// Clicks of the mouse wheel, notches, down when positive. Each
+    /// computer scrolls a notch as far as its own wheel would: Windows sends
+    /// WHEEL_DELTA for each, X11 a button 4 or 5 click, the Wayland portal a
+    /// discrete step and macOS a one line scroll event, which is what a slow
+    /// click of a wheel gives there. The name is the wire's and stays.
+    Scroll {
+        lines: i32,
+    },
     Release,
 }
 impl Input {
