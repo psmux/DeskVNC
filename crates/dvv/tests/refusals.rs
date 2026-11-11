@@ -429,11 +429,13 @@ async fn a_long_type_the_far_side_cuts_short_reports_exactly_what_went() {
     assert_eq!(error_code(&whole), None, "{whole}");
     assert_eq!(structured(&whole)["outcome"], "delivered");
 
+    // The typing fence's whole sentence, as `limb-core` words it for a type
+    // refused before anything went.
     source.refuse_presses_after(
         &limb,
         24,
         "SCREEN_CHANGED",
-        "the screen changed materially since this attachment last read it: it read content generation 28 and the limb is now at 37. Nothing was typed",
+        "the screen changed materially since this attachment last read it: it read content generation 28 and the limb is now at 37. Nothing was typed. Something large repainted, which is what a new window, a dialog or an application launching looks like, and the keystroke you were about to send would have gone into whatever is there now. To recover, take one screenshot (dvv_screen, or dvv screen in a shell; a small scale is enough), check what has focus and what is selected, then send the same call again",
     );
     let cut = client
         .tool("dvv_type", json!({ "limbId": limb, "text": command }))
@@ -455,5 +457,14 @@ async fn a_long_type_the_far_side_cuts_short_reports_exactly_what_went() {
     assert!(
         message.contains("generation 28"),
         "the far side's own words: {message}"
+    );
+    // The fence's sentence was written for a type refused whole. Here 24
+    // characters went, and an agent told "Nothing was typed ... send the same
+    // call again" typed them twice.
+    assert!(!message.contains("Nothing was typed"), "{message}");
+    assert!(!message.contains("same call again"), "{message}");
+    assert!(
+        message.contains(&format!("type only the text that was not typed, {rest:?}")),
+        "{message}"
     );
 }
