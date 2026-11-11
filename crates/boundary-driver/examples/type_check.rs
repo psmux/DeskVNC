@@ -107,8 +107,14 @@ async fn main() -> anyhow::Result<()> {
         }
         other => anyhow::bail!("unknown check {other}"),
     }
-    // Whatever is still on its way to the computer is let arrive.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // Whatever is still on its way to the computer is let arrive. A Windows
+    // computer types a character at most every 20 ms, 60 after a space, and
+    // what it has not typed yet is dropped when the helper leaves.
+    let pending = match what.as_str() {
+        "text" => std::fs::read_to_string(value)?.chars().count() as u64 * 60,
+        _ => 0,
+    };
+    tokio::time::sleep(Duration::from_millis(4000 + pending)).await;
     let _ = handle.commands.send(ClientCommand::Disconnect).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     Ok(())
