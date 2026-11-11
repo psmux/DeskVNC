@@ -8,6 +8,27 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.36.1] (2026-11-11)
+
+### Fixed
+
+* Typing into a Windows computer over Boundary no longer drops or swaps
+  characters. Keys that arrived while Support was capturing the screen were
+  typed back to back, and Notepad on Windows 11 reads a typed character late,
+  so "0123456789" could come out as "3333456789". Support now leaves at least
+  20 ms after each character on Windows, and 60 ms after a space or line
+  break. Of 446 characters typed into Notepad, 0.35.3 got 50 wrong and this
+  release none, with or without load. Long text takes longer to appear: 446
+  characters took about 16 s, against 5 s before. A typed letter also no
+  longer sends a stray key release the computer never saw pressed.
+* One wheel click scrolls one notch. A helper sent three per click, which
+  scrolled nine lines in Notepad instead of three.
+* When the far side stops a `dvv type` partway, the message says to type only
+  what was left, and quotes it. It used to repeat the far side's advice to
+  send the same call again, which typed the start a second time.
+* `dvv limbs` drops a Boundary session as soon as the person ends it, the
+  same moment `dvv status` reports it gone. It listed it for about 15 s more.
+
 ## [0.36.0] (2026-11-11)
 
 ### Added
