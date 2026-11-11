@@ -3485,12 +3485,31 @@ impl Plane {
         self.source.hosts()
     }
 
-    /// Every limb this attachment can see.
+    /// Every limb this attachment can see, as `dvv_status` would find each.
+    ///
+    /// The registry alone is not the answer. When the person pressed End
+    /// session in DeskVNC Support, `dvv limbs` went on listing the limb as
+    /// connected for 15 s and more while `dvv status` on it said LIMB_GONE,
+    /// because only [`Plane::resolve`] asks whether the relay is still there
+    /// and the application still has the session. So each limb is resolved
+    /// here as status resolves it, and one status would call gone is left out.
+    /// Any other refusal leaves the limb listed as it was: the limb is there,
+    /// and the refusal is for the call that acts on it to report.
     pub fn limbs(&self) -> Vec<LimbCard> {
         self.registry
             .list()
             .iter()
-            .map(|limb| self.card(limb))
+            .filter_map(|limb| {
+                let selector = Selector {
+                    limb_id: Some(limb.id().to_string()),
+                    ..Selector::default()
+                };
+                match self.resolve(&selector) {
+                    Ok(resolved) => Some(self.card(&resolved)),
+                    Err(gone) if gone.code == codes::LIMB_GONE => None,
+                    Err(_) => Some(self.card(limb)),
+                }
+            })
             .collect()
     }
 
