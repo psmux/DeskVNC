@@ -4993,7 +4993,7 @@ fn partly_refused(
             } else {
                 let why = cause_only(why);
                 format!(
-                    "typed {went} of {total} characters, then the rest was refused: {why}. Typed: {typed:?}. Not typed: {rest:?}. Take one screenshot (dvv_screen, or dvv screen in a shell) and check what has focus, then type only the text that was not typed, {rest:?}. Sending the same call again would type {typed:?} a second time"
+                    "typed {went} of {total} characters, then the rest was refused: {why}. Typed: {typed:?}. Not typed: {rest:?}. Take one screenshot (dvv_screen, or dvv screen in a shell) and check what has focus, then type only the text that was not typed, {rest:?}. Repeating the whole call would type {typed:?} a second time"
                 )
             }
         }
