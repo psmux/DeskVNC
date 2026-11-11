@@ -1,17 +1,17 @@
 #![forbid(unsafe_code)]
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{anyhow, bail, ensure, Result};
 use boundary_session::{
-    Abilities, Button, ClipboardRights, Event, HostOptions, Input, Invitation, Key, LinkLost,
-    Session, Update,
     tools::{Client, Reply, Request},
     unattended::{self, SecretKey},
+    Abilities, Button, ClipboardRights, Event, HostOptions, Input, Invitation, Key, LinkLost,
+    Session, Update,
 };
 use parking_lot::Mutex;
 use remote_core::{
-    ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch, ProtocolDriver, ProtocolKind,
-    ReconnectPolicy, Rect, RectPayload, SessionEvent, SessionHandle, SessionState,
-    reconnect::STABLE_UPTIME,
+    reconnect::STABLE_UPTIME, ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch,
+    ProtocolDriver, ProtocolKind, ReconnectPolicy, Rect, RectPayload, SessionEvent, SessionHandle,
+    SessionState,
 };
 use std::{
     collections::HashMap,
