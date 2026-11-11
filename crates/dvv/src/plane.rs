@@ -1135,7 +1135,7 @@ impl SessionSource for ShellSource {
             (None, None) => {
                 return Err(ToolError::bad_request(
                     "dvv_open needs a hostId from dvv_hosts, or an address with a protocol",
-                ))
+                ));
             }
         }
         // Attach first, always. Slot 0 adopts whatever is already live
@@ -1315,7 +1315,7 @@ impl SessionSource for ShellSource {
             Err(error) if error.code == codes::NOT_IMPLEMENTED => {
                 return Err(ToolError::not_implemented(
                     "this DeskVNCViewer is older than this dvv and does not hand the remote clipboard to agents. Update DeskVNCViewer, or ask the user to read it there",
-                ))
+                ));
             }
             Err(error) => return Err(error),
         };
@@ -1901,7 +1901,7 @@ impl FrameSource for ShellFrames {
             (Some(_), Some(s)) if (s - 1.0).abs() > f32::EPSILON => {
                 return Err(PerceptionUnavailable(format!(
                     "a region read is native resolution and this one asked for scale {s}; ask for the region at 1.0 and downscale nothing, or ask for the whole frame at a long edge"
-                )))
+                )));
             }
             (Some(rect), _) => {
                 params["kind"] = serde_json::json!("region");
@@ -2593,7 +2593,7 @@ fn run_from(answer: &serde_json::Value) -> Result<remote_core::intent::CommandRu
         other => {
             return Err(format!(
                 "`status.source` was {other:?}, which is a provenance this build does not know. It is refused rather than mapped onto the nearest tier, because the tiers are not equivalent"
-            ))
+            ));
         }
     };
     let unanswered = match status.get("unanswered").and_then(serde_json::Value::as_str) {
@@ -2604,7 +2604,7 @@ fn run_from(answer: &serde_json::Value) -> Result<remote_core::intent::CommandRu
         Some(other) => {
             return Err(format!(
                 "`status.unanswered` was {other:?}, which is a reason this build does not know"
-            ))
+            ));
         }
     };
     let code = match status.get("code") {
@@ -4027,13 +4027,13 @@ impl Plane {
             frame,
             locks: Observation::pending(),
             damage: match limb.observatory().damage_now() {
-                Some(damage) => limb_core::availability::Availability::live(
-                    crate::observation::Damage {
+                Some(damage) => {
+                    limb_core::availability::Availability::live(crate::observation::Damage {
                         union: damage.bounds.into(),
                         rects: damage.rects.len() as u32,
                         coverage: damage.coverage,
-                    },
-                ),
+                    })
+                }
                 None => limb_core::availability::Availability::unknown(
                     "no damage has arrived on this limb yet, and an absence of damage is not evidence the screen is still: a server whose damage tracking cannot be trusted sends nothing either",
                 ),
@@ -4991,8 +4991,9 @@ fn partly_refused(
             if went == 0 {
                 format!("nothing was typed: {why}. Not typed: {rest:?}")
             } else {
+                let why = cause_only(why);
                 format!(
-                    "typed {went} of {total} characters, then the rest was refused: {why}. Typed: {typed:?}. Not typed: {rest:?}. Look at the screen, then type only the part that was not typed"
+                    "typed {went} of {total} characters, then the rest was refused: {why}. Typed: {typed:?}. Not typed: {rest:?}. Take one screenshot (dvv_screen, or dvv screen in a shell) and check what has focus, then type only the text that was not typed, {rest:?}. Sending the same call again would type {typed:?} a second time"
                 )
             }
         }
@@ -5003,6 +5004,35 @@ fn partly_refused(
         _ => format!("part of this action did not reach the machine: {why}"),
     };
     ToolError::new(refused.code.clone(), message)
+}
+
+/// The far side's reason for a refusal, without what it says to do next.
+///
+/// A refusal that stops typing partway was written for one that stopped all
+/// of it: the typing fence says "Nothing was typed" and "send the same call
+/// again". Quoted whole after "typed 3 of 10 characters", an agent that did
+/// as it said typed the first three twice. So the sentences from the first
+/// that says nothing went, or to send the call again, are left out.
+fn cause_only(why: &str) -> &str {
+    let mut end = why.len();
+    let mut start = 0;
+    for (at, _) in why.match_indices(". ") {
+        let sentence = &why[start..at];
+        if says_resend(sentence) {
+            end = start;
+            break;
+        }
+        start = at + 2;
+    }
+    if end == why.len() && says_resend(&why[start..]) {
+        end = start;
+    }
+    why[..end].trim_end_matches([' ', '.'])
+}
+
+fn says_resend(sentence: &str) -> bool {
+    let sentence = sentence.to_ascii_lowercase();
+    sentence.contains("nothing was typed") || sentence.contains("same call again")
 }
 
 fn generation_from(quoted: u32, limb: &AttachedLimb) -> GeometryGeneration {
@@ -5160,6 +5190,29 @@ pub fn state_json(state: &SessionState) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The typing fence's sentences, cut to the reason when part of a type
+    /// went. Both are what `limb-core` really says, so a change to its words
+    /// that would bring "send the same call again" back fails here.
+    #[test]
+    fn a_partial_type_quotes_the_cause_and_not_the_resend() {
+        let mut fence = limb_core::fence::ContentFence::new();
+        let seen = fence.current();
+        let _ = fence.painted(1920 * 1080, 1920 * 1080);
+        let stale = fence.admit(Some(seen)).unwrap_err().to_string();
+        assert_eq!(
+            cause_only(&stale),
+            format!(
+                "the screen changed materially since this attachment last read it: it read content generation {} and the limb is now at {}",
+                seen.get(),
+                fence.current().get()
+            )
+        );
+        let blind = fence.admit(None).unwrap_err().to_string();
+        assert!(cause_only(&blind).starts_with("this attachment has never read this screen"));
+        assert!(!cause_only(&blind).contains("Nothing was typed"));
+        assert_eq!(cause_only("the session ended."), "the session ended");
+    }
 
     /// A terminal limb asked for its screen used to be told to open the
     /// machine again with perceive set, which a terminal can never satisfy.
