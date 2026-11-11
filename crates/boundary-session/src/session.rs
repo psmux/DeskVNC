@@ -1530,6 +1530,10 @@ where
     let mut last_change = Instant::now();
     let mut last: Option<Arc<Frame>> = None;
     let mut generation = permission.borrow().generation;
+    // After a typed character nothing more reaches the desktop until its
+    // gap has passed, and what waits is held here in order.
+    let mut held: Option<(u64, ToDesktop)> = None;
+    let mut text_at = Instant::now();
     while !cancel.is_cancelled() {
         let current = *permission.borrow();
         if current.generation != generation || last_input.elapsed() > Duration::from_secs(2) {
@@ -1538,13 +1542,27 @@ where
         }
         generation = current.generation;
         for _ in 0..128 {
-            let Ok((epoch, event)) = input.try_recv() else {
+            let Some((epoch, event)) = held.take().or_else(|| input.try_recv().ok()) else {
                 break;
             };
             if cancel.is_cancelled() {
                 break;
             }
+            if Instant::now() < text_at {
+                held = Some((epoch, event));
+                break;
+            }
             let event = match event {
+                ToDesktop::Input(Input::Text(text)) => {
+                    // One character at a time where the desktop needs a gap
+                    // between them, the rest held for the next turn.
+                    let (first, rest) = split_text(&text, desktop.0.as_ref());
+                    if !rest.is_empty() {
+                        held = Some((epoch, ToDesktop::Input(Input::Text(rest.to_owned()))));
+                    }
+                    text_at = Instant::now() + desktop.0.text_gap(first);
+                    Input::Text(first.to_owned())
+                }
                 ToDesktop::Input(event) => event,
                 ToDesktop::Paste(text) => {
                     if let Some(clipboard) = clipboard.as_mut() {
@@ -1615,12 +1633,23 @@ where
         }
         // Input is looked for at least every millisecond: waiting up to four
         // here held each pointer move and key back two on average.
-        let wait = capture_at
+        let mut wait = capture_at
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(1));
+        if held.is_some() {
+            wait = wait.min(text_at.saturating_duration_since(Instant::now()));
+        }
         std::thread::sleep(wait.max(Duration::from_micros(500)));
     }
     Ok(())
+}
+/// The first character of `text` and the rest, where the desktop wants a gap
+/// between characters, or the whole text where it does not.
+fn split_text<'a>(text: &'a str, desktop: &dyn Desktop) -> (&'a str, &'a str) {
+    match text.char_indices().nth(1) {
+        Some((at, _)) if !desktop.text_gap(&text[..at]).is_zero() => text.split_at(at),
+        _ => (text, ""),
+    }
 }
 /// How long one screen may take to reach the helper before it is given up.
 /// A whole screen is several hundred kilobytes, and on a slow uplink, such as
@@ -2944,5 +2973,109 @@ mod relay_tests {
         })
         .await
         .context("timed out")?
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+    use crate::Key;
+
+    /// A desktop that notes when each input reached it and wants 30 ms after
+    /// each typed character.
+    struct Typist(Arc<Mutex<Vec<(Instant, Input)>>>);
+    impl Desktop for Typist {
+        fn capture(&mut self) -> Result<Frame> {
+            Ok(Frame {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+            })
+        }
+        fn input(&mut self, input: Input) -> Result<()> {
+            self.0.lock().unwrap().push((Instant::now(), input));
+            Ok(())
+        }
+        fn text_gap(&self, _text: &str) -> Duration {
+            GAP
+        }
+        fn release(&mut self) {}
+    }
+    const GAP: Duration = Duration::from_millis(30);
+
+    /// Input piles up while a screen is captured and reached the desktop in
+    /// one burst, so a Windows program that reads a typed character late
+    /// wrote "0123" as "3333". Each character now waits for the desktop's
+    /// gap after the one before, text sent as one string is typed a
+    /// character at a time, and a key sent after the text stays behind it.
+    #[test]
+    fn typed_characters_reach_the_desktop_apart_and_in_order() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (input_tx, input_rx) = mpsc::channel(128);
+        let (_permission_tx, permission_rx) = watch::channel(Permission {
+            allowed: true,
+            generation: 0,
+        });
+        let (screens_tx, _screens_rx) = watch::channel(None);
+        let (encoders_tx, _encoders_rx) = oneshot::channel();
+        let (opened_tx, _opened_rx) = oneshot::channel();
+        let cancel = CancellationToken::new();
+        // All of it is waiting before the desktop looks, as after a capture.
+        for c in ["0", "1", "2"] {
+            input_tx
+                .try_send((0, ToDesktop::Input(Input::Text(c.into()))))
+                .unwrap();
+        }
+        input_tx
+            .try_send((0, ToDesktop::Input(Input::Text("3é".into()))))
+            .unwrap();
+        input_tx
+            .try_send((
+                0,
+                ToDesktop::Input(Input::Key {
+                    key: Key::Enter,
+                    down: true,
+                }),
+            ))
+            .unwrap();
+        let worker = std::thread::spawn({
+            let seen = seen.clone();
+            let cancel = cancel.clone();
+            move || {
+                desktop_loop(
+                    move || Ok(Box::new(Typist(seen)) as Box<dyn Desktop>),
+                    input_rx,
+                    permission_rx,
+                    screens_tx,
+                    encoders_tx,
+                    opened_tx,
+                    Arc::new(Mutex::new(Some(Vec::new()))),
+                    None,
+                    cancel,
+                )
+            }
+        });
+        let started = Instant::now();
+        while seen.lock().unwrap().len() < 6 && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cancel.cancel();
+        worker.join().unwrap().unwrap();
+        let seen = seen.lock().unwrap();
+        let got: Vec<String> = seen
+            .iter()
+            .map(|(_, input)| match input {
+                Input::Text(text) => text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            ["0", "1", "2", "3", "é", "Key { key: Enter, down: true }"]
+        );
+        for pair in seen.windows(2) {
+            let apart = pair[1].0 - pair[0].0;
+            assert!(apart >= GAP, "{:?} then {:?} only {apart:?} apart", pair[0].1, pair[1].1);
+        }
     }
 }

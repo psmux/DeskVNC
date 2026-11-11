@@ -759,6 +759,9 @@ impl Desktop for NativeDesktop {
         }
         Ok(())
     }
+    fn text_gap(&self, text: &str) -> std::time::Duration {
+        text_gap(text)
+    }
     fn video(&self) -> Option<boundary_session::video::VideoEncoders> {
         Some(video::encoders())
     }
@@ -828,6 +831,35 @@ impl Drop for NativeDesktop {
         self.release();
     }
 }
+/// How long to wait after typing `text` on Windows, where enigo types every
+/// character as VK_PACKET. Windows 11 Notepad reads such a character when it
+/// gets to it, and one that arrives before it has taken the last comes out
+/// as a copy of a later one ("abc" as "bbc", "0123" as "3333"). Typed into
+/// Notepad on a 6 core desktop while UI Automation read its text every
+/// 31 ms, 300 characters came out with 171 wrong at 4 ms apart, and 1116
+/// came out right at 20 ms. A character after a space waits longer: Notepad
+/// checks the word just ended then, and now and then it dropped the next
+/// character even at 25 or 30 ms ("1122" as "122"). 60 ms after a space
+/// dropped none.
+#[cfg(windows)]
+fn text_gap(text: &str) -> std::time::Duration {
+    if text.ends_with(char::is_whitespace) {
+        WORD_GAP
+    } else {
+        CHARACTER_GAP
+    }
+}
+#[cfg(not(windows))]
+fn text_gap(_text: &str) -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+/// The wait after a typed character on Windows, about fifty characters a
+/// second.
+#[cfg(windows)]
+const CHARACTER_GAP: std::time::Duration = std::time::Duration::from_millis(20);
+/// The wait after a typed space, tab or line on Windows.
+#[cfg(windows)]
+const WORD_GAP: std::time::Duration = std::time::Duration::from_millis(60);
 fn direction(down: bool) -> Direction {
     if down {
         Direction::Press

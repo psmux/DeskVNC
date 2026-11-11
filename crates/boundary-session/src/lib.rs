@@ -45,6 +45,16 @@ pub trait Desktop {
         None
     }
     fn input(&mut self, input: Input) -> Result<()>;
+    /// How long to wait after typing `text` before sending anything more.
+    /// Input reaches the desktop in bursts, since it piles up while a screen
+    /// is captured, and some programs read a typed character only when they
+    /// get to it: Windows 11 Notepad, handed characters as VK_PACKET 4 ms
+    /// apart, wrote "0123456789" as "9999999999". Zero, the default, sends
+    /// input as fast as it arrives.
+    fn text_gap(&self, text: &str) -> std::time::Duration {
+        let _ = text;
+        std::time::Duration::ZERO
+    }
     fn release(&mut self);
     /// How to make an H.264 encoder for this desktop's screens, for a helper
     /// that decodes video. `None`, the default, sends rectangles only.
