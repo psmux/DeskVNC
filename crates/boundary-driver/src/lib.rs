@@ -177,13 +177,19 @@ impl ProtocolDriver for BoundaryDriver {
                             unattended::connect_with(
                                 machine.clone(),
                                 name,
-                                options.credentials.password.clone().filter(|p| !p.is_empty()),
+                                options
+                                    .credentials
+                                    .password
+                                    .clone()
+                                    .filter(|p| !p.is_empty()),
                                 key,
                                 HostOptions::default(),
                                 ABILITIES,
                             )
                         }
-                        None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
+                        None => bail!(
+                            "This support invitation is no longer available. Paste a new invitation in the Library"
+                        ),
                     };
                     drive(
                         &mut session,
@@ -665,6 +671,9 @@ async fn drive(
 struct InputState {
     buttons: u16,
     modifiers: u8,
+    /// Letters and digits sent down as keys, for shortcuts, so each gets
+    /// its release however the modifiers changed meanwhile.
+    letters: Vec<char>,
 }
 impl InputState {
     fn translate(&mut self, command: ClientCommand, size: (u16, u16)) -> Vec<Input> {
@@ -683,11 +692,15 @@ impl InputState {
                         });
                     }
                 }
+                // One press of RFB wheel button 4 or 5 is one click of the
+                // wheel, and one click is one notch on the computer, which
+                // scrolls as far as that computer's own wheel would. Three
+                // here scrolled nine lines a click on Windows.
                 if button_mask & 8 != 0 && self.buttons & 8 == 0 {
-                    out.push(Input::Scroll { lines: -3 });
+                    out.push(Input::Scroll { lines: -1 });
                 }
                 if button_mask & 16 != 0 && self.buttons & 16 == 0 {
-                    out.push(Input::Scroll { lines: 3 });
+                    out.push(Input::Scroll { lines: 1 });
                 }
                 self.buttons = button_mask;
             }
@@ -732,12 +745,27 @@ impl InputState {
                         keysym
                     };
                     if let Some(c) = char::from_u32(code).filter(|c| !c.is_control()) {
-                        if c.is_ascii_alphanumeric() && (self.modifiers != 0 || !down) {
+                        let letter = c.to_ascii_lowercase();
+                        if c.is_ascii_alphanumeric() && down && self.modifiers != 0 {
+                            self.letters.push(letter);
                             out.push(Input::Key {
-                                key: Key::Letter(c.to_ascii_lowercase()),
+                                key: Key::Letter(letter),
                                 down,
                             });
-                        } else if down {
+                        } else if !down {
+                            // Only a key sent down is let go. A typed
+                            // character went as text, whole, when it was
+                            // pressed, and releasing a key the computer
+                            // never saw pressed reached Windows as a stray
+                            // key up between two typed characters.
+                            if let Some(at) = self.letters.iter().position(|l| *l == letter) {
+                                self.letters.remove(at);
+                                out.push(Input::Key {
+                                    key: Key::Letter(letter),
+                                    down,
+                                });
+                            }
+                        } else {
                             out.push(Input::Text(c.to_string()));
                         }
                     }
@@ -853,6 +881,90 @@ mod tests {
         );
         assert!(matches!(&events[0], Input::Text(s) if s == "λ"));
     }
+    fn key(state: &mut InputState, keysym: u32, down: bool) -> Vec<Input> {
+        state.translate(
+            ClientCommand::Key {
+                keysym,
+                keycode: None,
+                down,
+            },
+            (640, 360),
+        )
+    }
+
+    /// `dvv type` and a person typing both press and release each key. A
+    /// letter or digit went down as text and came up as a key release the
+    /// computer never saw pressed, which reached Windows as a stray key up
+    /// between two typed characters.
+    #[test]
+    fn a_typed_character_is_one_text_event_and_nothing_on_release() {
+        let mut state = InputState::default();
+        for c in "aZ0@é".chars() {
+            let keysym = if c.is_ascii() {
+                c as u32
+            } else {
+                0x0100_0000 | c as u32
+            };
+            let pressed = key(&mut state, keysym, true);
+            assert!(
+                matches!(pressed.as_slice(), [Input::Text(s)] if *s == c.to_string()),
+                "{c} pressed: {pressed:?}"
+            );
+            let released = key(&mut state, keysym, false);
+            assert!(released.is_empty(), "{c} released: {released:?}");
+        }
+    }
+
+    /// A shortcut goes as keys, and its letter is let go even when Control
+    /// comes up first.
+    #[test]
+    fn a_shortcut_letter_is_released_after_its_modifier() {
+        let mut state = InputState::default();
+        key(&mut state, 0xffe3, true);
+        let pressed = key(&mut state, 's' as u32, true);
+        assert!(matches!(
+            pressed.as_slice(),
+            [Input::Key {
+                key: Key::Letter('s'),
+                down: true
+            }]
+        ));
+        key(&mut state, 0xffe3, false);
+        let released = key(&mut state, 's' as u32, false);
+        assert!(matches!(
+            released.as_slice(),
+            [Input::Key {
+                key: Key::Letter('s'),
+                down: false
+            }]
+        ));
+        assert!(key(&mut state, 's' as u32, false).is_empty());
+    }
+
+    /// A viewer sends a wheel click as RFB button 4 or 5 pressed and let
+    /// go. Each click is one notch on the computer: three made one click
+    /// scroll nine lines on Windows, which turns a notch into three lines.
+    #[test]
+    fn one_wheel_click_is_one_notch() {
+        let mut state = InputState::default();
+        let mut scrolled = Vec::new();
+        for button_mask in [8, 0, 16, 0, 16, 0] {
+            for event in state.translate(
+                ClientCommand::Pointer {
+                    x: 10,
+                    y: 10,
+                    button_mask,
+                },
+                (640, 360),
+            ) {
+                if let Input::Scroll { lines } = event {
+                    scrolled.push(lines);
+                }
+            }
+        }
+        assert_eq!(scrolled, [-1, 1, 1]);
+    }
+
     #[test]
     fn bad_invitation_is_never_registered() {
         let driver = BoundaryDriver::default();

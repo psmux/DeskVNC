@@ -593,6 +593,17 @@ impl FakeSource {
         );
     }
 
+    /// The person ended this session in the application, as End session in
+    /// DeskVNC Support does: the application no longer has it open, and the
+    /// relay that carried the limb's commands stops.
+    pub fn end_in_app(&self, limb: &str) {
+        lock(&self.live).remove(limb);
+        lock(&self.channels).remove(limb);
+        if let Some(recorder) = lock(&self.recorders).get(limb) {
+            lock(&recorder.receiver).close();
+        }
+    }
+
     /// Every session `close` ended, in order.
     pub fn closed_sessions(&self) -> Vec<String> {
         lock(&self.closed).clone()
