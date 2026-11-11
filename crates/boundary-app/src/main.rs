@@ -1286,9 +1286,11 @@ impl App {
                         self.send(Input::Key { key, down: pressed });
                     }
                 }
+                // One wheel event, one notch on the computer, which scrolls
+                // as far as its own wheel would.
                 egui::Event::MouseWheel { delta, .. } if response.hovered() && delta.y != 0.0 => {
                     self.send(Input::Scroll {
-                        lines: if delta.y > 0.0 { -3 } else { 3 },
+                        lines: if delta.y > 0.0 { -1 } else { 1 },
                     });
                 }
                 _ => {}

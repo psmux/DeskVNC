@@ -692,11 +692,15 @@ impl InputState {
                         });
                     }
                 }
+                // One press of RFB wheel button 4 or 5 is one click of the
+                // wheel, and one click is one notch on the computer, which
+                // scrolls as far as that computer's own wheel would. Three
+                // here scrolled nine lines a click on Windows.
                 if button_mask & 8 != 0 && self.buttons & 8 == 0 {
-                    out.push(Input::Scroll { lines: -3 });
+                    out.push(Input::Scroll { lines: -1 });
                 }
                 if button_mask & 16 != 0 && self.buttons & 16 == 0 {
-                    out.push(Input::Scroll { lines: 3 });
+                    out.push(Input::Scroll { lines: 1 });
                 }
                 self.buttons = button_mask;
             }
@@ -935,6 +939,30 @@ mod tests {
             }]
         ));
         assert!(key(&mut state, 's' as u32, false).is_empty());
+    }
+
+    /// A viewer sends a wheel click as RFB button 4 or 5 pressed and let
+    /// go. Each click is one notch on the computer: three made one click
+    /// scroll nine lines on Windows, which turns a notch into three lines.
+    #[test]
+    fn one_wheel_click_is_one_notch() {
+        let mut state = InputState::default();
+        let mut scrolled = Vec::new();
+        for button_mask in [8, 0, 16, 0, 16, 0] {
+            for event in state.translate(
+                ClientCommand::Pointer {
+                    x: 10,
+                    y: 10,
+                    button_mask,
+                },
+                (640, 360),
+            ) {
+                if let Input::Scroll { lines } = event {
+                    scrolled.push(lines);
+                }
+            }
+        }
+        assert_eq!(scrolled, [-1, 1, 1]);
     }
 
     #[test]
