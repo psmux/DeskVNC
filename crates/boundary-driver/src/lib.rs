@@ -1,17 +1,17 @@
 #![forbid(unsafe_code)]
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{Result, anyhow, bail, ensure};
 use boundary_session::{
-    tools::{Client, Reply, Request},
-    unattended::{self, SecretKey},
     Abilities, Button, ClipboardRights, Event, HostOptions, Input, Invitation, Key, LinkLost,
     Session, Update,
+    tools::{Client, Reply, Request},
+    unattended::{self, SecretKey},
 };
 use parking_lot::Mutex;
 use remote_core::{
-    reconnect::STABLE_UPTIME, ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch,
-    ProtocolDriver, ProtocolKind, ReconnectPolicy, Rect, RectPayload, SessionEvent, SessionHandle,
-    SessionState,
+    ClientCommand, ConnectOptions, DecodedRect, OptionsMismatch, ProtocolDriver, ProtocolKind,
+    ReconnectPolicy, Rect, RectPayload, SessionEvent, SessionHandle, SessionState,
+    reconnect::STABLE_UPTIME,
 };
 use std::{
     collections::HashMap,
@@ -177,13 +177,19 @@ impl ProtocolDriver for BoundaryDriver {
                             unattended::connect_with(
                                 machine.clone(),
                                 name,
-                                options.credentials.password.clone().filter(|p| !p.is_empty()),
+                                options
+                                    .credentials
+                                    .password
+                                    .clone()
+                                    .filter(|p| !p.is_empty()),
                                 key,
                                 HostOptions::default(),
                                 ABILITIES,
                             )
                         }
-                        None => bail!("This support invitation is no longer available. Paste a new invitation in the Library"),
+                        None => bail!(
+                            "This support invitation is no longer available. Paste a new invitation in the Library"
+                        ),
                     };
                     drive(
                         &mut session,
@@ -890,7 +896,11 @@ mod tests {
     fn a_typed_character_is_one_text_event_and_nothing_on_release() {
         let mut state = InputState::default();
         for c in "aZ0@é".chars() {
-            let keysym = if c.is_ascii() { c as u32 } else { 0x0100_0000 | c as u32 };
+            let keysym = if c.is_ascii() {
+                c as u32
+            } else {
+                0x0100_0000 | c as u32
+            };
             let pressed = key(&mut state, keysym, true);
             assert!(
                 matches!(pressed.as_slice(), [Input::Text(s)] if *s == c.to_string()),

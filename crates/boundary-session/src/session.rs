@@ -3075,7 +3075,12 @@ mod typing_tests {
         );
         for pair in seen.windows(2) {
             let apart = pair[1].0 - pair[0].0;
-            assert!(apart >= GAP, "{:?} then {:?} only {apart:?} apart", pair[0].1, pair[1].1);
+            assert!(
+                apart >= GAP,
+                "{:?} then {:?} only {apart:?} apart",
+                pair[0].1,
+                pair[1].1
+            );
         }
     }
 }
