@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod agent;
+pub(crate) mod body;
 pub mod boundary;
 pub mod capture;
 pub mod credentials;

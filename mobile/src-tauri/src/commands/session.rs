@@ -18,7 +18,7 @@ use remote_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 
@@ -504,10 +504,8 @@ pub async fn session_input(
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
     let session_id = header(&request, "x-session-id").ok_or("missing x-session-id header")?;
-    let body = match request.body() {
-        InvokeBody::Raw(bytes) => bytes.as_slice(),
-        InvokeBody::Json(_) => return Err("session_input expects a raw binary body".into()),
-    };
+    // Raw on iOS, a JSON array of numbers on Android: see `body.rs`.
+    let body = super::body::bytes(request.body(), "session_input")?;
     let seq = header(&request, "x-input-seq").and_then(|v| v.parse::<u64>().ok());
     let order = seq.map(|_| {
         input_orders()
@@ -526,7 +524,7 @@ pub async fn session_input(
         _ => None,
     };
 
-    let commands = framing::decode_input(body)?;
+    let commands = framing::decode_input(&body)?;
     let (sender, last_mask) = {
         let sessions = state.sessions.lock();
         let s = sessions
@@ -739,10 +737,8 @@ pub async fn session_snapshot(
     let height: u32 = header(&request, "x-height")
         .and_then(|v| v.parse().ok())
         .ok_or("missing or invalid x-height header")?;
-    let rgba = match request.body() {
-        InvokeBody::Raw(bytes) => bytes.clone(),
-        InvokeBody::Json(_) => return Err("session_snapshot expects a raw RGBA body".into()),
-    };
+    // Raw on iOS, base64 text from the Android UI: see `body.rs`.
+    let rgba = super::body::bytes(request.body(), "session_snapshot")?.into_owned();
     thumbs::validate(width, height, rgba.len())?;
     let host_id = {
         let sessions = state.sessions.lock();
