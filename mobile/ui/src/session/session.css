@@ -720,6 +720,15 @@
   color: var(--s-ink-dim);
 }
 
+.dv-s-note.is-problem {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  color: var(--s-danger);
+  background: color-mix(in srgb, var(--s-danger) 12%, var(--s-surface-2));
+  font-weight: 600;
+}
+
 .dv-s-callout {
   margin: 0;
   padding: 12px 14px;

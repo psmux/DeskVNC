@@ -111,6 +111,7 @@ fn build_state(app: &tauri::App) -> Result<AppState, Box<dyn std::error::Error>>
 pub fn run() {
     init_logging();
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let state = build_state(app)?;
             install_boundary(&state);
