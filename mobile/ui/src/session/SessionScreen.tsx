@@ -57,6 +57,7 @@ import { Sheet as SessionSheet } from "./ui/Sheet";
 import { CertificateSheet } from "../components/sheets/CertificateSheet";
 import { CredentialSheet } from "../components/sheets/CredentialSheet";
 import { LAYER, useBack } from "../lib/back";
+import { sessionBackStep } from "./back";
 import { readPrefs, usePrefs } from "../lib/prefs";
 import { Toolbar, type ToolbarAction } from "./ui/Toolbar";
 import "./session.css";
@@ -797,16 +798,23 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     setAskLeave(false);
   }, [s.phase, openKeyboard]);
 
-  // Android Back: close whatever is open over the desktop first. On a live
-  // desktop ask before leaving, and a second Back leaves. Anywhere else
-  // (connecting, failed, ended) it leaves at once. It never closes the app.
+  // Android Back: see `sessionBackStep`. Back on the Leave prompt closes it
+  // and stays; only its Leave button leaves.
   useBack(true, LAYER.session, () => {
-    if (askLeave) return void leave();
-    if (sheet) return setSheet(null);
-    if (toolbarOpen) return setToolbarOpen(false);
-    if (coach) return setCoach(null);
-    if (s.phase === "connected") return setAskLeave(true);
-    void leave();
+    switch (sessionBackStep({ askLeave, sheet: sheet !== null, toolbarOpen, coach: coach !== null, connected: s.phase === "connected" })) {
+      case "close-leave":
+        return setAskLeave(false);
+      case "close-sheet":
+        return setSheet(null);
+      case "close-toolbar":
+        return setToolbarOpen(false);
+      case "close-coach":
+        return setCoach(null);
+      case "ask-leave":
+        return setAskLeave(true);
+      case "leave":
+        return void leave();
+    }
   });
 
   const onTool = useCallback(

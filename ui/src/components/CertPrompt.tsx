@@ -28,6 +28,15 @@ export interface CertPromptData {
   certificate?: CertificateDigests | null;
 }
 
+/**
+ * RSA-AES (VNC security types 5 and 129) and macOS Screen Sharing send a
+ * bare RSA key with no certificate around it, so the copy says key for
+ * those. The phone app's CertificateSheet makes the same split.
+ */
+export function isRawKey(scheme: PinScheme): boolean {
+  return scheme === "ra2" || scheme === "apple-rsa";
+}
+
 export function CertPrompt({
   data,
   onTrust,
@@ -58,7 +67,7 @@ export function CertPrompt({
               <IconAlert size={20} />
             </span>
             <p className="text-sm text-primary">
-              <strong>{data.hostName}</strong> is presenting a different certificate than the one
+              <strong>{data.hostName}</strong> is presenting a different {isRawKey(data.scheme) ? "key" : "certificate"} than the one
               you trusted before. This can mean the server was reinstalled, or that someone is
               intercepting your connection. <strong>Do not continue unless you know why this
               changed.</strong>

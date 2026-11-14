@@ -22,6 +22,21 @@ export function formatFingerprint(fp: string): string {
   return (hex.match(/.{1,2}/g) ?? []).join(" ");
 }
 
+/**
+ * RSA-AES (VNC security types 5 and 129) and macOS Screen Sharing send a
+ * bare RSA key with no certificate around it. Their `subject` describes the
+ * key, for example "RSA-AES server key (2048-bit)", and calling that a name
+ * on a certificate was wrong.
+ */
+export function isRawKey(scheme: string): boolean {
+  return scheme === "ra2" || scheme === "apple-rsa";
+}
+
+/** The label over `subject` in More details. */
+export function subjectLabel(scheme: string): string {
+  return isRawKey(scheme) ? "Kind of key" : "Name on its certificate";
+}
+
 interface Props {
   open: boolean;
   prompt: CertificatePrompt | null;
@@ -52,8 +67,12 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
         </button>
         {details && prompt && (
           <div className="rounded-[10px] bg-surface-2 p-4 text-footnote">
-            <p className="text-ink-dim">Name on its certificate</p>
-            <p className="mb-3 break-all font-medium">{prompt.subject}</p>
+            {prompt.subject ? (
+              <>
+                <p className="text-ink-dim">{subjectLabel(prompt.scheme)}</p>
+                <p className="mb-3 break-all font-medium">{prompt.subject}</p>
+              </>
+            ) : null}
             <p className="text-ink-dim">Fingerprint</p>
             <p className="break-all font-mono text-caption leading-relaxed">{formatFingerprint(prompt.fingerprint)}</p>
           </div>

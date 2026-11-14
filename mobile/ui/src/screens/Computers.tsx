@@ -135,7 +135,10 @@ export function Computers() {
             </Button>
           </div>
         )}
-        {!query && prefs.showDemo && <DemoCard onConnect={demo} onHide={hideDemo} />}
+        {/* Only once the list is in. Before that the grid held the demo card
+            alone, in the first slot, and when the saved computers arrived
+            it was drawn over the first of them. */}
+        {app.loaded && !query && prefs.showDemo && <DemoCard onConnect={demo} onHide={hideDemo} />}
       </div>
 
       <ActionSheet
