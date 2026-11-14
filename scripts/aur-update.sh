@@ -55,7 +55,8 @@ mkdir -p "$out"
 
 # The runtime dependencies are the libraries the release binaries link
 # against, plus the ones the app opens at run time (the tray icon library,
-# X11 and XInput). The .deb control file only names webkit2gtk, gtk3 and
+# X11 and XInput). namcap cannot see those three and calls them unneeded;
+# keep them. The .deb control file only names webkit2gtk, gtk3 and
 # appindicator; Debian pulls the rest in through those. Arch ships the
 # Ayatana flavour of appindicator, which the tray code tries first.
 cat > "$out/PKGBUILD" <<EOF
@@ -75,14 +76,16 @@ license=('MIT OR Apache-2.0')
 depends=(
   'cairo'
   'dbus'
-  'gcc-libs'
   'gdk-pixbuf2'
   'glib2'
   'glibc'
   'gtk3'
+  'hicolor-icon-theme'
   'libayatana-appindicator'
+  'libgcc'
   'libpipewire'
   'libsoup3'
+  'libstdc++'
   'libx11'
   'libxi'
   'libxkbcommon'
@@ -145,14 +148,16 @@ pkgbase = $pkgname
 	license = MIT OR Apache-2.0
 	depends = cairo
 	depends = dbus
-	depends = gcc-libs
 	depends = gdk-pixbuf2
 	depends = glib2
 	depends = glibc
 	depends = gtk3
+	depends = hicolor-icon-theme
 	depends = libayatana-appindicator
+	depends = libgcc
 	depends = libpipewire
 	depends = libsoup3
+	depends = libstdc++
 	depends = libx11
 	depends = libxi
 	depends = libxkbcommon
