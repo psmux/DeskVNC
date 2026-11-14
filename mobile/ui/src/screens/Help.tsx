@@ -1,7 +1,8 @@
 /**
- * Help someone with a Boundary code: they read it out, you tap it in on a
- * big number pad, the digits drop into three groups of four, and one press
- * connects. A pasted invitation works too.
+ * Help someone with DeskVNC Support. They press Create invitation and send
+ * the `boundary1:` invitation; you paste it, into the field or with the Paste
+ * button, and one press connects. When their Support has a code service it
+ * shows a 12 digit code instead, which goes in on the big number pad.
  */
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useState } from "react";
@@ -12,6 +13,7 @@ import { Button } from "../components/Button";
 import { ConnectingSteps } from "../components/ConnectingSteps";
 import { Field } from "../components/Field";
 import { Sheet } from "../components/Sheet";
+import { clipboardMessage, readClipboard } from "../lib/clipboard";
 import { CODE_DIGITS, codeBoxes, codeDigits, formatCode, isCompleteCode, readPastedHelp } from "../lib/code";
 import { haptic } from "../lib/haptics";
 import { setPrefs, usePrefs } from "../lib/prefs";
@@ -46,27 +48,42 @@ export function Help() {
     setDigits((cur) => cur.slice(0, -1));
   }, []);
 
-  const paste = async () => {
-    let text = "";
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      // Not allowed: say so below.
-    }
-    const found = readPastedHelp(text ?? "");
+  const [typed, setTyped] = useState("");
+
+  /** Take an invitation or a code out of pasted or typed text. True when one was found. */
+  const take = (text: string): boolean => {
+    const found = readPastedHelp(text);
     if (found.kind === "code") {
       haptic("success");
       setDigits(found.digits);
       setInvitation(null);
+      setTyped("");
       setNote(null);
-    } else if (found.kind === "invitation") {
+      return true;
+    }
+    if (found.kind === "invitation") {
       haptic("success");
       setInvitation(found.invitation);
       setDigits("");
+      setTyped("");
       setNote(null);
-    } else {
+      return true;
+    }
+    return false;
+  };
+
+  const paste = async () => {
+    let text = "";
+    try {
+      text = await readClipboard();
+    } catch (e) {
       haptic("warning");
-      setNote("There is no code on your clipboard. Copy their message first, or type the numbers.");
+      setNote(clipboardMessage(e));
+      return;
+    }
+    if (!take(text)) {
+      haptic("warning");
+      setNote("There is no invitation or code on your clipboard. Copy their message first, then tap Paste.");
     }
   };
 
@@ -124,9 +141,9 @@ export function Help() {
         <section className="mb-4 flex items-center gap-2 rounded-[14px] border border-line bg-surface p-2 pr-4 shadow-card @3xl:flex-col @3xl:p-6 @3xl:text-center">
           <ProtocolScene protocol="boundary" className="h-20 w-24 shrink-0 @3xl:h-auto @3xl:w-64" />
           <div>
-            <h2 className="text-headline @3xl:text-title2">Ask them for their code</h2>
+            <h2 className="text-headline @3xl:text-title2">Ask them for their invitation</h2>
             <p className="mt-1 text-subhead text-ink-dim @3xl:text-body">
-              They open DeskVNC Support, press Get a code and read you 12 numbers.
+              They open DeskVNC Support, press Create invitation, then Copy invitation, and send it to you. If they read you a 12 digit code instead, tap it in below.
             </p>
           </div>
         </section>
@@ -155,7 +172,40 @@ export function Help() {
               </button>
             </motion.div>
           ) : (
-            <CodeBoxes digits={digits} />
+            <>
+              <Field
+                label="Their invitation"
+                placeholder="boundary1:..."
+                value={typed}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="go"
+                onChange={(e) => {
+                  const text = e.target.value;
+                  // A paste lands all at once; typing is left alone until Enter or leaving the field.
+                  if (text.length - typed.length > 1 && take(text)) return;
+                  setTyped(text);
+                }}
+                onBlur={() => void (typed.trim() && take(typed))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && typed.trim() && !take(typed)) setNote("That is not an invitation. Copy the whole message they sent, starting boundary1:");
+                }}
+                hint={typed.trim() && !typed.trim().startsWith("boundary1:") ? "An invitation starts with boundary1:" : undefined}
+                trailing={
+                  <button
+                    type="button"
+                    aria-label="Paste their invitation"
+                    className="-mr-2 flex h-12 items-center gap-1.5 rounded-xl px-3 font-semibold text-accent"
+                    onClick={() => void paste()}
+                  >
+                    <IconPaste size={20} /> Paste
+                  </button>
+                }
+              />
+              <p className="mb-2 mt-4 px-1 text-footnote font-medium text-ink-dim">Or the 12 digit code they read you</p>
+              <CodeBoxes digits={digits} />
+            </>
           )}
 
           {note && <p className="mt-3 text-center text-subhead text-ink-dim">{note}</p>}
