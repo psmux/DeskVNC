@@ -118,7 +118,10 @@ mod tests {
             label(at("code", true, now), "invitation", "Copy invitation", now),
             "Copy invitation"
         );
-        assert_eq!(label(None, "invitation", "Copy invitation", now), "Copy invitation");
+        assert_eq!(
+            label(None, "invitation", "Copy invitation", now),
+            "Copy invitation"
+        );
     }
 
     /// The bug behind "can't copy or paste the invitation": with eframe's

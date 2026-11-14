@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "agent-lease"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "agent-perception"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "image",
  "limb-core",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "agent-plane"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "bench-stage"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "softbuffer",
  "sysinfo",
@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "boundary"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "boundary-codes",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-codes"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-driver"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "boundary-session",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-platform"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-provision"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "boundary-session"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "deskvncviewer"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -2540,7 +2540,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dvv"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "agent-lease",
  "agent-perception",
@@ -3035,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "fastlane-plan"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "fastlane-sense"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "serde_json",
  "windows 0.62.2",
@@ -5086,7 +5086,7 @@ dependencies = [
 
 [[package]]
 name = "limb-core"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "agent-lease",
  "bytes",
@@ -5137,7 +5137,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "local-pipe"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "tokio",
  "windows-sys 0.61.2",
@@ -7796,7 +7796,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-auth"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "aes 0.9.4",
  "cbc",
@@ -7821,7 +7821,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-codecs"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "criterion",
  "hex",
@@ -7832,7 +7832,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-core"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -7861,7 +7861,7 @@ dependencies = [
 
 [[package]]
 name = "rdp-pdu"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "bytes",
  "hex",
@@ -7969,7 +7969,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remote-bench"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "anyhow",
  "bench-stage",
@@ -7993,7 +7993,7 @@ dependencies = [
 
 [[package]]
 name = "remote-core"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "agent-lease",
  "bytes",
@@ -8009,7 +8009,7 @@ dependencies = [
 
 [[package]]
 name = "remote-pixel"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "criterion",
 ]
@@ -9268,7 +9268,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-core"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "bytes",
  "parking_lot 0.13.0",
@@ -9327,7 +9327,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-transport"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "aes 0.9.4",
  "argon2",
@@ -10800,7 +10800,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vnc-core"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "aes 0.9.4",
  "byteorder",
@@ -10839,7 +10839,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-discovery"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "dns-lookup",
  "futures",
@@ -10860,7 +10860,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-files"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -10882,7 +10882,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-input-capture"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
@@ -10899,7 +10899,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-store"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -10924,7 +10924,7 @@ dependencies = [
 
 [[package]]
 name = "vnc-transport"
-version = "0.36.1"
+version = "0.36.2"
 dependencies = [
  "hex",
  "openssl",

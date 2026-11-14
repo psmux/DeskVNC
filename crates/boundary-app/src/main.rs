@@ -910,7 +910,10 @@ impl App {
                 ui.horizontal(|ui| {
                     theme::small(ui, "This computer's ID");
                     ui.monospace(unattended::short(self.unattended.machine_id()));
-                    if ui.small_button(self.copier.label("id", "Copy ID")).clicked() {
+                    if ui
+                        .small_button(self.copier.label("id", "Copy ID"))
+                        .clicked()
+                    {
                         let id = self.unattended.machine_id().to_owned();
                         self.copy(ui.ctx(), "id", &id);
                     }
