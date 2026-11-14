@@ -966,6 +966,25 @@ mod tests {
         assert!(!format!("{gateway:?}").contains("token-value"));
     }
 
+    /// The user name in that file is a broker's: its routing written into the
+    /// name with spaces and switches. mstsc sends it as the file has it, so
+    /// the import keeps it byte for byte and invents no domain from the `@`.
+    #[test]
+    fn a_broker_user_name_is_kept_as_the_file_has_it() {
+        let name = "access /i user@example.com /s site /d local /a i-0123456789abcdef0";
+        let import = parse(&format!(
+            "full address:s:10.0.0.5\nusername:s:{name}\n\
+             gatewayhostname:s:gw.example:443\ngatewayaccesstoken:s:access\n\
+             gatewaycredentialssource:i:5\ngatewayusagemethod:i:1\n"
+        ));
+        assert_eq!(import.username.as_deref(), Some(name));
+        let settings = settings_of(&import);
+        assert!(settings.options.domain.is_none());
+        let gateway = settings.options.gateway.expect("recorded");
+        assert_eq!(gateway.access_token.as_deref(), Some("access"));
+        assert!(!gateway.separate_credentials);
+    }
+
     #[test]
     fn promptcredentialonce_zero_gives_the_gateway_its_own_account() {
         let import = parse("gatewayhostname:s:gw\npromptcredentialonce:i:0\n");
