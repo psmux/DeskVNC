@@ -20,7 +20,7 @@ import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFram
 import { WebGLRenderer } from "./render/WebGLRenderer";
 import { InputSender } from "./input/packets";
 import { InputFailures, errorText } from "./input/failures";
-import { endKind, mergeEnd, type EndKind } from "./status";
+import { endKind, isSignInRefusal, mergeEnd, type EndKind } from "./status";
 
 export type Phase = "connecting" | "connected" | "error" | "ended";
 
@@ -44,6 +44,16 @@ export function hasVideoDecoder(): boolean {
  */
 export function wireQuality(q: Quality, videoOk: boolean): Quality {
   return q === "auto" && !videoOk ? "quality" : q;
+}
+
+/**
+ * The target for the next attempt once the computer has refused a sign in.
+ * A saved computer's password is forgotten in the vault instead (see
+ * `onSignInRefused` below), so only a connection that was not saved carries
+ * one here, and it is dropped so the computer asks again.
+ */
+export function withoutPassword(target: ConnectTarget): ConnectTarget {
+  return target.kind === "adhoc" && target.password !== undefined ? { ...target, password: undefined } : target;
 }
 
 export interface RemoteSession {
@@ -112,6 +122,9 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const hidden = useRef(false);
   const endedWhileHidden = useRef(false);
   const exiting = useRef(false);
+  // Set when the computer refused the name or password. The next attempt
+  // then goes without the old password, so the computer asks for a new one.
+  const refused = useRef<{ target: ConnectTarget; forgotten: Promise<void> } | null>(null);
 
   const go = useCallback((p: Phase) => {
     phaseRef.current = p;
@@ -146,6 +159,25 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     const videoOk = hasVideoDecoder();
     let frameCount = 0;
     let frameFlush = 0;
+    if (refused.current && refused.current.target !== target) refused.current = null;
+    const wire = refused.current ? withoutPassword(target) : target;
+    let refusedHere = false;
+
+    // A remembered password the computer turned down is stale. Sending it
+    // again on Try again, with no prompt, only added to the server's count
+    // of failed sign ins, so it goes now. The user name stays, and fills in
+    // the sign in sheet the computer raises on the next attempt. Whatever is
+    // typed there is remembered again only if Remember is still on, and only
+    // once the computer accepts it (session_credentials on the Rust side).
+    const onSignInRefused = (): void => {
+      if (refusedHere) return;
+      refusedHere = true;
+      const forgotten =
+        target.kind === "saved"
+          ? api.hostsSetSecret(target.hostId, null, "").catch((e: unknown) => console.warn(`could not forget the password: ${errorText(e)}`))
+          : Promise.resolve();
+      refused.current = { target, forgotten };
+    };
 
     go("connecting");
     setState(IDLE);
@@ -196,6 +228,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           } else if (e.state.state === "disconnected") {
             if (exiting.current) return;
             if (hidden.current) endedWhileHidden.current = true;
+            if (isSignInRefusal(e.state.reason)) onSignInRefused();
             if (phaseRef.current === "connected" || phaseRef.current === "ended") {
               // A second reason can follow the first: the background one
               // comes after the driver's own clean end.
@@ -239,6 +272,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           setStats(e.stats);
           break;
         case "error":
+          if (isSignInRefusal(e.message)) onSignInRefused();
           setError(e.message);
           if (phaseRef.current !== "connected") go("error");
           break;
@@ -255,7 +289,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     };
 
     api
-      .sessionConnect(target, onFrame, onEvent)
+      .sessionConnect(wire, onFrame, onEvent)
       .then(({ sessionId: id }) => {
         if (cancelled) {
           void api.sessionDisconnect(id).catch(() => {});
@@ -324,7 +358,11 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
 
   const reconnect = useCallback(() => {
     exiting.current = false;
-    setAttempt((a) => a + 1);
+    const r = refused.current;
+    // After a refusal the vault is cleared first, or Rust would read the old
+    // password for this attempt too.
+    if (r) void r.forgotten.then(() => setAttempt((a) => a + 1));
+    else setAttempt((a) => a + 1);
   }, []);
 
   const snapshot = useCallback(async (): Promise<boolean> => {
