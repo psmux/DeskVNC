@@ -19,6 +19,7 @@ import type {
 import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFrameMessage } from "./render/frameProtocol";
 import { WebGLRenderer } from "./render/WebGLRenderer";
 import { InputSender } from "./input/packets";
+import { InputFailures, errorText } from "./input/failures";
 
 export type Phase = "connecting" | "connected" | "error" | "ended";
 
@@ -73,6 +74,8 @@ export interface RemoteSession {
   setQuality(q: Quality): void;
   snapshot(): Promise<boolean>;
   notice: string | null;
+  /** Set, as a new object each time, when taps and keys keep failing to send. */
+  inputFailure: { message: string } | null;
 }
 
 const IDLE: SessionState = { state: "connecting" };
@@ -95,6 +98,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [attempt, setAttempt] = useState(0);
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [inputFailure, setInputFailure] = useState<{ message: string } | null>(null);
 
   const renderer = useRef<WebGLRenderer | null>(null);
   const sender = useRef<InputSender | null>(null);
@@ -142,6 +146,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     go("connecting");
     setState(IDLE);
     setError(null);
+    setInputFailure(null);
     setNeedsReconnect(false);
     setCredentials(null);
     setCert(null);
@@ -245,9 +250,17 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         mySid = id;
         sid.current = id;
         setSessionId(id);
+        const failures = new InputFailures({
+          onPersistent: (message) => {
+            if (!cancelled) setInputFailure({ message });
+          },
+        });
         sender.current = new InputSender({
           send: (seq, body) => {
-            void api.sessionInput(id, seq, body).catch(() => {});
+            api.sessionInput(id, seq, body).then(
+              () => failures.ok(),
+              (err: unknown) => failures.fail(err),
+            );
           },
         });
         const q = wireQuality(quality.current, videoOk);
@@ -308,7 +321,8 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     try {
       await api.sessionSnapshot(id, shot.pixels, shot.width, shot.height);
       return true;
-    } catch {
+    } catch (err) {
+      console.warn(`session snapshot failed: ${errorText(err)}`);
       return false;
     }
   }, [api]);
@@ -389,5 +403,6 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     setQuality,
     snapshot,
     notice,
+    inputFailure,
   };
 }

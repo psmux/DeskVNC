@@ -163,10 +163,10 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   );
   useEffect(() => recognizer.setMode(mode), [mode, recognizer]);
 
-  const showToast = useCallback((text: string) => {
+  const showToast = useCallback((text: string, ms = 2600) => {
     setToast(text);
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2600);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
   }, []);
 
   // The host's operating system, for the Win or Cmd key label.
@@ -715,6 +715,12 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.notice]);
+
+  // Taps and keys keep failing to reach Rust: say so instead of going quiet.
+  useEffect(() => {
+    if (s.inputFailure) showToast(`Taps and keys are not reaching the computer: ${s.inputFailure.message}`, 6000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.inputFailure]);
 
   useEffect(() => {
     if (s.remoteClipboard && s.remoteClipboard !== clipSeen && s.phase === "connected") showToast("Something was copied on the computer");

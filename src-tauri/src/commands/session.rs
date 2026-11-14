@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 use vnc_core::{
@@ -1778,10 +1778,7 @@ pub async fn send_input(
         .and_then(|v| v.to_str().ok())
         .ok_or("missing x-session-id header")?
         .to_string();
-    let body = match request.body() {
-        InvokeBody::Raw(bytes) => bytes.as_slice(),
-        InvokeBody::Json(_) => return Err("send_input expects a raw binary body".into()),
-    };
+    let body = super::body::bytes(request.body(), "send_input")?;
 
     // Hold this call until every lower-numbered one has been queued. The
     // guard releases the number on every exit below, error paths included.
@@ -1811,7 +1808,7 @@ pub async fn send_input(
         _ => None,
     };
 
-    let commands = framing::decode_input(body)?;
+    let commands = framing::decode_input(&body)?;
     let (sender, last_pointer_mask) = state.command_channel(&session_id)?;
     // A person's key or button on this session is the person using it, and a
     // person outranks an agent: the shared lease moves to them, an agent
@@ -2335,10 +2332,7 @@ pub fn capture_thumbnail(
     let height: u32 = header(&request, "x-height")?
         .parse()
         .map_err(|_| "invalid x-height header".to_string())?;
-    let bytes = match request.body() {
-        InvokeBody::Raw(bytes) => bytes.clone(),
-        InvokeBody::Json(_) => return Err("capture_thumbnail expects a raw RGBA body".into()),
-    };
+    let bytes = super::body::bytes(request.body(), "capture_thumbnail")?.into_owned();
     // Geometry and body are both webview-supplied, bound them and require an
     // exact RGBA8888 length before handing anything to the store.
     crate::thumbnail::validate_frame(width, height, bytes.len())?;

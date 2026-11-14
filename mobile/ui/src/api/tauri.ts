@@ -2,15 +2,9 @@
  * The real Api: every call goes to Rust through `invoke`, streams arrive on
  * Tauri Channels. Command names and argument shapes are in mobile/CONTRACT.md.
  */
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { exactBuffer, largeBody } from "./binary";
 import type { Api, ConnectTarget, Host, HostDraft, KeyCombo, Quality, ScanEvent, SessionEvent } from "./contract";
-
-/** Copy the bytes so a view over a larger buffer never sends its neighbours. */
-function exactBuffer(bytes: Uint8Array): ArrayBuffer {
-  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-    ? (bytes.buffer as ArrayBuffer)
-    : (bytes.slice().buffer as ArrayBuffer);
-}
 
 export const tauriApi: Api = {
   hostsList: () => invoke<Host[]>("hosts_list"),
@@ -36,6 +30,8 @@ export const tauriApi: Api = {
     events.onmessage = onEvent;
     return invoke<{ sessionId: string }>("session_connect", { target, onFrame: frames, onEvent: events });
   },
+  // Raw on iOS; on Android Tauri delivers it as a JSON array of numbers,
+  // which for a few bytes of input costs nothing worth avoiding.
   sessionInput: (sessionId, seq, body) =>
     invoke<void>("session_input", exactBuffer(body), {
       headers: { "x-session-id": sessionId, "x-input-seq": String(seq) },
@@ -48,9 +44,11 @@ export const tauriApi: Api = {
     invoke<void>("session_trust", { sessionId, fingerprint, scheme, accept }),
   sessionQuality: (sessionId, quality: Quality) => invoke<void>("session_quality", { sessionId, quality }),
   sessionClipboard: (sessionId, text) => invoke<void>("session_clipboard", { sessionId, text }),
-  // Raw RGBA body like the desktop capture_thumbnail; metadata in headers.
+  // RGBA body like the desktop capture_thumbnail, metadata in headers. Raw on
+  // iOS, base64 text on Android (see binary.ts). A bare string is a valid
+  // JSON payload to Tauri, though `InvokeArgs` does not list it.
   sessionSnapshot: (sessionId, rgba, width, height) =>
-    invoke<void>("session_snapshot", exactBuffer(rgba), {
+    invoke<void>("session_snapshot", largeBody(rgba) as InvokeArgs, {
       headers: { "x-session-id": sessionId, "x-width": String(width), "x-height": String(height) },
     }),
   sessionDisconnect: (sessionId) => invoke<void>("session_disconnect", { sessionId }),
