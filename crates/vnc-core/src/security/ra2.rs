@@ -1,15 +1,15 @@
 //! Security types 5/6/129/130, RealVNC's RSA-AES (RA2 family).
 //!
 //! Used by RealVNC Server, including the Raspberry Pi OS default. Both sides
-//! exchange raw RSA public keys, each RSA-encrypts a 16-byte random for the
-//! other, and the two randoms are hashed into a pair of directional AES-EAX
-//! session keys.
+//! exchange raw RSA public keys, each RSA-encrypts a random for the other,
+//! and the two randoms are hashed into a pair of directional AES-EAX session
+//! keys. Randoms are 16 bytes for types 5/6 and 32 bytes for types 129/130.
 //!
 //! ```text
 //! S->C  u32 server_key_bits, modulus[k], exponent[k]      (k = ceil(bits/8))
 //! C->S  u32 client_key_bits, modulus[c], exponent[c]      (c = 256, 2048-bit)
-//! C->S  RSA_pkcs1v15(server_key, client_random[16])       -> k bytes
-//! S->C  RSA_pkcs1v15(client_key, server_random[16])       -> c bytes
+//! C->S  u16 k, RSA_pkcs1v15(server_key, client_random)      k ciphertext bytes
+//! S->C  u16 c, RSA_pkcs1v15(client_key, server_random)      c ciphertext bytes
 //!       --- everything below is AES-EAX framed ---
 //! S->C  server_hash                                       H(server_pub || client_pub)
 //! C->S  client_hash                                       H(client_pub || server_pub)
@@ -73,7 +73,7 @@ use vnc_transport::{
 };
 
 use super::prompt::CredentialSource;
-use super::{read_bytes_max, read_u32, AuthOutcome, ServerIdentity};
+use super::{read_bytes_max, read_u16, read_u32, AuthOutcome, ServerIdentity};
 use crate::error::{Result, VncError};
 use crate::types::{ConnectOptions, CredentialKind, PinScheme, SecurityType};
 
@@ -81,7 +81,6 @@ use crate::types::{ConnectOptions, CredentialKind, PinScheme, SecurityType};
 const CLIENT_KEY_BITS: usize = 2048;
 const CLIENT_KEY_BYTES: usize = CLIENT_KEY_BITS / 8;
 
-const RANDOM_LEN: usize = 16;
 const MAC_LEN: usize = 16;
 /// Largest plaintext we put in one frame. The length field is a u16, but
 /// RealVNC's own implementation chunks at 8 KiB.
@@ -468,17 +467,26 @@ pub(crate) async fn handshake(
     super::write_all(&mut stream, &client_public_blob).await?;
 
     // --- 3. exchange randoms ----------------------------------------------
-    let mut client_random = [0u8; RANDOM_LEN];
+    let random_len = variant.key_len();
+    let mut client_random = vec![0u8; random_len];
     rand::rng().fill_bytes(&mut client_random);
 
     let encrypted = server_key
         .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, &client_random)
         .map_err(|e| VncError::Other(format!("RA2: could not encrypt the client random: {e}")))?;
+    // The public key size is bounded above, so the ciphertext fits in a u16.
+    super::write_all(&mut stream, &(encrypted.len() as u16).to_be_bytes()).await?;
     super::write_all(&mut stream, &encrypted).await?;
 
+    let server_encrypted_len = read_u16(&mut stream).await? as usize;
+    if server_encrypted_len != CLIENT_KEY_BYTES {
+        return Err(VncError::Protocol(format!(
+            "RA2 server ciphertext length {server_encrypted_len} does not match the client RSA key"
+        )));
+    }
     let server_encrypted = read_bytes_max(
         &mut stream,
-        CLIENT_KEY_BYTES,
+        server_encrypted_len,
         CLIENT_KEY_BYTES,
         "RA2 server random",
     )
@@ -490,7 +498,7 @@ pub(crate) async fn handshake(
                 "the server's authentication payload could not be decrypted".into(),
             )
         })?;
-    if server_random.len() != RANDOM_LEN {
+    if server_random.len() != random_len {
         server_random.zeroize();
         return Err(VncError::Protocol(
             "RA2 server random has the wrong length".into(),
@@ -1019,17 +1027,13 @@ mod tests {
         let _ = writer.await.unwrap();
     }
 
-    /// A full handshake against a simulated RealVNC server built from the same
-    /// specification. This exercises key generation, the public-key blobs, the
-    /// RSA exchange, key derivation, the hash confirmation and the credential
-    /// frame end to end. It cannot validate our reading of the *message order*
-    /// against a real server (both sides here share our assumption), but it
-    /// does catch every self-inconsistency.
+    /// Use the challenge framing and variant-dependent lengths sent by
+    /// TigerVNC and NeatVNC, rather than mirroring the client's wire assumptions.
     #[tokio::test]
-    async fn full_handshake_against_a_simulated_server() {
+    async fn full_handshake_with_length_prefixed_rsa_challenges() {
         // One key for the whole test: it stands in for a single server that the
         // client meets repeatedly, which is what pinning is about.
-        let server_key = tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 2048))
+        let server_key = tokio::task::spawn_blocking(|| PrivateKey::new(&mut rand::rng(), 3072))
             .await
             .unwrap()
             .unwrap();
@@ -1039,6 +1043,7 @@ mod tests {
             SecurityType::Ra2,
             SecurityType::Ra2_256,
             SecurityType::Ra2ne,
+            SecurityType::Ra2ne256,
         ]
         .into_iter()
         .enumerate()
@@ -1054,34 +1059,50 @@ mod tests {
             let server = tokio::spawn(async move {
                 let server_pub = server_key.to_public_key();
                 let server_n =
-                    left_pad(&server_pub.n().as_ref().to_be_bytes_trimmed_vartime(), 256);
-                let server_e = left_pad(&server_pub.e().to_be_bytes_trimmed_vartime(), 256);
+                    left_pad(&server_pub.n().as_ref().to_be_bytes_trimmed_vartime(), 384);
+                let server_e = left_pad(&server_pub.e().to_be_bytes_trimmed_vartime(), 384);
 
                 let mut server_blob = Vec::new();
-                server_blob.extend_from_slice(&2048u32.to_be_bytes());
+                server_blob.extend_from_slice(&3072u32.to_be_bytes());
                 server_blob.extend_from_slice(&server_n);
                 server_blob.extend_from_slice(&server_e);
                 server_side.write_all(&server_blob).await.unwrap();
 
                 // Client public key.
-                let mut client_blob = vec![0u8; 4 + 512];
-                server_side.read_exact(&mut client_blob).await.unwrap();
+                let client_bits = server_side.read_u32().await.unwrap();
+                assert!((1024..=8192).contains(&client_bits));
+                let client_width = client_bits.div_ceil(8) as usize;
+                let mut components = vec![0u8; client_width * 2];
+                server_side.read_exact(&mut components).await.unwrap();
+                let mut client_blob = client_bits.to_be_bytes().to_vec();
+                client_blob.extend_from_slice(&components);
                 let client_pub = PublicKey::new(
-                    BoxedUint::from_be_slice_vartime(&client_blob[4..260]),
-                    BoxedUint::from_be_slice_vartime(&client_blob[260..516]),
+                    BoxedUint::from_be_slice_vartime(&components[..client_width]),
+                    BoxedUint::from_be_slice_vartime(&components[client_width..]),
                 )
                 .unwrap();
 
-                // Randoms.
-                let mut encrypted = vec![0u8; 256];
-                server_side.read_exact(&mut encrypted).await.unwrap();
-                let client_random = server_key.decrypt(Pkcs1v15Encrypt, &encrypted).unwrap();
-
-                let server_random = [0x5Au8; RANDOM_LEN];
+                // These are protocol fixture values, independent of the client.
+                let random_len = match security_type {
+                    SecurityType::Ra2 | SecurityType::Ra2ne => 16,
+                    SecurityType::Ra2_256 | SecurityType::Ra2ne256 => 32,
+                    _ => unreachable!(),
+                };
+                let server_random = vec![0x5Au8; random_len];
                 let out = client_pub
                     .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, &server_random)
                     .unwrap();
+                server_side.write_u16(client_width as u16).await.unwrap();
                 server_side.write_all(&out).await.unwrap();
+
+                // The challenge sent to the 3072-bit server key is 384 bytes,
+                // while its response to the client's key has a different width.
+                let encrypted_len = server_side.read_u16().await.unwrap() as usize;
+                assert_eq!(encrypted_len, 384, "{security_type:?}");
+                let mut encrypted = vec![0u8; encrypted_len];
+                server_side.read_exact(&mut encrypted).await.unwrap();
+                let client_random = server_key.decrypt(Pkcs1v15Encrypt, &encrypted).unwrap();
+                assert_eq!(client_random.len(), random_len, "{security_type:?}");
 
                 // Session keys, mirrored: the client's send key is ours to read.
                 let key_len = variant.key_len();
@@ -1130,9 +1151,13 @@ mod tests {
             // describes an X.509 certificate, not this RSA key.
             o.cert_pins.tls = Some("ff".repeat(32));
             let s: BoxedStream = Box::pin(client_side);
-            let outcome = handshake(s, security_type, &o, &CredentialSource::none())
-                .await
-                .unwrap();
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                handshake(s, security_type, &o, &CredentialSource::none()),
+            )
+            .await
+            .expect("the wire handshake must not hang")
+            .unwrap();
 
             // The identity check must not disturb the handshake, and must
             // report what the session layer needs to prompt with, including
@@ -1368,5 +1393,37 @@ mod tests {
             handshake(s, SecurityType::Ra2, &o, &CredentialSource::none()).await,
             Err(VncError::Protocol(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_rsa_ciphertext_length_without_reading_a_body() {
+        for length in [0u16, 255, 257, u16::MAX] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let key = test_key(0xC3);
+            let n = left_pad(&key.n().as_ref().to_be_bytes_trimmed_vartime(), 256);
+            let e = left_pad(&key.e().to_be_bytes_trimmed_vartime(), 256);
+            server.write_u32(2048).await.unwrap();
+            server.write_all(&n).await.unwrap();
+            server.write_all(&e).await.unwrap();
+            server.write_u16(length).await.unwrap();
+            // Keep the peer open and send no body. Invalid lengths must fail
+            // immediately, without a large allocation or waiting for payload.
+            let o = ConnectOptions::vnc("h", 5900);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                handshake(
+                    Box::pin(client),
+                    SecurityType::Ra2,
+                    &o,
+                    &CredentialSource::none(),
+                ),
+            )
+            .await
+            .expect("invalid ciphertext length must not wait for a body");
+            assert!(
+                matches!(result, Err(VncError::Protocol(_))),
+                "ciphertext length {length} must be rejected"
+            );
+        }
     }
 }
