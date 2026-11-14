@@ -22,6 +22,19 @@ describe("status words", () => {
     expect(friendlyError("Connection refused (os error 61)").title).toBe("We could not reach the computer");
     expect(friendlyError("Authentication failed").title).toBe("That sign in did not work");
     expect(friendlyError("weird thing").detail).toBe("weird thing");
+    // A server that hangs up during RSA-AES never saw a password.
+    expect(
+      friendlyError(
+        "The server closed the connection during the RSA-AES key exchange, before any name or password was sent.",
+      ).title,
+    ).toBe("The computer could not set up encryption");
+    expect(
+      friendlyError("The server refused the RSA-AES key exchange before any name or password was sent: no key").title,
+    ).toBe("The computer could not set up encryption");
+    expect(
+      friendlyError("This computer's identity was not trusted, so no name or password was sent to it.").title,
+    ).toBe("You did not trust this computer");
+    expect(friendlyError("This computer's identity has changed.").title).toBe("The computer's identity did not check out");
   });
 
   it("asks for still pictures when the phone has no video decoder", () => {

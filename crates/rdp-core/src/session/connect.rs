@@ -180,7 +180,14 @@ async fn establish(
 
     let gateway = options.rdp_options().and_then(|r| r.gateway.as_ref());
 
+    // The options every attempt in this chain dials with. They differ from
+    // `options` only in the pins: a certificate the user approved on one
+    // attempt is pinned for the next, so a retry after a refused password does
+    // not ask about the certificate the user approved seconds before.
+    let mut options = options.clone();
+
     loop {
+        ask.pin_trusted(&mut options.cert_pins);
         let stream = match gateway {
             // Through an RD Gateway. Its sign in can ask the user for the
             // same credentials CredSSP will use, so it borrows the prompt and
@@ -188,7 +195,7 @@ async fn establish(
             // typed comes round this loop exactly as CredSSP's does.
             Some(gateway) => {
                 let open = crate::transport::gateway::open(
-                    options,
+                    &options,
                     gateway,
                     &opts.client_name,
                     &mut creds,
@@ -217,7 +224,7 @@ async fn establish(
                     Err(e) => return Err(e),
                 }
             }
-            None => crate::transport::open_stream(options, events).await?,
+            None => crate::transport::open_stream(&options, events).await?,
         };
 
         // The connection sequence is straight line `await` code and is

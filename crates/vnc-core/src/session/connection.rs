@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{Result, VncError};
 use crate::proto::{self, messages, version::NegotiatedVersion, ProtocolVersion};
 use crate::quality::QualityResolve;
-use crate::security::{CredentialAsk, CredentialSource, MAX_CREDENTIAL_ATTEMPTS};
+use crate::security::{CredentialAsk, CredentialSource, TrustAsk, MAX_CREDENTIAL_ATTEMPTS};
 use crate::types::{
     ClientCommand, ColorDepth, ConnectOptions, Credentials, PixelFormat, QualityPreset, Rect,
     SecurityType, ServerCapabilities, SessionEvent, SessionState,
@@ -271,11 +271,16 @@ async fn establish(
     // is now proven, whatever happens to the connection after this line.
     creds.mark_authenticated();
 
-    // First contact with a server key we have no pin for, a TLS certificate
-    // (VeNCrypt) or a bare RSA key (RA2). Surface it so the UI can run its
-    // trust-on-first-use prompt (PRD/10 §4). The scheme travels with it: the
-    // answer has to be stored against the key the user was actually shown,
-    // not against whichever one the endpoint happened to pin first.
+    // A server key we have no pin for that the handshake did not already put
+    // to the user. RA2 and VeNCrypt ask inside the handshake, before any
+    // credential is sent (`CredentialSource::approve_server_key`), so a key
+    // they report was approved a moment ago and is not asked about twice.
+    // What is left is the macOS SRP host key: SRP never sends the password,
+    // the key only hides the account name, and the Mac has proved it knows
+    // the password by now, so it is still offered for pinning here, after
+    // the login (PRD/10 §4). The scheme travels with it: the answer has to be
+    // stored against the key the user was actually shown, not against
+    // whichever one the endpoint happened to pin first.
     if let Some(crate::security::ServerIdentity {
         scheme,
         decision:
@@ -286,17 +291,21 @@ async fn establish(
             },
     }) = trust
     {
-        emit(
-            events,
-            SessionEvent::CertificatePrompt {
-                fingerprint,
-                subject,
-                is_change: false,
-                scheme,
-                certificate,
-            },
-        )
-        .await?;
+        if creds.was_approved(scheme, &fingerprint) {
+            tracing::debug!(?scheme, "server key approved during the handshake");
+        } else {
+            emit(
+                events,
+                SessionEvent::CertificatePrompt {
+                    fingerprint,
+                    subject,
+                    is_change: false,
+                    scheme,
+                    certificate,
+                },
+            )
+            .await?;
+        }
     }
 
     emit_state(events, SessionState::Negotiating).await?;
@@ -413,6 +422,74 @@ async fn serve_credential_ask(
     }
 }
 
+/// Answer one [`TrustAsk`] by asking the user whether to trust a server key.
+///
+/// Emits [`SessionEvent::CertificatePrompt`] and pumps `commands` until the
+/// answer arrives, the way [`serve_credential_ask`] does for a password. Only
+/// a `TrustCertificate` that names this key under this scheme approves it. The
+/// dialog's cancel, a disconnect, a closed command channel and a teardown all
+/// refuse it, and the handshake then closes without sending a credential.
+async fn serve_trust_ask(
+    ask: TrustAsk,
+    events: &mpsc::Sender<SessionEvent>,
+    commands: &mut mpsc::Receiver<ClientCommand>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let TrustAsk {
+        scheme,
+        fingerprint,
+        subject,
+        certificate,
+        reply,
+    } = ask;
+    tracing::info!(%fingerprint, ?scheme, "asking the user to approve an unpinned server key");
+    emit(
+        events,
+        SessionEvent::CertificatePrompt {
+            fingerprint: fingerprint.clone(),
+            subject,
+            is_change: false,
+            scheme,
+            certificate,
+        },
+    )
+    .await?;
+
+    let wanted = vnc_transport::normalize_fingerprint(&fingerprint);
+    let approved = loop {
+        let cmd = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            cmd = commands.recv() => cmd,
+        };
+        match cmd {
+            None => break false,
+            Some(ClientCommand::TrustCertificate {
+                fingerprint: answered,
+                scheme: answered_scheme,
+                permanent,
+            }) => {
+                // An answer for another key or another scheme belongs to a
+                // different dialog and must not approve this one.
+                let same = answered_scheme == scheme
+                    && vnc_transport::normalize_fingerprint(&answered) == wanted;
+                if same {
+                    tracing::info!(permanent, ?scheme, "the user approved the server key");
+                } else {
+                    tracing::warn!(?scheme, "a trust answer named a different key; refusing");
+                }
+                break same;
+            }
+            Some(ClientCommand::CancelCredentials) | Some(ClientCommand::Disconnect) => break false,
+            // Input, clipboard and quality changes mean nothing before the
+            // session exists.
+            Some(_) => continue,
+        }
+    };
+    let _ = reply.send(approved);
+    Ok(())
+}
+
 /// Establish a connection, asking the user for credentials when the handshake
 /// needs them and re-asking when the server rejects what they typed.
 ///
@@ -441,12 +518,14 @@ async fn establish_interactive(
     loop {
         // One in-flight question at a time; the handshake is linear.
         let (ask_tx, mut ask_rx) = mpsc::channel::<CredentialAsk>(1);
+        let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
         let source = CredentialSource::interactive(
             &ask_tx,
             attempt,
             last_error.clone(),
             username_hint.clone(),
-        );
+        )
+        .with_trust_prompt(&trust_tx);
 
         let result = {
             let attempt_fut = establish(options, settings, events, &source);
@@ -461,9 +540,21 @@ async fn establish_interactive(
                     Some(ask) = ask_rx.recv() => {
                         serve_credential_ask(ask, events, commands, cancel).await?;
                     }
+                    Some(ask) = trust_rx.recv() => {
+                        serve_trust_ask(ask, events, commands, cancel).await?;
+                    }
                 }
             }
         };
+
+        // A key the user trusted in this attempt is pinned for the rest of the
+        // session, so the retry after a mistyped password, and any automatic
+        // reconnect, does not ask about it again. Only an empty slot is
+        // filled: a key that changes between attempts is still a changed
+        // identity.
+        for (scheme, fingerprint) in source.approved_keys() {
+            remember_trust(options, Some((scheme, fingerprint)));
+        }
 
         // Keep what the server accepted for every later attempt this session
         // makes, the way `rdp-core` keeps a typed credential for the
@@ -741,5 +832,244 @@ mod tests {
     fn rgb_reductions_map_to_rgb222() {
         assert_eq!(pixel_format_for(ColorDepth::Rgb222), PixelFormat::rgb222());
         assert_eq!(pixel_format_for(ColorDepth::Rgb111), PixelFormat::rgb222());
+    }
+
+    // -----------------------------------------------------------------------
+    // RA2: the trust prompt comes before the credentials, through a session
+    // -----------------------------------------------------------------------
+
+    use crate::security::ra2::test_server::{self, Finish, Recorded};
+    use crate::types::PinScheme;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+
+    /// A ServerInit for a 2x2 true colour screen named "pi".
+    fn server_init() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&2u16.to_be_bytes());
+        v.extend_from_slice(&2u16.to_be_bytes());
+        // 32 bpp, depth 24, little endian, true colour, 255/255/255, 16/8/0.
+        v.extend_from_slice(&[32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]);
+        v.extend_from_slice(&2u32.to_be_bytes());
+        v.extend_from_slice(b"pi");
+        v
+    }
+
+    /// An RFB 3.8 server on loopback that offers only RA2 and then runs the
+    /// simulated RA2 server from `ra2.rs`.
+    async fn ra2_server() -> (
+        u16,
+        Recorded,
+        tokio::task::JoinHandle<Option<Vec<u8>>>,
+    ) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let recorded = Recorded::default();
+        let log = recorded.clone();
+        let task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.ok()?;
+            sock.write_all(b"RFB 003.008\n").await.ok()?;
+            let mut version = [0u8; 12];
+            sock.read_exact(&mut version).await.ok()?;
+            sock.write_all(&[1, SecurityType::Ra2.to_wire()]).await.ok()?;
+            let chosen = sock.read_u8().await.ok()?;
+            assert_eq!(chosen, SecurityType::Ra2.to_wire());
+            test_server::serve(
+                &mut sock,
+                SecurityType::Ra2,
+                Some(1),
+                log,
+                Finish::Accept {
+                    server_init: server_init(),
+                },
+            )
+            .await
+        });
+        (port, recorded, task)
+    }
+
+    /// Everything a test needs to play the shell.
+    struct Shell {
+        events: mpsc::Receiver<SessionEvent>,
+        commands: mpsc::Sender<ClientCommand>,
+    }
+
+    impl Shell {
+        async fn next(&mut self) -> SessionEvent {
+            loop {
+                let ev = tokio::time::timeout(Duration::from_secs(30), self.events.recv())
+                    .await
+                    .expect("an event in time")
+                    .expect("the session is alive");
+                if !matches!(ev, SessionEvent::StateChanged(_)) {
+                    return ev;
+                }
+            }
+        }
+    }
+
+    fn start_establish(
+        mut options: ConnectOptions,
+    ) -> (
+        Shell,
+        tokio::task::JoinHandle<(Result<()>, ConnectOptions)>,
+    ) {
+        let (ev_tx, ev_rx) = mpsc::channel(64);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            let settings = SessionSettings::from_options(&options);
+            let cancel = CancellationToken::new();
+            let r = establish_interactive(&mut options, &settings, &ev_tx, &mut cmd_rx, &cancel)
+                .await
+                .map(|_| ());
+            (r, options)
+        });
+        (
+            Shell {
+                events: ev_rx,
+                commands: cmd_tx,
+            },
+            task,
+        )
+    }
+
+    /// First contact through the session: the certificate prompt is raised
+    /// with the server's subtype already waiting, nothing reaches the server
+    /// until the user trusts the key, the credential prompt comes after, and
+    /// the approved key is pinned for the rest of the session.
+    #[tokio::test]
+    async fn ra2_first_contact_asks_about_the_key_before_the_password() {
+        let (port, recorded, server) = ra2_server().await;
+        let (mut shell, task) = start_establish(ConnectOptions::vnc("127.0.0.1", port));
+
+        let (fingerprint, scheme) = match shell.next().await {
+            SessionEvent::CertificatePrompt {
+                fingerprint,
+                subject,
+                is_change,
+                scheme,
+                ..
+            } => {
+                assert!(!is_change);
+                assert_eq!(subject, "RSA-AES server key (2048-bit)");
+                (fingerprint, scheme)
+            }
+            other => panic!("expected the certificate prompt first, got {other:?}"),
+        };
+        assert_eq!(scheme, PinScheme::Ra2);
+        assert_eq!(fingerprint, test_server::fingerprint());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "bytes reached the server while the trust prompt was open"
+        );
+
+        shell
+            .commands
+            .send(ClientCommand::TrustCertificate {
+                fingerprint: fingerprint.clone(),
+                permanent: false,
+                scheme,
+            })
+            .await
+            .unwrap();
+
+        match shell.next().await {
+            SessionEvent::CredentialsRequired(req) => {
+                assert_eq!(req.method, crate::security::ra2::METHOD);
+            }
+            other => panic!("expected the credential prompt, got {other:?}"),
+        }
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "bytes reached the server before the user typed anything"
+        );
+        shell
+            .commands
+            .send(ClientCommand::ProvideCredentials {
+                username: Some("pi".into()),
+                password: "raspberry".into(),
+                save: false,
+            })
+            .await
+            .unwrap();
+
+        let (result, options) = task.await.unwrap();
+        result.expect("the connection is established");
+        // The key the user trusted is pinned for every later attempt in this
+        // session, so a reconnect does not ask again.
+        assert_eq!(
+            options.cert_pins.for_scheme(PinScheme::Ra2),
+            Some(fingerprint.as_str())
+        );
+        // No second prompt for the same key after the handshake.
+        while let Ok(ev) = shell.events.try_recv() {
+            assert!(
+                !matches!(ev, SessionEvent::CertificatePrompt { .. }),
+                "the key was asked about twice"
+            );
+        }
+        drop(options);
+        let credentials = server.await.unwrap().expect("credentials arrived");
+        assert_eq!(credentials[0] as usize, 2);
+        assert_eq!(&credentials[1..3], b"pi");
+    }
+
+    /// Refusing the key at the prompt, which the shells do by disconnecting,
+    /// ends the attempt as untrusted, never asks for a password, and sends
+    /// the server nothing after the key confirmation.
+    #[tokio::test]
+    async fn ra2_a_refused_key_never_sees_the_password() {
+        for answer in [ClientCommand::Disconnect, ClientCommand::CancelCredentials] {
+            let (port, recorded, server) = ra2_server().await;
+            let mut o = ConnectOptions::vnc("127.0.0.1", port);
+            // Even a stored password stays here.
+            o.credentials = Credentials::user_pass("pi", "raspberry");
+            let (mut shell, task) = start_establish(o);
+            match shell.next().await {
+                SessionEvent::CertificatePrompt { .. } => {}
+                other => panic!("expected the certificate prompt, got {other:?}"),
+            }
+            shell.commands.send(answer).await.unwrap();
+            let (result, options) = task.await.unwrap();
+            let err = result.expect_err("a refused key does not connect");
+            assert!(matches!(err, VncError::CertificateUntrusted(_)), "{err:?}");
+            assert!(options.cert_pins.for_scheme(PinScheme::Ra2).is_none());
+            while let Ok(ev) = shell.events.try_recv() {
+                assert!(
+                    !matches!(ev, SessionEvent::CredentialsRequired(_)),
+                    "asked for a password after the key was refused"
+                );
+            }
+            drop(shell);
+            assert_eq!(server.await.unwrap(), None);
+            assert!(
+                recorded.lock().unwrap().is_empty(),
+                "{} bytes sent to a refused key",
+                recorded.lock().unwrap().len()
+            );
+        }
+    }
+
+    /// A key pinned from an earlier session connects with no prompt at all.
+    #[tokio::test]
+    async fn ra2_a_pinned_key_connects_without_a_prompt() {
+        let (port, _recorded, server) = ra2_server().await;
+        let mut o = ConnectOptions::vnc("127.0.0.1", port);
+        o.credentials = Credentials::user_pass("pi", "raspberry");
+        o.cert_pins = crate::types::CertPins::one(PinScheme::Ra2, test_server::fingerprint());
+        let (mut shell, task) = start_establish(o);
+        let (result, _options) = task.await.unwrap();
+        result.expect("a pinned key connects");
+        while let Ok(ev) = shell.events.try_recv() {
+            assert!(
+                !matches!(
+                    ev,
+                    SessionEvent::CertificatePrompt { .. } | SessionEvent::CredentialsRequired(_)
+                ),
+                "a pinned key with a stored password asked the user: {ev:?}"
+            );
+        }
+        assert!(server.await.unwrap().is_some());
     }
 }

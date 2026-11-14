@@ -27,7 +27,10 @@ pub mod tight;
 pub mod vencrypt;
 pub mod vnc_auth;
 
-pub use prompt::{CredentialAsk, CredentialPrompt, CredentialSource, MAX_CREDENTIAL_ATTEMPTS};
+pub use prompt::{
+    CredentialAsk, CredentialPrompt, CredentialSource, TrustAsk, TrustPrompt,
+    MAX_CREDENTIAL_ATTEMPTS,
+};
 pub use vencrypt::VeNCryptSubtype;
 
 // ---------------------------------------------------------------------------
@@ -384,9 +387,11 @@ pub async fn authenticate<S: vnc_transport::Stream + 'static>(
 /// RA2's raw RSA key. Both are fingerprinted the same way, but they are
 /// different keys, so each carries its [`PinScheme`] and is pinned separately.
 ///
-/// The session layer needs this to raise `SessionEvent::CertificatePrompt` on
-/// [`TrustDecision::Unknown`], first contact is accepted so the fingerprint
-/// can be shown, and the UI decides whether to keep the connection. A
+/// Both handshakes stop at an unpinned key before any credential is sent and
+/// ask the user through the trust prompt `creds` carries
+/// ([`CredentialSource::with_trust_prompt`]); with no prompt the key is
+/// refused as `VncError::CertificateUntrusted`. So a decision reported here
+/// is pinned, CA verified, or approved by the user in this attempt. A
 /// [`TrustDecision::Changed`] never reaches here: it is a hard stop reported as
 /// `VncError::CertificateMismatch`.
 pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(

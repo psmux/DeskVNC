@@ -321,13 +321,18 @@ pub(crate) async fn handshake(
             TrustDecision::VerifiedByCa => tracing::info!("server certificate verified by CA"),
             TrustDecision::PinnedMatch => tracing::info!("server certificate matches stored pin"),
             TrustDecision::Unknown { fingerprint, .. } => {
-                // First contact. The session layer surfaces the TOFU prompt;
-                // see `authenticate_with_trust`.
+                // First contact: asked about just below, before the inner
+                // authentication sends anything.
                 tracing::warn!(%fingerprint, "server certificate is not yet trusted (TOFU prompt required)");
             }
             // `tls::upgrade` turns a mismatch into an error before we get here.
             TrustDecision::Changed { .. } => unreachable!("mismatch is reported as an error"),
         }
+        // The inner authentication sends the password inside this TLS
+        // session, so whoever holds the certificate's key reads it. An
+        // unpinned certificate is approved by the user first, or nothing is
+        // sent at all (see `ra2.rs` for the same gate).
+        creds.approve_server_key(PinScheme::Tls, &decision).await?;
         trust = Some(ServerIdentity {
             scheme: PinScheme::Tls,
             decision,
