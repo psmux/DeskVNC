@@ -113,6 +113,15 @@ impl ServerIdentity {
 /// and splitting it produces `NTOWFv2("user", "domain.example.com")`, which is
 /// not what the domain controller computes
 /// (`crates/rdp-auth/src/identity.rs:33`).
+///
+/// That empty domain holds even when the profile or the stored account has
+/// one, because a name with an `@` in it already says where it goes. The
+/// shell will not fold a domain in front of it either
+/// (`src-tauri/src/commands/session.rs`, `qualified_username`), and mstsc and
+/// FreeRDP both send such a name with no domain. It also covers the names
+/// some brokers write into a `.rdp` file, such as
+/// `access /i user@example.com /s site /d local /a i-0123`, which carry their
+/// routing in the user name and expect it, and nothing else, at the far end.
 #[must_use]
 pub fn logon_identity(
     username: &str,
@@ -120,14 +129,16 @@ pub fn logon_identity(
     opts: &ResolvedOptions,
 ) -> (String, String) {
     let (user, qualified_domain) = rdp_auth::split_qualified_username(username);
-    let domain = if qualified_domain.is_empty() {
+    let domain = if !qualified_domain.is_empty() {
+        qualified_domain
+    } else if user.contains('@') {
+        String::new()
+    } else {
         creds
             .domain
             .clone()
             .or_else(|| opts.domain.clone())
             .unwrap_or_default()
-    } else {
-        qualified_domain
     };
     (user, domain)
 }
@@ -439,9 +450,8 @@ f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e16
     /// in the user field whole with an empty domain, because a UPN is already
     /// fully qualified and splitting it produces
     /// `NTOWFv2("user", "domain.example.com")`, which is not what the domain
-    /// controller computes (`crates/rdp-auth/src/identity.rs:33`). So a UPN
-    /// falls through to the profile's domain here, which is empty for a UPN
-    /// logon and is what the server expects.
+    /// controller computes (`crates/rdp-auth/src/identity.rs:33`). The
+    /// profile's domain is not added to it either, which the next test pins.
     #[test]
     fn a_qualified_user_name_wins_over_the_profile_domain() {
         assert_eq!(
@@ -464,6 +474,45 @@ f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e16
         };
         let creds = Credentials::user_pass("CORP\\alice", "pw");
         credssp_client(&creds, &opts, &identity).expect("the seam builds a client");
+    }
+
+    /// A name with an `@` in it reaches the logon whole and with no domain,
+    /// whatever the profile or the stored account says, as mstsc and FreeRDP
+    /// send it. That includes the broker form a `.rdp` file can carry, spaces,
+    /// switches and all, which the far end parses for its own routing. A bare
+    /// name still takes the profile's domain.
+    #[test]
+    fn a_name_with_an_at_sign_goes_whole_and_takes_no_domain() {
+        let mut opts = resolved();
+        opts.domain = Some("PROFILE".into());
+        let broker = "access /i user@example.com /s site /d local /a i-0123456789abcdef0";
+        for name in ["alice@corp.example", broker] {
+            let mut creds = Credentials::user_pass(name, "pw");
+            assert_eq!(
+                logon_identity(name, &creds, &opts),
+                (name.to_owned(), String::new()),
+                "{name}"
+            );
+            creds.domain = Some("STORED".into());
+            assert_eq!(
+                logon_identity(name, &creds, &opts),
+                (name.to_owned(), String::new()),
+                "{name}"
+            );
+            let info = crate::connection::activate::client_info(&opts, &creds, None);
+            assert_eq!(info.info.user_name, name);
+            assert_eq!(info.info.domain, "");
+        }
+
+        let creds = Credentials::user_pass("alice", "pw");
+        assert_eq!(
+            logon_identity("alice", &creds, &opts),
+            ("alice".to_owned(), "PROFILE".to_owned())
+        );
+        assert_eq!(
+            logon_identity("CORP\\alice", &creds, &opts),
+            ("alice".to_owned(), "CORP".to_owned())
+        );
     }
 
     #[test]

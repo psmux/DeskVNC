@@ -369,11 +369,15 @@ fn ntlm_client(
     let password = creds.password.as_deref().ok_or_else(|| {
         RdpError::CredentialsRequired("no password for the RD Gateway".to_owned())
     })?;
+    // The same rule as the computer's logon (`connection::nla::logon_identity`):
+    // a name with an `@` in it goes whole, with no domain added to it.
     let (user, qualified) = rdp_auth::split_qualified_username(username);
-    let domain = if qualified.is_empty() {
-        creds.domain.clone().unwrap_or_default()
-    } else {
+    let domain = if !qualified.is_empty() {
         qualified
+    } else if user.contains('@') {
+        String::new()
+    } else {
+        creds.domain.clone().unwrap_or_default()
     };
     Ok(NtlmClient::new(NtlmConfig {
         identity: Identity::from_prompt(&user, &domain, password)?,
