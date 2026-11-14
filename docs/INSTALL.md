@@ -14,6 +14,7 @@ Download the file for your platform from the
 | Raspberry Pi 4 or 5 (64-bit Raspberry Pi OS), ARM64 Debian or Ubuntu | `DeskVNCViewer_<version>_arm64.deb` |
 | ARM64 Fedora, RHEL | `DeskVNCViewer-<version>-1.aarch64.rpm` |
 | Any ARM64 Linux | `DeskVNCViewer_<version>_aarch64.AppImage` |
+| Arch Linux, x64 or ARM64 | PKGBUILD in the repository, see [Arch Linux](#arch-linux) |
 
 ## macOS
 
@@ -113,6 +114,28 @@ tar -xzf DeskVNC-Support-Linux-x86_64.tar.gz      # or -aarch64 on ARM64
 menu entry at that copy. It needs no administrator, and the folder you unpacked
 the tarball into can be deleted afterwards. Run it again from a newer tarball to
 update the installed copy.
+
+## Arch Linux
+
+The repository carries a PKGBUILD for `deskvncviewer-bin`, which repackages the
+release `.deb` for x86_64 or aarch64. It is not on the AUR yet, so build it with
+makepkg from a clone:
+
+```sh
+git clone https://github.com/psmux/DeskVNC.git
+cd DeskVNC/packaging/aur/deskvncviewer-bin
+makepkg -si
+```
+
+makepkg downloads the `.deb` from the release and checks it against the
+SHA-256 in the PKGBUILD, which comes from the release's `SHA256SUMS.txt`. The
+package puts `deskvncviewer` and the `dvv` command in `/usr/bin`, adds the menu
+entry and icons, and pulls in webkit2gtk-4.1, gtk3 and the other runtime
+libraries. `sudo pacman -R deskvncviewer-bin` removes it.
+
+Releases after 0.36.1 also carry the PKGBUILD as an asset. To write one for
+any release yourself, run `scripts/aur-update.sh <version>` from the repository
+root.
 
 ## Android
 
