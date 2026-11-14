@@ -13,9 +13,10 @@ import { GestureRecognizer, type GestureAction, type Pt, type TouchInput, type T
 import { BUTTON } from "./input/packets";
 import {
   KEYSYM_BACKSPACE,
+  KEYSYM_ENTER,
+  KeyboardField,
   MODIFIERS,
   SENTINEL,
-  TextDiffer,
   afterKey,
   charIds,
   heldModifiers,
@@ -24,7 +25,7 @@ import {
   type ModState,
   type ModifierKey,
   type NamedKey,
-  type TextOp,
+  type FieldOp,
 } from "./input/keys";
 import { keyEventToIds } from "./input/keysyms";
 import {
@@ -147,8 +148,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   modsRef.current = mods;
   const modeRef = useRef(mode);
   modeRef.current = mode;
-  const differ = useRef(new TextDiffer());
-  const composing = useRef(false);
+  const field = useRef(new KeyboardField());
   const anim = useRef<{ raf: number; kind: "none" | "momentum" | "zoom" | "edge"; vx: number; vy: number; from?: View; to?: View; t0?: number; last?: number; ex?: number; ey?: number }>({
     raf: 0,
     kind: "none",
@@ -379,7 +379,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     if (!el) return;
     if (open) {
       el.value = SENTINEL;
-      differ.current.reset();
+      field.current.reset();
       el.focus({ preventScroll: true });
       try {
         el.setSelectionRange(el.value.length, el.value.length);
@@ -632,42 +632,48 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   );
 
   const applyTextOps = useCallback(
-    (ops: TextOp[]) => {
-      const id = s.sessionId;
+    (ops: FieldOp[]) => {
       for (const op of ops) {
-        if (op.type === "backspace") {
+        if (op.type === "enter") {
+          tapKey(KEYSYM_ENTER);
+        } else if (op.type === "backspace") {
           for (let i = 0; i < op.count; i++) tapKey(KEYSYM_BACKSPACE);
         } else if (heldModifiers(modsRef.current).length > 0) {
           // Ctrl+C and friends: characters go as keys with the modifiers held.
           for (const ch of Array.from(op.text)) tapKey(charIds(ch, true));
-        } else if (id) {
+        } else {
           // Typed text goes after anything already queued, such as a backspace.
-          s.sender.current?.flush();
-          void api.sessionText(id, op.text).catch(() => {});
+          s.sendText(op.text);
         }
       }
     },
-    [api, s.sessionId, s.sender, tapKey],
+    [s.sendText, tapKey],
   );
 
   const resetFieldIfIdle = (): void => {
     const el = inputRef.current;
-    if (!el || composing.current) return;
+    if (!el || field.current.composing()) return;
     if (el.value.length > 32 || el.value === "") {
       el.value = SENTINEL;
-      differ.current.reset();
+      field.current.reset();
     }
   };
 
   const onInput = (e: React.FormEvent<HTMLInputElement>): void => {
     const native = e.nativeEvent as InputEvent;
-    const ops = differ.current.onValue(e.currentTarget.value, composing.current || native.isComposing === true);
-    applyTextOps(ops);
+    applyTextOps(field.current.input(e.currentTarget.value, native.isComposing === true));
     resetFieldIfIdle();
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     const ne = e.nativeEvent;
+    // Enter first: while Gboard composes a word it comes flagged as composing.
+    const enter = field.current.keyDown(ne, e.currentTarget.value);
+    if (enter) {
+      e.preventDefault();
+      applyTextOps(enter);
+      return;
+    }
     if (ne.isComposing || ne.keyCode === 229 || e.key === "Unidentified" || e.key === "Process") return;
     const snd = s.sender.current;
     if (!snd) return;
@@ -688,11 +694,27 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   };
 
   const onKeyUp = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    field.current.keyUp(e.nativeEvent);
     if (e.key === "Control" || e.key === "Alt" || e.key === "Meta") {
       const ids = keyEventToIds(e.nativeEvent);
       if (ids) s.sender.current?.key(false, ids.keysym, ids.keycode);
     }
   };
+
+  // Some keyboards report Enter only as a line break beforeinput (React's
+  // onBeforeInput is a different, synthetic event without inputType).
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const onBeforeInput = (e: InputEvent): void => {
+      const ops = field.current.beforeInput(e.inputType, el.value);
+      if (!ops) return;
+      e.preventDefault();
+      applyTextOps(ops);
+    };
+    el.addEventListener("beforeinput", onBeforeInput);
+    return () => el.removeEventListener("beforeinput", onBeforeInput);
+  }, [applyTextOps]);
 
   const onKeyBar = useCallback(
     (p: KeyBarPress) => {
@@ -918,11 +940,10 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         onCompositionStart={() => {
-          composing.current = true;
+          field.current.compositionStart();
         }}
         onCompositionEnd={(e) => {
-          composing.current = false;
-          applyTextOps(differ.current.onCompositionEnd(e.currentTarget.value));
+          applyTextOps(field.current.compositionEnd(e.currentTarget.value));
           resetFieldIfIdle();
         }}
       />
