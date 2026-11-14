@@ -18,7 +18,7 @@ import type {
 } from "../api/contract";
 import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFrameMessage } from "./render/frameProtocol";
 import { WebGLRenderer } from "./render/WebGLRenderer";
-import { InputSender } from "./input/packets";
+import { InputSender, SendLane } from "./input/packets";
 import { InputFailures, errorText } from "./input/failures";
 import { endKind, mergeEnd, type EndKind } from "./status";
 
@@ -68,6 +68,8 @@ export interface RemoteSession {
   frames: number;
   renderer: React.RefObject<WebGLRenderer | null>;
   sender: React.RefObject<InputSender | null>;
+  /** Types text from the phone keyboard, after every input queued before it. */
+  sendText(text: string): void;
   attachCanvas(canvas: HTMLCanvasElement | null): void;
   reconnect(): void;
   disconnect(): Promise<void>;
@@ -106,6 +108,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
 
   const renderer = useRef<WebGLRenderer | null>(null);
   const sender = useRef<InputSender | null>(null);
+  const textOut = useRef<((text: string) => void) | null>(null);
   const sid = useRef<string | null>(null);
   const phaseRef = useRef<Phase>("connecting");
   const quality = useRef<Quality>(initialQuality);
@@ -269,14 +272,22 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
             if (!cancelled) setInputFailure({ message });
           },
         });
-        sender.current = new InputSender({
+        // Input bodies and typed text share one lane, so they reach the
+        // computer in the order they were made.
+        const lane = new SendLane();
+        const snd = new InputSender({
           send: (seq, body) => {
-            api.sessionInput(id, seq, body).then(
+            lane.run(() => api.sessionInput(id, seq, body)).then(
               () => failures.ok(),
               (err: unknown) => failures.fail(err),
             );
           },
         });
+        sender.current = snd;
+        textOut.current = (text) => {
+          snd.flush();
+          lane.run(() => api.sessionText(id, text)).catch(() => {});
+        };
         const q = wireQuality(quality.current, videoOk);
         if (q !== "auto") void api.sessionQuality(id, q).catch(() => {});
       })
@@ -292,6 +303,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
       const s = sender.current;
       if (s && mySid) s.releaseAll();
       sender.current = null;
+      textOut.current = null;
       if (mySid) void api.sessionDisconnect(mySid).catch(() => {});
       sid.current = null;
       setSessionId(null);
@@ -341,6 +353,8 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
       return false;
     }
   }, [api]);
+
+  const sendText = useCallback((text: string) => textOut.current?.(text), []);
 
   const disconnect = useCallback(async (): Promise<void> => {
     exiting.current = true;
@@ -410,6 +424,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     frames,
     renderer,
     sender,
+    sendText,
     attachCanvas: setCanvas,
     reconnect,
     disconnect,

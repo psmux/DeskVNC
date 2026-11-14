@@ -64,6 +64,23 @@ export function concat(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * Runs one call at a time, in the order they were queued. Rust handles every
+ * invoke on its own task, so two calls in flight can land in either order:
+ * typed letters came out swapped ("lnie2"), and a `session_input` body that
+ * waited on a slow earlier one timed out as an "input sequence gap" and then
+ * raced it. Each call here starts only once the one before has settled.
+ */
+export class SendLane {
+  private tail: Promise<void> = Promise.resolve();
+
+  run(call: () => Promise<void>): Promise<void> {
+    const done = this.tail.then(call);
+    this.tail = done.catch(() => {});
+    return done;
+  }
+}
+
 export interface SenderDeps {
   send(seq: number, body: Uint8Array): void;
   /** Schedules one flush. Defaults to requestAnimationFrame. */
