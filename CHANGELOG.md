@@ -8,6 +8,32 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [0.36.2] (2026-11-14)
+
+### Fixed
+
+* VNC servers that use RSA-AES (security types 5 and 129) connect again.
+  Each RSA encrypted challenge now carries its two byte length the way
+  TigerVNC and NeatVNC send it, and RA2_256 uses a 32 byte random instead of
+  16. Before this every such login stopped with "RA2 server random has the
+  wrong length". Tested against wayvnc 0.8 on a Raspberry Pi for both types.
+  Thanks to protonforest for the report and the fix (#42, #43).
+* DeskVNC Support copies and pastes through the system clipboard. The Copy
+  invitation button, the code's Copy button, Cmd+C on selected text and
+  pasting a code into Support all went to a clipboard inside the app, so
+  nothing reached other apps (#41). This affected Windows and Linux too. A
+  Copy button now says "Copied" or "Could not copy", and the Get help dialog
+  in the viewer says so as well when a copy fails.
+* An RDP user name with an `@` in it goes out whole and with no domain, to
+  the computer and to an RD Gateway, even when the host has a domain set.
+  That covers the broker style names some `.rdp` files carry (#20).
+
+### Added
+
+* An Arch Linux package, `deskvncviewer-bin`. The PKGBUILD lives in
+  `packaging/aur/` and builds with `makepkg -si`; each release also has the
+  PKGBUILD attached. See docs/INSTALL.md (#40).
+
 ## [0.36.1] (2026-11-11)
 
 ### Fixed
