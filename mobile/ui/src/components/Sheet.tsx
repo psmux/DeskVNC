@@ -5,6 +5,7 @@
  */
 import { AnimatePresence, motion, useDragControls } from "motion/react";
 import { useEffect, type ReactNode } from "react";
+import { LAYER, useBack } from "../lib/back";
 
 interface Props {
   open: boolean;
@@ -21,6 +22,11 @@ interface Props {
 
 export function Sheet({ open, onClose, children, art, title, subtitle, dismissible = true }: Props) {
   const drag = useDragControls();
+  // Android Back answers the sheet the way its own close does. A sheet that
+  // cannot be swiped away still has an answer for it (the certificate
+  // sheet's is "do not trust"), so Back never falls through to the screen
+  // underneath.
+  useBack(open && !!onClose, LAYER.sheet, () => onClose?.());
   useEffect(() => {
     if (!open || !dismissible) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose?.();
