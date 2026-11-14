@@ -121,8 +121,10 @@ export function ComputerCard({ host, thumb, online, onConnect, onMenu, onFavorit
 /** The built in demo computer, always there to try. */
 export function DemoCard({ onConnect, onHide }: { onConnect: () => void; onHide?: () => void }) {
   return (
+    // No `layout` here: the card is not keyed with the saved computers, and
+    // a layout move that started while the list filled in could leave it
+    // translated over another card.
     <motion.article
-      layout
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       className="relative overflow-hidden rounded-[14px] border border-line bg-surface shadow-card"
