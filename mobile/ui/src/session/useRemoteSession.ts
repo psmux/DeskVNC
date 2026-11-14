@@ -19,6 +19,7 @@ import type {
 import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFrameMessage } from "./render/frameProtocol";
 import { WebGLRenderer } from "./render/WebGLRenderer";
 import { InputSender } from "./input/packets";
+import { endKind, mergeEnd, type EndKind } from "./status";
 
 export type Phase = "connecting" | "connected" | "error" | "ended";
 
@@ -60,6 +61,8 @@ export interface RemoteSession {
   serverCursor: { x: number; y: number; at: number } | null;
   /** Set when the app came back from the background and the session had ended. */
   needsReconnect: boolean;
+  /** Why a session that was showing the desktop stopped, once it has. */
+  ended: { kind: EndKind; reason: string | null } | null;
   /** Bumped on every frame message, so the screen can tell pixels arrived. */
   frames: number;
   renderer: React.RefObject<WebGLRenderer | null>;
@@ -91,6 +94,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [hasCursorShape, setHasCursorShape] = useState(false);
   const [serverCursor, setServerCursor] = useState<{ x: number; y: number; at: number } | null>(null);
   const [needsReconnect, setNeedsReconnect] = useState(false);
+  const [ended, setEnded] = useState<{ kind: EndKind; reason: string | null } | null>(null);
   const [frames, setFrames] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -143,6 +147,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     setState(IDLE);
     setError(null);
     setNeedsReconnect(false);
+    setEnded(null);
     setCredentials(null);
     setCert(null);
     setStats(null);
@@ -186,7 +191,15 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           } else if (e.state.state === "disconnected") {
             if (exiting.current) return;
             if (hidden.current) endedWhileHidden.current = true;
-            if (phaseRef.current === "connected") {
+            if (phaseRef.current === "connected" || phaseRef.current === "ended") {
+              // A second reason can follow the first: the background one
+              // comes after the driver's own clean end.
+              const reason = e.state.reason;
+              const kind = endKind(reason, endedWhileHidden.current);
+              setEnded((prev) => {
+                const merged = mergeEnd(prev?.kind ?? null, kind);
+                return { kind: merged, reason: merged === prev?.kind ? prev.reason : reason };
+              });
               setNeedsReconnect(true);
               go("ended");
             } else {
@@ -227,6 +240,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         case "ended":
           if (exiting.current) return;
           if (hidden.current) endedWhileHidden.current = true;
+          setEnded((prev) => prev ?? { kind: endedWhileHidden.current ? "paused" : "lost", reason: null });
           setNeedsReconnect(true);
           if (phaseRef.current !== "error") go("ended");
           break;
@@ -283,6 +297,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         hidden.current = false;
         if (endedWhileHidden.current || phaseRef.current === "ended") {
           setNeedsReconnect(true);
+          setEnded((prev) => prev ?? { kind: "paused", reason: null });
           if (phaseRef.current !== "error") go("ended");
         } else {
           r?.start();
@@ -330,14 +345,14 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     [api],
   );
 
+  // Saying no to a sign in is a choice, not a failure: stop quietly, and the
+  // screen goes back to where the person came from.
   const cancelCredentials = useCallback(() => {
     setCredentials(null);
     const id = sid.current;
     exiting.current = true;
     if (id) void api.sessionDisconnect(id).catch(() => {});
-    setError("Sign in was cancelled.");
-    go("error");
-  }, [api, go]);
+  }, [api]);
 
   const answerCert = useCallback(
     (accept: boolean) => {
@@ -377,6 +392,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     hasCursorShape,
     serverCursor,
     needsReconnect,
+    ended,
     frames,
     renderer,
     sender,

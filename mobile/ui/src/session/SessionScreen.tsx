@@ -52,8 +52,10 @@ import { ConnectingScreen, ErrorScreen, ReconnectCard } from "./ui/ConnectingScr
 import { IconRotate, IconZoomOut } from "./ui/icons";
 import { KeyBar, type KeyBarPress } from "./ui/KeyBar";
 import { ClipboardSheet, ModeSheet, QualitySheet, StatsSheet } from "./ui/Panels";
+import { Sheet as SessionSheet } from "./ui/Sheet";
 import { CertificateSheet } from "../components/sheets/CertificateSheet";
 import { CredentialSheet } from "../components/sheets/CredentialSheet";
+import { LAYER, useBack } from "../lib/back";
 import { readPrefs, usePrefs } from "../lib/prefs";
 import { Toolbar, type ToolbarAction } from "./ui/Toolbar";
 import "./session.css";
@@ -127,6 +129,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   const [os, setOs] = useState<HostOs | null>(null);
   const [hostName, setHostName] = useState<string | null>(null);
   const [clipSeen, setClipSeen] = useState<string | null>(null);
+  const [askLeave, setAskLeave] = useState(false);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -264,15 +267,28 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     const vv = window.visualViewport;
     const root = rootRef.current;
     if (!vv || !root) return;
+    // Two ways a keyboard shows. iOS overlays it, so the visual viewport
+    // shrinks inside the layout one. Android, where MainActivity pads the
+    // WebView by the keyboard's height, shrinks the whole page instead, which
+    // only shows as the page being shorter than it was at this width.
+    let width = window.innerWidth;
+    let tallest = window.innerHeight;
     const update = (): void => {
+      if (window.innerWidth !== width) {
+        width = window.innerWidth;
+        tallest = window.innerHeight;
+      }
+      tallest = Math.max(tallest, window.innerHeight);
       const kb = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
       root.style.setProperty("--s-kb", `${Math.round(kb)}px`);
-      root.classList.toggle("kb-open", kb > 40);
+      root.classList.toggle("kb-open", kb > 40 || tallest - window.innerHeight > 120);
     };
     update();
     vv.addEventListener("resize", update);
     vv.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
     return () => {
+      window.removeEventListener("resize", update);
       vv.removeEventListener("resize", update);
       vv.removeEventListener("scroll", update);
     };
@@ -744,6 +760,27 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     onExit();
   }, [onExit, openKeyboard, s]);
 
+  // Once the desktop is gone the phone keyboard has nothing to type into.
+  // The hidden field kept its focus, and Android brought the keyboard back
+  // up over the card that says the session ended.
+  useEffect(() => {
+    if (s.phase === "connected") return;
+    openKeyboard(false);
+    setAskLeave(false);
+  }, [s.phase, openKeyboard]);
+
+  // Android Back: close whatever is open over the desktop first. On a live
+  // desktop ask before leaving, and a second Back leaves. Anywhere else
+  // (connecting, failed, ended) it leaves at once. It never closes the app.
+  useBack(true, LAYER.session, () => {
+    if (askLeave) return void leave();
+    if (sheet) return setSheet(null);
+    if (toolbarOpen) return setToolbarOpen(false);
+    if (coach) return setCoach(null);
+    if (s.phase === "connected") return setAskLeave(true);
+    void leave();
+  });
+
   const onTool = useCallback(
     (a: ToolbarAction) => {
       switch (a) {
@@ -864,6 +901,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
         autoCorrect="off"
         spellCheck={false}
         aria-label="Type on the computer"
+        readOnly={s.phase !== "connected"}
         enterKeyHint="send"
         onFocus={() => setKeyboardOn(true)}
         onBlur={() => {
@@ -887,10 +925,42 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
       {s.phase === "connecting" ? <ConnectingScreen title={name} step={stepOf(s.state)} words={stepWords(s.state)} reconnecting={reconnecting} onCancel={() => void leave()} /> : null}
       {s.phase === "error" ? <ErrorScreen title={name} message={s.error} onRetry={s.reconnect} onExit={() => void leave()} /> : null}
-      {s.phase === "ended" && s.needsReconnect ? <ReconnectCard title={name} onReconnect={s.reconnect} onExit={() => void leave()} /> : null}
+      {s.phase === "ended" && s.needsReconnect ? (
+        <ReconnectCard
+          title={name}
+          kind={s.ended?.kind ?? "lost"}
+          reason={s.ended?.reason ?? null}
+          // A Boundary invitation is good for one session only.
+          canReconnect={target.kind !== "boundary"}
+          onReconnect={s.reconnect}
+          onExit={() => void leave()}
+        />
+      ) : null}
 
       {s.credentials ? (
-        <CredentialSheet open request={s.credentials} hostName={name} onSubmit={s.answerCredentials} onCancel={s.cancelCredentials} />
+        <CredentialSheet
+          open
+          request={s.credentials}
+          hostName={name}
+          onSubmit={s.answerCredentials}
+          onCancel={() => {
+            s.cancelCredentials();
+            void leave();
+          }}
+        />
+      ) : null}
+      {askLeave ? (
+        <SessionSheet title={`Leave ${name}?`} onClose={() => setAskLeave(false)}>
+          <div className="dv-s-form">
+            <p className="dv-s-lead">The session ends. You can connect again from your computers.</p>
+            <button type="button" className="dv-s-big" onClick={() => void leave()}>
+              Leave
+            </button>
+            <button type="button" className="dv-s-plain" onClick={() => setAskLeave(false)}>
+              Stay
+            </button>
+          </div>
+        </SessionSheet>
       ) : null}
       {s.cert ? <CertificateSheet open prompt={s.cert} hostName={name} onAnswer={s.answerCert} /> : null}
 

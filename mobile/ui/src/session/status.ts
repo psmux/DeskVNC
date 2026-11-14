@@ -67,6 +67,64 @@ export function formatSpeed(bps: number): string {
 }
 
 /**
+ * Why a session that was showing the desktop stopped.
+ *
+ * * `paused`: this phone put it down, because DeskVNC sat in the background
+ *   past the grace period (`lifecycle::REASON` on the Rust side).
+ * * `remote`: the other side ended it on purpose. DeskVNC Support pressing
+ *   End closes cleanly, which the Boundary driver reports as "Support session
+ *   ended"; a computer that ends it with a reason says "That computer ended
+ *   the session: ..."; RDP says "the server ended the session".
+ * * `lost`: anything else, a link that failed.
+ */
+export type EndKind = "paused" | "remote" | "lost";
+
+/** The phrase the Rust side sends when the background ended a session. */
+export const BACKGROUND_REASON = "in the background for more than";
+
+export function endKind(reason: string | null, wasHidden: boolean): EndKind {
+  const m = (reason ?? "").toLowerCase();
+  if (m.includes(BACKGROUND_REASON)) return "paused";
+  // Leaving the app also ends a Boundary session cleanly, so while hidden a
+  // clean end is the phone's own doing, not the other side's.
+  if (wasHidden) return "paused";
+  if (/ended the session|session ended|closed by peer|stopped sharing/.test(m)) return "remote";
+  return "lost";
+}
+
+/**
+ * A second reason for the same end. The background reason arrives after the
+ * driver's own one, so it wins; otherwise the first reason stands.
+ */
+export function mergeEnd(prev: EndKind | null, next: EndKind): EndKind {
+  if (prev === null || next === "paused") return next;
+  return prev;
+}
+
+/** What the card over the stopped desktop says. */
+export function endWords(kind: EndKind, reason: string | null): { title: string; lead: string } {
+  switch (kind) {
+    case "paused":
+      return {
+        title: "The connection was paused",
+        lead: "This happens when DeskVNC is in the background for a while. Reconnect to pick up where you left off.",
+      };
+    case "remote": {
+      const why = /ended the session:\s*(.+)$/i.exec(reason ?? "")?.[1]?.trim();
+      return {
+        title: "They ended the session",
+        lead: why ? `The other side closed the connection: ${why}` : "The other side closed the connection.",
+      };
+    }
+    case "lost":
+      return {
+        title: "The connection dropped",
+        lead: "This happens when the network changes. Reconnect to pick up where you left off.",
+      };
+  }
+}
+
+/**
  * Turns a raw error from Rust or the server into a sentence a person can act
  * on. Unknown messages are kept, behind a friendly lead in.
  */
