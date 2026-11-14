@@ -480,7 +480,9 @@ async fn serve_trust_ask(
                 }
                 break same;
             }
-            Some(ClientCommand::CancelCredentials) | Some(ClientCommand::Disconnect) => break false,
+            Some(ClientCommand::CancelCredentials) | Some(ClientCommand::Disconnect) => {
+                break false
+            }
             // Input, clipboard and quality changes mean nothing before the
             // session exists.
             Some(_) => continue,
@@ -840,7 +842,7 @@ mod tests {
 
     use crate::security::ra2::test_server::{self, Finish, Recorded};
     use crate::types::PinScheme;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
 
     /// A ServerInit for a 2x2 true colour screen named "pi".
@@ -857,11 +859,7 @@ mod tests {
 
     /// An RFB 3.8 server on loopback that offers only RA2 and then runs the
     /// simulated RA2 server from `ra2.rs`.
-    async fn ra2_server() -> (
-        u16,
-        Recorded,
-        tokio::task::JoinHandle<Option<Vec<u8>>>,
-    ) {
+    async fn ra2_server() -> (u16, Recorded, tokio::task::JoinHandle<Option<Vec<u8>>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let recorded = Recorded::default();
@@ -871,7 +869,9 @@ mod tests {
             sock.write_all(b"RFB 003.008\n").await.ok()?;
             let mut version = [0u8; 12];
             sock.read_exact(&mut version).await.ok()?;
-            sock.write_all(&[1, SecurityType::Ra2.to_wire()]).await.ok()?;
+            sock.write_all(&[1, SecurityType::Ra2.to_wire()])
+                .await
+                .ok()?;
             let chosen = sock.read_u8().await.ok()?;
             assert_eq!(chosen, SecurityType::Ra2.to_wire());
             test_server::serve(
@@ -910,10 +910,7 @@ mod tests {
 
     fn start_establish(
         mut options: ConnectOptions,
-    ) -> (
-        Shell,
-        tokio::task::JoinHandle<(Result<()>, ConnectOptions)>,
-    ) {
+    ) -> (Shell, tokio::task::JoinHandle<(Result<()>, ConnectOptions)>) {
         let (ev_tx, ev_rx) = mpsc::channel(64);
         let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
         let task = tokio::spawn(async move {

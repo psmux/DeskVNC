@@ -512,7 +512,9 @@ async fn key_exchange(
         // Not a key length: a server that gives up on RA2 right after the
         // type was chosen may send a failed SecurityResult (1) and a reason
         // in clear instead of its key.
-        return Err(VncError::KeyExchange(refusal_before_credentials(&mut stream).await));
+        return Err(VncError::KeyExchange(
+            refusal_before_credentials(&mut stream).await,
+        ));
     }
     if !(MIN_SERVER_KEY_BITS..=MAX_SERVER_KEY_BITS).contains(&server_bits) {
         return Err(VncError::Protocol(format!(
