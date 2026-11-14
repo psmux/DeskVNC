@@ -20,8 +20,22 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   same now holds for VeNCrypt X.509 servers, whose certificate was trusted
   in the same order. A refused key gets nothing, and a pinned key still
   connects without a prompt.
+* A server that offers both RSA-AES and VeNCrypt now gets RSA-AES. VeNCrypt
+  only reveals its subtypes after it is chosen, and a server offering bare
+  Plain there received the password in clear text.
+* After a server refuses a saved password, Try again asks for a new one
+  instead of sending the refused password again, and the saved one is
+  forgotten.
 
 ### Fixed
+
+* Enter from the Android keyboard reaches the remote computer while a word
+  is still being composed, and typed text and keys arrive in the order they
+  were typed. Letters could arrive swapped and Enter could get ahead of
+  them.
+* Back while "Leave" is asked closes the question and keeps the session.
+* The trust prompt calls a bare RSA key a key, not a certificate.
+* The demo card no longer lands on top of a saved computer after a restart.
 
 * On Android, taps, clicks, drags, scrolling, Enter, Backspace and the key
   bar now reach the remote computer over VNC, RDP and Boundary. Android
