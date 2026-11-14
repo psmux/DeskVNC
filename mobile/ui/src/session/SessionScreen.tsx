@@ -651,6 +651,15 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     [s.sendText, tapKey],
   );
 
+  // After an Enter the field starts over, so a suggestion the keyboard
+  // offers for the word before it cannot backspace into the sent line.
+  const clearAfterEnter = useCallback((): void => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.value = SENTINEL;
+    field.current.clearedAfterEnter();
+  }, []);
+
   const resetFieldIfIdle = (): void => {
     const el = inputRef.current;
     if (!el || field.current.composing()) return;
@@ -673,6 +682,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     if (enter) {
       e.preventDefault();
       applyTextOps(enter);
+      if (enter.length > 0) clearAfterEnter();
       return;
     }
     if (ne.isComposing || ne.keyCode === 229 || e.key === "Unidentified" || e.key === "Process") return;
@@ -712,10 +722,11 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
       if (!ops) return;
       e.preventDefault();
       applyTextOps(ops);
+      if (ops.length > 0) clearAfterEnter();
     };
     el.addEventListener("beforeinput", onBeforeInput);
     return () => el.removeEventListener("beforeinput", onBeforeInput);
-  }, [applyTextOps]);
+  }, [applyTextOps, clearAfterEnter]);
 
   const onKeyBar = useCallback(
     (p: KeyBarPress) => {

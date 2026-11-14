@@ -204,6 +204,16 @@ export class KeyboardField {
     this.enterDown = false;
   }
 
+  /**
+   * The field was emptied after an Enter. Whatever the keyboard still holds
+   * from before the Enter, a pending suggestion for instance, belongs to the
+   * line already sent and must not edit it.
+   */
+  clearedAfterEnter(): void {
+    this.composingNow = false;
+    this.differ.reset();
+  }
+
   compositionStart(): void {
     this.composingNow = true;
   }

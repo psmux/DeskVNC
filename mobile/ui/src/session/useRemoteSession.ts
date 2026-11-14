@@ -310,16 +310,15 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         // computer in the order they were made.
         const lane = new SendLane();
         const snd = new InputSender({
-          send: (seq, body) => {
+          send: (seq, body) =>
             lane.run(() => api.sessionInput(id, seq, body)).then(
               () => failures.ok(),
               (err: unknown) => failures.fail(err),
-            );
-          },
+            ),
         });
         sender.current = snd;
         textOut.current = (text) => {
-          snd.flush();
+          snd.flush(true);
           lane.run(() => api.sessionText(id, text)).catch(() => {});
         };
         const q = wireQuality(quality.current, videoOk);
