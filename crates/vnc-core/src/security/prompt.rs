@@ -26,8 +26,10 @@ use std::sync::Mutex;
 
 use tokio::sync::{mpsc, oneshot};
 
+use vnc_transport::{CertificateDigests, TrustDecision};
+
 use crate::error::{Result, VncError};
-use crate::types::{ConnectOptions, CredentialKind, CredentialRequest, Credentials};
+use crate::types::{ConnectOptions, CredentialKind, CredentialRequest, Credentials, PinScheme};
 
 /// A pending question for the user, raised from inside the handshake.
 ///
@@ -43,6 +45,25 @@ pub struct CredentialAsk {
 /// The channel the session hands to the security layer so it can reach the
 /// user mid-handshake.
 pub type CredentialPrompt = mpsc::Sender<CredentialAsk>;
+
+/// A server key the handshake will not send a secret to until the user has
+/// approved it, raised from inside the handshake.
+///
+/// The session answers on [`reply`](Self::reply): `true` when the user trusted
+/// this exact key, `false` when they refused it. Dropping the sender means the
+/// session is tearing down.
+#[derive(Debug)]
+pub struct TrustAsk {
+    /// Which key this is, so the answer is pinned against the right one.
+    pub scheme: PinScheme,
+    pub fingerprint: String,
+    pub subject: String,
+    pub certificate: Option<CertificateDigests>,
+    pub reply: oneshot::Sender<bool>,
+}
+
+/// The channel the session hands to the security layer for [`TrustAsk`]s.
+pub type TrustPrompt = mpsc::Sender<TrustAsk>;
 
 /// How many times we ask before giving up on one connection (PRD/10 §3.4).
 /// The first attempt counts, so this is "one prompt plus two retries".
@@ -70,6 +91,11 @@ pub struct CredentialSource<'a> {
     supplied: Mutex<Option<Credentials>>,
     /// Set by the handshake once the security result came back OK.
     authenticated: AtomicBool,
+    /// Where an unpinned server key is taken to the user. `None` refuses such
+    /// a key outright, see [`approve_server_key`](Self::approve_server_key).
+    trust_prompt: Option<&'a TrustPrompt>,
+    /// Keys the user approved during this attempt.
+    approved: Mutex<Vec<(PinScheme, String)>>,
 }
 
 impl std::fmt::Debug for CredentialSource<'_> {
@@ -102,6 +128,8 @@ impl<'a> CredentialSource<'a> {
             last_username: Mutex::new(None),
             supplied: Mutex::new(None),
             authenticated: AtomicBool::new(false),
+            trust_prompt: None,
+            approved: Mutex::new(Vec::new()),
         }
     }
 
@@ -124,6 +152,94 @@ impl<'a> CredentialSource<'a> {
             last_username: Mutex::new(None),
             supplied: Mutex::new(None),
             authenticated: AtomicBool::new(false),
+            trust_prompt: None,
+            approved: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Route unpinned server keys to the user over `prompt`.
+    pub fn with_trust_prompt(mut self, prompt: &'a TrustPrompt) -> Self {
+        self.trust_prompt = Some(prompt);
+        self
+    }
+
+    /// Keys the user approved at a trust prompt during this attempt, by scheme.
+    pub fn approved_keys(&self) -> Vec<(PinScheme, String)> {
+        self.approved.lock().expect("not poisoned").clone()
+    }
+
+    /// True when `fingerprint` was approved under `scheme` in this attempt.
+    pub(crate) fn was_approved(&self, scheme: PinScheme, fingerprint: &str) -> bool {
+        let wanted = vnc_transport::normalize_fingerprint(fingerprint);
+        self.approved
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .any(|(s, f)| *s == scheme && vnc_transport::normalize_fingerprint(f) == wanted)
+    }
+
+    /// Decide whether the handshake may send secrets to this server key.
+    ///
+    /// Called after the key exchange has proved the server holds the key and
+    /// before any user name or password is written. A pinned or CA verified
+    /// key passes. A changed key is the hard stop
+    /// [`VncError::CertificateMismatch`]. A key with no pin is shown to the
+    /// user and the handshake waits for the answer, so a man in the middle on
+    /// first contact sees the prompt instead of the password.
+    ///
+    /// With no trust prompt wired up (the headless [`super::authenticate`] and
+    /// the unit tests) an unknown key is refused: nothing in this crate
+    /// approves a key without an explicit answer.
+    pub(crate) async fn approve_server_key(
+        &self,
+        scheme: PinScheme,
+        decision: &TrustDecision,
+    ) -> Result<()> {
+        let (fingerprint, subject, certificate) = match decision {
+            TrustDecision::VerifiedByCa | TrustDecision::PinnedMatch => return Ok(()),
+            TrustDecision::Changed { expected, actual } => {
+                return Err(VncError::CertificateMismatch {
+                    expected: expected.clone(),
+                    actual: actual.clone(),
+                })
+            }
+            TrustDecision::Unknown {
+                fingerprint,
+                subject,
+                certificate,
+            } => (fingerprint, subject, certificate),
+        };
+        let Some(prompt) = self.trust_prompt else {
+            return Err(VncError::CertificateUntrusted(format!(
+                "{fingerprint} has not been approved and there is nobody to ask"
+            )));
+        };
+        let (reply, answer) = oneshot::channel();
+        let ask = TrustAsk {
+            scheme,
+            fingerprint: fingerprint.clone(),
+            subject: subject.clone(),
+            certificate: certificate.clone(),
+            reply,
+        };
+        if prompt.send(ask).await.is_err() {
+            return Err(VncError::CertificateUntrusted(format!(
+                "{fingerprint} has not been approved and there is nobody to ask"
+            )));
+        }
+        match answer.await {
+            Ok(true) => {
+                self.approved
+                    .lock()
+                    .expect("not poisoned")
+                    .push((scheme, fingerprint.clone()));
+                Ok(())
+            }
+            Ok(false) => Err(VncError::CertificateUntrusted(format!(
+                "{fingerprint} was not approved"
+            ))),
+            // The session dropped the question: it is tearing down.
+            Err(_) => Err(VncError::Cancelled),
         }
     }
 

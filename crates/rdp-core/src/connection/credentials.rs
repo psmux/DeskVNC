@@ -40,7 +40,9 @@
 //! same shape `vnc-core` uses (`establish_interactive`,
 //! `crates/vnc-core/src/session/connection.rs:366`), for the same reason.
 
-use remote_core::{ClientCommand, CredentialKind, CredentialRequest, Credentials, SessionEvent};
+use remote_core::{
+    ClientCommand, CredentialKind, CredentialRequest, Credentials, PinScheme, SessionEvent,
+};
 use tokio::sync::mpsc;
 
 use crate::error::{RdpError, Result};
@@ -85,6 +87,11 @@ pub struct Ask {
     /// the next [`ensure`] ask even though the credentials on hand look
     /// usable.
     refused: Option<String>,
+    /// Server keys the user approved at a trust prompt in this chain of
+    /// attempts. A retry after a refused password dials again and meets the
+    /// same certificate; without this it asked about that certificate a
+    /// second time, seconds after the user had said yes to it.
+    trusted: Vec<(PinScheme, String)>,
 }
 
 impl Ask {
@@ -125,6 +132,23 @@ impl Ask {
     /// (PRDRDP/12 §6.4).
     pub fn refused(&mut self, why: String) {
         self.refused = Some(why);
+    }
+
+    /// Record a key the user approved at the trust prompt.
+    pub fn trusted(&mut self, scheme: PinScheme, fingerprint: String) {
+        self.trusted.retain(|(s, _)| *s != scheme);
+        self.trusted.push((scheme, fingerprint));
+    }
+
+    /// Pin every key approved in this chain into `pins`, for the next
+    /// attempt. A slot that already holds a pin is left alone, so a key that
+    /// changes between two attempts is still reported as a changed identity.
+    pub fn pin_trusted(&self, pins: &mut remote_core::CertPins) {
+        for (scheme, fingerprint) in &self.trusted {
+            if pins.for_scheme(*scheme).is_none() {
+                pins.set(*scheme, Some(fingerprint.clone()));
+            }
+        }
     }
 }
 

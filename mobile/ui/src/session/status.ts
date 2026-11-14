@@ -72,6 +72,17 @@ export function formatSpeed(bps: number): string {
  */
 export function friendlyError(raw: string): { title: string; detail: string } {
   const m = raw.toLowerCase();
+  // These two come first: both sentences mention a name or password that was
+  // never sent, and the sign in rule below would claim it was refused.
+  if (/key exchange/.test(m)) {
+    return {
+      title: "The computer could not set up encryption",
+      detail: "It ended the connection before asking for a name or password, so nothing was sent. Its VNC server may have no encryption key set up.",
+    };
+  }
+  if (/not trusted/.test(m)) {
+    return { title: "You did not trust this computer", detail: "Nothing was sent to it. Connect again to look at its fingerprint once more." };
+  }
   if (/refused|unreachable|no route|timed out|timeout|resolve|not found|dns|host is down/.test(m)) {
     return {
       title: "We could not reach the computer",
@@ -81,7 +92,7 @@ export function friendlyError(raw: string): { title: string; detail: string } {
   if (/auth|password|credential|denied|login|logon/.test(m)) {
     return { title: "That sign in did not work", detail: "The name or password was not accepted. Try again and check the spelling." };
   }
-  if (/certificate|fingerprint|tls|trust/.test(m)) {
+  if (/certificate|fingerprint|tls|trust|identity/.test(m)) {
     return { title: "The computer's identity did not check out", detail: "For your safety we stopped. Try again, or ask the person who looks after it." };
   }
   if (/expired|invitation|code/.test(m)) {
