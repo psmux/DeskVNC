@@ -8,10 +8,42 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
-## [0.36.2] (2026-11-14)
+## [0.36.3] (2026-11-15)
+
+0.36.2 was built but never published. Its changes are part of this release.
+
+### Security
+
+* DeskVNC asks you to trust an RSA-AES server's key before it sends your
+  user name and password. It used to send them first and ask afterwards, so
+  a man in the middle on the very first connection could read them. The
+  same now holds for VeNCrypt X.509 servers, whose certificate was trusted
+  in the same order. A refused key gets nothing, and a pinned key still
+  connects without a prompt.
 
 ### Fixed
 
+* On Android, taps, clicks, drags, scrolling, Enter, Backspace and the key
+  bar now reach the remote computer over VNC, RDP and Boundary. Android
+  hands the app's input to Rust as JSON rather than raw bytes, the input
+  command took only raw bytes, and the error was dropped, so only typed text
+  got through in 0.36.0 and 0.36.1. Snapshot and the computer thumbnails
+  had the same fault. If input still fails the session now says so.
+* The phone's clipboard works on Android: Copy to this phone, Paste from
+  phone and every Paste button. A refused copy or paste says what to do.
+* Android's Back button in a session asks before leaving and closes sheets
+  first. It used to close the whole app.
+* The keyboard on Android no longer covers sign in fields and their buttons.
+* When the other side ends a Boundary session the phone says so, instead of
+  saying the connection was paused because the app was in the background.
+* Cancel at a sign in prompt goes back quietly instead of showing an error.
+* Help someone on the phone takes a pasted invitation, and its wording
+  matches what DeskVNC Support shows.
+* A server that closes during the RSA-AES key exchange is no longer reported
+  as a wrong password. The key's details say "RSA-AES server key" instead of
+  naming RealVNC, since TigerVNC and wayvnc use it too.
+* After a failed RDP sign in, the retry does not ask again about the
+  certificate you just trusted.
 * VNC servers that use RSA-AES (security types 5 and 129) connect again.
   Each RSA encrypted challenge now carries its two byte length the way
   TigerVNC and NeatVNC send it, and RA2_256 uses a 32 byte random instead of
