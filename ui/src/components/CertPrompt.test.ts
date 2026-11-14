@@ -3,9 +3,11 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   CERTIFICATE_SHA256_LABEL,
+  CertPrompt,
   FINGERPRINT_LABEL,
   FingerprintBlock,
   THUMBPRINT_LABEL,
+  isRawKey,
 } from "./CertPrompt";
 
 // The pin is the SHA-256 of the public key. Labelled as a certificate
@@ -93,5 +95,36 @@ describe("FingerprintBlock with the certificate's own digests", () => {
     expect(el.querySelector(`[aria-label="${THUMBPRINT_LABEL}"]`)).toBeNull();
     expect(el.querySelector(`[aria-label="${CERTIFICATE_SHA256_LABEL}"]`)).toBeNull();
     expect(el.querySelector(`[aria-label="${FINGERPRINT_LABEL}"]`)).not.toBeNull();
+  });
+});
+
+describe("CertPrompt for a bare RSA key", () => {
+  let root: Root | null = null;
+  let host: HTMLDivElement | null = null;
+  afterEach(() => {
+    act(() => root?.unmount());
+    host?.remove();
+  });
+
+  function changed(scheme: "ra2" | "tls"): string {
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const data = { fingerprint: "ab".repeat(32), subject: "RSA-AES server key (2048-bit)", isChange: true, hostName: "office", scheme };
+    const noop = () => {};
+    act(() => root!.render(createElement(CertPrompt, { data, onTrust: noop, onConnectOnce: noop, onCancel: noop })));
+    return document.body.textContent ?? "";
+  }
+
+  it("says the key changed, since RSA-AES has no certificate", () => {
+    expect(isRawKey("ra2")).toBe(true);
+    expect(isRawKey("apple-rsa")).toBe(true);
+    expect(changed("ra2")).toContain("presenting a different key than the one");
+  });
+
+  it("still says certificate for TLS", () => {
+    expect(isRawKey("tls")).toBe(false);
+    expect(changed("tls")).toContain("presenting a different certificate than the one");
   });
 });
