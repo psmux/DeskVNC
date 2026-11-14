@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { BoundaryProviderSetup } from "./BoundaryProviderSetup";
 import { writeClipboard } from "../lib/tauri";
+import { copyButtonLabel, copyFailedHint, copyOutcomeMs, type CopyOutcome } from "../lib/copyButton";
+import { isMac } from "../lib/util";
 import {
   setCodeService,
   shortId,
@@ -96,19 +98,29 @@ function Body({ view, onClose }: { view: SupportView; onClose: () => void }): Re
 type Run = (action: () => Promise<unknown>) => void;
 
 function Copy({ text, label }: { text: string; label: string }): ReactNode {
-  const [done, setDone] = useState(false);
+  const [outcome, setOutcome] = useState<CopyOutcome>(null);
+  const timer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+  const failed = outcome !== null && !outcome.ok;
   return (
     <button
       type="button"
-      className="btn-secondary px-3 py-1 text-xs"
+      className={`btn-secondary px-3 py-1 text-xs ${failed ? "text-danger" : ""}`}
+      title={failed ? copyFailedHint(isMac) : undefined}
       onClick={() => {
         void writeClipboard(text).then((ok) => {
-          setDone(ok);
-          if (ok) setTimeout(() => setDone(false), 1500);
+          setOutcome({ ok });
+          if (timer.current !== null) window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setOutcome(null), copyOutcomeMs(ok));
         });
       }}
     >
-      {done ? "Copied" : label}
+      {copyButtonLabel(outcome, label)}
     </button>
   );
 }

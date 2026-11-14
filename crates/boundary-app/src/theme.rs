@@ -290,9 +290,10 @@ pub fn dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 4.5, color);
 }
 
-/// A large value in an inset box with a Copy button beside it. Returns
-/// whether Copy was pressed.
-pub fn value_box(ui: &mut egui::Ui, value: &str, size: f32) -> bool {
+/// A large value in an inset box with a Copy button beside it, labelled
+/// `button` so it can say whether the last copy worked. Returns whether it
+/// was pressed.
+pub fn value_box(ui: &mut egui::Ui, value: &str, size: f32, button: &str) -> bool {
     let p = pal(ui.ctx());
     egui::Frame::new()
         .fill(p.inset)
@@ -308,7 +309,7 @@ pub fn value_box(ui: &mut egui::Ui, value: &str, size: f32) -> bool {
                         .color(p.text),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.button("Copy").clicked()
+                    ui.button(button).clicked()
                 })
                 .inner
             })

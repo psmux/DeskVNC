@@ -4,6 +4,7 @@
 
 mod attention;
 mod codes;
+mod copy;
 mod install;
 mod journal;
 mod launcher;
@@ -331,6 +332,8 @@ struct App {
     /// Whether the window had focus when last drawn, for the session's
     /// events, which are read off the window's thread.
     focused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The copy buttons, and what the last press of one did.
+    copier: copy::Copier,
 }
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -420,7 +423,19 @@ impl App {
                 0
             },
             focused: Default::default(),
+            copier: copy::Copier::default(),
         }
+    }
+    /// Put `text` on this computer's clipboard for the button called `key`.
+    /// A failure is said on the button and in the status line, with the way
+    /// to copy the text by hand.
+    fn copy(&mut self, ctx: &egui::Context, key: &'static str, text: &str) -> bool {
+        let ok = self.copier.copy(ctx, key, text);
+        if !ok {
+            self.status = copy::failed_hint().into();
+            self.error = true;
+        }
+        ok
     }
     fn network_options(&self) -> HostOptions {
         self.network.options()
@@ -810,18 +825,22 @@ impl App {
                     self.codes.clear();
                 }
             } else if let Some(code) = self.codes.code() {
-                if theme::value_box(ui, &code, 26.0) {
-                    ui.ctx().copy_text(code.clone());
+                if theme::value_box(ui, &code, 26.0, self.copier.label("code", "Copy")) {
+                    self.copy(ui.ctx(), "code", &code);
                 }
                 theme::small(
                     ui,
                     "Read it out or send it. Your helper enters it, and you approve them here.",
                 );
                 if ui
-                    .small_button("Copy the full invitation instead")
+                    .small_button(
+                        self.copier
+                            .label("full", "Copy the full invitation instead"),
+                    )
                     .clicked()
                 {
-                    ui.ctx().copy_text(self.invitation.clone());
+                    let invitation = self.invitation.clone();
+                    self.copy(ui.ctx(), "full", &invitation);
                 }
             } else {
                 egui::ScrollArea::vertical()
@@ -836,12 +855,13 @@ impl App {
                     });
                 if ui
                     .add(
-                        theme::primary(ui, "Copy invitation")
+                        theme::primary(ui, self.copier.label("invitation", "Copy invitation"))
                             .min_size(egui::vec2(ui.available_width(), 42.0)),
                     )
                     .clicked()
                 {
-                    ui.ctx().copy_text(self.invitation.clone());
+                    let invitation = self.invitation.clone();
+                    self.copy(ui.ctx(), "invitation", &invitation);
                 }
                 theme::small(
                     ui,
@@ -890,8 +910,9 @@ impl App {
                 ui.horizontal(|ui| {
                     theme::small(ui, "This computer's ID");
                     ui.monospace(unattended::short(self.unattended.machine_id()));
-                    if ui.small_button("Copy ID").clicked() {
-                        ui.ctx().copy_text(self.unattended.machine_id().to_owned());
+                    if ui.small_button(self.copier.label("id", "Copy ID")).clicked() {
+                        let id = self.unattended.machine_id().to_owned();
+                        self.copy(ui.ctx(), "id", &id);
                     }
                 });
             }
@@ -1146,16 +1167,16 @@ impl App {
     fn remote(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             theme::small(ui, remote_hint(self.control, self.rights));
-            if let Some(text) = self.copied.as_ref() {
+            if let Some(text) = self.copied.clone() {
                 let count = text.chars().count();
                 if ui
-                    .button("Copy what they copied")
+                    .button(self.copier.label("theirs", "Copy what they copied"))
                     .on_hover_text(format!(
                         "{count} characters. Puts them on your clipboard, replacing what is there."
                     ))
                     .clicked()
+                    && self.copy(ui.ctx(), "theirs", &text)
                 {
-                    ui.ctx().copy_text(text.clone());
                     self.status =
                         format!("Your clipboard now has the {count} characters they copied");
                     self.error = false;

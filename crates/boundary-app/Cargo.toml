@@ -11,7 +11,10 @@ boundary-platform.workspace = true
 tokio = { workspace = true, features = ["process", "signal"] }
 serde.workspace = true
 serde_json.workspace = true
-eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "x11", "wayland"] }
+# `clipboard` is what connects egui to the system clipboard. Without it egui
+# keeps copies in a string of its own, and Cmd+C, Cmd+V and every Copy button
+# only ever talked to that string (issue #41).
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wgpu", "x11", "wayland"] }
 
 boundary-provision = { path = "../boundary-provision" }
 

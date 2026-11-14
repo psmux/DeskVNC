@@ -80,6 +80,8 @@ pub struct Unattended {
     checked: std::time::Instant,
     /// The window, woken when the listener has something to say.
     ctx: egui::Context,
+    /// The Copy button on this computer's ID.
+    copier: crate::copy::Copier,
 }
 
 impl Unattended {
@@ -110,6 +112,7 @@ impl Unattended {
             handed_over: false,
             checked: std::time::Instant::now(),
             ctx: ctx.clone(),
+            copier: crate::copy::Copier::default(),
         };
         // Rewrite an existing sign in entry, so one written by an older copy
         // picks up what this one adds (a restart after a crash on macOS) and
@@ -634,8 +637,16 @@ impl Unattended {
                     "This computer's ID"
                 },
             );
-            if theme::value_box(ui, &short(&self.machine), 16.0) {
-                ui.ctx().copy_text(self.machine.clone());
+            if theme::value_box(
+                ui,
+                &short(&self.machine),
+                16.0,
+                self.copier.label("id", "Copy"),
+            ) {
+                let machine = self.machine.clone();
+                if !self.copier.copy(ui.ctx(), "id", &machine) {
+                    self.fail(crate::copy::failed_hint().to_owned());
+                }
             }
             theme::small(
                 ui,
