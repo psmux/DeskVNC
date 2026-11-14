@@ -342,6 +342,26 @@ pub fn select_security_type(offered: &[u8], opts: &ConnectOptions) -> Result<Sec
             .then_with(|| a.to_wire().cmp(&b.to_wire()))
     });
 
+    // VeNCrypt's subtype list only arrives after we commit to type 19, and a
+    // server may offer nothing there but bare `Plain`, which sends the user
+    // name and password in the clear. TigerVNC run with `-SecurityTypes
+    // RA2,Plain` does exactly that. RSA-AES always encrypts the password and
+    // the session, so when it is on the list it goes ahead of VeNCrypt.
+    if usable[0] == SecurityType::VeNCrypt {
+        if let Some(i) = usable.iter().position(|t| {
+            matches!(
+                t,
+                SecurityType::Ra2
+                    | SecurityType::Ra2ne
+                    | SecurityType::Ra2_256
+                    | SecurityType::Ra2ne256
+            )
+        }) {
+            let ra2 = usable.remove(i);
+            usable.insert(0, ra2);
+        }
+    }
+
     // The strongest type the server actually offered. `None` is reached only
     // when it is the only thing on the list, because the sort puts every
     // other supported type ahead of it, so taking it is never a downgrade:
@@ -720,6 +740,25 @@ mod tests {
         assert_eq!(
             select_security_type(&[2, 19, 1], &o).unwrap(),
             SecurityType::VeNCrypt
+        );
+    }
+
+    #[test]
+    fn rsa_aes_goes_ahead_of_vencrypt() {
+        // VeNCrypt (19) might resolve to cleartext Plain, so an offered
+        // RSA-AES type wins over it.
+        let o = opts();
+        assert_eq!(
+            select_security_type(&[5, 19], &o).unwrap(),
+            SecurityType::Ra2
+        );
+        assert_eq!(
+            select_security_type(&[19, 5, 129, 2], &o).unwrap(),
+            SecurityType::Ra2_256
+        );
+        assert_eq!(
+            select_security_type(&[19, 6], &o).unwrap(),
+            SecurityType::Ra2ne
         );
     }
 
