@@ -57,6 +57,16 @@ import { HostDialog, draftFromHost, type HostDraft } from "../components/HostDia
 import { loadRdpDefaults } from "../lib/rdpDefaults";
 import { draftFromRdpImport } from "../lib/rdpImport";
 import { QuickConnect } from "../components/QuickConnect";
+import {
+  HOST_AUTOSAVED_EVENT,
+  SESSION_CONNECTED_EVENT,
+  autoSaveProfile,
+  canAutoSave,
+  discoveredFor,
+  findSavedHost,
+  type HostAutoSavedPayload,
+  type SessionConnectedPayload,
+} from "../lib/autoSave";
 import { ContextMenu, Dialog, EmptyState, Select, TileSkeleton, type MenuItem } from "../components/primitives";
 import {
   IconActivity,
@@ -173,7 +183,7 @@ export function Library({
     async (
       options: OpenSessionOptions,
       label: string,
-      onConnected?: () => void,
+      onConnected?: (sessionId: string) => void,
     ): Promise<void> => {
       const background = options.background === true;
       let outcome = await openSessionWindow({ ...options, asTab: tabbed });
@@ -211,7 +221,7 @@ export function Library({
           protocol: outcome.params.protocol,
         }, undefined, background);
       }
-      onConnected?.();
+      onConnected?.(outcome.sessionId);
     },
     [tabbed, selectSession, openTab, hasTab, push],
   );
@@ -248,10 +258,86 @@ export function Library({
     [openSession, tabbed, openTab],
   );
 
+  /**
+   * Ad hoc sessions this window opened, waiting to be saved once they
+   * connect. Only these are ever saved: a session an agent opened, or one
+   * for a host that is already saved, never lands here.
+   */
+  const autoSavePending = useRef(
+    new Map<string, { protocol: ProtocolKind; address: string; port: number }>(),
+  );
+  /**
+   * Connected announcements that arrived before `open_session_window`
+   * answered with the session's id. Unlikely, since the session has to load
+   * and connect first, but cheap to cover.
+   */
+  const autoSaveEarly = useRef(new Map<string, string>());
+  const autoSaveRef = useRef({ enabled: settings.autoSaveHosts, discovered, saveHost });
+  autoSaveRef.current = { enabled: settings.autoSaveHosts, discovered, saveHost };
+
+  const autoSaveSession = useCallback(async (sessionId: string, desktopName: string): Promise<void> => {
+    const pending = autoSavePending.current.get(sessionId);
+    if (!pending) {
+      autoSaveEarly.current.set(sessionId, desktopName);
+      // Announcements for sessions this window never opened ad hoc are
+      // normal (a saved host, an agent), so keep only the latest few.
+      if (autoSaveEarly.current.size > 16) {
+        const oldest = autoSaveEarly.current.keys().next().value;
+        if (oldest !== undefined) autoSaveEarly.current.delete(oldest);
+      }
+      return;
+    }
+    autoSavePending.current.delete(sessionId);
+    const { enabled, discovered: found, saveHost: save } = autoSaveRef.current;
+    if (!enabled) return;
+    // Read the store, not the list on screen: remembering a password while
+    // connecting already makes the shell save a host for this endpoint, and
+    // that one may not have reached this window yet.
+    const current = await safeInvoke<HostProfile[]>("list_hosts", undefined, []);
+    if (findSavedHost(Array.isArray(current) ? current : [], pending)) return;
+    const saved = await save(
+      autoSaveProfile({
+        ...pending,
+        desktopName,
+        discovered: discoveredFor(found, pending.protocol, pending.address, pending.port),
+      }),
+    );
+    if (!saved) return;
+    // The connection this host was born from is live, so the tile should
+    // not claim it has never been connected to.
+    void safeInvoke("touch_connected", { hostId: saved.id }, null);
+    const payload: HostAutoSavedPayload = { sessionId, name: saved.friendlyName };
+    void emit(HOST_AUTOSAVED_EVENT, payload).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void safeListen<SessionConnectedPayload>(SESSION_CONNECTED_EVENT, (ev) => {
+      if (cancelled || !ev || typeof ev.sessionId !== "string") return;
+      void autoSaveSession(ev.sessionId, typeof ev.desktopName === "string" ? ev.desktopName : "");
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [autoSaveSession]);
+
   const connectAdHoc = useCallback(
     (protocol: ProtocolKind, address: string, port: number): void => {
       if (inTauri()) {
-        void openSession({ address, port, protocol }, address);
+        void openSession({ address, port, protocol }, address, (sessionId) => {
+          if (!canAutoSave(protocol)) return;
+          autoSavePending.current.set(sessionId, { protocol, address, port });
+          const early = autoSaveEarly.current.get(sessionId);
+          if (early !== undefined) {
+            autoSaveEarly.current.delete(sessionId);
+            void autoSaveSession(sessionId, early);
+          }
+        });
         return;
       }
       // Endpoint rides along exactly as the shell sets it: an ad-hoc session
@@ -274,7 +360,7 @@ export function Library({
         `&name=${encodeURIComponent(address)}` +
         (protocol === "vnc" ? "" : `&protocol=${protocol}`);
     },
-    [openSession, tabbed, openTab],
+    [openSession, tabbed, openTab, autoSaveSession],
   );
 
   /**
@@ -1306,6 +1392,7 @@ export function Library({
         onConnectHost={connectHost}
         onConnectAddress={connectAdHoc}
         onRemember={rememberQuickConnect}
+        autoSave={settings.autoSaveHosts}
       />
 
       {/* `relative` anchors the floating selection bar: it must NOT be part of

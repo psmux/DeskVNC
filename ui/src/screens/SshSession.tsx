@@ -35,6 +35,7 @@ import { useToasts } from "../state/ToastContext";
 import { classNames } from "../lib/util";
 import { inTauri, safeInvoke } from "../lib/tauri";
 import { useTerminalMenu } from "../lib/menuSync";
+import { useAutoSaveNotice } from "../hooks/useAutoSaveNotice";
 import type { SessionState } from "../lib/types";
 
 /**
@@ -161,6 +162,7 @@ export function SshSession({
   );
 
   const session = useSession(params, bridge);
+  useAutoSaveNotice(params, session.state, session.desktopName, push);
   const sessionRef = useRef(session);
   sessionRef.current = session;
 

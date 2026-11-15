@@ -59,6 +59,7 @@ import {
 } from "../lib/viewPrefs";
 import { syncSessionMenu, type SessionMenuState } from "../lib/menuSync";
 import { ClipboardEcho, syncsOnArrival } from "../lib/clipboardEcho";
+import { useAutoSaveNotice } from "../hooks/useAutoSaveNotice";
 import {
   PREF_CLIPBOARD_AUTO,
   PREF_CLIPBOARD_ON_PASTE,
@@ -439,6 +440,7 @@ function SessionView({
   );
 
   const session = useSession(params, bridge, frame);
+  useAutoSaveNotice(params, session.state, session.desktopName, push);
   const viewOnly = requestedViewOnly || session.boundaryControl === false;
   viewOnlyRef.current = viewOnly;
   const sessionRef = useRef(session);
