@@ -226,11 +226,11 @@ impl ProtocolDriver for BoundaryDriver {
                         Tools {
                             registry: registry.clone(),
                             session_id: session_id.clone(),
+                            // Only a computer that can be dialled again is
+                            // worth remembering: an invitation's is gone after.
+                            book: unattended.then(|| book.clone()),
                         },
                         &mut connected_at,
-                        // Only a computer that can be dialled again is worth
-                        // remembering: an invitation's is gone after it.
-                        unattended.then(|| book.clone()),
                     )
                     .await
                 };
@@ -385,6 +385,9 @@ pub const TOO_OLD: &str = "that computer's DeskVNC Support is older than command
 struct Tools {
     registry: Registry,
     session_id: String,
+    /// Where a computer that answered directly is noted, for an unattended
+    /// session only.
+    book: Option<Book>,
 }
 impl Drop for Tools {
     fn drop(&mut self) {
@@ -540,8 +543,8 @@ async fn drive(
     paired: Option<OnPaired>,
     published: Tools,
     connected_at: &mut Option<Instant>,
-    book: Option<Book>,
 ) -> Result<()> {
+    let book = published.book.clone();
     let mut size = (0u16, 0u16);
     // The route last told to the window, and whether there is a route to
     // watch at all: the watch ends with the session.
