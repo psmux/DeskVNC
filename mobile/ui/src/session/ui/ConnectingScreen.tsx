@@ -3,8 +3,8 @@
  * a pulse running between them and the step in plain words. On failure the
  * same scene, broken, with one big Try again button.
  */
-import type { Step } from "../status";
-import { STEP_WORDS, friendlyError } from "../status";
+import type { EndKind, Step } from "../status";
+import { STEP_WORDS, endWords, friendlyError } from "../status";
 import { ConnectArt } from "./art";
 import { IconRefresh } from "./icons";
 
@@ -70,19 +70,56 @@ export function ErrorScreen({ message, onRetry, onExit }: { title?: string; mess
   );
 }
 
-export function ReconnectCard({ title, onReconnect, onExit }: { title: string; onReconnect(): void; onExit(): void }) {
+/**
+ * Over a desktop that stopped. Paused or dropped offers Reconnect first. When
+ * the other side ended it, leaving is the main answer, and connecting again
+ * is only offered where it can work: a Boundary invitation is good for one
+ * session, so a helper needs a new one.
+ */
+export function ReconnectCard({
+  title,
+  kind,
+  reason,
+  canReconnect,
+  onReconnect,
+  onExit,
+}: {
+  title: string;
+  kind: EndKind;
+  reason: string | null;
+  canReconnect: boolean;
+  onReconnect(): void;
+  onExit(): void;
+}) {
+  const words = endWords(kind, reason);
+  const byThem = kind === "remote";
   return (
-    <div className="dv-s-reconnect" role="alertdialog" aria-label="Connection paused">
+    <div className="dv-s-reconnect" role="alertdialog" aria-label={words.title}>
       <div className="dv-s-reconnect-card">
-        <ConnectArt step={0} failed />
-        <h2>{title}</h2>
-        <p className="dv-s-lead">The connection was paused. This happens when DeskVNC is in the background for a while, or the network changes.</p>
-        <button type="button" className="dv-s-big" onClick={onReconnect}>
-          <IconRefresh size={24} /> Reconnect
-        </button>
-        <button type="button" className="dv-s-plain" onClick={onExit}>
-          Back to my computers
-        </button>
+        <ConnectArt step={0} failed={!byThem} />
+        <h2>{byThem ? words.title : title}</h2>
+        <p className="dv-s-lead">{byThem ? words.lead : `${words.title}. ${words.lead}`}</p>
+        {byThem ? (
+          <>
+            <button type="button" className="dv-s-big" onClick={onExit}>
+              Back to my computers
+            </button>
+            {canReconnect ? (
+              <button type="button" className="dv-s-plain" onClick={onReconnect}>
+                Connect again
+              </button>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <button type="button" className="dv-s-big" onClick={onReconnect}>
+              <IconRefresh size={24} /> Reconnect
+            </button>
+            <button type="button" className="dv-s-plain" onClick={onExit}>
+              Back to my computers
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

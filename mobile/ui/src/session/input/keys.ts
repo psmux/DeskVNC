@@ -170,3 +170,83 @@ function isPlainLatin(s: string): boolean {
   }
   return true;
 }
+
+// ------------------------------------------------------------ keyboard field
+
+export type FieldOp = TextOp | { type: "enter" };
+
+/** The parts of a KeyboardEvent the field looks at. */
+export interface FieldKey {
+  key: string;
+  keyCode?: number;
+  isComposing?: boolean;
+}
+
+/**
+ * The hidden field as a whole: composition state, the text differ, and the
+ * Enter key. Android keyboards such as Gboard keep the current word in a
+ * composition, so an Enter right after typed letters can arrive as a keydown
+ * flagged as composing (keyCode 229), or only as a `beforeinput` line break.
+ * Either way the composed text goes out first and then one Return.
+ */
+export class KeyboardField {
+  private readonly differ = new TextDiffer();
+  private composingNow = false;
+  /** An Enter keydown was handled and its keyup has not come yet. */
+  private enterDown = false;
+
+  composing(): boolean {
+    return this.composingNow;
+  }
+
+  reset(): void {
+    this.differ.reset();
+    this.enterDown = false;
+  }
+
+  compositionStart(): void {
+    this.composingNow = true;
+  }
+
+  compositionEnd(value: string): FieldOp[] {
+    this.composingNow = false;
+    return this.differ.onCompositionEnd(value);
+  }
+
+  /** An `input` event. `nativeComposing` is `InputEvent.isComposing`. */
+  input(value: string, nativeComposing: boolean): FieldOp[] {
+    return this.differ.onValue(value, this.composingNow || nativeComposing);
+  }
+
+  /**
+   * A keydown. Returns the ops for an Enter the field owns, or null when the
+   * caller should handle the key itself (or ignore it, for IME keys).
+   */
+  keyDown(e: FieldKey, value: string): FieldOp[] | null {
+    if (e.key !== "Enter") return null;
+    const ops = this.enter(value, e.isComposing === true);
+    if (ops) this.enterDown = true;
+    return ops;
+  }
+
+  keyUp(e: FieldKey): void {
+    if (e.key === "Enter") this.enterDown = false;
+  }
+
+  /**
+   * A `beforeinput` event. Returns null when it is not a line break the
+   * field sends; a line break from a keydown already handled gives [].
+   */
+  beforeInput(inputType: string, value: string): FieldOp[] | null {
+    if (inputType !== "insertLineBreak" && inputType !== "insertParagraph") return null;
+    if (this.enterDown) return [];
+    return this.enter(value, false);
+  }
+
+  /** Commit whatever the field holds, then Return. */
+  private enter(value: string, nativeComposing: boolean): FieldOp[] | null {
+    // A CJK IME uses Enter to accept its candidate; that is not a Return.
+    if ((this.composingNow || nativeComposing) && !isPlainLatin(value)) return null;
+    return [...this.differ.onCompositionEnd(value), { type: "enter" }];
+  }
+}

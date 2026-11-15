@@ -2,6 +2,7 @@ import { AnimatePresence, motion, MotionConfig } from "motion/react";
 import { useEffect, useState } from "react";
 import { usingMock } from "./api";
 import { SideRail, TabBar } from "./components/TabBar";
+import { LAYER, useBack } from "./lib/back";
 import { setPrefs, usePrefs } from "./lib/prefs";
 import { AddComputer } from "./screens/AddComputer";
 import { Computers } from "./screens/Computers";
@@ -16,6 +17,8 @@ function Shell() {
   const app = useApp();
   const prefs = usePrefs();
   const [welcome, setWelcome] = useState(!prefs.onboarded);
+  // Back from another tab goes home; on the home tab Android has it.
+  useBack(app.tab !== "computers", LAYER.tab, () => app.setTab("computers"));
 
   // Deep links for screenshots and testing in the browser: ?tab=nearby
   useEffect(() => {

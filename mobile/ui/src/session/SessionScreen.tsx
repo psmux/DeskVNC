@@ -13,9 +13,10 @@ import { GestureRecognizer, type GestureAction, type Pt, type TouchInput, type T
 import { BUTTON } from "./input/packets";
 import {
   KEYSYM_BACKSPACE,
+  KEYSYM_ENTER,
+  KeyboardField,
   MODIFIERS,
   SENTINEL,
-  TextDiffer,
   afterKey,
   charIds,
   heldModifiers,
@@ -24,7 +25,7 @@ import {
   type ModState,
   type ModifierKey,
   type NamedKey,
-  type TextOp,
+  type FieldOp,
 } from "./input/keys";
 import { keyEventToIds } from "./input/keysyms";
 import {
@@ -52,8 +53,11 @@ import { ConnectingScreen, ErrorScreen, ReconnectCard } from "./ui/ConnectingScr
 import { IconRotate, IconZoomOut } from "./ui/icons";
 import { KeyBar, type KeyBarPress } from "./ui/KeyBar";
 import { ClipboardSheet, ModeSheet, QualitySheet, StatsSheet } from "./ui/Panels";
+import { Sheet as SessionSheet } from "./ui/Sheet";
 import { CertificateSheet } from "../components/sheets/CertificateSheet";
 import { CredentialSheet } from "../components/sheets/CredentialSheet";
+import { LAYER, useBack } from "../lib/back";
+import { sessionBackStep } from "./back";
 import { readPrefs, usePrefs } from "../lib/prefs";
 import { Toolbar, type ToolbarAction } from "./ui/Toolbar";
 import "./session.css";
@@ -127,6 +131,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   const [os, setOs] = useState<HostOs | null>(null);
   const [hostName, setHostName] = useState<string | null>(null);
   const [clipSeen, setClipSeen] = useState<string | null>(null);
+  const [askLeave, setAskLeave] = useState(false);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -144,8 +149,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   modsRef.current = mods;
   const modeRef = useRef(mode);
   modeRef.current = mode;
-  const differ = useRef(new TextDiffer());
-  const composing = useRef(false);
+  const field = useRef(new KeyboardField());
   const anim = useRef<{ raf: number; kind: "none" | "momentum" | "zoom" | "edge"; vx: number; vy: number; from?: View; to?: View; t0?: number; last?: number; ex?: number; ey?: number }>({
     raf: 0,
     kind: "none",
@@ -163,10 +167,10 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   );
   useEffect(() => recognizer.setMode(mode), [mode, recognizer]);
 
-  const showToast = useCallback((text: string) => {
+  const showToast = useCallback((text: string, ms = 2600) => {
     setToast(text);
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2600);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
   }, []);
 
   // The host's operating system, for the Win or Cmd key label.
@@ -264,15 +268,28 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     const vv = window.visualViewport;
     const root = rootRef.current;
     if (!vv || !root) return;
+    // Two ways a keyboard shows. iOS overlays it, so the visual viewport
+    // shrinks inside the layout one. Android, where MainActivity pads the
+    // WebView by the keyboard's height, shrinks the whole page instead, which
+    // only shows as the page being shorter than it was at this width.
+    let width = window.innerWidth;
+    let tallest = window.innerHeight;
     const update = (): void => {
+      if (window.innerWidth !== width) {
+        width = window.innerWidth;
+        tallest = window.innerHeight;
+      }
+      tallest = Math.max(tallest, window.innerHeight);
       const kb = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
       root.style.setProperty("--s-kb", `${Math.round(kb)}px`);
-      root.classList.toggle("kb-open", kb > 40);
+      root.classList.toggle("kb-open", kb > 40 || tallest - window.innerHeight > 120);
     };
     update();
     vv.addEventListener("resize", update);
     vv.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
     return () => {
+      window.removeEventListener("resize", update);
       vv.removeEventListener("resize", update);
       vv.removeEventListener("scroll", update);
     };
@@ -363,7 +380,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     if (!el) return;
     if (open) {
       el.value = SENTINEL;
-      differ.current.reset();
+      field.current.reset();
       el.focus({ preventScroll: true });
       try {
         el.setSelectionRange(el.value.length, el.value.length);
@@ -616,42 +633,48 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   );
 
   const applyTextOps = useCallback(
-    (ops: TextOp[]) => {
-      const id = s.sessionId;
+    (ops: FieldOp[]) => {
       for (const op of ops) {
-        if (op.type === "backspace") {
+        if (op.type === "enter") {
+          tapKey(KEYSYM_ENTER);
+        } else if (op.type === "backspace") {
           for (let i = 0; i < op.count; i++) tapKey(KEYSYM_BACKSPACE);
         } else if (heldModifiers(modsRef.current).length > 0) {
           // Ctrl+C and friends: characters go as keys with the modifiers held.
           for (const ch of Array.from(op.text)) tapKey(charIds(ch, true));
-        } else if (id) {
+        } else {
           // Typed text goes after anything already queued, such as a backspace.
-          s.sender.current?.flush();
-          void api.sessionText(id, op.text).catch(() => {});
+          s.sendText(op.text);
         }
       }
     },
-    [api, s.sessionId, s.sender, tapKey],
+    [s.sendText, tapKey],
   );
 
   const resetFieldIfIdle = (): void => {
     const el = inputRef.current;
-    if (!el || composing.current) return;
+    if (!el || field.current.composing()) return;
     if (el.value.length > 32 || el.value === "") {
       el.value = SENTINEL;
-      differ.current.reset();
+      field.current.reset();
     }
   };
 
   const onInput = (e: React.FormEvent<HTMLInputElement>): void => {
     const native = e.nativeEvent as InputEvent;
-    const ops = differ.current.onValue(e.currentTarget.value, composing.current || native.isComposing === true);
-    applyTextOps(ops);
+    applyTextOps(field.current.input(e.currentTarget.value, native.isComposing === true));
     resetFieldIfIdle();
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     const ne = e.nativeEvent;
+    // Enter first: while Gboard composes a word it comes flagged as composing.
+    const enter = field.current.keyDown(ne, e.currentTarget.value);
+    if (enter) {
+      e.preventDefault();
+      applyTextOps(enter);
+      return;
+    }
     if (ne.isComposing || ne.keyCode === 229 || e.key === "Unidentified" || e.key === "Process") return;
     const snd = s.sender.current;
     if (!snd) return;
@@ -672,11 +695,27 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
   };
 
   const onKeyUp = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    field.current.keyUp(e.nativeEvent);
     if (e.key === "Control" || e.key === "Alt" || e.key === "Meta") {
       const ids = keyEventToIds(e.nativeEvent);
       if (ids) s.sender.current?.key(false, ids.keysym, ids.keycode);
     }
   };
+
+  // Some keyboards report Enter only as a line break beforeinput (React's
+  // onBeforeInput is a different, synthetic event without inputType).
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const onBeforeInput = (e: InputEvent): void => {
+      const ops = field.current.beforeInput(e.inputType, el.value);
+      if (!ops) return;
+      e.preventDefault();
+      applyTextOps(ops);
+    };
+    el.addEventListener("beforeinput", onBeforeInput);
+    return () => el.removeEventListener("beforeinput", onBeforeInput);
+  }, [applyTextOps]);
 
   const onKeyBar = useCallback(
     (p: KeyBarPress) => {
@@ -716,6 +755,12 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.notice]);
 
+  // Taps and keys keep failing to reach Rust: say so instead of going quiet.
+  useEffect(() => {
+    if (s.inputFailure) showToast(`Taps and keys are not reaching the computer: ${s.inputFailure.message}`, 6000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.inputFailure]);
+
   useEffect(() => {
     if (s.remoteClipboard && s.remoteClipboard !== clipSeen && s.phase === "connected") showToast("Something was copied on the computer");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -743,6 +788,34 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     await s.disconnect();
     onExit();
   }, [onExit, openKeyboard, s]);
+
+  // Once the desktop is gone the phone keyboard has nothing to type into.
+  // The hidden field kept its focus, and Android brought the keyboard back
+  // up over the card that says the session ended.
+  useEffect(() => {
+    if (s.phase === "connected") return;
+    openKeyboard(false);
+    setAskLeave(false);
+  }, [s.phase, openKeyboard]);
+
+  // Android Back: see `sessionBackStep`. Back on the Leave prompt closes it
+  // and stays; only its Leave button leaves.
+  useBack(true, LAYER.session, () => {
+    switch (sessionBackStep({ askLeave, sheet: sheet !== null, toolbarOpen, coach: coach !== null, connected: s.phase === "connected" })) {
+      case "close-leave":
+        return setAskLeave(false);
+      case "close-sheet":
+        return setSheet(null);
+      case "close-toolbar":
+        return setToolbarOpen(false);
+      case "close-coach":
+        return setCoach(null);
+      case "ask-leave":
+        return setAskLeave(true);
+      case "leave":
+        return void leave();
+    }
+  });
 
   const onTool = useCallback(
     (a: ToolbarAction) => {
@@ -864,6 +937,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
         autoCorrect="off"
         spellCheck={false}
         aria-label="Type on the computer"
+        readOnly={s.phase !== "connected"}
         enterKeyHint="send"
         onFocus={() => setKeyboardOn(true)}
         onBlur={() => {
@@ -874,11 +948,10 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         onCompositionStart={() => {
-          composing.current = true;
+          field.current.compositionStart();
         }}
         onCompositionEnd={(e) => {
-          composing.current = false;
-          applyTextOps(differ.current.onCompositionEnd(e.currentTarget.value));
+          applyTextOps(field.current.compositionEnd(e.currentTarget.value));
           resetFieldIfIdle();
         }}
       />
@@ -887,10 +960,42 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
 
       {s.phase === "connecting" ? <ConnectingScreen title={name} step={stepOf(s.state)} words={stepWords(s.state)} reconnecting={reconnecting} onCancel={() => void leave()} /> : null}
       {s.phase === "error" ? <ErrorScreen title={name} message={s.error} onRetry={s.reconnect} onExit={() => void leave()} /> : null}
-      {s.phase === "ended" && s.needsReconnect ? <ReconnectCard title={name} onReconnect={s.reconnect} onExit={() => void leave()} /> : null}
+      {s.phase === "ended" && s.needsReconnect ? (
+        <ReconnectCard
+          title={name}
+          kind={s.ended?.kind ?? "lost"}
+          reason={s.ended?.reason ?? null}
+          // A Boundary invitation is good for one session only.
+          canReconnect={target.kind !== "boundary"}
+          onReconnect={s.reconnect}
+          onExit={() => void leave()}
+        />
+      ) : null}
 
       {s.credentials ? (
-        <CredentialSheet open request={s.credentials} hostName={name} onSubmit={s.answerCredentials} onCancel={s.cancelCredentials} />
+        <CredentialSheet
+          open
+          request={s.credentials}
+          hostName={name}
+          onSubmit={s.answerCredentials}
+          onCancel={() => {
+            s.cancelCredentials();
+            void leave();
+          }}
+        />
+      ) : null}
+      {askLeave ? (
+        <SessionSheet title={`Leave ${name}?`} onClose={() => setAskLeave(false)}>
+          <div className="dv-s-form">
+            <p className="dv-s-lead">The session ends. You can connect again from your computers.</p>
+            <button type="button" className="dv-s-big" onClick={() => void leave()}>
+              Leave
+            </button>
+            <button type="button" className="dv-s-plain" onClick={() => setAskLeave(false)}>
+              Stay
+            </button>
+          </div>
+        </SessionSheet>
       ) : null}
       {s.cert ? <CertificateSheet open prompt={s.cert} hostName={name} onAnswer={s.answerCert} /> : null}
 

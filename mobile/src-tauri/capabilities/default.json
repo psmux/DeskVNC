@@ -1,10 +1,12 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "default",
-  "description": "The phone app has one window. It gets core events and channels and exactly the commands in mobile/CONTRACT.md.",
+  "description": "The phone app has one window. It gets core events and channels and exactly the commands in mobile/CONTRACT.md, plus reading and writing text on the phone clipboard.",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
     "allow-hosts-list",
     "allow-hosts-save",
     "allow-hosts-delete",

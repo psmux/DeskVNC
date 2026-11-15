@@ -17,6 +17,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# The phone's own clipboard. The webview's navigator.clipboard is refused on
+# Android (NotAllowedError), so copy and paste go through the platform API.
+tauri-plugin-clipboard-manager = "2"
 
 # The protocol stack the desktop shell drives, unchanged.
 remote-core = { path = "../../crates/remote-core" }

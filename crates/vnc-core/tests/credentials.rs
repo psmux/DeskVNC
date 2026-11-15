@@ -529,7 +529,7 @@ fn ra2_subtypes_declare_the_right_credential_kind() {
         Some(CredentialKind::PasswordOnly)
     );
     assert_eq!(ra2::credential_kind_for_subtype(3), None);
-    assert_eq!(ra2::METHOD, "RealVNC RSA-AES");
+    assert_eq!(ra2::METHOD, "RSA-AES");
 }
 
 #[test]

@@ -17,12 +17,9 @@
 //!
 //! # The ordering, and why it differs from the VNC path
 //!
-//! The prompt completes **before** CredSSP starts. `vnc-core` emits its
-//! prompt and carries straight on
-//! (`crates/vnc-core/src/session/connection.rs:257` sends
-//! `SessionEvent::CertificatePrompt` and the next statement is
-//! `emit_state(Negotiating)`), which that file records as a pre existing bug.
-//! For RDP the ordering is not a nicety: CredSSP hands the user's plaintext
+//! The prompt completes **before** CredSSP starts. `vnc-core` holds the same
+//! line for its RSA-AES and VeNCrypt keys (`CredentialSource::approve_server_key`
+//! in `crates/vnc-core/src/security/prompt.rs`). For RDP the ordering is not a nicety: CredSSP hands the user's plaintext
 //! password, encrypted under the session key, to whoever holds the private
 //! key of the certificate we accepted (MS-CSSP 3.1.5). Accepting afterwards
 //! would be accepting a fact.
@@ -153,7 +150,9 @@ async fn ask(
     .await?;
 
     let Prompt {
-        commands, cancel, ..
+        commands,
+        cancel,
+        ask: chain,
     } = prompt;
     loop {
         let cmd = tokio::select! {
@@ -169,7 +168,14 @@ async fn ask(
                 fingerprint: answered,
                 scheme,
                 permanent,
-            }) => return decide(fingerprint, &answered, asked_scheme, scheme, permanent),
+            }) => {
+                decide(fingerprint, &answered, asked_scheme, scheme, permanent)?;
+                // A retry after a refused password reconnects and meets this
+                // key again; it was approved a moment ago and is not asked
+                // about twice (`crate::session::connect::establish`).
+                chain.trusted(asked_scheme, fingerprint.to_owned());
+                return Ok(());
+            }
             // The dialog's cancel button, and the disconnect that a user who
             // closes the window instead produces. Both mean the same thing:
             // the key was not approved, so nothing more may be sent.
@@ -329,18 +335,30 @@ mod tests {
             }
         });
 
+        let mut chain = Ask::new();
         approve(
             &unknown(),
             &events,
             Some(Prompt {
                 commands: &mut commands,
                 cancel: &cancel,
-                ask: &mut Ask::new(),
+                ask: &mut chain,
             }),
         )
         .await
         .expect("approved");
         answerer.await.expect("answerer");
+
+        // The retry after a refused password dials with these pins, so the
+        // certificate the user just approved is not asked about again.
+        let mut pins = remote_core::CertPins::default();
+        chain.pin_trusted(&mut pins);
+        assert_eq!(pins.for_scheme(PinScheme::RdpTls), Some("AA:BB:CC"));
+        // A pin already in the slot is never replaced from here, so a key
+        // that changes between attempts is still a changed identity.
+        let mut held = remote_core::CertPins::one(PinScheme::RdpTls, "11:22");
+        chain.pin_trusted(&mut held);
+        assert_eq!(held.for_scheme(PinScheme::RdpTls), Some("11:22"));
     }
 
     /// Dismissing the dialog stops the attempt, and stops it as "the user has

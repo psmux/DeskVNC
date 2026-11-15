@@ -27,7 +27,10 @@ pub mod tight;
 pub mod vencrypt;
 pub mod vnc_auth;
 
-pub use prompt::{CredentialAsk, CredentialPrompt, CredentialSource, MAX_CREDENTIAL_ATTEMPTS};
+pub use prompt::{
+    CredentialAsk, CredentialPrompt, CredentialSource, TrustAsk, TrustPrompt,
+    MAX_CREDENTIAL_ATTEMPTS,
+};
 pub use vencrypt::VeNCryptSubtype;
 
 // ---------------------------------------------------------------------------
@@ -339,6 +342,26 @@ pub fn select_security_type(offered: &[u8], opts: &ConnectOptions) -> Result<Sec
             .then_with(|| a.to_wire().cmp(&b.to_wire()))
     });
 
+    // VeNCrypt's subtype list only arrives after we commit to type 19, and a
+    // server may offer nothing there but bare `Plain`, which sends the user
+    // name and password in the clear. TigerVNC run with `-SecurityTypes
+    // RA2,Plain` does exactly that. RSA-AES always encrypts the password and
+    // the session, so when it is on the list it goes ahead of VeNCrypt.
+    if usable[0] == SecurityType::VeNCrypt {
+        if let Some(i) = usable.iter().position(|t| {
+            matches!(
+                t,
+                SecurityType::Ra2
+                    | SecurityType::Ra2ne
+                    | SecurityType::Ra2_256
+                    | SecurityType::Ra2ne256
+            )
+        }) {
+            let ra2 = usable.remove(i);
+            usable.insert(0, ra2);
+        }
+    }
+
     // The strongest type the server actually offered. `None` is reached only
     // when it is the only thing on the list, because the sort puts every
     // other supported type ahead of it, so taking it is never a downgrade:
@@ -384,9 +407,11 @@ pub async fn authenticate<S: vnc_transport::Stream + 'static>(
 /// RA2's raw RSA key. Both are fingerprinted the same way, but they are
 /// different keys, so each carries its [`PinScheme`] and is pinned separately.
 ///
-/// The session layer needs this to raise `SessionEvent::CertificatePrompt` on
-/// [`TrustDecision::Unknown`], first contact is accepted so the fingerprint
-/// can be shown, and the UI decides whether to keep the connection. A
+/// Both handshakes stop at an unpinned key before any credential is sent and
+/// ask the user through the trust prompt `creds` carries
+/// ([`CredentialSource::with_trust_prompt`]); with no prompt the key is
+/// refused as `VncError::CertificateUntrusted`. So a decision reported here
+/// is pinned, CA verified, or approved by the user in this attempt. A
 /// [`TrustDecision::Changed`] never reaches here: it is a hard stop reported as
 /// `VncError::CertificateMismatch`.
 pub async fn authenticate_with_trust<S: vnc_transport::Stream + 'static>(
@@ -715,6 +740,25 @@ mod tests {
         assert_eq!(
             select_security_type(&[2, 19, 1], &o).unwrap(),
             SecurityType::VeNCrypt
+        );
+    }
+
+    #[test]
+    fn rsa_aes_goes_ahead_of_vencrypt() {
+        // VeNCrypt (19) might resolve to cleartext Plain, so an offered
+        // RSA-AES type wins over it.
+        let o = opts();
+        assert_eq!(
+            select_security_type(&[5, 19], &o).unwrap(),
+            SecurityType::Ra2
+        );
+        assert_eq!(
+            select_security_type(&[19, 5, 129, 2], &o).unwrap(),
+            SecurityType::Ra2_256
+        );
+        assert_eq!(
+            select_security_type(&[19, 6], &o).unwrap(),
+            SecurityType::Ra2ne
         );
     }
 

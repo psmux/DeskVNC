@@ -13,6 +13,7 @@
 //!       --- everything below is AES-EAX framed ---
 //! S->C  server_hash                                       H(server_pub || client_pub)
 //! C->S  client_hash                                       H(client_pub || server_pub)
+//!       --- trust gate: an unpinned key waits here for the user's answer ---
 //! S->C  u8 subtype                                        1 = user+pass, 2 = pass only
 //! C->S  u8 user_len, user, u8 pass_len, pass
 //! ```
@@ -37,6 +38,18 @@
 //! key and relay, so the key is pinned trust-on-first-use exactly like a TLS
 //! certificate, via [`evaluate_trust`]. See that function for which bytes are
 //! hashed and why.
+//!
+//! The order matters as much as the pin. A changed key stops the handshake
+//! before the client sends anything. A key with no pin is shown to the user
+//! once the key confirmation has proved the server holds it, and the
+//! handshake waits on the answer: the user name and password are written only
+//! after the user trusts the key, and a refusal closes the connection with
+//! nothing secret sent. Prompting after the credentials, as this file once
+//! did, handed the password to whoever sat in the middle of a first
+//! connection.
+//!
+//! Used by RealVNC Server, TigerVNC and wayvnc, so nothing the user sees
+//! names a vendor.
 //!
 //! ## Known risk
 //!
@@ -89,8 +102,9 @@ const MAX_FRAME_PLAINTEXT: usize = 8192;
 const MIN_SERVER_KEY_BITS: u32 = 1024;
 const MAX_SERVER_KEY_BITS: u32 = 8192;
 
-/// What the credential dialog calls this family of methods.
-pub const METHOD: &str = "RealVNC RSA-AES";
+/// What the credential dialog calls this family of methods. Neutral on
+/// purpose: TigerVNC and wayvnc speak it as well as RealVNC.
+pub const METHOD: &str = "RSA-AES";
 
 /// What the server's credential subtype byte asks the user for.
 ///
@@ -353,8 +367,9 @@ fn evaluate_trust(key: &PublicKey, bits: u32, pin: Option<&str>) -> Result<Trust
     // There is no X.509 subject to show, inventing a hostname here would be a
     // lie, since nothing in RA2 binds the key to a name. Say exactly what the
     // user is being asked to trust; the dialog already names the host it is
-    // connecting to.
-    let subject = format!("RealVNC RSA key ({bits}-bit)");
+    // connecting to. No vendor either: TigerVNC and wayvnc send these keys
+    // too.
+    let subject = format!("RSA-AES server key ({bits}-bit)");
 
     Ok(
         match pin.map(normalize_fingerprint).filter(|p| !p.is_empty()) {
@@ -377,8 +392,25 @@ fn evaluate_trust(key: &PublicKey, bits: u32, pin: Option<&str>) -> Result<Trust
 // Handshake
 // ---------------------------------------------------------------------------
 
+/// What the user is told when the server ends RA2 before the credential
+/// step. A server with no RSA key set up does this as soon as the type is
+/// chosen; it says nothing about the user name or password, which were never
+/// sent.
+pub const CLOSED_BEFORE_CREDENTIALS: &str = "The server closed the connection during the \
+RSA-AES key exchange, before any name or password was sent. A VNC server with no RSA key set \
+up does this; choose another security type or set up the server's key.";
+
+/// The secure channel, established and confirmed, with the server's key
+/// approved, and nothing secret sent yet.
+struct Channel {
+    stream: BoxedStream,
+    send: Ra2Cipher,
+    recv: Ra2Cipher,
+    trust: TrustDecision,
+}
+
 pub(crate) async fn handshake(
-    mut stream: BoxedStream,
+    stream: BoxedStream,
     security_type: SecurityType,
     opts: &ConnectOptions,
     creds: &CredentialSource<'_>,
@@ -386,8 +418,104 @@ pub(crate) async fn handshake(
     let variant = Variant::of(security_type)
         .ok_or_else(|| VncError::UnsupportedSecurityType(security_type.to_wire()))?;
 
+    // Everything up to the credential step. A failure in here happened
+    // before the user name or password left this machine, so it is reported
+    // as what it is and never as a rejected password: a server that hangs up
+    // because it has no key would otherwise send the user off to retype a
+    // password that was never the problem.
+    let Channel {
+        mut stream,
+        mut send,
+        mut recv,
+        trust,
+    } = match key_exchange(stream, variant, opts, creds).await {
+        Ok(channel) => channel,
+        Err(VncError::ConnectionClosed) => {
+            return Err(VncError::KeyExchange(CLOSED_BEFORE_CREDENTIALS.into()))
+        }
+        Err(VncError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(VncError::KeyExchange(CLOSED_BEFORE_CREDENTIALS.into()))
+        }
+        Err(e) => return Err(e),
+    };
+
+    // --- 6. credentials ----------------------------------------------------
+    // The server sends its subtype right after the key confirmation, so it
+    // has been waiting in the stream while the trust prompt was open.
+    let subtype = match recv_frame(&mut stream, &mut recv).await {
+        Ok(frame) => frame,
+        Err(VncError::ConnectionClosed) => {
+            return Err(VncError::KeyExchange(CLOSED_BEFORE_CREDENTIALS.into()))
+        }
+        Err(e) => return Err(e),
+    };
+    let subtype = *subtype
+        .first()
+        .ok_or_else(|| VncError::Protocol("RA2 server sent an empty subtype".into()))?;
+
+    // The subtype is only known now, so this is where we can ask the user for
+    // exactly what the server wants, not before.
+    let kind = credential_kind_for_subtype(subtype)
+        .ok_or_else(|| VncError::Protocol(format!("unknown RA2 credential subtype {subtype}")))?;
+    let supplied = creds.obtain(METHOD, kind, false, opts).await?;
+    let password = supplied.password.unwrap_or_default();
+    let username = match kind {
+        CredentialKind::UsernameAndPassword => {
+            let u = supplied.username.unwrap_or_default();
+            if u.is_empty() {
+                return Err(VncError::CredentialsRequired(
+                    "this server requires a user name and password".into(),
+                ));
+            }
+            u
+        }
+        // Subtype 2 authenticates the password alone; the field stays empty.
+        CredentialKind::PasswordOnly => String::new(),
+    };
+
+    let mut credentials = encode_credentials(&username, &password)?;
+    let sent = send_frame(&mut stream, &mut send, &credentials).await;
+    credentials.zeroize();
+    sent?;
+
+    // --- 7. hand back the right stream ------------------------------------
+    let mut outcome = if variant.encrypt_session {
+        // Everything from the SecurityResult onwards stays inside the framing.
+        let wrapped = Ra2Stream::new(stream, recv, send);
+        AuthOutcome::auto(Box::pin(wrapped))
+    } else {
+        // "ne" = no encryption: the channel reverts to cleartext now.
+        AuthOutcome::auto(stream)
+    };
+    // The key confirmation succeeded and the key was pinned or approved by
+    // the user before the credentials went out. The session layer pins what
+    // was approved for the rest of the session.
+    outcome.trust = Some(ServerIdentity {
+        scheme: PinScheme::Ra2,
+        decision: trust,
+    });
+    Ok(outcome)
+}
+
+/// Steps 1 to 5 of the handshake, then the trust gate. Returns with the
+/// channel confirmed in both directions and the server's key pinned or
+/// approved, and nothing secret written.
+async fn key_exchange(
+    mut stream: BoxedStream,
+    variant: Variant,
+    opts: &ConnectOptions,
+    creds: &CredentialSource<'_>,
+) -> Result<Channel> {
     // --- 1. server public key ---------------------------------------------
     let server_bits = read_u32(&mut stream).await?;
+    if server_bits == 1 {
+        // Not a key length: a server that gives up on RA2 right after the
+        // type was chosen may send a failed SecurityResult (1) and a reason
+        // in clear instead of its key.
+        return Err(VncError::KeyExchange(
+            refusal_before_credentials(&mut stream).await,
+        ));
+    }
     if !(MIN_SERVER_KEY_BITS..=MAX_SERVER_KEY_BITS).contains(&server_bits) {
         return Err(VncError::Protocol(format!(
             "RA2 server key length {server_bits} bits is out of range"
@@ -425,8 +553,9 @@ pub(crate) async fn handshake(
     match &trust {
         TrustDecision::PinnedMatch => tracing::info!("RA2 server key matches stored pin"),
         TrustDecision::Unknown { fingerprint, .. } => {
-            // First contact. `authenticate_with_trust` carries this out to the
-            // session layer, which raises the TOFU prompt.
+            // First contact. The prompt waits until the server has proved it
+            // holds this key (step 5), and the credentials wait for the
+            // prompt.
             tracing::warn!(%fingerprint, "RA2 server key is not yet trusted (TOFU prompt required)");
         }
         TrustDecision::Changed { expected, actual } => {
@@ -494,8 +623,10 @@ pub(crate) async fn handshake(
     let mut server_random = client_key
         .decrypt(Pkcs1v15Encrypt, &server_encrypted)
         .map_err(|_| {
-            VncError::AuthFailed(
-                "the server's authentication payload could not be decrypted".into(),
+            VncError::KeyExchange(
+                "The server's RSA-AES key exchange message could not be decrypted. Nothing \
+                 secret was sent to it."
+                    .into(),
             )
         })?;
     if server_random.len() != random_len {
@@ -525,60 +656,53 @@ pub(crate) async fn handshake(
 
     let received = recv_frame(&mut stream, &mut recv_cipher).await?;
     if received != expected_server_hash {
-        return Err(VncError::AuthFailed(
-            "the server failed to prove ownership of its key (RA2 hash mismatch)".into(),
+        return Err(VncError::KeyExchange(
+            "The server failed to prove it holds the RSA key it sent (RA2 hash mismatch). \
+             Nothing secret was sent to it."
+                .into(),
         ));
     }
     send_frame(&mut stream, &mut send_cipher, &client_hash).await?;
 
-    // --- 6. credentials ----------------------------------------------------
-    let subtype = recv_frame(&mut stream, &mut recv_cipher).await?;
-    let subtype = *subtype
-        .first()
-        .ok_or_else(|| VncError::Protocol("RA2 server sent an empty subtype".into()))?;
+    // --- 5a. trust gate -----------------------------------------------------
+    // The server has now proved it holds the key it sent, so the fingerprint
+    // describes the key this channel is really encrypted to. That is the key
+    // the user is asked about, and nothing secret goes down the channel until
+    // they have approved it. Asking any later hands the password to whoever
+    // sits in the middle of a first connection. A pinned key passes with no
+    // prompt; a refusal ends the handshake here with nothing sent.
+    creds.approve_server_key(PinScheme::Ra2, &trust).await?;
 
-    // The subtype is only known now, so this is where we can ask the user for
-    // exactly what the server wants, not before.
-    let kind = credential_kind_for_subtype(subtype)
-        .ok_or_else(|| VncError::Protocol(format!("unknown RA2 credential subtype {subtype}")))?;
-    let supplied = creds.obtain(METHOD, kind, false, opts).await?;
-    let password = supplied.password.unwrap_or_default();
-    let username = match kind {
-        CredentialKind::UsernameAndPassword => {
-            let u = supplied.username.unwrap_or_default();
-            if u.is_empty() {
-                return Err(VncError::CredentialsRequired(
-                    "this server requires a user name and password".into(),
-                ));
-            }
-            u
-        }
-        // Subtype 2 authenticates the password alone; the field stays empty.
-        CredentialKind::PasswordOnly => String::new(),
-    };
+    Ok(Channel {
+        stream,
+        send: send_cipher,
+        recv: recv_cipher,
+        trust,
+    })
+}
 
-    let mut credentials = encode_credentials(&username, &password)?;
-    let sent = send_frame(&mut stream, &mut send_cipher, &credentials).await;
-    credentials.zeroize();
-    sent?;
-
-    // --- 7. hand back the right stream ------------------------------------
-    let mut outcome = if variant.encrypt_session {
-        // Everything from the SecurityResult onwards stays inside the framing.
-        let wrapped = Ra2Stream::new(stream, recv_cipher, send_cipher);
-        AuthOutcome::auto(Box::pin(wrapped))
-    } else {
-        // "ne" = no encryption: the channel reverts to cleartext now.
-        AuthOutcome::auto(stream)
-    };
-    // Reaching here means the key confirmation in step 5 succeeded, so the
-    // fingerprint now describes a key the server proved it holds. That is what
-    // the session layer may offer the user to pin.
-    outcome.trust = Some(ServerIdentity {
-        scheme: PinScheme::Ra2,
-        decision: trust,
-    });
-    Ok(outcome)
+/// The sentence for a server that answered the RA2 type with a failed
+/// SecurityResult. The reason is read when it follows within a moment and is
+/// sane; otherwise the generic sentence stands.
+async fn refusal_before_credentials(stream: &mut BoxedStream) -> String {
+    let reason = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let len = read_u32(stream).await.ok()? as usize;
+        let bytes = read_bytes_max(stream, len, 1024, "RA2 failure reason")
+            .await
+            .ok()?;
+        let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+        (!text.is_empty()).then_some(text)
+    })
+    .await
+    .ok()
+    .flatten();
+    match reason {
+        Some(reason) => format!(
+            "The server refused the RSA-AES key exchange before any name or password was \
+             sent: {reason}"
+        ),
+        None => CLOSED_BEFORE_CREDENTIALS.into(),
+    }
 }
 
 /// `u8 user_len, user, u8 pass_len, pass`, both UTF-8.
@@ -803,6 +927,166 @@ const _: fn() = || {
     fn assert_stream<T: Stream + 'static>() {}
     assert_stream::<Ra2Stream>();
 };
+
+/// A simulated RA2 server for this file's tests and the session tests in
+/// `session::connection`. It runs the key exchange honestly, sends the
+/// credential subtype right after the key confirmation, and from then on
+/// records every byte the client writes, so a test can tell exactly when the
+/// first credential byte arrived.
+#[cfg(test)]
+pub(crate) mod test_server {
+    use super::*;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One 2048-bit server key for every test in the process. Key generation
+    /// is slow in a debug build and nothing here needs a fresh key.
+    pub(crate) fn server_key() -> &'static PrivateKey {
+        static KEY: OnceLock<PrivateKey> = OnceLock::new();
+        KEY.get_or_init(|| PrivateKey::new(&mut rand::rng(), 2048).expect("server key"))
+    }
+
+    /// The fingerprint the client computes for [`server_key`].
+    pub(crate) fn fingerprint() -> String {
+        key_fingerprint(&server_key().to_public_key()).expect("fingerprint")
+    }
+
+    /// How the server ends once the subtype is out.
+    pub(crate) enum Finish {
+        /// Keep recording until the client hangs up.
+        ReadToEof,
+        /// Take one credential frame, report success, read the ClientInit
+        /// and send this ServerInit.
+        Accept { server_init: Vec<u8> },
+    }
+
+    /// Bytes the client wrote after the key confirmation, shared with the test.
+    pub(crate) type Recorded = Arc<Mutex<Vec<u8>>>;
+
+    /// Run the server side of `security_type` on `side`. Returns the first
+    /// frame the client sent after the key confirmation, decrypted, which is
+    /// the credentials when there were any.
+    pub(crate) async fn serve<S>(
+        side: &mut S,
+        security_type: SecurityType,
+        subtype: Option<u8>,
+        recorded: Recorded,
+        finish: Finish,
+    ) -> Option<Vec<u8>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let variant = Variant::of(security_type).expect("an RA2 type");
+        let server_key = server_key();
+        let server_pub = server_key.to_public_key();
+        let width = 256;
+        let mut server_blob = Vec::new();
+        server_blob.extend_from_slice(&2048u32.to_be_bytes());
+        server_blob.extend_from_slice(&left_pad(
+            &server_pub.n().as_ref().to_be_bytes_trimmed_vartime(),
+            width,
+        ));
+        server_blob.extend_from_slice(&left_pad(
+            &server_pub.e().to_be_bytes_trimmed_vartime(),
+            width,
+        ));
+        side.write_all(&server_blob).await.ok()?;
+
+        let client_bits = side.read_u32().await.ok()?;
+        let client_width = client_bits.div_ceil(8) as usize;
+        let mut components = vec![0u8; client_width * 2];
+        side.read_exact(&mut components).await.ok()?;
+        let mut client_blob = client_bits.to_be_bytes().to_vec();
+        client_blob.extend_from_slice(&components);
+        let client_pub = PublicKey::new(
+            BoxedUint::from_be_slice_vartime(&components[..client_width]),
+            BoxedUint::from_be_slice_vartime(&components[client_width..]),
+        )
+        .ok()?;
+
+        let random_len = variant.key_len();
+        let server_random = vec![0x5Au8; random_len];
+        let out = client_pub
+            .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, &server_random)
+            .ok()?;
+        side.write_u16(client_width as u16).await.ok()?;
+        side.write_all(&out).await.ok()?;
+
+        let encrypted_len = side.read_u16().await.ok()? as usize;
+        let mut encrypted = vec![0u8; encrypted_len];
+        side.read_exact(&mut encrypted).await.ok()?;
+        let client_random = server_key.decrypt(Pkcs1v15Encrypt, &encrypted).ok()?;
+
+        let key_len = variant.key_len();
+        let mut recv_key = variant.hash(&[&server_random, &client_random]);
+        let mut send_key = variant.hash(&[&client_random, &server_random]);
+        recv_key.truncate(key_len);
+        send_key.truncate(key_len);
+        let mut recv = Ra2Cipher::new(&recv_key).ok()?;
+        let mut send = Ra2Cipher::new(&send_key).ok()?;
+
+        let server_hash = variant.hash(&[&server_blob, &client_blob]);
+        side.write_all(&send.seal(&server_hash).ok()?).await.ok()?;
+        let mut header = [0u8; 2];
+        side.read_exact(&mut header).await.ok()?;
+        let mut body = vec![0u8; u16::from_be_bytes(header) as usize + MAC_LEN];
+        side.read_exact(&mut body).await.ok()?;
+        let client_hash = recv.open(header, &body).ok()?;
+        assert_eq!(client_hash, variant.hash(&[&client_blob, &server_blob]));
+
+        // The subtype goes out at once, as a real server sends it; the client
+        // must leave it waiting while the trust prompt is open. With no
+        // subtype the server hangs up here instead.
+        let subtype = subtype?;
+        side.write_all(&send.seal(&[subtype]).ok()?).await.ok()?;
+        side.flush().await.ok()?;
+
+        // Record everything from here on, chunk by chunk, so the test sees a
+        // byte the moment it lands.
+        let mut seen = Vec::new();
+        let frame_len = |b: &[u8]| {
+            (b.len() >= 2).then(|| 2 + u16::from_be_bytes([b[0], b[1]]) as usize + MAC_LEN)
+        };
+        let wait_for_frame = matches!(finish, Finish::Accept { .. });
+        let mut chunk = [0u8; 4096];
+        loop {
+            if wait_for_frame && frame_len(&seen).is_some_and(|n| seen.len() >= n) {
+                break;
+            }
+            let n = side.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(&chunk[..n]);
+            recorded.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+        let first = frame_len(&seen)
+            .filter(|n| seen.len() >= *n)
+            .and_then(|n| recv.open([seen[0], seen[1]], &seen[2..n]).ok());
+
+        if let Finish::Accept { server_init } = finish {
+            if variant.encrypt_session {
+                side.write_all(&send.seal(&0u32.to_be_bytes()).ok()?)
+                    .await
+                    .ok()?;
+                // ClientInit, one framed byte.
+                side.read_exact(&mut header).await.ok()?;
+                let mut body = vec![0u8; u16::from_be_bytes(header) as usize + MAC_LEN];
+                side.read_exact(&mut body).await.ok()?;
+                side.write_all(&send.seal(&server_init).ok()?).await.ok()?;
+            } else {
+                side.write_all(&0u32.to_be_bytes()).await.ok()?;
+                let mut client_init = [0u8; 1];
+                side.read_exact(&mut client_init).await.ok()?;
+                side.write_all(&server_init).await.ok()?;
+            }
+            side.flush().await.ok()?;
+            // Hold the connection until the client is done with it.
+            let _ = side.read(&mut chunk).await;
+        }
+        first
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1151,13 +1435,31 @@ mod tests {
             // describes an X.509 certificate, not this RSA key.
             o.cert_pins.tls = Some("ff".repeat(32));
             let s: BoxedStream = Box::pin(client_side);
+            // First contact asks; the user says yes here.
+            let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
+            let asked = tokio::spawn(async move {
+                let mut asked = 0;
+                while let Some(ask) = trust_rx.recv().await {
+                    asked += 1;
+                    let _ = ask.reply.send(true);
+                }
+                asked
+            });
+            let source = CredentialSource::none().with_trust_prompt(&trust_tx);
             let outcome = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                handshake(s, security_type, &o, &CredentialSource::none()),
+                handshake(s, security_type, &o, &source),
             )
             .await
             .expect("the wire handshake must not hang")
             .unwrap();
+            drop(source);
+            drop(trust_tx);
+            assert_eq!(
+                asked.await.unwrap(),
+                usize::from(stored_pin.is_none()),
+                "only first contact asks, {security_type:?}"
+            );
 
             // The identity check must not disturb the handshake, and must
             // report what the session layer needs to prompt with, including
@@ -1189,6 +1491,253 @@ mod tests {
             stream.read_exact(&mut result).await.unwrap();
             assert_eq!(u32::from_be_bytes(result), 0, "{security_type:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Trust before credentials
+    // -----------------------------------------------------------------------
+
+    use super::test_server::{self, Finish, Recorded};
+    use crate::security::prompt::TrustAsk;
+    use tokio::sync::mpsc;
+
+    fn stored_credentials() -> ConnectOptions {
+        let mut o = ConnectOptions::vnc("h", 5900);
+        o.credentials = crate::types::Credentials::user_pass("alice", "hunter2");
+        o
+    }
+
+    /// Start the simulated server on one end of a pipe; the other end is the
+    /// client's stream.
+    fn start_server(
+        security_type: SecurityType,
+        finish: Finish,
+    ) -> (
+        BoxedStream,
+        Recorded,
+        tokio::task::JoinHandle<Option<Vec<u8>>>,
+    ) {
+        start_server_with(security_type, Some(1), finish)
+    }
+
+    fn start_server_with(
+        security_type: SecurityType,
+        subtype: Option<u8>,
+        finish: Finish,
+    ) -> (
+        BoxedStream,
+        Recorded,
+        tokio::task::JoinHandle<Option<Vec<u8>>>,
+    ) {
+        let (client, mut server) = tokio::io::duplex(64 * 1024);
+        let recorded = Recorded::default();
+        let log = recorded.clone();
+        let task = tokio::spawn(async move {
+            test_server::serve(&mut server, security_type, subtype, log, finish).await
+        });
+        (Box::pin(client), recorded, task)
+    }
+
+    /// The fix this file carries: on first contact the user is asked about
+    /// the key after the key confirmation, and not one byte of the
+    /// credentials is written until they say yes.
+    #[tokio::test]
+    async fn no_credential_byte_is_written_before_the_key_is_trusted() {
+        for security_type in [SecurityType::Ra2, SecurityType::Ra2ne256] {
+            let (stream, recorded, server) = start_server(security_type, Finish::ReadToEof);
+            let o = stored_credentials();
+            let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
+            let source = CredentialSource::none().with_trust_prompt(&trust_tx);
+            let handshake = handshake(stream, security_type, &o, &source);
+            tokio::pin!(handshake);
+
+            // Drive the handshake until it asks.
+            let ask = tokio::select! {
+                ask = trust_rx.recv() => ask.expect("a trust prompt"),
+                r = &mut handshake => panic!("finished without asking: {:?}", r.err()),
+            };
+            assert_eq!(ask.scheme, PinScheme::Ra2);
+            assert_eq!(ask.fingerprint, test_server::fingerprint());
+            assert_eq!(ask.subject, "RSA-AES server key (2048-bit)");
+            assert!(ask.certificate.is_none());
+
+            // The prompt is open. Give a client that wrote early every chance
+            // to have done so, still polling the handshake, then look.
+            let early =
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut handshake).await;
+            assert!(early.is_err(), "the handshake went on without an answer");
+            assert!(
+                recorded.lock().unwrap().is_empty(),
+                "{} bytes reached the server before the key was trusted ({security_type:?})",
+                recorded.lock().unwrap().len()
+            );
+
+            ask.reply.send(true).unwrap();
+            let outcome = handshake
+                .await
+                .expect("the handshake completes once trusted");
+            assert_eq!(
+                source.approved_keys(),
+                vec![(PinScheme::Ra2, test_server::fingerprint())]
+            );
+            drop(outcome);
+            let credentials = server.await.unwrap();
+            assert_eq!(
+                credentials,
+                Some(encode_credentials("alice", "hunter2").unwrap()),
+                "{security_type:?}"
+            );
+        }
+    }
+
+    /// Refusing the key, or the session going away while the prompt is open,
+    /// closes the connection with nothing sent after the key confirmation.
+    #[tokio::test]
+    async fn a_refused_key_gets_nothing() {
+        for refuse in [true, false] {
+            let (stream, recorded, server) = start_server(SecurityType::Ra2, Finish::ReadToEof);
+            let o = stored_credentials();
+            let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
+            let answerer = tokio::spawn(async move {
+                let ask = trust_rx.recv().await.expect("a trust prompt");
+                if refuse {
+                    let _ = ask.reply.send(false);
+                }
+                // Otherwise the ask is dropped unanswered: a teardown.
+            });
+            let source = CredentialSource::none().with_trust_prompt(&trust_tx);
+            let err = match handshake(stream, SecurityType::Ra2, &o, &source).await {
+                Err(e) => e,
+                Ok(_) => panic!("a refused key must not complete the handshake"),
+            };
+            answerer.await.unwrap();
+            if refuse {
+                assert!(matches!(err, VncError::CertificateUntrusted(_)), "{err:?}");
+                assert!(err.needs_user_action(), "a refusal is never retried");
+            } else {
+                assert!(matches!(err, VncError::Cancelled), "{err:?}");
+            }
+            assert!(source.approved_keys().is_empty());
+            assert_eq!(server.await.unwrap(), None);
+            assert!(
+                recorded.lock().unwrap().is_empty(),
+                "{} bytes sent to a refused key",
+                recorded.lock().unwrap().len()
+            );
+        }
+    }
+
+    /// A pinned key goes straight through with no prompt.
+    #[tokio::test]
+    async fn a_pinned_key_is_not_asked_about() {
+        let (stream, _recorded, server) = start_server(SecurityType::Ra2, Finish::ReadToEof);
+        let mut o = stored_credentials();
+        o.cert_pins = CertPins::one(PinScheme::Ra2, test_server::fingerprint());
+        let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
+        let source = CredentialSource::none().with_trust_prompt(&trust_tx);
+        let outcome = handshake(stream, SecurityType::Ra2, &o, &source)
+            .await
+            .expect("a pinned key connects");
+        assert!(trust_rx.try_recv().is_err(), "a pinned key was asked about");
+        assert_eq!(
+            outcome.trust.as_ref().map(|t| &t.decision),
+            Some(&TrustDecision::PinnedMatch)
+        );
+        drop(outcome);
+        assert_eq!(
+            server.await.unwrap(),
+            Some(encode_credentials("alice", "hunter2").unwrap())
+        );
+    }
+
+    /// Headless, with nobody to ask, an unknown key is refused and the stored
+    /// password stays here.
+    #[tokio::test]
+    async fn with_nobody_to_ask_an_unknown_key_is_refused() {
+        let (stream, recorded, server) = start_server(SecurityType::Ra2, Finish::ReadToEof);
+        let o = stored_credentials();
+        let err = match handshake(stream, SecurityType::Ra2, &o, &CredentialSource::none()).await {
+            Err(e) => e,
+            Ok(_) => panic!("an unknown key must not be used headless"),
+        };
+        assert!(matches!(err, VncError::CertificateUntrusted(_)), "{err:?}");
+        assert!(err.to_string().contains(&test_server::fingerprint()));
+        assert_eq!(server.await.unwrap(), None);
+        assert!(recorded.lock().unwrap().is_empty());
+    }
+
+    /// A server that hangs up during the key exchange, as TigerVNC does with
+    /// no RSA key file, is not reported as a rejected password.
+    #[tokio::test]
+    async fn a_close_before_the_credential_step_is_not_an_auth_failure() {
+        // Closed at once, after the type was chosen.
+        let (client, server) = tokio::io::duplex(64);
+        drop(server);
+        let err = match handshake(
+            Box::pin(client),
+            SecurityType::Ra2,
+            &stored_credentials(),
+            &CredentialSource::none(),
+        )
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("nothing to connect to"),
+        };
+        assert!(matches!(err, VncError::KeyExchange(_)), "{err:?}");
+        assert!(!err.needs_user_action() && !err.is_transient(), "{err:?}");
+        assert_eq!(err.user_message(), CLOSED_BEFORE_CREDENTIALS);
+        assert!(!err.user_message().contains("not accepted"));
+
+        // A failed SecurityResult and a reason in place of the key.
+        let (client, mut server) = tokio::io::duplex(256);
+        let reason = b"failed to open key file";
+        server.write_u32(1).await.unwrap();
+        server.write_u32(reason.len() as u32).await.unwrap();
+        server.write_all(reason).await.unwrap();
+        drop(server);
+        let err = match handshake(
+            Box::pin(client),
+            SecurityType::Ra2,
+            &stored_credentials(),
+            &CredentialSource::none(),
+        )
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("refused"),
+        };
+        assert!(matches!(err, VncError::KeyExchange(_)), "{err:?}");
+        assert!(
+            err.user_message().contains("failed to open key file"),
+            "{}",
+            err.user_message()
+        );
+    }
+
+    /// A server that hangs up after the key confirmation, while the trust
+    /// prompt is open, is still a close before the credential step.
+    #[tokio::test]
+    async fn a_close_while_the_prompt_is_open_is_not_an_auth_failure() {
+        // The server gives up after the key confirmation, while the user
+        // reads the prompt.
+        let (stream, recorded, server) =
+            start_server_with(SecurityType::Ra2, None, Finish::ReadToEof);
+        let o = stored_credentials();
+        let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
+        let answerer = tokio::spawn(async move {
+            let ask = trust_rx.recv().await.expect("a trust prompt");
+            assert_eq!(server.await.unwrap(), None);
+            let _ = ask.reply.send(true);
+        });
+        let source = CredentialSource::none().with_trust_prompt(&trust_tx);
+        let err = match handshake(stream, SecurityType::Ra2, &o, &source).await {
+            Err(e) => e,
+            Ok(_) => panic!("the server went away"),
+        };
+        answerer.await.unwrap();
+        assert!(matches!(err, VncError::KeyExchange(_)), "{err:?}");
+        assert!(recorded.lock().unwrap().is_empty());
     }
 
     async fn read_one_frame<S: tokio::io::AsyncRead + Unpin>(
@@ -1276,7 +1825,7 @@ mod tests {
                 test_key(0x22).to_public_key_der().unwrap().as_bytes(),
             ))
         );
-        assert_eq!(subject, "RealVNC RSA key (2048-bit)");
+        assert_eq!(subject, "RSA-AES server key (2048-bit)");
         // An empty stored pin is "no pin", not "a pin that never matches".
         assert!(matches!(
             evaluate_trust(&key, 2048, Some("")).unwrap(),

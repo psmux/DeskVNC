@@ -5,6 +5,7 @@ import type { TouchMode } from "../input/gestures";
 import { LEVEL_WORDS, formatSpeed, qualityLevel } from "../status";
 import { ModePicture } from "./art";
 import { Sheet } from "./Sheet";
+import { READ_FAILED, WRITE_FAILED, clipboardMessage, readClipboard, writeClipboard } from "../../lib/clipboard";
 import { IconClipboard, IconCopy, IconPaste, IconQuality, IconSend, IconTouch, IconWifi } from "./icons";
 
 export function ModeSheet({ mode, onPick, onClose, onShowTips }: { mode: TouchMode; onPick(m: TouchMode): void; onClose(): void; onShowTips(): void }) {
@@ -85,26 +86,36 @@ export function ClipboardSheet({
 }) {
   const [text, setText] = useState("");
   const [copied, setCopied] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
   const paste = async (): Promise<void> => {
+    setProblem(null);
     try {
-      const t = await navigator.clipboard.readText();
+      const t = await readClipboard();
       if (t) setText(t);
-    } catch {
-      // Clipboard reading is blocked; the person can paste into the box.
+      else setProblem("There is no text on this phone's clipboard. Copy something first.");
+    } catch (e) {
+      setProblem(clipboardMessage(e, READ_FAILED));
     }
   };
   const copy = async (): Promise<void> => {
     if (!fromComputer) return;
+    setProblem(null);
     try {
-      await navigator.clipboard.writeText(fromComputer);
+      await writeClipboard(fromComputer);
       setCopied(true);
-    } catch {
+    } catch (e) {
       setCopied(false);
+      setProblem(clipboardMessage(e, WRITE_FAILED));
     }
   };
   return (
     <Sheet title="Copy and paste" icon={<IconClipboard />} onClose={onClose}>
       <div className="dv-s-form">
+        {problem ? (
+          <p className="dv-s-note is-problem" role="alert">
+            {problem}
+          </p>
+        ) : null}
         <div className="dv-s-clip-block">
           <h3>Send to the computer</h3>
           <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Type or paste text here" rows={3} />

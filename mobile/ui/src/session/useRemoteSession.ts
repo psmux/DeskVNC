@@ -18,7 +18,9 @@ import type {
 } from "../api/contract";
 import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFrameMessage } from "./render/frameProtocol";
 import { WebGLRenderer } from "./render/WebGLRenderer";
-import { InputSender } from "./input/packets";
+import { InputSender, SendLane } from "./input/packets";
+import { InputFailures, errorText } from "./input/failures";
+import { endKind, isSignInRefusal, mergeEnd, type EndKind } from "./status";
 
 export type Phase = "connecting" | "connected" | "error" | "ended";
 
@@ -44,6 +46,16 @@ export function wireQuality(q: Quality, videoOk: boolean): Quality {
   return q === "auto" && !videoOk ? "quality" : q;
 }
 
+/**
+ * The target for the next attempt once the computer has refused a sign in.
+ * A saved computer's password is forgotten in the vault instead (see
+ * `onSignInRefused` below), so only a connection that was not saved carries
+ * one here, and it is dropped so the computer asks again.
+ */
+export function withoutPassword(target: ConnectTarget): ConnectTarget {
+  return target.kind === "adhoc" && target.password !== undefined ? { ...target, password: undefined } : target;
+}
+
 export interface RemoteSession {
   phase: Phase;
   state: SessionState;
@@ -60,10 +72,14 @@ export interface RemoteSession {
   serverCursor: { x: number; y: number; at: number } | null;
   /** Set when the app came back from the background and the session had ended. */
   needsReconnect: boolean;
+  /** Why a session that was showing the desktop stopped, once it has. */
+  ended: { kind: EndKind; reason: string | null } | null;
   /** Bumped on every frame message, so the screen can tell pixels arrived. */
   frames: number;
   renderer: React.RefObject<WebGLRenderer | null>;
   sender: React.RefObject<InputSender | null>;
+  /** Types text from the phone keyboard, after every input queued before it. */
+  sendText(text: string): void;
   attachCanvas(canvas: HTMLCanvasElement | null): void;
   reconnect(): void;
   disconnect(): Promise<void>;
@@ -73,6 +89,8 @@ export interface RemoteSession {
   setQuality(q: Quality): void;
   snapshot(): Promise<boolean>;
   notice: string | null;
+  /** Set, as a new object each time, when taps and keys keep failing to send. */
+  inputFailure: { message: string } | null;
 }
 
 const IDLE: SessionState = { state: "connecting" };
@@ -91,19 +109,25 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [hasCursorShape, setHasCursorShape] = useState(false);
   const [serverCursor, setServerCursor] = useState<{ x: number; y: number; at: number } | null>(null);
   const [needsReconnect, setNeedsReconnect] = useState(false);
+  const [ended, setEnded] = useState<{ kind: EndKind; reason: string | null } | null>(null);
   const [frames, setFrames] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [inputFailure, setInputFailure] = useState<{ message: string } | null>(null);
 
   const renderer = useRef<WebGLRenderer | null>(null);
   const sender = useRef<InputSender | null>(null);
+  const textOut = useRef<((text: string) => void) | null>(null);
   const sid = useRef<string | null>(null);
   const phaseRef = useRef<Phase>("connecting");
   const quality = useRef<Quality>(initialQuality);
   const hidden = useRef(false);
   const endedWhileHidden = useRef(false);
   const exiting = useRef(false);
+  // Set when the computer refused the name or password. The next attempt
+  // then goes without the old password, so the computer asks for a new one.
+  const refused = useRef<{ target: ConnectTarget; forgotten: Promise<void> } | null>(null);
 
   const go = useCallback((p: Phase) => {
     phaseRef.current = p;
@@ -138,11 +162,32 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     const videoOk = hasVideoDecoder();
     let frameCount = 0;
     let frameFlush = 0;
+    if (refused.current && refused.current.target !== target) refused.current = null;
+    const wire = refused.current ? withoutPassword(target) : target;
+    let refusedHere = false;
+
+    // A remembered password the computer turned down is stale. Sending it
+    // again on Try again, with no prompt, only added to the server's count
+    // of failed sign ins, so it goes now. The user name stays, and fills in
+    // the sign in sheet the computer raises on the next attempt. Whatever is
+    // typed there is remembered again only if Remember is still on, and only
+    // once the computer accepts it (session_credentials on the Rust side).
+    const onSignInRefused = (): void => {
+      if (refusedHere) return;
+      refusedHere = true;
+      const forgotten =
+        target.kind === "saved"
+          ? api.hostsSetSecret(target.hostId, null, "").catch((e: unknown) => console.warn(`could not forget the password: ${errorText(e)}`))
+          : Promise.resolve();
+      refused.current = { target, forgotten };
+    };
 
     go("connecting");
     setState(IDLE);
     setError(null);
+    setInputFailure(null);
     setNeedsReconnect(false);
+    setEnded(null);
     setCredentials(null);
     setCert(null);
     setStats(null);
@@ -186,7 +231,16 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           } else if (e.state.state === "disconnected") {
             if (exiting.current) return;
             if (hidden.current) endedWhileHidden.current = true;
-            if (phaseRef.current === "connected") {
+            if (isSignInRefusal(e.state.reason)) onSignInRefused();
+            if (phaseRef.current === "connected" || phaseRef.current === "ended") {
+              // A second reason can follow the first: the background one
+              // comes after the driver's own clean end.
+              const reason = e.state.reason;
+              const kind = endKind(reason, endedWhileHidden.current);
+              setEnded((prev) => {
+                const merged = mergeEnd(prev?.kind ?? null, kind);
+                return { kind: merged, reason: merged === prev?.kind ? prev.reason : reason };
+              });
               setNeedsReconnect(true);
               go("ended");
             } else {
@@ -221,12 +275,14 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           setStats(e.stats);
           break;
         case "error":
+          if (isSignInRefusal(e.message)) onSignInRefused();
           setError(e.message);
           if (phaseRef.current !== "connected") go("error");
           break;
         case "ended":
           if (exiting.current) return;
           if (hidden.current) endedWhileHidden.current = true;
+          setEnded((prev) => prev ?? { kind: endedWhileHidden.current ? "paused" : "lost", reason: null });
           setNeedsReconnect(true);
           if (phaseRef.current !== "error") go("ended");
           break;
@@ -236,7 +292,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     };
 
     api
-      .sessionConnect(target, onFrame, onEvent)
+      .sessionConnect(wire, onFrame, onEvent)
       .then(({ sessionId: id }) => {
         if (cancelled) {
           void api.sessionDisconnect(id).catch(() => {});
@@ -245,11 +301,26 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         mySid = id;
         sid.current = id;
         setSessionId(id);
-        sender.current = new InputSender({
-          send: (seq, body) => {
-            void api.sessionInput(id, seq, body).catch(() => {});
+        const failures = new InputFailures({
+          onPersistent: (message) => {
+            if (!cancelled) setInputFailure({ message });
           },
         });
+        // Input bodies and typed text share one lane, so they reach the
+        // computer in the order they were made.
+        const lane = new SendLane();
+        const snd = new InputSender({
+          send: (seq, body) =>
+            lane.run(() => api.sessionInput(id, seq, body)).then(
+              () => failures.ok(),
+              (err: unknown) => failures.fail(err),
+            ),
+        });
+        sender.current = snd;
+        textOut.current = (text) => {
+          snd.flush(true);
+          lane.run(() => api.sessionText(id, text)).catch(() => {});
+        };
         const q = wireQuality(quality.current, videoOk);
         if (q !== "auto") void api.sessionQuality(id, q).catch(() => {});
       })
@@ -265,6 +336,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
       const s = sender.current;
       if (s && mySid) s.releaseAll();
       sender.current = null;
+      textOut.current = null;
       if (mySid) void api.sessionDisconnect(mySid).catch(() => {});
       sid.current = null;
       setSessionId(null);
@@ -283,6 +355,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         hidden.current = false;
         if (endedWhileHidden.current || phaseRef.current === "ended") {
           setNeedsReconnect(true);
+          setEnded((prev) => prev ?? { kind: "paused", reason: null });
           if (phaseRef.current !== "error") go("ended");
         } else {
           r?.start();
@@ -296,7 +369,11 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
 
   const reconnect = useCallback(() => {
     exiting.current = false;
-    setAttempt((a) => a + 1);
+    const r = refused.current;
+    // After a refusal the vault is cleared first, or Rust would read the old
+    // password for this attempt too.
+    if (r) void r.forgotten.then(() => setAttempt((a) => a + 1));
+    else setAttempt((a) => a + 1);
   }, []);
 
   const snapshot = useCallback(async (): Promise<boolean> => {
@@ -308,10 +385,13 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     try {
       await api.sessionSnapshot(id, shot.pixels, shot.width, shot.height);
       return true;
-    } catch {
+    } catch (err) {
+      console.warn(`session snapshot failed: ${errorText(err)}`);
       return false;
     }
   }, [api]);
+
+  const sendText = useCallback((text: string) => textOut.current?.(text), []);
 
   const disconnect = useCallback(async (): Promise<void> => {
     exiting.current = true;
@@ -330,14 +410,14 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     [api],
   );
 
+  // Saying no to a sign in is a choice, not a failure: stop quietly, and the
+  // screen goes back to where the person came from.
   const cancelCredentials = useCallback(() => {
     setCredentials(null);
     const id = sid.current;
     exiting.current = true;
     if (id) void api.sessionDisconnect(id).catch(() => {});
-    setError("Sign in was cancelled.");
-    go("error");
-  }, [api, go]);
+  }, [api]);
 
   const answerCert = useCallback(
     (accept: boolean) => {
@@ -377,9 +457,11 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     hasCursorShape,
     serverCursor,
     needsReconnect,
+    ended,
     frames,
     renderer,
     sender,
+    sendText,
     attachCanvas: setCanvas,
     reconnect,
     disconnect,
@@ -389,5 +471,6 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     setQuality,
     snapshot,
     notice,
+    inputFailure,
   };
 }

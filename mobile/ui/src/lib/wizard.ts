@@ -244,8 +244,8 @@ export function canContinue(s: WizardState): { ok: true } | { ok: false; error: 
       if (s.protocol === "boundary") {
         const t = s.boundaryText.trim();
         if (isCompleteCode(t) || isInvitation(t) || /^[0-9a-fA-F]{64}$/.test(t)) return { ok: true };
-        if (t === "") return { ok: false, error: "Type their code, or paste the invitation they sent" };
-        return { ok: false, error: "That does not look like a code. A code has 12 numbers." };
+        if (t === "") return { ok: false, error: "Paste the invitation they sent, or type their code" };
+        return { ok: false, error: "That does not look like an invitation or a code. An invitation starts with boundary1: and a code has 12 numbers." };
       }
       if (s.address.trim() === "") return { ok: false, error: "Type the computer's address, or tap one found nearby" };
       const parsed = parsePhoneTarget(s.address, s.protocol ?? undefined);

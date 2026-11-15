@@ -28,7 +28,9 @@ describe("InputSender", () => {
     const sent: { seq: number; body: number[] }[] = [];
     let pending: (() => void) | null = null;
     const s = new InputSender({
-      send: (seq, body) => sent.push({ seq, body: Array.from(body) }),
+      send: (seq, body) => {
+        sent.push({ seq, body: Array.from(body) });
+      },
       schedule: (cb) => {
         pending = cb;
       },

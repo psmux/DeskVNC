@@ -59,6 +59,14 @@ pub enum VncError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// The encrypted handshake failed before any credential was sent: the
+    /// server hung up during the key exchange or could not prove it holds
+    /// its key. Never a verdict on the user name or password, so it must not
+    /// be shown as one, and never retried, since the same server does the
+    /// same thing again.
+    #[error("key exchange failed: {0}")]
+    KeyExchange(String),
+
     /// Credentials are required but were not supplied (prompt the user).
     #[error("credentials required: {0}")]
     CredentialsRequired(String),
@@ -149,9 +157,14 @@ impl VncError {
             }
             VncError::AuthFailed(_) => "The password was not accepted.".into(),
             VncError::AccessDenied(r) => r.clone(),
+            VncError::KeyExchange(r) => r.clone(),
             VncError::CredentialsRequired(_) => "This computer requires a password.".into(),
             VncError::CertificateMismatch { .. } => {
                 "This computer's identity has changed. This could indicate a security problem."
+                    .into()
+            }
+            VncError::CertificateUntrusted(_) => {
+                "This computer's identity was not trusted, so no name or password was sent to it."
                     .into()
             }
             VncError::NoSupportedSecurityType(_) => {

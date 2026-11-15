@@ -64,8 +64,29 @@ export function concat(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * Runs one call at a time, in the order they were queued. Rust handles every
+ * invoke on its own task, so two calls in flight can land in either order:
+ * typed letters came out swapped ("lnie2"), and a `session_input` body that
+ * waited on a slow earlier one timed out as an "input sequence gap" and then
+ * raced it. Each call here starts only once the one before has settled.
+ */
+export class SendLane {
+  private tail: Promise<void> = Promise.resolve();
+
+  run(call: () => Promise<void>): Promise<void> {
+    const done = this.tail.then(call);
+    this.tail = done.catch(() => {});
+    return done;
+  }
+}
+
 export interface SenderDeps {
-  send(seq: number, body: Uint8Array): void;
+  /**
+   * Sends one body. When it returns a promise the sender keeps at most one
+   * body in flight and lets moves keep merging until it settles.
+   */
+  send(seq: number, body: Uint8Array): Promise<void> | void;
   /** Schedules one flush. Defaults to requestAnimationFrame. */
   schedule?(cb: () => void): void;
 }
@@ -82,6 +103,8 @@ export class InputSender {
   private lastMask = 0;
   private scheduled = false;
   private seq = 1;
+  /** Bodies sent whose promise has not settled. */
+  private inFlight = 0;
   private readonly schedule: (cb: () => void) => void;
 
   constructor(private readonly deps: SenderDeps) {
@@ -120,17 +143,30 @@ export class InputSender {
     this.queue.push(encodeReleaseAll());
     this.lastMove = -1;
     this.lastMask = 0;
-    this.flush();
+    this.flush(true);
   }
 
-  /** Send everything queued now, as one body. */
-  flush(): void {
+  /**
+   * Send everything queued as one body. While a body is still in flight this
+   * waits for it, so a slow link gets the newest pointer position rather
+   * than a backlog of old ones. `now` sends at once anyway, for callers that
+   * must put the queue ahead of something else, such as typed text.
+   */
+  flush(now = false): void {
     this.scheduled = false;
     if (this.queue.length === 0) return;
+    if (this.inFlight > 0 && !now) return;
     const body = concat(this.queue);
     this.queue = [];
     this.lastMove = -1;
-    this.deps.send(this.seq++, body);
+    const sent = this.deps.send(this.seq++, body);
+    if (!sent || typeof sent.then !== "function") return;
+    this.inFlight++;
+    const settle = (): void => {
+      this.inFlight--;
+      if (this.inFlight === 0 && this.queue.length > 0) this.flush();
+    };
+    sent.then(settle, settle);
   }
 
   private kick(): void {

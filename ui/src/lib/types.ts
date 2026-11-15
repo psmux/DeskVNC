@@ -519,7 +519,7 @@ export function hostMac(host: { mac?: string | null } | null | undefined): strin
  * Which server key a trust-on-first-use pin describes (`PinScheme` in
  * crates/remote-core/src/pins.rs).
  *
- * "tls" is a VeNCrypt X.509 certificate, "ra2" a RealVNC RSA key, "rdp-tls"
+ * "tls" is a VeNCrypt X.509 certificate, "ra2" an RSA-AES server key, "rdp-tls"
  * an RDP server's own certificate, "apple-rsa" a Mac's Screen Sharing host
  * key. One host can offer all three, and the
  * fingerprints are unrelated, so a prompt says which one it is about and the

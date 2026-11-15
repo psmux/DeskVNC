@@ -13,6 +13,8 @@ import { PROTOCOL_HINT, PROTOCOL_TITLE, ProtocolIcon, ProtocolScene } from "../a
 import { SceneKey, SceneSaved } from "../art/Scenes";
 import { Button, IconButton } from "../components/Button";
 import { Field, Toggle } from "../components/Field";
+import { clipboardMessage, readClipboard } from "../lib/clipboard";
+import { LAYER, useBack } from "../lib/back";
 import { formatCode } from "../lib/code";
 import { haptic } from "../lib/haptics";
 import { boundaryKind, canContinue, newWizard, reduceWizard, STEPS, toDraft, type WizardState } from "../lib/wizard";
@@ -27,11 +29,12 @@ const OS_CHOICES: { os: HostOs; label: string }[] = [
   { os: "unknown", label: "Other" },
 ];
 
-async function readClipboard(): Promise<string> {
+/** The clipboard's text, or the reason it could not be read. */
+async function pasted(): Promise<{ text: string; problem: string | null }> {
   try {
-    return (await navigator.clipboard.readText()) ?? "";
-  } catch {
-    return "";
+    return { text: (await readClipboard()).trim(), problem: null };
+  } catch (e) {
+    return { text: "", problem: clipboardMessage(e) };
   }
 }
 
@@ -55,6 +58,9 @@ export function AddComputer({ initial }: { initial: WizardState }) {
     if (s.step === "how" || (s.mode === "edit" && s.step === "where") || s.step === "done") app.closeWizard();
     else dispatch({ type: "back" });
   };
+
+  // Android Back is the wizard's own back arrow: one step, or close.
+  useBack(true, LAYER.wizard, back);
 
   const save = async (withSecret: boolean) => {
     setBusy(true);
@@ -220,7 +226,8 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
         type="button"
         className="mx-auto mt-6 flex min-h-11 items-center gap-2 rounded-full border border-line bg-surface-2 px-4 text-subhead font-medium text-accent"
         onClick={async () => {
-          const text = (await readClipboard()).trim();
+          const { text, problem } = await pasted();
+          if (problem) return setPasteNote(problem);
           if (!text) return setPasteNote("Copy a link like rdp://office-pc first, then tap here.");
           paste(text);
           setPasteNote(null);
@@ -239,6 +246,14 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
 function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.Dispatch<Parameters<typeof reduceWizard>[1]>; onEnter: () => void }) {
   const app = useApp();
   const [more, setMore] = useState(s.portTouched && s.mode === "add");
+  const [pasteProblem, setPasteProblem] = useState<string | null>(null);
+  const pasteInto = async (type: "boundary" | "address") => {
+    const { text, problem } = await pasted();
+    setPasteProblem(problem);
+    if (problem) return haptic("warning");
+    if (!text) return setPasteProblem("There is nothing on this phone's clipboard to paste.");
+    dispatch({ type, text });
+  };
   useEffect(() => {
     if (s.protocol !== "boundary" && !app.scanning && app.found.length === 0) void app.scan();
     // Only on arrival.
@@ -254,11 +269,12 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
         <StepTitle
           art={<ProtocolScene protocol="boundary" />}
           title="Their code or invitation"
-          subtitle="Ask them to open DeskVNC Support and tell you the code. A computer ID from that screen works too."
+          subtitle="Ask them to open DeskVNC Support, press Create invitation, then Copy invitation, and send it to you. A short code or a computer ID from that screen works too."
         />
         <Field
-          label="Code, invitation or computer ID"
-          placeholder="1234 5678 9012"
+          label="Invitation, code or computer ID"
+          placeholder="boundary1:..."
+          error={pasteProblem}
           value={/^\d+$/.test(s.boundaryText) ? formatCode(s.boundaryText) : s.boundaryText}
           onChange={(e) => dispatch({ type: "boundary", text: e.target.value })}
           inputMode="text"
@@ -271,7 +287,7 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
               type="button"
               aria-label="Paste"
               className="-mr-2 flex h-12 items-center gap-1.5 rounded-xl px-3 font-semibold text-accent"
-              onClick={async () => dispatch({ type: "boundary", text: (await readClipboard()).trim() })}
+              onClick={() => void pasteInto("boundary")}
             >
               <IconPaste size={20} /> Paste
             </button>
@@ -292,6 +308,7 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
         label="Name or address"
         placeholder={s.protocol === "rdp" ? "office-pc or 192.0.2.20" : "studio.local or 10.0.0.5"}
         value={s.address}
+        error={pasteProblem}
         onChange={(e) => dispatch({ type: "address", text: e.target.value })}
         inputMode="url"
         autoCapitalize="none"
@@ -305,7 +322,7 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
               type="button"
               aria-label="Paste"
               className="-mr-2 flex h-12 items-center gap-1.5 rounded-xl px-3 font-semibold text-accent"
-              onClick={async () => dispatch({ type: "address", text: (await readClipboard()).trim() })}
+              onClick={() => void pasteInto("address")}
             >
               <IconPaste size={20} /> Paste
             </button>

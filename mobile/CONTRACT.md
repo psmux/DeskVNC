@@ -35,14 +35,14 @@ done, total }` or `{ type: "complete" }`.
 |---|---|---|
 | `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent> }` | `{ sessionId }` |
 | `boundary_resolve` | `{ code }` | `{ invitation }`. Accepts `1234 5678 9012`, `123456789012` or a full `boundary1:` invitation |
-| `session_input` | raw body, headers `x-session-id`, `x-input-seq` | nothing. Body format is the desktop `send_input` format |
+| `session_input` | binary body (raw, or on Android the JSON array of numbers Tauri makes of it), headers `x-session-id`, `x-input-seq` | nothing. Body format is the desktop `send_input` format |
 | `session_text` | `{ sessionId, text }` | nothing. Types a string, used by the phone keyboard |
 | `session_key_combo` | `{ sessionId, combo: KeyCombo }` | nothing |
 | `session_credentials` | `{ sessionId, username?, password?, save }` | nothing. Answers `credentials-required` |
 | `session_trust` | `{ sessionId, fingerprint, scheme, accept }` | nothing. Answers `certificate-prompt` |
 | `session_quality` | `{ sessionId, quality: "auto" \| "speed" \| "balanced" \| "quality" }` | nothing |
 | `session_clipboard` | `{ sessionId, text }` | nothing |
-| `session_snapshot` | `{ sessionId, rgba, width, height }` raw body | nothing. Saves the thumbnail for the host card |
+| `session_snapshot` | RGBA body (raw, or base64 text on Android), headers `x-session-id`, `x-width`, `x-height` | nothing. Saves the thumbnail for the host card |
 | `session_disconnect` | `{ sessionId }` | nothing |
 
 `ConnectTarget` has a fourth kind, `{ kind: "demo" }`, the built in demo
