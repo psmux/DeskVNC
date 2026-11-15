@@ -53,6 +53,12 @@ pub const STABLE_UPTIME: Duration = Duration::from_secs(5);
 /// already unusual.
 pub const MAX_CHAINED_REATTEMPTS: u32 = 8;
 
+/// Retries allowed before a session has ever connected. A computer that never
+/// answered is usually off, on another network, or blocked by the phone's own
+/// local network permission, and retrying it forever behind "Trying again"
+/// hid the reason. Once a session has been up, a drop gets the full policy.
+pub const FIRST_CONNECT_RETRIES: u32 = 1;
+
 /// What the supervisor should do after a connection attempt failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -208,6 +214,19 @@ pub fn classify<E: RetryClassify + ?Sized>(
     Decision::Retry
 }
 
+/// The policy for this failure: capped at [`FIRST_CONNECT_RETRIES`] while the
+/// session has never connected.
+fn first_connect_policy(policy: &ReconnectPolicy, ever_connected: bool) -> ReconnectPolicy {
+    let mut p = *policy;
+    if !ever_connected {
+        p.max_attempts = Some(
+            p.max_attempts
+                .map_or(FIRST_CONNECT_RETRIES, |m| m.min(FIRST_CONNECT_RETRIES)),
+        );
+    }
+    p
+}
+
 enum WaitOutcome {
     Elapsed,
     RetryNow,
@@ -251,6 +270,7 @@ pub async fn supervise<C: ConnectOnce>(
 ) {
     let mut attempts_made: u32 = 0;
     let mut chained: u32 = 0;
+    let mut ever_connected = false;
 
     loop {
         let mut connected_at: Option<Instant> = None;
@@ -262,6 +282,7 @@ pub async fn supervise<C: ConnectOnce>(
         // again, so backoff starts from scratch on the next drop
         // (PRD/05 §6.2).
         if let Some(t) = connected_at {
+            ever_connected = true;
             if t.elapsed() >= STABLE_UPTIME {
                 attempts_made = 0;
             }
@@ -307,7 +328,8 @@ pub async fn supervise<C: ConnectOnce>(
         };
         chained = 0;
 
-        match classify(&err, conn.policy(), attempts_made) {
+        let policy = first_connect_policy(conn.policy(), ever_connected);
+        match classify(&err, &policy, attempts_made) {
             Decision::Stop { can_retry } => {
                 tracing::warn!(session = %id, error = %err, "session stopped");
                 if !err.is_cancelled() {
@@ -552,7 +574,7 @@ mod tests {
                 Err(TestError::Transient),
             ],
             absorbed: 0,
-            held: None,
+            held: Some(Duration::from_millis(500)),
         };
         supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
 
@@ -565,6 +587,37 @@ mod tests {
             })
             .collect();
         assert_eq!(attempts, vec![1, 2], "{states:?}");
+        assert!(matches!(
+            states.last(),
+            Some(SessionState::Disconnected {
+                can_retry: true,
+                ..
+            })
+        ));
+    }
+
+    /// A computer that never answered gets one retry and then the error,
+    /// whatever the policy allows for a session that was up.
+    #[tokio::test]
+    async fn a_first_connect_stops_after_one_retry() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: ReconnectPolicy {
+                max_attempts: None,
+                ..fast_policy()
+            },
+            script: vec![Err(TestError::Transient); 6],
+            absorbed: 0,
+            held: None,
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+        let states = states(&mut rx).await;
+        let attempts = states
+            .iter()
+            .filter(|s| matches!(s, SessionState::Reconnecting { .. }))
+            .count();
+        assert_eq!(attempts, FIRST_CONNECT_RETRIES as usize, "{states:?}");
         assert!(matches!(
             states.last(),
             Some(SessionState::Disconnected {
