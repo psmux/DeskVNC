@@ -332,7 +332,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(reconnecting, vec![1, 2], "states: {states:?}");
+        // The server never answers, so this is a first connect and gets
+        // remote_core's FIRST_CONNECT_RETRIES (one) whatever max_attempts says.
+        assert_eq!(
+            reconnecting.len(),
+            remote_core::reconnect::FIRST_CONNECT_RETRIES as usize,
+            "states: {states:?}"
+        );
         match states.last() {
             Some(SessionState::Disconnected { can_retry, .. }) => assert!(*can_retry),
             other => panic!("expected terminal Disconnected, got {other:?}"),
