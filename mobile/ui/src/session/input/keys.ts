@@ -140,6 +140,11 @@ export class TextDiffer {
     this.sent = SENTINEL;
   }
 
+  /** Take `value` as already known to the computer, sending nothing. */
+  rebase(value: string): void {
+    this.sent = value;
+  }
+
   /** What the field holds as far as the computer knows. */
   current(): string {
     return this.sent;
@@ -194,6 +199,14 @@ export class KeyboardField {
   private composingNow = false;
   /** An Enter keydown was handled and its keyup has not come yet. */
   private enterDown = false;
+  /**
+   * Length of the field, in code points, when the last Enter went out, or -1.
+   * The field keeps its text after Enter (emptying it under a composing
+   * Gboard scrambled fast typing), so a suggestion tapped afterwards would
+   * edit the line already sent. Replacements that reach back past this point
+   * are dropped; a plain Backspace still goes through.
+   */
+  private floor = -1;
 
   composing(): boolean {
     return this.composingNow;
@@ -202,17 +215,9 @@ export class KeyboardField {
   reset(): void {
     this.differ.reset();
     this.enterDown = false;
+    this.floor = -1;
   }
 
-  /**
-   * The field was emptied after an Enter. Whatever the keyboard still holds
-   * from before the Enter, a pending suggestion for instance, belongs to the
-   * line already sent and must not edit it.
-   */
-  clearedAfterEnter(): void {
-    this.composingNow = false;
-    this.differ.reset();
-  }
 
   compositionStart(): void {
     this.composingNow = true;
@@ -220,12 +225,30 @@ export class KeyboardField {
 
   compositionEnd(value: string): FieldOp[] {
     this.composingNow = false;
-    return this.differ.onCompositionEnd(value);
+    return this.guard(value) ?? this.differ.onCompositionEnd(value);
   }
 
   /** An `input` event. `nativeComposing` is `InputEvent.isComposing`. */
   input(value: string, nativeComposing: boolean): FieldOp[] {
-    return this.differ.onValue(value, this.composingNow || nativeComposing);
+    return this.guard(value) ?? this.differ.onValue(value, this.composingNow || nativeComposing);
+  }
+
+  /** [] when `value` rewrites text from before the last Enter, else null. */
+  private guard(value: string): FieldOp[] | null {
+    if (this.floor < 0) return null;
+    const a = Array.from(this.differ.current());
+    const b = Array.from(value);
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    if (i >= this.floor) return null;
+    if (b.length === i) {
+      // Only deleted: a Backspace the person meant, it goes to the computer.
+      this.floor = i;
+      return null;
+    }
+    this.differ.rebase(value);
+    this.floor = b.length;
+    return [];
   }
 
   /**
@@ -257,6 +280,8 @@ export class KeyboardField {
   private enter(value: string, nativeComposing: boolean): FieldOp[] | null {
     // A CJK IME uses Enter to accept its candidate; that is not a Return.
     if ((this.composingNow || nativeComposing) && !isPlainLatin(value)) return null;
-    return [...this.differ.onCompositionEnd(value), { type: "enter" }];
+    const ops: FieldOp[] = [...this.differ.onCompositionEnd(value), { type: "enter" }];
+    this.floor = Array.from(value).length;
+    return ops;
   }
 }

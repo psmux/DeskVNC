@@ -57,15 +57,43 @@ describe("input back pressure", () => {
 });
 
 describe("field after Enter", () => {
-  it("a suggestion for the word before Enter does not backspace into it", () => {
+  const typeWord = (f: KeyboardField, v: string) => f.input(v, true);
+
+  it("a suggestion for the word before Enter does not edit the sent line", () => {
     const f = new KeyboardField();
     f.compositionStart();
-    const typed = f.input(SENTINEL + "teh", true);
+    const typed = typeWord(f, SENTINEL + "teh");
     const enter = f.keyDown({ key: "Enter", keyCode: 229, isComposing: true }, SENTINEL + "teh") ?? [];
     expect([...typed, ...enter]).toEqual([{ type: "text", text: "teh" }, { type: "enter" }]);
-    f.clearedAfterEnter();
-    // The field was put back to the sentinel; the late commit sees only that.
-    expect(f.compositionEnd(SENTINEL)).toEqual([]);
-    expect(f.input(SENTINEL + "x", false)).toEqual([{ type: "text", text: "x" }]);
+    // Gboard swaps "teh" for "the ".
+    expect(f.input(SENTINEL + "the ", true)).toEqual([]);
+    expect(f.compositionEnd(SENTINEL + "the ")).toEqual([]);
+    // New typing after that goes out as usual.
+    expect(f.input(SENTINEL + "the x", false)).toEqual([{ type: "text", text: "x" }]);
+  });
+
+  it("Backspace after Enter still reaches the computer", () => {
+    const f = new KeyboardField();
+    f.input(SENTINEL + "ab", false);
+    f.keyDown({ key: "Enter" }, SENTINEL + "ab");
+    expect(f.input(SENTINEL + "a", false)).toEqual([{ type: "backspace", count: 1 }]);
+  });
+
+  it("fast rounds of a word and Enter keep their order", () => {
+    const f = new KeyboardField();
+    const out: string[] = [];
+    let v = SENTINEL;
+    for (let round = 0; round < 4; round++) {
+      f.compositionStart();
+      for (const ch of "line2") {
+        v += ch;
+        for (const op of f.input(v, true)) out.push(op.type === "text" ? op.text : `<${op.type}>`);
+      }
+      for (const op of f.keyDown({ key: "Enter", keyCode: 229, isComposing: true }, v) ?? []) {
+        out.push(op.type === "text" ? op.text : `<${op.type}>`);
+      }
+      for (const op of f.compositionEnd(v)) out.push(op.type === "text" ? op.text : `<${op.type}>`);
+    }
+    expect(out.join("")).toBe("line2<enter>".repeat(4));
   });
 });
