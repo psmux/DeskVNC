@@ -72,6 +72,12 @@ export interface Settings {
    * there is no host record. Kept to {@link MAX_QUICK_CONNECT_HISTORY} entries.
    */
   quickConnectHistory: string[];
+  /**
+   * Save a computer to the Library once a quick connect, a Recent or a Nearby
+   * row connects to it, unless a saved host already covers that endpoint.
+   * On by default; Recents keep working either way.
+   */
+  autoSaveHosts: boolean;
 }
 
 export const MAX_QUICK_CONNECT_HISTORY = 8;
@@ -87,6 +93,7 @@ export const DEFAULTS: Settings = {
   localCursor: "standard",
   windowMode: "tabs",
   quickConnectHistory: [],
+  autoSaveHosts: true,
 };
 
 const STORAGE_KEY = "deskvnc.settings.v1";
@@ -111,6 +118,7 @@ export function loadSettings(): Settings {
     if (merged.windowMode !== "windows" && merged.windowMode !== "tabs") {
       merged.windowMode = DEFAULTS.windowMode;
     }
+    if (typeof merged.autoSaveHosts !== "boolean") merged.autoSaveHosts = DEFAULTS.autoSaveHosts;
     return merged;
   } catch {
     return DEFAULTS;
