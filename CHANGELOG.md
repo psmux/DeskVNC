@@ -10,15 +10,45 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.4] (2026-11-16)
+
+0.36.3 was built but never published. Its changes, listed below under
+0.36.3, are part of this release.
+
+### Fixed
+
+* On Android 17 the phone app could not reach any computer on the local
+  network. Connect sat on "Finding the computer" and Nearby found nothing,
+  because the app never asked for Android's new local network permission. It
+  now asks once, at first launch.
+* A computer that never answers is tried once more and then the error is
+  shown with Try again, instead of "Trying again" forever.
+* The desktop app no longer pops a Paste button over the tab strip. It came
+  from reading the clipboard when a session window took focus while the
+  clipboard held no text, such as a screenshot or a copied file.
+* Display 1 and Display 2 now show whole monitors when the two are different
+  sizes. Each detected monitor keeps its own height, the join between them is
+  found from the empty area beside the shorter one, and detection runs again
+  when the desktop changes size.
+* Nearby on the phone shows the address of a computer that has no name,
+  instead of "A computer".
+
 ### Added
 
-* A computer you reach through quick connect, a recent or the Nearby list is
-  saved to your Library once the session connects, unless a saved computer
-  already has that address, port and protocol. It takes the name discovery
-  found, then the name the server gives itself, then the address, and keeps
-  what discovery learned about the system. Passwords are still kept only when
-  you tick Remember. Preferences, General, "Save computers I connect to"
-  turns it off. Boundary sessions are not saved this way.
+* The phone connects by typing a name or address at the top of Your
+  computers. It works out on its own whether the computer offers Remote
+  Desktop, screen sharing (VNC) or Boundary, asks once if it offers more than
+  one, and remembers the choice. The step by step setup is still behind +.
+* Both apps save every computer you connect to, under the best name known
+  (the name the network announces, the Windows name, or the name the server
+  gives itself, then the address). Passwords are kept only when you choose
+  Remember. "Save computers I connect to" in Settings or Preferences turns it
+  off.
+* Boundary to an address on your network or VPN connects straight to that
+  computer, with no relay and no address directory. A saved computer known by
+  its ID tries its last direct address first. The connection details show
+  whether the route is direct or through a relay, and "Never use relays"
+  keeps Boundary off relays altogether.
 
 ## [0.36.3] (2026-11-15)
 
