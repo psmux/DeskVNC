@@ -92,10 +92,15 @@ export async function writeClipboard(text: string): Promise<boolean> {
 /** Read the OS clipboard. Returns null when it could not be read. */
 export async function readClipboard(): Promise<string | null> {
   if (inTauri()) {
+    // No fallback to the webview here. The native read fails whenever the
+    // clipboard holds no text (a screenshot, a copied file, nothing at all),
+    // and WebKit answers `navigator.clipboard.readText()` without a gesture
+    // by popping its own "Paste" button, which then sat over the tab strip
+    // every time a session window took focus.
     try {
       return await invoke<string>("read_local_clipboard");
-    } catch (err) {
-      console.warn("[clipboard] native read failed:", err);
+    } catch {
+      return null;
     }
   }
   try {
