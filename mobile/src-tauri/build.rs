@@ -11,6 +11,7 @@ pub const COMMANDS: &[&str] = &[
     "hosts_thumbnail",
     "scan_start",
     "scan_stop",
+    "identify",
     "session_connect",
     "boundary_resolve",
     "session_input",
@@ -22,6 +23,7 @@ pub const COMMANDS: &[&str] = &[
     "session_clipboard",
     "session_snapshot",
     "session_disconnect",
+    "session_save_host",
 ];
 
 fn main() {

@@ -150,7 +150,7 @@ export function QuickConnect() {
                 setText(e.target.value);
                 setError(null);
               }}
-              placeholder="Type a name or address"
+              placeholder="Name or IP address"
               aria-label="Type a name or address"
               aria-invalid={!!error}
               className="min-w-0 flex-1 bg-transparent py-2 text-body outline-none placeholder:text-ink-faint"

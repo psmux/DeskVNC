@@ -14,6 +14,7 @@
     "allow-hosts-thumbnail",
     "allow-scan-start",
     "allow-scan-stop",
+    "allow-identify",
     "allow-session-connect",
     "allow-boundary-resolve",
     "allow-session-input",
@@ -24,6 +25,7 @@
     "allow-session-quality",
     "allow-session-clipboard",
     "allow-session-snapshot",
-    "allow-session-disconnect"
+    "allow-session-disconnect",
+    "allow-session-save-host"
   ]
 }
