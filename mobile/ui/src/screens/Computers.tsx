@@ -1,7 +1,8 @@
 /**
- * Your computers: big cards with a picture and one Connect button each.
- * Favourites first, a search when the list grows, pull down to refresh, and
- * the demo computer always within reach.
+ * Your computers: a field to connect by name or address, then big cards
+ * with a picture and one Connect button each. Favourites first, a search
+ * when the list grows, pull down to refresh, and the demo computer always
+ * within reach.
  */
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -11,6 +12,7 @@ import { OsArt } from "../art/OsArt";
 import { SceneEmptyDesk } from "../art/Scenes";
 import { Button, IconButton } from "../components/Button";
 import { ComputerCard, DemoCard } from "../components/ComputerCard";
+import { QuickConnect } from "../components/QuickConnect";
 import { ActionSheet, ConfirmSheet } from "../components/sheets/ActionSheet";
 import { setPrefs, usePrefs } from "../lib/prefs";
 import { wizardFromHost } from "../lib/wizard";
@@ -62,6 +64,9 @@ export function Computers() {
     return (
       <ScreenScroll onRefresh={refresh}>
         <ScreenHeader title="Your computers" />
+        <div className="mx-auto max-w-md px-4 pb-2">
+          <QuickConnect />
+        </div>
         <div className="mx-auto flex max-w-md flex-col items-center px-6 pb-6 text-center">
           <SceneEmptyDesk className="w-72 max-w-full" />
           <h2 className="mt-2 text-title2">No computers yet</h2>
@@ -92,6 +97,9 @@ export function Computers() {
           </IconButton>
         }
       />
+      <div className="px-4 pb-4 tab:px-8">
+        <QuickConnect />
+      </div>
       {app.hosts.length > 3 && (
         <div className="px-4 pb-4 tab:px-8">
           <label className="flex min-h-11 items-center gap-2 rounded-[10px] border border-line bg-surface px-3 focus-within:ring-2 focus-within:ring-accent">

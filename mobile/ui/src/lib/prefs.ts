@@ -19,6 +19,11 @@ export interface Prefs {
   onboarded: boolean;
   helperName: string;
   showDemo: boolean;
+  /** Save every computer connected to, if it is not on the list yet. */
+  autoSave: boolean;
+  /** The service picked last time at an address the quick field found
+   *  several at, as `protocol:port` keyed by the address. */
+  quickChoices: Record<string, string>;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -29,6 +34,8 @@ export const DEFAULT_PREFS: Prefs = {
   onboarded: false,
   helperName: "",
   showDemo: true,
+  autoSave: true,
+  quickChoices: {},
 };
 
 const KEY = "deskvnc.mobile.prefs";

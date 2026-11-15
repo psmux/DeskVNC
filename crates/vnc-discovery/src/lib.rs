@@ -21,6 +21,10 @@
 //! Boundary computers (unattended DeskVNC Support machines) are found by the
 //! one line they answer on TCP 5940 and by the DNS-SD record they advertise,
 //! see [`boundary`]. That probe writes nothing at all.
+//!
+//! [`identify`] puts those probes and the name ladder together for one
+//! address, which is what a quick connect field needs to work out what is
+//! listening behind an address typed with no protocol.
 
 #![forbid(unsafe_code)]
 
@@ -29,6 +33,7 @@ pub mod boundary;
 mod dnsmsg;
 mod error;
 pub mod filter;
+mod identify;
 mod mdns;
 mod msrpc;
 mod netbios;
@@ -50,6 +55,7 @@ pub use filter::{
     LocalNetwork,
 };
 pub use rdpnego::{caps_from_confirm, MAX_NEGO_READ};
+pub use identify::{identify, machine_os, os_hint, Identified, OsHint};
 pub use registry::HostRegistry;
 pub use resolve::{
     looks_like_a_windows_computer_name, resolve_host, NameSource, Resolved, RESOLVE_BUDGET,

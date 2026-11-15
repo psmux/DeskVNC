@@ -103,6 +103,9 @@ export interface Api {
 
   scanStart(onEvent: (e: ScanEvent) => void): Promise<void>;
   scanStop(): Promise<void>;
+  /** What answers at a typed name or address, best first. Empty when nothing
+   *  does. `port` limits it to that one port. */
+  identify(address: string, port: number | null): Promise<FoundComputer[]>;
 
   boundaryResolve(code: string): Promise<{ invitation: string }>;
   sessionConnect(
@@ -120,4 +123,7 @@ export interface Api {
   sessionClipboard(sessionId: string, text: string): Promise<void>;
   sessionSnapshot(sessionId: string, rgba: Uint8Array, width: number, height: number): Promise<void>;
   sessionDisconnect(sessionId: string): Promise<void>;
+  /** Save the computer an adhoc session reached, once it is connected, and
+   *  make the session that host's. */
+  sessionSaveHost(sessionId: string, host: HostDraft): Promise<Host>;
 }
