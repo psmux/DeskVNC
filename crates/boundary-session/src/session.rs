@@ -2362,7 +2362,8 @@ async fn send_updates(
     }
 }
 /// Said when an invitation could only have worked through a relay.
-pub(crate) const NO_DIRECT_ROUTE: &str = "Cannot reach that computer directly. Never use relays is on, so no relay was tried";
+pub(crate) const NO_DIRECT_ROUTE: &str =
+    "Cannot reach that computer directly. Never use relays is on, so no relay was tried";
 fn viewer_network_options(invitation: &Invitation, mut options: HostOptions) -> HostOptions {
     let advertised = invitation
         .address

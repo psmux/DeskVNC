@@ -567,7 +567,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_id_is_asked_for_and_given() {
-
         let id = EndpointId::from_str(ID).unwrap();
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = probe.local_addr().unwrap();

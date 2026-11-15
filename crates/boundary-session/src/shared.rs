@@ -88,7 +88,6 @@ async fn helper_with(options: &HostOptions, key: SecretKey, lookup: Lookup) -> R
     }
     let inner = Arc::new(Inner(
         session::endpoint_with(options, Some(key), lookup).await?,
-
     ));
     let mut pool = POOL.lock().unwrap();
     let pool = pool.get_or_insert_with(HashMap::new);

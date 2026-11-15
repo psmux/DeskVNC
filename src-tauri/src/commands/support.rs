@@ -850,11 +850,12 @@ pub fn install(app: &AppHandle) {
 /// Never use relays was switched, for what this computer shares.
 pub(crate) fn set_never_relay(app: &AppHandle, on: bool) {
     if let Some(support) = app.try_state::<Arc<Support>>() {
-        support.act(app, |m| {
-            m.set_never_relay(on);
-            Ok(())
-        })
-        .ok();
+        support
+            .act(app, |m| {
+                m.set_never_relay(on);
+                Ok(())
+            })
+            .ok();
     }
 }
 

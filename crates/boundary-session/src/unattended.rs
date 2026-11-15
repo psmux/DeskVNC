@@ -906,7 +906,8 @@ impl Dial {
                                 .await;
                         }
                         let endpoint = crate::shared::helper(options, key.clone()).await?;
-                        let connection = dial(&endpoint, EndpointAddr::new(id), CONNECT_WAIT).await?;
+                        let connection =
+                            dial(&endpoint, EndpointAddr::new(id), CONNECT_WAIT).await?;
                         Ok::<_, anyhow::Error>((connection, endpoint))
                     }
                 }
@@ -921,7 +922,11 @@ impl Dial {
 }
 /// How long a helper waits for the computer to answer.
 const CONNECT_WAIT: Duration = Duration::from_secs(30);
-async fn dial(endpoint: &iroh::Endpoint, target: EndpointAddr, wait: Duration) -> Result<Connection> {
+async fn dial(
+    endpoint: &iroh::Endpoint,
+    target: EndpointAddr,
+    wait: Duration,
+) -> Result<Connection> {
     tokio::time::timeout(wait, endpoint.connect(target, wire::ALPN))
         .await
         .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
