@@ -38,7 +38,7 @@ import { classNames } from "../lib/util";
 import { emit } from "@tauri-apps/api/event";
 import { EDIT_HOST_EVENT } from "../lib/editHost";
 import { Dialog } from "../components/primitives";
-import { candidateSeams, detectVerticalSeam } from "../render/seams";
+import { detectMonitors, type MonitorRect } from "../render/seams";
 import type { QualityPreset, ScalingMode, SessionState, SshTunnelSettings } from "../lib/types";
 import { parseSshTunnel, sideChannelLogin } from "../lib/types";
 import {
@@ -824,25 +824,33 @@ function SessionView({
   }, [zoom]);
 
   /**
-   * Seam detection: when the server sends no layout, look for the column
-   * where two side by side monitors visibly meet (see render/seams.ts).
+   * Monitor detection: when the server sends no layout, read the current
+   * frame for two side by side monitors and each one's real rectangle (see
+   * render/seams.ts `detectMonitors`). A shorter monitor leaves black under
+   * or over it, and its rectangle leaves that out.
    *
    * Runs once the desktop has settled after connect (windows restored,
    * wallpaper painted), again on every desktop resize, and on demand from
    * the menu's "Detect again", because a window straddling the seam at
-   * sampling time hides it. Stored per remote width so a resize can never
-   * leave a seam from the old geometry standing.
+   * sampling time hides it. Stored with the framebuffer size it was read
+   * from, so a resize can never leave rectangles from the old geometry
+   * standing: they stop applying the moment the size changes, and the
+   * effect below reads the new frame.
    */
-  const [detectedSeam, setDetectedSeam] = useState<{ x: number; forWidth: number } | null>(null);
+  const [detected, setDetected] = useState<{
+    rects: MonitorRect[];
+    w: number;
+    h: number;
+  } | null>(null);
   const detectDisplays = useCallback((): void => {
     const r = rendererRef.current;
     if (!r || !r.hasFrame()) return;
     const { width } = r.getRemoteSize();
     if (width < 1280) return;
-    const band = r.readSampledRowsRGBA(96);
-    if (!band) return;
-    const guess = detectVerticalSeam(band.pixels, band.width, band.rows, candidateSeams(band.width));
-    setDetectedSeam(guess ? { x: guess.x, forWidth: band.width } : null);
+    const frame = r.readFramebufferRGBA();
+    if (!frame) return;
+    const rects = detectMonitors(frame);
+    setDetected(rects ? { rects, w: frame.width, h: frame.height } : null);
   }, []);
 
   const layoutKnown = session.screens.length >= 2;
@@ -965,10 +973,12 @@ function SessionView({
         ? buildDisplayOptions(
             session.screens,
             remoteSize,
-            detectedSeam && detectedSeam.forWidth === remoteSize?.w ? detectedSeam.x : null,
+            detected && detected.w === remoteSize?.w && detected.h === remoteSize?.h
+              ? detected.rects
+              : null,
           )
         : [],
-    [guessDisplays, session.screens, remoteSize, detectedSeam],
+    [guessDisplays, session.screens, remoteSize, detected],
   );
 
   /**
