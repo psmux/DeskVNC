@@ -58,6 +58,14 @@ impl RetryClassify for VncError {
     fn user_message(&self) -> String {
         VncError::user_message(self)
     }
+
+    fn no_answer(&self) -> bool {
+        match self {
+            VncError::Timeout | VncError::ConnectionRefused(_) | VncError::ResolveFailed(_) => true,
+            VncError::Io(e) => remote_core::reconnect::io_no_answer(e),
+            _ => false,
+        }
+    }
 }
 
 /// Classify a connection failure against the reconnect policy.

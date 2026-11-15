@@ -110,6 +110,18 @@ impl RetryClassify for RdpError {
         RdpError::user_message(self)
     }
 
+    fn no_answer(&self) -> bool {
+        use crate::error::ConnectStage;
+        match self {
+            RdpError::ConnectionRefused(_) | RdpError::ResolveFailed(_) => true,
+            RdpError::Timeout { stage } => {
+                matches!(stage, ConnectStage::Resolving | ConnectStage::Dialling)
+            }
+            RdpError::Io(e) => remote_core::reconnect::io_no_answer(e),
+            _ => false,
+        }
+    }
+
     /// The fourth, and the reason this method exists on the trait at all.
     ///
     /// [`RdpError::symbol`] was written before anything read it

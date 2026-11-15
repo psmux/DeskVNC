@@ -53,10 +53,11 @@ pub const STABLE_UPTIME: Duration = Duration::from_secs(5);
 /// already unusual.
 pub const MAX_CHAINED_REATTEMPTS: u32 = 8;
 
-/// Retries allowed before a session has ever connected. A computer that never
-/// answered is usually off, on another network, or blocked by the phone's own
-/// local network permission, and retrying it forever behind "Trying again"
-/// hid the reason. Once a session has been up, a drop gets the full policy.
+/// Retries allowed while a session has never connected and nothing answered
+/// ([`RetryClassify::no_answer`]). Such a computer is usually off, on another
+/// network, or blocked by the phone's own local network permission, and
+/// retrying it forever behind "Trying again" hid the reason. Once a session
+/// has been up, or when the server answered, a failure gets the full policy.
 pub const FIRST_CONNECT_RETRIES: u32 = 1;
 
 /// What the supervisor should do after a connection attempt failed.
@@ -130,6 +131,14 @@ pub trait RetryClassify {
     /// `VncError` has none today.
     fn symbol(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Nothing answered at all: the dial timed out, was refused, found no
+    /// route, or the name did not resolve. Only these count toward
+    /// [`FIRST_CONNECT_RETRIES`]; a server that answered and then dropped the
+    /// connection keeps the full policy, since it may just be starting up.
+    fn no_answer(&self) -> bool {
+        false
     }
 }
 
@@ -212,6 +221,15 @@ pub fn classify<E: RetryClassify + ?Sized>(
         }
     }
     Decision::Retry
+}
+
+/// Whether an I/O error means nothing answered the dial.
+pub fn io_no_answer(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        TimedOut | ConnectionRefused | HostUnreachable | NetworkUnreachable | AddrNotAvailable
+    )
 }
 
 /// The policy for this failure: capped at [`FIRST_CONNECT_RETRIES`] while the
@@ -328,7 +346,7 @@ pub async fn supervise<C: ConnectOnce>(
         };
         chained = 0;
 
-        let policy = first_connect_policy(conn.policy(), ever_connected);
+        let policy = first_connect_policy(conn.policy(), ever_connected || !err.no_answer());
         match classify(&err, &policy, attempts_made) {
             Decision::Stop { can_retry } => {
                 tracing::warn!(session = %id, error = %err, "session stopped");
@@ -409,6 +427,8 @@ mod tests {
     enum TestError {
         Cancelled,
         Transient,
+        /// Transient, and nothing answered the dial.
+        NoAnswer,
         Fatal,
         NeedsUser,
     }
@@ -424,7 +444,10 @@ mod tests {
             matches!(self, TestError::Cancelled)
         }
         fn is_transient(&self) -> bool {
-            matches!(self, TestError::Transient)
+            matches!(self, TestError::Transient | TestError::NoAnswer)
+        }
+        fn no_answer(&self) -> bool {
+            matches!(self, TestError::NoAnswer)
         }
         fn needs_user_action(&self) -> bool {
             matches!(self, TestError::NeedsUser)
@@ -607,7 +630,7 @@ mod tests {
                 max_attempts: None,
                 ..fast_policy()
             },
-            script: vec![Err(TestError::Transient); 6],
+            script: vec![Err(TestError::NoAnswer); 6],
             absorbed: 0,
             held: None,
         };
@@ -625,6 +648,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A server that answered and dropped the connection before it ever got
+    /// in keeps the whole ladder: it may be starting up.
+    #[tokio::test]
+    async fn a_first_connect_that_got_an_answer_keeps_the_ladder() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: ReconnectPolicy {
+                max_attempts: Some(4),
+                ..fast_policy()
+            },
+            script: vec![Err(TestError::Transient); 6],
+            absorbed: 0,
+            held: None,
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+        let attempts = states(&mut rx)
+            .await
+            .iter()
+            .filter(|s| matches!(s, SessionState::Reconnecting { .. }))
+            .count();
+        assert_eq!(attempts, 4);
     }
 
     /// A link that keeps coming back is retried at the first, shortest delay
