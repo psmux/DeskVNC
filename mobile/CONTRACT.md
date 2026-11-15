@@ -25,15 +25,26 @@ by the UI, and unknown optional fields are ignored by Rust.
 |---|---|---|
 | `scan_start` | `{ onEvent: Channel<ScanEvent> }` | nothing |
 | `scan_stop` | none | nothing |
+| `identify` | `{ address, port? }` | `FoundComputer[]`. What answers at one typed name or address, for the quick connect field |
 
 `ScanEvent` is `{ type: "found", item: FoundComputer }`, `{ type: "progress",
 done, total }` or `{ type: "complete" }`.
+
+`identify` runs `vnc_discovery::identify`: with no `port` it tries 5900 and
+5901 (the RFB banner), 3389 (the RDP negotiation) and 5940 (the Boundary
+greeting) at once, next to the name lookups (reverse DNS, NetBIOS and the
+RDP certificate). With a `port` it tries only that port, reading first and
+sending the RDP negotiation only when nothing spoke. It returns one row per
+service that answered, Remote Desktop first, each with the machine's best
+name and OS guess. A Boundary row's `address` carries the machine ID in front
+(`<id>@192.0.2.7`), as a Boundary host is saved. Nothing answering, or a name
+that does not resolve, gives `[]`, not an error. It never authenticates.
 
 ## Sessions
 
 | Command | Args | Returns |
 |---|---|---|
-| `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent> }` | `{ sessionId }` |
+| `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent>, neverRelay?: boolean }` | `{ sessionId }`. `neverRelay` is the Never use relays setting: Boundary then uses no relay and no address directory |
 | `boundary_resolve` | `{ code }` | `{ invitation }`. Accepts `1234 5678 9012`, `123456789012` or a full `boundary1:` invitation |
 | `session_input` | binary body (raw, or on Android the JSON array of numbers Tauri makes of it), headers `x-session-id`, `x-input-seq` | nothing. Body format is the desktop `send_input` format |
 | `session_text` | `{ sessionId, text }` | nothing. Types a string, used by the phone keyboard |
@@ -44,6 +55,14 @@ done, total }` or `{ type: "complete" }`.
 | `session_clipboard` | `{ sessionId, text }` | nothing |
 | `session_snapshot` | RGBA body (raw, or base64 text on Android), headers `x-session-id`, `x-width`, `x-height` | nothing. Saves the thumbnail for the host card |
 | `session_disconnect` | `{ sessionId }` | nothing |
+| `session_save_host` | `{ sessionId, host: HostDraft }` | `Host`. Saves the computer an `adhoc` session reached and makes the session that host's. Refused until the session reached `connected` |
+
+`session_save_host` is how a computer connected to with no saved entry is
+added to Your computers. A password typed at the sign in prompt with
+Remember on (`session_credentials` with `save`) is held in memory once the
+computer accepts it, and goes to the vault for the new host only here. The
+session's card picture, taken when it closes, is kept for the new host.
+The `id` of the draft is ignored: it always makes a new host.
 
 `ConnectTarget` has a fourth kind, `{ kind: "demo" }`, the built in demo
 computer that store reviewers (and anyone curious) can try with no network.
@@ -58,7 +77,7 @@ exact byte layout of `src-tauri/FRAME_FORMAT.md`.
 flat, with `sessionId` and `type`. The phone UI handles at least:
 `state-changed`, `desktop-resize`, `desktop-name`, `cursor-position`,
 `clipboard-text`, `certificate-prompt`, `credentials-required`, `stats`,
-`error`, `ended`.
+`error`, `ended`, and for Boundary `boundary-route`, `{ route: "direct" | "relay" }`.
 
 ## App lifecycle
 

@@ -17,10 +17,44 @@ const screen = (id: number, x: number, width: number, height = 1080): RemoteScre
   height,
 });
 
+/** A detected pair split at `seam`, both full height. */
+const pair = (seam: number, w = 3840, h = 1080) => [
+  { x: 0, y: 0, width: seam, height: h },
+  { x: seam, y: 0, width: w - seam, height: h },
+];
+
 describe("buildDisplayOptions", () => {
+  it("offers each detected monitor at its own height, without the black under the short one", () => {
+    // The layout of a real two monitor PC: 1280x720 beside 1920x1080.
+    const detected = [
+      { x: 0, y: 0, width: 1280, height: 720 },
+      { x: 1280, y: 0, width: 1920, height: 1080 },
+    ];
+    const opts = buildDisplayOptions([], { w: 3200, h: 1080 }, detected);
+    expect(opts[0]).toEqual({
+      id: DETECTED_LEFT_ID,
+      ...detected[0],
+      label: "Display 1 (detected, 1280×720)",
+    });
+    expect(opts[1]).toEqual({
+      id: DETECTED_RIGHT_ID,
+      ...detected[1],
+      label: "Display 2 (detected, 1920×1080)",
+    });
+  });
+
+  it("ignores monitors read from a desktop of another size", () => {
+    const stale = [
+      { x: 0, y: 0, width: 1920, height: 1080 },
+      { x: 1920, y: 0, width: 2880, height: 1620 },
+    ];
+    const opts = buildDisplayOptions([], { w: 3200, h: 1080 }, stale);
+    expect(opts.some((o) => o.id === DETECTED_LEFT_ID)).toBe(false);
+  });
+
   it("uses the server's layout when it describes two or more monitors", () => {
     const layout = [screen(7, 1920, 1920), screen(3, 0, 1920)];
-    expect(buildDisplayOptions(layout, { w: 3840, h: 1080 }, 1600)).toBe(layout);
+    expect(buildDisplayOptions(layout, { w: 3840, h: 1080 }, pair(1600))).toBe(layout);
   });
 
   it("offers nothing before the first frame has said how big the desktop is", () => {
@@ -28,7 +62,7 @@ describe("buildDisplayOptions", () => {
   });
 
   it("puts a detected pair above the manual cuts and drops the cut it duplicates", () => {
-    const opts = buildDisplayOptions([], { w: 3840, h: 1080 }, 1920);
+    const opts = buildDisplayOptions([], { w: 3840, h: 1080 }, pair(1920));
     expect(opts[0].id).toBe(DETECTED_LEFT_ID);
     expect(opts[1].id).toBe(DETECTED_RIGHT_ID);
     // 3840 halves at exactly 1920, which is where the seam was found, so the
@@ -44,7 +78,7 @@ describe("buildDisplayOptions", () => {
   });
 
   it("ignores a seam that does not fall inside the desktop", () => {
-    expect(buildDisplayOptions([], { w: 3840, h: 1080 }, 3840)).not.toContainEqual(
+    expect(buildDisplayOptions([], { w: 3840, h: 1080 }, pair(3840, 4000))).not.toContainEqual(
       expect.objectContaining({ id: DETECTED_LEFT_ID }),
     );
   });
@@ -80,7 +114,7 @@ describe("matchDisplay", () => {
 
   it("follows the detected pair when the seam shifts between runs", () => {
     const want = { id: DETECTED_LEFT_ID, x: 0, y: 0, width: 1920, height: 1080 };
-    const moved = buildDisplayOptions([], { w: 3840, h: 1080 }, 1918);
+    const moved = buildDisplayOptions([], { w: 3840, h: 1080 }, pair(1918));
     expect(matchDisplay(want, moved)?.width).toBe(1918);
   });
 

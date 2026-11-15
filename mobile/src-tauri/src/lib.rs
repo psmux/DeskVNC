@@ -51,6 +51,11 @@ fn install_boundary(state: &AppState) {
         Ok(key) => state.drivers.boundary.set_identity(key),
         Err(error) => tracing::warn!("Boundary helper identity unavailable: {error:#}"),
     }
+    // Where each computer last answered directly, tried first next time.
+    state
+        .drivers
+        .boundary
+        .set_direct_book(&state.data_dir.join("boundary-direct.json"));
     let hosts = state.hosts.clone();
     state
         .drivers
@@ -126,6 +131,7 @@ pub fn run() {
             commands::hosts::hosts_thumbnail,
             commands::scan::scan_start,
             commands::scan::scan_stop,
+            commands::scan::identify,
             commands::session::session_connect,
             commands::session::boundary_resolve,
             commands::session::session_input,
@@ -137,6 +143,7 @@ pub fn run() {
             commands::session::session_clipboard,
             commands::session::session_snapshot,
             commands::session::session_disconnect,
+            commands::session::session_save_host,
         ])
         .build(tauri::generate_context!())
         .expect("error while building DeskVNC");

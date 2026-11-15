@@ -38,6 +38,13 @@ pub struct Session {
     pub background_ended: Arc<AtomicBool>,
     /// When the last thumbnail was stored, to bound how often one is encoded.
     pub last_thumbnail: Mutex<Option<Instant>>,
+    /// Set once the server accepted the session. `session_save_host` waits
+    /// for it, so a failed attempt is never saved.
+    pub connected: Arc<AtomicBool>,
+    /// A connect with no saved host keeps here the credential the person
+    /// asked to remember, once the server accepted it, until
+    /// `session_save_host` gives it a host to belong to.
+    pub kept_secret: Arc<Mutex<Option<Secret>>>,
 }
 
 pub type Sessions = Arc<Mutex<HashMap<String, Session>>>;

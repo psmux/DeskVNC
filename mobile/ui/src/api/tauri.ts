@@ -3,8 +3,9 @@
  * Tauri Channels. Command names and argument shapes are in mobile/CONTRACT.md.
  */
 import { Channel, invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { readPrefs } from "../lib/prefs";
 import { exactBuffer, largeBody } from "./binary";
-import type { Api, ConnectTarget, Host, HostDraft, KeyCombo, Quality, ScanEvent, SessionEvent } from "./contract";
+import type { Api, ConnectTarget, FoundComputer, Host, HostDraft, KeyCombo, Quality, ScanEvent, SessionEvent } from "./contract";
 
 export const tauriApi: Api = {
   hostsList: () => invoke<Host[]>("hosts_list"),
@@ -20,6 +21,7 @@ export const tauriApi: Api = {
     await invoke<void>("scan_start", { onEvent: channel });
   },
   scanStop: () => invoke<void>("scan_stop"),
+  identify: (address, port) => invoke<FoundComputer[]>("identify", { address, port: port ?? undefined }),
 
   boundaryResolve: (code) => invoke<{ invitation: string }>("boundary_resolve", { code }),
 
@@ -28,7 +30,12 @@ export const tauriApi: Api = {
     frames.onmessage = onFrame;
     const events = new Channel<SessionEvent>();
     events.onmessage = onEvent;
-    return invoke<{ sessionId: string }>("session_connect", { target, onFrame: frames, onEvent: events });
+    return invoke<{ sessionId: string }>("session_connect", {
+      target,
+      onFrame: frames,
+      onEvent: events,
+      neverRelay: readPrefs().neverRelay,
+    });
   },
   // Raw on iOS; on Android Tauri delivers it as a JSON array of numbers,
   // which for a few bytes of input costs nothing worth avoiding.
@@ -52,4 +59,5 @@ export const tauriApi: Api = {
       headers: { "x-session-id": sessionId, "x-width": String(width), "x-height": String(height) },
     }),
   sessionDisconnect: (sessionId) => invoke<void>("session_disconnect", { sessionId }),
+  sessionSaveHost: (sessionId, host: HostDraft) => invoke<Host>("session_save_host", { sessionId, host }),
 };

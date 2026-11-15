@@ -202,5 +202,8 @@ pub async fn set_app_setting(
     if key == crate::agent::AGENT_PLANE_ENABLED_KEY {
         crate::commands::agent::apply(&app, crate::agent::plane_enabled(Some(&value)));
     }
+    if key == super::boundary::NEVER_RELAY_KEY {
+        super::boundary::apply_never_relay(&app, value == "true");
+    }
     Ok(())
 }

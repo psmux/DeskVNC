@@ -1,6 +1,8 @@
 /**
  * QuickConnect: the always-visible address bar. Type where to go, press Enter,
- * you are connected. Nothing is saved and nothing has to be set up first.
+ * you are connected. Nothing has to be set up first. With the "Save computers
+ * I connect to" preference on, the Library saves the computer once the
+ * session connects (see `lib/autoSave.ts`); this bar itself saves nothing.
  *
  * It is deliberately a permanent strip rather than a dialog behind a shortcut,
  * because "I just want to reach this one machine once" is the single most
@@ -19,16 +21,7 @@ import { DEFAULT_PORT, PROTOCOLS, hostProtocol, protocolLabel, protocolName } fr
 import { discoveredEndpoint, formatTarget, parseConnectTarget, presetProtocol } from "../lib/address";
 import { classNames, fuzzyMatch, modKeyLabel } from "../lib/util";
 import { IconArrowRight, IconClock, IconMonitor, IconZap } from "./icons";
-
-/** Matches the Rust side's `normalize_address`, so both agree on "same machine". */
-function sameAddress(a: string, b: string): boolean {
-  const norm = (s: string): string =>
-    s
-      .trim()
-      .replace(/\.+$/, "")
-      .replace(/[A-Z]/g, (c) => c.toLowerCase()); // ASCII only, as Rust does
-  return norm(a) === norm(b);
-}
+import { findSavedHost, sameAddress } from "../lib/autoSave";
 
 /**
  * The protocol the chip flips to on a click, wrapping through `PROTOCOLS` in
@@ -70,6 +63,7 @@ export function QuickConnect({
   onConnectHost,
   onConnectAddress,
   onRemember,
+  autoSave = false,
 }: {
   hosts: HostProfile[];
   discovered: DiscoveredHost[];
@@ -79,6 +73,8 @@ export function QuickConnect({
   onConnectHost: (host: HostProfile) => void;
   onConnectAddress: (protocol: ProtocolKind, address: string, port: number) => void;
   onRemember: (address: string) => void;
+  /** The "Save computers I connect to" preference, for the hint beside the field. */
+  autoSave?: boolean;
 }): ReactNode {
   const [value, setValue] = useState("");
   const [open, setOpen] = useState(false);
@@ -118,14 +114,7 @@ export function QuickConnect({
     // When the input NAMED a protocol, only a host of that protocol matches:
     // typing `rdp://box` must not connect through a VNC profile saved at that
     // address, which would dial the wrong thing at the wrong port.
-    return (
-      hosts.find(
-        (h) =>
-          sameAddress(h.address, address) &&
-          (!explicitPort || h.port === port) &&
-          (protocol === null || hostProtocol(h) === protocol),
-      ) ?? null
-    );
+    return findSavedHost(hosts, { address, port, protocol, explicitPort });
   }, [parsed, hosts]);
 
   /**
@@ -469,7 +458,9 @@ export function QuickConnect({
           {parsed.error}
         </span>
       ) : (
-        <span className="truncate text-xs text-tertiary">Connects without saving anything</span>
+        <span className="truncate text-xs text-tertiary">
+          {autoSave ? "Saves to your Library once it connects" : "Connects without saving anything"}
+        </span>
       )}
     </div>
   );

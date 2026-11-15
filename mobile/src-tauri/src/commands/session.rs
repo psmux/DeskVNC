@@ -27,7 +27,7 @@ use crate::events;
 use crate::framing;
 use crate::keys::{self, KeyCombo};
 use crate::state::{AppState, Session, Sessions};
-use crate::store::{self, Protocol};
+use crate::store::{self, Host, HostDraft, Protocol};
 use crate::thumbs;
 use crate::vault::Secret;
 
@@ -94,7 +94,13 @@ pub async fn session_connect(
     target: ConnectTarget,
     on_frame: Channel<InvokeResponseBody>,
     on_event: Channel<Value>,
+    never_relay: Option<bool>,
 ) -> Result<Connected, String> {
+    // Never use relays lives in the phone's settings and comes with every
+    // connect. Only Boundary reads it.
+    if let Some(on) = never_relay {
+        state.drivers.boundary.set_never_relay(on);
+    }
     let (kind, mut options, host_id) = match target {
         ConnectTarget::Saved { host_id } => {
             let host = state
@@ -229,6 +235,8 @@ pub async fn session_connect(
     ));
     let pending_save = Arc::new(Mutex::new(None));
     let background_ended = Arc::new(AtomicBool::new(false));
+    let connected = Arc::new(AtomicBool::new(false));
+    let kept_secret = Arc::new(Mutex::new(None));
     state.sessions.lock().insert(
         id.clone(),
         Session {
@@ -242,6 +250,8 @@ pub async fn session_connect(
             pending_save: pending_save.clone(),
             background_ended: background_ended.clone(),
             last_thumbnail: Mutex::new(None),
+            connected: connected.clone(),
+            kept_secret: kept_secret.clone(),
         },
     );
     forward_events(Forward {
@@ -256,6 +266,8 @@ pub async fn session_connect(
         pending_save,
         background_ended,
         kind,
+        connected,
+        kept_secret,
     });
     Ok(Connected { session_id: id })
 }
@@ -290,6 +302,8 @@ struct Forward {
     pending_save: Arc<Mutex<Option<Secret>>>,
     background_ended: Arc<AtomicBool>,
     kind: ProtocolKind,
+    connected: Arc<AtomicBool>,
+    kept_secret: Arc<Mutex<Option<Secret>>>,
 }
 
 /// Pump one session's events to the UI until the session ends, then say so.
@@ -306,6 +320,8 @@ fn forward_events(f: Forward) {
         pending_save,
         background_ended,
         kind,
+        connected,
+        kept_secret,
     } = f;
     tauri::async_runtime::spawn(async move {
         // The UI sizes its canvas from `desktop-resize`, so no frame goes out
@@ -334,7 +350,8 @@ fn forward_events(f: Forward) {
                 sized = true;
             }
             if let SessionEvent::StateChanged(SessionState::Connected) = &event {
-                on_connected(&app, host_id.as_deref(), &pending_save);
+                connected.store(true, Ordering::Relaxed);
+                on_connected(&app, host_id.as_deref(), &pending_save, &kept_secret);
             }
             // A new handshake step means an earlier "remember" belonged to
             // an attempt that is over, unless it is the one that connected.
@@ -383,9 +400,18 @@ fn forward_events(f: Forward) {
 
 /// The server accepted the session: stamp the host and settle a password the
 /// person asked to remember. Only now, so a rejected password is never kept.
-fn on_connected(app: &AppHandle, host_id: Option<&str>, pending: &Mutex<Option<Secret>>) {
+fn on_connected(
+    app: &AppHandle,
+    host_id: Option<&str>,
+    pending: &Mutex<Option<Secret>>,
+    kept: &Mutex<Option<Secret>>,
+) {
     let Some(host_id) = host_id.map(str::to_string) else {
-        pending.lock().take();
+        // No host yet. Kept in memory for `session_save_host`, and gone
+        // with the session if it is never saved.
+        if let Some(secret) = pending.lock().take() {
+            *kept.lock() = Some(secret);
+        }
         return;
     };
     let save = pending.lock().take();
@@ -593,7 +619,8 @@ pub async fn session_key_combo(
 /// the person cancelled the prompt, and the attempt is abandoned.
 ///
 /// With `save`, the answer is remembered for a saved host, and only once the
-/// server accepts it. An ad hoc connect has no host to remember it for.
+/// server accepts it. An ad hoc connect has no host to remember it for yet,
+/// so it is held until `session_save_host` gives it one.
 #[tauri::command]
 pub async fn session_credentials(
     state: State<'_, AppState>,
@@ -602,16 +629,12 @@ pub async fn session_credentials(
     password: Option<String>,
     save: bool,
 ) -> Result<(), String> {
-    let (sender, pending, has_host) = {
+    let (sender, pending) = {
         let sessions = state.sessions.lock();
         let s = sessions
             .get(&session_id)
             .ok_or_else(|| format!("unknown session: {session_id}"))?;
-        (
-            s.handle.commands.clone(),
-            s.pending_save.clone(),
-            s.host_id.is_some(),
-        )
+        (s.handle.commands.clone(), s.pending_save.clone())
     };
     let username = username.filter(|u| !u.is_empty());
     if username.is_none() && password.is_none() {
@@ -622,7 +645,7 @@ pub async fn session_credentials(
             .map_err(|_| "session is no longer running".to_string());
     }
     let password = password.unwrap_or_default();
-    *pending.lock() = (save && has_host).then(|| Secret {
+    *pending.lock() = save.then(|| Secret {
         username: username.clone(),
         password: (!password.is_empty()).then(|| password.clone()),
     });
@@ -767,6 +790,68 @@ pub async fn session_snapshot(
         Ok::<_, String>(())
     })
     .await
+}
+
+/// Save the computer a session reached with no saved host, and make the
+/// session that host's: a credential the person asked to remember goes to
+/// the vault, `lastConnectedAt` is stamped, and the card picture taken when
+/// the session closes is kept. Refused until the server has accepted the
+/// session, so a failed attempt is never saved.
+#[tauri::command]
+pub async fn session_save_host(
+    state: State<'_, AppState>,
+    session_id: String,
+    mut host: HostDraft,
+) -> Result<Host, String> {
+    let kept = {
+        let sessions = state.sessions.lock();
+        let s = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("unknown session: {session_id}"))?;
+        if s.host_id.is_some() {
+            return Err("This session is already a saved computer".into());
+        }
+        if !s.connected.load(Ordering::Relaxed) {
+            return Err("Not connected yet".into());
+        }
+        s.kept_secret.clone()
+    };
+    // Always a new host: an id here would overwrite another one.
+    host.id = None;
+    let secret = kept.lock().take();
+    let hosts = state.hosts.clone();
+    let secrets = state.secrets.clone();
+    let saved = super::blocking(move || {
+        let saved = hosts.save(host).map_err(|e| e.to_string())?;
+        let mut has_password = None;
+        let mut username = None;
+        if let Some(secret) = secret {
+            match secrets.save(&saved.id, &secret) {
+                Ok(()) => {
+                    has_password = Some(secret.password.is_some());
+                    username = secret.username.clone();
+                }
+                Err(error) => tracing::warn!(%error, "could not remember the password"),
+            }
+        }
+        let updated = hosts
+            .update(&saved.id, |h| {
+                h.last_connected_at = Some(store::now_ms());
+                if let Some(p) = has_password {
+                    h.has_password = p;
+                }
+                if username.is_some() {
+                    h.username = username;
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok::<_, String>(updated.unwrap_or(saved))
+    })
+    .await?;
+    if let Some(s) = state.sessions.lock().get_mut(&session_id) {
+        s.host_id = Some(saved.id.clone());
+    }
+    Ok(saved)
 }
 
 /// End a session. Its `ended` event follows on `onEvent`.

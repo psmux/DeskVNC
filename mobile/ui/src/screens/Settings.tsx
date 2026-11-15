@@ -4,7 +4,7 @@
  */
 import { useState, type ReactNode } from "react";
 import type { Quality } from "../api/contract";
-import { IconChevron, IconExternal, IconPlay } from "../art/Icons";
+import { IconChevron, IconExternal, IconPlay, IconPlus } from "../art/Icons";
 import { SceneTouchMode } from "../art/Scenes";
 import { Segmented, Toggle } from "../components/Field";
 import { Sheet } from "../components/Sheet";
@@ -195,6 +195,16 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           <Row
             icon={
               <Swatch>
+                <IconPlus size={20} />
+              </Swatch>
+            }
+            title="Save computers I connect to"
+            detail="Adds each new one to Your computers once it connects"
+            trailing={<Toggle on={prefs.autoSave} onChange={(autoSave) => setPrefs({ autoSave })} label="Save computers I connect to" />}
+          />
+          <Row
+            icon={
+              <Swatch>
                 <IconPlay size={18} />
               </Swatch>
             }
@@ -229,6 +239,23 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
             title="Show the welcome again"
             trailing={<IconChevron className="text-ink-dim" />}
             onClick={onShowWelcome}
+          />
+        </Group>
+
+        <Group title="Network">
+          <Row
+            icon={
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <circle cx="5" cy="12" r="2.5" />
+                  <circle cx="19" cy="12" r="2.5" />
+                  <path d="M7.5 12h9" />
+                </svg>
+              </Swatch>
+            }
+            title="Never use relays"
+            detail="Boundary connects only straight to the computer, on your network or VPN. A computer saved only by its ID needs one direct connection first."
+            trailing={<Toggle on={prefs.neverRelay} onChange={(neverRelay) => setPrefs({ neverRelay })} label="Never use relays" />}
           />
         </Group>
 

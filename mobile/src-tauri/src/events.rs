@@ -77,6 +77,9 @@ pub fn event_json(session_id: &str, event: &SessionEvent) -> Option<Value> {
         SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard { write, read }) => {
             json!({ "type": "boundary-clipboard", "write": write, "read": read })
         }
+        SessionEvent::Protocol(ProtocolEvent::BoundaryRoute { direct }) => {
+            json!({ "type": "boundary-route", "route": if *direct { "direct" } else { "relay" } })
+        }
         _ => return None,
     };
     if let Value::Object(map) = &mut value {
@@ -185,6 +188,16 @@ mod tests {
             (v["width"].as_u64(), v["height"].as_u64()),
             (Some(1920), Some(1080))
         );
+
+        for (direct, route) in [(true, "direct"), (false, "relay")] {
+            let v = event_json(
+                "s1",
+                &SessionEvent::Protocol(ProtocolEvent::BoundaryRoute { direct }),
+            )
+            .unwrap();
+            assert_eq!(v["type"], "boundary-route");
+            assert_eq!(v["route"], route);
+        }
     }
 
     #[test]

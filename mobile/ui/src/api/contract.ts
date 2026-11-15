@@ -87,8 +87,12 @@ export type SessionEvent =
     }
   | { sessionId: string; type: "credentials-required"; request: CredentialRequest }
   | { sessionId: string; type: "stats"; stats: SessionStats }
+  /** Boundary only: whether the session goes straight to the computer or through a relay. */
+  | { sessionId: string; type: "boundary-route"; route: BoundaryRoute }
   | { sessionId: string; type: "error"; message: string }
   | { sessionId: string; type: "ended"; durationS: number };
+
+export type BoundaryRoute = "direct" | "relay";
 
 export type KeyCombo = "ctrl-alt-del" | "win" | "alt-tab" | "cmd-tab" | "ctrl-c" | "ctrl-v" | "esc";
 
@@ -103,6 +107,9 @@ export interface Api {
 
   scanStart(onEvent: (e: ScanEvent) => void): Promise<void>;
   scanStop(): Promise<void>;
+  /** What answers at a typed name or address, best first. Empty when nothing
+   *  does. `port` limits it to that one port. */
+  identify(address: string, port: number | null): Promise<FoundComputer[]>;
 
   boundaryResolve(code: string): Promise<{ invitation: string }>;
   sessionConnect(
@@ -120,4 +127,7 @@ export interface Api {
   sessionClipboard(sessionId: string, text: string): Promise<void>;
   sessionSnapshot(sessionId: string, rgba: Uint8Array, width: number, height: number): Promise<void>;
   sessionDisconnect(sessionId: string): Promise<void>;
+  /** Save the computer an adhoc session reached, once it is connected, and
+   *  make the session that host's. */
+  sessionSaveHost(sessionId: string, host: HostDraft): Promise<Host>;
 }

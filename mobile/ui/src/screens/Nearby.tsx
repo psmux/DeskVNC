@@ -97,7 +97,8 @@ export function Nearby() {
                   <div className="flex items-center gap-3">
                     <span className="flex h-20 w-24 shrink-0 items-center justify-center rounded-[10px] bg-surface-2"><OsArt os={f.os} backdrop={false} className="h-16 w-20" /></span>
                     <div className="min-w-0 flex-1">
-                      <h3 className="truncate text-headline">{host?.name ?? f.name ?? "A computer"}</h3>
+                      <h3 className="truncate text-headline">{host?.name ?? f.name ?? f.address}</h3>
+                      {(host?.name ?? f.name) && <p className="truncate text-footnote tabular-nums text-ink-dim">{f.address}</p>}
                       <ProtocolBadge protocol={f.protocol} className="mt-1" />
                       {host && (
                         <p className="mt-1.5 flex items-center gap-1 text-footnote font-medium text-ok">
@@ -114,7 +115,15 @@ export function Nearby() {
                       onClick={() =>
                         host
                           ? app.connect({ kind: "saved", hostId: host.id }, host.name)
-                          : app.connect({ kind: "adhoc", protocol: f.protocol, address: f.address, port: f.port }, f.name ?? f.address)
+                          : app.connect({ kind: "adhoc", protocol: f.protocol, address: f.address, port: f.port }, f.name ?? f.address, {
+                              protocol: f.protocol,
+                              address: f.address,
+                              port: f.port,
+                              username: null,
+                              foundName: f.name,
+                              identifiedName: null,
+                              os: f.os,
+                            })
                       }
                     >
                       Connect

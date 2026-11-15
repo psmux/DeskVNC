@@ -1,8 +1,8 @@
 /** The sheets the toolbar opens: touch mode, picture quality, clipboard and connection details. */
 import { useState } from "react";
-import type { Quality, SessionStats } from "../../api/contract";
+import type { BoundaryRoute, Quality, SessionStats } from "../../api/contract";
 import type { TouchMode } from "../input/gestures";
-import { LEVEL_WORDS, formatSpeed, qualityLevel } from "../status";
+import { LEVEL_WORDS, formatSpeed, qualityLevel, routeWords } from "../status";
 import { ModePicture } from "./art";
 import { Sheet } from "./Sheet";
 import { READ_FAILED, WRITE_FAILED, clipboardMessage, readClipboard, writeClipboard } from "../../lib/clipboard";
@@ -146,7 +146,17 @@ export function ClipboardSheet({
   );
 }
 
-export function StatsSheet({ stats, onClose, onQuality }: { stats: SessionStats | null; onClose(): void; onQuality(): void }) {
+export function StatsSheet({
+  stats,
+  route = null,
+  onClose,
+  onQuality,
+}: {
+  stats: SessionStats | null;
+  route?: BoundaryRoute | null;
+  onClose(): void;
+  onQuality(): void;
+}) {
   const level = qualityLevel(stats);
   return (
     <Sheet title={LEVEL_WORDS[level]} icon={<IconWifi />} onClose={onClose}>
@@ -168,6 +178,12 @@ export function StatsSheet({ stats, onClose, onQuality }: { stats: SessionStats 
           <dt>Speed</dt>
           <dd>{stats ? formatSpeed(stats.throughput_bps) : "Measuring"}</dd>
         </div>
+        {route ? (
+          <div>
+            <dt>Route</dt>
+            <dd>{routeWords(route)}</dd>
+          </div>
+        ) : null}
       </dl>
       {level !== "good" ? <p className="dv-s-note">If things feel slow, try the Faster picture quality.</p> : null}
       <button type="button" className="dv-s-big secondary" onClick={onQuality}>

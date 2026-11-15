@@ -68,6 +68,17 @@ export interface SessionScreenProps {
   /** The computer's name. Optional: without it the saved host's name, the helper's name or the address is used. */
   title?: string;
   onExit(): void;
+  /** Called once per session when it reaches connected, with what the
+   *  computer said its name is, so the shell can save it. */
+  onConnected?(info: ConnectedInfo): void;
+}
+
+export interface ConnectedInfo {
+  sessionId: string;
+  /** The desktop name the computer sent, if it sent one. */
+  desktopName: string | null;
+  /** The subject of the certificate the person was asked to trust, if any. */
+  certSubject: string | null;
 }
 
 /** A name for the computer from the target alone, before anything is looked up. */
@@ -106,7 +117,7 @@ function metaLabelFor(os: HostOs | null): string {
   return "Win";
 }
 
-export function SessionScreen({ api, target, title, onExit }: SessionScreenProps) {
+export function SessionScreen({ api, target, title, onExit, onConnected }: SessionScreenProps) {
   // Settings give the starting touch mode and quality; switching them here
   // lasts for this session only.
   const prefs = usePrefs();
@@ -745,6 +756,27 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
     if (s.phase === "connected" && !coachSeen(modeRef.current)) setCoach(modeRef.current);
   }, [s.phase]);
 
+  // Tell the shell, once per session, that the computer accepted it. The
+  // desktop name usually comes with the first picture, so it gets a moment
+  // to arrive. No cleanup on purpose: a session that ends inside that moment
+  // still connected, and the shell decides what to do with it.
+  const onConnectedRef = useRef(onConnected);
+  onConnectedRef.current = onConnected;
+  const desktopNameRef = useRef(s.desktopName);
+  desktopNameRef.current = s.desktopName;
+  const certSubject = useRef<string | null>(null);
+  if (s.cert?.subject) certSubject.current = s.cert.subject;
+  const reported = useRef<string | null>(null);
+  useEffect(() => {
+    const id = s.sessionId;
+    if (s.phase !== "connected" || !id || reported.current === id || !onConnectedRef.current) return;
+    reported.current = id;
+    setTimeout(
+      () => onConnectedRef.current?.({ sessionId: id, desktopName: desktopNameRef.current, certSubject: certSubject.current }),
+      desktopNameRef.current ? 0 : 1000,
+    );
+  }, [s.phase, s.sessionId]);
+
   // A picture format this phone cannot show: ask for one it can.
   useEffect(() => {
     if (s.notice === "no-h264") {
@@ -1036,7 +1068,7 @@ export function SessionScreen({ api, target, title, onExit }: SessionScreenProps
           onClose={() => setSheet(null)}
         />
       ) : null}
-      {sheet === "stats" ? <StatsSheet stats={s.stats} onClose={() => setSheet(null)} onQuality={() => setSheet("quality")} /> : null}
+      {sheet === "stats" ? <StatsSheet stats={s.stats} route={s.route} onClose={() => setSheet(null)} onQuality={() => setSheet("quality")} /> : null}
 
       {coach && showDesktop && !s.credentials && !s.cert ? <Coach mode={coach} onDone={() => setCoach(null)} /> : null}
 

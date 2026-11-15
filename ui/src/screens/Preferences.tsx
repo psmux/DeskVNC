@@ -169,6 +169,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [losslessRefresh, setLosslessRefresh] = useAppSetting("lossless_refresh", true);
   const [deepNames, setDeepNames] = useAppSetting("probe_other_services", true);
   const [probeRdp, setProbeRdp] = useAppSetting("probe_rdp", true);
+  const [neverRelay, setNeverRelay] = useAppSetting("boundary_never_relay", false);
   // Defaults for NEW Remote Desktop hosts. They live in the Rust key-value
   // table rather than the webview so the connect path can read them later
   // without a round trip through JS.
@@ -276,6 +277,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="While a session is connected, its library tile shows a live picture (about 2 frames per second) instead of the saved thumbnail"
                   value={livePreviews}
                   onChange={setLivePreviews}
+                />
+                <Toggle
+                  label="Save computers I connect to"
+                  description="Add a computer to your Library once a quick connect, a recent or a nearby computer connects. Passwords are only kept when you tick Remember for this computer."
+                  value={settings.autoSaveHosts}
+                  onChange={(v) => update({ autoSaveHosts: v })}
                 />
                 <Toggle
                   label="Compact library density"
@@ -633,6 +640,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Listen for VNC servers advertising themselves on your local network"
                   value={mdnsEnabled}
                   onChange={setMdnsEnabled}
+                />
+                <Toggle
+                  label="Never use relays"
+                  description="Boundary connects only straight to the other computer, on your network or VPN, and never through a relay or the address directory. A computer saved only by its ID needs one direct connection by address first. Support invitations you share also stop offering a relay."
+                  value={neverRelay}
+                  onChange={setNeverRelay}
                 />
                 <Toggle
                   label="Probe saved hosts for online status"

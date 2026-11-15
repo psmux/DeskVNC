@@ -7,12 +7,12 @@ import { SessionScreen } from "../session/SessionScreen";
 import { useApp } from "../state/app";
 
 export function SessionRoute() {
-  const { session, endSession } = useApp();
+  const { session, endSession, sessionConnected } = useApp();
   if (!session) return null;
   // Its own layer over the tab bar and everything else in the shell.
   return (
     <div className="fixed inset-0 z-50">
-      <SessionScreen key={session.key} api={api} target={session.target} title={session.title} onExit={endSession} />
+      <SessionScreen key={session.key} api={api} target={session.target} title={session.title} onExit={endSession} onConnected={(info) => sessionConnected(session, info)} />
     </div>
   );
 }

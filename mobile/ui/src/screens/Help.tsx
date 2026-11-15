@@ -72,6 +72,14 @@ export function Help() {
     return false;
   };
 
+  // A code or invitation typed into the field on Your computers lands here.
+  useEffect(() => {
+    const text = app.takeHelpPrefill();
+    if (text) take(text);
+    // Once, when the tab opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const paste = async () => {
     let text = "";
     try {

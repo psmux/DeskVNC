@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   Api,
+  BoundaryRoute,
   ConnectTarget,
   CredentialRequest,
   Quality,
@@ -63,6 +64,8 @@ export interface RemoteSession {
   desktop: { w: number; h: number };
   desktopName: string | null;
   stats: SessionStats | null;
+  /** How a Boundary session travels, once it is known. */
+  route: BoundaryRoute | null;
   credentials: CredentialRequest | null;
   cert: CertPromptData | null;
   error: string | null;
@@ -102,6 +105,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [desktop, setDesktop] = useState({ w: 0, h: 0 });
   const [desktopName, setDesktopName] = useState<string | null>(null);
   const [stats, setStats] = useState<SessionStats | null>(null);
+  const [route, setRoute] = useState<BoundaryRoute | null>(null);
   const [credentials, setCredentials] = useState<CredentialRequest | null>(null);
   const [cert, setCert] = useState<CertPromptData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -273,6 +277,9 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           break;
         case "stats":
           setStats(e.stats);
+          break;
+        case "boundary-route":
+          setRoute(e.route);
           break;
         case "error":
           if (isSignInRefusal(e.message)) onSignInRefused();
@@ -450,6 +457,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     desktop,
     desktopName,
     stats,
+    route,
     credentials,
     cert,
     error,

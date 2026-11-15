@@ -276,6 +276,7 @@ export function makeFakeApi(params = new URLSearchParams(location.search)): Api 
     hostsThumbnail: async () => null,
     scanStart: async () => {},
     scanStop: async () => {},
+    identify: async () => [],
     boundaryResolve: async (code) => ({ invitation: `boundary1:${code}` }),
 
     async sessionConnect(_target: ConnectTarget, onFrame, onEvent) {
@@ -420,6 +421,7 @@ export function makeFakeApi(params = new URLSearchParams(location.search)): Api 
       if (s) clearInterval(s.timer);
       sessions.delete(sessionId);
     },
+    sessionSaveHost: async (_id, h) => ({ ...hosts[0], ...h, id: "new" }) as Host,
   };
   return api;
 }

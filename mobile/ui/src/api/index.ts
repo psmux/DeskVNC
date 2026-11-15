@@ -40,6 +40,8 @@ export function withDemo(inner: Api, demo: MockSessions = createMockSessions(() 
     // A demo screen is never saved as a card picture.
     sessionSnapshot: (id, rgba, w, h) => (demo.has(id) ? Promise.resolve() : inner.sessionSnapshot(id, rgba, w, h)),
     sessionDisconnect: (id) => pick(id).sessionDisconnect(id),
+    // The demo computer is never saved.
+    sessionSaveHost: (id, host) => (demo.has(id) ? Promise.reject(new Error("The demo computer is not saved")) : inner.sessionSaveHost(id, host)),
   };
 }
 

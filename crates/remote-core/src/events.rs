@@ -228,6 +228,12 @@ pub enum ProtocolEvent {
         write: bool,
         read: bool,
     },
+    /// How a support session's packets travel, sent when it is first known
+    /// and on every change: `direct` straight between the two computers,
+    /// otherwise through a relay.
+    BoundaryRoute {
+        direct: bool,
+    },
     Rdp(RdpEvent),
     Ssh(SshEvent),
 }
