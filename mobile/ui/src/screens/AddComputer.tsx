@@ -376,8 +376,8 @@ function FoundRow({ item, picked, onPick }: { item: FoundComputer; picked: boole
     >
       <OsArt os={item.os} className="h-12 w-16 shrink-0" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-headline">{item.name ?? "A computer"}</span>
-        <span className="block truncate text-footnote tabular-nums text-ink-dim">{item.address}</span>
+        <span className="block truncate text-headline">{item.name ?? item.address}</span>
+        {item.name && <span className="block truncate text-footnote tabular-nums text-ink-dim">{item.address}</span>}
       </span>
       {picked ? (
         <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent-fill text-accent-ink">
