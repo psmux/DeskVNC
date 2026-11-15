@@ -321,6 +321,25 @@ jobs:
           & $env:SIGNTOOL @signArgs 'src-tauri/binaries/dvv-x86_64-pc-windows-msvc.exe'
           if ($LASTEXITCODE -ne 0) { throw "signtool could not sign dvv.exe" }
 
+      # Tauri notarizes whenever these are set, even to an empty string, so
+      # they reach the bundler only when notarizing: every tag build, and a
+      # hand run unless its notarize input is off.
+      - name: Hand the notary credentials to the bundler
+        if: runner.os == 'macOS' && (github.event_name != 'workflow_dispatch' || inputs.notarize)
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "${APPLE_ID:-}" ] || exit 0
+          {
+            echo "APPLE_ID=$APPLE_ID"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
       # tauri-action runs the frontend build via beforeBuildCommand, bundles
       # for the host platform, and on a tag creates a draft release.
       #
@@ -349,9 +368,6 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_TEAM_ID || '' }}
         with:
           args: --target ${{ matrix.bundle-target }} --config src-tauri/tauri.release.conf.json ${{ env.WINDOWS_SIGN_CONFIG }} -- --locked
           releaseId: ${{ needs.draft.outputs.id }}
