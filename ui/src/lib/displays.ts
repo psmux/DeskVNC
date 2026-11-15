@@ -80,47 +80,61 @@ export function syntheticSplits(w: number, h: number): DisplayOption[] {
   return out;
 }
 
+/** A rectangle in framebuffer pixels. */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /**
  * The rows the Displays menus offer: the server's own monitor layout when it
- * sent one; else the detected pair when the seam detector found one, on top of
+ * sent one; else the detected pair when detection found one, on top of
  * synthetic width splits, so a TightVNC-style multi-head desktop is still
  * separable by hand when detection has nothing to see.
  *
- * `seam` is the detected boundary column, or null. `size` is null before the
- * first frame has told us how big the desktop is.
+ * `detected` is the pair of monitor rectangles read from the picture (see
+ * render/seams.ts `detectMonitors`), in framebuffer pixels, or null. Each
+ * keeps its own height, so a shorter monitor is offered without the black
+ * area under it. A pair that does not fit inside `size` was read from a
+ * desktop of another size and is ignored. `size` is null before the first
+ * frame has told us how big the desktop is.
  */
 export function buildDisplayOptions(
   screens: RemoteScreen[],
   size: { w: number; h: number } | null,
-  seam: number | null,
+  detected: readonly Rect[] | null,
 ): DisplayOption[] {
   if (screens.length >= 2) return screens;
   if (!size) return [];
   const opts: DisplayOption[] = [];
-  if (seam !== null && seam > 0 && seam < size.w) {
-    opts.push(
-      {
-        id: DETECTED_LEFT_ID,
-        x: 0,
-        y: 0,
-        width: seam,
-        height: size.h,
-        label: `Display 1 (detected, ${seam}×${size.h})`,
-      },
-      {
-        id: DETECTED_RIGHT_ID,
-        x: seam,
-        y: 0,
-        width: size.w - seam,
-        height: size.h,
-        label: `Display 2 (detected, ${size.w - seam}×${size.h})`,
-      },
-    );
+  const inside = (r: Rect): boolean =>
+    r.width > 0 &&
+    r.height > 0 &&
+    r.x >= 0 &&
+    r.y >= 0 &&
+    r.x + r.width <= size.w &&
+    r.y + r.height <= size.h;
+  if (detected && detected.length === 2 && detected.every(inside)) {
+    const ids = [DETECTED_LEFT_ID, DETECTED_RIGHT_ID];
+    detected.forEach((r, i) => {
+      opts.push({
+        id: ids[i],
+        x: r.x,
+        y: r.y,
+        width: r.width,
+        height: r.height,
+        label: `Display ${i + 1} (detected, ${r.width}×${r.height})`,
+      });
+    });
   }
   // Manual cuts that duplicate the detected pair would read as a choice where
   // there is none; drop them.
+  const same = (a: Rect, b: Rect): boolean =>
+    a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
   for (const s of syntheticSplits(size.w, size.h)) {
-    if (!opts.some((o) => o.x === s.x && o.width === s.width)) opts.push(s);
+    if (!opts.some((o) => same(o, s))) opts.push(s);
   }
   return opts;
 }
