@@ -32,8 +32,7 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 * Enter from the Android keyboard reaches the remote computer while a word
   is still being composed, and typed text and keys arrive in the order they
   were typed. Letters could arrive swapped and Enter could get ahead of
-  them. A Gboard suggestion tapped after Enter no longer edits the line
-  already sent.
+  them. Dragging no longer lags behind the finger on a slow connection.
 * Back while "Leave" is asked closes the question and keeps the session.
 * The trust prompt calls a bare RSA key a key, not a certificate.
 * The demo card no longer lands on top of a saved computer after a restart.
