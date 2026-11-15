@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use remote_core::ProtocolKind;
 
+use crate::banner::server_label;
 use crate::boundary;
 use crate::probe;
 use crate::resolve::{self, NameSource, Resolved};
 use crate::scan::rdp_label;
 use crate::types::{DiscoveredHost, DiscoverySource, RdpCaps};
-use crate::banner::server_label;
 
 /// The ports tried when the address carries none, with what each is asked.
 pub const DEFAULT_PROBES: [(u16, Service); 4] = [
@@ -364,13 +364,22 @@ mod tests {
 
     #[test]
     fn each_row_suggests_an_os() {
-        assert_eq!(os_hint(&row(ProtocolKind::Rdp, 3389, "Remote Desktop")), OsHint::Windows);
+        assert_eq!(
+            os_hint(&row(ProtocolKind::Rdp, 3389, "Remote Desktop")),
+            OsHint::Windows
+        );
         assert_eq!(
             os_hint(&row(ProtocolKind::Vnc, 5900, "macOS Screen Sharing")),
             OsHint::Mac
         );
-        assert_eq!(os_hint(&row(ProtocolKind::Vnc, 5900, "VNC server (RFB 3.8)")), OsHint::Unknown);
-        assert_eq!(os_hint(&row(ProtocolKind::Boundary, 5940, boundary::LABEL)), OsHint::Unknown);
+        assert_eq!(
+            os_hint(&row(ProtocolKind::Vnc, 5900, "VNC server (RFB 3.8)")),
+            OsHint::Unknown
+        );
+        assert_eq!(
+            os_hint(&row(ProtocolKind::Boundary, 5940, boundary::LABEL)),
+            OsHint::Unknown
+        );
         let mut pi = row(ProtocolKind::Vnc, 5900, "VNC server (RFB 3.8)");
         pi.hostname = Some("raspberrypi".into());
         assert_eq!(os_hint(&pi), OsHint::Raspberry);
@@ -385,8 +394,14 @@ mod tests {
         // A Mac with Screen Sharing and Boundary.
         assert_eq!(machine_os([OsHint::Mac, OsHint::Unknown]), OsHint::Mac);
         // A Windows PC with Remote Desktop and a VNC server that says nothing.
-        assert_eq!(machine_os([OsHint::Unknown, OsHint::Windows]), OsHint::Windows);
-        assert_eq!(machine_os([OsHint::Linux, OsHint::Windows]), OsHint::Windows);
+        assert_eq!(
+            machine_os([OsHint::Unknown, OsHint::Windows]),
+            OsHint::Windows
+        );
+        assert_eq!(
+            machine_os([OsHint::Linux, OsHint::Windows]),
+            OsHint::Windows
+        );
         assert_eq!(machine_os([]), OsHint::Unknown);
     }
 
@@ -443,11 +458,8 @@ mod tests {
                 tokio::spawn(async move {
                     let _ = sock.write_all(line).await;
                     let mut sink = [0u8; 64];
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(500),
-                        sock.read(&mut sink),
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(Duration::from_millis(500), sock.read(&mut sink))
+                        .await;
                 });
             }
         });
@@ -485,6 +497,8 @@ mod tests {
         };
         let rows = identify("127.0.0.1", Some(port), Duration::from_millis(300)).await;
         assert!(rows.is_empty(), "{rows:?}");
-        assert!(identify("", None, Duration::from_millis(100)).await.is_empty());
+        assert!(identify("", None, Duration::from_millis(100))
+            .await
+            .is_empty());
     }
 }

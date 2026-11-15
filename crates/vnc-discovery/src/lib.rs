@@ -54,8 +54,8 @@ pub use filter::{
     address_rank, classify, is_listable, pick_best_address, rank_addresses, AddressVerdict,
     LocalNetwork,
 };
-pub use rdpnego::{caps_from_confirm, MAX_NEGO_READ};
 pub use identify::{identify, machine_os, os_hint, Identified, OsHint};
+pub use rdpnego::{caps_from_confirm, MAX_NEGO_READ};
 pub use registry::HostRegistry;
 pub use resolve::{
     looks_like_a_windows_computer_name, resolve_host, NameSource, Resolved, RESOLVE_BUDGET,
