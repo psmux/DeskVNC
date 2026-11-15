@@ -142,7 +142,7 @@ impl NameResolution {
 
 /// A human label for an RDP row, built the way `server_label` builds one for
 /// RFB: from what the server actually said, never from a guess.
-fn rdp_label(caps: &crate::types::RdpCaps) -> String {
+pub(crate) fn rdp_label(caps: &crate::types::RdpCaps) -> String {
     if caps.standard_only {
         return "Remote Desktop (unsupported security)".to_string();
     }

@@ -4,13 +4,20 @@
 //! an mDNS browse (`_rfb._tcp` and the record a Boundary computer
 //! advertises) and a polite TCP sweep of the phone's own subnet on 5900 and
 //! 5901 for VNC, 3389 for Remote Desktop and 5940 for Boundary.
+//!
+//! `identify` asks the same questions of one typed address, for the quick
+//! connect field.
+
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vnc_discovery::{DiscoveredHost, Discovery, DiscoveryEvent, ProtocolKind, ScanOptions};
+use vnc_discovery::{
+    DiscoveredHost, Discovery, DiscoveryEvent, Identified, OsHint, ProtocolKind, ScanOptions,
+};
 
 use crate::state::AppState;
 use crate::store::{HostOs, Protocol};
@@ -127,6 +134,58 @@ pub async fn scan_stop(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// How long each probe of `identify` waits for a connect. A computer on the
+/// same Wi-Fi answers in a few milliseconds; this is for one that is waking.
+const IDENTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// What answers at a typed address: every service found, as rows shaped like
+/// the scan's, Remote Desktop first. Empty when nothing answered or the name
+/// does not resolve. `port` limits the probes to that one port.
+#[tauri::command]
+pub async fn identify(address: String, port: Option<u16>) -> Result<Vec<FoundComputer>, String> {
+    let address = address.trim();
+    if address.is_empty() || address.len() > 255 {
+        return Err("Type a name or address".into());
+    }
+    let port = port.filter(|p| *p != 0);
+    let found = vnc_discovery::identify(address, port, IDENTIFY_TIMEOUT).await;
+    Ok(found.iter().filter_map(identified).collect())
+}
+
+/// One `identify` row as the phone shows it. `None` for a protocol the phone
+/// does not speak.
+pub fn identified(row: &Identified) -> Option<FoundComputer> {
+    let protocol = match row.protocol {
+        ProtocolKind::Vnc => Protocol::Vnc,
+        ProtocolKind::Rdp => Protocol::Rdp,
+        ProtocolKind::Boundary => Protocol::Boundary,
+        _ => return None,
+    };
+    // A Boundary computer is dialled by its machine ID and address, so the
+    // key is pinned, the way a scan row is saved (`discoveredEndpoint`).
+    let address = match (&row.boundary_id, protocol) {
+        (Some(id), Protocol::Boundary) => format!("{id}@{}", row.address),
+        _ => row.address.to_string(),
+    };
+    Some(FoundComputer {
+        address,
+        port: row.port,
+        protocol,
+        name: row.name.clone().filter(|n| !n.trim().is_empty()),
+        os: host_os(row.os),
+    })
+}
+
+fn host_os(os: OsHint) -> HostOs {
+    match os {
+        OsHint::Windows => HostOs::Windows,
+        OsHint::Mac => HostOs::Mac,
+        OsHint::Linux => HostOs::Linux,
+        OsHint::Raspberry => HostOs::Raspberry,
+        OsHint::Unknown => HostOs::Unknown,
+    }
+}
+
 /// One discovered row as the phone shows it. `None` for a protocol the
 /// phone does not speak.
 pub fn found(host: &DiscoveredHost) -> Option<FoundComputer> {
@@ -145,37 +204,11 @@ pub fn found(host: &DiscoveredHost) -> Option<FoundComputer> {
     })
 }
 
-/// A guess at the operating system, for the card's artwork.
-///
-/// The desktop's `os_hint` in `src-tauri/src/commands/discovery.rs` is a
-/// private function of a Tauri command module, so its rule is restated here
-/// rather than shared: a name from a Windows only service settles it, then a
-/// sniff over the banner and host name. Two phone specific additions: an RDP
-/// row is Windows, and a Raspberry Pi gets its own artwork.
+/// A guess at the operating system, for the card's artwork. The rule is
+/// `vnc_discovery::os_hint`, shared with `identify` so a computer found by
+/// the radar and one typed in get the same picture.
 pub fn os_hint(host: &DiscoveredHost) -> HostOs {
-    if host.name_source.is_some_and(|s| s.implies_windows()) {
-        return HostOs::Windows;
-    }
-    let mut hay = host.server_label.to_ascii_lowercase();
-    if let Some(name) = &host.hostname {
-        hay.push(' ');
-        hay.push_str(&name.to_ascii_lowercase());
-    }
-    if hay.contains("raspberry") || hay.contains("wayvnc") {
-        HostOs::Raspberry
-    } else if hay.contains("macos") || hay.contains("apple") || hay.contains("screen sharing") {
-        HostOs::Mac
-    } else if host.protocol == ProtocolKind::Rdp
-        || hay.contains("windows")
-        || hay.contains("tightvnc")
-        || hay.contains("ultravnc")
-    {
-        HostOs::Windows
-    } else if hay.contains("tigervnc") || hay.contains("vino") || hay.contains("x11") {
-        HostOs::Linux
-    } else {
-        HostOs::Unknown
-    }
+    host_os(vnc_discovery::os_hint(host))
 }
 
 #[cfg(test)]
@@ -245,5 +278,32 @@ mod tests {
         );
         assert_eq!(os_hint(&host(ProtocolKind::Vnc, "", None)), HostOs::Unknown);
         assert!(found(&host(ProtocolKind::Ssh, "", None)).is_none());
+    }
+
+    #[test]
+    fn an_identified_boundary_computer_keeps_its_id() {
+        let row = Identified {
+            address: "192.0.2.7".parse().unwrap(),
+            port: 5940,
+            protocol: ProtocolKind::Boundary,
+            name: Some("studio".into()),
+            name_source: None,
+            server_label: String::new(),
+            os: OsHint::Mac,
+            rdp: None,
+            boundary_id: Some("ab".repeat(32)),
+        };
+        let f = identified(&row).unwrap();
+        assert_eq!(f.address, format!("{}@192.0.2.7", "ab".repeat(32)));
+        assert_eq!(f.protocol, Protocol::Boundary);
+        assert_eq!(f.os, HostOs::Mac);
+        let vnc = identified(&Identified {
+            protocol: ProtocolKind::Vnc,
+            port: 5900,
+            boundary_id: None,
+            ..row
+        })
+        .unwrap();
+        assert_eq!(vnc.address, "192.0.2.7");
     }
 }

@@ -126,6 +126,7 @@ pub fn run() {
             commands::hosts::hosts_thumbnail,
             commands::scan::scan_start,
             commands::scan::scan_stop,
+            commands::scan::identify,
             commands::session::session_connect,
             commands::session::boundary_resolve,
             commands::session::session_input,
@@ -137,6 +138,7 @@ pub fn run() {
             commands::session::session_clipboard,
             commands::session::session_snapshot,
             commands::session::session_disconnect,
+            commands::session::session_save_host,
         ])
         .build(tauri::generate_context!())
         .expect("error while building DeskVNC");
