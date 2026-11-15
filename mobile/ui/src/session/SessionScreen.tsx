@@ -1068,7 +1068,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
           onClose={() => setSheet(null)}
         />
       ) : null}
-      {sheet === "stats" ? <StatsSheet stats={s.stats} onClose={() => setSheet(null)} onQuality={() => setSheet("quality")} /> : null}
+      {sheet === "stats" ? <StatsSheet stats={s.stats} route={s.route} onClose={() => setSheet(null)} onQuality={() => setSheet("quality")} /> : null}
 
       {coach && showDesktop && !s.credentials && !s.cert ? <Coach mode={coach} onDone={() => setCoach(null)} /> : null}
 

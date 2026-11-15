@@ -44,7 +44,7 @@ that does not resolve, gives `[]`, not an error. It never authenticates.
 
 | Command | Args | Returns |
 |---|---|---|
-| `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent> }` | `{ sessionId }` |
+| `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent>, neverRelay?: boolean }` | `{ sessionId }`. `neverRelay` is the Never use relays setting: Boundary then uses no relay and no address directory |
 | `boundary_resolve` | `{ code }` | `{ invitation }`. Accepts `1234 5678 9012`, `123456789012` or a full `boundary1:` invitation |
 | `session_input` | binary body (raw, or on Android the JSON array of numbers Tauri makes of it), headers `x-session-id`, `x-input-seq` | nothing. Body format is the desktop `send_input` format |
 | `session_text` | `{ sessionId, text }` | nothing. Types a string, used by the phone keyboard |
@@ -77,7 +77,7 @@ exact byte layout of `src-tauri/FRAME_FORMAT.md`.
 flat, with `sessionId` and `type`. The phone UI handles at least:
 `state-changed`, `desktop-resize`, `desktop-name`, `cursor-position`,
 `clipboard-text`, `certificate-prompt`, `credentials-required`, `stats`,
-`error`, `ended`.
+`error`, `ended`, and for Boundary `boundary-route`, `{ route: "direct" | "relay" }`.
 
 ## App lifecycle
 

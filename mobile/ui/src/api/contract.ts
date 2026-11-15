@@ -87,8 +87,12 @@ export type SessionEvent =
     }
   | { sessionId: string; type: "credentials-required"; request: CredentialRequest }
   | { sessionId: string; type: "stats"; stats: SessionStats }
+  /** Boundary only: whether the session goes straight to the computer or through a relay. */
+  | { sessionId: string; type: "boundary-route"; route: BoundaryRoute }
   | { sessionId: string; type: "error"; message: string }
   | { sessionId: string; type: "ended"; durationS: number };
+
+export type BoundaryRoute = "direct" | "relay";
 
 export type KeyCombo = "ctrl-alt-del" | "win" | "alt-tab" | "cmd-tab" | "ctrl-c" | "ctrl-v" | "esc";
 

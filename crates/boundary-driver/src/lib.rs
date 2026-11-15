@@ -2,10 +2,11 @@
 
 use anyhow::{anyhow, bail, ensure, Result};
 use boundary_session::{
+    direct,
     tools::{Client, Reply, Request},
     unattended::{self, SecretKey},
     Abilities, Button, ClipboardRights, Event, HostOptions, Input, Invitation, Key, LinkLost,
-    Session, Update,
+    Route, Session, Update,
 };
 use parking_lot::Mutex;
 use remote_core::{
@@ -52,8 +53,28 @@ pub struct BoundaryDriver {
     identity: std::sync::Arc<Mutex<Option<SecretKey>>>,
     paired: std::sync::Arc<Mutex<Option<OnPaired>>>,
     tools: Registry,
+    never_relay: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    book: Book,
 }
+/// Where each computer last answered directly, shared by the sessions.
+type Book = std::sync::Arc<Mutex<Option<direct::Book>>>;
 impl BoundaryDriver {
+    /// Never use relays: no session started after this contacts a relay or
+    /// the address directory. A computer known only by its ID is then
+    /// reached at the address it last answered on directly, or not at all.
+    pub fn set_never_relay(&self, on: bool) {
+        self.never_relay
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn never_relay(&self) -> bool {
+        self.never_relay.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Keep the address each computer answered on directly in `path`, so a
+    /// computer saved by its ID is tried there first next time, with no
+    /// relay or directory.
+    pub fn set_direct_book(&self, path: &std::path::Path) {
+        *self.book.lock() = Some(direct::Book::open(path));
+    }
     /// How to send commands and file requests to the computer behind
     /// `session_id`, while that session lasts. `None` when there is no such
     /// session, it has not connected yet, or the computer's DeskVNC Support
@@ -133,6 +154,8 @@ impl ProtocolDriver for BoundaryDriver {
         let identity = self.identity.lock().clone();
         let paired = self.paired.lock().clone();
         let registry = self.tools.clone();
+        let network = network_options(self.never_relay());
+        let book = self.book.clone();
         let session_id = id.clone();
         let (commands, mut receiver) = mpsc::channel(128);
         let cancel = CancellationToken::new();
@@ -161,7 +184,7 @@ impl ProtocolDriver for BoundaryDriver {
                             boundary_session::viewer_with(
                                 pending.ticket,
                                 pending.helper,
-                                HostOptions::default(),
+                                network.clone(),
                                 identity.clone(),
                                 ABILITIES,
                             )
@@ -174,8 +197,11 @@ impl ProtocolDriver for BoundaryDriver {
                                 .clone()
                                 .filter(|n| !n.trim().is_empty())
                                 .unwrap_or_else(helper_name);
+                            // A computer saved by its ID goes first to the
+                            // address it last answered on directly.
+                            let known = book.lock().as_ref().and_then(|b| b.get(&machine));
                             unattended::connect_with(
-                                machine.clone(),
+                                direct::prefer_direct(&machine, known),
                                 name,
                                 options
                                     .credentials
@@ -183,7 +209,7 @@ impl ProtocolDriver for BoundaryDriver {
                                     .clone()
                                     .filter(|p| !p.is_empty()),
                                 key,
-                                HostOptions::default(),
+                                network.clone(),
                                 ABILITIES,
                             )
                         }
@@ -200,6 +226,9 @@ impl ProtocolDriver for BoundaryDriver {
                         Tools {
                             registry: registry.clone(),
                             session_id: session_id.clone(),
+                            // Only a computer that can be dialled again is
+                            // worth remembering: an invitation's is gone after.
+                            book: unattended.then(|| book.clone()),
                         },
                         &mut connected_at,
                     )
@@ -268,6 +297,14 @@ impl ProtocolDriver for BoundaryDriver {
             commands,
             cancel,
         })
+    }
+}
+/// The network options every session starts with. Never use relays turns
+/// relays off, and with them the address directory.
+fn network_options(never_relay: bool) -> HostOptions {
+    HostOptions {
+        relay: !never_relay,
+        ..HostOptions::default()
     }
 }
 /// A small random fraction for the backoff's jitter. Spreading retries out
@@ -348,6 +385,9 @@ pub const TOO_OLD: &str = "that computer's DeskVNC Support is older than command
 struct Tools {
     registry: Registry,
     session_id: String,
+    /// Where a computer that answered directly is noted, for an unattended
+    /// session only.
+    book: Option<Book>,
 }
 impl Drop for Tools {
     fn drop(&mut self) {
@@ -504,7 +544,12 @@ async fn drive(
     published: Tools,
     connected_at: &mut Option<Instant>,
 ) -> Result<()> {
+    let book = published.book.clone();
     let mut size = (0u16, 0u16);
+    // The route last told to the window, and whether there is a route to
+    // watch at all: the watch ends with the session.
+    let mut shown_route: Option<bool> = None;
+    let mut watching_route = true;
     // The whole screen as it stands, for a window or mirror that asks for
     // all of it again: updates after the first carry only what changed.
     let mut current: Option<std::sync::Arc<boundary_session::Frame>> = None;
@@ -555,6 +600,29 @@ async fn drive(
                 Some(Event::Finished(result)) => return result,
                 None => return Ok(()),
                 _ => {},
+            },
+            changed = session.connectivity.changed(), if watching_route => {
+                if changed.is_err() {
+                    watching_route = false;
+                    continue;
+                }
+                let info = session.connectivity.borrow_and_update().clone();
+                let direct = match info.route {
+                    Some(Route::Direct) => true,
+                    Some(Route::Relay) => false,
+                    _ => continue,
+                };
+                if shown_route != Some(direct) {
+                    shown_route = Some(direct);
+                    emit(events, SessionEvent::Protocol(remote_core::ProtocolEvent::BoundaryRoute { direct })).await?;
+                }
+                if let (true, Some(book), Some(machine), Some(addr)) = (direct, book.as_ref(), info.remote, info.direct_addr) {
+                    if let Some(book) = book.lock().as_mut() {
+                        if book.remember(machine, addr) {
+                            tracing::info!(%machine, %addr, "boundary computer answered directly, remembered for next time");
+                        }
+                    }
+                }
             },
             frame = session.frames.changed() => {
                 if frame.is_err() {
@@ -851,6 +919,15 @@ mod tests {
             with_port(&format!("{id}@box"), 6000),
             format!("{id}@box:6000")
         );
+    }
+    #[test]
+    fn never_use_relays_turns_relays_off_for_every_session() {
+        let driver = BoundaryDriver::default();
+        assert!(!driver.never_relay(), "off by default");
+        assert!(network_options(driver.never_relay()).relay);
+        driver.set_never_relay(true);
+        let options = network_options(driver.never_relay());
+        assert!(!options.relay && options.relay_url.is_none() && options.bind_ip.is_none());
     }
     #[test]
     fn coordinates_buttons_and_unicode_are_translated() {

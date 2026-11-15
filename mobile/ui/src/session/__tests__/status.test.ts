@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { friendlyError, qualityLevel, stepOf } from "../status";
+import { friendlyError, qualityLevel, routeWords, stepOf } from "../status";
 import { wireQuality } from "../useRemoteSession";
 
 describe("status words", () => {
+  it("names a Boundary route in plain words", () => {
+    expect(routeWords("direct")).toBe("Direct");
+    expect(routeWords("relay")).toBe("Through a relay");
+  });
+
   it("maps session states to the four friendly steps", () => {
     expect(stepOf({ state: "connecting" })).toBe(0);
     expect(stepOf({ state: "negotiating" })).toBe(1);

@@ -18,6 +18,13 @@ pub fn install(app: &AppHandle, data_dir: &std::path::Path) {
         Ok(key) => state.protocols.boundary.set_identity(key),
         Err(error) => tracing::warn!("Boundary helper identity unavailable: {error:#}"),
     }
+    // Where each computer last answered directly, so one saved by its ID
+    // is tried there first with no relay or directory.
+    state
+        .protocols
+        .boundary
+        .set_direct_book(&data_dir.join("boundary-direct.json"));
+    state.protocols.boundary.set_never_relay(never_relay(app));
     let app = app.clone();
     state
         .protocols
@@ -30,6 +37,26 @@ pub fn install(app: &AppHandle, data_dir: &std::path::Path) {
                 }
             });
         }));
+}
+
+/// The app setting behind Preferences, Network, Never use relays. Off
+/// unless it was turned on.
+pub const NEVER_RELAY_KEY: &str = "boundary_never_relay";
+
+/// Whether Never use relays is on.
+pub fn never_relay(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .and_then(|state| state.store.get_setting(NEVER_RELAY_KEY).ok().flatten())
+        .is_some_and(|value| value == "true")
+}
+
+/// Never use relays was switched: sessions started from now on, what this
+/// computer shares, and its unattended listener all follow it.
+pub fn apply_never_relay(app: &AppHandle, on: bool) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.protocols.boundary.set_never_relay(on);
+    }
+    super::support::set_never_relay(app, on);
 }
 
 /// Put a paired computer in the Library, or rename it if it is there already.

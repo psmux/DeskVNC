@@ -128,6 +128,9 @@ struct Model {
     key: Option<SecretKey>,
     access: Access,
     listener: Option<Listener>,
+    /// Never use relays, from Preferences: no relay and no address
+    /// directory for anything this computer shares.
+    never_relay: bool,
     claim: Option<std::fs::File>,
     /// Every helper in unattended right now; up to the listener's limit.
     active: Vec<Active>,
@@ -265,6 +268,7 @@ impl Model {
             access: Access::default(),
             addresses: Vec::new(),
             listener: None,
+            never_relay: false,
             claim: None,
             active: Vec::new(),
             next_active: 0,
@@ -340,7 +344,8 @@ impl Model {
             .ok_or("No display found to share")?;
         self.error = false;
         self.status = "Creating your code".into();
-        self.session = Some(boundary_session::host(self.network.options(), move || {
+        let options = self.relay_choice(self.network.options());
+        self.session = Some(boundary_session::host(options, move || {
             boundary_platform::open(id)
         }));
         Ok(())
@@ -432,7 +437,7 @@ impl Model {
             }
         }
         self.listener = Some(unattended::listen(
-            boundary_session::HostOptions::default(),
+            self.relay_choice(boundary_session::HostOptions::default()),
             key,
             self.access_path.clone(),
             // The primary display, found when a helper arrives: nobody is
@@ -440,6 +445,31 @@ impl Model {
             boundary_platform::open_primary,
         ));
         self.say("Starting unattended access");
+    }
+    /// `options` with relays, and so the directory, off when the person
+    /// chose Never use relays.
+    fn relay_choice(
+        &self,
+        mut options: boundary_session::HostOptions,
+    ) -> boundary_session::HostOptions {
+        if self.never_relay {
+            options.relay = false;
+            options.relay_url = None;
+        }
+        options
+    }
+    /// Never use relays changed. A listener already running is started
+    /// again, so it stops or starts publishing this computer's address.
+    /// An invitation already shown keeps what it was made with.
+    pub(crate) fn set_never_relay(&mut self, on: bool) {
+        if self.never_relay == on {
+            return;
+        }
+        self.never_relay = on;
+        if self.listener.is_some() {
+            self.halt();
+            self.start_listener();
+        }
     }
     fn halt(&mut self) {
         self.listener = None;
@@ -801,8 +831,10 @@ impl Support {
 /// Make the model and start polling. Unattended access, if the person
 /// switched it on, starts on the first poll.
 pub fn install(app: &AppHandle) {
+    let mut model = Model::new();
+    model.never_relay = super::boundary::never_relay(app);
     let support = Arc::new(Support {
-        model: Mutex::new(Model::new()),
+        model: Mutex::new(model),
         sent: Mutex::new(serde_json::Value::Null),
     });
     app.manage(support.clone());
@@ -813,6 +845,18 @@ pub fn install(app: &AppHandle) {
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
     });
+}
+
+/// Never use relays was switched, for what this computer shares.
+pub(crate) fn set_never_relay(app: &AppHandle, on: bool) {
+    if let Some(support) = app.try_state::<Arc<Support>>() {
+        support
+            .act(app, |m| {
+                m.set_never_relay(on);
+                Ok(())
+            })
+            .ok();
+    }
 }
 
 type Shared<'a> = State<'a, Arc<Support>>;

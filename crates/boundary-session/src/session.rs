@@ -82,10 +82,17 @@ pub struct Connectivity {
     pub route: Option<Route>,
     pub rtt: Option<Duration>,
     pub warning: Option<String>,
+    /// The other side's ID, once connected.
+    pub remote: Option<iroh::EndpointId>,
+    /// The address the other side is reached at while the route is direct.
+    pub direct_addr: Option<std::net::SocketAddr>,
 }
 #[derive(Clone)]
 pub struct HostOptions {
-    /// Public relays carry encrypted QUIC packets. No directory is used.
+    /// Whether relays may carry the encrypted QUIC packets when no direct
+    /// path works. Off means no relay and no address directory either: the
+    /// endpoint neither publishes its address nor looks anybody up, and only
+    /// addresses it was handed are dialled. Never use relays sets it off.
     pub relay: bool,
     pub relay_url: Option<String>,
     /// Restrict the host to an existing routed interface, with no public fallback.
@@ -509,7 +516,7 @@ pub fn viewer_with(
 }
 /// Whether an endpoint's address goes into, or comes out of, the public
 /// address directory that lets a machine be reached by its ID alone.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Lookup {
     /// Attended sessions: the invitation carries the address.
     Off,
@@ -518,6 +525,35 @@ pub(crate) enum Lookup {
     /// A helper finding an unattended machine by ID. Nothing is published
     /// about the helper.
     Resolve,
+    /// A helper dialling an address it was given. No relay, no directory
+    /// and no port mapping: the only machine it contacts is that address.
+    Direct,
+}
+
+/// What an endpoint may contact besides the addresses it dials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reach {
+    /// Relays carry packets when no direct path works.
+    pub relay: bool,
+    /// The endpoint's own address goes to the public directory.
+    pub publish: bool,
+    /// Other machines are looked up in the public directory by ID.
+    pub resolve: bool,
+    /// The local router is asked to open a port (UPnP, PCP, NAT-PMP).
+    pub port_mapping: bool,
+}
+
+/// The one place that decides which outside services an endpoint uses.
+/// With relays off nothing goes to or comes from the directory either, and
+/// a helper dialling an address uses none of them whatever the options say.
+pub(crate) fn reach(options: &HostOptions, lookup: Lookup) -> Reach {
+    let relay = options.relay && lookup != Lookup::Direct;
+    Reach {
+        relay,
+        publish: relay && lookup == Lookup::Publish,
+        resolve: relay && matches!(lookup, Lookup::Publish | Lookup::Resolve),
+        port_mapping: lookup != Lookup::Direct && options.bind_ip.is_none(),
+    }
 }
 async fn endpoint(options: &HostOptions) -> Result<Endpoint> {
     endpoint_with(options, None, Lookup::Off).await
@@ -580,21 +616,34 @@ async fn bind_endpoint(
         options.bind_ip.is_none() || !options.relay,
         "Private interface mode cannot enable a relay"
     );
-    let relay = if !options.relay {
+    let reach = reach(options, lookup);
+    let relay = if !reach.relay {
         RelayMode::Disabled
     } else if let Some(url) = options.relay_url.as_ref().filter(|s| !s.trim().is_empty()) {
         RelayMode::Custom(iroh::RelayMap::from(parse_relay_url(url)?))
     } else {
         RelayMode::Default
     };
-    let mut builder = match lookup {
-        // The invitation includes the address; publishing a directory entry is unnecessary.
-        Lookup::Off => Endpoint::builder(presets::Minimal),
-        Lookup::Publish => Endpoint::builder(presets::N0),
-        Lookup::Resolve => Endpoint::builder(presets::Minimal)
+    // Minimal sets no address lookup and no relay. An invitation carries
+    // the address, so an attended session needs no directory entry.
+    let mut builder = Endpoint::builder(presets::Minimal);
+    if reach.publish {
+        builder = builder.address_lookup(iroh::address_lookup::PkarrPublisher::n0_dns());
+    }
+    if reach.resolve {
+        builder = builder
             .address_lookup(iroh::address_lookup::PkarrResolver::n0_dns())
-            .address_lookup(iroh::address_lookup::DnsAddressLookup::n0_dns()),
-    };
+            .address_lookup(iroh::address_lookup::DnsAddressLookup::n0_dns());
+    }
+    if !reach.relay {
+        // With no relay the network report has no server to probe and the
+        // captive portal check none to ask. Said here too, so a change in
+        // iroh's defaults cannot start either.
+        builder = builder.net_report_config(iroh::endpoint::NetReportConfig::minimal());
+    }
+    if !reach.port_mapping {
+        builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
+    }
     builder = builder
         .relay_mode(relay)
         .alpns(vec![wire::ALPN.to_vec()])
@@ -610,7 +659,6 @@ async fn bind_endpoint(
         );
         builder = builder
             .clear_ip_transports()
-            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
             .bind_addr(std::net::SocketAddr::new(ip, port))?;
     } else if port != 0 {
         builder = builder
@@ -644,30 +692,42 @@ fn parse_relay_url(value: &str) -> Result<iroh::RelayUrl> {
     );
     Ok(url)
 }
-fn route_snapshot(connection: &Connection) -> (Route, Option<Duration>) {
+fn route_snapshot(
+    connection: &Connection,
+) -> (Route, Option<Duration>, Option<std::net::SocketAddr>) {
     let paths = connection.paths();
     match paths.iter().find(|path| path.is_selected()) {
-        Some(path) => (
-            if path.is_ip() {
+        Some(path) => {
+            let direct = match path.remote_addr() {
+                iroh::TransportAddr::Ip(addr) => Some(*addr),
+                _ => None,
+            };
+            let route = if path.is_ip() {
                 Route::Direct
             } else if path.is_relay() {
                 Route::Relay
             } else {
                 Route::Unknown
-            },
-            Some(path.rtt()),
-        ),
-        None => (Route::Unknown, None),
+            };
+            (route, Some(path.rtt()), direct)
+        }
+        None => (Route::Unknown, None, None),
     }
 }
 async fn monitor_route(connection: &Connection, updates: &watch::Sender<Connectivity>) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let remote = Some(connection.remote_id());
     loop {
         tokio::select! {
             _ = connection.closed() => return,
             _ = tick.tick() => {
-                let (route, rtt) = route_snapshot(connection);
-                updates.send_modify(|info| { info.route = Some(route); info.rtt = rtt; });
+                let (route, rtt, direct_addr) = route_snapshot(connection);
+                updates.send_modify(|info| {
+                    info.route = Some(route);
+                    info.rtt = rtt;
+                    info.remote = remote;
+                    info.direct_addr = direct_addr;
+                });
             }
         }
     }
@@ -2301,6 +2361,9 @@ async fn send_updates(
         }
     }
 }
+/// Said when an invitation could only have worked through a relay.
+pub(crate) const NO_DIRECT_ROUTE: &str =
+    "Cannot reach that computer directly. Never use relays is on, so no relay was tried";
 fn viewer_network_options(invitation: &Invitation, mut options: HostOptions) -> HostOptions {
     let advertised = invitation
         .address
@@ -2324,6 +2387,8 @@ async fn run_viewer(
     abilities: Abilities,
 ) -> Result<()> {
     let invitation = Invitation::decode(&ticket)?;
+    // The helper turned relays off, but the other side offers one.
+    let refused_relay = !options.relay && invitation.address.relay_urls().next().is_some();
     // A host without a relay address must not cause the helper to use public relays.
     // For a relayed ticket, use its advertised relay rather than adding n0 defaults.
     let options = viewer_network_options(&invitation, options);
@@ -2351,7 +2416,11 @@ async fn run_viewer(
     let connection = within(
         Duration::from_secs(25),
         endpoint.connect(invitation.address, wire::ALPN),
-        "Connection timed out",
+        if refused_relay {
+            NO_DIRECT_ROUTE
+        } else {
+            "Connection timed out"
+        },
     )
     .await??;
     let guard = Close(connection.clone());
@@ -2799,6 +2868,94 @@ mod relay_tests {
         .await
         .unwrap_err();
         assert_eq!(format!("{late:#}"), "Helper stopped responding");
+    }
+
+    fn options(relay: bool) -> HostOptions {
+        HostOptions {
+            relay,
+            ..HostOptions::default()
+        }
+    }
+    const NOTHING: Reach = Reach {
+        relay: false,
+        publish: false,
+        resolve: false,
+        port_mapping: false,
+    };
+
+    #[test]
+    fn a_helper_dialling_an_address_uses_no_outside_service() {
+        for relay in [true, false] {
+            assert_eq!(reach(&options(relay), Lookup::Direct), NOTHING);
+        }
+        let mut custom = options(true);
+        custom.relay_url = Some("https://relay.example".into());
+        assert_eq!(reach(&custom, Lookup::Direct), NOTHING);
+    }
+
+    #[test]
+    fn with_relays_off_nothing_goes_to_the_directory() {
+        for lookup in [Lookup::Off, Lookup::Publish, Lookup::Resolve] {
+            let r = reach(&options(false), lookup);
+            assert!(!r.relay && !r.publish && !r.resolve, "{lookup:?}");
+        }
+    }
+
+    #[test]
+    fn with_relays_on_each_side_uses_what_it_did_before() {
+        // An attended session: relays, and no directory, the invitation
+        // carries the address.
+        assert_eq!(
+            reach(&options(true), Lookup::Off),
+            Reach {
+                relay: true,
+                port_mapping: true,
+                ..NOTHING
+            }
+        );
+        // An unattended machine: published, so it can be found by ID.
+        assert_eq!(
+            reach(&options(true), Lookup::Publish),
+            Reach {
+                relay: true,
+                publish: true,
+                resolve: true,
+                port_mapping: true,
+            }
+        );
+        // A helper finding a machine by ID: looks up, publishes nothing.
+        assert_eq!(
+            reach(&options(true), Lookup::Resolve),
+            Reach {
+                relay: true,
+                resolve: true,
+                port_mapping: true,
+                ..NOTHING
+            }
+        );
+        // Held to one private interface: no port mapping either.
+        let private = HostOptions {
+            relay: false,
+            relay_url: None,
+            bind_ip: Some("10.0.0.2".parse().unwrap()),
+        };
+        assert_eq!(reach(&private, Lookup::Off), NOTHING);
+    }
+
+    /// The endpoint bound for a direct dial carries no relay, so nothing it
+    /// does can reach one.
+    #[tokio::test]
+    async fn a_direct_endpoint_has_no_relay() -> Result<()> {
+        let endpoint = endpoint_with(&options(true), None, Lookup::Direct).await?;
+        assert!(endpoint.addr().relay_urls().next().is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), endpoint.online())
+                .await
+                .is_err(),
+            "a direct endpoint went online, which needs a relay"
+        );
+        endpoint.close().await;
+        Ok(())
     }
 
     #[test]

@@ -94,7 +94,13 @@ pub async fn session_connect(
     target: ConnectTarget,
     on_frame: Channel<InvokeResponseBody>,
     on_event: Channel<Value>,
+    never_relay: Option<bool>,
 ) -> Result<Connected, String> {
+    // Never use relays lives in the phone's settings and comes with every
+    // connect. Only Boundary reads it.
+    if let Some(on) = never_relay {
+        state.drivers.boundary.set_never_relay(on);
+    }
     let (kind, mut options, host_id) = match target {
         ConnectTarget::Saved { host_id } => {
             let host = state

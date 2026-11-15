@@ -24,6 +24,8 @@ export interface Prefs {
   /** The service picked last time at an address the quick field found
    *  several at, as `protocol:port` keyed by the address. */
   quickChoices: Record<string, string>;
+  /** Boundary never uses a relay or the address directory. */
+  neverRelay: boolean;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -36,6 +38,7 @@ export const DEFAULT_PREFS: Prefs = {
   showDemo: true,
   autoSave: true,
   quickChoices: {},
+  neverRelay: false,
 };
 
 const KEY = "deskvnc.mobile.prefs";
