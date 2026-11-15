@@ -115,7 +115,15 @@ export function Nearby() {
                       onClick={() =>
                         host
                           ? app.connect({ kind: "saved", hostId: host.id }, host.name)
-                          : app.connect({ kind: "adhoc", protocol: f.protocol, address: f.address, port: f.port }, f.name ?? f.address)
+                          : app.connect({ kind: "adhoc", protocol: f.protocol, address: f.address, port: f.port }, f.name ?? f.address, {
+                              protocol: f.protocol,
+                              address: f.address,
+                              port: f.port,
+                              username: null,
+                              foundName: f.name,
+                              identifiedName: null,
+                              os: f.os,
+                            })
                       }
                     >
                       Connect

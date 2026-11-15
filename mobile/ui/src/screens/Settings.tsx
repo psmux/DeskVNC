@@ -4,7 +4,7 @@
  */
 import { useState, type ReactNode } from "react";
 import type { Quality } from "../api/contract";
-import { IconChevron, IconExternal, IconPlay } from "../art/Icons";
+import { IconChevron, IconExternal, IconPlay, IconPlus } from "../art/Icons";
 import { SceneTouchMode } from "../art/Scenes";
 import { Segmented, Toggle } from "../components/Field";
 import { Sheet } from "../components/Sheet";
@@ -191,6 +191,16 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
             title="Vibrate on taps"
             detail="A small buzz when you press things"
             trailing={<Toggle on={prefs.haptics} onChange={(haptics) => setPrefs({ haptics })} label="Vibrate on taps" />}
+          />
+          <Row
+            icon={
+              <Swatch>
+                <IconPlus size={20} />
+              </Swatch>
+            }
+            title="Save computers I connect to"
+            detail="Adds each new one to Your computers once it connects"
+            trailing={<Toggle on={prefs.autoSave} onChange={(autoSave) => setPrefs({ autoSave })} label="Save computers I connect to" />}
           />
           <Row
             icon={

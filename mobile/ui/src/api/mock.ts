@@ -369,6 +369,13 @@ export function createMockSessions(describe: (hostId: string) => { name: string;
     get(sessionId: string): { hostId: string | null } | undefined {
       return sessions.get(sessionId);
     },
+    /** Make an adhoc session a saved host's, once it is connected. */
+    adopt(sessionId: string, hostId: string): boolean {
+      const s = sessions.get(sessionId);
+      if (!s || !s.connected || s.hostId) return false;
+      s.hostId = hostId;
+      return true;
+    },
   };
 }
 
@@ -377,7 +384,7 @@ export type MockSessions = ReturnType<typeof createMockSessions>;
 // ---------------------------------------------------------------- full api
 
 function withoutHelpers(m: MockSessions) {
-  const { has: _has, get: _get, ...rest } = m;
+  const { has: _has, get: _get, adopt: _adopt, ...rest } = m;
   return rest;
 }
 
@@ -471,6 +478,18 @@ export function createMockApi(): Api {
       scanning = [];
     },
 
+    async identify(address: string, port: number | null) {
+      await wait(700);
+      const where = address.trim().toLowerCase();
+      // `nothing.example` and anything ending .99 have nothing listening.
+      if (where.startsWith("nothing") || where.endsWith(".99")) return [];
+      let rows = FOUND.filter((f) => f.address === where || f.name?.toLowerCase() === where);
+      // The studio PC also runs a VNC server, so the pick sheet has something to show.
+      if (rows.some((f) => f.address === "10.0.0.21")) rows = [...rows, { ...rows[0], port: 5900, protocol: "vnc" }];
+      if (rows.length === 0) rows = [{ address: where, port: port ?? 5900, protocol: "vnc", name: null, os: "unknown" }];
+      return port ? rows.filter((f) => f.port === port) : rows;
+    },
+
     async boundaryResolve(code: string) {
       await wait(1100);
       const digits = code.replace(/\D/g, "");
@@ -488,6 +507,20 @@ export function createMockApi(): Api {
         save();
       }
       return result;
+    },
+    async sessionSaveHost(sessionId, draft) {
+      await wait(200);
+      const host: Host = {
+        ...draft,
+        id: `h${Date.now().toString(36)}`,
+        hasPassword: false,
+        lastConnectedAt: Date.now(),
+        hasThumbnail: false,
+      };
+      if (!sessionsApi.adopt(sessionId, host.id)) throw new Error("Not connected yet");
+      hosts = [...hosts, host];
+      save();
+      return { ...host };
     },
     async sessionSnapshot(sessionId, rgba, w, h) {
       const s = sessionsApi.get(sessionId);

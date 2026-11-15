@@ -6,14 +6,20 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api } from "../api";
 import type { ConnectTarget, FoundComputer, Host, HostDraft } from "../api/contract";
 import type { TabKey } from "../art/Icons";
+import { autoSaveDraft, certCommonName, isSaved, type AutoSave } from "../lib/autosave";
 import { haptic } from "../lib/haptics";
+import { readPrefs } from "../lib/prefs";
 import { newWizard, type WizardState } from "../lib/wizard";
+import type { ConnectedInfo } from "../session/SessionScreen";
 
 export interface SessionRequest {
   target: ConnectTarget;
   /** What to call it while connecting. */
   title: string;
   key: number;
+  /** Set for a computer that is not saved yet, so it can be saved once the
+   *  connection works. */
+  autoSave?: AutoSave;
 }
 
 interface AppState {
@@ -30,8 +36,14 @@ interface AppState {
   openWizard: (s?: WizardState) => void;
   closeWizard: () => void;
   session: SessionRequest | null;
-  connect: (target: ConnectTarget, title: string) => void;
+  connect: (target: ConnectTarget, title: string, autoSave?: AutoSave) => void;
   endSession: () => void;
+  /** The session screen's word that a session reached connected. */
+  sessionConnected: (request: SessionRequest, info: ConnectedInfo) => void;
+  /** A help code or invitation typed elsewhere, for Help someone to take. */
+  helpPrefill: string | null;
+  openHelp: (text: string) => void;
+  takeHelpPrefill: () => string | null;
   refresh: () => Promise<void>;
   scan: () => Promise<void>;
   saveHost: (draft: HostDraft) => Promise<Host>;
@@ -64,6 +76,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [wizard, setWizard] = useState<WizardState | null>(null);
   const [session, setSession] = useState<SessionRequest | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [helpPrefill, setHelpPrefill] = useState<string | null>(null);
+  const hostsRef = useRef<Host[]>([]);
+  hostsRef.current = hosts;
+  const autoSaving = useRef(new Set<string>());
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionKey = useRef(0);
   const scanDone = useRef<(() => void) | null>(null);
@@ -127,6 +143,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  // Save a computer that was connected to with no saved entry. Only once the
+  // session reached connected, only when the switch in Settings is on, and
+  // only when it is not on the list already.
+  const sessionConnected = useCallback(
+    (request: SessionRequest, info: ConnectedInfo) => {
+      const plan = request.autoSave;
+      if (!plan || request.target.kind !== "adhoc" || !readPrefs().autoSave) return;
+      if (isSaved(hostsRef.current, plan) || autoSaving.current.has(info.sessionId)) return;
+      autoSaving.current.add(info.sessionId);
+      const draft = autoSaveDraft(plan, { desktopName: info.desktopName, certName: certCommonName(info.certSubject) });
+      const attempt = async (tries: number): Promise<void> => {
+        try {
+          const saved = await api.sessionSaveHost(info.sessionId, draft);
+          setHosts((list) => (list.some((h) => h.id === saved.id) ? list : [...list, saved]));
+          showToast(`Saved ${saved.name} to Your computers`);
+        } catch (e) {
+          // The picture can arrive a moment before Rust hears the session
+          // is connected. Once more, then let it go quietly.
+          if (tries > 0) {
+            await new Promise((r) => setTimeout(r, 1000));
+            return attempt(tries - 1);
+          }
+          console.warn(`could not save the computer: ${String(e)}`);
+        }
+      };
+      void attempt(1);
+    },
+    [showToast],
+  );
+
   const deleteHost = useCallback(async (id: string) => {
     await api.hostsDelete(id);
     setHosts((list) => list.filter((h) => h.id !== id));
@@ -160,10 +206,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       openWizard: (s) => setWizard(s ?? newWizard()),
       closeWizard: () => setWizard(null),
       session,
-      connect: (target, title) => {
+      connect: (target, title, autoSave) => {
         haptic("tap");
         sessionKey.current += 1;
-        setSession({ target, title, key: sessionKey.current });
+        setSession({ target, title, key: sessionKey.current, autoSave });
+      },
+      sessionConnected,
+      helpPrefill,
+      openHelp: (text) => {
+        setHelpPrefill(text);
+        setTabState("help");
+      },
+      takeHelpPrefill: () => {
+        const text = helpPrefill;
+        if (text !== null) setHelpPrefill(null);
+        return text;
       },
       endSession: () => {
         setSession(null);
@@ -178,7 +235,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toast,
       showToast,
     }),
-    [hosts, loaded, thumbs, seen, scanning, found, tab, wizard, session, refresh, scan, saveHost, deleteHost, toggleFavorite, toast, showToast],
+    [hosts, loaded, thumbs, seen, scanning, found, tab, wizard, session, refresh, scan, saveHost, deleteHost, toggleFavorite, toast, showToast, sessionConnected, helpPrefill],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

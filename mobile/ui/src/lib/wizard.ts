@@ -53,7 +53,7 @@ export type WizardAction =
   | { type: "back" }
   | { type: "saved"; id: string };
 
-const PROTOCOL_COLOR: Record<Protocol, string> = { rdp: "blue", vnc: "teal", boundary: "orange" };
+export const PROTOCOL_COLOR: Record<Protocol, string> = { rdp: "blue", vnc: "teal", boundary: "orange" };
 const PROTOCOL_OS: Record<Protocol, HostOs> = { rdp: "windows", vnc: "unknown", boundary: "unknown" };
 
 export function newWizard(protocol: Protocol | null = null): WizardState {
