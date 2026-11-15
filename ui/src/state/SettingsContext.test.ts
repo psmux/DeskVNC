@@ -51,3 +51,25 @@ describe("DEFAULTS", () => {
     expect(DEFAULTS.windowMode).toBe("tabs");
   });
 });
+
+describe("autoSaveHosts", () => {
+  it("saves computers you connect to on a fresh install", () => {
+    expect(DEFAULTS.autoSaveHosts).toBe(true);
+    expect(loadSettings().autoSaveHosts).toBe(true);
+  });
+
+  it("turns on for an install whose stored settings predate the switch", () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: "dark", quickConnectHistory: ["10.0.0.5"] }));
+    expect(loadSettings().autoSaveHosts).toBe(true);
+  });
+
+  it("keeps it off once someone turned it off", () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ autoSaveHosts: false }));
+    expect(loadSettings().autoSaveHosts).toBe(false);
+  });
+
+  it("falls back to on when the stored value is not a boolean", () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ autoSaveHosts: "nope" }));
+    expect(loadSettings().autoSaveHosts).toBe(true);
+  });
+});

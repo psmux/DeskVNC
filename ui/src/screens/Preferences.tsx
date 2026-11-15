@@ -278,6 +278,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   onChange={setLivePreviews}
                 />
                 <Toggle
+                  label="Save computers I connect to"
+                  description="Add a computer to your Library once a quick connect, a recent or a nearby computer connects. Passwords are only kept when you tick Remember for this computer."
+                  value={settings.autoSaveHosts}
+                  onChange={(v) => update({ autoSaveHosts: v })}
+                />
+                <Toggle
                   label="Compact library density"
                   description="Smaller tiles and tighter spacing for large libraries"
                   value={settings.compact}

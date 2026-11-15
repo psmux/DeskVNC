@@ -8,6 +8,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the version stays below 1.0, minor releases may contain breaking changes
 to stored data and to the IPC contract between the Rust core and the frontend.
 
+## [Unreleased]
+
+### Added
+
+* A computer you reach through quick connect, a recent or the Nearby list is
+  saved to your Library once the session connects, unless a saved computer
+  already has that address, port and protocol. It takes the name discovery
+  found, then the name the server gives itself, then the address, and keeps
+  what discovery learned about the system. Passwords are still kept only when
+  you tick Remember. Preferences, General, "Save computers I connect to"
+  turns it off. Boundary sessions are not saved this way.
+
 ## [0.36.3] (2026-11-15)
 
 0.36.2 was built but never published. Its changes are part of this release.
