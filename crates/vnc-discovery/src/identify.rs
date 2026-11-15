@@ -91,9 +91,10 @@ pub fn plan(port: Option<u16>) -> Vec<Vec<(u16, Service)>> {
 
 /// Find what answers at `host`, which may be a name or an address.
 ///
-/// The probes and the name lookups run at the same time, each held to
-/// `timeout`, so the whole call takes about `timeout` plus the short read
-/// that follows a connect. A name that does not resolve, or an address where
+/// The probes and the name lookups run at the same time. Each connect is held
+/// to `timeout` and the names to the ladder's own budget, so the whole call
+/// takes no longer than `timeout` plus the short read that follows a connect,
+/// and on a LAN usually about half a second. A name that does not resolve, or an address where
 /// nothing answers, gives an empty list. The list is in a fixed order:
 /// Remote Desktop, then VNC by port, then Boundary.
 pub async fn identify(host: &str, port: Option<u16>, timeout: Duration) -> Vec<Identified> {
@@ -115,9 +116,11 @@ pub async fn identify(host: &str, port: Option<u16>, timeout: Duration) -> Vec<I
     };
     let names = async {
         match ip {
-            // The ladder's own rule: only the name services, no extra ports.
-            // The certificate name comes from the RDP probe instead.
-            IpAddr::V4(v4) => resolve::resolve_host_with(v4, timeout, false).await,
+            // The ladder's own rule and budget: only the name services, no
+            // extra ports. The certificate name comes from the RDP probe.
+            IpAddr::V4(v4) => {
+                resolve::resolve_host_with(v4, timeout.min(resolve::RESOLVE_BUDGET), false).await
+            }
             IpAddr::V6(_) => Resolved::default(),
         }
     };
