@@ -232,6 +232,23 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           />
         </Group>
 
+        <Group title="Network">
+          <Row
+            icon={
+              <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <circle cx="5" cy="12" r="2.5" />
+                  <circle cx="19" cy="12" r="2.5" />
+                  <path d="M7.5 12h9" />
+                </svg>
+              </Swatch>
+            }
+            title="Never use relays"
+            detail="Boundary connects only straight to the computer, on your network or VPN. A computer saved only by its ID needs one direct connection first."
+            trailing={<Toggle on={prefs.neverRelay} onChange={(neverRelay) => setPrefs({ neverRelay })} label="Never use relays" />}
+          />
+        </Group>
+
         <Group title="About">
           <Row
             icon={

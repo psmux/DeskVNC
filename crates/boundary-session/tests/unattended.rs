@@ -783,6 +783,107 @@ async fn an_address_with_nothing_listening_says_so() {
     assert!(error.contains("did not say which computer"), "{error}");
 }
 
+/// A helper whose relays are on, given the machine's ID and its address,
+/// reaches it straight at that address: its endpoint for the direct try has
+/// no relay and no directory, so this passes with no internet at all, and
+/// the route it reports is direct, at the address it was given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_id_with_an_address_connects_directly_with_relays_on() {
+    if skipped() {
+        return;
+    }
+    timeout(Duration::from_secs(60), async {
+        let dir = scratch("direct-first");
+        let access_path = dir.join("access.json");
+        let machine_key = unattended::load_or_create_key(&dir.join("machine.key")).unwrap();
+        let machine = unattended::machine_id(&machine_key);
+        let helper_key = unattended::load_or_create_key(&dir.join("helper.key")).unwrap();
+        let mut access = Access::default();
+        access.enabled = true;
+        access
+            .trust(&helper_key.public().to_string(), "Sam", true)
+            .unwrap();
+        access.save(&access_path).unwrap();
+        let mut listener =
+            unattended::listen(local(), machine_key, access_path, || Ok(Box::new(Fake)));
+        let address = loop {
+            match listener.notices.recv().await {
+                Some(Notice::Ready { address, .. }) => break address,
+                Some(Notice::Finished(result)) => panic!("listener ended: {result:?}"),
+                _ => {}
+            }
+        };
+        let picked = address
+            .ip_addrs()
+            .find(|a| a.is_ipv4() && !a.ip().is_loopback())
+            .or_else(|| address.ip_addrs().next())
+            .copied()
+            .expect("a direct address");
+        let ip = if picked.ip().is_unspecified() {
+            "127.0.0.1".parse().unwrap()
+        } else {
+            picked.ip()
+        };
+        let at = std::net::SocketAddr::new(ip, picked.port());
+        let started = std::time::Instant::now();
+        let mut helper = unattended::connect(
+            format!("{machine}@{at}"),
+            "Sam".into(),
+            None,
+            helper_key,
+            HostOptions::default(),
+        );
+        let said = said_until_in(&mut helper).await;
+        assert!(
+            !said.iter().any(|s| s.contains("relay")),
+            "the helper read {said:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the direct try did not succeed at once"
+        );
+        let mut seen = None;
+        for _ in 0..50 {
+            let info = helper.connectivity.borrow().clone();
+            if info.route.is_some() {
+                seen = Some(info);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let info = seen.expect("no route reported");
+        assert_eq!(info.route, Some(boundary_session::Route::Direct));
+        assert_eq!(info.remote.map(|id| id.to_string()), Some(machine));
+        assert_eq!(info.direct_addr.map(|a| a.port()), Some(at.port()));
+        helper.stop();
+        listener.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// With relays off, an ID alone has nowhere to go, and the helper is told
+/// so at once rather than after a wait.
+#[tokio::test]
+async fn an_id_alone_with_relays_off_is_refused_at_once() {
+    let machine = unattended::machine_id(&unattended::SecretKey::generate());
+    let helper = unattended::connect(
+        machine,
+        "Sam".into(),
+        None,
+        unattended::SecretKey::generate(),
+        local(),
+    );
+    let error = timeout(Duration::from_secs(5), outcome(helper))
+        .await
+        .expect("timed out")
+        .unwrap_err();
+    assert!(
+        error.starts_with(boundary_session::direct::NO_DIRECT_ADDRESS),
+        "{error}"
+    );
+}
+
 /// DeskVNC Support quitting under a helper, as it does when it is updated or
 /// restarted, is a lost link: the computer is coming back, and nobody there
 /// ended the session.

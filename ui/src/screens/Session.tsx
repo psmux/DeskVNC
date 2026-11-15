@@ -2058,6 +2058,7 @@ function SessionView({
           protocol={params.protocol}
           state={st}
           stats={session.stats}
+          boundaryRoute={session.boundaryRoute}
           scalingMode={scalingMode}
           zoom={zoom}
           quality={quality}
@@ -2111,7 +2112,7 @@ function SessionView({
       {connectionInfoOpen ? (
         <Dialog title="Connection info" onClose={() => setConnectionInfoOpen(false)} width={360}>
           <div className="p-4">
-            <SessionStatusDetails stats={session.stats} desktopName={session.desktopName} />
+            <SessionStatusDetails stats={session.stats} desktopName={session.desktopName} route={session.boundaryRoute} />
             <div className="mt-4 flex justify-end">
               <button
                 type="button"

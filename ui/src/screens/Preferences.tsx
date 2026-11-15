@@ -169,6 +169,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [losslessRefresh, setLosslessRefresh] = useAppSetting("lossless_refresh", true);
   const [deepNames, setDeepNames] = useAppSetting("probe_other_services", true);
   const [probeRdp, setProbeRdp] = useAppSetting("probe_rdp", true);
+  const [neverRelay, setNeverRelay] = useAppSetting("boundary_never_relay", false);
   // Defaults for NEW Remote Desktop hosts. They live in the Rust key-value
   // table rather than the webview so the connect path can read them later
   // without a round trip through JS.
@@ -633,6 +634,12 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                   description="Listen for VNC servers advertising themselves on your local network"
                   value={mdnsEnabled}
                   onChange={setMdnsEnabled}
+                />
+                <Toggle
+                  label="Never use relays"
+                  description="Boundary connects only straight to the other computer, on your network or VPN, and never through a relay or the address directory. A computer saved only by its ID needs one direct connection by address first. Support invitations you share also stop offering a relay."
+                  value={neverRelay}
+                  onChange={setNeverRelay}
                 />
                 <Toggle
                   label="Probe saved hosts for online status"

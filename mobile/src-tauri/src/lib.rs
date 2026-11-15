@@ -51,6 +51,11 @@ fn install_boundary(state: &AppState) {
         Ok(key) => state.drivers.boundary.set_identity(key),
         Err(error) => tracing::warn!("Boundary helper identity unavailable: {error:#}"),
     }
+    // Where each computer last answered directly, tried first next time.
+    state
+        .drivers
+        .boundary
+        .set_direct_book(&state.data_dir.join("boundary-direct.json"));
     let hosts = state.hosts.clone();
     state
         .drivers

@@ -3,6 +3,7 @@
  * Tauri Channels. Command names and argument shapes are in mobile/CONTRACT.md.
  */
 import { Channel, invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { readPrefs } from "../lib/prefs";
 import { exactBuffer, largeBody } from "./binary";
 import type { Api, ConnectTarget, Host, HostDraft, KeyCombo, Quality, ScanEvent, SessionEvent } from "./contract";
 
@@ -28,7 +29,12 @@ export const tauriApi: Api = {
     frames.onmessage = onFrame;
     const events = new Channel<SessionEvent>();
     events.onmessage = onEvent;
-    return invoke<{ sessionId: string }>("session_connect", { target, onFrame: frames, onEvent: events });
+    return invoke<{ sessionId: string }>("session_connect", {
+      target,
+      onFrame: frames,
+      onEvent: events,
+      neverRelay: readPrefs().neverRelay,
+    });
   },
   // Raw on iOS; on Android Tauri delivers it as a JSON array of numbers,
   // which for a few bytes of input costs nothing worth avoiding.

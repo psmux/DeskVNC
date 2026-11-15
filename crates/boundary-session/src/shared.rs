@@ -27,6 +27,7 @@ struct Key {
     relay: bool,
     relay_url: Option<String>,
     bind_ip: Option<IpAddr>,
+    lookup: Lookup,
 }
 
 static POOL: Mutex<Option<HashMap<Key, Weak<Inner>>>> = Mutex::new(None);
@@ -58,11 +59,21 @@ impl std::ops::Deref for Shared {
 /// first time and shared after that. It can find machines by ID, which an
 /// invitation does not need and does not mind.
 pub(crate) async fn helper(options: &HostOptions, key: SecretKey) -> Result<Shared> {
+    helper_with(options, key, Lookup::Resolve).await
+}
+/// [`helper`] for a helper dialling an address, which uses no relay and no
+/// directory. It has the same key as the other, which a relay would mind
+/// and nothing here does, since this one never meets a relay.
+pub(crate) async fn direct(options: &HostOptions, key: SecretKey) -> Result<Shared> {
+    helper_with(options, key, Lookup::Direct).await
+}
+async fn helper_with(options: &HostOptions, key: SecretKey, lookup: Lookup) -> Result<Shared> {
     let wanted = Key {
         id: key.public(),
         relay: options.relay,
         relay_url: options.relay_url.clone().filter(|s| !s.trim().is_empty()),
         bind_ip: options.bind_ip,
+        lookup,
     };
     let _binding = BINDING.lock().await;
     if let Some(inner) = POOL
@@ -76,7 +87,8 @@ pub(crate) async fn helper(options: &HostOptions, key: SecretKey) -> Result<Shar
         return Ok(Shared(inner));
     }
     let inner = Arc::new(Inner(
-        session::endpoint_with(options, Some(key), Lookup::Resolve).await?,
+        session::endpoint_with(options, Some(key), lookup).await?,
+
     ));
     let mut pool = POOL.lock().unwrap();
     let pool = pool.get_or_insert_with(HashMap::new);

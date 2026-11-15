@@ -13,6 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  BoundaryRoute,
   DisplayOption,
   ProtocolKind,
   QualityPreset,
@@ -122,6 +123,8 @@ export interface SessionToolbarProps {
   protocol: ProtocolKind;
   state: SessionState;
   stats: SessionStats | null;
+  /** A Boundary session's route, shown with the status figures. */
+  boundaryRoute?: BoundaryRoute | null;
   scalingMode: ScalingMode;
   zoom: number;
   quality: QualityPreset;
@@ -810,7 +813,7 @@ export function SessionToolbar(props: SessionToolbarProps): ReactNode {
         >
           {openMenu === "status" ? (
             <div className="w-60 px-2.5 py-1.5">
-              <SessionStatusDetails stats={props.stats} desktopName={props.desktopName} />
+              <SessionStatusDetails stats={props.stats} desktopName={props.desktopName} route={props.boundaryRoute ?? null} />
             </div>
           ) : null}
           {openMenu === "scale" ? (
@@ -1246,13 +1249,21 @@ function MenuRow({
 export function SessionStatusDetails({
   stats,
   desktopName,
+  route = null,
 }: {
   stats: SessionStats | null;
   desktopName: string;
+  route?: BoundaryRoute | null;
 }): ReactNode {
   return (
     <div className="text-sm">
       <p className="mb-2 truncate font-medium text-primary">{desktopName}</p>
+      {route ? (
+        <dl className="mb-1 grid grid-cols-2 gap-y-1 text-xs">
+          <dt className="text-tertiary">Route</dt>
+          <dd className="text-primary">{routeWords(route)}</dd>
+        </dl>
+      ) : null}
       {stats ? (
         <dl className="grid grid-cols-2 gap-y-1 text-xs">
           <dt className="text-tertiary">Latency</dt>
@@ -1275,6 +1286,11 @@ export function SessionStatusDetails({
       )}
     </div>
   );
+}
+
+/** A Boundary route in the words the status details show. */
+export function routeWords(route: BoundaryRoute): string {
+  return route === "direct" ? "Direct" : "Through a relay";
 }
 
 function encodingName(enc: number): string {

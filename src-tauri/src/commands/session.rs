@@ -148,6 +148,9 @@ fn event_json(session_id: &str, event: &SessionEvent) -> Option<serde_json::Valu
         SessionEvent::Protocol(ProtocolEvent::BoundaryClipboard { write, read }) => {
             json!({ "type": "boundary-clipboard", "write": write, "read": read })
         }
+        SessionEvent::Protocol(ProtocolEvent::BoundaryRoute { direct }) => {
+            json!({ "type": "boundary-route", "route": if *direct { "direct" } else { "relay" } })
+        }
         // Terminal bytes never become JSON. They go out on the binary channel
         // (`framing::encode_pty`) for the same reason framebuffer rectangles
         // do: base64 in a JSON envelope costs a third more bytes plus escaping

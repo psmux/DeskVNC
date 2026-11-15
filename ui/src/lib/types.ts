@@ -658,6 +658,9 @@ export interface DisplayOption extends RemoteScreen {
   label?: string;
 }
 
+/** How a Boundary session travels: straight between the computers, or through a relay. */
+export type BoundaryRoute = "direct" | "relay";
+
 /**
  * JSON payload of `session://event`. The discriminator and `sessionId` are on
  * the SAME object, the payload is flat, there is no nested `event` field.
@@ -666,6 +669,7 @@ export interface DisplayOption extends RemoteScreen {
 export type SessionEvent =
   | { type: "boundary-control"; control: boolean }
   | { type: "boundary-clipboard"; write: boolean; read: boolean }
+  | { type: "boundary-route"; route: BoundaryRoute }
   | { type: "state-changed"; state: SessionState }
   | { type: "desktop-resize"; width: number; height: number }
   | { type: "desktop-name"; name: string }

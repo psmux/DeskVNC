@@ -27,7 +27,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 /// A lasting identity, for a machine or a helper.
 pub use iroh::SecretKey;
-use iroh::{EndpointAddr, EndpointId};
+use iroh::{EndpointAddr, EndpointId, endpoint::Connection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -850,16 +850,84 @@ enum Dial {
     Text(String),
 }
 impl Dial {
-    /// A mistyped target is the helper's to fix; a lookup that fails is a
-    /// network that may come back, so only that is worth trying again.
-    async fn resolve(self) -> Result<EndpointAddr> {
-        match self {
-            Self::Addr(addr) => addr,
-            Self::Text(text) => crate::direct::resolve(target(&text)?)
-                .await
-                .map_err(session::link_lost),
+    /// Connect, the way [`crate::direct::plan`] says: an address straight
+    /// to that address with no relay or directory, and the ID route only
+    /// where the plan has it. Returns the connection and the endpoint that
+    /// holds it.
+    ///
+    /// A mistyped target is the helper's to fix; a lookup or a dial that
+    /// fails is a network that may come back, so only that is worth trying
+    /// again.
+    async fn reach(
+        self,
+        worker: &session::Worker,
+        options: &HostOptions,
+        key: SecretKey,
+    ) -> Result<(Connection, crate::shared::Shared)> {
+        use crate::direct::{DIRECT_TRY, Step};
+        let text = match self {
+            Self::Addr(addr) => {
+                let addr = addr?;
+                let endpoint = crate::shared::helper(options, key).await?;
+                let connection = dial(&endpoint, addr, CONNECT_WAIT).await?;
+                return Ok((connection, endpoint));
+            }
+            Self::Text(text) => text,
+        };
+        let target = target(&text)?;
+        let steps = crate::direct::plan(&target, options.relay)?;
+        let mut failed = None;
+        for step in steps {
+            let attempt = async {
+                match step {
+                    Step::Direct { short } => {
+                        let endpoint = crate::shared::direct(options, key.clone()).await?;
+                        let dialled = async {
+                            let addr = crate::direct::resolve(target.clone())
+                                .await
+                                .map_err(session::link_lost)?;
+                            dial(&endpoint, addr, CONNECT_WAIT).await
+                        };
+                        let connection = if short {
+                            tokio::time::timeout(DIRECT_TRY, dialled)
+                                .await
+                                .map_err(|_| session::link_lost(anyhow!("No direct answer")))??
+                        } else {
+                            dialled.await?
+                        };
+                        Ok((connection, endpoint))
+                    }
+                    Step::Directory(id) => {
+                        if failed.is_some() {
+                            let _ = worker
+                                .emit(Event::Status(
+                                    "No direct answer. Trying through a relay".into(),
+                                ))
+                                .await;
+                        }
+                        let endpoint = crate::shared::helper(options, key.clone()).await?;
+                        let connection = dial(&endpoint, EndpointAddr::new(id), CONNECT_WAIT).await?;
+                        Ok::<_, anyhow::Error>((connection, endpoint))
+                    }
+                }
+            };
+            match attempt.await {
+                Ok(reached) => return Ok(reached),
+                Err(error) => failed = Some(error),
+            }
         }
+        Err(failed.unwrap_or_else(|| anyhow!("Cannot reach the computer")))
     }
+}
+/// How long a helper waits for the computer to answer.
+const CONNECT_WAIT: Duration = Duration::from_secs(30);
+async fn dial(endpoint: &iroh::Endpoint, target: EndpointAddr, wait: Duration) -> Result<Connection> {
+    tokio::time::timeout(wait, endpoint.connect(target, wire::ALPN))
+        .await
+        .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
+        .map_err(session::link_lost)?
+        .context("Cannot reach the computer")
+        .map_err(session::link_lost)
 }
 fn target(text: &str) -> Result<crate::direct::Target> {
     crate::direct::Target::parse(text).map_err(|error| {
@@ -956,9 +1024,8 @@ async fn run_connect(
     worker
         .emit(Event::Status("Finding the computer".into()))
         .await?;
-    let target = target.resolve().await?;
-    let endpoint = crate::shared::helper(&options, key).await?;
-    let result = visit(worker, &endpoint, target, name, password, abilities).await;
+    let (connection, endpoint) = target.reach(worker, &options, key).await?;
+    let result = visit(worker, connection, name, password, abilities).await;
     // A lost link is dialled again in a moment. Binding a new endpoint for
     // that and finding the relay again cost 1 to 3 seconds of the 4 to 7 it
     // took to get back to a restarted computer, so this one is kept a while.
@@ -975,18 +1042,11 @@ async fn run_connect(
 const KEEP_ENDPOINT: Duration = Duration::from_secs(30);
 async fn visit(
     worker: &mut session::Worker,
-    endpoint: &iroh::Endpoint,
-    target: EndpointAddr,
+    connection: Connection,
     name: String,
     password: Option<String>,
     abilities: Abilities,
 ) -> Result<()> {
-    let connection = tokio::time::timeout(Duration::from_secs(30), endpoint.connect(target, wire::ALPN))
-        .await
-        .context("The computer did not answer. It may be off, asleep, offline, or its unattended access may be switched off")
-        .map_err(session::link_lost)?
-        .context("Cannot reach the computer")
-        .map_err(session::link_lost)?;
     // Nothing has been asked yet, so failing here is the link failing.
     let (mut send, recv) = connection
         .open_bi()

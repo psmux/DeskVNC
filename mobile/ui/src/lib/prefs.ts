@@ -19,6 +19,8 @@ export interface Prefs {
   onboarded: boolean;
   helperName: string;
   showDemo: boolean;
+  /** Boundary never uses a relay or the address directory. */
+  neverRelay: boolean;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -29,6 +31,7 @@ export const DEFAULT_PREFS: Prefs = {
   onboarded: false,
   helperName: "",
   showDemo: true,
+  neverRelay: false,
 };
 
 const KEY = "deskvnc.mobile.prefs";

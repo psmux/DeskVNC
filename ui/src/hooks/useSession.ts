@@ -32,6 +32,7 @@ import type { PromptAnswer } from "../lib/credentials";
 import { nextRemoteClipboard, type RemoteClipboard } from "../lib/clipboardEcho";
 import { initTrace, traceMark } from "../render/trace";
 import type {
+  BoundaryRoute,
   CertificateDigests,
   CredentialRequest,
   PinScheme,
@@ -130,6 +131,8 @@ export interface SessionApi {
    * clipboard; `null` for every other protocol, whose clipboard is its own.
    */
   boundaryClipboardWrite: boolean | null;
+  /** A Boundary session only: its route once known, `null` until then and for every other protocol. */
+  boundaryRoute: BoundaryRoute | null;
   state: SessionState;
   desktopName: string;
   /**
@@ -346,6 +349,7 @@ export function useSession(
   const [boundaryClipboardWrite, setBoundaryClipboardWrite] = useState<boolean | null>(
     params.protocol === "boundary" ? false : null,
   );
+  const [boundaryRoute, setBoundaryRoute] = useState<BoundaryRoute | null>(null);
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
@@ -493,6 +497,9 @@ export function useSession(
           break;
         case "boundary-clipboard":
           setBoundaryClipboardWrite(ev.write);
+          break;
+        case "boundary-route":
+          setBoundaryRoute(ev.route);
           break;
         case "desktop-name":
           setDesktopName(ev.name);
@@ -1047,7 +1054,7 @@ export function useSession(
   }, []);
 
   return {
-    state, desktopName, boundaryControl, boundaryClipboardWrite, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
+    state, desktopName, boundaryControl, boundaryClipboardWrite, boundaryRoute, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,

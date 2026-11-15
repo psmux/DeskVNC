@@ -13,10 +13,22 @@
 //!
 //! Accepted forms: `id`, `id@host`, `id@host:port`, `host`, `host:port`,
 //! `[v6]:port`, each optionally after `boundary://`.
+//!
+//! A helper given an address dials only that address. Its endpoint has no
+//! relay, no address directory and no port mapping, so nothing but the
+//! computer at the address hears from it, the way a VNC or RDP client works.
+//! [`plan`] decides when the ID route through the directory and relays is
+//! tried after that, and when it is not tried at all.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use iroh::{EndpointAddr, EndpointId};
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
@@ -109,6 +121,133 @@ fn parse_port(text: &str) -> Result<u16> {
         .ok()
         .filter(|p| *p != 0)
         .ok_or_else(|| anyhow!("Port must be between 1 and 65535"))
+}
+
+/// One way of reaching a computer, tried in the order [`plan`] gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// Dial the address with no relay and no directory. `short` when the
+    /// ID route follows, so a computer that is not there costs only
+    /// [`DIRECT_TRY`] before it is tried.
+    Direct { short: bool },
+    /// Find the computer by its ID through the address directory, with
+    /// relays to fall back on.
+    Directory(EndpointId),
+}
+
+/// How long a direct try may take when the ID route follows it. On a LAN
+/// or a VPN the handshake takes milliseconds; a computer that is elsewhere
+/// never answers, so this is all it costs.
+pub(crate) const DIRECT_TRY: Duration = Duration::from_secs(4);
+
+/// Said when relays are off and the helper gave only an ID.
+pub const NO_DIRECT_ADDRESS: &str = "Never use relays is on, and there is no direct address for this computer yet. Connect to it once by its address, or turn off Never use relays";
+
+/// How to reach `target`. `relay` is false when the helper turned relays
+/// off, and then the directory is never used either.
+///
+/// * An address alone is dialled directly, and that is all. Without an ID
+///   there is nothing to look up anyway.
+/// * An ID with an address (typed as `id@address`, saved by the phone, or
+///   remembered from a direct session) is dialled directly first, then by
+///   ID if that fails.
+/// * An ID alone goes through the directory, or is refused with relays off.
+pub(crate) fn plan(target: &Target, relay: bool) -> Result<Vec<Step>> {
+    Ok(match (target, relay) {
+        (Target::Id(_), false) => bail!(NO_DIRECT_ADDRESS),
+        (Target::Id(id), true) => vec![Step::Directory(*id)],
+        (Target::At { id: Some(id), .. }, true) => {
+            vec![Step::Direct { short: true }, Step::Directory(*id)]
+        }
+        (Target::At { .. }, _) => vec![Step::Direct { short: false }],
+    })
+}
+
+/// Whether a direct address is worth trying first next time. One on the
+/// fixed port, or on a private or VPN network, is where the computer itself
+/// listens. A public address on another port is a NAT's mapping for that
+/// one session and would only cost [`DIRECT_TRY`] next time.
+pub fn worth_remembering(addr: SocketAddr) -> bool {
+    let ip = addr.ip();
+    let link_local = match ip {
+        std::net::IpAddr::V4(ip) => ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+    };
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !link_local
+        && addr.port() != 0
+        && (addr.port() == PORT || is_private(ip))
+}
+
+/// What the helper typed, with the address this computer last answered on
+/// directly put in front of a bare ID, so that address is tried first.
+/// Anything else is returned as it is.
+pub fn prefer_direct(text: &str, known: Option<SocketAddr>) -> String {
+    match (Target::parse(text), known) {
+        (Ok(Target::Id(id)), Some(addr)) => format!("{id}@{addr}"),
+        _ => text.to_string(),
+    }
+}
+
+/// The address each computer last answered on directly, by machine ID, in
+/// a small file of its own.
+#[derive(Debug, Default)]
+pub struct Book {
+    path: Option<PathBuf>,
+    addrs: BTreeMap<String, SocketAddr>,
+}
+/// Enough for every computer anybody helps; the file stays a few KB.
+const BOOK_MAX: usize = 500;
+impl Book {
+    /// The book in `path`. A missing or unreadable file is an empty book.
+    pub fn open(path: &Path) -> Self {
+        let addrs = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, SocketAddr>>(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            path: Some(path.to_path_buf()),
+            addrs,
+        }
+    }
+    /// Where `machine` last answered directly.
+    pub fn get(&self, machine: &str) -> Option<SocketAddr> {
+        let id = EndpointId::from_str(&machine.trim().to_ascii_lowercase()).ok()?;
+        self.addrs.get(&id.to_string()).copied()
+    }
+    /// Note that `machine` answered directly at `addr`. True when that is
+    /// news and was written down.
+    pub fn remember(&mut self, machine: EndpointId, addr: SocketAddr) -> bool {
+        if !worth_remembering(addr) {
+            return false;
+        }
+        let key = machine.to_string();
+        if self.addrs.get(&key) == Some(&addr) {
+            return false;
+        }
+        if !self.addrs.contains_key(&key) && self.addrs.len() >= BOOK_MAX {
+            let first = self.addrs.keys().next().cloned();
+            if let Some(first) = first {
+                self.addrs.remove(&first);
+            }
+        }
+        self.addrs.insert(key, addr);
+        if let Some(path) = &self.path {
+            let _ = save(path, &self.addrs);
+        }
+        true
+    }
+}
+fn save(path: &Path, addrs: &BTreeMap<String, SocketAddr>) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(addrs)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Turn a target into the address QUIC dials: the ID, plus the address's
@@ -300,7 +439,7 @@ mod tests {
             "203.0.113.9:5940",
             "192.168.50.173:5940",
             "169.254.3.4:5940",
-            "10.8.0.4:6000",
+            "10.0.0.4:6000",
             "[fe80::1]:5940",
             "[2606:4700::4]:5940",
         ]
@@ -313,8 +452,122 @@ mod tests {
         );
     }
 
+    fn id() -> EndpointId {
+        EndpointId::from_str(ID).unwrap()
+    }
+
+    #[test]
+    fn an_address_is_dialled_directly_and_nothing_else() {
+        for relay in [true, false] {
+            for text in ["10.0.0.5", "box.lan:6000", "[fd00::2]:6001"] {
+                assert_eq!(
+                    plan(&Target::parse(text).unwrap(), relay).unwrap(),
+                    [Step::Direct { short: false }],
+                    "{text} relay {relay}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_id_with_an_address_goes_direct_first() {
+        let target = Target::parse(&format!("{ID}@10.0.0.5")).unwrap();
+        assert_eq!(
+            plan(&target, true).unwrap(),
+            [Step::Direct { short: true }, Step::Directory(id())]
+        );
+        // With relays off the address is all there is, so it gets the
+        // whole wait.
+        assert_eq!(
+            plan(&target, false).unwrap(),
+            [Step::Direct { short: false }]
+        );
+    }
+
+    #[test]
+    fn an_id_alone_uses_the_directory_unless_relays_are_off() {
+        let target = Target::parse(ID).unwrap();
+        assert_eq!(plan(&target, true).unwrap(), [Step::Directory(id())]);
+        let refused = plan(&target, false).unwrap_err().to_string();
+        assert_eq!(refused, NO_DIRECT_ADDRESS);
+    }
+
+    #[test]
+    fn a_known_address_goes_in_front_of_a_bare_id() {
+        let lan: SocketAddr = "192.168.1.20:5940".parse().unwrap();
+        let v6: SocketAddr = "[fd00::7]:5940".parse().unwrap();
+        let typed = prefer_direct(ID, Some(lan));
+        assert_eq!(typed, format!("{ID}@192.168.1.20:5940"));
+        assert_eq!(
+            Target::parse(&typed).unwrap(),
+            Target::At {
+                id: Some(id()),
+                host: "192.168.1.20".into(),
+                port: PORT
+            }
+        );
+        assert_eq!(
+            Target::parse(&prefer_direct(ID, Some(v6))).unwrap(),
+            Target::At {
+                id: Some(id()),
+                host: "fd00::7".into(),
+                port: PORT
+            }
+        );
+        assert_eq!(prefer_direct(ID, None), ID);
+        // An address the helper typed is never replaced.
+        assert_eq!(prefer_direct("10.0.0.9:6000", Some(lan)), "10.0.0.9:6000");
+        let typed = format!("{ID}@10.0.0.9");
+        assert_eq!(prefer_direct(&typed, Some(lan)), typed);
+    }
+
+    #[test]
+    fn only_addresses_the_computer_listens_on_are_remembered() {
+        for good in [
+            "192.168.1.20:5940",
+            "10.0.0.4:61234",
+            "100.64.1.2:5940",
+            "[fd00::2]:7000",
+            "203.0.113.9:5940",
+        ] {
+            assert!(worth_remembering(good.parse().unwrap()), "{good}");
+        }
+        for bad in [
+            "203.0.113.9:41641",
+            "127.0.0.1:5940",
+            "169.254.3.4:5940",
+            "[fe80::1]:5940",
+            "0.0.0.0:5940",
+            "[2606:4700::4]:40000",
+        ] {
+            assert!(!worth_remembering(bad.parse().unwrap()), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_book_keeps_the_last_direct_address() {
+        let dir = std::env::temp_dir().join(format!("boundary-book-{}", std::process::id()));
+        let path = dir.join("direct.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut book = Book::open(&path);
+        assert_eq!(book.get(ID), None);
+        let first: SocketAddr = "192.168.1.20:5940".parse().unwrap();
+        let moved: SocketAddr = "192.168.1.31:5940".parse().unwrap();
+        assert!(book.remember(id(), first));
+        assert!(!book.remember(id(), first), "the same address is not news");
+        assert!(!book.remember(id(), "203.0.113.9:41641".parse().unwrap()));
+        assert_eq!(Book::open(&path).get(ID), Some(first));
+        assert!(book.remember(id(), moved));
+        assert_eq!(Book::open(&path).get(&ID.to_uppercase()), Some(moved));
+        assert_eq!(book.get("not an id"), None);
+        std::fs::write(&path, b"{ broken").unwrap();
+        assert_eq!(Book::open(&path).get(ID), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn the_id_is_asked_for_and_given() {
+
         let id = EndpointId::from_str(ID).unwrap();
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = probe.local_addr().unwrap();

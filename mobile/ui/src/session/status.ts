@@ -2,7 +2,7 @@
  * Plain words for what the session is doing, and the colour of the
  * connection badge. Kept apart from the components so they can be tested.
  */
-import type { SessionState, SessionStats } from "../api/contract";
+import type { BoundaryRoute, SessionState, SessionStats } from "../api/contract";
 
 export type Step = 0 | 1 | 2 | 3;
 
@@ -58,6 +58,11 @@ export const LEVEL_WORDS: Record<Level, string> = {
   fair: "A little slow",
   poor: "Slow connection",
 };
+
+/** How a Boundary session travels, in the words the connection sheet shows. */
+export function routeWords(route: BoundaryRoute): string {
+  return route === "direct" ? "Direct" : "Through a relay";
+}
 
 export function formatSpeed(bps: number): string {
   const bits = bps * 8;
