@@ -140,3 +140,22 @@ export function autoSaveProfile(input: {
     wolMac: hostMac(d),
   };
 }
+
+/**
+ * The host the shell saved for this endpoint, renamed, or null to leave it.
+ *
+ * Ticking Remember on the first connect makes the shell save the host before
+ * the auto save runs, named by its bare address. That one takes the better
+ * name and any hints it lacks. A host someone named is never touched.
+ */
+export function renameAdopted(existing: HostProfile, profile: HostProfile): HostProfile | null {
+  const bare = existing.friendlyName.trim() === existing.address.trim();
+  if (!bare || profile.friendlyName === existing.friendlyName) return null;
+  return {
+    ...existing,
+    friendlyName: profile.friendlyName,
+    osHint: (existing.osHint ?? "unknown") === "unknown" ? profile.osHint : existing.osHint,
+    serverHint: existing.serverHint ?? profile.serverHint,
+    wolMac: existing.wolMac ?? profile.wolMac,
+  };
+}

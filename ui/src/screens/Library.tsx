@@ -64,6 +64,7 @@ import {
   canAutoSave,
   discoveredFor,
   findSavedHost,
+  renameAdopted,
   type HostAutoSavedPayload,
   type SessionConnectedPayload,
 } from "../lib/autoSave";
@@ -272,8 +273,8 @@ export function Library({
    * and connect first, but cheap to cover.
    */
   const autoSaveEarly = useRef(new Map<string, string>());
-  const autoSaveRef = useRef({ enabled: settings.autoSaveHosts, discovered, saveHost });
-  autoSaveRef.current = { enabled: settings.autoSaveHosts, discovered, saveHost };
+  const autoSaveRef = useRef({ enabled: settings.autoSaveHosts, discovered, saveHost, refresh });
+  autoSaveRef.current = { enabled: settings.autoSaveHosts, discovered, saveHost, refresh };
 
   const autoSaveSession = useCallback(async (sessionId: string, desktopName: string): Promise<void> => {
     const pending = autoSavePending.current.get(sessionId);
@@ -294,18 +295,24 @@ export function Library({
     // connecting already makes the shell save a host for this endpoint, and
     // that one may not have reached this window yet.
     const current = await safeInvoke<HostProfile[]>("list_hosts", undefined, []);
-    if (findSavedHost(Array.isArray(current) ? current : [], pending)) return;
-    const saved = await save(
-      autoSaveProfile({
-        ...pending,
-        desktopName,
-        discovered: discoveredFor(found, pending.protocol, pending.address, pending.port),
-      }),
-    );
+    const profile = autoSaveProfile({
+      ...pending,
+      desktopName,
+      discovered: discoveredFor(found, pending.protocol, pending.address, pending.port),
+    });
+    const existing = findSavedHost(Array.isArray(current) ? current : [], pending);
+    let saved: HostProfile | null;
+    if (existing) {
+      const renamed = renameAdopted(existing, profile);
+      if (!renamed) return;
+      saved = await save(renamed);
+    } else {
+      saved = await save(profile);
+    }
     if (!saved) return;
     // The connection this host was born from is live, so the tile should
-    // not claim it has never been connected to.
-    void safeInvoke("touch_connected", { hostId: saved.id }, null);
+    // not claim it has never been connected to, and Recents should list it.
+    await safeInvoke("touch_connected", { hostId: saved.id }, null);
     const payload: HostAutoSavedPayload = { sessionId, name: saved.friendlyName };
     void emit(HOST_AUTOSAVED_EVENT, payload).catch(() => {});
   }, []);
@@ -315,7 +322,11 @@ export function Library({
     let cancelled = false;
     void safeListen<SessionConnectedPayload>(SESSION_CONNECTED_EVENT, (ev) => {
       if (cancelled || !ev || typeof ev.sessionId !== "string") return;
-      void autoSaveSession(ev.sessionId, typeof ev.desktopName === "string" ? ev.desktopName : "");
+      // Any connect moves "Last connected" and Recents, saved host or not,
+      // so read the list again once the auto save has had its turn.
+      void autoSaveSession(ev.sessionId, typeof ev.desktopName === "string" ? ev.desktopName : "").finally(() => {
+        void autoSaveRef.current.refresh();
+      });
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;

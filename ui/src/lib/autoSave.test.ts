@@ -6,6 +6,7 @@ import {
   canAutoSave,
   discoveredFor,
   findSavedHost,
+  renameAdopted,
   sameAddress,
 } from "./autoSave";
 
@@ -161,5 +162,25 @@ describe("autoSaveProfile", () => {
     expect(p.serverHint).toBeNull();
     expect(p.wolMac).toBeNull();
     expect(p.protocol).toBe("ssh");
+  });
+});
+
+describe("renameAdopted", () => {
+  const better = { ...host("vnc", "10.0.0.5", 5900, "Studio Box"), osHint: "linux" as const };
+
+  it("gives a host saved under its bare address the better name and hints", () => {
+    const adopted = host("vnc", "10.0.0.5", 5900);
+    const out = renameAdopted(adopted, better);
+    expect(out?.friendlyName).toBe("Studio Box");
+    expect(out?.osHint).toBe("linux");
+    expect(out?.id).toBe(adopted.id);
+  });
+
+  it("leaves a host someone named alone", () => {
+    expect(renameAdopted(host("vnc", "10.0.0.5", 5900, "Kitchen PC"), better)).toBeNull();
+  });
+
+  it("does nothing when there is no better name", () => {
+    expect(renameAdopted(host("vnc", "10.0.0.5", 5900), host("vnc", "10.0.0.5", 5900))).toBeNull();
   });
 });
