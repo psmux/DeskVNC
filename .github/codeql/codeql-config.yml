@@ -1,0 +1,27 @@
+# CodeQL configuration for .github/workflows/codeql.yml.
+#
+# The paths below are code that never ships in a DeskVNC build, so alerts in
+# them are noise: tests and examples whose passwords and keys are fixtures,
+# and the third party crates under patches/ that are vendored only to carry a
+# fix (see patches/README.md). Their examples and tests are not built by our
+# workspace at all.
+#
+# Test modules inside src files (`#[cfg(test)] mod tests`) cannot be told
+# apart by path and still get scanned.
+#
+# This file only takes effect once code scanning's default setup is turned
+# off in the repository settings; default setup ignores it.
+#
+# The query suite stays the default one, the same set default setup runs.
+name: DeskVNC CodeQL config
+
+paths-ignore:
+  - patches/**
+  - "**/tests/**"
+  - "**/examples/**"
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.test.mjs"
+  - "**/node_modules/**"
+  - "**/dist/**"
+  - target/**
