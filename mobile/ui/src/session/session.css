@@ -1836,3 +1836,8 @@
   outline-offset: 2px;
   opacity: 1;
 }
+
+/* The turn sideways hint rises over the button so both can be tapped. */
+.dv-session.has-keybtn .dv-s-hint {
+  bottom: calc(var(--s-safe-b) + var(--s-kb) + var(--s-keybar-h) + 76px);
+}

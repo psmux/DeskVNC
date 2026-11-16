@@ -916,10 +916,11 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   const showDesktop = s.phase === "connected" || s.phase === "ended";
   const reconnecting = s.state.state === "reconnecting";
   const keyBarVisible = showDesktop && (keyboardOn || keysOn);
+  const keyButtonVisible = prefs.keyButton && s.phase === "connected" && !toolbarOpen && !coach && !sheet && !askLeave;
   const ringStyle = ring ? { left: ring.x, top: ring.y } : undefined;
 
   return (
-    <div ref={rootRef} className={`dv-session mode-${mode}${keyBarVisible ? " has-keybar" : ""}`}>
+    <div ref={rootRef} className={`dv-session mode-${mode}${keyBarVisible ? " has-keybar" : ""}${keyButtonVisible ? " has-keybtn" : ""}`}>
       <div ref={stageRef} className="dv-s-stage" aria-label="The computer's screen" role="application">
         <canvas ref={s.attachCanvas} className="dv-s-canvas" />
         {showDesktop ? (
@@ -973,7 +974,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
               <IconZoomOut size={20} /> Show the whole screen
             </button>
           ) : null}
-          {prefs.keyButton && s.phase === "connected" && !toolbarOpen && !coach && !sheet && !askLeave ? (
+          {keyButtonVisible ? (
             <KeyButton
               pos={prefs.keyButtonPos}
               bottomInset={kb.px + (keyBarVisible ? KEYBAR_H : 0)}
