@@ -23,6 +23,11 @@ on:
       - "scripts/agent_e2e_mcp.py"
       - ".github/workflows/agents-e2e.yml"
 
+# Least privilege for the GITHUB_TOKEN: this workflow only reads the
+# repository.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

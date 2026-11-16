@@ -11,11 +11,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { escapeHtml as esc } from "./html.mjs";
 
 const store = join(dirname(fileURLToPath(import.meta.url)), "..", "store");
 const md = readFileSync(join(store, "privacy-policy.md"), "utf8");
 
-const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// A link's URL is already escaped text when it reaches the href, and `esc`
+// escapes quotes, so nothing in the policy can end the attribute early.
 const inline = (s) =>
   esc(s).replace(/https:\/\/[^\s)]+[^\s).,]/g, (u) => `<a href="${u}">${u}</a>`);
 

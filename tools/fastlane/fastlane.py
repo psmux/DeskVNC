@@ -23,10 +23,12 @@ then carried out by a loop with no large model in it:
 Run:  python3 fastlane.py --plan plan.json
 plan.json: {"host_id": "<DeskVNC saved host>", "steps": [...]}, steps as run() describes.
 Settings come from the environment: FASTLANE_KEY (the shared bearer token),
-FASTLANE_JEV (optional, http://host:port of jev serve), FASTLANE_DVV (the dvv binary), FASTLANE_SENSE_PORT (5942).
+FASTLANE_JEV (optional, http://host:port of jev serve), FASTLANE_DVV (the dvv binary), FASTLANE_SENSE_PORT (5942),
+FASTLANE_LISTEN (the address the sense dials, 0.0.0.0 by default).
 """
 
 import argparse
+import hmac
 import json
 import os
 import socket
@@ -39,6 +41,11 @@ KEY = os.environ.get("FASTLANE_KEY", "")
 JEV = os.environ.get("FASTLANE_JEV", "")
 DVV = os.environ.get("FASTLANE_DVV", "dvv")
 SENSE_PORT = int(os.environ.get("FASTLANE_SENSE_PORT", "5942"))
+# The sense on the remote computer dials in, so by default this listens on
+# every interface. Set it to one address to keep the port off the others.
+LISTEN = os.environ.get("FASTLANE_LISTEN", "0.0.0.0")
+# The same floor deskvnc-sense sets for its side of the secret.
+MIN_KEY_LEN = 16
 
 CLICKABLE = {"button", "checkbox", "radio", "combobox", "link", "listitem", "menuitem", "tab", "treeitem", "row", "header", "textbox", "document"}
 EDITABLE = {"textbox", "combobox", "document"}
@@ -58,20 +65,33 @@ def post(url, body, timeout=10):
         return json.loads(r.read())
 
 
+def token_ok(sent, key):
+    """Whether the token a sense sent is the shared secret.
+
+    A short or empty secret is refused outright, or a sense sending an empty
+    token would match an unset FASTLANE_KEY. The comparison takes the same
+    time wherever the first wrong byte is."""
+    if len(key) < MIN_KEY_LEN or not isinstance(sent, str):
+        return False
+    return hmac.compare_digest(sent.encode(), key.encode())
+
+
 class Sense:
     """The remote computer's deskvnc-sense, which dials in to us."""
 
     def __init__(self, port):
+        if len(KEY) < MIN_KEY_LEN:
+            raise SystemExit(f"set FASTLANE_KEY to a secret of at least {MIN_KEY_LEN} characters")
         srv = socket.socket()
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("0.0.0.0", port))
+        srv.bind((LISTEN, port))
         srv.listen(1)
-        print(f"waiting for deskvnc-sense on port {port}", file=sys.stderr)
+        print(f"waiting for deskvnc-sense on {LISTEN}:{port}", file=sys.stderr)
         conn, addr = srv.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.io = conn.makefile("rw")
         hello = json.loads(self.io.readline())
-        if hello.get("token") != KEY:
+        if not token_ok(hello.get("token"), KEY):
             raise SystemExit("deskvnc-sense sent the wrong token")
         print(f"deskvnc-sense connected from {addr[0]}", file=sys.stderr)
 
