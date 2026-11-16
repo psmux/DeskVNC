@@ -58,7 +58,9 @@ import { CertificateSheet } from "../components/sheets/CertificateSheet";
 import { CredentialSheet } from "../components/sheets/CredentialSheet";
 import { LAYER, useBack } from "../lib/back";
 import { sessionBackStep } from "./back";
-import { readPrefs, usePrefs } from "../lib/prefs";
+import { readPrefs, setPrefs, usePrefs } from "../lib/prefs";
+import { KeyButton } from "./ui/KeyButton";
+import { keyButtonTap } from "./input/keyButton";
 import { Toolbar, type ToolbarAction } from "./ui/Toolbar";
 import "./session.css";
 
@@ -104,6 +106,8 @@ const SCROLL_STEP = 22;
 const FOLLOW_MARGIN = 44;
 /** A finger this close to an edge while dragging pans a zoomed view. */
 const EDGE_ZONE = 36;
+/** The key bar's height; matches `--s-keybar-h` in session.css. */
+const KEYBAR_H = 100;
 
 const NAMED_KEYS = new Set<string>([
   "Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown",
@@ -143,6 +147,9 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   const [hostName, setHostName] = useState<string | null>(null);
   const [clipSeen, setClipSeen] = useState<string | null>(null);
   const [askLeave, setAskLeave] = useState(false);
+  /** The phone keyboard as last measured: pixels it overlays the page by
+   *  (iOS; 0 on Android, which shrinks the page) and whether it is up. */
+  const [kb, setKb] = useState({ px: 0, shown: false });
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -292,8 +299,11 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
       }
       tallest = Math.max(tallest, window.innerHeight);
       const kb = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
-      root.style.setProperty("--s-kb", `${Math.round(kb)}px`);
-      root.classList.toggle("kb-open", kb > 40 || tallest - window.innerHeight > 120);
+      const px = Math.round(kb);
+      const shown = kb > 40 || tallest - window.innerHeight > 120;
+      root.style.setProperty("--s-kb", `${px}px`);
+      root.classList.toggle("kb-open", shown);
+      setKb((prev) => (prev.px === px && prev.shown === shown ? prev : { px, shown }));
     };
     update();
     vv.addEventListener("resize", update);
@@ -880,6 +890,25 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
     [keyboardOn, leave, openKeyboard, s, showToast],
   );
 
+  // The floating keyboard button: same path as the toolbar's Keyboard.
+  const onKeyButton = useCallback(() => {
+    tick("soft");
+    const focused = document.activeElement === inputRef.current;
+    switch (keyButtonTap(focused, kb.shown)) {
+      case "hide":
+        openKeyboard(false);
+        break;
+      case "reshow":
+        openKeyboard(false);
+        openKeyboard(true);
+        break;
+      case "show":
+        openKeyboard(true);
+        break;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kb.shown, openKeyboard]);
+
   // ------------------------------------------------------------ render
 
   const name = title?.trim() || hostName || (target.kind === "saved" && s.desktopName) || targetName(target);
@@ -943,6 +972,15 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
             }}>
               <IconZoomOut size={20} /> Show the whole screen
             </button>
+          ) : null}
+          {prefs.keyButton && s.phase === "connected" && !toolbarOpen && !coach && !sheet && !askLeave ? (
+            <KeyButton
+              pos={prefs.keyButtonPos}
+              bottomInset={kb.px + (keyBarVisible ? KEYBAR_H : 0)}
+              open={keyboardOn && kb.shown}
+              onTap={onKeyButton}
+              onMoved={(keyButtonPos) => setPrefs({ keyButtonPos })}
+            />
           ) : null}
           {sidewaysHint && !zoomed ? (
             <button type="button" className="dv-s-hint" onClick={() => setSidewaysHint(false)}>
