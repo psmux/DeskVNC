@@ -556,6 +556,10 @@ jobs:
           codesign --verify --strict --deep "$APP"
           codesign -dvv "$APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
             || { echo "not signed with a Developer ID"; exit 1; }
+          if [ "${{ github.event_name == 'workflow_dispatch' && !inputs.notarize }}" = "true" ]; then
+            echo "Notarization was turned off for this hand run; signed with a Developer ID only."
+            exit 0
+          fi
           xcrun stapler validate "$APP" \
             || { echo "no notarization ticket stapled to the .app"; exit 1; }
           # The check that actually predicts a user's experience: a downloaded
