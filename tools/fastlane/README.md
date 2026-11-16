@@ -93,7 +93,9 @@ On the MSI that plan ran its 7 actions in 5.9 s.
 
 ### The Python prototype
 
-On the controller:
+On the controller. `FASTLANE_KEY` must be at least 16 characters, the same
+floor deskvnc-sense sets. The prototype listens on every interface for the
+sense to dial in; set `FASTLANE_LISTEN` to one address to narrow that.
 
 ```sh
 FASTLANE_KEY=<shared secret> \
