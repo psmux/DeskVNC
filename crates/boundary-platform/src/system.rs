@@ -69,24 +69,51 @@ pub fn console() -> Option<Console> {
             &mut bytes,
         )
     };
-    if ok == 0 || buffer.is_null() {
+    if ok == 0 {
         return None;
     }
-    // SAFETY: WTSSessionInfoEx fills a WTSINFOEXW, freed once read.
-    let (signed_in, locked) = unsafe {
-        let info = &*(buffer as *const WTSINFOEXW);
-        let level = &info.Data.WTSInfoExLevel1;
-        let signed_in = level.UserName[0] != 0;
-        // WTS_SESSIONSTATE_LOCK is 0; UNLOCK is 1 and UNKNOWN is -1.
-        let locked = info.Level == 1 && level.SessionFlags == 0;
-        WTSFreeMemory(buffer.cast());
-        (signed_in, locked)
-    };
+    let buffer = std::ptr::NonNull::new(buffer)?;
+    // SAFETY: on success WTSQuerySessionInformationW hands back a buffer of
+    // `bytes` bytes that stays valid until WTSFreeMemory, called right after.
+    let state = unsafe { session_state(buffer.cast::<u8>().as_ptr(), bytes as usize) };
+    // SAFETY: the buffer came from WTSQuerySessionInformationW and is freed
+    // once, here, after the last read above.
+    unsafe { WTSFreeMemory(buffer.as_ptr().cast()) };
+    let (signed_in, locked) = state?;
     Some(Console {
         session,
         signed_in,
         locked,
     })
+}
+
+/// Whether somebody is signed in and whether the session is locked, read from
+/// the `WTSSessionInfoEx` answer at `buffer`, or `None` when the answer is too
+/// short to hold a `WTSINFOEXW` or is not the level 1 form this reads.
+///
+/// The record is copied out with an unaligned read rather than referenced in
+/// place, and its length is checked first, so a short or oddly aligned buffer
+/// is refused instead of read past its end.
+///
+/// # Safety
+///
+/// `buffer` must be valid for reads of `bytes` bytes.
+unsafe fn session_state(buffer: *const u8, bytes: usize) -> Option<(bool, bool)> {
+    if bytes < std::mem::size_of::<WTSINFOEXW>() {
+        return None;
+    }
+    // SAFETY: the caller vouches for `bytes` readable bytes, and there are at
+    // least as many as a WTSINFOEXW, which is plain data valid for any bits.
+    let info = unsafe { std::ptr::read_unaligned(buffer.cast::<WTSINFOEXW>()) };
+    if info.Level != 1 {
+        return None;
+    }
+    // SAFETY: Level 1 says the union holds WTSInfoExLevel1.
+    let level = unsafe { info.Data.WTSInfoExLevel1 };
+    let signed_in = level.UserName[0] != 0;
+    // WTS_SESSIONSTATE_LOCK is 0; UNLOCK is 1 and UNKNOWN is -1.
+    let locked = level.SessionFlags == 0;
+    Some((signed_in, locked))
 }
 
 /// The session this process runs in.
@@ -380,4 +407,70 @@ pub(crate) fn remote_session() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
     // SAFETY: no pointers.
     unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(level: u32, user: &str, flags: i32) -> WTSINFOEXW {
+        // SAFETY: WTSINFOEXW is plain data; all zero bits is a valid value.
+        let mut info: WTSINFOEXW = unsafe { std::mem::zeroed() };
+        info.Level = level;
+        // SAFETY: writing the level 1 arm of a zeroed union.
+        let one = unsafe { &mut info.Data.WTSInfoExLevel1 };
+        for (dst, src) in one.UserName.iter_mut().zip(user.encode_utf16()) {
+            *dst = src;
+        }
+        one.SessionFlags = flags;
+        info
+    }
+
+    fn read(info: &WTSINFOEXW, bytes: usize) -> Option<(bool, bool)> {
+        // SAFETY: `bytes` never exceeds the record's size in these tests.
+        unsafe { session_state((info as *const WTSINFOEXW).cast(), bytes) }
+    }
+
+    #[test]
+    fn reads_a_signed_in_locked_session() {
+        let info = record(1, "alice", 0);
+        assert_eq!(read(&info, size_of::<WTSINFOEXW>()), Some((true, true)));
+    }
+
+    #[test]
+    fn reads_the_sign_in_screen() {
+        let info = record(1, "", 1);
+        assert_eq!(read(&info, size_of::<WTSINFOEXW>()), Some((false, false)));
+    }
+
+    #[test]
+    fn refuses_a_short_answer() {
+        let info = record(1, "alice", 0);
+        assert_eq!(read(&info, size_of::<WTSINFOEXW>() - 1), None);
+        assert_eq!(read(&info, 0), None);
+    }
+
+    #[test]
+    fn refuses_a_level_it_does_not_know() {
+        let info = record(2, "alice", 0);
+        assert_eq!(read(&info, size_of::<WTSINFOEXW>()), None);
+    }
+
+    #[test]
+    fn reads_from_an_unaligned_buffer() {
+        let info = record(1, "bob", 0);
+        let size = size_of::<WTSINFOEXW>();
+        let mut bytes = vec![0u8; size + 1];
+        // SAFETY: copying the record's bytes into a buffer one longer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (&info as *const WTSINFOEXW).cast::<u8>(),
+                bytes.as_mut_ptr().add(1),
+                size,
+            );
+        }
+        // SAFETY: `size` bytes from offset 1 are inside the vector.
+        let got = unsafe { session_state(bytes.as_ptr().add(1), size) };
+        assert_eq!(got, Some((true, true)));
+    }
 }
