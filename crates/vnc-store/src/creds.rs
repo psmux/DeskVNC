@@ -36,6 +36,16 @@ const HEADER_LEN: usize = 4 + 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
 const DEFAULT_M_COST: u32 = 65536; // KiB => 64 MiB
 const DEFAULT_T_COST: u32 = 3;
 const DEFAULT_P_COST: u32 = 4;
+/// Upper limits for the Argon2 parameters read from a file header. The
+/// header is only authenticated after the key is derived, so without these a
+/// tampered file could ask for gigabytes of memory or hours of work and hang
+/// unlock. They sit far above anything this code writes.
+const MAX_M_COST: u32 = 1024 * 1024; // KiB => 1 GiB
+const MAX_T_COST: u32 = 64;
+const MAX_P_COST: u32 = 64;
+const _: () = assert!(
+    DEFAULT_M_COST <= MAX_M_COST && DEFAULT_T_COST <= MAX_T_COST && DEFAULT_P_COST <= MAX_P_COST
+);
 
 /// Which backend currently serves credentials (for the UI status chip).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -463,6 +473,11 @@ fn open_vault(bytes: &[u8], master_password: &str) -> Result<Vault> {
     salt.copy_from_slice(&header[17..17 + SALT_LEN]);
     let mut nonce = [0u8; NONCE_LEN];
     nonce.copy_from_slice(&header[17 + SALT_LEN..HEADER_LEN]);
+    if m_cost > MAX_M_COST || t_cost > MAX_T_COST || p_cost > MAX_P_COST {
+        return Err(Error::MalformedCredentialFile(format!(
+            "Argon2 parameters out of range (m={m_cost} KiB, t={t_cost}, p={p_cost})"
+        )));
+    }
 
     let key = derive_key(master_password, &salt, m_cost, t_cost, p_cost)?;
     let cipher = XChaCha20Poly1305::new((&*key).into());
@@ -910,6 +925,36 @@ mod tests {
                           // Re-derive would use the tampered params, so decryption must fail
                           // regardless of which password is supplied.
         assert!(open_vault(&bytes, "pw").is_err());
+    }
+
+    #[test]
+    fn a_huge_kdf_cost_in_the_header_is_refused_before_deriving() {
+        // A tampered header asking for 4 TiB of memory must fail at once as a
+        // malformed file, not hang unlock trying to allocate it.
+        let dir = tempfile::tempdir().unwrap();
+        let store = file_store(dir.path());
+        store.unlock("pw").unwrap();
+        store.save("host-1", &sample_creds()).unwrap();
+        store.lock();
+
+        let path = dir.path().join("credentials.enc");
+        let mut bytes = std::fs::read(&path).unwrap();
+        for (off, value) in [(5, u32::MAX), (9, 1), (13, 1)] {
+            bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            open_vault(&bytes, "pw"),
+            Err(Error::MalformedCredentialFile(_))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+        bytes[5..9].copy_from_slice(&8u32.to_le_bytes());
+        bytes[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            open_vault(&bytes, "pw"),
+            Err(Error::MalformedCredentialFile(_))
+        ));
     }
 
     #[test]
