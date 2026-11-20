@@ -595,6 +595,9 @@ async fn drive(
                 // server's cut text, and the agent plane keeps it for
                 // clipboard.read.
                 Some(Event::ClipboardText(text)) => emit(events, SessionEvent::ClipboardText(text)).await?,
+                // Why typing and clicks are not reaching that computer, such
+                // as a Mac at its lock screen, and when they do again.
+                Some(Event::Notice(notice)) => emit(events, SessionEvent::Protocol(remote_core::ProtocolEvent::BoundaryInput { trouble: notice.text() })).await?,
                 Some(Event::Paired { machine, name }) => {
                     if let Some(paired) = paired.as_ref() { paired(machine, name); }
                 }

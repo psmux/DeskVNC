@@ -66,6 +66,11 @@ export interface RemoteSession {
   stats: SessionStats | null;
   /** How a Boundary session travels, once it is known. */
   route: BoundaryRoute | null;
+  /**
+   * Why a Boundary computer is not taking taps and keys right now, such as a
+   * Mac at its lock screen, in words to show. Null while they land.
+   */
+  inputTrouble: string | null;
   credentials: CredentialRequest | null;
   cert: CertPromptData | null;
   error: string | null;
@@ -106,6 +111,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [desktopName, setDesktopName] = useState<string | null>(null);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [route, setRoute] = useState<BoundaryRoute | null>(null);
+  const [inputTrouble, setInputTrouble] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<CredentialRequest | null>(null);
   const [cert, setCert] = useState<CertPromptData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -195,6 +201,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     setCredentials(null);
     setCert(null);
     setStats(null);
+    setInputTrouble(null);
     endedWhileHidden.current = false;
     exiting.current = false;
 
@@ -280,6 +287,9 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
           break;
         case "boundary-route":
           setRoute(e.route);
+          break;
+        case "boundary-input":
+          setInputTrouble(typeof e.trouble === "string" ? e.trouble : null);
           break;
         case "error":
           if (isSignInRefusal(e.message)) onSignInRefused();
@@ -480,5 +490,6 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     snapshot,
     notice,
     inputFailure,
+    inputTrouble,
   };
 }
