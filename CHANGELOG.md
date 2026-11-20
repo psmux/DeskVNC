@@ -10,6 +10,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* A Mac with "Also before anyone signs in" switched on could not be reached
+  after a restart. DeskVNC Support started at the sign in screen before macOS
+  let it near the screen, found no display and ended, and macOS started it
+  again only after a crash. It is now started again whenever it ends. Switch
+  the setting off and on once to pick this up on a Mac set up before.
+
 ## [0.36.5] (2026-11-20)
 
 0.36.4 was built but never published: Apple refused to notarize it until an

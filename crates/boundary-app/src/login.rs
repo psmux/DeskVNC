@@ -280,6 +280,12 @@ mod imp {
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
         };
+        // Started again whenever it ends, not only after a crash. At boot
+        // launchd starts it before the window server lets anyone in; it then
+        // found no display and ended within two seconds, and with restarts
+        // only after a crash nothing brought it back until somebody signed
+        // in and out. macOS unloads a LoginWindow agent when somebody signs
+        // in, so this cannot spin behind a signed in session.
         let body = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -290,7 +296,8 @@ mod imp {
 <key>ProgramArguments</key><array><string>{}</string><string>--login-screen</string></array>
 <key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string></dict>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>5</integer>
 <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
 "#,
