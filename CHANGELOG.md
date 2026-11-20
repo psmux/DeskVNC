@@ -10,8 +10,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.5] (2026-11-20)
+
+0.36.4 was built but never published: Apple refused to notarize it until an
+updated developer agreement was signed. Its changes and those of 0.36.3, both
+listed below, are part of this release. Among them, the DeskVNC Support copy
+buttons put the invitation and the computer's ID on the clipboard again.
+
 ### Fixed
 
+* A tampered credentials file could ask for so much memory and so many passes
+  that unlocking hung. Costs above 1 GiB, 64 passes or 64 lanes are now
+  refused as a malformed file. Everything DeskVNC writes is far below that.
 * A Boundary session could show an old screen after video. Once the screen
   settled, the computer sent only the tiles video had drawn wrong, and when
   those sat in opposite corners the viewer took them for a whole screen. The
