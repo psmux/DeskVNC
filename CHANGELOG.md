@@ -10,6 +10,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* A Boundary session could show an old screen after video. Once the screen
+  settled, the computer sent only the tiles video had drawn wrong, and when
+  those sat in opposite corners the viewer took them for a whole screen. The
+  next refresh, which comes every time an agent reads the screen after a
+  minute away, then painted the screen from before the video over the window
+  and the agent's mirror: a closed Launchpad or an earlier page came back in
+  blocks. The viewer now counts a screen as whole only when the tiles really
+  cover it.
+
 ## [0.36.4] (2026-11-16)
 
 0.36.3 was built but never published. Its changes, listed below under
