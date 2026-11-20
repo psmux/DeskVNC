@@ -662,7 +662,13 @@ async fn drive(
                                 None => (vec![DecodedRect { rect: whole, payload: RectPayload::Rgba(frame.rgba.clone()) }], whole),
                             };
                             // A whole screen of tiles covers whatever video drew.
-                            if damage == whole {
+                            // The box around the tiles is no test of that: after
+                            // video the computer sends only the tiles video got
+                            // wrong, and two in opposite corners span the whole
+                            // screen while covering almost none of it. Taking
+                            // that as whole let the next Refresh paint the screen
+                            // from before the video over the window and the mirror.
+                            if covers(rects.iter().map(|r| r.rect), whole) {
                                 video.stale = false;
                             }
                             emit(events, SessionEvent::FramebufferUpdate { rects, damage }).await?;
@@ -884,6 +890,41 @@ impl Video {
     }
 }
 
+/// Whether `rects` together cover every pixel of `whole`, overlaps and all.
+/// The area of their union is measured on the grid their own edges make, so
+/// a few hundred tiles cost a few hundred thousand cell checks at most.
+fn covers(rects: impl Iterator<Item = Rect>, whole: Rect) -> bool {
+    let clipped: Vec<(u32, u32, u32, u32)> = rects
+        .filter_map(|r| {
+            let x0 = u32::from(r.x).max(u32::from(whole.x));
+            let y0 = u32::from(r.y).max(u32::from(whole.y));
+            let x1 = (u32::from(r.x) + u32::from(r.width))
+                .min(u32::from(whole.x) + u32::from(whole.width));
+            let y1 = (u32::from(r.y) + u32::from(r.height))
+                .min(u32::from(whole.y) + u32::from(whole.height));
+            (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+        })
+        .collect();
+    let mut xs: Vec<u32> = clipped.iter().flat_map(|r| [r.0, r.2]).collect();
+    let mut ys: Vec<u32> = clipped.iter().flat_map(|r| [r.1, r.3]).collect();
+    xs.sort_unstable();
+    xs.dedup();
+    ys.sort_unstable();
+    ys.dedup();
+    let mut area = 0u64;
+    for col in xs.windows(2) {
+        for row in ys.windows(2) {
+            if clipped
+                .iter()
+                .any(|r| r.0 <= col[0] && col[1] <= r.2 && r.1 <= row[0] && row[1] <= r.3)
+            {
+                area += u64::from(col[1] - col[0]) * u64::from(row[1] - row[0]);
+            }
+        }
+    }
+    area == u64::from(whole.width) * u64::from(whole.height)
+}
+
 /// One changed rectangle of a Boundary screen, as its own pixels.
 fn crop(frame: &boundary_session::Frame, r: &boundary_session::Rect) -> DecodedRect {
     let stride = frame.width as usize * 4;
@@ -906,6 +947,43 @@ fn crop(frame: &boundary_session::Frame, r: &boundary_session::Rect) -> DecodedR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The tiles video got wrong, in two corners: their box is the whole
+    /// screen, and they cover almost none of it. Video still owns the rest.
+    #[test]
+    fn tiles_in_opposite_corners_do_not_cover_the_screen() {
+        let whole = rect(0, 0, 1920, 1080);
+        let corners = [rect(0, 0, 64, 64), rect(1856, 1016, 64, 64)];
+        assert_eq!(corners[0].union(&corners[1]), whole);
+        assert!(!covers(corners.into_iter(), whole));
+    }
+
+    #[test]
+    fn the_whole_screen_or_tiles_that_fill_it_cover_it() {
+        let whole = rect(0, 0, 1920, 1080);
+        assert!(covers([whole].into_iter(), whole));
+        // Rows of tiles, overlapping where they meet, with nothing left out.
+        let rows = [
+            rect(0, 0, 1920, 600),
+            rect(0, 540, 1000, 540),
+            rect(990, 540, 930, 540),
+        ];
+        assert!(covers(rows.into_iter(), whole));
+        // One tile short.
+        let short = [rect(0, 0, 1920, 1016), rect(0, 1016, 1856, 64)];
+        assert!(!covers(short.into_iter(), whole));
+        assert!(!covers(std::iter::empty(), whole));
+    }
+
     #[test]
     fn a_saved_port_is_added_only_where_one_is_missing() {
         let id = "3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723";
