@@ -85,6 +85,7 @@ async fn ended_by_the_helper(approval: Approval, clipboard: bool) -> anyhow::Res
             tools: false,
             video: false,
             clipboard,
+            notices: false,
         },
     );
     connected(&mut host, Some(approval)).await;

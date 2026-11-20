@@ -26,7 +26,25 @@ use std::io::Cursor;
 const JPEG_QUALITY: u8 = 70;
 pub use screen::Rect;
 pub use video::{Update, VideoUnit};
-pub use wire::{Button, ClipboardRights, Input, Invitation, Key, MAX_CLIPBOARD};
+pub use wire::{
+    Button, ClipboardRights, HostNotice, Input, InputTrouble, Invitation, Key, MAX_CLIPBOARD,
+};
+
+/// Why [`Desktop::input`] could not deliver an event, for a backend that
+/// knows. The session drops the event and goes on, and a helper that reads
+/// notices is told in words that fit `trouble`. Any other error from
+/// [`Desktop::input`] is told as it is, as [`InputTrouble::Other`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputUnavailable {
+    pub trouble: InputTrouble,
+    pub reason: String,
+}
+impl std::fmt::Display for InputUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+impl std::error::Error for InputUnavailable {}
 
 /// Implemented by a local platform backend, created only after consent.
 pub trait Desktop {
@@ -44,6 +62,10 @@ pub trait Desktop {
     fn capture_damage(&self) -> Option<Vec<Rect>> {
         None
     }
+    /// Deliver one event. An error does not end the session: the event is
+    /// dropped, the screen goes on being shared, and the helper is told why
+    /// (see [`InputUnavailable`]). A backend that cannot make input right now
+    /// should fail fast and try again now and then, not on every event.
     fn input(&mut self, input: Input) -> Result<()>;
     /// How long to wait after typing `text` before sending anything more.
     /// Input reaches the desktop in bursts, since it piles up while a screen

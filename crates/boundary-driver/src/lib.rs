@@ -35,6 +35,7 @@ const ABILITIES: Abilities = Abilities {
     tools: true,
     video: !cfg!(target_os = "linux"),
     clipboard: true,
+    notices: true,
 };
 struct Pending {
     ticket: String,
