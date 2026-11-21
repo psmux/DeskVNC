@@ -12,6 +12,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* With "resize remote to fit" on, an agent's clicks could land off target.
+  The agent activity strip grew when an agent started driving and shrank
+  when it stopped, and a single pane gained and lost its header the same
+  way, so the remote desktop was resized between the agent's screenshot and
+  its click. While agents are turned on, the strip and the pane header now
+  keep one height whether or not an agent is driving. A new preference,
+  "Keep the activity strip to one line", shows a small chip per machine in
+  place of the cards (#52).
 * A Boundary session to a Mac at its sign in screen or lock screen ended on
   the helper's first click, with "no connection could be established (failed
   creating event source)", and again after every reconnect, so the helper
