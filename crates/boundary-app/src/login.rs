@@ -65,6 +65,11 @@ fn probe(display: u32) -> String {
 async fn serve() -> Result<()> {
     let dir = boundary_provision::platform::data_dir()?;
     let access_path = dir.join("access.json");
+    // launchd starts this again whenever it ends. Should it ever do so
+    // behind a signed in session, end at once, before writing to the log.
+    if signed_in() {
+        return Ok(());
+    }
     note(&dir, "started");
     // Whoever listens holds this. The app in the tray lets go of it when the
     // screen locks; with fast user switching it may still hold it behind the
@@ -271,6 +276,44 @@ mod imp {
         );
         Ok(())
     }
+    /// The launchd job that starts the host at the sign in screen.
+    ///
+    /// Started again whenever it ends, not only after a failure, for as
+    /// long as the program exists. At boot launchd can start it before the
+    /// window server lets anyone in, and it ended within two seconds with a
+    /// clean exit, so a job that restarted only after a failure left the
+    /// computer out of reach until somebody signed in and out. Keeping it
+    /// alive on the program's path rather than always means an app moved
+    /// to the Trash without switching this off leaves a job that does
+    /// nothing, not one launchd tries to start every five seconds. macOS
+    /// unloads a LoginWindow agent when somebody signs in, and the host
+    /// steps aside before it takes the machine ID when somebody is signed
+    /// in, so this cannot push the app in the tray off the relay.
+    pub(super) fn launch_agent(exe: &str, home: &str) -> String {
+        let escape = |s: &str| {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        };
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{LABEL}</string>
+<key>AssociatedBundleIdentifiers</key><string>com.psmux.deskvnc.support</string>
+<key>LimitLoadToSessionType</key><string>LoginWindow</string>
+<key>ProgramArguments</key><array><string>{exe}</string><string>--login-screen</string></array>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>{home}</string></dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>PathState</key><dict><key>{exe}</key><true/></dict></dict>
+<key>ThrottleInterval</key><integer>5</integer>
+<key>ProcessType</key><string>Interactive</string>
+</dict></plist>
+"#,
+            exe = escape(exe),
+            home = escape(home)
+        )
+    }
     pub fn set(on: bool) -> Result<()> {
         if !on {
             return as_admin(&format!("rm -f '{}'", plist()));
@@ -281,28 +324,7 @@ mod imp {
         );
         let exe = std::env::current_exe().context("This app cannot find itself")?;
         let home = std::env::var("HOME").context("No home folder")?;
-        let escape = |s: &str| {
-            s.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-        };
-        let body = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>{LABEL}</string>
-<key>AssociatedBundleIdentifiers</key><string>com.psmux.deskvnc.support</string>
-<key>LimitLoadToSessionType</key><string>LoginWindow</string>
-<key>ProgramArguments</key><array><string>{}</string><string>--login-screen</string></array>
-<key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string></dict>
-<key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-<key>ProcessType</key><string>Interactive</string>
-</dict></plist>
-"#,
-            escape(&exe.to_string_lossy()),
-            escape(&home)
-        );
+        let body = launch_agent(&exe.to_string_lossy(), &home);
         let staged = std::env::temp_dir().join(format!("{LABEL}.plist"));
         std::fs::write(&staged, body)?;
         let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
@@ -444,5 +466,59 @@ mod imp {
     }
     pub fn set(_: bool) -> Result<()> {
         bail!("This system has no way to start the app before sign in")
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::imp::launch_agent;
+
+    #[test]
+    fn launch_agent_restarts_after_any_exit_and_lints() {
+        let body = launch_agent(
+            "/Applications/A & B.app/Contents/MacOS/x",
+            "/Users/<someone>",
+        );
+        // A clean exit at boot must bring it back, not only a failure, but
+        // only while the program is there to start.
+        assert!(body.contains(
+            "<key>KeepAlive</key><dict><key>PathState</key><dict>\
+             <key>/Applications/A &amp; B.app/Contents/MacOS/x</key><true/></dict></dict>"
+        ));
+        assert!(!body.contains("SuccessfulExit"));
+        assert!(!body.contains("<key>KeepAlive</key><true/>"));
+        assert!(body.contains("<key>ThrottleInterval</key><integer>5</integer>"));
+        assert!(body.contains("<key>LimitLoadToSessionType</key><string>LoginWindow</string>"));
+        assert!(body.contains("A &amp; B.app"));
+        assert!(body.contains("/Users/&lt;someone&gt;"));
+        let path = std::env::temp_dir().join(format!("launch-agent-{}.plist", std::process::id()));
+        std::fs::write(&path, &body).unwrap();
+        let lint = std::process::Command::new("plutil")
+            .arg("-lint")
+            .arg(&path)
+            .output();
+        // How launchd reads it: the program's own path, unescaped, as the
+        // condition that keeps it alive.
+        let json = std::process::Command::new("plutil")
+            .args(["-convert", "json", "-o", "-"])
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        if let Ok(lint) = lint {
+            assert!(
+                lint.status.success(),
+                "{}",
+                String::from_utf8_lossy(&lint.stdout)
+            );
+        }
+        if let Ok(json) = json {
+            let json = String::from_utf8_lossy(&json.stdout).replace("\\/", "/");
+            assert!(
+                json.contains(
+                    r#""KeepAlive":{"PathState":{"/Applications/A & B.app/Contents/MacOS/x":true}}"#
+                ),
+                "{json}"
+            );
+        }
     }
 }

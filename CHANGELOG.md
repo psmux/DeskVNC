@@ -22,7 +22,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 * When an Android phone cannot reach a computer, the error now also points
   at the Nearby devices permission. Android 17 drops DeskVNC's connections
   to the local network without it, and the connect just times out.
-
+* A Mac with "Also before anyone signs in" switched on could not be reached
+  after a restart. DeskVNC Support started at the sign in screen before macOS
+  let it near the screen and ended without an error, and macOS started it
+  again only after a failure. It is now started again whenever it ends, for
+  as long as the app is there. Switch the setting off and on once to pick
+  this up on a Mac set up before.
 * A Boundary session to a Mac at its sign in screen or lock screen ended on
   the helper's first click, with "no connection could be established (failed
   creating event source)", and again after every reconnect, so the helper
