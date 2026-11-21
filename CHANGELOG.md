@@ -19,8 +19,15 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   and the screen goes on being shared. DeskVNC Support tries again every two
   seconds, so control comes back by itself once someone at the Mac unlocks
   it. On a Mac that cannot make an event source of its own, input now uses
-  the session's shared one instead, which may be enough at the sign in
-  screen.
+  the session's shared one instead.
+* At a Mac's sign in screen, DeskVNC Support showed the screen but every
+  click and key was dropped: macOS refused to let it reach the window server
+  before anyone signed in. Support now carries the marker macOS looks for,
+  as Apple's own screen sharing does, and the helper can click, open the
+  menus there and type into the password field.
+* On a Mac with no monitor attached, a helper who reached the sign in screen
+  after somebody signed out was cut off with "The selected display is no
+  longer connected". The display is now found when the helper arrives.
 * The viewer and the phone app say why typing and clicks are not landing,
   such as a Mac at its lock screen, and take the message down when they land
   again. DeskVNC Support tells only viewers that ask for it, so older viewers
