@@ -2139,6 +2139,20 @@ function SessionView({
         </Dialog>
       ) : null}
 
+      {/* A Boundary computer that cannot take typing and clicks right now,
+          such as a Mac at its lock screen. The screen is still live, so this
+          sits over its foot and lets the pointer through. */}
+      {st.state === "connected" && session.boundaryInputTrouble ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4">
+          <div
+            role="status"
+            className="max-w-xl rounded-md border border-subtle bg-raised px-3 py-2 text-xs text-secondary shadow-lg"
+          >
+            {session.boundaryInputTrouble}
+          </div>
+        </div>
+      ) : null}
+
       {showConnecting ? <ConnectingOverlay state={st} name={session.desktopName} /> : null}
 
       {scrimFading && st.state === "connected" ? (

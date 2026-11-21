@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
-use boundary_session::{Button, Desktop, Frame, Input, Key, Rect};
-use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+use boundary_session::{Button, Desktop, Frame, Input, InputTrouble, InputUnavailable, Key, Rect};
+use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, NewConError, Settings};
 #[cfg(not(target_os = "linux"))]
 use xcap::Monitor;
 
@@ -10,6 +10,7 @@ mod damage;
 mod dxgi;
 #[cfg(target_os = "linux")]
 mod linux;
+mod retry;
 #[cfg(target_os = "linux")]
 pub use linux::notify::{Notification, notify};
 /// A line to show beside Allow viewing and control where the desktop asks
@@ -157,7 +158,7 @@ pub fn open(id: u32) -> Result<Box<dyn Desktop>> {
         #[cfg(target_os = "linux")]
         remote: screen.linux.remote(),
         screen,
-        enigo: None,
+        enigo: retry::Retry::default(),
         buttons: Vec::new(),
         keys: Vec::new(),
         clipboard: clipboard::Clipboard::new(),
@@ -555,7 +556,9 @@ impl Capturer {
 
 struct NativeDesktop {
     screen: Capturer,
-    enigo: Option<Enigo>,
+    /// Made when the first event needs it, and tried again now and then
+    /// while it cannot be, such as at a Mac's lock screen.
+    enigo: retry::Retry<Enigo>,
     buttons: Vec<Button>,
     keys: Vec<Key>,
     /// Input through the Wayland RemoteDesktop portal, granted with the
@@ -603,15 +606,17 @@ impl Drop for Awake {
     }
 }
 impl NativeDesktop {
+    /// The injector, or why there is none right now. Neither ends the
+    /// session: the event is dropped and the helper is told why.
     fn injector(&mut self) -> Result<&mut Enigo> {
-        ensure!(
-            input_permission(),
-            "Allow this app in System Settings > Privacy & Security > Accessibility to use control"
-        );
-        if self.enigo.is_none() {
-            self.enigo = Some(Enigo::new(&input_settings())?);
+        if !input_permission() {
+            return Err(InputUnavailable {
+                trouble: InputTrouble::Permission,
+                reason: "Allow this app in System Settings > Privacy & Security > Accessibility to use control".into(),
+            }
+            .into());
         }
-        self.enigo.as_mut().context("Input is unavailable")
+        Ok(self.enigo.get(std::time::Instant::now(), make_injector)?)
     }
     /// Where a pointer at `x`, `y` across the shared screen goes, in the
     /// coordinates the injector takes.
@@ -657,6 +662,45 @@ impl NativeDesktop {
             Input::Scroll { lines } => remote.scroll(*lines),
             Input::Release => Ok(()),
         })
+    }
+}
+/// A new injector, or why one cannot be made right now.
+fn make_injector() -> Result<Enigo, InputUnavailable> {
+    let made = Enigo::new(&input_settings());
+    // At the macOS sign in screen an event source of the injector's own
+    // cannot be made: CGEventSourceCreate with the private state fails there,
+    // run from DeskVNC Support's own sign in screen job, while the combined
+    // session state is made. The private one is what is asked for first, so
+    // keys held down on the Mac do not change what the helper types.
+    #[cfg(target_os = "macos")]
+    let made = made.or_else(|error| match error {
+        NewConError::EstablishCon(_) => {
+            let shared = Settings {
+                independent_of_keyboard_state: false,
+                ..input_settings()
+            };
+            let made = Enigo::new(&shared);
+            if made.is_ok() {
+                eprintln!("Input uses the session's shared event source: a private one cannot be made here");
+            }
+            made
+        }
+        other => Err(other),
+    });
+    made.map_err(|error| InputUnavailable {
+        trouble: input_trouble(&error),
+        reason: error.to_string(),
+    })
+}
+/// What kind of trouble an injector that could not be made is.
+fn input_trouble(error: &NewConError) -> InputTrouble {
+    match error {
+        NewConError::NoPermission => InputTrouble::Permission,
+        // What a Mac says at its lock screen and its sign in screen, where
+        // no event source can be made at all.
+        #[cfg(target_os = "macos")]
+        NewConError::EstablishCon(_) => InputTrouble::LockScreen,
+        _ => InputTrouble::Other,
     }
 }
 /// How the injector is set up. On Linux each session gets one kind of
@@ -816,7 +860,7 @@ impl Desktop for NativeDesktop {
             }
             return;
         }
-        if let Some(enigo) = self.enigo.as_mut() {
+        if let Some(enigo) = self.enigo.made() {
             for button in self.buttons.drain(..) {
                 let _ = enigo.button(native_button(button), Direction::Release);
             }

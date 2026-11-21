@@ -10,6 +10,32 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* A Boundary session to a Mac at its sign in screen or lock screen ended on
+  the helper's first click, with "no connection could be established (failed
+  creating event source)", and again after every reconnect, so the helper
+  could not even watch. Input that cannot reach the computer is now dropped
+  and the screen goes on being shared. DeskVNC Support tries again every two
+  seconds, so control comes back by itself once someone at the Mac unlocks
+  it. On a Mac that cannot make an event source of its own, input now uses
+  the session's shared one instead.
+* At a Mac's sign in screen, DeskVNC Support showed the screen but every
+  click and key was dropped: macOS refused to let it reach the window server
+  before anyone signed in. Support now carries the marker macOS looks for,
+  as Apple's own screen sharing does, and the helper can click, open the
+  menus there and type into the password field.
+* On a Mac with no monitor attached, a helper who reached the sign in screen
+  after somebody signed out was cut off with "The selected display is no
+  longer connected". The display is now found when the helper arrives.
+* The viewer and the phone app say why typing and clicks are not landing,
+  such as a Mac at its lock screen, and take the message down when they land
+  again. DeskVNC Support tells only viewers that ask for it, so older viewers
+  are unaffected.
+* After a Boundary session had ended, the next key or click reported "Input
+  queue is full or disconnected", which hid why the session ended. It now
+  gives the session's own reason.
+
 ## [0.36.5] (2026-11-20)
 
 0.36.4 was built but never published: Apple refused to notarize it until an

@@ -466,6 +466,7 @@ where
         tiles,
         video,
         clipboard,
+        notices: host_notices,
     } = message
     else {
         refuse(connection, send, "This computer accepts only unattended connections on this ID. Ask for an invitation instead".into());
@@ -555,7 +556,7 @@ where
         let result = tokio::select! {
             _ = stop.cancelled() => Ok(()),
             _ = ended.cancelled() => Ok(()),
-            result = session::serve(&mut worker, &connection, send, recv, peer, session::Offer { control, tools, clipboard }, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
+            result = session::serve(&mut worker, &connection, send, recv, peer, session::Offer { control, tools, clipboard, notices: host_notices }, wire::Screens::from_hello(jpeg, tiles, &video), move || desktop()) => result,
         };
         // The app stopping, for an update or a restart, ends nothing the
         // person decided, so the helper is told the link went and
@@ -827,6 +828,7 @@ pub fn connect_with_tools(
             tools: true,
             video: false,
             clipboard: false,
+            notices: false,
         },
     )
 }
@@ -978,6 +980,7 @@ pub fn connect_to_with_tools(
             tools: true,
             video: false,
             clipboard: false,
+            notices: false,
         },
     )
 }
@@ -1068,12 +1071,20 @@ async fn visit(
             tiles: true,
             video: abilities.codecs(),
             clipboard: abilities.clipboard,
+            notices: abilities.notices,
         },
     )
     .await
     .map_err(session::link_lost)?;
-    let result =
-        session::watch_session(worker, &connection, send, recv, session::UNATTENDED_WAIT).await;
+    let result = session::watch_session(
+        worker,
+        &connection,
+        send,
+        recv,
+        session::UNATTENDED_WAIT,
+        abilities.notices,
+    )
+    .await;
     connection.close(0u8.into(), b"Session ended");
     result
 }
