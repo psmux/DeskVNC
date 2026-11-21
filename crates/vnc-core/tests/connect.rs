@@ -454,3 +454,66 @@ async fn user_disconnect_is_a_clean_terminal_state() {
         "a user disconnect must never reconnect"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TigerVNC's default security (issue #56)
+// ---------------------------------------------------------------------------
+
+/// A stock TigerVNC server (`x0vncserver`, `Xvnc`, `vncserver`) runs with
+/// `SecurityTypes=TLSVnc,VncAuth`: the top level offer is `[VeNCrypt,
+/// VncAuth]` and the only VeNCrypt subtype is TLSVnc, anonymous TLS that
+/// rustls cannot speak. Committing to VeNCrypt left nothing to do but hang
+/// up, so such a server could never be reached, while RealVNC's viewer, which
+/// has no VeNCrypt, picks VncAuth and connects. The session must come back on
+/// a fresh connection with VncAuth.
+#[tokio::test]
+async fn tigervnc_default_falls_back_to_vnc_auth() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .security(&[SEC_VENCRYPT, SEC_VNC_AUTH])
+            .vencrypt_subtypes(&[VENCRYPT_TLS_VNC])
+            .password("throwaway"),
+    )
+    .await;
+
+    let opts = with_password(options(server.port()), "throwaway");
+    let (handle, mut events) = spawn_session(opts);
+    events.wait_connected(DEFAULT_TIMEOUT).await;
+
+    assert_eq!(
+        server.selected_security(),
+        vec![SEC_VENCRYPT, SEC_VNC_AUTH],
+        "VeNCrypt is tried first, then VncAuth on a second connection"
+    );
+    assert_eq!(server.connection_count(), 2);
+    handle.shutdown();
+}
+
+/// With nothing but anonymous TLS on offer there is nothing to fall back to:
+/// one connection, a stop, and a reason that names the server setting rather
+/// than reading as a network failure or a refused password.
+#[tokio::test]
+async fn anonymous_tls_only_stops_with_a_reason_that_names_the_setting() {
+    let server = MockServer::start(
+        MockConfig::new()
+            .security(&[SEC_VENCRYPT])
+            .vencrypt_subtypes(&[VENCRYPT_TLS_VNC])
+            .password("throwaway"),
+    )
+    .await;
+
+    let mut opts = with_password(options(server.port()), "throwaway");
+    opts.reconnect.initial_delay_ms = 20;
+    opts.reconnect.max_delay_ms = 20;
+    let (handle, mut events) = spawn_session(opts);
+    let reason = events
+        .wait_state(DEFAULT_TIMEOUT, "terminal Disconnected", |s| match s {
+            SessionState::Disconnected { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(reason.contains("SecurityTypes"), "reason: {reason}");
+    events.drain_for(Duration::from_millis(200)).await;
+    assert_eq!(server.connection_count(), 1);
+    handle.shutdown();
+}
