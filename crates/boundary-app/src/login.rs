@@ -278,14 +278,17 @@ mod imp {
     }
     /// The launchd job that starts the host at the sign in screen.
     ///
-    /// Started again whenever it ends, not only after a failure. At boot
-    /// launchd can start it before the window server lets anyone in, and it
-    /// ended within two seconds with a clean exit, so a job that restarted
-    /// only after a failure left the computer out of reach until somebody
-    /// signed in and out. macOS unloads a LoginWindow agent when somebody
-    /// signs in, and the host steps aside before it takes the machine ID
-    /// when somebody is signed in, so this cannot spin behind a signed in
-    /// session or push the app in the tray off the relay.
+    /// Started again whenever it ends, not only after a failure, for as
+    /// long as the program exists. At boot launchd can start it before the
+    /// window server lets anyone in, and it ended within two seconds with a
+    /// clean exit, so a job that restarted only after a failure left the
+    /// computer out of reach until somebody signed in and out. Keeping it
+    /// alive on the program's path rather than always means an app moved
+    /// to the Trash without switching this off leaves a job that does
+    /// nothing, not one launchd tries to start every five seconds. macOS
+    /// unloads a LoginWindow agent when somebody signs in, and the host
+    /// steps aside before it takes the machine ID when somebody is signed
+    /// in, so this cannot push the app in the tray off the relay.
     pub(super) fn launch_agent(exe: &str, home: &str) -> String {
         let escape = |s: &str| {
             s.replace('&', "&amp;")
@@ -299,16 +302,16 @@ mod imp {
 <key>Label</key><string>{LABEL}</string>
 <key>AssociatedBundleIdentifiers</key><string>com.psmux.deskvnc.support</string>
 <key>LimitLoadToSessionType</key><string>LoginWindow</string>
-<key>ProgramArguments</key><array><string>{}</string><string>--login-screen</string></array>
-<key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string></dict>
+<key>ProgramArguments</key><array><string>{exe}</string><string>--login-screen</string></array>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>{home}</string></dict>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><true/>
+<key>KeepAlive</key><dict><key>PathState</key><dict><key>{exe}</key><true/></dict></dict>
 <key>ThrottleInterval</key><integer>5</integer>
 <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
 "#,
-            escape(exe),
-            escape(home)
+            exe = escape(exe),
+            home = escape(home)
         )
     }
     pub fn set(on: bool) -> Result<()> {
@@ -476,9 +479,14 @@ mod tests {
             "/Applications/A & B.app/Contents/MacOS/x",
             "/Users/<someone>",
         );
-        // A clean exit at boot must bring it back, not only a failure.
-        assert!(body.contains("<key>KeepAlive</key><true/>"));
+        // A clean exit at boot must bring it back, not only a failure, but
+        // only while the program is there to start.
+        assert!(body.contains(
+            "<key>KeepAlive</key><dict><key>PathState</key><dict>\
+             <key>/Applications/A &amp; B.app/Contents/MacOS/x</key><true/></dict></dict>"
+        ));
         assert!(!body.contains("SuccessfulExit"));
+        assert!(!body.contains("<key>KeepAlive</key><true/>"));
         assert!(body.contains("<key>ThrottleInterval</key><integer>5</integer>"));
         assert!(body.contains("<key>LimitLoadToSessionType</key><string>LoginWindow</string>"));
         assert!(body.contains("A &amp; B.app"));
@@ -489,12 +497,27 @@ mod tests {
             .arg("-lint")
             .arg(&path)
             .output();
+        // How launchd reads it: the program's own path, unescaped, as the
+        // condition that keeps it alive.
+        let json = std::process::Command::new("plutil")
+            .args(["-convert", "json", "-o", "-"])
+            .arg(&path)
+            .output();
         let _ = std::fs::remove_file(&path);
         if let Ok(lint) = lint {
             assert!(
                 lint.status.success(),
                 "{}",
                 String::from_utf8_lossy(&lint.stdout)
+            );
+        }
+        if let Ok(json) = json {
+            let json = String::from_utf8_lossy(&json.stdout).replace("\\/", "/");
+            assert!(
+                json.contains(
+                    r#""KeepAlive":{"PathState":{"/Applications/A & B.app/Contents/MacOS/x":true}}"#
+                ),
+                "{json}"
             );
         }
     }
