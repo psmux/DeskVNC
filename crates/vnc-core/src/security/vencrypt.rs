@@ -24,8 +24,11 @@
 //! (`ADH`/`AECDH`): the server presents no certificate at all. rustls does not
 //! implement anonymous ciphersuites and has stated it will not, so those
 //! subtypes cannot be completed with our TLS stack. We still negotiate them, //! the subtype list is parsed and ranked exactly as the PRD specifies, but if
-//! the *only* usable options are anonymous-TLS ones we stop with a clear error
-//! telling the operator to enable an X509 subtype. (An `openssl`/`native-tls`
+//! the *only* usable options are anonymous-TLS ones we stop with
+//! `VncError::AnonymousTlsOnly`. The session then reconnects without VeNCrypt
+//! when the server offered another type beside it, which is the case for
+//! TigerVNC's default `TLSVnc, VncAuth` (issue #56), and otherwise reports
+//! the server setting to change. (An `openssl`/`native-tls`
 //! fallback behind a feature flag is the escape hatch the PRD contemplates;
 //! it is not built.)
 
@@ -166,9 +169,6 @@ impl VeNCryptSubtype {
     }
 }
 
-const ANON_TLS_MESSAGE: &str = "anonymous TLS (VeNCrypt TLS* subtypes) is not supported; \
-                                ask the server admin to enable an X509 subtype";
-
 /// Choose the strongest subtype we can actually complete.
 ///
 /// Anonymous-TLS subtypes are ranked but never selected (see the module docs);
@@ -205,7 +205,7 @@ pub fn select_subtype(
     }
 
     if ranked.iter().any(|s| s.is_anonymous_tls()) {
-        return Err(VncError::Tls(ANON_TLS_MESSAGE.into()));
+        return Err(VncError::AnonymousTlsOnly);
     }
     Err(VncError::Protocol("no usable VeNCrypt subtype".into()))
 }
@@ -305,7 +305,7 @@ pub(crate) async fn handshake(
         if !chosen.uses_x509() {
             // Unreachable via `select_subtype`, but keep the guard: never start
             // a TLS handshake we know cannot authenticate the peer.
-            return Err(VncError::Tls(ANON_TLS_MESSAGE.into()));
+            return Err(VncError::AnonymousTlsOnly);
         }
 
         // Only the TLS pin is offered to the verifier. An RA2 pin for the same
@@ -484,8 +484,8 @@ mod tests {
     fn anonymous_tls_only_is_a_clear_error() {
         let offered = parse_subtypes(&[20u8, 21, 22], false);
         match select_subtype(&offered, &opts(true)) {
-            Err(VncError::Tls(m)) => assert!(m.contains("anonymous TLS")),
-            other => panic!("expected a TLS error, got {other:?}"),
+            Err(VncError::AnonymousTlsOnly) => {}
+            other => panic!("expected AnonymousTlsOnly, got {other:?}"),
         }
     }
 
@@ -567,8 +567,8 @@ mod tests {
 
         let s: BoxedStream = Box::pin(client);
         match handshake(s, &opts(true), &CredentialSource::none()).await {
-            Err(VncError::Tls(m)) => assert!(m.contains("anonymous TLS")),
-            other => panic!("expected an anon-TLS error, got {:?}", other.err()),
+            Err(VncError::AnonymousTlsOnly) => {}
+            other => panic!("expected AnonymousTlsOnly, got {:?}", other.err()),
         }
     }
 
