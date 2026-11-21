@@ -25,9 +25,21 @@
  * setting, and appears the way the tab strip appears when the first session
  * connects.
  *
- * So: a strip, along the bottom, one card per driven limb, present only while
- * an agent holds something. It reads like a row of machines rather than a list
- * of events, which is the difference between watching and reading a log.
+ * So: a strip, along the bottom, one card per driven limb. It reads like a row
+ * of machines rather than a list of events, which is the difference between
+ * watching and reading a log.
+ *
+ * ONE HEIGHT, DRIVEN OR NOT. The strip takes its height from the panes, and a
+ * pane that changes height changes the size "resize remote to fit" asks the
+ * remote for. An agent takes a screenshot, the strip grows because the agent
+ * started driving, the remote desktop is resized, and the click the agent
+ * worked out from that screenshot lands somewhere else (issue #52). So while
+ * the plane is on the strip is always there and always the same height: the
+ * card row keeps its space when there are no cards, and every card is the same
+ * height whatever it is quoting. By default (`PREF_COMPACT_AGENT_ROW`) the
+ * strip is one line, with a chip per machine in place of the cards, which is
+ * the same promise at about the height the old idle strip had. The cards are
+ * the opt in.
  *
  * UNTRUSTED CONTENT. A card can quote what the far side printed. That text is
  * data and never instruction (`AGENT_BRIEF` D6): it arrives already neutralised
@@ -50,6 +62,7 @@ import {
 } from "../lib/agentActivity";
 import {
   PREF_CHANGED_EVENT,
+  PREF_COMPACT_AGENT_ROW,
   PREF_HIDE_AGENT_STATUS,
   readBoolPref,
   type PrefChanged,
@@ -75,8 +88,26 @@ function useSecondsTick(active: boolean): number {
   return now;
 }
 
+/** One card, whatever it holds. Room for all four of its lines. */
+const CARD_PX = 88;
+/** The card row: a card, and room under it for a thin scrollbar. */
+const CARD_ROW_PX = CARD_PX + 10;
+/** The headline. Also the whole of the compact strip's content. */
+const HEADLINE_PX = 20;
+/** The strip's padding and its top border, which are part of its height. */
+const STRIP_CHROME_PX = 12 + 1;
+
 /**
- * Does this person want the counts?
+ * The strip's height, which is the same whether or not an agent is driving.
+ * Exported for the test that holds it to that.
+ */
+export const AGENT_ROW_PX = {
+  full: STRIP_CHROME_PX + HEADLINE_PX + 4 + CARD_ROW_PX,
+  compact: STRIP_CHROME_PX + HEADLINE_PX,
+} as const;
+
+/**
+ * Does this person want the counts? Or the compact strip?
  *
  * Read on mount and then followed, rather than read on use like most of
  * `lib/prefs`: this is chrome that is already on screen when the switch is
@@ -84,17 +115,17 @@ function useSecondsTick(active: boolean): number {
  * under the person who changed it. `PREF_CHANGED_EVENT` is that push and it is
  * window local, which is all this needs.
  */
-function useStatusHidden(): boolean {
-  const [hidden, setHidden] = useState(() => readBoolPref(PREF_HIDE_AGENT_STATUS, false));
+function useLivePref(key: string, fallback: boolean): boolean {
+  const [value, setValue] = useState(() => readBoolPref(key, fallback));
   useEffect(() => {
     const onChange = (e: Event): void => {
       const detail = (e as CustomEvent<PrefChanged>).detail;
-      if (detail?.key === PREF_HIDE_AGENT_STATUS) setHidden(detail.value);
+      if (detail?.key === key) setValue(detail.value);
     };
     window.addEventListener(PREF_CHANGED_EVENT, onChange);
     return () => window.removeEventListener(PREF_CHANGED_EVENT, onChange);
-  }, []);
-  return hidden;
+  }, [key]);
+  return value;
 }
 
 /** Short and absolute, so a glance reads it: "4s", "1m 20s". */
@@ -218,10 +249,13 @@ function Card({
       className={classNames(
         // Fixed width, not content width: a row of cards that each sized
         // themselves would change shape every time a machine did something,
-        // and the whole point of the ordering is that a card stays put.
+        // and the whole point of the ordering is that a card stays put. Fixed
+        // height for the same reason, and because a card that grew a line to
+        // quote the far side would grow the strip and shrink the panes.
         "relative flex w-64 shrink-0 flex-col gap-1 overflow-hidden rounded-md border bg-surface px-2.5 py-1.5",
         driven ? "border-subtle" : "border-accent/50",
       )}
+      style={{ height: CARD_PX }}
     >
       {/*
         The left edge is the card's pulse. A solid bar means the lease is held
@@ -314,7 +348,9 @@ export function AgentWall({
   const { wall, count, plane, stopAgent, stopAll } = useAgentActivity();
   const now = useSecondsTick(wall.length > 0);
   const scroller = useRef<HTMLDivElement>(null);
-  const hidden = useStatusHidden();
+  const hidden = useLivePref(PREF_HIDE_AGENT_STATUS, false);
+  // One line unless the person asked for the cards. See `PREF_COMPACT_AGENT_ROW`.
+  const compact = useLivePref(PREF_COMPACT_AGENT_ROW, true);
 
   /**
    * The counts live HERE rather than in a second surface of their own.
@@ -336,21 +372,23 @@ export function AgentWall({
     [showStatus, plane],
   );
 
-  // Nothing at all with the plane off, and nothing when a person has put the
-  // counts away and no agent is driving. This is what "the interactive product
+  // Nothing at all with the plane off. This is what "the interactive product
   // does not regress" looks like in a component: no strip, no border, and no
-  // height taken from the panes.
-  if (wall.length === 0 && !showStatus) return null;
+  // height taken from the panes. With the plane on the strip stays, counts or
+  // no counts, because a strip that came and went with the first lease would
+  // resize the panes under an agent that had just taken a screenshot.
+  if (wall.length === 0 && !plane.on) return null;
 
   return (
     <div
-      className="fade-in flex shrink-0 flex-col gap-1 border-t border-subtle bg-inset/60 px-2 py-1.5"
+      className="flex shrink-0 flex-col gap-1 overflow-hidden border-t border-subtle bg-inset/60 px-2 py-1.5"
+      style={{ height: compact ? AGENT_ROW_PX.compact : AGENT_ROW_PX.full }}
       // Announced, but not interrupting: a person watching this is looking at
       // it, and a person who is not should not have their work read over.
       role="region"
       aria-label="Agent activity"
     >
-      <div className="flex items-center gap-2 px-0.5">
+      <div className="flex min-w-0 shrink-0 items-center gap-2 px-0.5" style={{ height: HEADLINE_PX }}>
         <span
           aria-hidden="true"
           className={classNames(
@@ -366,13 +404,28 @@ export function AgentWall({
           time a machine was taken or given back.
         */}
         <h2
-          className="text-2xs font-medium tabular-nums text-secondary"
+          className="shrink-0 text-2xs font-medium tabular-nums text-secondary"
           aria-live="polite"
           title={showStatus ? planeStatusDetail(plane) : undefined}
         >
           {headline}
         </h2>
-        <span className="flex-1" />
+        {compact ? (
+          // The compact strip's stand in for the cards: a chip per machine, on
+          // the headline's own line, scrolling sideways rather than wrapping.
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
+            {wall.map((entry) => (
+              <Chip
+                key={entry.sessionId}
+                entry={entry}
+                onGo={() => onShowSession(entry.sessionId)}
+                onStop={() => stopAgent(entry.sessionId)}
+              />
+            ))}
+          </div>
+        ) : (
+          <span className="flex-1" />
+        )}
         {count > 0 ? (
           <button
             type="button"
@@ -388,17 +441,27 @@ export function AgentWall({
       </div>
 
       {/*
-        No cards, no row: with the plane on and nothing being driven the strip
-        is one line of text, and an empty scroller would leave a few pixels of
-        nothing under it for as long as that lasted.
+        The card row keeps its space with no cards in it. Taking it away when
+        the last agent let go, and giving it back when the next one started,
+        is the resize that put agents' clicks in the wrong place.
       */}
-      {wall.length > 0 ? (
+      {compact ? null : wall.length === 0 ? (
+        <div
+          className="flex shrink-0 items-center rounded-md border border-dashed border-subtle px-2.5"
+          style={{ height: CARD_PX }}
+        >
+          <p className="truncate text-2xs text-tertiary">
+            Each machine an agent drives gets a card here.
+          </p>
+        </div>
+      ) : (
         <div
           ref={scroller}
           // Horizontal rather than wrapping: a row that reflows moves cards
           // between lines as machines come and go, and the point of the ordering
           // in `wallEntries` is that a card stays where a person left it.
-          className="flex gap-1.5 overflow-x-auto pb-0.5"
+          className="flex shrink-0 gap-1.5 overflow-x-auto overflow-y-hidden"
+          style={{ height: CARD_ROW_PX }}
         >
           {wall.map((entry) => (
             <Card
@@ -410,7 +473,64 @@ export function AgentWall({
             />
           ))}
         </div>
-      ) : null}
+      )}
     </div>
+  );
+}
+
+/** A card cut down to one line, for the compact strip. */
+function Chip({
+  entry,
+  onGo,
+  onStop,
+}: {
+  entry: AgentActivity;
+  onGo: () => void;
+  onStop: () => void;
+}): ReactNode {
+  const holder = entry.holder;
+  const driven = holder?.kind === "agent";
+  const label = entry.machine?.label ?? entry.sessionId;
+  return (
+    <span
+      className={classNames(
+        "flex h-[18px] max-w-48 shrink-0 items-center gap-1 rounded-pill border bg-surface pr-0.5 pl-1.5",
+        driven ? "border-subtle" : "border-accent/50",
+      )}
+      title={
+        driven
+          ? `${holderLabel(holder)}${entry.intent ? `: ${entry.intent.kind}` : ""}`
+          : entry.preempted
+            ? `You took the wheel from ${entry.preempted.agent}`
+            : holderLabel(holder)
+      }
+    >
+      <span
+        aria-hidden="true"
+        className={classNames(
+          "h-1.5 w-1.5 shrink-0 rounded-[1px]",
+          driven ? "bg-warning" : "bg-accent",
+          entry.intent?.outcome === "in-flight" && "animate-pulse",
+        )}
+      />
+      <button
+        type="button"
+        onClick={onGo}
+        className="min-w-0 truncate text-2xs font-medium text-primary hover:text-accent hover:underline"
+      >
+        {label}
+      </button>
+      {driven ? (
+        <button
+          type="button"
+          onClick={onStop}
+          className="shrink-0 rounded-pill p-0.5 text-warning hover:bg-danger-subtle hover:text-danger"
+          aria-label={`Stop the agent driving ${label}, and take control`}
+          title={`Stop ${holderLabel(holder)} and take control`}
+        >
+          <IconStop size={10} />
+        </button>
+      ) : null}
+    </span>
   );
 }

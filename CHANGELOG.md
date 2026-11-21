@@ -12,6 +12,15 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* With "resize remote to fit" on, an agent's clicks could land off target.
+  The agent activity strip grew when an agent started driving and shrank
+  when it stopped, and a single pane gained and lost its header the same
+  way, so the remote desktop was resized between the agent's screenshot and
+  its click. While agents are turned on, the strip and the pane header now
+  keep one height whether or not an agent is driving. The strip is one line
+  by default, with a small chip per machine an agent drives. The cards are
+  still there behind a new preference, "Show a card for each machine an
+  agent drives", which keeps the strip taller at one fixed height (#52).
 * A TigerVNC server left on its defaults (`x0vncserver`, `Xvnc` or
   `vncserver` with `SecurityTypes=TLSVnc,VncAuth`) could not be reached at
   all. DeskVNC chose VeNCrypt, found only TLSVnc inside it, which it cannot
