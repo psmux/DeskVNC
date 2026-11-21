@@ -23,7 +23,7 @@
 //! Every event, notice and command result is printed with the seconds since
 //! start, so a run can be read back beside the computer's own log.
 use anyhow::{Context, Result, bail};
-use boundary_session::unattended::{self, SecretKey};
+use boundary_session::unattended;
 use boundary_session::{Abilities, Button, Event, HostOptions, Input, Key, Session};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -95,16 +95,19 @@ async fn main() -> Result<()> {
         bail!("usage: drive <machine ID or address> <helper key file> [name]");
     };
     let name = rest.first().cloned().unwrap_or_else(|| "drive".into());
-    let bytes: [u8; 32] = std::fs::read(key_file)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("the key file is not 32 bytes"))?;
+    // Checked first: loading a key that is not there would make a new one.
+    let key_file = std::path::Path::new(key_file);
+    if !key_file.is_file() {
+        bail!("no key file at {}", key_file.display());
+    }
+    let key = unattended::load_or_create_key(key_file)?;
     let started = Instant::now();
     let at = move || format!("{:7.2}", started.elapsed().as_secs_f32());
     let mut session = unattended::connect_with(
         machine.clone(),
         name,
         None,
-        SecretKey::from_bytes(&bytes),
+        key,
         HostOptions::default(),
         Abilities {
             notices: true,
