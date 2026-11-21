@@ -16,6 +16,7 @@ import {
   PREF_EDGE_PAN,
   PREF_FORWARD_INSERTED_TEXT,
   PREF_TYPE_LOCAL_PASTE,
+  PREF_COMPACT_AGENT_ROW,
   PREF_HIDE_AGENT_STATUS,
   PREF_HIDE_TOOLBAR,
   PREF_MATCH_LOCAL_LAYOUT,
@@ -190,6 +191,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [zoomLocked, setZoomLocked] = usePref(PREF_ZOOM_LOCKED, false);
   const [edgePan, setEdgePan] = usePref(PREF_EDGE_PAN, true);
   const [hideAgentStatus, setHideAgentStatus] = usePref(PREF_HIDE_AGENT_STATUS, false);
+  const [compactAgentRow, setCompactAgentRow] = usePref(PREF_COMPACT_AGENT_ROW, false);
   const [viewDefaults, setViewDefaults] = useViewDefaults();
   // The plane, read for two things only: whether the Agents tab exists at all,
   // and the live line the toggle below is about.
@@ -659,9 +661,15 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
               <>
                 <Toggle
                   label="Hide the agent counts"
-                  description="Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself still appears while an agent is driving something, with a card per machine, and this switch stays here."
+                  description="Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself stays while agents are turned on, with a card per machine an agent drives, and this switch stays here."
                   value={hideAgentStatus}
                   onChange={setHideAgentStatus}
+                />
+                <Toggle
+                  label="Keep the activity strip to one line"
+                  description="Show each machine an agent drives as a small chip beside the counts, in place of a card. The strip keeps the same height whether or not an agent is driving, either way, so a remote desktop set to resize to fit is not resized under an agent."
+                  value={compactAgentRow}
+                  onChange={setCompactAgentRow}
                 />
                 <div className="border-t border-subtle pt-5">
                   <p className="text-sm font-medium text-primary">Right now</p>
