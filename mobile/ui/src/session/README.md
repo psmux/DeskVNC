@@ -45,6 +45,22 @@ letter by letter. With a key bar modifier lit, characters go as key events
 with the modifier held, so Ctrl and C is a real Ctrl+C. Special keys from a
 hardware keyboard (iPad, Android tablets) go straight through as key events.
 
+## Keyboard button
+
+A round button floats at the bottom right (`ui/KeyButton.tsx`, math in
+`input/keyButton.ts`). A tap shows the phone keyboard through the same
+`openKeyboard` the toolbar uses, and hides it when it is up. When Android has
+hidden the keyboard but the field kept focus, the tap blurs and focuses again
+so it comes back. A press that moves more than 8 pixels is a drag and never
+a tap; when let go the button settles on the nearer side edge. It sits
+outside the stage, so its touches never reach the gestures or the computer,
+and it cancels its pointerdown so the hidden field keeps focus, like the key
+bar. It stays clear of the top band (toolbar and connection chip), and above
+the keyboard and the key bar. The position is saved in prefs as an edge and a
+fraction of the free height, so it holds after turning or folding the phone.
+Settings, Feel, Keyboard button hides it. It hides itself while the toolbar,
+a sheet, the coach or the Leave prompt is open.
+
 ## H.264 and the fallback
 
 H.264 rects (format 3) decode with WebCodecs `VideoDecoder`, as on the

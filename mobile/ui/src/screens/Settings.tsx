@@ -195,6 +195,19 @@ export function Settings({ onShowWelcome }: { onShowWelcome: () => void }) {
           <Row
             icon={
               <Swatch>
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <rect x="2.5" y="6" width="19" height="12" rx="2.5" />
+                  <path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M6.5 14h11" />
+                </svg>
+              </Swatch>
+            }
+            title="Keyboard button"
+            detail="A round button on the computer's screen that brings up the keyboard. Drag it where you like"
+            trailing={<Toggle on={prefs.keyButton} onChange={(keyButton) => setPrefs({ keyButton })} label="Keyboard button" />}
+          />
+          <Row
+            icon={
+              <Swatch>
                 <IconPlus size={20} />
               </Swatch>
             }
