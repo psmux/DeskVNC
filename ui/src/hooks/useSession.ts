@@ -133,6 +133,12 @@ export interface SessionApi {
   boundaryClipboardWrite: boolean | null;
   /** A Boundary session only: its route once known, `null` until then and for every other protocol. */
   boundaryRoute: BoundaryRoute | null;
+  /**
+   * A Boundary session only: why its computer is not taking typing and clicks
+   * right now (a Mac at its lock screen, say), in words to show. `null` while
+   * input lands, and for every other protocol.
+   */
+  boundaryInputTrouble: string | null;
   state: SessionState;
   desktopName: string;
   /**
@@ -350,6 +356,7 @@ export function useSession(
     params.protocol === "boundary" ? false : null,
   );
   const [boundaryRoute, setBoundaryRoute] = useState<BoundaryRoute | null>(null);
+  const [boundaryInputTrouble, setBoundaryInputTrouble] = useState<string | null>(null);
   const [screens, setScreens] = useState<RemoteScreen[]>([]);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [certPrompt, setCertPrompt] = useState<CertPromptState | null>(null);
@@ -487,6 +494,9 @@ export function useSession(
           if (next.state === "connected" || next.state === "disconnected") {
             setCredentialRequest(null);
           }
+          // A new connection starts with nothing said about input: the
+          // computer says again if it still cannot take it.
+          if (next.state !== "connected") setBoundaryInputTrouble(null);
           break;
         }
         case "desktop-resize":
@@ -500,6 +510,9 @@ export function useSession(
           break;
         case "boundary-route":
           setBoundaryRoute(ev.route);
+          break;
+        case "boundary-input":
+          setBoundaryInputTrouble(typeof ev.trouble === "string" ? ev.trouble : null);
           break;
         case "desktop-name":
           setDesktopName(ev.name);
@@ -1054,7 +1067,7 @@ export function useSession(
   }, []);
 
   return {
-    state, desktopName, boundaryControl, boundaryClipboardWrite, boundaryRoute, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
+    state, desktopName, boundaryControl, boundaryClipboardWrite, boundaryRoute, boundaryInputTrouble, screens, stats, certPrompt, sshHostKeyPrompt, credentialRequest, lastCredentialAnswer, remoteClipboard, bellTick,
     sshAttached, sshNotice,
     sendInput, sendTerminalInput, sendTerminalResize, disconnect, reconnectNow, setQuality, setViewOnly, refreshScreen,
     requestResize, sendClipboard, releaseAllKeys, captureThumbnail, trustCertificate, setAlwaysRefresh,

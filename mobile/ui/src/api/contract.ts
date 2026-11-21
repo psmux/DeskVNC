@@ -89,6 +89,8 @@ export type SessionEvent =
   | { sessionId: string; type: "stats"; stats: SessionStats }
   /** Boundary only: whether the session goes straight to the computer or through a relay. */
   | { sessionId: string; type: "boundary-route"; route: BoundaryRoute }
+  /** Why the computer is not taking taps and keys, or null once it does again. */
+  | { sessionId: string; type: "boundary-input"; trouble: string | null }
   | { sessionId: string; type: "error"; message: string }
   | { sessionId: string; type: "ended"; durationS: number };
 

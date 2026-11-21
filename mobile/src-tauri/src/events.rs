@@ -80,6 +80,9 @@ pub fn event_json(session_id: &str, event: &SessionEvent) -> Option<Value> {
         SessionEvent::Protocol(ProtocolEvent::BoundaryRoute { direct }) => {
             json!({ "type": "boundary-route", "route": if *direct { "direct" } else { "relay" } })
         }
+        SessionEvent::Protocol(ProtocolEvent::BoundaryInput { trouble }) => {
+            json!({ "type": "boundary-input", "trouble": trouble })
+        }
         _ => return None,
     };
     if let Value::Object(map) = &mut value {
@@ -198,6 +201,22 @@ mod tests {
             assert_eq!(v["type"], "boundary-route");
             assert_eq!(v["route"], route);
         }
+
+        let v = event_json(
+            "s1",
+            &SessionEvent::Protocol(ProtocolEvent::BoundaryInput {
+                trouble: Some("That Mac is at its lock screen".into()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(v["type"], "boundary-input");
+        assert_eq!(v["trouble"], "That Mac is at its lock screen");
+        let v = event_json(
+            "s1",
+            &SessionEvent::Protocol(ProtocolEvent::BoundaryInput { trouble: None }),
+        )
+        .unwrap();
+        assert!(v["trouble"].is_null());
     }
 
     #[test]

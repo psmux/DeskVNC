@@ -561,7 +561,8 @@ impl Model {
                     Event::Tools(_)
                     | Event::Paired { .. }
                     | Event::ClipboardRights(_)
-                    | Event::ClipboardText(_) => {}
+                    | Event::ClipboardText(_)
+                    | Event::Notice(_) => {}
                     Event::Activity(line) => keep(&mut self.activity, line),
                     Event::Finished(result) => finished = Some(result),
                 }

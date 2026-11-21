@@ -77,7 +77,9 @@ exact byte layout of `src-tauri/FRAME_FORMAT.md`.
 flat, with `sessionId` and `type`. The phone UI handles at least:
 `state-changed`, `desktop-resize`, `desktop-name`, `cursor-position`,
 `clipboard-text`, `certificate-prompt`, `credentials-required`, `stats`,
-`error`, `ended`, and for Boundary `boundary-route`, `{ route: "direct" | "relay" }`.
+`error`, `ended`, and for Boundary `boundary-route`, `{ route: "direct" | "relay" }`,
+and `boundary-input`, `{ trouble: string | null }`: why the computer is not taking
+taps and keys (a Mac at its lock screen, say), or null once it does again.
 
 ## App lifecycle
 
