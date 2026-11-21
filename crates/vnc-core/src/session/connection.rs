@@ -240,12 +240,27 @@ async fn establish(
     creds: &CredentialSource<'_>,
 ) -> Result<Established> {
     let mut can_skip_vencrypt = false;
-    match establish_once(options, settings, events, creds, false, &mut can_skip_vencrypt).await {
+    match establish_once(
+        options,
+        settings,
+        events,
+        creds,
+        false,
+        &mut can_skip_vencrypt,
+    )
+    .await
+    {
         Err(VncError::AnonymousTlsOnly) if can_skip_vencrypt => {
-            tracing::info!(
-                "VeNCrypt offers only anonymous TLS; connecting again without VeNCrypt"
-            );
-            establish_once(options, settings, events, creds, true, &mut can_skip_vencrypt).await
+            tracing::info!("VeNCrypt offers only anonymous TLS; connecting again without VeNCrypt");
+            establish_once(
+                options,
+                settings,
+                events,
+                creds,
+                true,
+                &mut can_skip_vencrypt,
+            )
+            .await
         }
         other => other,
     }

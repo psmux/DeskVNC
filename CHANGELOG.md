@@ -12,6 +12,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* A TigerVNC server left on its defaults (`x0vncserver`, `Xvnc` or
+  `vncserver` with `SecurityTypes=TLSVnc,VncAuth`) could not be reached at
+  all. DeskVNC chose VeNCrypt, found only TLSVnc inside it, which it cannot
+  speak, and gave up. It now connects again with VncAuth, the way RealVNC's
+  viewer does. A server that offers nothing but TLSVnc gets a message naming
+  the SecurityTypes setting to change, and the phone no longer calls that a
+  failed sign in or a bad identity (#56).
+* When an Android phone cannot reach a computer, the error now also points
+  at the Nearby devices permission. Android 17 drops DeskVNC's connections
+  to the local network without it, and the connect just times out.
+
 * A Boundary session to a Mac at its sign in screen or lock screen ended on
   the helper's first click, with "no connection could be established (failed
   creating event source)", and again after every reconnect, so the helper

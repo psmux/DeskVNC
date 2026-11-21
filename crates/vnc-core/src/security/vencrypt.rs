@@ -169,7 +169,6 @@ impl VeNCryptSubtype {
     }
 }
 
-
 /// Choose the strongest subtype we can actually complete.
 ///
 /// Anonymous-TLS subtypes are ranked but never selected (see the module docs);

@@ -55,6 +55,15 @@ describe("status words", () => {
     expect(isSignInRefusal(method)).toBe(false);
   });
 
+  it("names the local network permission when an Android phone cannot reach a computer", () => {
+    // Android 17 drops the connect until DeskVNC may use the local network,
+    // so it times out (issue #56).
+    const timeout = "The computer did not respond. It may be asleep or unreachable.";
+    expect(friendlyError(timeout, true).title).toBe("We could not reach the computer");
+    expect(friendlyError(timeout, true).detail).toContain("Nearby devices");
+    expect(friendlyError(timeout, false).detail).not.toContain("Nearby devices");
+  });
+
   it("asks for still pictures when the phone has no video decoder", () => {
     expect(wireQuality("auto", false)).toBe("quality");
     expect(wireQuality("auto", true)).toBe("auto");

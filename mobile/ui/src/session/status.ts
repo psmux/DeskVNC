@@ -2,6 +2,7 @@
  * Plain words for what the session is doing, and the colour of the
  * connection badge. Kept apart from the components so they can be tested.
  */
+import { isAndroid } from "../api/binary";
 import type { BoundaryRoute, SessionState, SessionStats } from "../api/contract";
 
 export type Step = 0 | 1 | 2 | 3;
@@ -169,8 +170,13 @@ export function isSignInRefusal(raw: string | null): boolean {
 /**
  * Turns a raw error from Rust or the server into a sentence a person can act
  * on. Unknown messages are kept, behind a friendly lead in.
+ *
+ * On Android a computer on the same Wi-Fi can be out of reach for a reason
+ * the phone owns: Android 17 drops this app's connections to the local
+ * network until it is allowed to find devices there, and the connect just
+ * times out (issue #56). That gets named next to the usual checks.
  */
-export function friendlyError(raw: string): { title: string; detail: string } {
+export function friendlyError(raw: string, android: boolean = isAndroid()): { title: string; detail: string } {
   switch (errorKind(raw)) {
     case "setting":
       return { title: "The computer's VNC server needs a setting changed", detail: raw };
@@ -184,7 +190,9 @@ export function friendlyError(raw: string): { title: string; detail: string } {
     case "unreachable":
       return {
         title: "We could not reach the computer",
-        detail: "Check that it is switched on and that this phone is on the internet, then try again.",
+        detail: android
+          ? "Check that it is switched on and that this phone is on the internet or the same Wi-Fi. If it is on your local network, also check that DeskVNC may find devices there: Settings, Apps, DeskVNC, Permissions, Nearby devices."
+          : "Check that it is switched on and that this phone is on the internet, then try again.",
       };
     case "sign-in":
       return { title: "That sign in did not work", detail: "The name or password was not accepted. Try again and check the spelling." };
