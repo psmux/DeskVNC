@@ -224,11 +224,64 @@ type Established = (
 );
 
 /// Everything up to (and including) the ServerInit exchange.
+///
+/// A server whose VeNCrypt has nothing but anonymous TLS subtypes can only be
+/// turned down after the client has committed to VeNCrypt, and RFB has no way
+/// back from that choice on the same connection. TigerVNC ships exactly that
+/// as its default (`SecurityTypes=TLSVnc,VncAuth`), so when the server
+/// offered another usable type beside VeNCrypt this connects once more
+/// without it (issue #56). RealVNC's and most other viewers have no VeNCrypt
+/// and land on VncAuth directly; the session gets the unencrypted badge
+/// either way.
 async fn establish(
     options: &ConnectOptions,
     settings: &SessionSettings,
     events: &mpsc::Sender<SessionEvent>,
     creds: &CredentialSource<'_>,
+) -> Result<Established> {
+    let mut can_skip_vencrypt = false;
+    match establish_once(options, settings, events, creds, false, &mut can_skip_vencrypt).await {
+        Err(VncError::AnonymousTlsOnly) if can_skip_vencrypt => {
+            tracing::info!(
+                "VeNCrypt offers only anonymous TLS; connecting again without VeNCrypt"
+            );
+            establish_once(options, settings, events, creds, true, &mut can_skip_vencrypt).await
+        }
+        other => other,
+    }
+}
+
+/// Whether an offer still has a type this client can use once VeNCrypt is
+/// taken off it. Never when the user pinned a type, which is honoured exactly
+/// or not at all, and never under RFB 3.3, where the server picks.
+fn usable_without_vencrypt(
+    offered: &[u8],
+    version: ProtocolVersion,
+    options: &ConnectOptions,
+) -> bool {
+    if version == ProtocolVersion::V3_3 || crate::security::security_pref(options).is_some() {
+        return false;
+    }
+    let rest = without_vencrypt(offered);
+    !rest.is_empty() && crate::security::select_security_type(&rest, options).is_ok()
+}
+
+fn without_vencrypt(offered: &[u8]) -> Vec<u8> {
+    let vencrypt = SecurityType::VeNCrypt.to_wire();
+    offered.iter().copied().filter(|&t| t != vencrypt).collect()
+}
+
+/// One connection through ServerInit. With `skip_vencrypt` VeNCrypt is taken
+/// off the server's offer before a type is chosen. `can_skip_vencrypt` is set
+/// when VeNCrypt failed for want of a subtype rustls can complete and the
+/// offer has something else to try.
+async fn establish_once(
+    options: &ConnectOptions,
+    settings: &SessionSettings,
+    events: &mpsc::Sender<SessionEvent>,
+    creds: &CredentialSource<'_>,
+    skip_vencrypt: bool,
+    can_skip_vencrypt: &mut bool,
 ) -> Result<Established> {
     let mut tcp = open_stream(options, events).await?;
 
@@ -242,11 +295,14 @@ async fn establish(
         "negotiated RFB version"
     );
 
-    let offered = with_timeout(
+    let mut offered = with_timeout(
         options.connect_timeout,
         read_security_offer(&mut tcp, negotiated.version),
     )
     .await?;
+    if skip_vencrypt && negotiated.version != ProtocolVersion::V3_3 {
+        offered = without_vencrypt(&offered);
+    }
 
     // Name the type this client will pick, so a pinned type (or the auto
     // choice) is what the state shows, not merely the strongest on offer.
@@ -261,12 +317,17 @@ async fn establish(
         minor: negotiated.version.minor() as u8,
         is_apple: negotiated.is_apple_screen_sharing,
     };
+    let authenticated =
+        crate::security::authenticate_full(tcp, version_info, &offered, options, creds).await;
+    if matches!(authenticated, Err(VncError::AnonymousTlsOnly)) {
+        *can_skip_vencrypt = usable_without_vencrypt(&offered, negotiated.version, options);
+    }
     let crate::security::Authenticated {
         mut stream,
         security,
         trust,
         apple_wrap_key,
-    } = crate::security::authenticate_full(tcp, version_info, &offered, options, creds).await?;
+    } = authenticated?;
     // The security result was OK, so whatever the user typed for this attempt
     // is now proven, whatever happens to the connection after this line.
     creds.mark_authenticated();

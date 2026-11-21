@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { friendlyError, qualityLevel, routeWords, stepOf } from "../status";
+import { friendlyError, isSignInRefusal, qualityLevel, routeWords, stepOf } from "../status";
 import { wireQuality } from "../useRemoteSession";
 
 describe("status words", () => {
@@ -40,6 +40,19 @@ describe("status words", () => {
       friendlyError("This computer's identity was not trusted, so no name or password was sent to it.").title,
     ).toBe("You did not trust this computer");
     expect(friendlyError("This computer's identity has changed.").title).toBe("The computer's identity did not check out");
+  });
+
+  it("says when the VNC server needs a setting changed, not that the password or identity failed", () => {
+    // TigerVNC left with only TLSVnc (issue #56). The sentence names VncAuth
+    // and encryption, which the sign in and identity rules would claim.
+    const tls =
+      "This computer's VNC server only offers TLSVnc or TLSNone, a kind of encryption DeskVNC cannot use. Add VncAuth, X509Vnc or RA2 to its SecurityTypes setting.";
+    expect(friendlyError(tls).title).toBe("The computer's VNC server needs a setting changed");
+    expect(friendlyError(tls).detail).toBe(tls);
+    expect(isSignInRefusal(tls)).toBe(false);
+    const method = "This server uses an authentication method DeskVNCViewer does not support.";
+    expect(friendlyError(method).title).toBe("The computer's VNC server needs a setting changed");
+    expect(isSignInRefusal(method)).toBe(false);
   });
 
   it("asks for still pictures when the phone has no video decoder", () => {

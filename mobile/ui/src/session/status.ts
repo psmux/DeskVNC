@@ -129,11 +129,15 @@ export function endWords(kind: EndKind, reason: string | null): { title: string;
   }
 }
 
-type ErrorKind = "encryption" | "untrusted" | "unreachable" | "sign-in" | "identity" | "code" | "dropped" | "other";
+type ErrorKind = "setting" | "encryption" | "untrusted" | "unreachable" | "sign-in" | "identity" | "code" | "dropped" | "other";
 
 /** Sorts a raw error from Rust or the server. The order of the tests matters. */
 function errorKind(raw: string): ErrorKind {
   const m = raw.toLowerCase();
+  // The server answered but offers no way in this app can use (TigerVNC with
+  // only TLSVnc, or a method DeskVNC lacks). The sentence names VncAuth and
+  // encryption, so it has to be caught before the sign in and identity rules.
+  if (/securitytypes|does not support/.test(m)) return "setting";
   // These two come first: both sentences mention a name or password that was
   // never sent, and the sign in rule below would claim it was refused.
   if (/key exchange/.test(m)) return "encryption";
@@ -168,6 +172,8 @@ export function isSignInRefusal(raw: string | null): boolean {
  */
 export function friendlyError(raw: string): { title: string; detail: string } {
   switch (errorKind(raw)) {
+    case "setting":
+      return { title: "The computer's VNC server needs a setting changed", detail: raw };
     case "encryption":
       return {
         title: "The computer could not set up encryption",
