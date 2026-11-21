@@ -17,9 +17,10 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   when it stopped, and a single pane gained and lost its header the same
   way, so the remote desktop was resized between the agent's screenshot and
   its click. While agents are turned on, the strip and the pane header now
-  keep one height whether or not an agent is driving. A new preference,
-  "Keep the activity strip to one line", shows a small chip per machine in
-  place of the cards (#52).
+  keep one height whether or not an agent is driving. The strip is one line
+  by default, with a small chip per machine an agent drives. The cards are
+  still there behind a new preference, "Show a card for each machine an
+  agent drives", which keeps the strip taller at one fixed height (#52).
 * A Boundary session to a Mac at its sign in screen or lock screen ended on
   the helper's first click, with "no connection could be established (failed
   creating event source)", and again after every reconnect, so the helper

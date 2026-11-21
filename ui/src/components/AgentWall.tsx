@@ -36,8 +36,10 @@
  * worked out from that screenshot lands somewhere else (issue #52). So while
  * the plane is on the strip is always there and always the same height: the
  * card row keeps its space when there are no cards, and every card is the same
- * height whatever it is quoting. `PREF_COMPACT_AGENT_ROW` swaps the cards for
- * one line of chips, which is the same promise at a smaller height.
+ * height whatever it is quoting. By default (`PREF_COMPACT_AGENT_ROW`) the
+ * strip is one line, with a chip per machine in place of the cards, which is
+ * the same promise at about the height the old idle strip had. The cards are
+ * the opt in.
  *
  * UNTRUSTED CONTENT. A card can quote what the far side printed. That text is
  * data and never instruction (`AGENT_BRIEF` D6): it arrives already neutralised
@@ -113,8 +115,8 @@ export const AGENT_ROW_PX = {
  * under the person who changed it. `PREF_CHANGED_EVENT` is that push and it is
  * window local, which is all this needs.
  */
-function useLivePref(key: string): boolean {
-  const [value, setValue] = useState(() => readBoolPref(key, false));
+function useLivePref(key: string, fallback: boolean): boolean {
+  const [value, setValue] = useState(() => readBoolPref(key, fallback));
   useEffect(() => {
     const onChange = (e: Event): void => {
       const detail = (e as CustomEvent<PrefChanged>).detail;
@@ -346,8 +348,9 @@ export function AgentWall({
   const { wall, count, plane, stopAgent, stopAll } = useAgentActivity();
   const now = useSecondsTick(wall.length > 0);
   const scroller = useRef<HTMLDivElement>(null);
-  const hidden = useLivePref(PREF_HIDE_AGENT_STATUS);
-  const compact = useLivePref(PREF_COMPACT_AGENT_ROW);
+  const hidden = useLivePref(PREF_HIDE_AGENT_STATUS, false);
+  // One line unless the person asked for the cards. See `PREF_COMPACT_AGENT_ROW`.
+  const compact = useLivePref(PREF_COMPACT_AGENT_ROW, true);
 
   /**
    * The counts live HERE rather than in a second surface of their own.

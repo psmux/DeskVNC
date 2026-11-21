@@ -191,7 +191,7 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
   const [zoomLocked, setZoomLocked] = usePref(PREF_ZOOM_LOCKED, false);
   const [edgePan, setEdgePan] = usePref(PREF_EDGE_PAN, true);
   const [hideAgentStatus, setHideAgentStatus] = usePref(PREF_HIDE_AGENT_STATUS, false);
-  const [compactAgentRow, setCompactAgentRow] = usePref(PREF_COMPACT_AGENT_ROW, false);
+  const [compactAgentRow, setCompactAgentRow] = usePref(PREF_COMPACT_AGENT_ROW, true);
   const [viewDefaults, setViewDefaults] = useViewDefaults();
   // The plane, read for two things only: whether the Agents tab exists at all,
   // and the live line the toggle below is about.
@@ -661,15 +661,19 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
               <>
                 <Toggle
                   label="Hide the agent counts"
-                  description="Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself stays while agents are turned on, with a card per machine an agent drives, and this switch stays here."
+                  description="Take the line reading how many agents are connected, and how much of this computer they are driving, off the activity strip. The strip itself stays while agents are turned on, with each machine an agent drives on it, and this switch stays here."
                   value={hideAgentStatus}
                   onChange={setHideAgentStatus}
                 />
+                {/*
+                  Stored the other way round, as "compact", so the cards are
+                  the opt in and anyone who already chose stays where they were.
+                */}
                 <Toggle
-                  label="Keep the activity strip to one line"
-                  description="Show each machine an agent drives as a small chip beside the counts, in place of a card. The strip keeps the same height whether or not an agent is driving, either way, so a remote desktop set to resize to fit is not resized under an agent."
-                  value={compactAgentRow}
-                  onChange={setCompactAgentRow}
+                  label="Show a card for each machine an agent drives"
+                  description="The activity strip grows taller to hold the cards, and stays that height whether or not an agent is driving, so a remote desktop set to resize to fit is never resized under an agent. Off, each machine is a small chip on the strip's one line."
+                  value={!compactAgentRow}
+                  onChange={(v) => setCompactAgentRow(!v)}
                 />
                 <div className="border-t border-subtle pt-5">
                   <p className="text-sm font-medium text-primary">Right now</p>

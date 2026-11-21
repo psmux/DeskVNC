@@ -84,9 +84,10 @@ function stripHeight(wall: AgentActivity[]): string | null {
 
 describe("the agent strip keeps one height (issue #52)", () => {
   const cases: Array<[string, Record<string, string>]> = [
-    ["with the cards", {}],
+    ["by default", {}],
     ["with the counts hidden", { [PREF_HIDE_AGENT_STATUS]: "1" }],
-    ["kept to one line", { [PREF_COMPACT_AGENT_ROW]: "1" }],
+    ["with the cards", { [PREF_COMPACT_AGENT_ROW]: "0" }],
+    ["with the cards and the counts hidden", { [PREF_COMPACT_AGENT_ROW]: "0", [PREF_HIDE_AGENT_STATUS]: "1" }],
   ];
 
   for (const [name, prefs] of cases) {
@@ -99,14 +100,24 @@ describe("the agent strip keeps one height (issue #52)", () => {
     });
   }
 
-  it("is shorter kept to one line than with the cards", () => {
-    const full = parseInt(stripHeight([DRIVEN]) ?? "0", 10);
-    localStorage.setItem(prefStorageKey(PREF_COMPACT_AGENT_ROW), "1");
+  it("is one line by default, and taller only when the cards are asked for", () => {
+    const byDefault = parseInt(stripHeight([DRIVEN]) ?? "0", 10);
+    expect(host.querySelector(".w-64")).toBeNull();
+    localStorage.setItem(prefStorageKey(PREF_COMPACT_AGENT_ROW), "0");
     act(() => root.unmount());
     root = createRoot(host);
-    const compact = parseInt(stripHeight([DRIVEN]) ?? "0", 10);
-    expect(compact).toBeGreaterThan(0);
-    expect(compact).toBeLessThan(full);
+    const cards = parseInt(stripHeight([DRIVEN]) ?? "0", 10);
+    expect(byDefault).toBeGreaterThan(0);
+    expect(byDefault).toBeLessThan(cards);
+  });
+
+  it("keeps a choice somebody already made for the one line strip", () => {
+    localStorage.setItem(prefStorageKey(PREF_COMPACT_AGENT_ROW), "1");
+    const chosen = stripHeight([DRIVEN]);
+    localStorage.clear();
+    act(() => root.unmount());
+    root = createRoot(host);
+    expect(stripHeight([DRIVEN])).toBe(chosen);
   });
 
   it("still takes no room at all with the plane off", () => {
