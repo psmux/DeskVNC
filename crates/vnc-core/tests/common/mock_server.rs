@@ -45,6 +45,9 @@ pub const SEC_VNC_AUTH: u8 = 2;
 /// VeNCrypt (19). The mock only offers the `Plain` subtype (256), no TLS, /// which is enough to exercise a username+password credential prompt.
 pub const SEC_VENCRYPT: u8 = 19;
 const VENCRYPT_PLAIN: u32 = 256;
+/// VeNCrypt TLSVnc (258): anonymous TLS, then VncAuth inside it. Half of the
+/// `TLSVnc, VncAuth` default every TigerVNC server ships with.
+pub const VENCRYPT_TLS_VNC: u32 = 258;
 /// Apple's Diffie-Hellman login (30), as an older Mac runs it: the 1024-bit
 /// group of RFC 2409 with generator 2. The mock decrypts the credentials
 /// with the shared secret and checks them like VeNCrypt Plain.
@@ -658,6 +661,10 @@ pub struct MockConfig {
     /// Announce ContinuousUpdates support (an unsolicited
     /// EndOfContinuousUpdates right after ServerInit), the way TigerVNC does.
     pub advertise_continuous_updates: bool,
+    /// The VeNCrypt subtypes offered after type 19 is chosen. Only Plain can
+    /// be completed by the mock; any other subtype is offered so a client can
+    /// be seen to turn it down.
+    pub vencrypt_subtypes: Vec<u32>,
 }
 
 impl Default for MockConfig {
@@ -682,6 +689,7 @@ impl Default for MockConfig {
             flood: None,
             flood_gap: Duration::ZERO,
             advertise_continuous_updates: false,
+            vencrypt_subtypes: vec![VENCRYPT_PLAIN],
         }
     }
 }
@@ -756,6 +764,10 @@ impl MockConfig {
     }
     pub fn advertise_continuous_updates(mut self) -> Self {
         self.advertise_continuous_updates = true;
+        self
+    }
+    pub fn vencrypt_subtypes(mut self, subtypes: &[u32]) -> Self {
+        self.vencrypt_subtypes = subtypes.to_vec();
         self
     }
 }
@@ -1033,16 +1045,22 @@ async fn serve(
             }
         }
         SEC_VENCRYPT => {
-            // Version 0.2, then a single subtype: Plain (cleartext
-            // username+password, no TLS, rustls cannot do anonymous DH and
-            // the mock has no certificate).
+            // Version 0.2, then the configured subtypes (Plain unless a test
+            // says otherwise). Only Plain is carried through: cleartext
+            // username+password, no TLS, since rustls cannot do anonymous DH
+            // and the mock has no certificate. A client that turns the list
+            // down just closes the socket, which ends this connection.
             stream.write_all(&[0, 2]).await?;
             stream.flush().await?;
             let mut client_version = [0u8; 2];
             stream.read_exact(&mut client_version).await?;
             stream.write_all(&[0]).await?; // ack
-            stream.write_all(&[1]).await?; // one subtype
-            stream.write_all(&VENCRYPT_PLAIN.to_be_bytes()).await?;
+            stream
+                .write_all(&[cfg.vencrypt_subtypes.len() as u8])
+                .await?;
+            for subtype in &cfg.vencrypt_subtypes {
+                stream.write_all(&subtype.to_be_bytes()).await?;
+            }
             stream.flush().await?;
 
             let mut chosen_subtype = [0u8; 4];

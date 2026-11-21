@@ -74,6 +74,17 @@ pub enum VncError {
     #[error("tls error: {0}")]
     Tls(String),
 
+    /// The server's only VeNCrypt subtypes are the anonymous TLS ones
+    /// (TLSNone, TLSVnc, TLSPlain), which rustls cannot complete. It is
+    /// raised after the client has committed to VeNCrypt, so the session
+    /// tries once more on a fresh connection without VeNCrypt when the server
+    /// offered anything else beside it (`session::connection`).
+    #[error(
+        "the server offers only anonymous TLS (VeNCrypt TLSNone, TLSVnc or TLSPlain), \
+         which DeskVNC cannot use; add VncAuth, X509Vnc or RA2 to its SecurityTypes"
+    )]
+    AnonymousTlsOnly,
+
     /// Server certificate fingerprint differs from the pinned one.
     /// Hard stop, never auto-retried (PRD/10 §4.3).
     #[error("server identity changed: expected {expected}, got {actual}")]
@@ -165,6 +176,12 @@ impl VncError {
             }
             VncError::CertificateUntrusted(_) => {
                 "This computer's identity was not trusted, so no name or password was sent to it."
+                    .into()
+            }
+            VncError::AnonymousTlsOnly => {
+                "This computer's VNC server only offers TLSVnc or TLSNone, a kind of \
+                 encryption DeskVNC cannot use. Add VncAuth, X509Vnc or RA2 to its \
+                 SecurityTypes setting."
                     .into()
             }
             VncError::NoSupportedSecurityType(_) => {
