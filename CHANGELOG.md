@@ -12,6 +12,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* RDP to Ubuntu with GNOME Remote Login (Settings, System, Remote Desktop,
+  Remote Login) now reaches the desktop after you sign in at the login
+  screen. GNOME hands the connection over to your own session with a
+  redirection that names no address, only a routing token and one time
+  credentials meant for RDSTLS, a sign in DeskVNC did not speak. It now
+  reconnects to the same computer, presents the token, and signs in with
+  RDSTLS. The one time credentials are used for that connection only and
+  never replace the ones saved with the host (#59).
 * Boundary, on a screen shared for viewing only (GNOME with Allow Remote
   Interaction left off): ticking control just as the helper came in could
   leave the box ticked with nothing said. The host marked the person's tick
