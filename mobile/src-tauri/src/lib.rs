@@ -12,6 +12,7 @@ mod commands;
 mod events;
 mod keys;
 mod lifecycle;
+mod localnet;
 mod pins;
 mod state;
 mod store;
@@ -117,6 +118,7 @@ pub fn run() {
     init_logging();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(localnet::plugin())
         .setup(|app| {
             let state = build_state(app)?;
             install_boundary(&state);
@@ -144,6 +146,9 @@ pub fn run() {
             commands::session::session_snapshot,
             commands::session::session_disconnect,
             commands::session::session_save_host,
+            commands::localnet::local_network_state,
+            commands::localnet::local_network_ask,
+            commands::localnet::app_settings_open,
         ])
         .build(tauri::generate_context!())
         .expect("error while building DeskVNC");
