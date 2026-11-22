@@ -122,13 +122,13 @@ impl ConnectOnce for MockConnect {
                 Ok(connected) => connected,
                 Err(RdpError::Redirected(redirect)) => {
                     self.carry.redirect = Some(*redirect);
-                    return absorb_attempt(
+                    return Ok(absorb_attempt(
                         &mut self.options,
                         &mut self.carry,
                         rdp_core::session::run_loop::RunOutcome::ServerDisconnect {
                             user_requested: false,
                         },
-                    );
+                    ));
                 }
                 Err(e) => return Err(e),
             };
@@ -172,19 +172,19 @@ impl ConnectOnce for MockConnect {
             let _ = writer_task.await;
 
             match outcome {
-                Ok(attempt) => absorb_attempt(&mut self.options, &mut self.carry, attempt),
+                Ok(attempt) => Ok(absorb_attempt(&mut self.options, &mut self.carry, attempt)),
                 Err(e) => {
                     // A redirection recorded by the pump outlives the error
                     // the socket produced afterwards, which is what makes a
                     // redirect followed by a close still a redirect.
                     if self.carry.redirect.is_some() {
-                        return absorb_attempt(
+                        return Ok(absorb_attempt(
                             &mut self.options,
                             &mut self.carry,
                             rdp_core::session::run_loop::RunOutcome::ServerDisconnect {
                                 user_requested: false,
                             },
-                        );
+                        ));
                     }
                     Err(e)
                 }
@@ -614,15 +614,22 @@ async fn a_gnome_handover_is_followed_to_the_same_host_with_rdstls() {
     );
 }
 
-/// Two servers that keep sending a client to each other would reconnect
-/// forever. The chain is bounded: the mock redirects every connection to
-/// itself, and the session stops after `MAX_REDIRECTS` with a sentence.
+/// A server that hands every RDSTLS connection over again would send the
+/// client round the same host forever. The same host path goes through the
+/// supervisor's bound on chained redirections like any other redirection.
 #[tokio::test]
-async fn a_redirection_loop_stops() {
-    let server = MockRdpServer::start(MockConfig {
-        session: SessionBehaviour::RedirectAfterLogon,
-        ..MockConfig::default()
-    })
+async fn a_handover_loop_stops() {
+    let server = MockRdpServer::start_sequence(vec![
+        MockConfig {
+            session: SessionBehaviour::HandoverWithoutTarget,
+            ..MockConfig::default()
+        },
+        MockConfig {
+            negotiation: Negotiation::Rdstls,
+            session: SessionBehaviour::HandoverWithoutTarget,
+            ..MockConfig::default()
+        },
+    ])
     .await;
 
     let mut options = options_for(server.addr);
@@ -644,17 +651,20 @@ async fn a_redirection_loop_stops() {
 
     match states(&events).last() {
         Some(SessionState::Disconnected { reason, .. }) => {
-            assert!(
-                reason.contains("redirected this session more than"),
-                "{reason}"
-            );
+            assert!(reason.contains("kept redirecting"), "{reason}");
         }
         other => panic!("expected a disconnect with a reason, got {other:?}"),
     }
-    let max = rdp_core::session::MAX_REDIRECTS as usize;
+    let max = remote_core::reconnect::MAX_CHAINED_REATTEMPTS as usize;
+    let recorded = server.wait_until(|r| r.connections > max).await;
     assert_eq!(
-        server.wait_until(|r| r.connections > max).await.connections,
+        recorded.connections,
         max + 1,
-        "every redirection up to the bound was followed, and no more"
+        "every handover up to the bound was followed, and no more"
+    );
+    assert_eq!(
+        recorded.rdstls_requests.len(),
+        max,
+        "each one signed in with rdstls"
     );
 }

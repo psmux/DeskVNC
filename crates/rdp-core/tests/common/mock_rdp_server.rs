@@ -618,6 +618,11 @@ async fn serve_rdstls(
         result_code, RdstlsAuthResponse, RdstlsCapabilities, RdstlsPasswordRequest,
     };
 
+    // On a real server the capabilities come after a TLS handshake, so they
+    // can never share a read with the Connection Confirm. The mock has no
+    // handshake, and a client that reads both at once rightly refuses bytes
+    // that arrived before the upgrade, so it waits for that read to finish.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let caps = RdstlsCapabilities {
         supported_versions: rdp_pdu::rdstls::VERSION_1,
     };

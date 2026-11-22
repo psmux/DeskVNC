@@ -155,15 +155,6 @@ pub struct RdpConnect {
     carry: Continuity,
 }
 
-/// How many Server Redirections one session follows in a row.
-///
-/// GNOME Remote Login needs one: the login screen hands over to the user's
-/// session. A broker in front of a farm needs one, and a broker in front of a
-/// target that redirects again needs two. Four leaves room for that and still
-/// stops two servers that send a client back and forth between them, which
-/// would otherwise reconnect forever without the user ever seeing a desktop.
-pub const MAX_REDIRECTS: u32 = 4;
-
 /// What one attempt reads from the last one and writes for the next.
 ///
 /// Each field is a reason a `ConnectOnce` implementor has to be a struct
@@ -184,9 +175,6 @@ pub struct Continuity {
     /// on the next connection (MS-RDPBCGR 5.4.5.3). Scoped like the routing
     /// token.
     pub rdstls: Option<RdstlsCredentials>,
-    /// How many redirections this session has followed without an attempt
-    /// that ended any other way, bounded by [`MAX_REDIRECTS`].
-    pub redirects: u32,
 }
 
 impl Continuity {
@@ -240,14 +228,9 @@ impl ConnectOnce for RdpConnect {
             .await
             {
                 Ok(outcome) => outcome,
-                Err(e) => {
-                    // A failure ends a chain of redirections: whatever comes
-                    // next starts from what the profile says.
-                    self.carry.redirects = 0;
-                    return absorb_failure(&mut self.options, e);
-                }
+                Err(e) => return absorb_failure(&mut self.options, e),
             };
-            absorb_attempt(&mut self.options, &mut self.carry, outcome)
+            Ok(absorb_attempt(&mut self.options, &mut self.carry, outcome))
         })
     }
 
@@ -303,38 +286,24 @@ pub fn absorb_failure(options: &mut ConnectOptions, err: RdpError) -> Result<Run
 /// (`crates/rdp-core/tests/connect.rs`). The alternative is a second copy of
 /// the redirection rules in a test, which is the copy that goes stale.
 ///
-/// # Errors
-///
-/// [`RdpError::Protocol`] when following this redirection would be the
-/// session's redirection number [`MAX_REDIRECTS`] plus one.
+/// A chain of redirections is bounded by the supervisor
+/// (`remote_core::reconnect::MAX_CHAINED_REATTEMPTS`), the same host
+/// handover included.
+#[must_use]
 pub fn absorb_attempt(
     options: &mut ConnectOptions,
     carry: &mut Continuity,
     outcome: Attempt,
-) -> Result<RunOutcome, RdpError> {
+) -> RunOutcome {
     match carry.redirect.take() {
         Some(redirect) => {
-            carry.redirects += 1;
-            if carry.redirects > MAX_REDIRECTS {
-                tracing::warn!(
-                    redirects = carry.redirects,
-                    %redirect,
-                    "too many redirections in a row: not following this one"
-                );
-                carry.routing_token = None;
-                carry.rdstls = None;
-                return Err(RdpError::Protocol(format!(
-                    "the server redirected this session more than {MAX_REDIRECTS} times in a row, \
-                     so it was stopped rather than sent round again (MS-RDPBCGR 2.2.13.1)"
-                )));
-            }
             // The cookie belongs to the session on the machine we are
             // leaving, and offering it to the target would be a wasted round
             // trip and a rejection (PRDRDP/06 §5.5.5).
             carry.cookie = None;
             let why = redirect.describe();
             redirect.apply(options, &mut carry.routing_token, &mut carry.rdstls);
-            Ok(RunOutcome::Reattempt { why })
+            RunOutcome::Reattempt { why }
         }
         // A logoff and an administrative close are both deliberate, and
         // reconnecting into a session the far end just ended is a loop. A
@@ -346,8 +315,7 @@ pub fn absorb_attempt(
                 outcome,
                 Attempt::UserDisconnect | Attempt::ServerDisconnect { .. }
             ));
-            carry.redirects = 0;
-            Ok(RunOutcome::UserDisconnect)
+            RunOutcome::UserDisconnect
         }
     }
 }
