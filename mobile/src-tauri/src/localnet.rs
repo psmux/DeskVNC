@@ -113,7 +113,11 @@ pub async fn open_settings<R: Runtime>(_app: &tauri::AppHandle<R>) -> Result<(),
 
 /// Fails with [`REFUSED`] when the permission is missing and `host` is on
 /// this network. Anything else goes ahead and dials.
-pub async fn check<R: Runtime>(app: &tauri::AppHandle<R>, host: &str, port: u16) -> Result<(), String> {
+pub async fn check<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    host: &str,
+    port: u16,
+) -> Result<(), String> {
     if !cfg!(target_os = "android") {
         return Ok(());
     }
@@ -190,7 +194,10 @@ fn lan_v4(ip: Ipv4Addr, subnets: &[(Ipv4Addr, u8)]) -> bool {
     if ip.is_link_local() {
         return true;
     }
-    ip.is_private() && subnets.iter().any(|&(net, prefix)| in_subnet(ip, net, prefix))
+    ip.is_private()
+        && subnets
+            .iter()
+            .any(|&(net, prefix)| in_subnet(ip, net, prefix))
 }
 
 fn lan_v6(ip: Ipv6Addr) -> bool {
@@ -246,7 +253,10 @@ mod tests {
         assert!(!is_lan_ip(ip("127.0.0.1"), HOME));
         assert!(!is_lan_ip(ip("::1"), HOME));
         // A public address is not local even inside a subnet listed by mistake.
-        assert!(!is_lan_ip(ip("203.0.113.7"), &[(Ipv4Addr::new(203, 0, 113, 0), 24)]));
+        assert!(!is_lan_ip(
+            ip("203.0.113.7"),
+            &[(Ipv4Addr::new(203, 0, 113, 0), 24)]
+        ));
     }
 
     #[test]
@@ -276,8 +286,20 @@ mod tests {
 
     #[test]
     fn subnet_masks() {
-        assert!(in_subnet(Ipv4Addr::new(10, 0, 2, 2), Ipv4Addr::new(10, 0, 2, 0), 24));
-        assert!(!in_subnet(Ipv4Addr::new(10, 0, 3, 2), Ipv4Addr::new(10, 0, 2, 0), 24));
-        assert!(in_subnet(Ipv4Addr::new(172, 16, 9, 9), Ipv4Addr::new(172, 16, 0, 0), 20));
+        assert!(in_subnet(
+            Ipv4Addr::new(10, 0, 2, 2),
+            Ipv4Addr::new(10, 0, 2, 0),
+            24
+        ));
+        assert!(!in_subnet(
+            Ipv4Addr::new(10, 0, 3, 2),
+            Ipv4Addr::new(10, 0, 2, 0),
+            24
+        ));
+        assert!(in_subnet(
+            Ipv4Addr::new(172, 16, 9, 9),
+            Ipv4Addr::new(172, 16, 0, 0),
+            20
+        ));
     }
 }
