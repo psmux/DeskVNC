@@ -12,6 +12,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* Boundary, on a screen shared for viewing only (GNOME with Allow Remote
+  Interaction left off): ticking control just as the helper came in could
+  leave the box ticked with nothing said. The host marked the person's tick
+  as seen together with its own change to control a moment earlier. Only
+  its own change is marked seen now, so the tick goes back off with the
+  reason, as it does later in the session.
 * On a Retina Mac, a Remote Desktop session to Windows came up with every
   word and icon at half size, and resizing the window did not change the
   remote resolution. The desktop was asked for at the window's physical
