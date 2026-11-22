@@ -72,6 +72,19 @@ async fn run_sequence_against(
     let mut options = options_for(server.addr);
     options.credentials = creds;
     options.rdp_mut().license_dir = license_dir.map(std::path::Path::to_path_buf);
+    run_sequence_with(server, options).await
+}
+
+/// [`run_sequence`] against a server that is already up, dialling with these
+/// options.
+async fn run_sequence_with(
+    server: MockRdpServer,
+    mut options: remote_core::ConnectOptions,
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<Connected, RdpError>,
+) {
     let rdp = rdp_half(&options);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
@@ -265,6 +278,95 @@ async fn a_server_that_skips_licensing_still_reaches_connected() {
     .await;
     let connected = result.expect("no licensing pdu is a legal server");
     assert_eq!(connected.activation.share_id, SHARE_ID);
+}
+
+/// Issue #59: gnome-remote-desktop runs connect time detection after the
+/// Client Info PDU and waits, with no timeout, for the Bandwidth Measure
+/// Results and then for the RTT Measure Response. A client that advertises
+/// `RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT` and stays silent sits on
+/// "Negotiating" until something gives up. The client now answers both on
+/// the message channel and reaches `Connected`.
+#[tokio::test]
+async fn connect_time_auto_detect_is_answered_and_the_session_connects() {
+    use common::mock_rdp_server::{
+        AUTODETECT_PAYLOAD_LEN, AUTODETECT_RTT_SEQUENCE, MESSAGE_CHANNEL_ID,
+    };
+    use rdp_pdu::rdp::control::autodetect;
+
+    let (server, _, result) = run_sequence(
+        MockConfig {
+            session: SessionBehaviour::AwaitAutoDetect,
+            ..MockConfig::default()
+        },
+        Credentials::default(),
+    )
+    .await;
+    let connected = result.expect("the sequence carries on past connect time detection");
+    assert_eq!(connected.activation.share_id, SHARE_ID);
+
+    let responses = server.recorded().autodetect_responses;
+    assert_eq!(responses.len(), 2, "{responses:?}");
+    let results = responses[0];
+    assert_eq!(results.channel_id, MESSAGE_CHANNEL_ID);
+    assert_eq!(results.response_type, autodetect::BANDWIDTH_RESULTS);
+    assert_eq!(results.sequence_number, 0);
+    let (_, byte_count) = results.results.expect("the results carry a byte count");
+    assert_eq!(
+        byte_count as usize,
+        2 * AUTODETECT_PAYLOAD_LEN,
+        "the payload and the stop each carried one filler"
+    );
+    let rtt = responses[1];
+    assert_eq!(rtt.channel_id, MESSAGE_CHANNEL_ID);
+    assert_eq!(rtt.response_type, autodetect::RTT_RESPONSE);
+    assert_eq!(rtt.sequence_number, AUTODETECT_RTT_SEQUENCE);
+}
+
+/// Issue #59, the second half: gnome-remote-desktop sends a Deactivate All
+/// where the Demand Active belongs and closes the connection, with no error
+/// info, when the Client Core Data does not advertise the graphics pipeline. That close is named,
+/// the session goes round again at once with the pipeline asked for, and the
+/// second attempt connects.
+#[tokio::test]
+async fn a_server_that_needs_the_graphics_pipeline_gets_it_on_the_next_attempt() {
+    use rdp_pdu::gcc::client::early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL;
+
+    let config = MockConfig {
+        session: SessionBehaviour::RequireGraphicsPipeline,
+        ..MockConfig::default()
+    };
+    let server = MockRdpServer::start(config).await;
+    let mut options = options_for(server.addr);
+    assert!(!options.rdp_mut().graphics_pipeline, "off unless asked for");
+
+    let (server, _, result) = run_sequence_with(server, options.clone()).await;
+    let err = result.expect_err("the mock closes on a client without the pipeline");
+    assert!(
+        matches!(err, RdpError::ClosedWithoutGraphicsPipeline),
+        "{err:?}"
+    );
+
+    match rdp_core::session::absorb_failure(&mut options, err) {
+        Ok(remote_core::reconnect::RunOutcome::Reattempt { .. }) => {}
+        other => panic!("expected an immediate second attempt, got {other:?}"),
+    }
+    assert!(options.rdp_mut().graphics_pipeline);
+
+    let (server, _, result) = run_sequence_with(server, options.clone()).await;
+    result.expect("the second attempt asks for the pipeline and connects");
+    let flags = server
+        .recorded()
+        .client_blocks
+        .and_then(|b| b.core)
+        .and_then(|c| c.early_capability_flags)
+        .unwrap_or(0);
+    assert_ne!(flags & SUPPORT_DYNVC_GFX_PROTOCOL, 0);
+
+    // A close with the pipeline already on is not answered a second time.
+    assert!(matches!(
+        rdp_core::session::absorb_failure(&mut options, RdpError::ClosedWithoutGraphicsPipeline),
+        Err(RdpError::ClosedWithoutGraphicsPipeline)
+    ));
 }
 
 /// A licensing refusal is a sentence, not a number: the user has to be able to

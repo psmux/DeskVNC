@@ -93,6 +93,13 @@ async fn main() {
         None => Credentials::user_pass(&user, &pass),
     };
 
+    // `RDP_GFX=1` asks for the graphics pipeline (MS-RDPEGFX), which
+    // gnome-remote-desktop requires and refuses the connection without.
+    if std::env::var("RDP_GFX").as_deref() == Ok("1") {
+        options.rdp_mut().graphics_pipeline = true;
+        println!("graphics pipeline requested (RDP_GFX=1)");
+    }
+
     let (events_tx, mut events_rx) = mpsc::channel::<SessionEvent>(256);
 
     // Drive the real session, the same entry point the application uses, so

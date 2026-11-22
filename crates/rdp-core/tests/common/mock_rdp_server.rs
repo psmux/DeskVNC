@@ -269,11 +269,32 @@ pub enum SessionBehaviour {
     /// like. The client must classify it as transient and come back with the
     /// cookie in its next Client Info PDU.
     CookieThenDrop,
+    /// Connect time network characteristics detection the way
+    /// gnome-remote-desktop runs it (MS-RDPBCGR 2.2.14), then the rest of
+    /// [`SessionBehaviour::Serve`].
+    ///
+    /// Between the Client Info PDU and licensing the mock sends a Bandwidth
+    /// Measure Start, one Payload and a Stop on the message channel, and then
+    /// does nothing until the client answers with the Bandwidth Measure
+    /// Results. Then one RTT Measure Request, and again nothing until the
+    /// response. gnome-remote-desktop has no timeout on either wait, so a
+    /// client that stays silent never reaches the Demand Active (issue #59).
+    AwaitAutoDetect,
+    /// Unless the Client Core Data advertised the graphics pipeline, send a
+    /// Deactivate All where the Demand Active belongs and close the
+    /// connection, with no Set Error Info. Otherwise the whole of
+    /// [`SessionBehaviour::Serve`]. What gnome-remote-desktop does to a
+    /// client without MS-RDPEGFX.
+    RequireGraphicsPipeline,
     /// Phases 6 to 10, then a Standard Server Redirection PDU
     /// (MS-RDPBCGR 2.2.13.2) naming this same mock as the target, with a
     /// `LoadBalanceInfo` the next Connection Request has to echo as its
     /// routing token (3.2.5.3.1).
     RedirectAfterLogon,
+    /// [`SessionBehaviour::RedirectAfterLogon`] with no target address at
+    /// all, only a routing token and a user name: what GNOME Remote Login
+    /// sends to hand the connection to the user's own session.
+    HandoverWithoutTarget,
 }
 
 /// How the mock answers the MCS Connect Initial.
@@ -406,7 +427,30 @@ pub struct Recorded {
     pub licensing: Vec<u8>,
     /// The `LicenseInfo` blob of each `LICENSE_INFO` the client presented.
     pub presented_licences: Vec<Vec<u8>>,
+
+    // Network characteristics detection (MS-RDPBCGR 2.2.14).
+    /// Every detection response the client sent, in order.
+    pub autodetect_responses: Vec<AutoDetectRecord>,
 }
+
+/// One detection response the client sent (MS-RDPBCGR 2.2.14.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoDetectRecord {
+    /// The MCS channel it arrived on.
+    pub channel_id: u16,
+    /// `responseType`.
+    pub response_type: u16,
+    /// `sequenceNumber`.
+    pub sequence_number: u16,
+    /// `timeDelta` and `byteCount`, for a Bandwidth Measure Results.
+    pub results: Option<(u32, u32)>,
+}
+
+/// The filler length of each bandwidth measurement PDU the mock sends.
+pub const AUTODETECT_PAYLOAD_LEN: usize = 1024;
+
+/// The sequence number of the mock's RTT Measure Request.
+pub const AUTODETECT_RTT_SEQUENCE: u16 = 0x2a;
 
 /// One `RDPGFX_FRAME_ACKNOWLEDGE_PDU` (MS-RDPEGFX 2.2.2.13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -952,6 +996,11 @@ async fn serve(
         rec.client_info = Some(info);
     }
 
+    // ---- Connect time auto detect (MS-RDPBCGR 2.2.14) --------------------
+    if config.session == SessionBehaviour::AwaitAutoDetect {
+        connect_time_autodetect(&mut stream, &recorded).await?;
+    }
+
     // ---- Phase 7: licensing ---------------------------------------------
     match config.session {
         SessionBehaviour::ServeWithoutLicensing => {}
@@ -1007,6 +1056,31 @@ async fn serve(
             );
             stream.write_all(&io_frame(&ok)).await?;
             stream.flush().await?;
+        }
+    }
+
+    if config.session == SessionBehaviour::RequireGraphicsPipeline {
+        let gfx = recorded
+            .lock()
+            .expect("not poisoned")
+            .client_blocks
+            .as_ref()
+            .and_then(|b| b.core.as_ref())
+            .and_then(|c| c.early_capability_flags)
+            .is_some_and(|f| {
+                f & rdp_pdu::gcc::client::early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL != 0
+            });
+        if !gfx {
+            let deactivate = SharePdu::DeactivateAll {
+                pdu_source: SERVER_PDU_SOURCE,
+                pdu: rdp_pdu::rdp::DeactivateAllPdu {
+                    share_id: SHARE_ID,
+                    source_descriptor: b"\0".to_vec(),
+                },
+            };
+            stream.write_all(&io_frame(&encoded(&deactivate))).await?;
+            stream.flush().await?;
+            return Ok(());
         }
     }
 
@@ -1135,11 +1209,16 @@ async fn serve(
     }
 
     // ---- A broker redirection -------------------------------------------
-    if config.session == SessionBehaviour::RedirectAfterLogon {
+    if matches!(
+        config.session,
+        SessionBehaviour::RedirectAfterLogon | SessionBehaviour::HandoverWithoutTarget
+    ) {
         let mut packet = ServerRedirectionPacket::new(REDIRECT_SESSION_ID);
         // The mock is its own redirection target, which is what makes the
         // second connection land back here and be assertable.
-        packet.target_net_address = Some("127.0.0.1".to_owned());
+        if config.session == SessionBehaviour::RedirectAfterLogon {
+            packet.target_net_address = Some("127.0.0.1".to_owned());
+        }
         packet.load_balance_info = Some(Payload::new(REDIRECT_ROUTING_TOKEN));
         packet.username = Some(REDIRECT_USERNAME.to_owned());
         let mut body = vec![0u8; rdp_pdu::rdp::redirection::STANDARD_PAD_LEN];
@@ -1316,6 +1395,137 @@ fn io_frame(body: &[u8]) -> Vec<u8> {
         channel_id: IO_CHANNEL_ID,
         payload: Payload::new(body),
     })
+}
+
+/// A server detection request on the message channel: the basic security
+/// header with `SEC_AUTODETECT_REQ`, then the request (MS-RDPBCGR 2.2.14.3).
+fn autodetect_frame(pdu: &rdp_pdu::rdp::AutoDetectPdu<'_>) -> Vec<u8> {
+    use rdp_pdu::rdp::security::{security_flags, BasicSecurityHeader};
+
+    let mut body = encoded(&BasicSecurityHeader::new(security_flags::AUTODETECT_REQ));
+    body.extend_from_slice(&encoded(pdu));
+    domain_frame(&DomainMcsPdu::SendDataIndication {
+        initiator: SERVER_PDU_SOURCE,
+        channel_id: MESSAGE_CHANNEL_ID,
+        payload: Payload::new(&body),
+    })
+}
+
+/// Read the client's next PDU, which has to be a detection response, and
+/// record it.
+async fn read_autodetect_response(
+    stream: &mut TcpStream,
+    recorded: &Arc<Mutex<Recorded>>,
+) -> std::io::Result<AutoDetectRecord> {
+    use rdp_pdu::rdp::security::{security_flags, SlowPathClass};
+    use rdp_pdu::rdp::{decode_io_pdu, AutoDetectBody, IoPdu, IoPduContext};
+
+    let frame = read_tpkt(stream).await?;
+    let mut r = Reader::new(&frame);
+    let mut body = x224::read_data_tpdu(&mut r).map_err(std::io::Error::other)?;
+    let DomainMcsPdu::SendDataRequest {
+        channel_id,
+        payload,
+        ..
+    } = DomainMcsPdu::decode(&mut body).map_err(std::io::Error::other)?
+    else {
+        return Err(std::io::Error::other("expected a send data request"));
+    };
+    let bytes = payload.as_slice();
+    let flags = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if flags & security_flags::AUTODETECT_RSP == 0 {
+        return Err(std::io::Error::other(format!(
+            "expected SEC_AUTODETECT_RSP, got flags {flags:#06x}"
+        )));
+    }
+    let IoPdu::AutoDetect(pdu) = decode_io_pdu(
+        &mut Reader::new(bytes),
+        IoPduContext::external_security(),
+        SlowPathClass::AutoDetectResponse,
+    )
+    .map_err(std::io::Error::other)?
+    else {
+        return Err(std::io::Error::other("expected a detection response"));
+    };
+    let record = AutoDetectRecord {
+        channel_id,
+        response_type: pdu.request_type,
+        sequence_number: pdu.sequence_number,
+        results: match pdu.body {
+            AutoDetectBody::Results {
+                time_delta,
+                byte_count,
+            } => Some((time_delta, byte_count)),
+            _ => None,
+        },
+    };
+    recorded
+        .lock()
+        .expect("not poisoned")
+        .autodetect_responses
+        .push(record);
+    Ok(record)
+}
+
+/// gnome-remote-desktop's connect time detection, cut down to one bandwidth
+/// round and one RTT ping: see [`SessionBehaviour::AwaitAutoDetect`].
+async fn connect_time_autodetect(
+    stream: &mut TcpStream,
+    recorded: &Arc<Mutex<Recorded>>,
+) -> std::io::Result<()> {
+    use rdp_pdu::rdp::control::autodetect;
+    use rdp_pdu::rdp::{AutoDetectBody, AutoDetectPdu};
+
+    let filler = vec![0x5a; AUTODETECT_PAYLOAD_LEN];
+    let request = |request_type, sequence_number, body| AutoDetectPdu {
+        header_type_id: autodetect::TYPE_ID_REQUEST,
+        sequence_number,
+        request_type,
+        body,
+    };
+    for pdu in [
+        request(
+            autodetect::BANDWIDTH_START_CONNECT,
+            0,
+            AutoDetectBody::Empty,
+        ),
+        request(
+            autodetect::BANDWIDTH_PAYLOAD,
+            0,
+            AutoDetectBody::Payload(Payload::new(&filler)),
+        ),
+        request(
+            autodetect::BANDWIDTH_STOP_CONNECT,
+            0,
+            AutoDetectBody::Payload(Payload::new(&filler)),
+        ),
+    ] {
+        stream.write_all(&autodetect_frame(&pdu)).await?;
+    }
+    stream.flush().await?;
+    read_autodetect_response(stream, recorded).await?;
+
+    let ping = request(
+        autodetect::RTT_REQUEST_CONNECT,
+        AUTODETECT_RTT_SEQUENCE,
+        AutoDetectBody::Empty,
+    );
+    stream.write_all(&autodetect_frame(&ping)).await?;
+    stream.flush().await?;
+    read_autodetect_response(stream, recorded).await?;
+
+    // The summary has no answer; the client must take it and carry on.
+    let result = request(
+        autodetect::NETCHAR_RESULT_ALL,
+        1,
+        AutoDetectBody::NetworkCharacteristics {
+            base_rtt: Some(1),
+            bandwidth: Some(100_000),
+            average_rtt: Some(2),
+        },
+    );
+    stream.write_all(&autodetect_frame(&result)).await?;
+    stream.flush().await
 }
 
 /// The payload of a client Send Data Request on the I/O channel.

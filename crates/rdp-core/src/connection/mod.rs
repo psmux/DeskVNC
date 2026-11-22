@@ -33,13 +33,14 @@
 //! | 1, the X.224 negotiation | [`negotiate`] |
 //! | 2, the TLS upgrade and CredSSP | [`crate::transport`], [`nla`] |
 //! | 3 and 4, the Basic Settings Exchange and Channel Connection | [`mcs`] |
-//! | 6 to 10, Client Info to the Font Map | [`activate`] |
+//! | 6 to 10, Client Info to the Font Map | [`activate`], [`autodetect`] |
 //!
 //! Phase 5, RDP Security Commencement, is skipped by construction: it exists
 //! only for standard RDP security, which this client never negotiates
 //! (PRDRDP/03 §2.6, D6).
 
 pub mod activate;
+pub mod autodetect;
 pub mod credentials;
 pub mod licensing;
 pub mod mcs;

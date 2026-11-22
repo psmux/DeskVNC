@@ -49,6 +49,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::channels::{ChannelCtx, Outbox, StaticChannels};
 use crate::connection::activate::{self, Activated};
+use crate::connection::autodetect::AutoDetectResponder;
 use crate::connection::ChannelMap;
 use crate::error::{RdpError, Result};
 use crate::options::ResolvedOptions;
@@ -152,6 +153,9 @@ pub struct RunLoop<R> {
     /// Frames and rectangles handed to the renderer since the last tick.
     frames_since_tick: u32,
     rects_decoded: u64,
+    /// Answers the RTT and bandwidth requests a server keeps sending on the
+    /// message channel while the session runs (MS-RDPBCGR 2.2.14).
+    autodetect: AutoDetectResponder,
 }
 
 impl<R: AsyncRead + Unpin> RunLoop<R> {
@@ -194,6 +198,7 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
             last_tick_at: None,
             frames_since_tick: 0,
             rects_decoded: 0,
+            autodetect: AutoDetectResponder::new(),
         }
     }
 
@@ -567,9 +572,18 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                         });
                     }
                     // What is left is the message channel, which carries
-                    // connect time auto detect and the heartbeat. Neither is
-                    // acted on, and both are length prefixed, so skipping
-                    // cannot desync (MS-RDPBCGR 2.2.1.4.5, PRDRDP/05 §5.1).
+                    // network characteristics detection and the heartbeat.
+                    // Detection requests are answered, because the Client
+                    // Core Data said they would be; the rest is length
+                    // prefixed, so skipping cannot desync
+                    // (MS-RDPBCGR 2.2.1.4.5, PRDRDP/05 §5.1).
+                    if self.channels.message_channel_id == Some(channel_id) {
+                        if let Some(signal) =
+                            self.answer_autodetect(channel_id, payload.as_slice())?
+                        {
+                            return Ok(signal);
+                        }
+                    }
                     tracing::trace!(
                         channel_id,
                         len = payload.len(),
@@ -594,6 +608,55 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
                 | DomainMcsPdu::DisconnectProviderUltimatum { .. } => unreachable!("handled above"),
             })),
         }
+    }
+
+    /// Answer a network characteristics detection request that arrived on the
+    /// message channel, or `None` when the PDU is something else.
+    ///
+    /// A request that does not parse is logged and dropped rather than ending
+    /// the session: detection is about pacing, and a picture that keeps
+    /// coming is worth more than a strict reading of a measurement.
+    fn answer_autodetect(
+        &mut self,
+        channel_id: u16,
+        payload: &[u8],
+    ) -> Result<Option<SessionSignal>> {
+        use rdp_pdu::rdp::security::security_flags;
+        use rdp_pdu::{Encode, Writer};
+
+        let Some(two) = payload.get(..2) else {
+            return Ok(None);
+        };
+        if u16::from_le_bytes([two[0], two[1]]) & security_flags::AUTODETECT_REQ == 0 {
+            return Ok(None);
+        }
+        let request = match decode_io_pdu(
+            &mut Reader::new(payload),
+            IoPduContext::external_security(),
+            SlowPathClass::AutoDetectRequest,
+        ) {
+            Ok(IoPdu::AutoDetect(request)) => request,
+            Ok(_) => return Ok(None),
+            Err(e) => {
+                tracing::debug!(error = %e, "a detection request did not parse; dropped");
+                return Ok(Some(SessionSignal::Ignored(
+                    "a detection request that did not parse",
+                )));
+            }
+        };
+        let reply = match self.autodetect.answer(&request, Instant::now()) {
+            Some(response) => {
+                let mut body = Vec::with_capacity(response.size());
+                response.encode_checked(&mut Writer::new(&mut body))?;
+                Some(activate::send_data_request(
+                    self.channels.user_channel_id,
+                    channel_id,
+                    &body,
+                )?)
+            }
+            None => None,
+        };
+        Ok(Some(SessionSignal::Handled { reply }))
     }
 
     /// One slow path PDU off the I/O channel.
@@ -837,11 +900,25 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
 
         let packet = ServerRedirectionPacket::read_standard(&mut Reader::new(body))?;
         let Some(redirect) = Redirection::from_packet(&packet) else {
-            // `LB_NOREDIRECT`, or a target we will not dial. Either way the
-            // session carries on where it is, which is what the specification
-            // says `LB_NOREDIRECT` means.
-            return Ok(SessionSignal::Ignored(
-                "a server redirection this client will not follow",
+            if packet.is_no_redirect() {
+                // Informational: the session carries on where it is, which is
+                // what the specification says `LB_NOREDIRECT` means.
+                return Ok(SessionSignal::Ignored(
+                    "a server redirection with LB_NOREDIRECT",
+                ));
+            }
+            // A redirection with nowhere usable to go. GNOME Remote Login
+            // sends exactly this once the user's session is ready: no
+            // address, a routing token, and a one time password encrypted
+            // for RDSTLS. Staying put is not an option, because the server
+            // waits thirty seconds for the client to come back and then
+            // cancels the connection, so the user would watch a blank
+            // picture and then get "the connection was cancelled". Saying
+            // what happened now is better.
+            return Err(RdpError::Protocol(
+                "the server tried to hand this session over to another login, \
+                 which this version cannot follow yet (MS-RDPBCGR 2.2.13.1)"
+                    .to_owned(),
             ));
         };
         tracing::info!(?redirect, "the server redirected this session");
