@@ -951,6 +951,14 @@ where
     endpoint.close().await;
     result
 }
+/// Marks this side's own change to control, generation `ours`, as seen. A
+/// change the person made after it stays unseen, so the loop that tells the
+/// helper still acts on it.
+fn own_change_seen(control: &mut watch::Receiver<Permission>, ours: u64) {
+    if control.borrow_and_update().generation != ours {
+        control.mark_changed();
+    }
+}
 /// `future`, or `why` alone if it takes longer than `limit`. With `.context`
 /// the person read "Helper stopped responding: deadline has elapsed", the
 /// last part being the timer's own words.
@@ -1187,18 +1195,19 @@ where
     // opened, say on the sharing screen during GNOME's prompt. Putting back
     // what they approved with lost that: the tick showed control, the
     // helper never heard of it, and only a second tick reached it.
-    let wanted = {
-        let permission = worker.control.borrow();
-        if permission.generation == opening {
+    // Read and written in one step, so a tick that lands in between is not
+    // overwritten unseen.
+    let (mut wanted, mut control, mut ours) = (false, false, 0);
+    worker.control_tx.send_modify(|p| {
+        wanted = if p.generation == opening {
             allowed
         } else {
-            permission.allowed
-        }
-    };
-    let control = wanted && controllable;
-    worker.control_tx.send_modify(|p| {
+            p.allowed
+        };
+        control = wanted && controllable;
         p.allowed = control;
         p.generation += 1;
+        ours = p.generation;
     });
     worker.emit(Event::Connected { peer, control }).await?;
     if control != allowed {
@@ -1233,8 +1242,10 @@ where
         }
     }
     // The helper has been told. The loop below writes only what the person
-    // changes later.
-    worker.control.borrow_and_update();
+    // changes later, which includes anything changed since control was set
+    // above: marking that seen too lost a tick made while the helper was
+    // being told, and the box stayed ticked on a screen that takes no input.
+    own_change_seen(&mut worker.control, ours);
     let events = worker.events.clone();
     let control_tx = worker.control_tx.clone();
     let read_input = async {
@@ -1339,11 +1350,13 @@ where
                         // Ticked on this side, but the desktop takes no
                         // input, so the helper stays a viewer and the tick
                         // goes back off with the reason.
+                        let mut ours = 0;
                         control_tx.send_modify(|p| {
                             p.allowed = false;
                             p.generation += 1;
+                            ours = p.generation;
                         });
-                        worker.control.borrow_and_update();
+                        own_change_seen(&mut worker.control, ours);
                         let _ = events.send(Event::Control(false)).await;
                         let _ = events.send(Event::Status(NO_CONTROL.into())).await;
                         continue;

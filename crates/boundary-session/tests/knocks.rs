@@ -421,7 +421,7 @@ async fn a_helper_on_a_screen_shared_alone_is_told_it_can_only_watch() {
         // Ticking control on the person's side cannot give what the desktop
         // did not: it goes back off, with the reason.
         host.set_control(true);
-        let quiet = timeout(Duration::from_secs(2), async {
+        let quiet = timeout(Duration::from_secs(10), async {
             loop {
                 match host.events.recv().await {
                     Some(Event::Control(false)) => return "unticked",
@@ -432,6 +432,58 @@ async fn a_helper_on_a_screen_shared_alone_is_told_it_can_only_watch() {
         })
         .await;
         assert_eq!(quiet, Ok("unticked"));
+        let helper_heard = timeout(Duration::from_secs(2), async {
+            loop {
+                match first.events.recv().await {
+                    Some(Event::Control(true)) => return "control",
+                    Some(Event::Finished(_)) | None => return "ended",
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert!(helper_heard.is_err(), "the helper heard {helper_heard:?}");
+        host.stop();
+    })
+    .await
+    .expect("timed out");
+}
+
+/// A tick made while the host was still telling the helper it could only
+/// watch was marked seen with the host's own change and dropped: the box
+/// stayed ticked on a screen that takes no input, with no reason given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tick_while_the_helper_is_told_it_can_only_watch_still_goes_back_off() {
+    if skipped() {
+        return;
+    }
+    timeout(Duration::from_secs(60), async {
+        let mut host = boundary_session::host(loopback(), || Ok(Box::new(Watched)));
+        let ticket = invitation(&mut host).await;
+        let mut first = helper(&ticket, "Sam");
+        let (_, answer) = prompt(&mut host).await;
+        let _ = answer.send(Approval::Control);
+        loop {
+            match host.events.recv().await {
+                Some(Event::Connected { .. }) => break,
+                Some(Event::Finished(result)) => panic!("the host stopped: {result:?}"),
+                None => panic!("the host went quiet"),
+                _ => {}
+            }
+        }
+        // Straight away, while the host is still writing to the helper.
+        host.set_control(true);
+        let unticked = timeout(Duration::from_secs(10), async {
+            loop {
+                match host.events.recv().await {
+                    Some(Event::Control(false)) => return "unticked",
+                    Some(Event::Finished(_)) | None => return "ended",
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert_eq!(unticked, Ok("unticked"), "the tick stayed on");
         let helper_heard = timeout(Duration::from_secs(2), async {
             loop {
                 match first.events.recv().await {
