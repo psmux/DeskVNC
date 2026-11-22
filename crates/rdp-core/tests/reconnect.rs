@@ -363,6 +363,52 @@ async fn the_second_attempt_offers_the_cookie_the_first_was_given() {
     );
 }
 
+/// A redirection that names nowhere to go ends the session with a sentence
+/// at once. GNOME Remote Login sends one when the user's session is ready,
+/// and then cancels the connection thirty seconds later if the client stays;
+/// ignoring it showed a blank picture for those thirty seconds and then "the
+/// connection was cancelled" (issue #59).
+#[tokio::test]
+async fn a_handover_with_no_target_stops_with_a_sentence() {
+    let server = MockRdpServer::start(MockConfig {
+        session: SessionBehaviour::HandoverWithoutTarget,
+        ..MockConfig::default()
+    })
+    .await;
+
+    let mut options = options_for(server.addr);
+    fast_ladder(&mut options, Some(2));
+    let (events_tx, mut events_rx) = mpsc::channel(256);
+    let (_commands_tx, commands_rx) = mpsc::channel(16);
+
+    let supervisor = tokio::spawn(remote_core::reconnect::supervise(
+        "handover".into(),
+        MockConnect::new(options),
+        events_tx,
+        commands_rx,
+        CancellationToken::new(),
+    ));
+    let events = tokio::time::timeout(DEFAULT_TIMEOUT, drain(&mut events_rx))
+        .await
+        .expect("the session ended inside the timeout");
+    supervisor.await.expect("the supervisor finished");
+
+    let states = states(&events);
+    assert!(
+        !states
+            .iter()
+            .any(|s| matches!(s, SessionState::Reconnecting { .. })),
+        "{states:?}"
+    );
+    match states.last() {
+        Some(SessionState::Disconnected { reason, .. }) => {
+            assert!(reason.contains("hand this session over"), "{reason}");
+        }
+        other => panic!("expected a disconnect with a reason, got {other:?}"),
+    }
+    assert_eq!(server.recorded().connections, 1, "nothing to dial");
+}
+
 /// MS-RDPBCGR 2.2.13.1 and 3.2.5.3.1: a broker names another host, and the
 /// client hangs up and dials it, presenting the `LoadBalanceInfo` as the
 /// routing token of the new Connection Request and using the user name the

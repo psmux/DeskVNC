@@ -900,11 +900,25 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
 
         let packet = ServerRedirectionPacket::read_standard(&mut Reader::new(body))?;
         let Some(redirect) = Redirection::from_packet(&packet) else {
-            // `LB_NOREDIRECT`, or a target we will not dial. Either way the
-            // session carries on where it is, which is what the specification
-            // says `LB_NOREDIRECT` means.
-            return Ok(SessionSignal::Ignored(
-                "a server redirection this client will not follow",
+            if packet.is_no_redirect() {
+                // Informational: the session carries on where it is, which is
+                // what the specification says `LB_NOREDIRECT` means.
+                return Ok(SessionSignal::Ignored(
+                    "a server redirection with LB_NOREDIRECT",
+                ));
+            }
+            // A redirection with nowhere usable to go. GNOME Remote Login
+            // sends exactly this once the user's session is ready: no
+            // address, a routing token, and a one time password encrypted
+            // for RDSTLS. Staying put is not an option, because the server
+            // waits thirty seconds for the client to come back and then
+            // cancels the connection, so the user would watch a blank
+            // picture and then get "the connection was cancelled". Saying
+            // what happened now is better.
+            return Err(RdpError::Protocol(
+                "the server tried to hand this session over to another login, \
+                 which this version cannot follow yet (MS-RDPBCGR 2.2.13.1)"
+                    .to_owned(),
             ));
         };
         tracing::info!(?redirect, "the server redirected this session");

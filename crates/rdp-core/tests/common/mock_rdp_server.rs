@@ -291,6 +291,10 @@ pub enum SessionBehaviour {
     /// `LoadBalanceInfo` the next Connection Request has to echo as its
     /// routing token (3.2.5.3.1).
     RedirectAfterLogon,
+    /// [`SessionBehaviour::RedirectAfterLogon`] with no target address at
+    /// all, only a routing token and a user name: what GNOME Remote Login
+    /// sends to hand the connection to the user's own session.
+    HandoverWithoutTarget,
 }
 
 /// How the mock answers the MCS Connect Initial.
@@ -1205,11 +1209,16 @@ async fn serve(
     }
 
     // ---- A broker redirection -------------------------------------------
-    if config.session == SessionBehaviour::RedirectAfterLogon {
+    if matches!(
+        config.session,
+        SessionBehaviour::RedirectAfterLogon | SessionBehaviour::HandoverWithoutTarget
+    ) {
         let mut packet = ServerRedirectionPacket::new(REDIRECT_SESSION_ID);
         // The mock is its own redirection target, which is what makes the
         // second connection land back here and be assertable.
-        packet.target_net_address = Some("127.0.0.1".to_owned());
+        if config.session == SessionBehaviour::RedirectAfterLogon {
+            packet.target_net_address = Some("127.0.0.1".to_owned());
+        }
         packet.load_balance_info = Some(Payload::new(REDIRECT_ROUTING_TOKEN));
         packet.username = Some(REDIRECT_USERNAME.to_owned());
         let mut body = vec![0u8; rdp_pdu::rdp::redirection::STANDARD_PAD_LEN];
