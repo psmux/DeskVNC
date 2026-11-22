@@ -131,6 +131,28 @@ pub const REDIRECT_ROUTING_TOKEN: &[u8] = b"tsv://MS Terminal Services Plugin.1.
 /// out of the packet reached the next Client Info PDU.
 pub const REDIRECT_USERNAME: &str = "redirected-user";
 
+/// The routing token gnome-remote-desktop's system daemon puts in a handover,
+/// shaped like the real one: a run of digits. The `LoadBalanceInfo` carries
+/// it as `Cookie: msts=<token>\r\n`, the way FreeRDP's server writes it.
+pub const HANDOVER_ROUTING_TOKEN: &[u8] = b"3147902345";
+/// The one time user name of a handover.
+pub const HANDOVER_USERNAME: &str = "handover-user";
+/// The one time password of a handover, sent as UTF-16LE with a terminator
+/// and flagged `LB_PASSWORD_IS_PK_ENCRYPTED`, which is what
+/// gnome-remote-desktop does. The client must present these bytes in RDSTLS
+/// unchanged.
+pub const HANDOVER_PASSWORD: &str = "one-time-cookie";
+/// The `RedirectionGuid` of a handover: UTF-16LE text of a Base64 string.
+pub const HANDOVER_GUID: &str = "q1Jm0kX2v8nO4cRrS7tZ6A==";
+
+/// A string as UTF-16LE with its terminator.
+#[must_use]
+pub fn utf16z(s: &str) -> Vec<u8> {
+    let mut out: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
 /// Where the mock draws its one bitmap.
 pub const BITMAP_AT: (u16, u16) = (10, 20);
 
@@ -215,6 +237,13 @@ pub enum Negotiation {
     /// the server does not understand negotiation and has chosen standard RDP
     /// security. A real case, not a theoretical one.
     NoStructure,
+    /// What gnome-remote-desktop's handover daemon does with the connection
+    /// that follows its redirection: select `PROTOCOL_RDSTLS` when the
+    /// request offered it and then run the server side of RDSTLS
+    /// (MS-RDPBCGR 5.4.5.3), answering success only for the handover's user
+    /// name, password and GUID. A request without RDSTLS gets
+    /// `HYBRID_REQUIRED_BY_SERVER`.
+    Rdstls,
 }
 
 /// What the mock does after the channel joins.
@@ -291,10 +320,15 @@ pub enum SessionBehaviour {
     /// `LoadBalanceInfo` the next Connection Request has to echo as its
     /// routing token (3.2.5.3.1).
     RedirectAfterLogon,
-    /// [`SessionBehaviour::RedirectAfterLogon`] with no target address at
-    /// all, only a routing token and a user name: what GNOME Remote Login
-    /// sends to hand the connection to the user's own session.
+    /// What GNOME Remote Login sends once the user has signed in at the
+    /// login screen: a redirection with no target address, a
+    /// `LoadBalanceInfo` of `Cookie: msts=<token>\r\n`, a one time user
+    /// name, a password flagged `LB_PASSWORD_IS_PK_ENCRYPTED`, a
+    /// `RedirectionGuid` and a `TargetCertificate`.
     HandoverWithoutTarget,
+    /// A redirection with no target and no routing token, which leaves the
+    /// client nowhere to go.
+    RedirectNowhere,
 }
 
 /// How the mock answers the MCS Connect Initial.
@@ -380,6 +414,12 @@ pub struct Recorded {
     /// The routing token of each connection's X.224 Connection Request, in
     /// order (MS-RDPBCGR 2.2.1.1).
     pub routing_tokens: Vec<Option<Vec<u8>>>,
+    /// The `requestedProtocols` of each connection's Connection Request, in
+    /// order (MS-RDPBCGR 2.2.1.1.1).
+    pub requested_protocols: Vec<u32>,
+    /// Every RDSTLS Authentication Request the client sent
+    /// (MS-RDPBCGR 2.2.17.2.1).
+    pub rdstls_requests: Vec<rdp_pdu::rdstls::RdstlsPasswordRequest>,
     /// The `shareId` the client echoed in its Confirm Active.
     pub confirmed_share_id: Option<u32>,
     /// The `capabilitySetType` of every set the client confirmed, in order.
@@ -554,6 +594,74 @@ impl MockRdpServer {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
     }
+}
+
+/// Whether the connection request this connection just recorded offered
+/// `protocol`.
+fn request_offers(recorded: &Arc<Mutex<Recorded>>, protocol: u32) -> bool {
+    recorded
+        .lock()
+        .expect("not poisoned")
+        .requested_protocols
+        .last()
+        .is_some_and(|r| r & protocol != 0)
+}
+
+/// The server half of RDSTLS (MS-RDPBCGR 5.4.5.3): capabilities out, the
+/// authentication request in and recorded, the response out. True when the
+/// request matched the handover's credentials and the connection goes on.
+async fn serve_rdstls(
+    stream: &mut TcpStream,
+    recorded: &Arc<Mutex<Recorded>>,
+) -> std::io::Result<bool> {
+    use rdp_pdu::rdstls::{
+        result_code, RdstlsAuthResponse, RdstlsCapabilities, RdstlsPasswordRequest,
+    };
+
+    // On a real server the capabilities come after a TLS handshake, so they
+    // can never share a read with the Connection Confirm. The mock has no
+    // handshake, and a client that reads both at once rightly refuses bytes
+    // that arrived before the upgrade, so it waits for that read to finish.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let caps = RdstlsCapabilities {
+        supported_versions: rdp_pdu::rdstls::VERSION_1,
+    };
+    stream.write_all(&encoded(&caps)).await?;
+    stream.flush().await?;
+
+    // Version, type, data type, then four length prefixed fields.
+    let mut head = [0u8; 6];
+    stream.read_exact(&mut head).await?;
+    let mut body = head.to_vec();
+    for _ in 0..4 {
+        let mut len = [0u8; 2];
+        stream.read_exact(&mut len).await?;
+        let mut field = vec![0u8; usize::from(u16::from_le_bytes(len))];
+        stream.read_exact(&mut field).await?;
+        body.extend_from_slice(&len);
+        body.extend_from_slice(&field);
+    }
+    let request =
+        RdstlsPasswordRequest::decode(&mut Reader::new(&body)).map_err(std::io::Error::other)?;
+    let ok = request.username == HANDOVER_USERNAME
+        && request.password.expose() == utf16z(HANDOVER_PASSWORD).as_slice()
+        && request.redirection_guid == utf16z(HANDOVER_GUID);
+    recorded
+        .lock()
+        .expect("not poisoned")
+        .rdstls_requests
+        .push(request);
+
+    let rsp = RdstlsAuthResponse {
+        result_code: if ok {
+            result_code::SUCCESS
+        } else {
+            result_code::LOGON_FAILURE
+        },
+    };
+    stream.write_all(&encoded(&rsp)).await?;
+    stream.flush().await?;
+    Ok(ok)
 }
 
 /// Read one whole TPKT from `stream`.
@@ -786,16 +894,30 @@ async fn serve(
             Some(x224::X224Cookie::RoutingToken(t)) => Some(t.clone()),
             _ => None,
         });
+        rec.requested_protocols.push(
+            request
+                .nego
+                .map(|n| n.requested_protocols)
+                .unwrap_or_default(),
+        );
         rec.connection_request = Some(request);
     }
 
+    let offered_rdstls = request_offers(&recorded, security_protocol::RDSTLS);
+    let negotiation = match config.negotiation {
+        Negotiation::Rdstls if offered_rdstls => Negotiation::Select(security_protocol::RDSTLS),
+        Negotiation::Rdstls => {
+            Negotiation::Fail(rdp_pdu::x224::neg_failure::HYBRID_REQUIRED_BY_SERVER)
+        }
+        other => other,
+    };
     let confirm = X224ConnectionConfirm {
         dst_ref: 0,
         // Non zero, as MS-RDPBCGR 4.1.2's example is, so a client that
         // accidentally requires zero fails here rather than in the field.
         src_ref: 0x1234,
         class_options: 0,
-        nego: match config.negotiation {
+        nego: match negotiation {
             Negotiation::Select(p) => Some(X224Negotiation::Response(NegotiationResponse {
                 flags: 0,
                 selected_protocol: p,
@@ -803,12 +925,19 @@ async fn serve(
             Negotiation::Fail(code) => Some(X224Negotiation::Failure(NegotiationFailure {
                 failure_code: code,
             })),
-            Negotiation::NoStructure => None,
+            Negotiation::NoStructure | Negotiation::Rdstls => None,
         },
     };
     stream.write_all(&encoded(&confirm)).await?;
     stream.flush().await?;
-    if !matches!(config.negotiation, Negotiation::Select(_)) {
+    if !matches!(negotiation, Negotiation::Select(_)) {
+        return Ok(());
+    }
+
+    // ---- Phase 2, RDSTLS: inside the tunnel, which the mock does not have
+    if negotiation == Negotiation::Select(security_protocol::RDSTLS)
+        && !serve_rdstls(&mut stream, &recorded).await?
+    {
         return Ok(());
     }
 
@@ -1211,16 +1340,36 @@ async fn serve(
     // ---- A broker redirection -------------------------------------------
     if matches!(
         config.session,
-        SessionBehaviour::RedirectAfterLogon | SessionBehaviour::HandoverWithoutTarget
+        SessionBehaviour::RedirectAfterLogon
+            | SessionBehaviour::HandoverWithoutTarget
+            | SessionBehaviour::RedirectNowhere
     ) {
         let mut packet = ServerRedirectionPacket::new(REDIRECT_SESSION_ID);
-        // The mock is its own redirection target, which is what makes the
-        // second connection land back here and be assertable.
-        if config.session == SessionBehaviour::RedirectAfterLogon {
-            packet.target_net_address = Some("127.0.0.1".to_owned());
+        let lb_info: Vec<u8> = [b"Cookie: msts=", HANDOVER_ROUTING_TOKEN, b"\r\n"].concat();
+        let guid = utf16z(HANDOVER_GUID);
+        // Any bytes do: the client carries the container and reads none of it.
+        let certificate = utf16z("AAAAAA==");
+        match config.session {
+            // The mock is its own redirection target, which is what makes the
+            // second connection land back here and be assertable.
+            SessionBehaviour::RedirectAfterLogon => {
+                packet.target_net_address = Some("127.0.0.1".to_owned());
+                packet.load_balance_info = Some(Payload::new(REDIRECT_ROUTING_TOKEN));
+                packet.username = Some(REDIRECT_USERNAME.to_owned());
+            }
+            SessionBehaviour::HandoverWithoutTarget => {
+                packet.load_balance_info = Some(Payload::new(&lb_info));
+                packet.username = Some(HANDOVER_USERNAME.to_owned());
+                packet.password = Some(rdp_pdu::SecretBytes::new(utf16z(HANDOVER_PASSWORD)));
+                packet.redir_options |=
+                    rdp_pdu::rdp::redirection::redir_flags::PASSWORD_IS_PK_ENCRYPTED;
+                packet.redirection_guid = Some(Payload::new(&guid));
+                packet.target_certificate = Some(Payload::new(&certificate));
+            }
+            _ => {
+                packet.username = Some(REDIRECT_USERNAME.to_owned());
+            }
         }
-        packet.load_balance_info = Some(Payload::new(REDIRECT_ROUTING_TOKEN));
-        packet.username = Some(REDIRECT_USERNAME.to_owned());
         let mut body = vec![0u8; rdp_pdu::rdp::redirection::STANDARD_PAD_LEN];
         packet
             .encode_checked(&mut Writer::new(&mut body))

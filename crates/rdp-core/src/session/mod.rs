@@ -42,7 +42,9 @@ use remote_core::{ClientCommand, ConnectOptions, ProtocolKind, SessionEvent, Ses
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::connection::rdstls::RdstlsCredentials;
 use crate::error::RdpError;
+use crate::options::ResolvedOptions;
 use crate::session::cookie::ReconnectCookie;
 use crate::session::redirect::Redirection;
 use crate::session::run_loop::Attempt;
@@ -155,8 +157,8 @@ pub struct RdpConnect {
 
 /// What one attempt reads from the last one and writes for the next.
 ///
-/// Three fields, and each is the reason a `ConnectOnce` implementor has to be
-/// a struct rather than a bare async function (PRDRDP/02 §11.2).
+/// Each field is a reason a `ConnectOnce` implementor has to be a struct
+/// rather than a bare async function (PRDRDP/02 §11.2).
 #[derive(Debug, Default)]
 pub struct Continuity {
     /// In: the cookie to offer, when one is stored and not stale. Out: the
@@ -169,6 +171,20 @@ pub struct Continuity {
     /// Out: the redirection this attempt was told to follow
     /// (MS-RDPBCGR 2.2.13.1).
     pub redirect: Option<Redirection>,
+    /// In: the credentials a redirection handed over for an RDSTLS sign in
+    /// on the next connection (MS-RDPBCGR 5.4.5.3). Scoped like the routing
+    /// token.
+    pub rdstls: Option<RdstlsCredentials>,
+}
+
+impl Continuity {
+    /// Hand this attempt what the last one left for it: the routing token
+    /// and the RDSTLS credentials of a redirection. Both are taken, so they
+    /// are presented once and are gone from every later attempt.
+    pub fn prime(&mut self, opts: &mut ResolvedOptions) {
+        opts.routing_token = self.routing_token.take();
+        opts.rdstls = self.rdstls.take();
+    }
 }
 
 impl RdpConnect {
@@ -269,6 +285,10 @@ pub fn absorb_failure(options: &mut ConnectOptions, err: RdpError) -> Result<Run
 /// and then take this decision with the same code the driver does
 /// (`crates/rdp-core/tests/connect.rs`). The alternative is a second copy of
 /// the redirection rules in a test, which is the copy that goes stale.
+///
+/// A chain of redirections is bounded by the supervisor
+/// (`remote_core::reconnect::MAX_CHAINED_REATTEMPTS`), the same host
+/// handover included.
 #[must_use]
 pub fn absorb_attempt(
     options: &mut ConnectOptions,
@@ -282,7 +302,7 @@ pub fn absorb_attempt(
             // trip and a rejection (PRDRDP/06 §5.5.5).
             carry.cookie = None;
             let why = redirect.describe();
-            redirect.apply(options, &mut carry.routing_token);
+            redirect.apply(options, &mut carry.routing_token, &mut carry.rdstls);
             RunOutcome::Reattempt { why }
         }
         // A logoff and an administrative close are both deliberate, and

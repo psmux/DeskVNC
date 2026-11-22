@@ -61,6 +61,10 @@ pub enum ConnectStage {
     SecurityUpgrade,
     /// CredSSP: SPNEGO over NTLMv2, TSRequest rounds (MS-CSSP 3.1.5).
     Credssp,
+    /// RDSTLS: the capabilities, the authentication request with the
+    /// credentials a Server Redirection handed over, and the response
+    /// (MS-RDPBCGR 5.4.5.3). Only on the connection after a redirection.
+    Rdstls,
     /// The four byte Early User Authorization Result, `HYBRID_EX` only
     /// (MS-RDPBCGR 2.2.10.2).
     EarlyUserAuthResult,
@@ -103,6 +107,7 @@ impl ConnectStage {
         ConnectStage::AwaitConnectionConfirm,
         ConnectStage::SecurityUpgrade,
         ConnectStage::Credssp,
+        ConnectStage::Rdstls,
         ConnectStage::EarlyUserAuthResult,
         ConnectStage::SendMcsConnectInitial,
         ConnectStage::AwaitMcsConnectResponse,
@@ -128,6 +133,7 @@ impl ConnectStage {
             ConnectStage::AwaitConnectionConfirm => "x224-connection-confirm",
             ConnectStage::SecurityUpgrade => "security-upgrade",
             ConnectStage::Credssp => "credssp",
+            ConnectStage::Rdstls => "rdstls",
             ConnectStage::EarlyUserAuthResult => "early-user-auth-result",
             ConnectStage::SendMcsConnectInitial => "mcs-connect-initial",
             ConnectStage::AwaitMcsConnectResponse => "mcs-connect-response",
@@ -154,6 +160,7 @@ impl ConnectStage {
             ConnectStage::AwaitConnectionConfirm => "MS-RDPBCGR 2.2.1.2",
             ConnectStage::SecurityUpgrade => "MS-RDPBCGR 5.4.5.1",
             ConnectStage::Credssp => "MS-CSSP 3.1.5",
+            ConnectStage::Rdstls => "MS-RDPBCGR 5.4.5.3",
             ConnectStage::EarlyUserAuthResult => "MS-RDPBCGR 2.2.10.2",
             ConnectStage::SendMcsConnectInitial => "MS-RDPBCGR 2.2.1.3",
             ConnectStage::AwaitMcsConnectResponse => "MS-RDPBCGR 2.2.1.4",
@@ -185,7 +192,7 @@ impl ConnectStage {
             | ConnectStage::SendConnectionRequest
             | ConnectStage::AwaitConnectionConfirm
             | ConnectStage::SecurityUpgrade => SessionState::Connecting,
-            ConnectStage::Credssp | ConnectStage::EarlyUserAuthResult => {
+            ConnectStage::Credssp | ConnectStage::Rdstls | ConnectStage::EarlyUserAuthResult => {
                 SessionState::Authenticating {
                     method: method.to_owned(),
                 }

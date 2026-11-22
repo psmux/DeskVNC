@@ -26,20 +26,34 @@
 //! that is not a plausible host, and a packet that does not parse never gets
 //! here at all.
 //!
-//! # What we do not do
+//! # A redirection with no address
+//!
+//! A packet that names no target at all but carries a `LoadBalanceInfo` is
+//! followed back to the host this session dialled, presenting the routing
+//! token there. That is what GNOME Remote Login sends once the user has
+//! signed in at its login screen: no address, a routing token the system
+//! daemon uses to find the user's own session, a one time user name and a
+//! password cookie for RDSTLS. A packet with neither a target nor a routing
+//! token has nowhere to go, and [`Redirection::from_packet`] refuses it.
+//!
+//! # The password cookie
 //!
 //! `LB_PASSWORD_IS_PK_ENCRYPTED` (MS-RDPBCGR 2.2.13.1) says the `Password`
-//! is encrypted under the target's public key, taken from
-//! `TargetCertificate`. Decrypting it is an RSA operation against a
-//! certificate we would have to parse first, and phase 2 does neither: the
-//! password is dropped and the redirection is followed with whatever
-//! credentials the profile already has, which is what happens today for every
-//! host. `LB_SMARTCARD_LOGON` is likewise carried and not acted on.
+//! is opaque to the client: encrypted under the target's public key, or, as
+//! gnome-remote-desktop does it, a cookie the client must not read as a
+//! password. Either way only the server can check it, and it travels back
+//! unchanged in the RDSTLS Authentication Request of the next connection
+//! (MS-RDPBCGR 5.4.5.3), together with the `RedirectionGuid`. Such a
+//! redirection does not touch the profile's credentials at all: the user
+//! name it carries is for that one sign in. `LB_SMARTCARD_LOGON` is carried
+//! and not acted on.
 
 use rdp_pdu::rdp::redirection::redir_flags;
 use rdp_pdu::rdp::ServerRedirectionPacket;
 use remote_core::ConnectOptions;
 use zeroize::Zeroizing;
+
+use crate::connection::rdstls::RdstlsCredentials;
 
 /// The longest host name we will dial from a redirection.
 ///
@@ -59,7 +73,9 @@ pub struct Redirection {
     pub session_id: u32,
     /// Where to dial: `TargetNetAddress`, else the first of
     /// `TargetNetAddresses`, else `TargetFQDN`, else `TargetNetBiosName`.
-    target: String,
+    /// `None` when the packet named none of them, which means the host this
+    /// session already dialled.
+    target: Option<String>,
     /// `TargetFQDN`, which is the name the target's certificate is issued to
     /// and therefore the name TLS has to verify against.
     fqdn: Option<String>,
@@ -74,14 +90,19 @@ pub struct Redirection {
     /// `LB_DONTSTOREUSERNAME`: the user name in this packet is for this
     /// reconnection and must not be saved.
     dont_store_username: bool,
+    /// The password cookie, the `RedirectionGuid` and the user name, for an
+    /// RDSTLS sign in on the next connection. Present when the packet set
+    /// `LB_PASSWORD_IS_PK_ENCRYPTED` and carried a `Password`.
+    rdstls: Option<RdstlsCredentials>,
 }
 
 impl Redirection {
     /// Reduce a decoded packet, or refuse it.
     ///
-    /// `None` for a packet we will not act on, with the reason logged:
-    /// `LB_NOREDIRECT` (the packet is informational and the client stays
-    /// where it is), or no usable target.
+    /// `None` for a packet we will not act on: `LB_NOREDIRECT` (the packet
+    /// is informational and the client stays where it is), a target we will
+    /// not dial, or no target and no routing token, which leaves nowhere to
+    /// go and nothing to present when we get there.
     #[must_use]
     pub fn from_packet(packet: &ServerRedirectionPacket<'_>) -> Option<Self> {
         if packet.is_no_redirect() {
@@ -92,29 +113,58 @@ impl Redirection {
             return None;
         }
 
-        let target = packet
+        // The first field present decides. One that is present and
+        // implausible is a refusal rather than a reason to try the next: it
+        // is the sign of a packet we have misread (`is_plausible_target`).
+        let named = packet
             .target_net_address
             .as_deref()
             .or_else(|| packet.target_net_addresses.first().map(String::as_str))
             .or(packet.target_fqdn.as_deref())
-            .or(packet.target_netbios_name.as_deref())
-            .map(str::trim)
-            .filter(|t| is_plausible_target(t))?;
+            .or(packet.target_netbios_name.as_deref());
+        let target = match named.map(str::trim) {
+            Some(t) if is_plausible_target(t) => Some(t.to_owned()),
+            Some(_) => return None,
+            None => None,
+        };
+        let routing_token = packet
+            .load_balance_info
+            .as_ref()
+            .map(|p| routing_token(p.as_slice()))
+            .filter(|t| !t.is_empty());
+        if target.is_none() && routing_token.is_none() {
+            return None;
+        }
 
         // The password is cleartext UTF-16LE unless the flag says it is
-        // ciphertext under a key we do not have.
-        let password = if packet.password_is_encrypted() {
-            tracing::debug!(
-                "the redirection password is public key encrypted, which this build cannot read"
-            );
-            None
-        } else {
-            packet.password.as_ref().map(|p| utf16_secret(p.expose()))
+        // opaque, in which case it is a cookie for RDSTLS and nothing else.
+        let (password, rdstls) = match packet.password.as_ref() {
+            Some(p) if packet.password_is_encrypted() => {
+                tracing::debug!(
+                    len = p.expose().len(),
+                    "the redirection carries a password cookie: the next connection signs in with rdstls"
+                );
+                let handed = RdstlsCredentials {
+                    redirection_guid: packet
+                        .redirection_guid
+                        .as_ref()
+                        .map(|g| g.as_slice().to_vec())
+                        .unwrap_or_default(),
+                    // Filled in from the profile by `apply` when the packet
+                    // names nobody.
+                    username: packet.username.clone().unwrap_or_default(),
+                    domain: packet.domain.clone().unwrap_or_default(),
+                    password: Zeroizing::new(p.expose().to_vec()),
+                };
+                (None, Some(handed))
+            }
+            Some(p) => (Some(utf16_secret(p.expose())), None),
+            None => (None, None),
         };
 
         Some(Self {
             session_id: packet.session_id,
-            target: target.to_owned(),
+            target,
             fqdn: packet
                 .target_fqdn
                 .as_deref()
@@ -124,11 +174,9 @@ impl Redirection {
             username: packet.username.clone().filter(|u| !u.is_empty()),
             domain: packet.domain.clone().filter(|d| !d.is_empty()),
             password,
-            routing_token: packet
-                .load_balance_info
-                .as_ref()
-                .map(|p| p.as_slice().to_vec()),
+            routing_token,
             dont_store_username: packet.redir_options & redir_flags::DONTSTOREUSERNAME != 0,
+            rdstls,
         })
     }
 
@@ -136,7 +184,16 @@ impl Redirection {
     /// event. Carries no credential and no token.
     #[must_use]
     pub fn describe(&self) -> String {
-        format!("redirected to {}", self.target)
+        match &self.target {
+            Some(target) => format!("redirected to {target}"),
+            None => "handed over to another session on the same server".to_owned(),
+        }
+    }
+
+    /// True when the next connection signs in with RDSTLS.
+    #[must_use]
+    pub const fn uses_rdstls(&self) -> bool {
+        self.rdstls.is_some()
     }
 
     /// True when the packet said not to save the user name it carried.
@@ -155,10 +212,21 @@ impl Redirection {
     /// port field, and a broker farm listens on the same port the broker
     /// does.
     ///
-    /// `routing_token` is the caller's, because it belongs to the attempt and
-    /// not to the profile: a token is presented once, to the host that issued
-    /// it, and must not survive into an unrelated later connection.
-    pub fn apply(self, options: &mut ConnectOptions, routing_token: &mut Option<Vec<u8>>) {
+    /// `routing_token` and `rdstls` are the caller's, because they belong to
+    /// the attempt and not to the profile: a token and a cookie are presented
+    /// once, to the host that issued them, and must not survive into an
+    /// unrelated later connection.
+    ///
+    /// A redirection with no target leaves the host alone. One that hands
+    /// over RDSTLS credentials leaves the profile's credentials alone too:
+    /// its user name and cookie are for one sign in, and a reconnect after a
+    /// dropped link has to sign in to the original server as the user.
+    pub fn apply(
+        self,
+        options: &mut ConnectOptions,
+        routing_token: &mut Option<Vec<u8>>,
+        rdstls: &mut Option<RdstlsCredentials>,
+    ) {
         let Self {
             target,
             fqdn,
@@ -166,16 +234,29 @@ impl Redirection {
             domain,
             password,
             routing_token: token,
+            rdstls: handed,
             ..
         } = self;
+        *routing_token = token;
+        *rdstls = handed.map(|mut handed| {
+            if handed.username.is_empty() {
+                handed.username = options.credentials.username.clone().unwrap_or_default();
+            }
+            handed
+        });
 
-        options.host = target;
+        if let Some(target) = target {
+            options.host = target;
+        }
         // The certificate the target presents is issued to its FQDN, so that
         // is what SNI, the trust on first use pin and the CredSSP service
         // principal have to use, not the address we dialled (PRDRDP/00 R26
         // makes `server_name` the identity and `host` the dial address).
         if let Some(fqdn) = fqdn {
             options.rdp_mut().server_name = Some(fqdn);
+        }
+        if rdstls.is_some() {
+            return;
         }
         if let Some(username) = username {
             options.credentials.username = Some(username);
@@ -192,7 +273,6 @@ impl Redirection {
             // password.
             options.credentials.password = Some(password.to_string());
         }
-        *routing_token = token;
     }
 }
 
@@ -200,7 +280,12 @@ impl Redirection {
 /// nothing that arrived with it.
 impl std::fmt::Display for Redirection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the server redirected this session to {}", self.target)
+        match &self.target {
+            Some(target) => write!(f, "the server redirected this session to {target}"),
+            None => f.write_str(
+                "the server handed this session over to another session on the same server",
+            ),
+        }
     }
 }
 
@@ -217,6 +302,7 @@ impl std::fmt::Debug for Redirection {
                 "routing_token_len",
                 &self.routing_token.as_ref().map(Vec::len),
             )
+            .field("rdstls", &self.rdstls.is_some())
             .finish()
     }
 }
@@ -235,6 +321,21 @@ fn is_plausible_target(target: &str) -> bool {
         && target
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_' | '[' | ']'))
+}
+
+/// The routing token to present, from a `LoadBalanceInfo`.
+///
+/// The X.224 encoder writes `Cookie: msts=`, the token and a CRLF
+/// (MS-RDPBCGR 2.2.1.1). FreeRDP based servers, gnome-remote-desktop among
+/// them, send the `LoadBalanceInfo` with that prefix and terminator already
+/// in it, so both are taken off here, or the server would be handed
+/// `Cookie: msts=Cookie: msts=...` and route nowhere. Anything else is kept
+/// as it came.
+fn routing_token(info: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"Cookie: msts=";
+    let body = info.strip_prefix(PREFIX).unwrap_or(info);
+    let body = body.strip_suffix(b"\r\n").unwrap_or(body);
+    body.to_vec()
 }
 
 /// Transcode a UTF-16LE field into a string that zeroizes when it drops.
@@ -284,7 +385,7 @@ mod tests {
 
         let mut options = ConnectOptions::rdp("broker.corp.example", 3389);
         let mut token = None;
-        redirect.apply(&mut options, &mut token);
+        redirect.apply(&mut options, &mut token, &mut None);
         assert_eq!(options.host, "10.0.0.7");
         assert_eq!(options.port, 3389, "a redirection carries no port");
         assert_eq!(
@@ -317,7 +418,7 @@ mod tests {
 
         let mut options = ConnectOptions::rdp("broker", 3389);
         let mut token = None;
-        redirect.apply(&mut options, &mut token);
+        redirect.apply(&mut options, &mut token, &mut None);
         assert_eq!(token.as_deref(), Some(&blob[..]));
     }
 
@@ -329,7 +430,7 @@ mod tests {
         p.password = Some(rdp_pdu::rdp::SecretBytes::new(utf16("hunter2")));
         let redirect = Redirection::from_packet(&p).expect("followed");
         let mut options = ConnectOptions::rdp("broker", 3389);
-        redirect.apply(&mut options, &mut None);
+        redirect.apply(&mut options, &mut None, &mut None);
         assert_eq!(options.credentials.password.as_deref(), Some("hunter2"));
 
         let mut p = packet();
@@ -337,7 +438,7 @@ mod tests {
         p.redir_options |= redir_flags::PASSWORD_IS_PK_ENCRYPTED;
         let redirect = Redirection::from_packet(&p).expect("followed");
         let mut options = ConnectOptions::rdp("broker", 3389);
-        redirect.apply(&mut options, &mut None);
+        redirect.apply(&mut options, &mut None, &mut None);
         assert_eq!(options.credentials.password, None);
     }
 
@@ -376,6 +477,81 @@ mod tests {
             Redirection::from_packet(&p).expect("followed").describe(),
             "redirected to HOST7"
         );
+    }
+
+    /// What gnome-remote-desktop sends to hand a remote login over to the
+    /// user's session: no address, a `Cookie: msts=` routing token, a one
+    /// time user name, a password flagged as opaque and a GUID.
+    fn gnome_handover() -> ServerRedirectionPacket<'static> {
+        let mut p = ServerRedirectionPacket::new(3);
+        p.load_balance_info = Some(Payload::new(b"Cookie: msts=3147902345\r\n"));
+        p.username = Some("one-time".to_owned());
+        p.password = Some(rdp_pdu::rdp::SecretBytes::new(utf16("cookie")));
+        p.redir_options |= redir_flags::PASSWORD_IS_PK_ENCRYPTED;
+        p.redirection_guid = Some(Payload::new(b"G\0U\0I\0D\0\0\0"));
+        p
+    }
+
+    /// No address means the host this session already dialled, and the
+    /// routing token goes back without the prefix the encoder adds again.
+    #[test]
+    fn a_handover_with_no_address_goes_back_to_the_same_host() {
+        let redirect = Redirection::from_packet(&gnome_handover()).expect("followed");
+        assert!(redirect.uses_rdstls());
+        assert_eq!(
+            redirect.describe(),
+            "handed over to another session on the same server"
+        );
+
+        let mut options = ConnectOptions::rdp("192.0.2.10", 3389);
+        options.credentials.username = Some("system".to_owned());
+        options.credentials.password = Some("system-pass".to_owned());
+        let (mut token, mut rdstls) = (None, None);
+        redirect.apply(&mut options, &mut token, &mut rdstls);
+
+        assert_eq!(options.host, "192.0.2.10", "the host is unchanged");
+        assert_eq!(token.as_deref(), Some(&b"3147902345"[..]));
+        let handed = rdstls.expect("rdstls credentials");
+        assert_eq!(handed.username, "one-time");
+        assert_eq!(handed.password.as_slice(), utf16("cookie").as_slice());
+        assert_eq!(handed.redirection_guid, b"G\0U\0I\0D\0\0\0");
+        // The one time credentials are for one sign in. A reconnect after a
+        // dropped link signs in to the original server as the user.
+        assert_eq!(options.credentials.username.as_deref(), Some("system"));
+        assert_eq!(options.credentials.password.as_deref(), Some("system-pass"));
+    }
+
+    /// A handover that names nobody signs in as the profile's user.
+    #[test]
+    fn a_handover_without_a_user_name_uses_the_profiles() {
+        let mut p = gnome_handover();
+        p.username = None;
+        let redirect = Redirection::from_packet(&p).expect("followed");
+        let mut options = ConnectOptions::rdp("192.0.2.10", 3389);
+        options.credentials.username = Some("someone".to_owned());
+        let mut rdstls = None;
+        redirect.apply(&mut options, &mut None, &mut rdstls);
+        assert_eq!(rdstls.expect("rdstls").username, "someone");
+    }
+
+    /// No target and no routing token: nowhere to go and nothing to present.
+    #[test]
+    fn a_redirection_with_neither_target_nor_token_is_refused() {
+        let mut p = gnome_handover();
+        p.load_balance_info = None;
+        assert!(Redirection::from_packet(&p).is_none());
+        let mut p = gnome_handover();
+        p.load_balance_info = Some(Payload::new(b"Cookie: msts=\r\n"));
+        assert!(Redirection::from_packet(&p).is_none(), "an empty token");
+    }
+
+    /// A token without the prefix is kept as it came, which is what the
+    /// broker test above relies on.
+    #[test]
+    fn only_a_cookie_prefix_is_taken_off_the_token() {
+        assert_eq!(routing_token(b"tsv://farm"), b"tsv://farm");
+        assert_eq!(routing_token(b"Cookie: msts=42\r\n"), b"42");
+        assert_eq!(routing_token(b"Cookie: msts=42"), b"42");
     }
 
     /// Neither the password nor the routing token reaches a log line.

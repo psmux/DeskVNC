@@ -21,7 +21,7 @@ use crate::transport::{with_timeout, X224_TIMEOUT};
 
 /// The protocol the server selected.
 ///
-/// A three variant enum rather than the raw `u32`, because the rest of the
+/// A small enum rather than the raw `u32`, because the rest of the
 /// sequence branches on exactly this and a bare number invites a comparison
 /// against the wrong constant. `PROTOCOL_RDP` is not a variant: standard RDP
 /// security is RC4 and this client never negotiates it (D6), so it is refused
@@ -36,6 +36,10 @@ pub enum SecurityProtocol {
     /// `PROTOCOL_HYBRID_EX`: `Hybrid` plus the four byte Early User
     /// Authorization Result (MS-RDPBCGR 2.2.10.2).
     HybridEx,
+    /// `PROTOCOL_RDSTLS`: TLS, then the RDSTLS sign in with the credentials
+    /// a Server Redirection handed over (MS-RDPBCGR 5.4.5.3). Offered only on
+    /// the connection that follows such a redirection.
+    Rdstls,
 }
 
 impl SecurityProtocol {
@@ -46,6 +50,7 @@ impl SecurityProtocol {
             SecurityProtocol::Ssl => security_protocol::SSL,
             SecurityProtocol::Hybrid => security_protocol::HYBRID,
             SecurityProtocol::HybridEx => security_protocol::HYBRID_EX,
+            SecurityProtocol::Rdstls => security_protocol::RDSTLS,
         }
     }
 
@@ -65,6 +70,7 @@ impl SecurityProtocol {
             // lands this becomes a decision the mechanism makes, not one this
             // enum can answer.
             SecurityProtocol::Hybrid | SecurityProtocol::HybridEx => "nla-ntlm",
+            SecurityProtocol::Rdstls => "rdstls",
         }
     }
 }
@@ -84,6 +90,20 @@ impl SecurityProtocol {
 /// acceptable.
 pub const REQUESTED_PROTOCOLS: u32 = security_protocol::SSL | security_protocol::HYBRID;
 
+/// What this attempt advertises: [`REQUESTED_PROTOCOLS`], plus
+/// `PROTOCOL_RDSTLS` when a Server Redirection handed us credentials for it.
+///
+/// TLS and CredSSP stay in the set, so a server that does not pick RDSTLS
+/// still gets an answer it can use.
+#[must_use]
+pub fn requested_protocols(opts: &ResolvedOptions) -> u32 {
+    if opts.rdstls.is_some() {
+        REQUESTED_PROTOCOLS | security_protocol::RDSTLS
+    } else {
+        REQUESTED_PROTOCOLS
+    }
+}
+
 /// Send the Connection Request and read the Connection Confirm.
 ///
 /// # Errors
@@ -97,7 +117,8 @@ pub async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     opts: &ResolvedOptions,
     username: Option<&str>,
 ) -> Result<SecurityProtocol> {
-    let mut request = X224ConnectionRequest::new(REQUESTED_PROTOCOLS);
+    let requested = requested_protocols(opts);
+    let mut request = X224ConnectionRequest::new(requested);
     // A Connection Request carries at most one cookie (MS-RDPBCGR 2.2.1.1),
     // and the routing token wins: it was handed to us by the broker we are
     // being redirected from, and presenting it is the whole reason the target
@@ -139,27 +160,35 @@ pub async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(
     )
     .await?;
     let confirm = X224ConnectionConfirm::decode(&mut Reader::new(&frame))?;
-    select_protocol(&confirm)
+    select_protocol(&confirm, requested)
 }
 
 /// Turn a Connection Confirm into the protocol we will use, or into the error
 /// that explains why we cannot.
 ///
 /// Separate from [`negotiate`] and taking no stream, so every branch is a
-/// unit test over a decoded structure rather than a socket.
+/// unit test over a decoded structure rather than a socket. `requested` is
+/// what the Connection Request offered, because RDSTLS is a valid answer
+/// only when we asked for it.
 ///
 /// # Errors
 ///
 /// As [`negotiate`].
-pub fn select_protocol(confirm: &X224ConnectionConfirm) -> Result<SecurityProtocol> {
+pub fn select_protocol(
+    confirm: &X224ConnectionConfirm,
+    requested: u32,
+) -> Result<SecurityProtocol> {
     match confirm.nego {
         Some(X224Negotiation::Response(rsp)) => match rsp.selected_protocol {
             security_protocol::HYBRID_EX => Ok(SecurityProtocol::HybridEx),
             security_protocol::HYBRID => Ok(SecurityProtocol::Hybrid),
             security_protocol::SSL => Ok(SecurityProtocol::Ssl),
+            security_protocol::RDSTLS if requested & security_protocol::RDSTLS != 0 => {
+                Ok(SecurityProtocol::Rdstls)
+            }
             // Includes `PROTOCOL_RDP` (0), which is standard RDP security
-            // with RC4 (D6), and `RDSTLS` and `RDSAAD`, which we did not
-            // offer. MS-RDPBCGR 2.2.1.2.1 lets a server select only from what
+            // with RC4 (D6), `RDSAAD`, which we never offer, and `RDSTLS`
+            // when we did not offer it. MS-RDPBCGR 2.2.1.2.1 lets a server select only from what
             // the request asked for, so anything else is the server being
             // wrong about the session and not something to carry on through.
             other => {
@@ -238,15 +267,15 @@ mod tests {
     #[test]
     fn the_three_protocols_we_can_use_are_accepted() {
         assert_eq!(
-            select_protocol(&response(security_protocol::SSL)).unwrap(),
+            select_protocol(&response(security_protocol::SSL), REQUESTED_PROTOCOLS).unwrap(),
             SecurityProtocol::Ssl
         );
         assert_eq!(
-            select_protocol(&response(security_protocol::HYBRID)).unwrap(),
+            select_protocol(&response(security_protocol::HYBRID), REQUESTED_PROTOCOLS).unwrap(),
             SecurityProtocol::Hybrid
         );
         assert_eq!(
-            select_protocol(&response(security_protocol::HYBRID_EX)).unwrap(),
+            select_protocol(&response(security_protocol::HYBRID_EX), REQUESTED_PROTOCOLS).unwrap(),
             SecurityProtocol::HybridEx
         );
     }
@@ -257,7 +286,7 @@ mod tests {
     #[test]
     fn standard_rdp_security_is_refused() {
         assert!(matches!(
-            select_protocol(&response(security_protocol::RDP)),
+            select_protocol(&response(security_protocol::RDP), REQUESTED_PROTOCOLS),
             Err(RdpError::NegotiationInconsistent)
         ));
     }
@@ -268,10 +297,24 @@ mod tests {
     fn a_protocol_we_never_offered_is_refused() {
         for p in [security_protocol::RDSTLS, security_protocol::RDSAAD] {
             assert!(matches!(
-                select_protocol(&response(p)),
+                select_protocol(&response(p), REQUESTED_PROTOCOLS),
                 Err(RdpError::NegotiationInconsistent)
             ));
         }
+    }
+
+    /// RDSTLS is accepted exactly when the request offered it, which is only
+    /// after a redirection that handed us credentials for it.
+    #[test]
+    fn rdstls_is_accepted_only_when_it_was_offered() {
+        let offered = REQUESTED_PROTOCOLS | security_protocol::RDSTLS;
+        assert_eq!(
+            select_protocol(&response(security_protocol::RDSTLS), offered).unwrap(),
+            SecurityProtocol::Rdstls
+        );
+        assert!(!SecurityProtocol::Rdstls.wants_credssp());
+        assert_eq!(SecurityProtocol::Rdstls.wire(), security_protocol::RDSTLS);
+        assert_eq!(SecurityProtocol::Rdstls.method(), "rdstls");
     }
 
     /// A Connection Confirm with no negotiation structure means the server
@@ -279,7 +322,7 @@ mod tests {
     #[test]
     fn a_confirm_without_a_negotiation_structure_is_refused() {
         assert!(matches!(
-            select_protocol(&confirm(None)),
+            select_protocol(&confirm(None), REQUESTED_PROTOCOLS),
             Err(RdpError::NegotiationInconsistent)
         ));
     }
@@ -292,7 +335,7 @@ mod tests {
             let c = confirm(Some(X224Negotiation::Failure(NegotiationFailure {
                 failure_code: code,
             })));
-            match select_protocol(&c) {
+            match select_protocol(&c, REQUESTED_PROTOCOLS) {
                 Err(RdpError::NegotiationFailed { code: got, reason }) => {
                     assert_eq!(got, code);
                     assert!(!reason.is_empty());
@@ -313,7 +356,7 @@ mod tests {
         let c = confirm(Some(X224Negotiation::Failure(NegotiationFailure {
             failure_code: 0xdead,
         })));
-        match select_protocol(&c) {
+        match select_protocol(&c, REQUESTED_PROTOCOLS) {
             Err(RdpError::NegotiationFailed { code, .. }) => assert_eq!(code, 0xdead),
             other => panic!("expected a negotiation failure, got {other:?}"),
         }
