@@ -267,6 +267,48 @@ async fn a_server_that_skips_licensing_still_reaches_connected() {
     assert_eq!(connected.activation.share_id, SHARE_ID);
 }
 
+/// Issue #59: gnome-remote-desktop runs connect time detection after the
+/// Client Info PDU and waits, with no timeout, for the Bandwidth Measure
+/// Results and then for the RTT Measure Response. A client that advertises
+/// `RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT` and stays silent sits on
+/// "Negotiating" until something gives up. The client now answers both on
+/// the message channel and reaches `Connected`.
+#[tokio::test]
+async fn connect_time_auto_detect_is_answered_and_the_session_connects() {
+    use common::mock_rdp_server::{
+        AUTODETECT_PAYLOAD_LEN, AUTODETECT_RTT_SEQUENCE, MESSAGE_CHANNEL_ID,
+    };
+    use rdp_pdu::rdp::control::autodetect;
+
+    let (server, _, result) = run_sequence(
+        MockConfig {
+            session: SessionBehaviour::AwaitAutoDetect,
+            ..MockConfig::default()
+        },
+        Credentials::default(),
+    )
+    .await;
+    let connected = result.expect("the sequence carries on past connect time detection");
+    assert_eq!(connected.activation.share_id, SHARE_ID);
+
+    let responses = server.recorded().autodetect_responses;
+    assert_eq!(responses.len(), 2, "{responses:?}");
+    let results = responses[0];
+    assert_eq!(results.channel_id, MESSAGE_CHANNEL_ID);
+    assert_eq!(results.response_type, autodetect::BANDWIDTH_RESULTS);
+    assert_eq!(results.sequence_number, 0);
+    let (_, byte_count) = results.results.expect("the results carry a byte count");
+    assert_eq!(
+        byte_count as usize,
+        2 * AUTODETECT_PAYLOAD_LEN,
+        "the payload and the stop each carried one filler"
+    );
+    let rtt = responses[1];
+    assert_eq!(rtt.channel_id, MESSAGE_CHANNEL_ID);
+    assert_eq!(rtt.response_type, autodetect::RTT_RESPONSE);
+    assert_eq!(rtt.sequence_number, AUTODETECT_RTT_SEQUENCE);
+}
+
 /// A licensing refusal is a sentence, not a number: the user has to be able to
 /// tell "this server wants a client access licence" from "the network broke".
 #[tokio::test]

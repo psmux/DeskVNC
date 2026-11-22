@@ -844,8 +844,12 @@ pub mod autodetect {
     pub const BANDWIDTH_STOP_UDP: u16 = 0x0429;
     /// Bandwidth Measure Stop, continuous.
     pub const BANDWIDTH_STOP_CONTINUOUS: u16 = 0x0629;
-    /// Bandwidth Measure Results (2.2.14.2.2).
+    /// Bandwidth Measure Results after a connect time measurement
+    /// (2.2.14.2.2).
     pub const BANDWIDTH_RESULTS: u16 = 0x0003;
+    /// Bandwidth Measure Results after a continuous measurement
+    /// (2.2.14.2.2).
+    pub const BANDWIDTH_RESULTS_CONTINUOUS: u16 = 0x000b;
     /// Network Characteristics Result, base and average RTT (2.2.14.1.5).
     pub const NETCHAR_RESULT_BASE_AVERAGE_RTT: u16 = 0x0840;
     /// Network Characteristics Result, bandwidth and average RTT.
@@ -989,6 +993,9 @@ impl<'a> AutoDetectPdu<'a> {
                 AutoDetectKind::BandwidthResults,
                 AutoDetectPhase::ConnectTime,
             ),
+            t::BANDWIDTH_RESULTS_CONTINUOUS => {
+                (AutoDetectKind::BandwidthResults, AutoDetectPhase::Continuous)
+            }
             t::NETCHAR_RESULT_BASE_AVERAGE_RTT
             | t::NETCHAR_RESULT_BANDWIDTH_AVERAGE_RTT
             | t::NETCHAR_RESULT_ALL => (
@@ -1211,6 +1218,28 @@ impl<'a> AutoDetectResponse<'a> {
                 header_type_id: autodetect::TYPE_ID_RESPONSE,
                 sequence_number,
                 request_type: autodetect::BANDWIDTH_RESULTS,
+                body: AutoDetectBody::Results {
+                    time_delta,
+                    byte_count,
+                },
+            },
+        }
+    }
+
+    /// Bandwidth Measure Results for a continuous measurement, which differs
+    /// from [`AutoDetectResponse::bandwidth_results`] only in its
+    /// `responseType` (MS-RDPBCGR 2.2.14.2.2).
+    #[must_use]
+    pub const fn bandwidth_results_continuous(
+        sequence_number: u16,
+        time_delta: u32,
+        byte_count: u32,
+    ) -> Self {
+        Self {
+            pdu: AutoDetectPdu {
+                header_type_id: autodetect::TYPE_ID_RESPONSE,
+                sequence_number,
+                request_type: autodetect::BANDWIDTH_RESULTS_CONTINUOUS,
                 body: AutoDetectBody::Results {
                     time_delta,
                     byte_count,

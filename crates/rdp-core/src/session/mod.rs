@@ -122,6 +122,10 @@ impl RetryClassify for RdpError {
         }
     }
 
+    fn stalled_after_answer(&self) -> bool {
+        RdpError::stalled_in_sequence(self)
+    }
+
     /// The fourth, and the reason this method exists on the trait at all.
     ///
     /// [`RdpError::symbol`] was written before anything read it

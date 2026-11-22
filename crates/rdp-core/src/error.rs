@@ -576,10 +576,35 @@ impl RdpError {
         }
     }
 
+    /// A timeout after the server had already answered the dial, the TLS
+    /// handshake and any CredSSP exchange: it went quiet somewhere between
+    /// the MCS Connect Initial and the Font Map, the stretch the UI shows as
+    /// `Negotiating`.
+    ///
+    /// The network is not the suspect here, the server is. It is waiting for
+    /// something this client did not send, or it is stuck, and either way a
+    /// fresh attempt meets the same wait. Issue #59 was this: the client
+    /// timed out, the supervisor retried, and the user watched "Negotiating"
+    /// for as long as the tab stayed open.
+    #[must_use]
+    pub fn stalled_in_sequence(&self) -> bool {
+        matches!(
+            self,
+            RdpError::Timeout { stage }
+                if matches!(stage.session_state(""), remote_core::SessionState::Negotiating)
+        )
+    }
+
     /// The sentence the UI shows. Never carries a credential, a token or a
     /// byte of remote data (PRDRDP/12 §6.4).
     #[must_use]
     pub fn user_message(&self) -> String {
+        if self.stalled_in_sequence() {
+            return format!(
+                "The computer answered, then stopped responding while the session was being \
+                 set up ({self})"
+            );
+        }
         self.to_string()
     }
 }
@@ -649,6 +674,31 @@ mod tests {
         };
         assert!(!e.is_transient());
         assert!(!e.needs_user_action());
+    }
+
+    /// A stall after the server answered says so in words, and keeps the
+    /// stage so a bug report still names where it stopped. A timeout before
+    /// the server answered is a network problem and keeps its own sentence.
+    #[test]
+    fn a_stall_in_the_connection_sequence_reads_as_one() {
+        let e = RdpError::Timeout {
+            stage: ConnectStage::Licensing,
+        };
+        assert!(e.stalled_in_sequence());
+        let msg = e.user_message();
+        assert!(msg.contains("stopped responding"), "{msg}");
+        assert!(msg.contains("licensing"), "{msg}");
+
+        for stage in [
+            ConnectStage::Dialling,
+            ConnectStage::AwaitConnectionConfirm,
+            ConnectStage::Credssp,
+        ] {
+            let e = RdpError::Timeout { stage };
+            assert!(!e.stalled_in_sequence(), "{stage}");
+            assert_eq!(e.user_message(), e.to_string());
+        }
+        assert!(!RdpError::ConnectionClosed.stalled_in_sequence());
     }
 
     /// The `NotImplemented` message has to name the phase and cite the

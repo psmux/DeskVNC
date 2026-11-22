@@ -535,6 +535,7 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
     );
     let mut phase = Phase::Licensing;
     let mut activated: Option<Activated> = None;
+    let mut autodetect = super::autodetect::AutoDetectResponder::new();
     let started = std::time::Instant::now();
 
     loop {
@@ -616,16 +617,28 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                     phase = Phase::Sharing;
                 }
             }
-            IoPdu::AutoDetect(_) => {
-                // MS-RDPBCGR 2.2.14 is optional and best effort: a server that
-                // gets no response uses its own default for the connection
-                // type hint. Answering needs the round trip measurement of
-                // PRDRDP/05 §6.1, which is not written, so the phase is named
-                // in the trace rather than answered wrongly.
+            IoPdu::AutoDetect(request) => {
+                // Windows treats an unanswered request as best effort and
+                // carries on. gnome-remote-desktop waits for the answer with
+                // no timeout, so silence here is a connection that never
+                // reaches the Demand Active (issue #59). The answer goes back
+                // on the channel the request came in on, which is the message
+                // channel (MS-RDPBCGR 2.2.14.4).
                 tracing::debug!(
                     stage = %ConnectStage::ConnectTimeAutoDetect,
-                    "connect time auto detect is not answered in this build"
+                    request_type = request.request_type,
+                    sequence = request.sequence_number,
+                    "connect time auto detect request"
                 );
+                if let Some(response) = autodetect.answer(&request, std::time::Instant::now()) {
+                    let mut body = Vec::with_capacity(response.size());
+                    response.encode_checked(&mut Writer::new(&mut body))?;
+                    reply = Some(send_data_request(
+                        channels.user_channel_id,
+                        data.channel_id,
+                        &body,
+                    )?);
+                }
             }
             IoPdu::Heartbeat(_) => {
                 tracing::trace!("a heartbeat arrived during the connection sequence");
