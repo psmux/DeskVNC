@@ -544,8 +544,12 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                 stage: stage_of(phase, activated.is_some()),
             });
         }
-        let frame = next_tpkt(framer, stage_of(phase, activated.is_some()), pending).await?;
-        let data = read_send_data_indication(&frame)?;
+        let confirmed = activated.is_some();
+        let frame = next_tpkt(framer, stage_of(phase, confirmed), pending)
+            .await
+            .map_err(|e| closed_after_confirm(e, confirmed, opts))?;
+        let data = read_send_data_indication(&frame)
+            .map_err(|e| closed_after_confirm(e, confirmed, opts))?;
         if !channels.knows(data.channel_id) {
             return Err(RdpError::Protocol(format!(
                 "data arrived on channel {}, which we never joined \
@@ -773,6 +777,26 @@ fn redirection_from(packet: &rdp_pdu::rdp::ServerRedirectionPacket<'_>) -> RdpEr
              not follow (MS-RDPBCGR 2.2.13.1)"
                 .to_owned(),
         ),
+    }
+}
+
+/// Name a hang up that comes straight after our Confirm Active when the
+/// graphics pipeline was not asked for.
+///
+/// A server that insists on the pipeline cannot say so: there is no error
+/// info code for it, and gnome-remote-desktop just closes the connection.
+/// The Confirm Active is the first thing it judges, so a close after it and
+/// before the Font Map, with the pipeline off, is the one shape worth a
+/// second attempt with the pipeline on. Anything else passes through as it
+/// was.
+fn closed_after_confirm(e: RdpError, confirmed: bool, opts: &ResolvedOptions) -> RdpError {
+    match e {
+        RdpError::ServerDisconnect { .. } | RdpError::ConnectionClosed
+            if confirmed && !opts.graphics_pipeline =>
+        {
+            RdpError::ClosedWithoutGraphicsPipeline
+        }
+        other => other,
     }
 }
 

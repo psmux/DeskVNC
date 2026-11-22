@@ -376,6 +376,21 @@ pub enum RdpError {
         user_requested: bool,
     },
 
+    /// The server hung up straight after our Confirm Active, and this client
+    /// had not asked for the graphics pipeline.
+    ///
+    /// gnome-remote-desktop does exactly this: it sends nothing a client can
+    /// read, not even a Set Error Info, and logs "Client did not advertise
+    /// support for the Graphics Pipeline" on its own side. The session layer
+    /// answers it once by asking again with the pipeline
+    /// (`crate::session::absorb_failure`), so the user sees this only from a
+    /// server that also closes on that attempt.
+    #[error(
+        "the server closed the connection after the capability exchange; it may need \
+         the graphics pipeline (MS-RDPEGFX), which this connection did not ask for"
+    )]
+    ClosedWithoutGraphicsPipeline,
+
     // ---- not written yet -------------------------------------------------
     /// This crate has no code for that stage of the sequence yet.
     ///

@@ -280,6 +280,11 @@ pub enum SessionBehaviour {
     /// response. gnome-remote-desktop has no timeout on either wait, so a
     /// client that stays silent never reaches the Demand Active (issue #59).
     AwaitAutoDetect,
+    /// Close the connection straight after the Confirm Active unless the
+    /// Client Core Data advertised the graphics pipeline, with no Set Error
+    /// Info first, then the rest of [`SessionBehaviour::Serve`]. What
+    /// gnome-remote-desktop does to a client without MS-RDPEGFX.
+    RequireGraphicsPipeline,
     /// Phases 6 to 10, then a Standard Server Redirection PDU
     /// (MS-RDPBCGR 2.2.13.2) naming this same mock as the target, with a
     /// `LoadBalanceInfo` the next Connection Request has to echo as its
@@ -1096,6 +1101,22 @@ async fn serve(
                     "expected a confirm active or a share data pdu, got {other:?}"
                 )))
             }
+        }
+    }
+
+    if config.session == SessionBehaviour::RequireGraphicsPipeline {
+        let gfx = recorded
+            .lock()
+            .expect("not poisoned")
+            .client_blocks
+            .as_ref()
+            .and_then(|b| b.core.as_ref())
+            .and_then(|c| c.early_capability_flags)
+            .is_some_and(|f| {
+                f & rdp_pdu::gcc::client::early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL != 0
+            });
+        if !gfx {
+            return Ok(());
         }
     }
 

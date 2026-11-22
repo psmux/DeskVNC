@@ -200,7 +200,7 @@ impl ConnectOnce for RdpConnect {
     ) -> Pin<Box<dyn Future<Output = Result<RunOutcome, RdpError>> + Send + 'a>> {
         Box::pin(async move {
             self.settings.apply(&self.options);
-            let outcome = connect::run_once(
+            let outcome = match connect::run_once(
                 &self.options,
                 &mut self.settings,
                 &mut self.carry,
@@ -209,13 +209,55 @@ impl ConnectOnce for RdpConnect {
                 cancel,
                 connected_at,
             )
-            .await?;
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => return absorb_failure(&mut self.options, e),
+            };
             Ok(absorb_attempt(&mut self.options, &mut self.carry, outcome))
         })
     }
 
     fn absorb_while_disconnected(&mut self, cmd: &ClientCommand) {
         self.settings.absorb(cmd);
+    }
+}
+
+/// Turn one attempt's failure into the supervisor's input, going round again
+/// at once when the failure says how to get further.
+///
+/// One case today. A server that closes the connection straight after the
+/// Confirm Active while the graphics pipeline is off gets one more attempt
+/// with the pipeline on (issue #59: gnome-remote-desktop refuses every client
+/// that does not advertise MS-RDPEGFX). The option is changed on the profile
+/// this session dials with, so a later reconnect asks for the pipeline too,
+/// and a second close on the new attempt is a different error that stops
+/// the session in the usual way. Nothing is stored with the host.
+///
+/// Public for the same reason [`absorb_attempt`] is: the integration tests
+/// drive the sequence against the mock themselves and take this decision
+/// with the code the driver uses.
+///
+/// # Errors
+///
+/// `err` itself, whenever it is not the one case above.
+pub fn absorb_failure(options: &mut ConnectOptions, err: RdpError) -> Result<RunOutcome, RdpError> {
+    match err {
+        RdpError::ClosedWithoutGraphicsPipeline => {
+            let rdp = options.rdp_mut();
+            if rdp.graphics_pipeline {
+                return Err(RdpError::ClosedWithoutGraphicsPipeline);
+            }
+            rdp.graphics_pipeline = true;
+            tracing::info!(
+                "the server closed the connection after the capability exchange; \
+                 asking again with the graphics pipeline"
+            );
+            Ok(RunOutcome::Reattempt {
+                why: "the server needs the graphics pipeline".to_owned(),
+            })
+        }
+        other => Err(other),
     }
 }
 
