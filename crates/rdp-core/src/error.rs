@@ -376,12 +376,12 @@ pub enum RdpError {
         user_requested: bool,
     },
 
-    /// The server hung up straight after our Confirm Active, and this client
-    /// had not asked for the graphics pipeline.
+    /// The server hung up during the capability exchange, with no error
+    /// info, and this client had not asked for the graphics pipeline.
     ///
-    /// gnome-remote-desktop does exactly this: it sends nothing a client can
-    /// read, not even a Set Error Info, and logs "Client did not advertise
-    /// support for the Graphics Pipeline" on its own side. The session layer
+    /// gnome-remote-desktop does exactly this: a Deactivate All where the
+    /// Demand Active should be, then a close, and "Client did not advertise
+    /// support for the Graphics Pipeline" in its own log. The session layer
     /// answers it once by asking again with the pipeline
     /// (`crate::session::absorb_failure`), so the user sees this only from a
     /// server that also closes on that attempt.

@@ -226,8 +226,8 @@ impl ConnectOnce for RdpConnect {
 /// Turn one attempt's failure into the supervisor's input, going round again
 /// at once when the failure says how to get further.
 ///
-/// One case today. A server that closes the connection straight after the
-/// Confirm Active while the graphics pipeline is off gets one more attempt
+/// One case today. A server that closes the connection during the capability
+/// exchange while the graphics pipeline is off gets one more attempt
 /// with the pipeline on (issue #59: gnome-remote-desktop refuses every client
 /// that does not advertise MS-RDPEGFX). The option is changed on the profile
 /// this session dials with, so a later reconnect asks for the pipeline too,
@@ -250,7 +250,7 @@ pub fn absorb_failure(options: &mut ConnectOptions, err: RdpError) -> Result<Run
             }
             rdp.graphics_pipeline = true;
             tracing::info!(
-                "the server closed the connection after the capability exchange; \
+                "the server closed the connection during the capability exchange; \
                  asking again with the graphics pipeline"
             );
             Ok(RunOutcome::Reattempt {

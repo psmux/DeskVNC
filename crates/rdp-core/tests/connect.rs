@@ -322,9 +322,9 @@ async fn connect_time_auto_detect_is_answered_and_the_session_connects() {
     assert_eq!(rtt.sequence_number, AUTODETECT_RTT_SEQUENCE);
 }
 
-/// Issue #59, the second half: gnome-remote-desktop closes the connection
-/// straight after the Confirm Active, with no error info, when the Client
-/// Core Data does not advertise the graphics pipeline. That close is named,
+/// Issue #59, the second half: gnome-remote-desktop sends a Deactivate All
+/// where the Demand Active belongs and closes the connection, with no error
+/// info, when the Client Core Data does not advertise the graphics pipeline. That close is named,
 /// the session goes round again at once with the pipeline asked for, and the
 /// second attempt connects.
 #[tokio::test]

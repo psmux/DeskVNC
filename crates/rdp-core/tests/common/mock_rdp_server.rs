@@ -280,10 +280,11 @@ pub enum SessionBehaviour {
     /// response. gnome-remote-desktop has no timeout on either wait, so a
     /// client that stays silent never reaches the Demand Active (issue #59).
     AwaitAutoDetect,
-    /// Close the connection straight after the Confirm Active unless the
-    /// Client Core Data advertised the graphics pipeline, with no Set Error
-    /// Info first, then the rest of [`SessionBehaviour::Serve`]. What
-    /// gnome-remote-desktop does to a client without MS-RDPEGFX.
+    /// Unless the Client Core Data advertised the graphics pipeline, send a
+    /// Deactivate All where the Demand Active belongs and close the
+    /// connection, with no Set Error Info. Otherwise the whole of
+    /// [`SessionBehaviour::Serve`]. What gnome-remote-desktop does to a
+    /// client without MS-RDPEGFX.
     RequireGraphicsPipeline,
     /// Phases 6 to 10, then a Standard Server Redirection PDU
     /// (MS-RDPBCGR 2.2.13.2) naming this same mock as the target, with a
@@ -1054,6 +1055,31 @@ async fn serve(
         }
     }
 
+    if config.session == SessionBehaviour::RequireGraphicsPipeline {
+        let gfx = recorded
+            .lock()
+            .expect("not poisoned")
+            .client_blocks
+            .as_ref()
+            .and_then(|b| b.core.as_ref())
+            .and_then(|c| c.early_capability_flags)
+            .is_some_and(|f| {
+                f & rdp_pdu::gcc::client::early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL != 0
+            });
+        if !gfx {
+            let deactivate = SharePdu::DeactivateAll {
+                pdu_source: SERVER_PDU_SOURCE,
+                pdu: rdp_pdu::rdp::DeactivateAllPdu {
+                    share_id: SHARE_ID,
+                    source_descriptor: b"\0".to_vec(),
+                },
+            };
+            stream.write_all(&io_frame(&encoded(&deactivate))).await?;
+            stream.flush().await?;
+            return Ok(());
+        }
+    }
+
     // ---- Phase 9: the capability exchange -------------------------------
     // The server's own advertisement. `ClientCapabilitySupport` names the two
     // optional sets from the client's side, and a server offering both is the
@@ -1101,22 +1127,6 @@ async fn serve(
                     "expected a confirm active or a share data pdu, got {other:?}"
                 )))
             }
-        }
-    }
-
-    if config.session == SessionBehaviour::RequireGraphicsPipeline {
-        let gfx = recorded
-            .lock()
-            .expect("not poisoned")
-            .client_blocks
-            .as_ref()
-            .and_then(|b| b.core.as_ref())
-            .and_then(|c| c.early_capability_flags)
-            .is_some_and(|f| {
-                f & rdp_pdu::gcc::client::early_capability_flags::SUPPORT_DYNVC_GFX_PROTOCOL != 0
-            });
-        if !gfx {
-            return Ok(());
         }
     }
 
