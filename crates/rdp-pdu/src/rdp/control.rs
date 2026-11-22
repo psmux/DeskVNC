@@ -993,9 +993,10 @@ impl<'a> AutoDetectPdu<'a> {
                 AutoDetectKind::BandwidthResults,
                 AutoDetectPhase::ConnectTime,
             ),
-            t::BANDWIDTH_RESULTS_CONTINUOUS => {
-                (AutoDetectKind::BandwidthResults, AutoDetectPhase::Continuous)
-            }
+            t::BANDWIDTH_RESULTS_CONTINUOUS => (
+                AutoDetectKind::BandwidthResults,
+                AutoDetectPhase::Continuous,
+            ),
             t::NETCHAR_RESULT_BASE_AVERAGE_RTT
             | t::NETCHAR_RESULT_BANDWIDTH_AVERAGE_RTT
             | t::NETCHAR_RESULT_ALL => (
@@ -1058,9 +1059,20 @@ impl<'a> AutoDetectPdu<'a> {
                     // `payloadLength` (MS-RDPBCGR 2.2.14.1.4).
                     AutoDetectBody::Empty
                 } else {
+                    // `headerLength` is 0x08 for both PDUs and the filler
+                    // follows the header rather than sitting inside it
+                    // (MS-RDPBCGR 2.2.14.1.3, 2.2.14.1.4): gnome-remote-desktop
+                    // sends sixteen kilobytes of it, which no `u8` length
+                    // could cover. A filler that does sit inside a longer
+                    // header is still read from there.
                     let declared = usize::from(body_reader.u16(Self::NAME)?);
-                    let available = body_reader.remaining().min(declared);
-                    AutoDetectBody::Payload(Payload::new(body_reader.slice(available, Self::NAME)?))
+                    let filler = if body_reader.remaining() >= declared {
+                        body_reader.slice(declared, Self::NAME)?
+                    } else {
+                        let available = r.remaining().min(declared);
+                        r.slice(available, Self::NAME)?
+                    };
+                    AutoDetectBody::Payload(Payload::new(filler))
                 }
             }
             AutoDetectKind::BandwidthResults => AutoDetectBody::Results {
@@ -1117,7 +1129,13 @@ impl Encode for AutoDetectPdu<'_> {
     }
 
     fn encode(&self, w: &mut Writer<'_>) -> PduResult<()> {
-        let header_length = u8::try_from(self.size()).map_err(|_| PduError::Encode {
+        // The bandwidth filler is outside `headerLength`
+        // (MS-RDPBCGR 2.2.14.1.3); everything else is inside it.
+        let outside = match &self.body {
+            AutoDetectBody::Payload(filler) => filler.len(),
+            _ => 0,
+        };
+        let header_length = u8::try_from(self.size() - outside).map_err(|_| PduError::Encode {
             context: Self::NAME,
             reason: "detection PDU longer than its headerLength field",
         })?;
@@ -1840,12 +1858,38 @@ mod tests {
 
     #[test]
     fn a_bandwidth_payload_keeps_its_filler() {
-        let mut bytes = vec![0x00, 0x00, 0x05, 0x00, 0x02, 0x00, 0x04, 0x00];
+        // `headerLength` is 0x08 and the filler follows the header
+        // (MS-RDPBCGR 2.2.14.1.3), which is how FreeRDP and
+        // gnome-remote-desktop send it.
+        let mut bytes = vec![0x08, 0x00, 0x05, 0x00, 0x02, 0x00, 0x04, 0x00];
         bytes.extend_from_slice(&[0xaa; 4]);
-        bytes[0] = bytes.len() as u8;
         let pdu = AutoDetectPdu::read(&mut Reader::new(&bytes)).unwrap();
         assert_eq!(pdu.body, AutoDetectBody::Payload(Payload::new(&[0xaa; 4])));
         assert_eq!(encode(&pdu), bytes);
+
+        // A filler counted inside a longer `headerLength` reads the same.
+        let mut inside = bytes.clone();
+        inside[0] = inside.len() as u8;
+        let pdu = AutoDetectPdu::read(&mut Reader::new(&inside)).unwrap();
+        assert_eq!(pdu.body, AutoDetectBody::Payload(Payload::new(&[0xaa; 4])));
+    }
+
+    /// The real size: a filler far longer than a `u8` `headerLength` could
+    /// count, on a connect time Bandwidth Measure Stop.
+    #[test]
+    fn a_sixteen_kilobyte_bandwidth_stop_round_trips() {
+        let filler = vec![0x5a; 15 * 1024 + 960];
+        let pdu = AutoDetectPdu {
+            header_type_id: autodetect::TYPE_ID_REQUEST,
+            sequence_number: 0,
+            request_type: autodetect::BANDWIDTH_STOP_CONNECT,
+            body: AutoDetectBody::Payload(Payload::new(&filler)),
+        };
+        let bytes = encode(&pdu);
+        assert_eq!(bytes[0], 0x08);
+        assert_eq!(bytes.len(), 8 + filler.len());
+        let back = AutoDetectPdu::read(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(back, pdu);
     }
 
     #[test]

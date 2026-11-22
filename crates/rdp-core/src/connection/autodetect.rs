@@ -143,7 +143,11 @@ mod tests {
     use rdp_pdu::rdp::control::autodetect;
     use std::time::Duration;
 
-    fn request(request_type: u16, sequence_number: u16, body: AutoDetectBody<'_>) -> AutoDetectPdu<'_> {
+    fn request(
+        request_type: u16,
+        sequence_number: u16,
+        body: AutoDetectBody<'_>,
+    ) -> AutoDetectPdu<'_> {
         AutoDetectPdu {
             header_type_id: autodetect::TYPE_ID_REQUEST,
             sequence_number,
@@ -155,7 +159,10 @@ mod tests {
     #[test]
     fn an_rtt_request_is_answered_with_its_own_sequence_number() {
         let mut r = AutoDetectResponder::new();
-        for code in [autodetect::RTT_REQUEST_CONNECT, autodetect::RTT_REQUEST_CONTINUOUS] {
+        for code in [
+            autodetect::RTT_REQUEST_CONNECT,
+            autodetect::RTT_REQUEST_CONTINUOUS,
+        ] {
             let out = r
                 .answer(&request(code, 7, AutoDetectBody::Empty), Instant::now())
                 .expect("an rtt request needs a response");
@@ -173,7 +180,14 @@ mod tests {
         let filler = vec![0u8; 1000];
         let t0 = Instant::now();
         assert!(r
-            .answer(&request(autodetect::BANDWIDTH_START_CONNECT, 0, AutoDetectBody::Empty), t0)
+            .answer(
+                &request(
+                    autodetect::BANDWIDTH_START_CONNECT,
+                    0,
+                    AutoDetectBody::Empty
+                ),
+                t0
+            )
             .is_none());
         for _ in 0..3 {
             assert!(r
@@ -211,14 +225,28 @@ mod tests {
     fn a_continuous_measurement_is_answered_with_the_continuous_code() {
         let mut r = AutoDetectResponder::new();
         let t0 = Instant::now();
-        r.answer(&request(autodetect::BANDWIDTH_START_CONTINUOUS, 3, AutoDetectBody::Empty), t0);
+        r.answer(
+            &request(
+                autodetect::BANDWIDTH_START_CONTINUOUS,
+                3,
+                AutoDetectBody::Empty,
+            ),
+            t0,
+        );
         let out = r
             .answer(
-                &request(autodetect::BANDWIDTH_STOP_CONTINUOUS, 3, AutoDetectBody::Empty),
+                &request(
+                    autodetect::BANDWIDTH_STOP_CONTINUOUS,
+                    3,
+                    AutoDetectBody::Empty,
+                ),
                 t0 + Duration::from_millis(40),
             )
             .unwrap();
-        assert_eq!(out.pdu.request_type, autodetect::BANDWIDTH_RESULTS_CONTINUOUS);
+        assert_eq!(
+            out.pdu.request_type,
+            autodetect::BANDWIDTH_RESULTS_CONTINUOUS
+        );
         assert_eq!(out.pdu.sequence_number, 3);
     }
 

@@ -616,7 +616,11 @@ impl<R: AsyncRead + Unpin> RunLoop<R> {
     /// A request that does not parse is logged and dropped rather than ending
     /// the session: detection is about pacing, and a picture that keeps
     /// coming is worth more than a strict reading of a measurement.
-    fn answer_autodetect(&mut self, channel_id: u16, payload: &[u8]) -> Result<Option<SessionSignal>> {
+    fn answer_autodetect(
+        &mut self,
+        channel_id: u16,
+        payload: &[u8],
+    ) -> Result<Option<SessionSignal>> {
         use rdp_pdu::rdp::security::security_flags;
         use rdp_pdu::{Encode, Writer};
 

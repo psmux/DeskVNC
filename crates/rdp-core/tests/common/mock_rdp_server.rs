@@ -1444,7 +1444,11 @@ async fn connect_time_autodetect(
         body,
     };
     for pdu in [
-        request(autodetect::BANDWIDTH_START_CONNECT, 0, AutoDetectBody::Empty),
+        request(
+            autodetect::BANDWIDTH_START_CONNECT,
+            0,
+            AutoDetectBody::Empty,
+        ),
         request(
             autodetect::BANDWIDTH_PAYLOAD,
             0,
