@@ -125,7 +125,7 @@ function useAppSetting(key: string, initial: boolean): [boolean, (v: boolean) =>
  * restart.
  */
 function useRdpResolutionDefault(): [RdpResolution, (v: RdpResolution) => void] {
-  const [v, setV] = useState<RdpResolution>({ mode: "window-at-connect" });
+  const [v, setV] = useState<RdpResolution>({ mode: "follow-window" });
   useEffect(() => {
     let cancelled = false;
     void safeInvoke<string | null>(
@@ -369,9 +369,9 @@ export function Preferences({ onClose }: { onClose: () => void }): ReactNode {
                 <label className="block">
                   <span className="text-sm text-primary">Resolution for new Remote Desktop hosts</span>
                   <span className="mt-0.5 block text-xs text-tertiary">
-                    Matching the window when connecting is what Windows' own client does. Making it
-                    keep matching resizes the remote desktop every time you resize this one, which
-                    rearranges that machine's icons each time.
+                    Keeping it matched is what Windows App does on a Mac: the remote desktop
+                    resizes with this window. Matching only when connecting leaves it alone
+                    afterwards, so that machine's icons stay where they are.
                   </span>
                   <select
                     className="field mt-1.5"

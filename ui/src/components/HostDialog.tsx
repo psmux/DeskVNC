@@ -991,6 +991,12 @@ function RdpOptionsSection({
       />
       <ResolutionField value={rdp.resolution} onChange={(resolution) => onChange({ resolution })} />
       <Check
+        checked={rdp.matchLocalScale}
+        onChange={(matchLocalScale) => onChange({ matchLocalScale })}
+        label="Match this screen's scaling"
+        hint="Text and icons on the remote desktop come out the size they are here: 200% on a Retina display. Turn it off to always use 100%."
+      />
+      <Check
         checked={rdp.fullscreen}
         onChange={(fullscreen) => onChange({ fullscreen })}
         label="Open full screen"
