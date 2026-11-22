@@ -255,23 +255,18 @@ impl ResolvedOptions {
         // Windows desktop drawn at half size (issue #60).
         let measured = rdp.local_scale.filter(|_| rdp.match_local_scale);
         let requested_scale = measured.unwrap_or(rdp.desktop_scale_factor);
-        let scale_factor = if requested_scale < MIN_SCALE_FACTOR
-            || requested_scale > MAX_SCALE_FACTOR
+        let scale_factor = requested_scale.clamp(MIN_SCALE_FACTOR, MAX_SCALE_FACTOR);
+        // A screen at less than one physical pixel to the point is ordinary
+        // (a zoomed out webview reports that) and not worth a warning; a
+        // stored figure out of range is.
+        if scale_factor != requested_scale
+            && (measured.is_none() || requested_scale > MAX_SCALE_FACTOR)
         {
-            let clamped = requested_scale.clamp(MIN_SCALE_FACTOR, MAX_SCALE_FACTOR);
-            // A screen at less than one physical pixel to the point is
-            // ordinary (a zoomed out webview reports that) and not worth a
-            // warning; a stored figure out of range is.
-            if measured.is_none() || requested_scale > MAX_SCALE_FACTOR {
-                warnings.push(format!(
-                    "desktop scale factor {requested_scale} is outside \
-                     {MIN_SCALE_FACTOR} to {MAX_SCALE_FACTOR}, using {clamped}"
-                ));
-            }
-            clamped
-        } else {
-            requested_scale
-        };
+            warnings.push(format!(
+                "desktop scale factor {requested_scale} is outside \
+                 {MIN_SCALE_FACTOR} to {MAX_SCALE_FACTOR}, using {scale_factor}"
+            ));
+        }
 
         if matches!(
             rdp.monitors,
@@ -463,7 +458,10 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
 
         // And it is what goes on the wire in the Client Core Data.
-        let blocks = crate::connection::mcs::client_blocks(&r, crate::connection::negotiate::SecurityProtocol::Hybrid);
+        let blocks = crate::connection::mcs::client_blocks(
+            &r,
+            crate::connection::negotiate::SecurityProtocol::Hybrid,
+        );
         let core = blocks.core.expect("core block");
         assert_eq!(core.desktop_scale_factor, Some(200));
         assert_eq!(core.device_scale_factor, Some(180));
