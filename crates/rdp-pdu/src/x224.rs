@@ -80,7 +80,8 @@ pub mod security_protocol {
     pub const SSL: u32 = 0x0000_0001;
     /// CredSSP over TLS, which is what everyone calls NLA.
     pub const HYBRID: u32 = 0x0000_0002;
-    /// Out of scope (PRDRDP/03 §13.2).
+    /// RDSTLS, offered only on the connection that follows a Server
+    /// Redirection carrying a password cookie (MS-RDPBCGR 5.4.5.3).
     pub const RDSTLS: u32 = 0x0000_0004;
     /// CredSSP plus the Early User Authorization Result PDU.
     pub const HYBRID_EX: u32 = 0x0000_0008;

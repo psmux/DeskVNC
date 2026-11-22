@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common::mock_rdp_server::{
-    MockConfig, MockRdpServer, SessionBehaviour, COOKIE_LOGON_ID, COOKIE_RANDOM_BITS,
-    REDIRECT_ROUTING_TOKEN, REDIRECT_SESSION_ID, REDIRECT_USERNAME,
+    utf16z, MockConfig, MockRdpServer, Negotiation, SessionBehaviour, COOKIE_LOGON_ID,
+    COOKIE_RANDOM_BITS, HANDOVER_GUID, HANDOVER_PASSWORD, HANDOVER_ROUTING_TOKEN,
+    HANDOVER_USERNAME, REDIRECT_ROUTING_TOKEN, REDIRECT_SESSION_ID, REDIRECT_USERNAME,
 };
 use common::{dial_host, options_for, rdp_half, DEFAULT_TIMEOUT};
 use rdp_core::error::RdpError;
@@ -88,7 +89,7 @@ impl ConnectOnce for MockConnect {
             let rdp = rdp_half(&self.options);
             let mut opts =
                 ResolvedOptions::resolve(&self.options, &rdp, &mut Vec::new()).expect("valid");
-            opts.routing_token = self.carry.routing_token.take();
+            self.carry.prime(&mut opts);
 
             // The cookie half of `session::connect::run_once`: offer what is
             // stored and not stale (MS-RDPBCGR 2.2.4.3).
@@ -121,13 +122,13 @@ impl ConnectOnce for MockConnect {
                 Ok(connected) => connected,
                 Err(RdpError::Redirected(redirect)) => {
                     self.carry.redirect = Some(*redirect);
-                    return Ok(absorb_attempt(
+                    return absorb_attempt(
                         &mut self.options,
                         &mut self.carry,
                         rdp_core::session::run_loop::RunOutcome::ServerDisconnect {
                             user_requested: false,
                         },
-                    ));
+                    );
                 }
                 Err(e) => return Err(e),
             };
@@ -171,19 +172,19 @@ impl ConnectOnce for MockConnect {
             let _ = writer_task.await;
 
             match outcome {
-                Ok(attempt) => Ok(absorb_attempt(&mut self.options, &mut self.carry, attempt)),
+                Ok(attempt) => absorb_attempt(&mut self.options, &mut self.carry, attempt),
                 Err(e) => {
                     // A redirection recorded by the pump outlives the error
                     // the socket produced afterwards, which is what makes a
                     // redirect followed by a close still a redirect.
                     if self.carry.redirect.is_some() {
-                        return Ok(absorb_attempt(
+                        return absorb_attempt(
                             &mut self.options,
                             &mut self.carry,
                             rdp_core::session::run_loop::RunOutcome::ServerDisconnect {
                                 user_requested: false,
                             },
-                        ));
+                        );
                     }
                     Err(e)
                 }
@@ -363,15 +364,13 @@ async fn the_second_attempt_offers_the_cookie_the_first_was_given() {
     );
 }
 
-/// A redirection that names nowhere to go ends the session with a sentence
-/// at once. GNOME Remote Login sends one when the user's session is ready,
-/// and then cancels the connection thirty seconds later if the client stays;
-/// ignoring it showed a blank picture for those thirty seconds and then "the
-/// connection was cancelled" (issue #59).
+/// A redirection that names no target and carries no routing token has
+/// nowhere to go, and ends the session with a sentence at once rather than a
+/// blank picture until the server gives up on us.
 #[tokio::test]
-async fn a_handover_with_no_target_stops_with_a_sentence() {
+async fn a_redirection_with_nowhere_to_go_stops_with_a_sentence() {
     let server = MockRdpServer::start(MockConfig {
-        session: SessionBehaviour::HandoverWithoutTarget,
+        session: SessionBehaviour::RedirectNowhere,
         ..MockConfig::default()
     })
     .await;
@@ -498,5 +497,164 @@ async fn a_redirection_is_followed_with_its_routing_token() {
             .any(|s| matches!(s, SessionState::Reconnecting { .. })),
         "a redirection is not a retry: {:?}",
         states(&events)
+    );
+}
+
+/// GNOME Remote Login (issue #59). Once the user signs in at the remote login
+/// screen, gnome-remote-desktop sends a redirection with no address, a
+/// `LoadBalanceInfo` of `Cookie: msts=<token>\r\n`, a one time user name, a
+/// password flagged `LB_PASSWORD_IS_PK_ENCRYPTED` and a `RedirectionGuid`.
+/// The client has to dial the same host again, present the token as the
+/// routing token, offer `PROTOCOL_RDSTLS`, and sign in with RDSTLS
+/// presenting the GUID, the user name and the password bytes unchanged
+/// (MS-RDPBCGR 3.2.5.3.1, 5.4.5.3). The handover daemon refuses anything
+/// else, so the session only draws if every one of those is right.
+#[tokio::test]
+async fn a_gnome_handover_is_followed_to_the_same_host_with_rdstls() {
+    let server = MockRdpServer::start_sequence(vec![
+        MockConfig {
+            session: SessionBehaviour::HandoverWithoutTarget,
+            ..MockConfig::default()
+        },
+        MockConfig {
+            negotiation: Negotiation::Rdstls,
+            ..MockConfig::default()
+        },
+    ])
+    .await;
+
+    let mut options = options_for(server.addr);
+    fast_ladder(&mut options, Some(2));
+    let (events_tx, mut events_rx) = mpsc::channel(256);
+    let (commands_tx, commands_rx) = mpsc::channel(16);
+
+    let supervisor = tokio::spawn(remote_core::reconnect::supervise(
+        "gnome-handover".into(),
+        MockConnect::new(options),
+        events_tx,
+        commands_rx,
+        CancellationToken::new(),
+    ));
+
+    let mut redirected = None;
+    let mut drew = false;
+    let mut events = Vec::new();
+    let collect = async {
+        while let Some(event) = events_rx.recv().await {
+            if let SessionEvent::Protocol(ProtocolEvent::Rdp(RdpEvent::Redirected {
+                target, ..
+            })) = &event
+            {
+                redirected = Some(target.clone());
+            }
+            let frame = matches!(event, SessionEvent::FramebufferUpdate { .. });
+            events.push(event);
+            if frame {
+                drew = true;
+                let _ = commands_tx.send(ClientCommand::Disconnect).await;
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(DEFAULT_TIMEOUT, collect)
+        .await
+        .expect("the handed over session drew inside the timeout");
+    events.extend(
+        tokio::time::timeout(DEFAULT_TIMEOUT, drain(&mut events_rx))
+            .await
+            .expect("the session ended inside the timeout"),
+    );
+    supervisor.await.expect("the supervisor finished");
+
+    assert!(drew, "the handed over session drew: {:?}", states(&events));
+    let target = redirected.expect("the shell was told about the handover");
+    assert!(target.contains("same server"), "{target}");
+    assert!(
+        !target.contains("3147902345"),
+        "no token in the event: {target}"
+    );
+
+    let recorded = server.wait_until(|r| !r.rdstls_requests.is_empty()).await;
+    assert_eq!(recorded.connections, 2, "one handover, one more dial");
+    assert_eq!(
+        recorded.routing_tokens[1].as_deref(),
+        Some(HANDOVER_ROUTING_TOKEN),
+        "the token went back without a second Cookie: msts= prefix"
+    );
+    assert_eq!(
+        recorded.requested_protocols[0] & rdp_pdu::x224::security_protocol::RDSTLS,
+        0,
+        "no RDSTLS on the first dial"
+    );
+    assert_ne!(
+        recorded.requested_protocols[1] & rdp_pdu::x224::security_protocol::RDSTLS,
+        0,
+        "RDSTLS offered after the handover"
+    );
+    let request = &recorded.rdstls_requests[0];
+    assert_eq!(request.username, HANDOVER_USERNAME);
+    assert_eq!(request.redirection_guid, utf16z(HANDOVER_GUID));
+    assert_eq!(
+        request.password.expose(),
+        utf16z(HANDOVER_PASSWORD).as_slice()
+    );
+
+    let info = recorded.client_info.expect("the second client info pdu");
+    assert_eq!(info.info.user_name, HANDOVER_USERNAME);
+    assert!(
+        info.info.password.is_empty(),
+        "the cookie is never sent as a password"
+    );
+    assert!(
+        !states(&events)
+            .iter()
+            .any(|s| matches!(s, SessionState::Reconnecting { .. })),
+        "a handover is not a retry: {:?}",
+        states(&events)
+    );
+}
+
+/// Two servers that keep sending a client to each other would reconnect
+/// forever. The chain is bounded: the mock redirects every connection to
+/// itself, and the session stops after `MAX_REDIRECTS` with a sentence.
+#[tokio::test]
+async fn a_redirection_loop_stops() {
+    let server = MockRdpServer::start(MockConfig {
+        session: SessionBehaviour::RedirectAfterLogon,
+        ..MockConfig::default()
+    })
+    .await;
+
+    let mut options = options_for(server.addr);
+    fast_ladder(&mut options, Some(2));
+    let (events_tx, mut events_rx) = mpsc::channel(1024);
+    let (_commands_tx, commands_rx) = mpsc::channel(16);
+
+    let supervisor = tokio::spawn(remote_core::reconnect::supervise(
+        "redirect-loop".into(),
+        MockConnect::new(options),
+        events_tx,
+        commands_rx,
+        CancellationToken::new(),
+    ));
+    let events = tokio::time::timeout(DEFAULT_TIMEOUT, drain(&mut events_rx))
+        .await
+        .expect("the loop was stopped inside the timeout");
+    supervisor.await.expect("the supervisor finished");
+
+    match states(&events).last() {
+        Some(SessionState::Disconnected { reason, .. }) => {
+            assert!(
+                reason.contains("redirected this session more than"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected a disconnect with a reason, got {other:?}"),
+    }
+    let max = rdp_core::session::MAX_REDIRECTS as usize;
+    assert_eq!(
+        server.wait_until(|r| r.connections > max).await.connections,
+        max + 1,
+        "every redirection up to the bound was followed, and no more"
     );
 }

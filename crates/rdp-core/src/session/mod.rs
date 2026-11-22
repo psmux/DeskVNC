@@ -42,7 +42,9 @@ use remote_core::{ClientCommand, ConnectOptions, ProtocolKind, SessionEvent, Ses
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::connection::rdstls::RdstlsCredentials;
 use crate::error::RdpError;
+use crate::options::ResolvedOptions;
 use crate::session::cookie::ReconnectCookie;
 use crate::session::redirect::Redirection;
 use crate::session::run_loop::Attempt;
@@ -153,10 +155,19 @@ pub struct RdpConnect {
     carry: Continuity,
 }
 
+/// How many Server Redirections one session follows in a row.
+///
+/// GNOME Remote Login needs one: the login screen hands over to the user's
+/// session. A broker in front of a farm needs one, and a broker in front of a
+/// target that redirects again needs two. Four leaves room for that and still
+/// stops two servers that send a client back and forth between them, which
+/// would otherwise reconnect forever without the user ever seeing a desktop.
+pub const MAX_REDIRECTS: u32 = 4;
+
 /// What one attempt reads from the last one and writes for the next.
 ///
-/// Three fields, and each is the reason a `ConnectOnce` implementor has to be
-/// a struct rather than a bare async function (PRDRDP/02 §11.2).
+/// Each field is a reason a `ConnectOnce` implementor has to be a struct
+/// rather than a bare async function (PRDRDP/02 §11.2).
 #[derive(Debug, Default)]
 pub struct Continuity {
     /// In: the cookie to offer, when one is stored and not stale. Out: the
@@ -169,6 +180,23 @@ pub struct Continuity {
     /// Out: the redirection this attempt was told to follow
     /// (MS-RDPBCGR 2.2.13.1).
     pub redirect: Option<Redirection>,
+    /// In: the credentials a redirection handed over for an RDSTLS sign in
+    /// on the next connection (MS-RDPBCGR 5.4.5.3). Scoped like the routing
+    /// token.
+    pub rdstls: Option<RdstlsCredentials>,
+    /// How many redirections this session has followed without an attempt
+    /// that ended any other way, bounded by [`MAX_REDIRECTS`].
+    pub redirects: u32,
+}
+
+impl Continuity {
+    /// Hand this attempt what the last one left for it: the routing token
+    /// and the RDSTLS credentials of a redirection. Both are taken, so they
+    /// are presented once and are gone from every later attempt.
+    pub fn prime(&mut self, opts: &mut ResolvedOptions) {
+        opts.routing_token = self.routing_token.take();
+        opts.rdstls = self.rdstls.take();
+    }
 }
 
 impl RdpConnect {
@@ -212,9 +240,14 @@ impl ConnectOnce for RdpConnect {
             .await
             {
                 Ok(outcome) => outcome,
-                Err(e) => return absorb_failure(&mut self.options, e),
+                Err(e) => {
+                    // A failure ends a chain of redirections: whatever comes
+                    // next starts from what the profile says.
+                    self.carry.redirects = 0;
+                    return absorb_failure(&mut self.options, e);
+                }
             };
-            Ok(absorb_attempt(&mut self.options, &mut self.carry, outcome))
+            absorb_attempt(&mut self.options, &mut self.carry, outcome)
         })
     }
 
@@ -269,21 +302,39 @@ pub fn absorb_failure(options: &mut ConnectOptions, err: RdpError) -> Result<Run
 /// and then take this decision with the same code the driver does
 /// (`crates/rdp-core/tests/connect.rs`). The alternative is a second copy of
 /// the redirection rules in a test, which is the copy that goes stale.
-#[must_use]
+///
+/// # Errors
+///
+/// [`RdpError::Protocol`] when following this redirection would be the
+/// session's redirection number [`MAX_REDIRECTS`] plus one.
 pub fn absorb_attempt(
     options: &mut ConnectOptions,
     carry: &mut Continuity,
     outcome: Attempt,
-) -> RunOutcome {
+) -> Result<RunOutcome, RdpError> {
     match carry.redirect.take() {
         Some(redirect) => {
+            carry.redirects += 1;
+            if carry.redirects > MAX_REDIRECTS {
+                tracing::warn!(
+                    redirects = carry.redirects,
+                    %redirect,
+                    "too many redirections in a row: not following this one"
+                );
+                carry.routing_token = None;
+                carry.rdstls = None;
+                return Err(RdpError::Protocol(format!(
+                    "the server redirected this session more than {MAX_REDIRECTS} times in a row, \
+                     so it was stopped rather than sent round again (MS-RDPBCGR 2.2.13.1)"
+                )));
+            }
             // The cookie belongs to the session on the machine we are
             // leaving, and offering it to the target would be a wasted round
             // trip and a rejection (PRDRDP/06 §5.5.5).
             carry.cookie = None;
             let why = redirect.describe();
-            redirect.apply(options, &mut carry.routing_token);
-            RunOutcome::Reattempt { why }
+            redirect.apply(options, &mut carry.routing_token, &mut carry.rdstls);
+            Ok(RunOutcome::Reattempt { why })
         }
         // A logoff and an administrative close are both deliberate, and
         // reconnecting into a session the far end just ended is a loop. A
@@ -295,7 +346,8 @@ pub fn absorb_attempt(
                 outcome,
                 Attempt::UserDisconnect | Attempt::ServerDisconnect { .. }
             ));
-            RunOutcome::UserDisconnect
+            carry.redirects = 0;
+            Ok(RunOutcome::UserDisconnect)
         }
     }
 }
