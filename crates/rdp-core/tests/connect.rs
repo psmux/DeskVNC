@@ -821,9 +821,24 @@ async fn run_session_steps(
     Vec<SessionEvent>,
     Result<RunOutcome, RdpError>,
 ) {
+    run_session_steps_with(config, steps, |_| ()).await
+}
+
+/// [`run_session_steps`] with the host's RDP options changed first, the way
+/// the shell fills in what it measured before it connects.
+async fn run_session_steps_with(
+    config: MockConfig,
+    steps: Vec<Step>,
+    tweak: impl FnOnce(&mut remote_core::RdpOptions),
+) -> (
+    MockRdpServer,
+    Vec<SessionEvent>,
+    Result<RunOutcome, RdpError>,
+) {
     let server = MockRdpServer::start(config).await;
     let mut options = options_for(server.addr);
-    let rdp = rdp_half(&options);
+    let mut rdp = rdp_half(&options);
+    tweak(&mut rdp);
     let opts = ResolvedOptions::resolve(&options, &rdp, &mut Vec::new()).expect("valid options");
 
     let (events, mut event_rx) = mpsc::channel(256);
@@ -1447,6 +1462,42 @@ async fn a_resize_reaches_the_server_as_a_monitor_layout() {
             .any(|(id, status)| *id == DISPLAY_DVC_CHANNEL_ID && *status == 0),
         "the display control channel was accepted: {:?}",
         recorded.dvc_creations
+    );
+}
+
+/// Issue #60, end to end: on a Retina screen the shell measures the window
+/// in physical pixels and the screen at two to the point. A window resize
+/// then has to reach the server with 200 percent beside the size, or Windows
+/// rebuilds the desktop at 100 percent and everything on it is half size.
+#[tokio::test]
+async fn a_resize_on_a_retina_screen_carries_its_scale() {
+    let (server, _events, outcome) = run_session_steps_with(
+        channel_config(SessionBehaviour::ServeChannels),
+        vec![Step::after(
+            is_framebuffer_update,
+            vec![
+                ClientCommand::RequestResize {
+                    width: 3024,
+                    height: 1890,
+                },
+                ClientCommand::Disconnect,
+            ],
+        )],
+        |rdp| {
+            rdp.window_size = Some((3840, 1890));
+            rdp.local_scale = Some(200);
+        },
+    )
+    .await;
+    assert_eq!(outcome.expect("a clean end"), RunOutcome::UserDisconnect);
+
+    let recorded = server.wait_until(|r| !r.monitor_layouts.is_empty()).await;
+    let layout = recorded.monitor_layouts[0];
+    assert_eq!(layout.size, (3024, 1890));
+    assert_eq!(
+        layout.scale,
+        (200, 180),
+        "the screen's 200 percent, with the device scale the field allows"
     );
 }
 

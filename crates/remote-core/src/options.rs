@@ -327,7 +327,33 @@ pub struct RdpOptions {
     /// HiDPI scale factor, percent, 100 to 500. MS-RDPBCGR 2.2.2.2.1
     /// DISPLAYCONTROL_MONITOR_LAYOUT `DeviceScaleFactor` and the connector's
     /// `desktopScaleFactor`. 100 means no scaling.
+    ///
+    /// Only used as given when [`Self::match_local_scale`] is off, or when
+    /// nothing measured the local screen.
     pub desktop_scale_factor: u32,
+
+    /// Ask the server for this screen's own scale rather than
+    /// [`Self::desktop_scale_factor`].
+    ///
+    /// The desktop is sized in physical pixels, so on a screen with two
+    /// physical pixels to the point (a Retina Mac) a desktop at 100 percent
+    /// draws everything at half the size the person is used to. Sending the
+    /// screen's scale alongside is what mstsc does on a HiDPI Windows laptop,
+    /// and what Windows App does on a Mac with Retina resolution on.
+    ///
+    /// On by default, and a profile written before the field existed reads
+    /// as on: no build ever offered a way to set the scale factor, so every
+    /// stored 100 is the old default and not a choice.
+    pub match_local_scale: bool,
+
+    /// The local screen's scale, percent, as the shell measured it
+    /// (`devicePixelRatio` times 100). `None` for a headless caller, which
+    /// then gets [`Self::desktop_scale_factor`].
+    ///
+    /// Not stored with the host: it belongs to the screen the window is on
+    /// at connect time, not to the remote computer.
+    #[serde(skip)]
+    pub local_scale: Option<u32>,
 
     /// Whether to ask for the clipboard channel (MS-RDPECLIP) at all.
     ///
@@ -388,10 +414,29 @@ impl Default for RdpOptions {
             send_mstshash_cookie: false,
             allow_auto_reconnect: true,
             desktop_scale_factor: 100,
+            match_local_scale: true,
+            local_scale: None,
             redirect_clipboard: true,
             graphics_pipeline: false,
             license_dir: None,
         }
+    }
+}
+
+impl RdpOptions {
+    /// A screen's `devicePixelRatio` as the percentage `desktopScaleFactor`
+    /// takes, or `None` for a ratio that is not a number a screen reports.
+    ///
+    /// Not clamped here: the resolver clamps to the wire range and says so,
+    /// and doing it twice would hide the second warning.
+    #[must_use]
+    pub fn scale_for_pixel_ratio(ratio: f64) -> Option<u32> {
+        if !ratio.is_finite() || ratio <= 0.0 || ratio > 16.0 {
+            return None;
+        }
+        // Checked above: positive and at most 1600, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some((ratio * 100.0).round() as u32)
     }
 }
 
@@ -508,12 +553,17 @@ pub enum MonitorPolicy {
 pub enum RdpResolution {
     /// Connect at the window's size and send a new monitor layout whenever it
     /// changes (MS-RDPEDISP, DISPLAYCONTROL_MONITOR_LAYOUT_PDU).
+    ///
+    /// The default, because it is what Windows App does on a Mac and what
+    /// people expect from a window: one that is resized and keeps showing a
+    /// desktop of the old size looks broken. A server that cannot resize
+    /// leaves the desktop where it is and the window scales it.
+    #[default]
     FollowWindow,
     /// Connect at the window's size and leave the desktop there. The client
-    /// scales afterwards, which is what mstsc does and why it is the default:
-    /// a desktop that reflows every time a window edge moves rearranges the
-    /// icons of the machine on the other end.
-    #[default]
+    /// scales afterwards, which is what mstsc does: a desktop that reflows
+    /// every time a window edge moves rearranges the icons of the machine on
+    /// the other end.
     WindowAtConnect,
     /// A fixed size, whatever the window does.
     Fixed { width: u16, height: u16 },
@@ -719,7 +769,9 @@ mod tests {
         );
     }
 
-    /// Only one of the three tracks the window, and the default is not it.
+    /// Only one of the three tracks the window, and it is the default: a
+    /// resized window that keeps a desktop of the old size looked broken
+    /// (issue #60).
     #[test]
     fn only_follow_window_tracks_the_window() {
         assert!(RdpResolution::FollowWindow.follows_window());
@@ -729,7 +781,7 @@ mod tests {
             height: 1080
         }
         .follows_window());
-        assert!(!RdpResolution::default().follows_window());
+        assert!(RdpResolution::default().follows_window());
     }
 
     /// A window that has not been laid out reports zero, and a desktop no
@@ -747,6 +799,41 @@ mod tests {
             height: 1080,
         };
         assert_eq!(f.size(None), Some((1920, 1080)));
+    }
+
+    /// A Retina screen reports two, which is 200 percent; nonsense is not a
+    /// scale and leaves the profile's own figure in charge.
+    #[test]
+    fn a_pixel_ratio_becomes_a_scale_percentage() {
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(2.0), Some(200));
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(1.0), Some(100));
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(1.25), Some(125));
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(1.749_999), Some(175));
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(0.0), None);
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(-2.0), None);
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(f64::NAN), None);
+        assert_eq!(RdpOptions::scale_for_pixel_ratio(f64::INFINITY), None);
+    }
+
+    /// A profile stored before the switch existed has it on, which is what
+    /// fixes the hosts people already have. Its `desktopScaleFactor` of 100
+    /// was the only value any build could write.
+    #[test]
+    fn an_old_profile_matches_the_local_scale() {
+        let old: RdpOptions = serde_json::from_str(
+            r#"{"desktopScaleFactor":100,"resolution":{"mode":"window-at-connect"}}"#,
+        )
+        .expect("parses");
+        assert!(old.match_local_scale);
+        assert_eq!(old.desktop_scale_factor, 100);
+        // The stored resolution is a choice and is kept.
+        assert_eq!(old.resolution, RdpResolution::WindowAtConnect);
+        // The measured scale is never written into the profile.
+        let mut measured = old.clone();
+        measured.local_scale = Some(200);
+        let json = serde_json::to_string(&measured).expect("serialises");
+        assert!(!json.contains("localScale"), "{json}");
+        assert!(json.contains(r#""matchLocalScale":true"#), "{json}");
     }
 }
 
