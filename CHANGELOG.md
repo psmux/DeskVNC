@@ -12,6 +12,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* On a Retina Mac, a Remote Desktop session to Windows came up with every
+  word and icon at half size, and resizing the window did not change the
+  remote resolution. The desktop was asked for at the window's physical
+  pixel size with 100% scaling. The session now sends the screen's own
+  scale with it (200% on a Retina display), so Windows draws things the size
+  they are on the Mac, and a new host keeps the remote desktop matched to
+  the window as it is resized, the way Windows App does. Hosts with a
+  resolution already set keep it. A new host setting, "Match this screen's
+  scaling", turns the scale off for a host that should stay at 100%. When a
+  server does not change its resolution to match the window, the picture is
+  scaled to fit and a notice says so. VNC's "Remote resize" now asks for the
+  window's size in points on a Retina screen for the same reason (#60).
 * With "resize remote to fit" on, an agent's clicks could land off target.
   The agent activity strip grew when an agent started driving and shrank
   when it stopped, and a single pane gained and lost its header the same

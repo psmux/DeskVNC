@@ -648,6 +648,10 @@ export function useSession(
           viewportHeight: Math.round(
             (availableRef.current?.height || window.innerHeight) * window.devicePixelRatio,
           ),
+          // The viewport above is in physical pixels; this says how many of
+          // them make a point, so an RDP desktop of that size is asked for
+          // at the screen's own scale and not at half size (issue #60).
+          devicePixelRatio: window.devicePixelRatio,
           onEvent: channel,
         });
         repromptRef.current = false;
