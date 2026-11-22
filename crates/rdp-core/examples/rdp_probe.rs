@@ -278,12 +278,19 @@ async fn main() {
 async fn type_text(handle: &remote_core::SessionHandle, text: &str) {
     for ch in text.chars() {
         // X11 keysyms: Latin-1 is its own code point, Return is 0xff0d.
-        let keysym = if ch == '\n' { 0xff0d } else { ch as u32 };
+        // Return goes as its XT scancode (0x1c), because a key with no
+        // character cannot travel as a unicode event; the rest go as
+        // characters.
+        let (keysym, keycode) = if ch == '\n' {
+            (0xff0d, Some(0x1c))
+        } else {
+            (ch as u32, None)
+        };
         for down in [true, false] {
             let _ = handle
                 .send(remote_core::ClientCommand::Key {
                     keysym,
-                    keycode: None,
+                    keycode,
                     down,
                 })
                 .await;
