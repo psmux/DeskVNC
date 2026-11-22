@@ -1182,6 +1182,12 @@ pub async fn connect_session(
     // profile, which is what a fixed resolution wants anyway.
     viewport_width: Option<u16>,
     viewport_height: Option<u16>,
+    // The webview's devicePixelRatio, physical pixels to the CSS pixel. The
+    // viewport above is in physical pixels, so on a Retina Mac an RDP desktop
+    // of that size needs a scale of 200 percent beside it or Windows draws
+    // everything at half size (issue #60). The window's own scale factor is
+    // the fallback for a webview that did not send it.
+    device_pixel_ratio: Option<f64>,
     on_event: Channel<InvokeResponseBody>,
 ) -> Result<SessionConnectOutcome, String> {
     let id = match session_id {
@@ -1310,6 +1316,9 @@ pub async fn connect_session(
             // on one pin key.
             rdp.server_name.get_or_insert_with(|| options.host.clone());
             rdp.window_size = viewport(&window, viewport_width, viewport_height);
+            rdp.local_scale = device_pixel_ratio
+                .or_else(|| window.scale_factor().ok())
+                .and_then(remote_core::RdpOptions::scale_for_pixel_ratio);
             // Client access licences from an RD licence server live beside the
             // rest of this installation's data, never with the host profile:
             // a licence belongs to this device (issue #25).
