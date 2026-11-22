@@ -22,6 +22,7 @@ import type {
   SessionEvent,
   SessionState,
 } from "./contract";
+import { LOCAL_NETWORK_REFUSED } from "./contract";
 import { arrowCursor, FakeDesktop, styleForOs, type DesktopStyle, type Scene } from "./mockDesktop";
 
 /** What each sample computer's card picture shows. The wallpaper is the
@@ -480,6 +481,7 @@ export function createMockApi(): Api {
 
     async identify(address: string, port: number | null) {
       await wait(700);
+      if (q.get("lan") === "denied") throw new Error(LOCAL_NETWORK_REFUSED);
       const where = address.trim().toLowerCase();
       // `nothing.example` and anything ending .99 have nothing listening.
       if (where.startsWith("nothing") || where.endsWith(".99")) return [];
@@ -499,8 +501,23 @@ export function createMockApi(): Api {
       return { invitation: `boundary1:mock-${digits}` };
     },
 
+    // `?lan=denied` plays an Android 17 phone where Nearby devices is off:
+    // the prompt is refused and a computer on the network is out of reach.
+    async localNetworkState() {
+      return q.get("lan") === "denied" ? "denied" : "granted";
+    },
+    async localNetworkAsk() {
+      await wait(400);
+      return q.get("lan") === "denied" ? "denied" : "granted";
+    },
+    async openAppSettings() {},
+
     ...withoutHelpers(sessionsApi),
     async sessionConnect(target, onFrame, onEvent) {
+      if (q.get("lan") === "denied" && target.kind !== "demo" && target.kind !== "boundary") {
+        await wait(300);
+        throw new Error(LOCAL_NETWORK_REFUSED);
+      }
       const result = await sessionsApi.sessionConnect(target, onFrame, onEvent);
       if (target.kind === "saved") {
         hosts = hosts.map((h) => (h.id === target.hostId ? { ...h, lastConnectedAt: Date.now() } : h));

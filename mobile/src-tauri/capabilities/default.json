@@ -26,6 +26,9 @@
     "allow-session-clipboard",
     "allow-session-snapshot",
     "allow-session-disconnect",
-    "allow-session-save-host"
+    "allow-session-save-host",
+    "allow-local-network-state",
+    "allow-local-network-ask",
+    "allow-app-settings-open"
   ]
 }

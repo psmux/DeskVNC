@@ -92,6 +92,7 @@ function fakeApi(script: Script) {
     sessionInput: vi.fn(async () => {}),
     sessionSnapshot: vi.fn(async () => {}),
     sessionTrust: vi.fn(async () => {}),
+    localNetworkState: vi.fn(async () => "granted"),
   } as unknown as Api;
   return { api, calls, releaseSecret: () => releaseSecret() };
 }

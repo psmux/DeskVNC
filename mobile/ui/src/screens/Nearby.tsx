@@ -12,6 +12,7 @@ import { Radar } from "../art/Radar";
 import { SceneSleepyRadar } from "../art/Scenes";
 import { Button } from "../components/Button";
 import { haptic } from "../lib/haptics";
+import { LOCAL_NETWORK_WORDS } from "../session/status";
 import { wizardFromFound } from "../lib/wizard";
 import { useApp } from "../state/app";
 import { ScreenHeader, ScreenScroll } from "./layout";
@@ -38,6 +39,7 @@ export function Nearby() {
 
   const saved = (f: FoundComputer) => app.hosts.find((h) => h.address === f.address && h.port === f.port) ?? null;
   const nothing = !app.scanning && app.found.length === 0;
+  const blocked = nothing && app.lanDenied;
 
   return (
     <ScreenScroll onRefresh={app.scan}>
@@ -47,7 +49,18 @@ export function Nearby() {
       />
       <div className="tab:px-8 @4xl:grid @4xl:grid-cols-[minmax(0,22rem)_1fr] @4xl:gap-8">
         <div className="px-6 tab:px-0 @4xl:sticky @4xl:top-4 @4xl:self-start">
-          {nothing ? (
+          {blocked ? (
+            <div className="flex flex-col items-center text-center">
+              <SceneSleepyRadar className="w-64" />
+              <h2 className="text-title2">{LOCAL_NETWORK_WORDS.title}</h2>
+              <p className="mt-2 text-subhead text-ink-dim">{LOCAL_NETWORK_WORDS.detail}</p>
+              <div className="mt-4">
+                <Button size="lg" onClick={app.openAppSettings}>
+                  Open settings
+                </Button>
+              </div>
+            </div>
+          ) : nothing ? (
             <div className="flex flex-col items-center text-center">
               <SceneSleepyRadar className="w-64" />
               <h2 className="text-title2">Nothing found nearby</h2>
@@ -66,7 +79,7 @@ export function Nearby() {
             />
           )}
           <div className="mt-4 flex justify-center">
-            <Button variant={nothing ? "primary" : "soft"} size="lg" disabled={app.scanning} icon={<IconRefresh className={app.scanning ? "dv-spin" : ""} />} onClick={() => void app.scan()}>
+            <Button variant={nothing && !blocked ? "primary" : "soft"} size="lg" disabled={app.scanning} icon={<IconRefresh className={app.scanning ? "dv-spin" : ""} />} onClick={() => void app.scan()}>
               {app.scanning ? "Looking…" : "Look again"}
             </Button>
           </div>

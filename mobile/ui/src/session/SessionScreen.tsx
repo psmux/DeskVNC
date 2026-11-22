@@ -999,7 +999,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
       {keyBarVisible ? <KeyBar mods={mods} metaLabel={metaLabelFor(os)} onPress={onKeyBar} /> : null}
 
       {s.phase === "connecting" ? <ConnectingScreen title={name} step={stepOf(s.state)} words={stepWords(s.state)} reconnecting={reconnecting} onCancel={() => void leave()} /> : null}
-      {s.phase === "error" ? <ErrorScreen title={name} message={s.error} onRetry={s.reconnect} onExit={() => void leave()} /> : null}
+      {s.phase === "error" ? <ErrorScreen title={name} message={s.error} lanBlocked={s.lanBlocked} onRetry={s.reconnect} onExit={() => void leave()} onOpenSettings={s.openSettings} /> : null}
       {s.phase === "ended" && s.needsReconnect ? (
         <ReconnectCard
           title={name}

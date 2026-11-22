@@ -1,7 +1,5 @@
 package com.psmux.deskvnc.mobile
 
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.view.View
 import androidx.activity.enableEdgeToEdge
@@ -13,20 +11,11 @@ class MainActivity : TauriActivity() {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     keepAboveKeyboard()
-    askForLocalNetwork()
   }
 
-  // Almost every computer this app reaches is on the local network, so ask
-  // for it at the first launch rather than letting the first Connect hang.
-  private fun askForLocalNetwork() {
-    if (Build.VERSION.SDK_INT < 37) return
-    if (checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) return
-    requestPermissions(arrayOf(LOCAL_NETWORK), 7301)
-  }
-
-  private companion object {
-    const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
-  }
+  // Android 17's local network permission is asked for where it is needed,
+  // by LocalNetworkPlugin: when Nearby looks around and when a connect goes
+  // to a computer on this network.
 
   // Edge to edge, Android no longer shrinks the window for the soft
   // keyboard (adjustResize only hands the app the keyboard's inset), and the

@@ -3,6 +3,7 @@
 
 pub(crate) mod body;
 pub mod hosts;
+pub mod localnet;
 pub mod scan;
 pub mod session;
 

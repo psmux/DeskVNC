@@ -49,6 +49,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 * When an Android phone cannot reach a computer, the error now also points
   at the Nearby devices permission. Android 17 drops DeskVNC's connections
   to the local network without it, and the connect just times out.
+* On Android 17 the phone app asked for the Nearby devices permission once,
+  at launch, and never again. When that prompt was missed or refused, every
+  computer on the same Wi-Fi sat on "Finding the computer" until it timed
+  out. The app now asks when it is needed: when Nearby looks around, and when
+  you connect to a computer on your network. When the permission is still
+  off, it says so straight away, with an Open settings button, instead of
+  waiting for a timeout (#56).
 
 * A Boundary session to a Mac at its sign in screen or lock screen ended on
   the helper's first click, with "no connection could be established (failed

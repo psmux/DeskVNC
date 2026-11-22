@@ -87,3 +87,19 @@ When the app goes to the background, Rust keeps the session for up to 30
 seconds (iOS gives about that much) and pauses frame updates. Coming back
 within that window resumes. After it, the session ends and the UI offers a
 one tap reconnect from the session screen.
+
+## Local network permission (Android 17)
+
+| Command | Args | Returns |
+|---|---|---|
+| `local_network_state` | none | `"granted" \| "denied"`. Whether DeskVNC holds `ACCESS_LOCAL_NETWORK` (Nearby devices in Settings). Always `"granted"` on iOS and before Android 17 |
+| `local_network_ask` | none | `"granted" \| "denied"`. Shows Android's own prompt when Android still allows one, and answers with what the person chose |
+| `app_settings_open` | none | nothing. Opens DeskVNC's page in Android settings |
+
+When the permission is missing and the computer is plainly on this network
+(a `.local` name, a link local address, or a private address inside one of
+the phone's own subnets), `session_connect` fails at once with
+`LOCAL_NETWORK_REFUSED` from `contract.ts` instead of dialing and timing out.
+The session then calls `local_network_ask` and dials again on a yes. The
+Nearby tab calls it before a scan. The Kotlin side is
+`gen/android/app/src/main/java/com/psmux/deskvnc/mobile/LocalNetworkPlugin.kt`.

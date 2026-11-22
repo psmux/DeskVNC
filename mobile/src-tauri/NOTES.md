@@ -52,7 +52,11 @@ Xcode project):
     `_ard._tcp`, `_workstation._tcp` (the last two are what the mDNS browse in
     `vnc-discovery` also asks for).
 * Android `AndroidManifest.xml`: `INTERNET`, `ACCESS_NETWORK_STATE`,
-  `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`.
+  `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`, and
+  `ACCESS_LOCAL_NETWORK`, the Android 17 runtime permission (Nearby devices)
+  without which a connect to the local network is dropped.
+  `LocalNetworkPlugin.kt` asks for it when Nearby scans and when a connect
+  goes to this network (`src/localnet.rs`).
 
 ## Things that differ from the desktop, and why
 
