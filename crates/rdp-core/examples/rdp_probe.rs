@@ -113,7 +113,15 @@ async fn main() {
     // this exercises the whole path and not just the connection sequence. An
     // earlier version of this probe stopped at `Connected` and therefore
     // proved nothing about the first frame, which is where the next fault was.
-    let handle = rdp_core::RdpSession::spawn("probe".to_owned(), options, events_tx);
+    // Through `RdpDriver`, the object the viewer puts in its driver registry
+    // (`src-tauri/src/state.rs`), rather than the session type underneath it.
+    let handle = remote_core::ProtocolDriver::spawn(
+        &rdp_core::RdpDriver::new(),
+        "probe".to_owned(),
+        options,
+        events_tx,
+    )
+    .expect("RDP options for the RDP driver");
 
     let mut frames = 0usize;
     let mut cursors = 0usize;
