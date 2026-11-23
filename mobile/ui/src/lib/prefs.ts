@@ -26,6 +26,11 @@ export interface Prefs {
   quickChoices: Record<string, string>;
   /** Boundary never uses a relay or the address directory. */
   neverRelay: boolean;
+  /** The round keyboard button on the session screen. */
+  keyButton: boolean;
+  /** Where that button sits: a side edge and a fraction of the free height
+   *  (0 top, 1 bottom), so it survives turning and folding the phone. */
+  keyButtonPos: { edge: "left" | "right"; y: number };
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -39,6 +44,8 @@ export const DEFAULT_PREFS: Prefs = {
   autoSave: true,
   quickChoices: {},
   neverRelay: false,
+  keyButton: true,
+  keyButtonPos: { edge: "right", y: 1 },
 };
 
 const KEY = "deskvnc.mobile.prefs";

@@ -1770,3 +1770,74 @@
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ---------------------------------------------------------------- keyboard button */
+
+/* The safe area, for the floating keyboard button to measure and move in.
+   Touches pass through everywhere but the button itself. */
+.dv-s-keybtn-layer {
+  position: absolute;
+  top: var(--s-safe-t);
+  left: var(--s-safe-l);
+  right: var(--s-safe-r);
+  bottom: var(--s-safe-b);
+  z-index: 16;
+  pointer-events: none;
+}
+
+.dv-s-keybtn {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--s-line);
+  background: color-mix(in srgb, var(--s-surface) 82%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  color: var(--s-ink);
+  opacity: 0.55;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  will-change: transform;
+  transition:
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 160ms ease-out,
+    background-color 160ms ease-out;
+}
+
+.dv-s-keybtn.is-pressed,
+.dv-s-keybtn.is-dragging,
+.dv-s-keybtn.is-on {
+  opacity: 1;
+}
+
+.dv-s-keybtn.is-dragging {
+  transition: opacity 160ms ease-out;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.dv-s-keybtn.is-on {
+  background: var(--s-accent-fill);
+  color: var(--s-accent-ink);
+  border-color: transparent;
+}
+
+.dv-s-keybtn:focus-visible {
+  outline: 3px solid var(--s-accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+/* The turn sideways hint rises over the button so both can be tapped. */
+.dv-session.has-keybtn .dv-s-hint {
+  bottom: calc(var(--s-safe-b) + var(--s-kb) + var(--s-keybar-h) + 76px);
+}
