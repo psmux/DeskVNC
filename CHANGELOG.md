@@ -57,6 +57,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 * When an Android phone cannot reach a computer, the error now also points
   at the Nearby devices permission. Android 17 drops DeskVNC's connections
   to the local network without it, and the connect just times out.
+* A Mac with "Also before anyone signs in" switched on could not be reached
+  after a restart. DeskVNC Support started at the sign in screen before macOS
+  let it near the screen and ended without an error, and macOS started it
+  again only after a failure. It is now started again whenever it ends, for
+  as long as the app is there. Switch the setting off and on once to pick
+  this up on a Mac set up before.
 * On Android 17 the phone app asked for the Nearby devices permission once,
   at launch, and never again. When that prompt was missed or refused, every
   computer on the same Wi-Fi sat on "Finding the computer" until it timed
