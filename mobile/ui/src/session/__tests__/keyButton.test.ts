@@ -79,6 +79,16 @@ describe("keyboard button: placement", () => {
     expect(p.y + KEY_BUTTON_SIZE).toBeLessThanOrEqual(tiny.h - tiny.bottomInset);
   });
 
+  it("leaves the quality badge's corner when the area is cramped", () => {
+    // A phone held sideways with the keyboard and the key bar up: about 150
+    // CSS pixels of page, 100 of them the key bar.
+    const sideways: KeyButtonArea = { w: 915, h: 150, bottomInset: 100 };
+    const p = placeKeyButton({ edge: "left", y: 0.5 }, sideways);
+    expect(p.x).toBe(sideways.w - KEY_BUTTON_SIZE - KEY_BUTTON_MARGIN);
+    // With room again it goes back to the edge it was left on.
+    expect(placeKeyButton({ edge: "left", y: 0.5 }, PHONE).x).toBe(KEY_BUTTON_MARGIN);
+  });
+
   it("clamps a dragged corner inside the area", () => {
     expect(clampKeyButton(-50, -50, PHONE)).toEqual({ x: KEY_BUTTON_MARGIN, y: KEY_BUTTON_TOP });
     expect(clampKeyButton(9999, 9999, PHONE)).toEqual({

@@ -58,6 +58,9 @@ and it cancels its pointerdown so the hidden field keeps focus, like the key
 bar. It stays clear of the top band (toolbar and connection chip), and above
 the keyboard and the key bar. The position is saved in prefs as an edge and a
 fraction of the free height, so it holds after turning or folding the phone.
+When the free height is too short for the top band (a phone held sideways
+with the keyboard up), the button rises into it and shows on the right edge,
+since the connection chip holds the top left corner.
 Settings, Feel, Keyboard button hides it. It hides itself while the toolbar,
 a sheet, the coach or the Leave prompt is open.
 

@@ -60,12 +60,22 @@ export function horizontalRange(area: KeyButtonArea): { min: number; max: number
   return { min, max };
 }
 
-/** The button's top left corner in the area for a stored position. */
+/** True when the free area is too short to keep the top band clear, as on
+ *  a phone held sideways with the keyboard and the key bar up. */
+export function isCramped(area: KeyButtonArea): boolean {
+  return verticalRange(area).max < KEY_BUTTON_TOP;
+}
+
+/** The button's top left corner in the area for a stored position. When the
+ *  area is cramped the button rises into the top band, and on the left edge
+ *  the quality badge would cover it there, so it shows on the right until
+ *  there is room again. The stored edge is kept. */
 export function placeKeyButton(pos: KeyButtonPos, area: KeyButtonArea): { x: number; y: number } {
   const h = horizontalRange(area);
   const v = verticalRange(area);
+  const edge: KeyButtonEdge = isCramped(area) ? "right" : pos.edge;
   return {
-    x: pos.edge === "left" ? h.min : h.max,
+    x: edge === "left" ? h.min : h.max,
     y: Math.round(v.min + clamp(pos.y, 0, 1) * (v.max - v.min)),
   };
 }
