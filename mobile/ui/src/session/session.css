@@ -334,6 +334,15 @@
   --lvl: var(--s-ok);
 }
 
+/* A phone held sideways with the keyboard and the key bar up leaves too
+   little height under the status bar for the badge, which would cover the
+   key bar's first tab. It comes back when the keyboard goes. */
+@media (max-height: 240px) {
+  .dv-session.has-keybar .dv-s-quality {
+    display: none;
+  }
+}
+
 .dv-s-quality.level-fair {
   --lvl: var(--s-warn);
 }
@@ -1774,14 +1783,16 @@
 /* ---------------------------------------------------------------- keyboard button */
 
 /* The safe area, for the floating keyboard button to measure and move in.
-   Touches pass through everywhere but the button itself. */
+   Touches pass through everywhere but the button itself. Above the key bar:
+   on a phone held sideways with the keyboard up there is no room left over
+   it, and the button rises onto the key bar's empty right end. */
 .dv-s-keybtn-layer {
   position: absolute;
   top: var(--s-safe-t);
   left: var(--s-safe-l);
   right: var(--s-safe-r);
   bottom: var(--s-safe-b);
-  z-index: 16;
+  z-index: 18;
   pointer-events: none;
 }
 
