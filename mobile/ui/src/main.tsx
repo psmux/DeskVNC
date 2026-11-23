@@ -4,6 +4,7 @@ import { App } from "./App";
 import "./index.css";
 import { installKeyboardRoom } from "./lib/keyboard";
 import { applyTheme, DEFAULT_PREFS, readPrefs, setPrefs } from "./lib/prefs";
+import { installSafeArea } from "./lib/safeArea";
 
 // Browser switches for screenshots: ?reset=1 starts fresh, ?theme=dark forces a theme,
 // ?onboarded=1 skips the welcome.
@@ -13,6 +14,7 @@ if (q.get("onboarded") === "1") setPrefs({ onboarded: true });
 const theme = q.get("theme");
 if (theme === "dark" || theme === "light") setPrefs({ theme });
 applyTheme(readPrefs().theme);
+installSafeArea();
 installKeyboardRoom();
 
 createRoot(document.getElementById("root")!).render(

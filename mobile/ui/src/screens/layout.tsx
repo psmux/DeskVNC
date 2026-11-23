@@ -50,7 +50,7 @@ export function ScreenScroll({ children, onRefresh, className = "" }: { children
   return (
     <div
       ref={ref}
-      className={`pt-safe relative h-full overflow-y-auto overscroll-contain pb-[calc(6rem+env(safe-area-inset-bottom))] tab:pb-10 ${className}`}
+      className={`pt-safe relative h-full overflow-y-auto overscroll-contain pb-[calc(6rem+var(--dv-safe-bottom))] tab:pb-10 ${className}`}
       onTouchStart={(e) => {
         if (onRefresh && ref.current && ref.current.scrollTop <= 0) start.current = e.touches[0].clientY;
       }}
@@ -65,7 +65,7 @@ export function ScreenScroll({ children, onRefresh, className = "" }: { children
       onTouchEnd={() => void end()}
     >
       {onRefresh && (
-        <motion.div className="pointer-events-none absolute inset-x-0 top-[env(safe-area-inset-top)] z-10 flex justify-center" style={{ height: pull, opacity }}>
+        <motion.div className="pointer-events-none absolute inset-x-0 top-[var(--dv-safe-top)] z-10 flex justify-center" style={{ height: pull, opacity }}>
           <motion.span
             className={`mt-3 flex h-11 w-11 items-center justify-center rounded-full bg-surface text-accent shadow-card ${busy ? "dv-spin" : ""}`}
             style={busy ? undefined : { rotate }}

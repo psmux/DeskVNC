@@ -22,10 +22,10 @@
   --s-hand-line: #4c5361;
   --s-accent-fill: var(--dv-accent-fill, #2f6fe4);
   --s-accent-ink: var(--dv-accent-ink, #fff);
-  --s-safe-t: env(safe-area-inset-top, 0px);
-  --s-safe-r: env(safe-area-inset-right, 0px);
-  --s-safe-b: env(safe-area-inset-bottom, 0px);
-  --s-safe-l: env(safe-area-inset-left, 0px);
+  --s-safe-t: var(--dv-safe-top);
+  --s-safe-r: var(--dv-safe-right);
+  --s-safe-b: var(--dv-safe-bottom);
+  --s-safe-l: var(--dv-safe-left);
   --s-kb: 0px;
   --s-keybar-h: 0px;
   --s-radius: 22px;

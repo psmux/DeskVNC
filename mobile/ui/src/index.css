@@ -140,17 +140,32 @@ button {
 
 }
 
+/*
+ * The safe area: what the system bars and the camera cutout leave free.
+ * Android's WebView puts only the cutout in env(safe-area-inset-*), not the
+ * status bar or the gesture bar, so MainActivity measures them and
+ * src/lib/safeArea.ts sets --dv-native-safe-*. Each side takes the larger of
+ * the two, so iOS and a WebView that does report the bars count them once.
+ * Use these, never env(safe-area-inset-*) directly.
+ */
+:root {
+  --dv-safe-top: max(env(safe-area-inset-top, 0px), var(--dv-native-safe-top, 0px));
+  --dv-safe-right: max(env(safe-area-inset-right, 0px), var(--dv-native-safe-right, 0px));
+  --dv-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--dv-native-safe-bottom, 0px));
+  --dv-safe-left: max(env(safe-area-inset-left, 0px), var(--dv-native-safe-left, 0px));
+}
+
 .pt-safe {
-  padding-top: env(safe-area-inset-top);
+  padding-top: var(--dv-safe-top);
 }
 .pb-safe {
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: var(--dv-safe-bottom);
 }
 .pl-safe {
-  padding-left: env(safe-area-inset-left);
+  padding-left: var(--dv-safe-left);
 }
 .pr-safe {
-  padding-right: env(safe-area-inset-right);
+  padding-right: var(--dv-safe-right);
 }
 
 .no-scrollbar::-webkit-scrollbar {
