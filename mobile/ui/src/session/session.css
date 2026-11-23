@@ -22,10 +22,10 @@
   --s-hand-line: #4c5361;
   --s-accent-fill: var(--dv-accent-fill, #2f6fe4);
   --s-accent-ink: var(--dv-accent-ink, #fff);
-  --s-safe-t: env(safe-area-inset-top, 0px);
-  --s-safe-r: env(safe-area-inset-right, 0px);
-  --s-safe-b: env(safe-area-inset-bottom, 0px);
-  --s-safe-l: env(safe-area-inset-left, 0px);
+  --s-safe-t: var(--dv-safe-top);
+  --s-safe-r: var(--dv-safe-right);
+  --s-safe-b: var(--dv-safe-bottom);
+  --s-safe-l: var(--dv-safe-left);
   --s-kb: 0px;
   --s-keybar-h: 0px;
   --s-radius: 22px;
@@ -332,6 +332,15 @@
   backdrop-filter: blur(14px);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
   --lvl: var(--s-ok);
+}
+
+/* A phone held sideways with the keyboard and the key bar up leaves too
+   little height under the status bar for the badge, which would cover the
+   key bar's first tab. It comes back when the keyboard goes. */
+@media (max-height: 240px) {
+  .dv-session.has-keybar .dv-s-quality {
+    display: none;
+  }
 }
 
 .dv-s-quality.level-fair {
@@ -1774,14 +1783,16 @@
 /* ---------------------------------------------------------------- keyboard button */
 
 /* The safe area, for the floating keyboard button to measure and move in.
-   Touches pass through everywhere but the button itself. */
+   Touches pass through everywhere but the button itself. Above the key bar:
+   on a phone held sideways with the keyboard up there is no room left over
+   it, and the button rises onto the key bar's empty right end. */
 .dv-s-keybtn-layer {
   position: absolute;
   top: var(--s-safe-t);
   left: var(--s-safe-l);
   right: var(--s-safe-r);
   bottom: var(--s-safe-b);
-  z-index: 16;
+  z-index: 18;
   pointer-events: none;
 }
 

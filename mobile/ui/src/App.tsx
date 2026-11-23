@@ -58,7 +58,7 @@ function Shell() {
       <AnimatePresence>
         {app.toast && (
           <motion.div
-            className="pointer-events-none fixed inset-x-0 bottom-[calc(5.5rem+env(safe-area-inset-bottom))] z-[60] flex justify-center px-6 tab:bottom-8"
+            className="pointer-events-none fixed inset-x-0 bottom-[calc(5.5rem+var(--dv-safe-bottom))] z-[60] flex justify-center px-6 tab:bottom-8"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
