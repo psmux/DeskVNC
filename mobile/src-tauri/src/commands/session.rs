@@ -209,6 +209,14 @@ pub async fn session_connect(
         _ => {}
     }
 
+    // Android 17 drops a connect to this network until DeskVNC may use it,
+    // and the connect would only time out. Say so now instead, so the UI can
+    // ask for the permission. Boundary finds its own way, through a relay
+    // when the direct path is closed.
+    if kind != ProtocolKind::Boundary {
+        crate::localnet::check(&app, &options.host, options.port).await?;
+    }
+
     // Trust on first use pins, every scheme, as the desktop loads them.
     if kind != ProtocolKind::Boundary {
         for (scheme, pin) in state.pins.for_endpoint(&options.host, options.port) {

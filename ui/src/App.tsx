@@ -449,10 +449,11 @@ function MainShell(): ReactNode {
         Below the panes rather than over them: the grid only ever draws the tab
         in front, so anything painted on it can show a subset of the work at
         best, and the whole point of this strip is that eight machines being
-        driven at once are visible at once. It takes no height at all until a
-        lease is actually held, which is why it needs no toggle and cannot be
-        put away, and why a person who never turns the plane on will never see
-        it. See the file header of `AgentWall`.
+        driven at once are visible at once. It takes no height at all while the
+        plane is off, so a person who never turns the plane on will never see
+        it, and one fixed height while it is on, so the panes above it are not
+        resized when an agent starts or stops driving. See the file header of
+        `AgentWall`.
       */}
       <AgentWall onShowSession={selectSession} />
 

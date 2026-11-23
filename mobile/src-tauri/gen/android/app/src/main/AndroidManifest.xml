@@ -8,8 +8,8 @@
     <!-- Android 17 blocks connections to the local network (every LAN
          computer, and the mDNS scan) for apps targeting SDK 37 unless they
          hold this runtime permission. Without it Connect hung on "Finding
-         the computer" until it timed out. -->
-    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+         the computer" until it timed out. LocalNetworkPlugin.kt asks for it
+         when Nearby runs and when a connect goes to this network. -->    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

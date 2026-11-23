@@ -24,6 +24,9 @@ pub const COMMANDS: &[&str] = &[
     "session_snapshot",
     "session_disconnect",
     "session_save_host",
+    "local_network_state",
+    "local_network_ask",
+    "app_settings_open",
 ];
 
 fn main() {

@@ -100,6 +100,20 @@ export type KeyCombo = "ctrl-alt-del" | "win" | "alt-tab" | "cmd-tab" | "ctrl-c"
 
 export type Quality = "auto" | "speed" | "balanced" | "quality";
 
+/**
+ * Android 17's local network permission (Nearby devices in Settings).
+ * Anywhere else, and before Android 17, it is always "granted".
+ */
+export type LocalNetwork = "granted" | "denied";
+
+/**
+ * The error `session_connect` gives at once, without dialing, when Android
+ * would drop the connection for want of that permission. The same sentence
+ * as `REFUSED` in `src-tauri/src/localnet.rs`.
+ */
+export const LOCAL_NETWORK_REFUSED =
+  "Android is not letting DeskVNC reach the local network, so it cannot get to this computer. Allow Nearby devices for DeskVNC.";
+
 export interface Api {
   hostsList(): Promise<Host[]>;
   hostsSave(host: HostDraft): Promise<Host>;
@@ -132,4 +146,12 @@ export interface Api {
   /** Save the computer an adhoc session reached, once it is connected, and
    *  make the session that host's. */
   sessionSaveHost(sessionId: string, host: HostDraft): Promise<Host>;
+
+  /** Whether DeskVNC may use the local network now. */
+  localNetworkState(): Promise<LocalNetwork>;
+  /** Ask with Android's own prompt, where it still shows one, and say what
+   *  the person chose. Answers at once when it is already granted. */
+  localNetworkAsk(): Promise<LocalNetwork>;
+  /** Open DeskVNC's page in Android settings. */
+  openAppSettings(): Promise<void>;
 }

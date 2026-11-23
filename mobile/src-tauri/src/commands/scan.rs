@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use vnc_discovery::{
@@ -142,12 +142,19 @@ const IDENTIFY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// the scan's, Remote Desktop first. Empty when nothing answered or the name
 /// does not resolve. `port` limits the probes to that one port.
 #[tauri::command]
-pub async fn identify(address: String, port: Option<u16>) -> Result<Vec<FoundComputer>, String> {
+pub async fn identify(
+    app: AppHandle,
+    address: String,
+    port: Option<u16>,
+) -> Result<Vec<FoundComputer>, String> {
     let address = address.trim();
     if address.is_empty() || address.len() > 255 {
         return Err("Type a name or address".into());
     }
     let port = port.filter(|p| *p != 0);
+    // Without Android 17's local network permission every probe to this
+    // network is dropped, and the answer would be a false "nothing here".
+    crate::localnet::check(&app, address, port.unwrap_or(5900)).await?;
     let found = vnc_discovery::identify(address, port, IDENTIFY_TIMEOUT).await;
     Ok(found.iter().filter_map(identified).collect())
 }

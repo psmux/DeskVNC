@@ -14,6 +14,7 @@ import { bareAddress, choiceKey, choiceValue, chooseService, readQuickInput } fr
 import { haptic } from "../lib/haptics";
 import { setPrefs, usePrefs } from "../lib/prefs";
 import { newWizard, reduceWizard } from "../lib/wizard";
+import { LOCAL_NETWORK_WORDS, isLocalNetworkRefusal } from "../session/status";
 import { useApp } from "../state/app";
 import { Button } from "./Button";
 import { ActionSheet } from "./sheets/ActionSheet";
@@ -43,6 +44,9 @@ export function QuickConnect() {
   const [error, setError] = useState<string | null>(null);
   const [pick, setPick] = useState<{ items: FoundComputer[]; typed: Typed } | null>(null);
   const [nothing, setNothing] = useState<string | null>(null);
+  // Android 17 keeps DeskVNC off the local network until Nearby devices is
+  // allowed, and then nothing on this Wi-Fi can answer.
+  const [lanBlocked, setLanBlocked] = useState(false);
 
   /** Connect to one service that answered, through its saved entry if it has one. */
   const open = (item: FoundComputer, typed: Typed) => {
@@ -67,6 +71,7 @@ export function QuickConnect() {
   const go = async () => {
     if (busy) return;
     setError(null);
+    setLanBlocked(false);
     const input = readQuickInput(text, app.hosts);
     switch (input.kind) {
       case "empty":
@@ -98,10 +103,24 @@ export function QuickConnect() {
         try {
           items = await api.identify(input.address, input.port);
         } catch (e) {
-          setBusy(false);
-          haptic("error");
-          setError(e instanceof Error ? e.message : String(e));
-          return;
+          let message = e instanceof Error ? e.message : String(e);
+          // The address is on this network and Android would drop every
+          // probe. Ask with Android's prompt now, and look again on a yes.
+          if (isLocalNetworkRefusal(message) && (await api.localNetworkAsk().catch(() => "denied")) === "granted") {
+            try {
+              items = await api.identify(input.address, input.port);
+              message = "";
+            } catch (again) {
+              message = again instanceof Error ? again.message : String(again);
+            }
+          }
+          if (message) {
+            setBusy(false);
+            haptic("error");
+            if (isLocalNetworkRefusal(message)) setLanBlocked(true);
+            else setError(message);
+            return;
+          }
         }
         setBusy(false);
         const typed = { address: input.address, username: input.username };
@@ -164,6 +183,15 @@ export function QuickConnect() {
           <p role="alert" className="px-1 text-footnote font-medium text-danger">
             {error}
           </p>
+        )}
+        {lanBlocked && (
+          <div role="alert" className="flex flex-col items-start gap-2 px-1">
+            <p className="text-footnote font-semibold text-danger">{LOCAL_NETWORK_WORDS.title}</p>
+            <p className="text-footnote text-ink-dim">{LOCAL_NETWORK_WORDS.detail}</p>
+            <Button type="button" size="md" variant="soft" onClick={app.openAppSettings}>
+              Open settings
+            </Button>
+          </div>
         )}
       </form>
 

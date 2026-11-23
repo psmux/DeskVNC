@@ -158,6 +158,11 @@ pub struct ResolvedOptions {
     /// [`ResolvedOptions::resolve`] always sets it to `None`. The session
     /// fills it in afterwards, which is the only way in.
     pub routing_token: Option<Vec<u8>>,
+    /// The credentials a Server Redirection handed over for an RDSTLS sign
+    /// in on this attempt (MS-RDPBCGR 5.4.5.3). Scoped exactly as
+    /// [`ResolvedOptions::routing_token`] is, and while it is set the X.224
+    /// request offers `PROTOCOL_RDSTLS` as well.
+    pub rdstls: Option<crate::connection::rdstls::RdstlsCredentials>,
     /// Where issued client access licences are kept, see
     /// `remote_core::RdpOptions::license_dir`.
     pub license_dir: Option<std::path::PathBuf>,
@@ -249,20 +254,24 @@ impl ResolvedOptions {
 
         let color_depth = resolve_color_depth(rdp.color_depth, options.quality);
 
-        let scale_factor = if rdp.desktop_scale_factor < MIN_SCALE_FACTOR
-            || rdp.desktop_scale_factor > MAX_SCALE_FACTOR
+        // The desktop is sized in physical pixels, so the scale that goes
+        // with it is the screen's own unless the profile turned that off. A
+        // Retina Mac asking for its physical size at 100 percent got a
+        // Windows desktop drawn at half size (issue #60).
+        let measured = rdp.local_scale.filter(|_| rdp.match_local_scale);
+        let requested_scale = measured.unwrap_or(rdp.desktop_scale_factor);
+        let scale_factor = requested_scale.clamp(MIN_SCALE_FACTOR, MAX_SCALE_FACTOR);
+        // A screen at less than one physical pixel to the point is ordinary
+        // (a zoomed out webview reports that) and not worth a warning; a
+        // stored figure out of range is.
+        if scale_factor != requested_scale
+            && (measured.is_none() || requested_scale > MAX_SCALE_FACTOR)
         {
-            let clamped = rdp
-                .desktop_scale_factor
-                .clamp(MIN_SCALE_FACTOR, MAX_SCALE_FACTOR);
             warnings.push(format!(
-                "desktop scale factor {} is outside {MIN_SCALE_FACTOR} to {MAX_SCALE_FACTOR}, using {clamped}",
-                rdp.desktop_scale_factor
+                "desktop scale factor {requested_scale} is outside \
+                 {MIN_SCALE_FACTOR} to {MAX_SCALE_FACTOR}, using {scale_factor}"
             ));
-            clamped
-        } else {
-            rdp.desktop_scale_factor
-        };
+        }
 
         if matches!(
             rdp.monitors,
@@ -330,6 +339,7 @@ impl ResolvedOptions {
             // A redirection is the only thing that puts a token here, and it
             // does it after this function has run.
             routing_token: None,
+            rdstls: None,
             license_dir: rdp.license_dir.clone(),
         })
     }
@@ -435,6 +445,60 @@ mod tests {
             assert_eq!(r.desktop, (1712, 1067), "{mode:?}");
             assert_eq!(r.desktop_wanted, (1712, 1067), "{mode:?}");
         }
+    }
+
+    /// Issue #60. A Retina Mac measures its window in physical pixels, two to
+    /// the point, and the desktop is asked for at that size. Without the
+    /// screen's scale beside it Windows draws at 100 percent on a desktop
+    /// twice as wide as the window looks, and everything is half size. The
+    /// screen's 200 has to reach `desktopScaleFactor`.
+    #[test]
+    fn a_retina_window_asks_for_its_own_scale() {
+        let (opts, mut rdp) = options();
+        rdp.window_size = Some((3840, 1890));
+        rdp.local_scale = Some(200);
+        let mut warnings = Vec::new();
+        let r = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect("valid");
+        assert_eq!(r.desktop, (3840, 1890));
+        assert_eq!(r.scale_factor, 200);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // And it is what goes on the wire in the Client Core Data.
+        let blocks = crate::connection::mcs::client_blocks(
+            &r,
+            crate::connection::negotiate::SecurityProtocol::Hybrid,
+        );
+        let core = blocks.core.expect("core block");
+        assert_eq!(core.desktop_scale_factor, Some(200));
+        assert_eq!(core.device_scale_factor, Some(180));
+    }
+
+    /// The same profile on an ordinary screen still asks for 100, and a host
+    /// set not to follow the screen keeps its own figure whatever the screen.
+    #[test]
+    fn the_local_scale_only_applies_while_the_host_follows_it() {
+        let (opts, mut rdp) = options();
+        rdp.local_scale = Some(100);
+        let r = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+        assert_eq!(r.scale_factor, 100);
+
+        rdp.local_scale = Some(200);
+        rdp.match_local_scale = false;
+        rdp.desktop_scale_factor = 125;
+        let r = ResolvedOptions::resolve(&opts, &rdp, &mut Vec::new()).expect("valid");
+        assert_eq!(r.scale_factor, 125);
+    }
+
+    /// A webview zoomed out reports less than one pixel to the point. That is
+    /// 100 on the wire and not a warning: nothing the user stored is wrong.
+    #[test]
+    fn a_screen_below_one_to_one_asks_for_100_quietly() {
+        let (opts, mut rdp) = options();
+        rdp.local_scale = Some(90);
+        let mut warnings = Vec::new();
+        let r = ResolvedOptions::resolve(&opts, &rdp, &mut warnings).expect("valid");
+        assert_eq!(r.scale_factor, 100);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// A fixed size ignores the window entirely.

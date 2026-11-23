@@ -140,6 +140,18 @@ pub trait RetryClassify {
     fn no_answer(&self) -> bool {
         false
     }
+
+    /// The server answered, then went quiet partway through setting the
+    /// session up and the attempt timed out waiting for it.
+    ///
+    /// Before the session has ever connected this is not retried: the same
+    /// server meets the next attempt with the same wait, and a retry ladder
+    /// turns one clear timeout into a progress screen that never ends. Once a
+    /// session has been up, the full policy applies, because then a stall on
+    /// the way back is as likely to be the network.
+    fn stalled_after_answer(&self) -> bool {
+        false
+    }
 }
 
 /// One protocol's "make an attempt" half of the supervisor.
@@ -347,7 +359,12 @@ pub async fn supervise<C: ConnectOnce>(
         chained = 0;
 
         let policy = first_connect_policy(conn.policy(), ever_connected || !err.no_answer());
-        match classify(&err, &policy, attempts_made) {
+        let decision = if !ever_connected && err.stalled_after_answer() {
+            Decision::Stop { can_retry: true }
+        } else {
+            classify(&err, &policy, attempts_made)
+        };
+        match decision {
             Decision::Stop { can_retry } => {
                 tracing::warn!(session = %id, error = %err, "session stopped");
                 if !err.is_cancelled() {
@@ -429,6 +446,8 @@ mod tests {
         Transient,
         /// Transient, and nothing answered the dial.
         NoAnswer,
+        /// Transient, and the server went quiet after it answered.
+        Stalled,
         Fatal,
         NeedsUser,
     }
@@ -444,10 +463,16 @@ mod tests {
             matches!(self, TestError::Cancelled)
         }
         fn is_transient(&self) -> bool {
-            matches!(self, TestError::Transient | TestError::NoAnswer)
+            matches!(
+                self,
+                TestError::Transient | TestError::NoAnswer | TestError::Stalled
+            )
         }
         fn no_answer(&self) -> bool {
             matches!(self, TestError::NoAnswer)
+        }
+        fn stalled_after_answer(&self) -> bool {
+            matches!(self, TestError::Stalled)
         }
         fn needs_user_action(&self) -> bool {
             matches!(self, TestError::NeedsUser)
@@ -648,6 +673,62 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A server that answered and then went quiet during the connection
+    /// sequence stops the first connect at once with its error, rather than
+    /// cycling through "Reconnecting" for as long as the window is open
+    /// (issue #59).
+    #[tokio::test]
+    async fn a_first_connect_that_stalls_after_an_answer_stops_at_once() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: ReconnectPolicy {
+                max_attempts: None,
+                ..fast_policy()
+            },
+            script: vec![Err(TestError::Stalled); 6],
+            absorbed: 0,
+            held: None,
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+        let states = states(&mut rx).await;
+        assert!(
+            !states
+                .iter()
+                .any(|s| matches!(s, SessionState::Reconnecting { .. })),
+            "{states:?}"
+        );
+        assert!(matches!(
+            states.last(),
+            Some(SessionState::Disconnected {
+                can_retry: true,
+                reason,
+                ..
+            }) if reason == "Stalled"
+        ));
+    }
+
+    /// The same stall on a session that was already up gets the ladder: on
+    /// the way back it is as likely to be the network as the server.
+    #[tokio::test]
+    async fn a_stall_after_the_session_was_up_keeps_the_ladder() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let conn = Scripted {
+            policy: fast_policy(),
+            script: vec![Err(TestError::Stalled); 3],
+            absorbed: 0,
+            held: Some(Duration::from_millis(500)),
+        };
+        supervise("t".into(), conn, tx, cmd_rx, CancellationToken::new()).await;
+        let attempts = states(&mut rx)
+            .await
+            .iter()
+            .filter(|s| matches!(s, SessionState::Reconnecting { .. }))
+            .count();
+        assert_eq!(attempts, 2);
     }
 
     /// A server that answered and dropped the connection before it ever got

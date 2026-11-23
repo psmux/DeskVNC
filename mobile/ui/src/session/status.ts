@@ -130,11 +130,24 @@ export function endWords(kind: EndKind, reason: string | null): { title: string;
   }
 }
 
-type ErrorKind = "setting" | "encryption" | "untrusted" | "unreachable" | "sign-in" | "identity" | "code" | "dropped" | "other";
+type ErrorKind =
+  | "local-network"
+  | "setting"
+  | "encryption"
+  | "untrusted"
+  | "unreachable"
+  | "sign-in"
+  | "identity"
+  | "code"
+  | "dropped"
+  | "other";
 
 /** Sorts a raw error from Rust or the server. The order of the tests matters. */
 function errorKind(raw: string): ErrorKind {
   const m = raw.toLowerCase();
+  // Android 17 kept DeskVNC off the local network (LOCAL_NETWORK_REFUSED).
+  // Nothing was dialed, so none of the rules below applies.
+  if (/reach the local network/.test(m)) return "local-network";
   // The server answered but offers no way in this app can use (TigerVNC with
   // only TLSVnc, or a method DeskVNC lacks). The sentence names VncAuth and
   // encryption, so it has to be caught before the sign in and identity rules.
@@ -168,6 +181,30 @@ export function isSignInRefusal(raw: string | null): boolean {
 }
 
 /**
+ * True when Android kept DeskVNC off the local network. The fix is a
+ * permission on the phone, not anything on the computer.
+ */
+export function isLocalNetworkRefusal(raw: string | null): boolean {
+  return raw !== null && errorKind(raw) === "local-network";
+}
+
+/** True when the computer could not be reached at all. */
+export function isUnreachable(raw: string | null): boolean {
+  return raw !== null && errorKind(raw) === "unreachable";
+}
+
+/**
+ * The words for a phone that may not use the local network: Android 17 with
+ * Nearby devices switched off for DeskVNC. Shown next to an Open settings
+ * button.
+ */
+export const LOCAL_NETWORK_WORDS = {
+  title: "Allow DeskVNC on your local network",
+  detail:
+    "Android keeps DeskVNC away from computers on your Wi-Fi until you allow it. Open settings, tap Permissions, then Nearby devices, and choose Allow. Then come back and try again.",
+};
+
+/**
  * Turns a raw error from Rust or the server into a sentence a person can act
  * on. Unknown messages are kept, behind a friendly lead in.
  *
@@ -178,6 +215,8 @@ export function isSignInRefusal(raw: string | null): boolean {
  */
 export function friendlyError(raw: string, android: boolean = isAndroid()): { title: string; detail: string } {
   switch (errorKind(raw)) {
+    case "local-network":
+      return LOCAL_NETWORK_WORDS;
     case "setting":
       return { title: "The computer's VNC server needs a setting changed", detail: raw };
     case "encryption":

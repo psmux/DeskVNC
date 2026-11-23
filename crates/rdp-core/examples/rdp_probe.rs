@@ -20,6 +20,13 @@
 //! text the server offers back is printed, which is how clipboard sharing is
 //! checked against a real server. `RDP_SECS` sets how long the probe runs, and `RDP_RESIZE_AFTER=WxH` asks for a second size after the first reactivation. `RUST_LOG` defaults to a level
 //! that prints the diagnostic frame dumps, which is the point of running it.
+//!
+//! `RDP_TYPE` types into the session once the first frame is up, which is how
+//! a login screen on the far side (GNOME Remote Login, say) is got past
+//! without a person. It is a list of `seconds:text` steps separated by `;`,
+//! each waiting that long after the one before, with `\n` in the text for
+//! Enter: `RDP_TYPE='8:\n;3:secret\n'`. Use throwaway accounts only: the
+//! text is in the environment of the process.
 
 use remote_core::{ConnectOptions, Credentials, SessionEvent};
 use tokio::sync::mpsc;
@@ -93,13 +100,28 @@ async fn main() {
         None => Credentials::user_pass(&user, &pass),
     };
 
+    // `RDP_GFX=1` asks for the graphics pipeline (MS-RDPEGFX), which
+    // gnome-remote-desktop requires and refuses the connection without.
+    if std::env::var("RDP_GFX").as_deref() == Ok("1") {
+        options.rdp_mut().graphics_pipeline = true;
+        println!("graphics pipeline requested (RDP_GFX=1)");
+    }
+
     let (events_tx, mut events_rx) = mpsc::channel::<SessionEvent>(256);
 
     // Drive the real session, the same entry point the application uses, so
     // this exercises the whole path and not just the connection sequence. An
     // earlier version of this probe stopped at `Connected` and therefore
     // proved nothing about the first frame, which is where the next fault was.
-    let handle = rdp_core::RdpSession::spawn("probe".to_owned(), options, events_tx);
+    // Through `RdpDriver`, the object the viewer puts in its driver registry
+    // (`src-tauri/src/state.rs`), rather than the session type underneath it.
+    let handle = remote_core::ProtocolDriver::spawn(
+        &rdp_core::RdpDriver::new(),
+        "probe".to_owned(),
+        options,
+        events_tx,
+    )
+    .expect("RDP options for the RDP driver");
 
     let mut frames = 0usize;
     let mut cursors = 0usize;
@@ -121,8 +143,43 @@ async fn main() {
             Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
         });
     let mut desktops = 0usize;
+    let mut typing: std::collections::VecDeque<(u64, String)> = std::env::var("RDP_TYPE")
+        .ok()
+        .map(|spec| {
+            spec.split(';')
+                .filter_map(|step| {
+                    let (secs, text) = step.split_once(':')?;
+                    Some((secs.trim().parse().ok()?, text.replace("\\n", "\n")))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut next_type_at: Option<std::time::Instant> = None;
 
-    while let Some(ev) = events_rx.recv().await {
+    loop {
+        let ev = tokio::select! {
+            ev = events_rx.recv() => match ev {
+                Some(ev) => ev,
+                None => break,
+            },
+            () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                if next_type_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                    if let Some((_, text)) = typing.pop_front() {
+                        println!("  typing a step of {} characters", text.chars().count());
+                        type_text(&handle, &text).await;
+                    }
+                    next_type_at = typing
+                        .front()
+                        .map(|(secs, _)| std::time::Instant::now() + std::time::Duration::from_secs(*secs));
+                }
+                if std::time::Instant::now() > deadline {
+                    println!("  ({secs} seconds elapsed, stopping)");
+                    let _ = handle.send(remote_core::ClientCommand::Disconnect).await;
+                    break;
+                }
+                continue;
+            }
+        };
         match &ev {
             // The picture. Counted rather than printed: a busy desktop sends
             // hundreds and the interesting fact is that any arrived at all.
@@ -130,6 +187,9 @@ async fn main() {
                 frames += 1;
                 if frames == 1 {
                     println!("  FIRST FRAME received");
+                    next_type_at = typing.front().map(|(secs, _)| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(*secs)
+                    });
                     if let Some(text) = &clip {
                         println!("  sending clipboard text to the server: {text}");
                         let _ = handle
@@ -219,6 +279,31 @@ async fn main() {
         println!("the picture arrived");
     } else {
         println!("NO FRAME ARRIVED");
+    }
+}
+
+/// Type `text` as key presses, Enter for a newline.
+async fn type_text(handle: &remote_core::SessionHandle, text: &str) {
+    for ch in text.chars() {
+        // X11 keysyms: Latin-1 is its own code point, Return is 0xff0d.
+        // Return goes as its XT scancode (0x1c), because a key with no
+        // character cannot travel as a unicode event; the rest go as
+        // characters.
+        let (keysym, keycode) = if ch == '\n' {
+            (0xff0d, Some(0x1c))
+        } else {
+            (ch as u32, None)
+        };
+        for down in [true, false] {
+            let _ = handle
+                .send(remote_core::ClientCommand::Key {
+                    keysym,
+                    keycode,
+                    down,
+                })
+                .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
 }
 
