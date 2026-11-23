@@ -35,12 +35,24 @@ const MAX_REASON: usize = 8192;
 /// reply, so it generates minimal server logging. The socket is dropped on
 /// return.
 pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<Banner> {
+    fingerprint_within(addr, connect_timeout, BANNER_READ_TIMEOUT).await
+}
+
+/// [`fingerprint`] with its own wait for the banner. The sweep's 200 ms is
+/// right for hundreds of addresses on one Wi-Fi, but one typed address can
+/// afford longer: x11vnc takes about half a second to greet, and a server
+/// across a VPN or a phone's emulator network adds its round trip on top.
+pub async fn fingerprint_within(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<Banner> {
     let mut stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(s)) => s,
         _ => return None,
     };
     let mut buf = [0u8; 12];
-    match timeout(BANNER_READ_TIMEOUT, stream.read_exact(&mut buf)).await {
+    match timeout(read_timeout, stream.read_exact(&mut buf)).await {
         Ok(Ok(_)) => parse_banner(&buf),
         _ => None,
     }

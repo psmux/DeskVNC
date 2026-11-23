@@ -73,6 +73,16 @@ pub fn machine_id(text: &str) -> Option<String> {
 /// slowly, or answers with something else (a VNC banner on a moved port, an
 /// HTTP server).
 pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<String> {
+    fingerprint_within(addr, connect_timeout, READ_TIMEOUT).await
+}
+
+/// [`fingerprint`] with its own wait for the line, for one typed address
+/// where a slow link should not read as nothing there.
+pub async fn fingerprint_within(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
     let mut stream = timeout(connect_timeout, TcpStream::connect(addr))
         .await
         .ok()?
@@ -90,7 +100,7 @@ pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<
         }
         Some(())
     };
-    timeout(READ_TIMEOUT, read).await.ok()??;
+    timeout(read_timeout, read).await.ok()??;
     parse_greeting(&line)
 }
 
