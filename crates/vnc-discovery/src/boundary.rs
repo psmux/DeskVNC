@@ -46,9 +46,10 @@ const GREETING: &[u8] = b"BOUNDARY1 ";
 const ID_LEN: usize = 64;
 /// The greeting, the ID and the newline: nothing longer is a Boundary answer.
 const LINE_MAX: usize = GREETING.len() + ID_LEN + 1;
-/// The machine writes its line the moment it accepts, so this is the same
+/// The machine writes its line the moment it accepts, but this probe also
+/// reads ports where a VNC server may be slow to greet, so it gets the same
 /// budget the RFB banner gets.
-const READ_TIMEOUT: Duration = Duration::from_millis(200);
+const READ_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// The machine ID in a TCP answer, lowercased, or `None` for anything that is
 /// not exactly `BOUNDARY1 <64 hex>` with an optional trailing newline.
@@ -73,6 +74,16 @@ pub fn machine_id(text: &str) -> Option<String> {
 /// slowly, or answers with something else (a VNC banner on a moved port, an
 /// HTTP server).
 pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<String> {
+    fingerprint_within(addr, connect_timeout, READ_TIMEOUT).await
+}
+
+/// [`fingerprint`] with its own wait for the line, for one typed address
+/// where a slow link should not read as nothing there.
+pub async fn fingerprint_within(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
     let mut stream = timeout(connect_timeout, TcpStream::connect(addr))
         .await
         .ok()?
@@ -90,7 +101,7 @@ pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<
         }
         Some(())
     };
-    timeout(READ_TIMEOUT, read).await.ok()??;
+    timeout(read_timeout, read).await.ok()??;
     parse_greeting(&line)
 }
 

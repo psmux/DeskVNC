@@ -163,6 +163,20 @@ describe("what the parser must not guess", () => {
     expect(presetProtocol({ port: DEFAULT_VNC_PORT })).toBe("vnc");
   });
 
+  it("reads host:port as that port on VNC, the same as a vnc:// link", () => {
+    for (const [typed, address] of [
+      ["10.0.2.2:5901", "10.0.2.2"],
+      ["[::1]:5901", "::1"],
+      ["studio.example.com:5901", "studio.example.com"],
+    ] as const) {
+      const t = ok(typed);
+      expect(t).toMatchObject({ address, port: 5901, explicitPort: true });
+      expect(presetProtocol(t)).toBe("vnc");
+      expect(ok(`vnc://${typed}`)).toMatchObject({ address, port: 5901, protocol: "vnc" });
+    }
+    expect(ok("studio.example.com")).toMatchObject({ address: "studio.example.com", port: DEFAULT_VNC_PORT, explicitPort: false });
+  });
+
   it("parses as the protocol the caller assumes when the input named none", () => {
     // The host dialog passes the draft's protocol, so `box:1` in an RDP or
     // SSH host's address field is port 1 rather than a display number.

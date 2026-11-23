@@ -45,6 +45,15 @@ describe("readQuickInput", () => {
     expect(readQuickInput("box:1", [])).toMatchObject({ kind: "identify", address: "box", port: 5901 });
   });
 
+  it("reads host:port the way a vnc:// link reads it, without picking a protocol", () => {
+    // The emulator's address for the computer it runs on, with x11vnc on 5901.
+    expect(readQuickInput("10.0.2.2:5901", [])).toEqual({ kind: "identify", address: "10.0.2.2", port: 5901, username: null });
+    expect(readQuickInput("vnc://10.0.2.2:5901", [])).toMatchObject({ kind: "direct", protocol: "vnc", address: "10.0.2.2", port: 5901 });
+    expect(readQuickInput("[::1]:5901", [])).toMatchObject({ kind: "identify", address: "::1", port: 5901 });
+    expect(readQuickInput("studio.example.com:5901", [])).toMatchObject({ kind: "identify", address: "studio.example.com", port: 5901 });
+    expect(readQuickInput("studio.example.com", [])).toMatchObject({ kind: "identify", address: "studio.example.com", port: null });
+  });
+
   it("connects straight away when a link names the protocol", () => {
     expect(readQuickInput("vnc://studio.example.com:1", [])).toEqual({
       kind: "direct",

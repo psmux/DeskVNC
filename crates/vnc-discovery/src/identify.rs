@@ -92,9 +92,10 @@ pub fn plan(port: Option<u16>) -> Vec<Vec<(u16, Service)>> {
 /// Find what answers at `host`, which may be a name or an address.
 ///
 /// The probes and the name lookups run at the same time. Each connect is held
-/// to `timeout` and the names to the ladder's own budget, so the whole call
-/// takes no longer than `timeout` plus the short read that follows a connect,
-/// and on a LAN usually about half a second. A name that does not resolve, or an address where
+/// to `timeout`, and so is the wait for a VNC banner or a Boundary line once
+/// it connects, since x11vnc takes about half a second to greet and a slow
+/// link adds its round trip. The names keep the ladder's own budget. On a LAN
+/// the whole call usually takes about half a second. A name that does not resolve, or an address where
 /// nothing answers, gives an empty list. The list is in a fixed order:
 /// Remote Desktop, then VNC by port, then Boundary.
 pub async fn identify(host: &str, port: Option<u16>, timeout: Duration) -> Vec<Identified> {
@@ -180,7 +181,7 @@ async fn run(ip: IpAddr, port: u16, service: Service, timeout: Duration) -> Opti
     let addr = SocketAddr::new(ip, port);
     match service {
         Service::Vnc => {
-            let banner = probe::fingerprint(addr, timeout).await?;
+            let banner = probe::fingerprint_within(addr, timeout, timeout).await?;
             let mut host = DiscoveredHost::new(
                 ip,
                 port,
@@ -198,7 +199,7 @@ async fn run(ip: IpAddr, port: u16, service: Service, timeout: Duration) -> Opti
             Some(host)
         }
         Service::Boundary => {
-            let id = boundary::fingerprint(addr, timeout).await?;
+            let id = boundary::fingerprint_within(addr, timeout, timeout).await?;
             let mut host = DiscoveredHost::new(
                 ip,
                 port,
@@ -475,6 +476,65 @@ mod tests {
         assert_eq!(rows[0].port, port);
         assert_eq!(rows[0].os, OsHint::Mac);
         assert_eq!(rows[0].server_label, "macOS Screen Sharing");
+    }
+
+    /// A server that waits `delay` after the accept before it writes `line`.
+    /// x11vnc does this: on an idle desktop it took 400 to 530 ms to send
+    /// its banner, even over loopback.
+    async fn slow_speaker(line: &'static [u8], delay: Duration) -> u16 {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = sock.write_all(line).await;
+                    let mut sink = [0u8; 64];
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), sock.read(&mut sink)).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_vnc_server_slow_to_greet_is_still_found() {
+        // `10.0.2.2:5901` in quick connect came back "Nothing answered" from
+        // an x11vnc server that a `vnc://` link reached fine: the banner
+        // arrived after the probe had stopped listening for it.
+        let port = slow_speaker(b"RFB 003.008\n", Duration::from_millis(550)).await;
+        let rows = identify("127.0.0.1", Some(port), Duration::from_millis(1500)).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].protocol, ProtocolKind::Vnc);
+        assert_eq!(rows[0].port, port);
+    }
+
+    #[tokio::test]
+    async fn a_boundary_computer_slow_to_greet_is_still_found() {
+        const LINE: &[u8] =
+            b"BOUNDARY1 3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723\n";
+        let port = slow_speaker(LINE, Duration::from_millis(550)).await;
+        let rows = identify("127.0.0.1", Some(port), Duration::from_millis(1500)).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].protocol, ProtocolKind::Boundary);
+    }
+
+    #[tokio::test]
+    async fn the_sweep_also_waits_for_a_slow_greeting() {
+        // The radar uses the same reads with their own budget.
+        let vnc = slow_speaker(b"RFB 003.008\n", Duration::from_millis(550)).await;
+        let addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, vnc));
+        assert!(probe::fingerprint(addr, Duration::from_millis(500))
+            .await
+            .is_some());
+        const LINE: &[u8] =
+            b"BOUNDARY1 3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723\n";
+        let bnd = slow_speaker(LINE, Duration::from_millis(550)).await;
+        let addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, bnd));
+        assert!(boundary::fingerprint(addr, Duration::from_millis(500))
+            .await
+            .is_some());
     }
 
     #[tokio::test]

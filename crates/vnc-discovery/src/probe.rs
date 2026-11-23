@@ -20,8 +20,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Timeout for reading the 12-byte banner once connected.
-const BANNER_READ_TIMEOUT: Duration = Duration::from_millis(200);
+/// Timeout for reading the 12-byte banner once connected. Only a port that
+/// accepted waits this long, so it costs a sweep little. It was 200 ms, and
+/// x11vnc takes 400 to 530 ms to greet even over loopback, so the radar and
+/// quick connect both said nothing was there.
+const BANNER_READ_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Timeout for reads during a deep probe.
 const PROBE_READ_TIMEOUT: Duration = Duration::from_millis(800);
 /// Longest refusal reason a deep probe reads. The length on the wire is a
@@ -35,12 +38,23 @@ const MAX_REASON: usize = 8192;
 /// reply, so it generates minimal server logging. The socket is dropped on
 /// return.
 pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<Banner> {
+    fingerprint_within(addr, connect_timeout, BANNER_READ_TIMEOUT).await
+}
+
+/// [`fingerprint`] with its own wait for the banner. One typed address can
+/// afford longer than a sweep: a server across a VPN or a slow link adds its
+/// round trip on top of however long it takes to greet.
+pub async fn fingerprint_within(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<Banner> {
     let mut stream = match timeout(connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(s)) => s,
         _ => return None,
     };
     let mut buf = [0u8; 12];
-    match timeout(BANNER_READ_TIMEOUT, stream.read_exact(&mut buf)).await {
+    match timeout(read_timeout, stream.read_exact(&mut buf)).await {
         Ok(Ok(_)) => parse_banner(&buf),
         _ => None,
     }
