@@ -46,9 +46,10 @@ const GREETING: &[u8] = b"BOUNDARY1 ";
 const ID_LEN: usize = 64;
 /// The greeting, the ID and the newline: nothing longer is a Boundary answer.
 const LINE_MAX: usize = GREETING.len() + ID_LEN + 1;
-/// The machine writes its line the moment it accepts, so this is the same
+/// The machine writes its line the moment it accepts, but this probe also
+/// reads ports where a VNC server may be slow to greet, so it gets the same
 /// budget the RFB banner gets.
-const READ_TIMEOUT: Duration = Duration::from_millis(200);
+const READ_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// The machine ID in a TCP answer, lowercased, or `None` for anything that is
 /// not exactly `BOUNDARY1 <64 hex>` with an optional trailing newline.

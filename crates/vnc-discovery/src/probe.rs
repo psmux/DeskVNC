@@ -20,8 +20,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Timeout for reading the 12-byte banner once connected.
-const BANNER_READ_TIMEOUT: Duration = Duration::from_millis(200);
+/// Timeout for reading the 12-byte banner once connected. Only a port that
+/// accepted waits this long, so it costs a sweep little. It was 200 ms, and
+/// x11vnc takes 400 to 530 ms to greet even over loopback, so the radar and
+/// quick connect both said nothing was there.
+const BANNER_READ_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Timeout for reads during a deep probe.
 const PROBE_READ_TIMEOUT: Duration = Duration::from_millis(800);
 /// Longest refusal reason a deep probe reads. The length on the wire is a
@@ -38,10 +41,9 @@ pub async fn fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<
     fingerprint_within(addr, connect_timeout, BANNER_READ_TIMEOUT).await
 }
 
-/// [`fingerprint`] with its own wait for the banner. The sweep's 200 ms is
-/// right for hundreds of addresses on one Wi-Fi, but one typed address can
-/// afford longer: x11vnc takes about half a second to greet, and a server
-/// across a VPN or a phone's emulator network adds its round trip on top.
+/// [`fingerprint`] with its own wait for the banner. One typed address can
+/// afford longer than a sweep: a server across a VPN or a slow link adds its
+/// round trip on top of however long it takes to greet.
 pub async fn fingerprint_within(
     addr: SocketAddr,
     connect_timeout: Duration,

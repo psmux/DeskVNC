@@ -93,10 +93,9 @@ pub fn plan(port: Option<u16>) -> Vec<Vec<(u16, Service)>> {
 ///
 /// The probes and the name lookups run at the same time. Each connect is held
 /// to `timeout`, and so is the wait for a VNC banner or a Boundary line once
-/// it connects: the subnet scan gives that read 200 ms, which x11vnc misses
-/// on its own loopback. The names keep the ladder's own budget. A server that
-/// answers takes as long as it takes to greet; on a LAN that is usually about
-/// half a second. A name that does not resolve, or an address where
+/// it connects, since x11vnc takes about half a second to greet and a slow
+/// link adds its round trip. The names keep the ladder's own budget. On a LAN
+/// the whole call usually takes about half a second. A name that does not resolve, or an address where
 /// nothing answers, gives an empty list. The list is in a fixed order:
 /// Remote Desktop, then VNC by port, then Boundary.
 pub async fn identify(host: &str, port: Option<u16>, timeout: Duration) -> Vec<Identified> {
@@ -519,6 +518,23 @@ mod tests {
         let rows = identify("127.0.0.1", Some(port), Duration::from_millis(1500)).await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].protocol, ProtocolKind::Boundary);
+    }
+
+    #[tokio::test]
+    async fn the_sweep_also_waits_for_a_slow_greeting() {
+        // The radar uses the same reads with their own budget.
+        let vnc = slow_speaker(b"RFB 003.008\n", Duration::from_millis(550)).await;
+        let addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, vnc));
+        assert!(probe::fingerprint(addr, Duration::from_millis(500))
+            .await
+            .is_some());
+        const LINE: &[u8] =
+            b"BOUNDARY1 3ae432ab7fd87dbd85b26c69e3d00be3f1ad47688df3e79e650ea9c8f0440723\n";
+        let bnd = slow_speaker(LINE, Duration::from_millis(550)).await;
+        let addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, bnd));
+        assert!(boundary::fingerprint(addr, Duration::from_millis(500))
+            .await
+            .is_some());
     }
 
     #[tokio::test]
