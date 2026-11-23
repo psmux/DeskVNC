@@ -278,6 +278,9 @@ export function makeFakeApi(params = new URLSearchParams(location.search)): Api 
     scanStop: async () => {},
     identify: async () => [],
     boundaryResolve: async (code) => ({ invitation: `boundary1:${code}` }),
+    localNetworkState: async () => (params.get("lan") === "denied" ? "denied" : "granted"),
+    localNetworkAsk: async () => (params.get("lan") === "denied" ? "denied" : "granted"),
+    openAppSettings: async () => {},
 
     async sessionConnect(_target: ConnectTarget, onFrame, onEvent) {
       const id = `s${++n}`;

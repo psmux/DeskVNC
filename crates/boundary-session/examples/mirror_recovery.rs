@@ -162,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
             tools: false,
             video: true,
             clipboard: false,
+            notices: false,
         },
     );
     loop {

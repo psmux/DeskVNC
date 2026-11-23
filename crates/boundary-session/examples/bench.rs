@@ -363,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
                     tools: false,
                     video: !tiles_only,
                     clipboard: false,
+                    notices: false,
                 },
             );
             loop {

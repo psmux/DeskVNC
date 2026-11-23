@@ -24,11 +24,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Session } from "../screens/Session";
 import { PaneVisible } from "./Pane";
-import { PaneHeader, PANE_HEADER_PX } from "./PaneHeader";
+import { PaneHeader, PANE_HEADER_PX, paneHeaderShown } from "./PaneHeader";
 import { PanePicker } from "./PanePicker";
 import { useTabs } from "../state/TabsContext";
 import { useAgentActivity } from "../state/AgentActivityContext";
-import { drivenByAgent } from "../lib/agentActivity";
 import {
   layoutGeometry,
   panes,
@@ -156,7 +155,7 @@ export function SplitView({
     tabs, sessions, activeId, close, closePane, focusPane, setTitle, setState, resize,
     reportArea, split: splitPane, adopt, toggleZoom,
   } = useTabs();
-  const { forSession, stopAgent } = useAgentActivity();
+  const { forSession, stopAgent, plane } = useAgentActivity();
   const areaRef = useRef<HTMLDivElement>(null);
   const area = useArea(areaRef);
 
@@ -356,17 +355,19 @@ export function SplitView({
           const drawn = onScreen && (!zoomed || pane.id === tab.zoomedPaneId);
           const session = pane.sessionId ? sessions[pane.sessionId] : undefined;
           const agent = session ? forSession(session.id) : null;
-          const driven = drivenByAgent(agent ?? undefined);
           /*
-            A lone pane grows a header while something else is driving it.
+            A lone pane has a header while the agent plane is on.
 
             Splits were the only reason to spend 24 pixels before, and a single
             pane stayed full bleed. A robot on the machine in front of you is
             the other reason: without this, the one arrangement most people use
             most of the time is the one arrangement with nowhere to say that an
-            agent is at the wheel and no way to take it back.
+            agent is at the wheel and no way to take it back. It is there for
+            as long as the plane is on rather than only while an agent drives,
+            so the pane does not change height under an agent. See
+            `paneHeaderShown`.
           */
-          const showHeader = split || driven || agent?.preempted != null;
+          const showHeader = paneHeaderShown(split, plane.on, agent);
           // Per pane rather than per tab, now that a pane can have a header its
           // neighbours do not. The toolbar's frame is measured from this, and
           // an offset that belonged to a different pane would put the toolbar

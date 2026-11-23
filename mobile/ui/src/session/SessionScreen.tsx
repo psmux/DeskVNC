@@ -797,6 +797,14 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.notice]);
 
+  // The computer cannot take taps and keys right now, such as a Mac at its
+  // lock screen. The screen is still live, so this is said and not shown as
+  // an error.
+  useEffect(() => {
+    if (s.inputTrouble) showToast(s.inputTrouble, 8000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.inputTrouble]);
+
   // Taps and keys keep failing to reach Rust: say so instead of going quiet.
   useEffect(() => {
     if (s.inputFailure) showToast(`Taps and keys are not reaching the computer: ${s.inputFailure.message}`, 6000);
@@ -1030,7 +1038,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
       {keyBarVisible ? <KeyBar mods={mods} metaLabel={metaLabelFor(os)} onPress={onKeyBar} /> : null}
 
       {s.phase === "connecting" ? <ConnectingScreen title={name} step={stepOf(s.state)} words={stepWords(s.state)} reconnecting={reconnecting} onCancel={() => void leave()} /> : null}
-      {s.phase === "error" ? <ErrorScreen title={name} message={s.error} onRetry={s.reconnect} onExit={() => void leave()} /> : null}
+      {s.phase === "error" ? <ErrorScreen title={name} message={s.error} lanBlocked={s.lanBlocked} onRetry={s.reconnect} onExit={() => void leave()} onOpenSettings={s.openSettings} /> : null}
       {s.phase === "ended" && s.needsReconnect ? (
         <ReconnectCard
           title={name}

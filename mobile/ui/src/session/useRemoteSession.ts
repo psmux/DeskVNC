@@ -21,7 +21,7 @@ import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFram
 import { WebGLRenderer } from "./render/WebGLRenderer";
 import { InputSender, SendLane } from "./input/packets";
 import { InputFailures, errorText } from "./input/failures";
-import { endKind, isSignInRefusal, mergeEnd, type EndKind } from "./status";
+import { endKind, isLocalNetworkRefusal, isSignInRefusal, isUnreachable, mergeEnd, type EndKind } from "./status";
 
 export type Phase = "connecting" | "connected" | "error" | "ended";
 
@@ -66,6 +66,11 @@ export interface RemoteSession {
   stats: SessionStats | null;
   /** How a Boundary session travels, once it is known. */
   route: BoundaryRoute | null;
+  /**
+   * Why a Boundary computer is not taking taps and keys right now, such as a
+   * Mac at its lock screen, in words to show. Null while they land.
+   */
+  inputTrouble: string | null;
   credentials: CredentialRequest | null;
   cert: CertPromptData | null;
   error: string | null;
@@ -94,6 +99,14 @@ export interface RemoteSession {
   notice: string | null;
   /** Set, as a new object each time, when taps and keys keep failing to send. */
   inputFailure: { message: string } | null;
+  /**
+   * True when the connect failed and Android 17 is keeping DeskVNC off the
+   * local network (Nearby devices is not allowed), so the error screen
+   * explains that and offers the settings page.
+   */
+  lanBlocked: boolean;
+  /** Opens DeskVNC's page in Android settings. */
+  openSettings(): void;
 }
 
 const IDLE: SessionState = { state: "connecting" };
@@ -106,6 +119,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [desktopName, setDesktopName] = useState<string | null>(null);
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [route, setRoute] = useState<BoundaryRoute | null>(null);
+  const [inputTrouble, setInputTrouble] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<CredentialRequest | null>(null);
   const [cert, setCert] = useState<CertPromptData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +133,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [inputFailure, setInputFailure] = useState<{ message: string } | null>(null);
+  const [lanBlocked, setLanBlocked] = useState(false);
 
   const renderer = useRef<WebGLRenderer | null>(null);
   const sender = useRef<InputSender | null>(null);
@@ -132,6 +147,9 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   // Set when the computer refused the name or password. The next attempt
   // then goes without the old password, so the computer asks for a new one.
   const refused = useRef<{ target: ConnectTarget; forgotten: Promise<void> } | null>(null);
+  // Set once Android's local network prompt was shown for this screen, so a
+  // yes dials again once and never loops. Try again clears it.
+  const askedLan = useRef(false);
 
   const go = useCallback((p: Phase) => {
     phaseRef.current = p;
@@ -195,6 +213,8 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     setCredentials(null);
     setCert(null);
     setStats(null);
+    setInputTrouble(null);
+    setLanBlocked(false);
     endedWhileHidden.current = false;
     exiting.current = false;
 
@@ -281,6 +301,9 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
         case "boundary-route":
           setRoute(e.route);
           break;
+        case "boundary-input":
+          setInputTrouble(typeof e.trouble === "string" ? e.trouble : null);
+          break;
         case "error":
           if (isSignInRefusal(e.message)) onSignInRefused();
           setError(e.message);
@@ -333,7 +356,30 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(typeof err === "string" ? err : err instanceof Error ? err.message : String(err));
+        const message = typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
+        // Android 17 would have dropped the connect (the computer is on this
+        // network and DeskVNC may not use it), so Rust refused before dialing.
+        // This is the moment to ask: the person just pressed Connect. A yes
+        // dials again; a no, or a phone that will not ask any more, explains.
+        if (isLocalNetworkRefusal(message) && !askedLan.current) {
+          askedLan.current = true;
+          void api
+            .localNetworkAsk()
+            .catch(() => "denied" as const)
+            .then((answer) => {
+              if (cancelled) return;
+              if (answer === "granted") {
+                setAttempt((a) => a + 1);
+                return;
+              }
+              setLanBlocked(true);
+              setError(message);
+              go("error");
+            });
+          return;
+        }
+        if (isLocalNetworkRefusal(message)) setLanBlocked(true);
+        setError(message);
         go("error");
       });
 
@@ -374,8 +420,31 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [go]);
 
+  // A connect that timed out may have been dropped by Android 17 for want of
+  // the local network permission, when Rust could not tell the computer was
+  // on this network (an address behind the router, say). Look, so the error
+  // can say so.
+  useEffect(() => {
+    if (phase !== "error" || !isUnreachable(error)) return;
+    let live = true;
+    api
+      .localNetworkState()
+      .then((s) => {
+        if (live && s === "denied") setLanBlocked(true);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [api, phase, error]);
+
+  const openSettings = useCallback(() => {
+    void api.openAppSettings().catch((e: unknown) => console.warn(`could not open settings: ${errorText(e)}`));
+  }, [api]);
+
   const reconnect = useCallback(() => {
     exiting.current = false;
+    askedLan.current = false;
     const r = refused.current;
     // After a refusal the vault is cleared first, or Rust would read the old
     // password for this attempt too.
@@ -480,5 +549,8 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     snapshot,
     notice,
     inputFailure,
+    inputTrouble,
+    lanBlocked,
+    openSettings,
   };
 }

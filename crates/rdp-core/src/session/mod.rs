@@ -42,7 +42,9 @@ use remote_core::{ClientCommand, ConnectOptions, ProtocolKind, SessionEvent, Ses
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::connection::rdstls::RdstlsCredentials;
 use crate::error::RdpError;
+use crate::options::ResolvedOptions;
 use crate::session::cookie::ReconnectCookie;
 use crate::session::redirect::Redirection;
 use crate::session::run_loop::Attempt;
@@ -122,6 +124,10 @@ impl RetryClassify for RdpError {
         }
     }
 
+    fn stalled_after_answer(&self) -> bool {
+        RdpError::stalled_in_sequence(self)
+    }
+
     /// The fourth, and the reason this method exists on the trait at all.
     ///
     /// [`RdpError::symbol`] was written before anything read it
@@ -151,8 +157,8 @@ pub struct RdpConnect {
 
 /// What one attempt reads from the last one and writes for the next.
 ///
-/// Three fields, and each is the reason a `ConnectOnce` implementor has to be
-/// a struct rather than a bare async function (PRDRDP/02 §11.2).
+/// Each field is a reason a `ConnectOnce` implementor has to be a struct
+/// rather than a bare async function (PRDRDP/02 §11.2).
 #[derive(Debug, Default)]
 pub struct Continuity {
     /// In: the cookie to offer, when one is stored and not stale. Out: the
@@ -165,6 +171,20 @@ pub struct Continuity {
     /// Out: the redirection this attempt was told to follow
     /// (MS-RDPBCGR 2.2.13.1).
     pub redirect: Option<Redirection>,
+    /// In: the credentials a redirection handed over for an RDSTLS sign in
+    /// on the next connection (MS-RDPBCGR 5.4.5.3). Scoped like the routing
+    /// token.
+    pub rdstls: Option<RdstlsCredentials>,
+}
+
+impl Continuity {
+    /// Hand this attempt what the last one left for it: the routing token
+    /// and the RDSTLS credentials of a redirection. Both are taken, so they
+    /// are presented once and are gone from every later attempt.
+    pub fn prime(&mut self, opts: &mut ResolvedOptions) {
+        opts.routing_token = self.routing_token.take();
+        opts.rdstls = self.rdstls.take();
+    }
 }
 
 impl RdpConnect {
@@ -196,7 +216,7 @@ impl ConnectOnce for RdpConnect {
     ) -> Pin<Box<dyn Future<Output = Result<RunOutcome, RdpError>> + Send + 'a>> {
         Box::pin(async move {
             self.settings.apply(&self.options);
-            let outcome = connect::run_once(
+            let outcome = match connect::run_once(
                 &self.options,
                 &mut self.settings,
                 &mut self.carry,
@@ -205,13 +225,55 @@ impl ConnectOnce for RdpConnect {
                 cancel,
                 connected_at,
             )
-            .await?;
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => return absorb_failure(&mut self.options, e),
+            };
             Ok(absorb_attempt(&mut self.options, &mut self.carry, outcome))
         })
     }
 
     fn absorb_while_disconnected(&mut self, cmd: &ClientCommand) {
         self.settings.absorb(cmd);
+    }
+}
+
+/// Turn one attempt's failure into the supervisor's input, going round again
+/// at once when the failure says how to get further.
+///
+/// One case today. A server that closes the connection during the capability
+/// exchange while the graphics pipeline is off gets one more attempt
+/// with the pipeline on (issue #59: gnome-remote-desktop refuses every client
+/// that does not advertise MS-RDPEGFX). The option is changed on the profile
+/// this session dials with, so a later reconnect asks for the pipeline too,
+/// and a second close on the new attempt is a different error that stops
+/// the session in the usual way. Nothing is stored with the host.
+///
+/// Public for the same reason [`absorb_attempt`] is: the integration tests
+/// drive the sequence against the mock themselves and take this decision
+/// with the code the driver uses.
+///
+/// # Errors
+///
+/// `err` itself, whenever it is not the one case above.
+pub fn absorb_failure(options: &mut ConnectOptions, err: RdpError) -> Result<RunOutcome, RdpError> {
+    match err {
+        RdpError::ClosedWithoutGraphicsPipeline => {
+            let rdp = options.rdp_mut();
+            if rdp.graphics_pipeline {
+                return Err(RdpError::ClosedWithoutGraphicsPipeline);
+            }
+            rdp.graphics_pipeline = true;
+            tracing::info!(
+                "the server closed the connection during the capability exchange; \
+                 asking again with the graphics pipeline"
+            );
+            Ok(RunOutcome::Reattempt {
+                why: "the server needs the graphics pipeline".to_owned(),
+            })
+        }
+        other => Err(other),
     }
 }
 
@@ -223,6 +285,10 @@ impl ConnectOnce for RdpConnect {
 /// and then take this decision with the same code the driver does
 /// (`crates/rdp-core/tests/connect.rs`). The alternative is a second copy of
 /// the redirection rules in a test, which is the copy that goes stale.
+///
+/// A chain of redirections is bounded by the supervisor
+/// (`remote_core::reconnect::MAX_CHAINED_REATTEMPTS`), the same host
+/// handover included.
 #[must_use]
 pub fn absorb_attempt(
     options: &mut ConnectOptions,
@@ -236,7 +302,7 @@ pub fn absorb_attempt(
             // trip and a rejection (PRDRDP/06 §5.5.5).
             carry.cookie = None;
             let why = redirect.describe();
-            redirect.apply(options, &mut carry.routing_token);
+            redirect.apply(options, &mut carry.routing_token, &mut carry.rdstls);
             RunOutcome::Reattempt { why }
         }
         // A logoff and an administrative close are both deliberate, and

@@ -4,7 +4,7 @@
  * same scene, broken, with one big Try again button.
  */
 import type { EndKind, Step } from "../status";
-import { STEP_WORDS, endWords, friendlyError } from "../status";
+import { LOCAL_NETWORK_WORDS, STEP_WORDS, endWords, friendlyError } from "../status";
 import { ConnectArt } from "./art";
 import { IconRefresh } from "./icons";
 
@@ -47,7 +47,22 @@ export function ConnectingScreen({
   );
 }
 
-export function ErrorScreen({ message, onRetry, onExit }: { title?: string; message: string | null; onRetry(): void; onExit(): void }) {
+export function ErrorScreen({
+  message,
+  lanBlocked = false,
+  onRetry,
+  onExit,
+  onOpenSettings,
+}: {
+  title?: string;
+  message: string | null;
+  /** Android is keeping DeskVNC off the local network. */
+  lanBlocked?: boolean;
+  onRetry(): void;
+  onExit(): void;
+  onOpenSettings?(): void;
+}) {
+  if (lanBlocked && onOpenSettings) return <LocalNetworkScreen onOpenSettings={onOpenSettings} onRetry={onRetry} onExit={onExit} />;
   const f = friendlyError(message ?? "");
   return (
     <div className="dv-s-scene-screen" role="alert">
@@ -59,6 +74,36 @@ export function ErrorScreen({ message, onRetry, onExit }: { title?: string; mess
           <div className="dv-s-scene-actions">
             <button type="button" className="dv-s-big" onClick={onRetry}>
               <IconRefresh size={24} /> Try again
+            </button>
+            <button type="button" className="dv-s-plain" onClick={onExit}>
+              Back to my computers
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Android 17 with Nearby devices off for DeskVNC: nothing on this Wi-Fi can
+ * be reached until it is allowed, and only the settings page can allow it
+ * once the person said no to the prompt.
+ */
+function LocalNetworkScreen({ onOpenSettings, onRetry, onExit }: { onOpenSettings(): void; onRetry(): void; onExit(): void }) {
+  return (
+    <div className="dv-s-scene-screen" role="alert">
+      <div className="dv-s-scene-body">
+        <ConnectArt step={0} failed />
+        <div className="dv-s-scene-text">
+          <h1 className="dv-s-scene-title">{LOCAL_NETWORK_WORDS.title}</h1>
+          <p className="dv-s-scene-detail">{LOCAL_NETWORK_WORDS.detail}</p>
+          <div className="dv-s-scene-actions">
+            <button type="button" className="dv-s-big" onClick={onOpenSettings}>
+              Open settings
+            </button>
+            <button type="button" className="dv-s-plain" onClick={onRetry}>
+              Try again
             </button>
             <button type="button" className="dv-s-plain" onClick={onExit}>
               Back to my computers

@@ -100,11 +100,17 @@ async fn serve() -> Result<()> {
                     .await
                     .unwrap_or_default();
                 note(&dir, &probed);
+                // The display is found again when a helper arrives. Its ID
+                // can change while this listens: on a Mac with no monitor the
+                // screen is a virtual one that is made again after somebody
+                // signs out, and holding on to the first ID ended every
+                // session with "The selected display is no longer
+                // connected".
                 listener = Some(unattended::listen_at_login(
                     boundary_session::HostOptions::default(),
                     key,
                     access_path.clone(),
-                    move || boundary_platform::open(display),
+                    boundary_platform::open_primary,
                 ));
             } else {
                 note(&dir, "no display to share");

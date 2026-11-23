@@ -5,7 +5,7 @@
 import { Channel, invoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { readPrefs } from "../lib/prefs";
 import { exactBuffer, largeBody } from "./binary";
-import type { Api, ConnectTarget, FoundComputer, Host, HostDraft, KeyCombo, Quality, ScanEvent, SessionEvent } from "./contract";
+import type { Api, ConnectTarget, FoundComputer, Host, HostDraft, KeyCombo, LocalNetwork, Quality, ScanEvent, SessionEvent } from "./contract";
 
 export const tauriApi: Api = {
   hostsList: () => invoke<Host[]>("hosts_list"),
@@ -60,4 +60,8 @@ export const tauriApi: Api = {
     }),
   sessionDisconnect: (sessionId) => invoke<void>("session_disconnect", { sessionId }),
   sessionSaveHost: (sessionId, host: HostDraft) => invoke<Host>("session_save_host", { sessionId, host }),
+
+  localNetworkState: () => invoke<LocalNetwork>("local_network_state"),
+  localNetworkAsk: () => invoke<LocalNetwork>("local_network_ask"),
+  openAppSettings: () => invoke<void>("app_settings_open"),
 };

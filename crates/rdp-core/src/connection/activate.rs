@@ -535,6 +535,7 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
     );
     let mut phase = Phase::Licensing;
     let mut activated: Option<Activated> = None;
+    let mut autodetect = super::autodetect::AutoDetectResponder::new();
     let started = std::time::Instant::now();
 
     loop {
@@ -543,8 +544,12 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                 stage: stage_of(phase, activated.is_some()),
             });
         }
-        let frame = next_tpkt(framer, stage_of(phase, activated.is_some()), pending).await?;
-        let data = read_send_data_indication(&frame)?;
+        let sharing = phase == Phase::Sharing;
+        let frame = next_tpkt(framer, stage_of(phase, activated.is_some()), pending)
+            .await
+            .map_err(|e| closed_in_capability_exchange(e, sharing, opts))?;
+        let data = read_send_data_indication(&frame)
+            .map_err(|e| closed_in_capability_exchange(e, sharing, opts))?;
         if !channels.knows(data.channel_id) {
             return Err(RdpError::Protocol(format!(
                 "data arrived on channel {}, which we never joined \
@@ -616,16 +621,28 @@ pub async fn activate<S: AsyncRead + AsyncWrite + Unpin>(
                     phase = Phase::Sharing;
                 }
             }
-            IoPdu::AutoDetect(_) => {
-                // MS-RDPBCGR 2.2.14 is optional and best effort: a server that
-                // gets no response uses its own default for the connection
-                // type hint. Answering needs the round trip measurement of
-                // PRDRDP/05 §6.1, which is not written, so the phase is named
-                // in the trace rather than answered wrongly.
+            IoPdu::AutoDetect(request) => {
+                // Windows treats an unanswered request as best effort and
+                // carries on. gnome-remote-desktop waits for the answer with
+                // no timeout, so silence here is a connection that never
+                // reaches the Demand Active (issue #59). The answer goes back
+                // on the channel the request came in on, which is the message
+                // channel (MS-RDPBCGR 2.2.14.4).
                 tracing::debug!(
                     stage = %ConnectStage::ConnectTimeAutoDetect,
-                    "connect time auto detect is not answered in this build"
+                    request_type = request.request_type,
+                    sequence = request.sequence_number,
+                    "connect time auto detect request"
                 );
+                if let Some(response) = autodetect.answer(&request, std::time::Instant::now()) {
+                    let mut body = Vec::with_capacity(response.size());
+                    response.encode_checked(&mut Writer::new(&mut body))?;
+                    reply = Some(send_data_request(
+                        channels.user_channel_id,
+                        data.channel_id,
+                        &body,
+                    )?);
+                }
             }
             IoPdu::Heartbeat(_) => {
                 tracing::trace!("a heartbeat arrived during the connection sequence");
@@ -760,6 +777,29 @@ fn redirection_from(packet: &rdp_pdu::rdp::ServerRedirectionPacket<'_>) -> RdpEr
              not follow (MS-RDPBCGR 2.2.13.1)"
                 .to_owned(),
         ),
+    }
+}
+
+/// Name a hang up in the capability exchange when the graphics pipeline was
+/// not asked for.
+///
+/// A server that insists on the pipeline cannot say so: there is no error
+/// info code for it. gnome-remote-desktop judges the Client Core Data when it
+/// is about to send the Demand Active, finds no
+/// `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL`, sends a Deactivate All instead and
+/// closes the connection. So a close after licensing and before the Font
+/// Map, with the pipeline off and no error info, is the one shape worth a
+/// second attempt with the pipeline on. A server that refuses for any other
+/// reason normally sends a Set Error Info first, which is a different error
+/// and passes through as it was.
+fn closed_in_capability_exchange(e: RdpError, sharing: bool, opts: &ResolvedOptions) -> RdpError {
+    match e {
+        RdpError::ServerDisconnect { .. } | RdpError::ConnectionClosed
+            if sharing && !opts.graphics_pipeline =>
+        {
+            RdpError::ClosedWithoutGraphicsPipeline
+        }
+        other => other,
     }
 }
 

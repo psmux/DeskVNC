@@ -89,6 +89,8 @@ export type SessionEvent =
   | { sessionId: string; type: "stats"; stats: SessionStats }
   /** Boundary only: whether the session goes straight to the computer or through a relay. */
   | { sessionId: string; type: "boundary-route"; route: BoundaryRoute }
+  /** Why the computer is not taking taps and keys, or null once it does again. */
+  | { sessionId: string; type: "boundary-input"; trouble: string | null }
   | { sessionId: string; type: "error"; message: string }
   | { sessionId: string; type: "ended"; durationS: number };
 
@@ -97,6 +99,20 @@ export type BoundaryRoute = "direct" | "relay";
 export type KeyCombo = "ctrl-alt-del" | "win" | "alt-tab" | "cmd-tab" | "ctrl-c" | "ctrl-v" | "esc";
 
 export type Quality = "auto" | "speed" | "balanced" | "quality";
+
+/**
+ * Android 17's local network permission (Nearby devices in Settings).
+ * Anywhere else, and before Android 17, it is always "granted".
+ */
+export type LocalNetwork = "granted" | "denied";
+
+/**
+ * The error `session_connect` gives at once, without dialing, when Android
+ * would drop the connection for want of that permission. The same sentence
+ * as `REFUSED` in `src-tauri/src/localnet.rs`.
+ */
+export const LOCAL_NETWORK_REFUSED =
+  "Android is not letting DeskVNC reach the local network, so it cannot get to this computer. Allow Nearby devices for DeskVNC.";
 
 export interface Api {
   hostsList(): Promise<Host[]>;
@@ -130,4 +146,12 @@ export interface Api {
   /** Save the computer an adhoc session reached, once it is connected, and
    *  make the session that host's. */
   sessionSaveHost(sessionId: string, host: HostDraft): Promise<Host>;
+
+  /** Whether DeskVNC may use the local network now. */
+  localNetworkState(): Promise<LocalNetwork>;
+  /** Ask with Android's own prompt, where it still shows one, and say what
+   *  the person chose. Answers at once when it is already granted. */
+  localNetworkAsk(): Promise<LocalNetwork>;
+  /** Open DeskVNC's page in Android settings. */
+  openAppSettings(): Promise<void>;
 }

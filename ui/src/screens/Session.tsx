@@ -29,7 +29,8 @@ import { ConnectingOverlay, DisconnectedOverlay, ReconnectOverlay } from "../com
 import { SshSession } from "./SshSession";
 import { useFiles } from "../hooks/useFiles";
 import type { RdpResolution } from "../lib/rdp";
-import { parseRdpSettings } from "../lib/rdp";
+import { blankRdpSettings, parseRdpSettings } from "../lib/rdp";
+import { ResizeWatch, remoteResizeTarget, type Size } from "../lib/remoteSize";
 import { encodeResolution } from "../lib/rdpDefaults";
 import { ToastShelf } from "../components/primitives";
 import { useToasts } from "../state/ToastContext";
@@ -384,6 +385,14 @@ function SessionView({
   const sendComboRef = useRef<((c: "ctrl-alt-del") => void) | null>(null);
   const disconnectRef = useRef<(() => void) | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ w: number; h: number } | null>(null);
+  const remoteSizeRef = useRef<Size | null>(null);
+  /**
+   * Notices a server that never acts on a resize (issue #60): no display
+   * control channel, a guest whose driver keeps its size, or a VNC server
+   * without ExtendedDesktopSize. The picture is then scaled to the window,
+   * and the person is told why the remote desktop did not change.
+   */
+  const resizeWatchRef = useRef<ResizeWatch | null>(null);
   /**
    * The monitor the user asked for, remembered against this computer, or null
    * for the whole desktop.
@@ -427,6 +436,8 @@ function SessionView({
       },
       onDesktopResize: (w, h) => {
         rendererRef.current?.setRemoteSize(w, h);
+        remoteSizeRef.current = { w, h };
+        resizeWatchRef.current?.resized();
         setRemoteSize({ w, h });
       },
       onCursorShape: (w, h, hx, hy, rgba) => rendererRef.current?.setCursorShape(w, h, hx, hy, rgba),
@@ -445,6 +456,50 @@ function SessionView({
   viewOnlyRef.current = viewOnly;
   const sessionRef = useRef(session);
   sessionRef.current = session;
+
+  const pushRef = useRef(push);
+  pushRef.current = push;
+  if (resizeWatchRef.current === null) {
+    resizeWatchRef.current = new ResizeWatch(() => {
+      // "Fit", "Aspect fit" and "Remote resize" all draw the desktop scaled
+      // to the window; 1:1 and a custom zoom are the person's own choice and
+      // are left alone, so the notice does not claim a scaling it did not do.
+      const scaled = modeRef.current !== "actual" && modeRef.current !== "custom";
+      pushRef.current(
+        "info",
+        scaled
+          ? "The remote computer did not change its resolution to match this window, so the picture is scaled to fit instead."
+          : "The remote computer did not change its resolution to match this window.",
+      );
+    });
+  }
+  useEffect(() => () => resizeWatchRef.current?.cancel(), []);
+
+  /**
+   * Ask for a desktop of `size`, exactly, and watch for an answer. Only a
+   * connected session is watched: before that there is no desktop to
+   * compare with, and the request is the connect's own sizing anyway.
+   */
+  const askRemoteSize = useCallback((size: Size): void => {
+    sessionRef.current.requestResize(size.w, size.h);
+    const connected = sessionRef.current.state.state === "connected";
+    resizeWatchRef.current?.requested(size, connected ? remoteSizeRef.current : null);
+  }, []);
+
+  /**
+   * Ask for a desktop that matches a canvas of `w` by `h` physical pixels.
+   * Remote Desktop gets the physical size, with the screen's scale already
+   * sent at connect; VNC, which has no scale to send, gets the size in
+   * points so its text is not half size on a Retina screen.
+   */
+  const fitRemoteTo = useCallback(
+    (w: number, h: number): void => {
+      askRemoteSize(remoteResizeTarget(params.protocol, w, h, window.devicePixelRatio));
+    },
+    [askRemoteSize, params.protocol],
+  );
+  const fitRemoteToRef = useRef(fitRemoteTo);
+  fitRemoteToRef.current = fitRemoteTo;
 
   // ------------------------------------------------- renderer + input setup
 
@@ -583,7 +638,7 @@ function SessionView({
       if (!follows) return;
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        sessionRef.current.requestResize(canvas.width, canvas.height);
+        fitRemoteToRef.current(canvas.width, canvas.height);
       }, 500);
     };
 
@@ -814,7 +869,7 @@ function SessionView({
     if (scalingMode === "remote-resize") {
       r.setScalingMode("aspect-fit");
       const c = canvasRef.current;
-      if (c) session.requestResize(c.width, c.height);
+      if (c) fitRemoteTo(c.width, c.height);
     } else {
       r.setScalingMode(scalingMode === "custom" ? "custom" : scalingMode);
     }
@@ -876,13 +931,13 @@ function SessionView({
     (next: RdpResolution): void => {
       setResolution(next);
       if (next.mode === "fixed") {
-        session.requestResize(next.width, next.height);
+        askRemoteSize({ w: next.width, h: next.height });
       } else if (next.mode === "follow-window") {
         const c = canvasRef.current;
-        if (c) session.requestResize(c.width, c.height);
+        if (c) fitRemoteTo(c.width, c.height);
       }
     },
-    [session],
+    [askRemoteSize, fitRemoteTo],
   );
 
   // Whether this host already has a saved password. A prompt then starts
@@ -911,8 +966,8 @@ function SessionView({
     const id = params.profileId;
     if (!id) {
       // An ad-hoc connect has no profile, so it gets the same default a new
-      // one would: sized at connect, then left alone.
-      setResolution({ mode: "window-at-connect" });
+      // one would: sized to the window, and kept that way.
+      setResolution({ mode: "follow-window" });
       return;
     }
     let cancelled = false;
@@ -920,9 +975,7 @@ function SessionView({
       (host) => {
         if (cancelled) return;
         const settings = parseRdpSettings(host?.rdpSettings ?? null);
-        setResolution(settings?.resolution ?? {
-          mode: "window-at-connect",
-        });
+        setResolution(settings?.resolution ?? blankRdpSettings().resolution);
         setOpenFullscreen(settings?.fullscreen === true);
       },
     );
@@ -2137,6 +2190,20 @@ function SessionView({
             </div>
           </div>
         </Dialog>
+      ) : null}
+
+      {/* A Boundary computer that cannot take typing and clicks right now,
+          such as a Mac at its lock screen. The screen is still live, so this
+          sits over its foot and lets the pointer through. */}
+      {st.state === "connected" && session.boundaryInputTrouble ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-4 z-20 flex justify-center px-4">
+          <div
+            role="status"
+            className="max-w-xl rounded-md border border-subtle bg-raised px-3 py-2 text-xs text-secondary shadow-lg"
+          >
+            {session.boundaryInputTrouble}
+          </div>
+        </div>
       ) : null}
 
       {showConnecting ? <ConnectingOverlay state={st} name={session.desktopName} /> : null}

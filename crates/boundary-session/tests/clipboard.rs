@@ -98,6 +98,7 @@ fn abilities(clipboard: bool) -> Abilities {
         tools: false,
         video: false,
         clipboard,
+        notices: false,
     }
 }
 

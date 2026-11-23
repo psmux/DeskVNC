@@ -33,6 +33,25 @@ import {
 /** How tall the strip is. Taken out of the session's area, so it is modest. */
 export const PANE_HEADER_PX = 24;
 
+/**
+ * Does this pane get the strip?
+ *
+ * A split always does. A lone pane does while the agent plane is on, whether
+ * or not an agent holds it right now, so that it has somewhere to say an agent
+ * is at the wheel and a way to take it back. Before, a lone pane grew the strip
+ * when an agent took the lease and lost it when the agent let go, and with
+ * "resize remote to fit" those 24 pixels resized the remote desktop between an
+ * agent's screenshot and its click (issue #52). With the plane on it is
+ * reserved for as long as the plane stays on.
+ */
+export function paneHeaderShown(
+  split: boolean,
+  planeOn: boolean,
+  agent: AgentActivity | null,
+): boolean {
+  return split || planeOn || drivenByAgent(agent ?? undefined) || agent?.preempted != null;
+}
+
 /** Same colours the tab strip uses, so one connection reads the same everywhere. */
 function statusDot(state: SessionState): string {
   switch (state.state) {

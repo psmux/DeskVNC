@@ -14,6 +14,7 @@ import { ScanButton } from "../components/ScanButton";
 import { useSettings, MAX_QUICK_CONNECT_HISTORY, type SortKey } from "../state/SettingsContext";
 import { useToasts } from "../state/ToastContext";
 import { saveCredentials } from "../lib/credentialStore";
+import { devSessionId } from "../lib/devSession";
 import type { DiscoveredHost, HostGroup, HostProfile, ProtocolKind } from "../lib/types";
 import { serializeRdpSettings } from "../lib/rdp";
 import { discoveredEndpoint } from "../lib/address";
@@ -111,14 +112,6 @@ interface GroupMenuState {
  */
 const TILE_MAX_WIDTH = { normal: 440, compact: 320 };
 const TILE_GAP = { normal: 16, compact: 12 };
-
-/**
- * A session id for the browser-dev mock, where there is no shell to mint one.
- * Unique per tab, or two mock sessions would collide on one tab.
- */
-function devSessionId(): string {
-  return `dev-${Math.random().toString(36).slice(2, 10)}`;
-}
 
 function gridCap(count: number, compact: boolean): CSSProperties | undefined {
   if (count <= 0) return undefined;

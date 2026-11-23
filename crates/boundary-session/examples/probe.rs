@@ -165,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
                 None,
                 Abilities {
                     clipboard: true,
+                    notices: false,
                     ..Abilities::default()
                 },
             );

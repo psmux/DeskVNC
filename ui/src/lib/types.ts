@@ -670,6 +670,8 @@ export type SessionEvent =
   | { type: "boundary-control"; control: boolean }
   | { type: "boundary-clipboard"; write: boolean; read: boolean }
   | { type: "boundary-route"; route: BoundaryRoute }
+  /** Why the computer is not taking typing and clicks, or null once it does again. */
+  | { type: "boundary-input"; trouble: string | null }
   | { type: "state-changed"; state: SessionState }
   | { type: "desktop-resize"; width: number; height: number }
   | { type: "desktop-name"; name: string }

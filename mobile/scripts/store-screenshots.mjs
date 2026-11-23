@@ -23,6 +23,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { escapeHtml } from "./html.mjs";
 
 // How each screen is reached in the phone UI's mock mode (see mobile/ui/src
 // main.tsx and App.tsx). The query string starts the app fresh, in mock mode,
@@ -150,7 +151,9 @@ async function waitForServer(base, ms = 60000) {
 }
 
 // A stand in for the UI: one page per route, drawn like a phone screen, so the
-// framing and sizes can be checked before the real UI exists.
+// framing and sizes can be checked before the real UI exists. The route name
+// comes from the request, so it is escaped before it goes into the page, and
+// the server listens on this machine only.
 function startStub(port) {
   const server = createServer((req, res) => {
     const u = new URL(req.url, "http://x");
@@ -160,9 +163,9 @@ function startStub(port) {
 <style>body{margin:0;font:600 20px system-ui;background:#0f172a;color:#e2e8f0}
 header{padding:48px 20px 16px;font-size:28px}.card{margin:12px 16px;height:140px;border-radius:18px;background:#1e293b;display:flex;align-items:end;padding:14px}
 .card:nth-child(odd){background:#1d4ed8}</style>
-<div id=root><header>${name}</header>${'<div class=card>Sample</div>'.repeat(6)}</div>`);
+<div id=root><header>${escapeHtml(name)}</header>${'<div class=card>Sample</div>'.repeat(6)}</div>`);
   });
-  return new Promise((resolve) => server.listen(port, () => resolve(server)));
+  return new Promise((resolve) => server.listen(port, "localhost", () => resolve(server)));
 }
 
 // The framed image. An upright shot gets the caption above the device. A

@@ -1,6 +1,6 @@
 use crate::pace::Pace;
 use crate::{
-    ClipboardRights, Desktop, Frame, Input, Invitation,
+    ClipboardRights, Desktop, Frame, HostNotice, Input, InputTrouble, InputUnavailable, Invitation,
     screen::{self, Rect},
     tools,
     video::{self, Update, VideoEncoder, VideoEncoders, VideoUnit},
@@ -58,6 +58,11 @@ pub enum Event {
     ClipboardRights(ClipboardRights),
     /// On the helper's side: text the person copied.
     ClipboardText(String),
+    /// On the helper's side, for one that said [`Abilities::notices`]: what
+    /// the host said about the session, such as why input is not reaching
+    /// the computer. [`HostNotice::text`] is what to show, and `None` there
+    /// means take down what was shown.
+    Notice(HostNotice),
     /// On the host's side: one line for each command or file request the
     /// helper ran, and for each clipboard text that went either way (its
     /// length, never the text), so the person can see what was done.
@@ -135,8 +140,17 @@ pub struct Session {
     clipboard_rights: watch::Receiver<ClipboardRights>,
     /// On the helper's side, text for the person's clipboard.
     clipboard_out: mpsc::Sender<String>,
+    /// Why the session ended, once it has with an error.
+    ended: Ended,
     cancel: CancellationToken,
 }
+/// Why a session ended, kept where [`Session::input`] can say it.
+type Ended = Arc<Mutex<Option<String>>>;
+/// What [`Session::input`] says once the session is over and nothing said
+/// why.
+const ENDED: &str = "The session has ended";
+/// What a helper whose own input piled up past the queue is told.
+const INPUT_FULL: &str = "Input queue is full. Session stopped";
 /// What a helper can do beyond drawing screens, said in its first message.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Abilities {
@@ -150,6 +164,10 @@ pub struct Abilities {
     /// [`Event::ClipboardText`] and [`Event::ClipboardRights`]. Only a
     /// caller that reads those events may say so.
     pub clipboard: bool,
+    /// Hear what the host says about the session as [`Event::Notice`], such
+    /// as why input is not reaching the computer. A host that says nothing
+    /// sends none.
+    pub notices: bool,
 }
 impl Abilities {
     /// The video codecs to name in the first message.
@@ -341,12 +359,24 @@ impl Session {
             // slow a full queue drops it. Ending the session for it froze
             // the picture for the person moving the mouse.
             Err(mpsc::error::TrySendError::Full(Input::Move { .. })) => Ok(()),
-            Err(_) => {
+            Err(mpsc::error::TrySendError::Full(_)) => {
                 // Never silently lose a key release when the queue fills.
                 self.stop();
-                bail!("Input queue is full or disconnected. Session stopped");
+                bail!(INPUT_FULL);
             }
+            // The session is already over. Its own reason is what the
+            // person needs: "queue is full" here hid that the computer had
+            // ended it, and why.
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!(self.end_reason())),
         }
+    }
+    /// Why the session ended, or that it has, once it is over.
+    fn end_reason(&self) -> String {
+        self.ended
+            .lock()
+            .ok()
+            .and_then(|ended| ended.clone())
+            .unwrap_or_else(|| ENDED.into())
     }
 }
 impl Drop for Session {
@@ -370,6 +400,7 @@ pub(crate) struct Worker {
     pub(crate) clipboard_read: watch::Sender<bool>,
     clipboard_rights: watch::Sender<ClipboardRights>,
     clipboard_out: mpsc::Receiver<String>,
+    ended: Ended,
     cancel: CancellationToken,
 }
 pub(crate) fn channels() -> (Session, Worker) {
@@ -392,6 +423,7 @@ pub(crate) fn channels() -> (Session, Worker) {
     let cancel = CancellationToken::new();
     let damage = Arc::new(Mutex::new(Damage::default()));
     let received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let ended = Ended::default();
     (
         Session {
             connectivity,
@@ -408,6 +440,7 @@ pub(crate) fn channels() -> (Session, Worker) {
             clipboard_read: clipboard_read.clone(),
             clipboard_rights,
             clipboard_out,
+            ended: ended.clone(),
             cancel: cancel.clone(),
         },
         Worker {
@@ -426,6 +459,7 @@ pub(crate) fn channels() -> (Session, Worker) {
             clipboard_read,
             clipboard_rights: clipboard_rights_tx,
             clipboard_out: clipboard_out_rx,
+            ended,
             cancel,
         },
     )
@@ -435,6 +469,13 @@ impl Worker {
         self.cancel.clone()
     }
     pub(crate) async fn emit(&self, event: Event) -> Result<()> {
+        // Noted before it is sent, so input refused from here on says why
+        // the session ended rather than that it did.
+        if let Event::Finished(Err(error)) = &event
+            && let Ok(mut ended) = self.ended.lock()
+        {
+            *ended = Some(format!("{error:#}"));
+        }
         self.events
             .send(event)
             .await
@@ -490,6 +531,7 @@ pub fn viewer_with_tools(
             tools: true,
             video: false,
             clipboard: false,
+            notices: false,
         },
     )
 }
@@ -884,6 +926,7 @@ where
         tools,
         screens,
         clipboard,
+        notices,
         ..
     } = knock;
     let connection = &guard.0;
@@ -897,6 +940,7 @@ where
             control: allowed,
             tools,
             clipboard,
+            notices,
         },
         screens,
         desktop,
@@ -906,6 +950,14 @@ where
     drop(guard);
     endpoint.close().await;
     result
+}
+/// Marks this side's own change to control, generation `ours`, as seen. A
+/// change the person made after it stays unseen, so the loop that tells the
+/// helper still acts on it.
+fn own_change_seen(control: &mut watch::Receiver<Permission>, ours: u64) {
+    if control.borrow_and_update().generation != ours {
+        control.mark_changed();
+    }
 }
 /// `future`, or `why` alone if it takes longer than `limit`. With `.context`
 /// the person read "Helper stopped responding: deadline has elapsed", the
@@ -928,6 +980,8 @@ struct Knock {
     tools: bool,
     screens: Screens,
     clipboard: bool,
+    /// It reads [`Message::Notice`].
+    notices: bool,
 }
 /// A knock the person is being asked about.
 struct Asking {
@@ -973,6 +1027,7 @@ async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::S
                     tools,
                     screens,
                     clipboard,
+                    notices,
                 } = wire::validate_hello(wire::read(&mut recv).await?, &invite)?;
                 Ok::<_, anyhow::Error>(Knock {
                     guard,
@@ -982,6 +1037,7 @@ async fn front_door(endpoint: Endpoint, invite: Arc<Invitation>, knocks: mpsc::S
                     tools,
                     screens,
                     clipboard,
+                    notices,
                 })
             };
             if let Ok(Ok(knock)) = tokio::time::timeout(HELLO_WAIT, handshake).await {
@@ -1039,6 +1095,7 @@ where
         control: allowed,
         tools,
         clipboard,
+        notices,
     } = offer;
     let mut tools_rx = worker.tools_tx.subscribe();
     if !tools {
@@ -1071,6 +1128,9 @@ where
     let (encoders_tx, encoders_rx) = oneshot::channel();
     let (opened_tx, opened_rx) = oneshot::channel();
     let (copied_tx, mut copied_rx) = mpsc::channel(4);
+    // What the desktop last said about input reaching it. A watch, so the
+    // helper always ends up told where things stand, however fast it changes.
+    let (input_told, mut told_rx) = watch::channel(None::<HostNotice>);
     let changes: Changes = Arc::new(Mutex::new(Some(Vec::new())));
     let cancel = worker.cancel.clone();
     let clipboard_link = clipboard.then(|| ClipboardLink {
@@ -1090,6 +1150,7 @@ where
                 opened_tx,
                 changes,
                 clipboard_link,
+                InputWatch::new(input_told),
                 cancel,
             )
         }
@@ -1134,18 +1195,19 @@ where
     // opened, say on the sharing screen during GNOME's prompt. Putting back
     // what they approved with lost that: the tick showed control, the
     // helper never heard of it, and only a second tick reached it.
-    let wanted = {
-        let permission = worker.control.borrow();
-        if permission.generation == opening {
+    // Read and written in one step, so a tick that lands in between is not
+    // overwritten unseen.
+    let (mut wanted, mut control, mut ours) = (false, false, 0);
+    worker.control_tx.send_modify(|p| {
+        wanted = if p.generation == opening {
             allowed
         } else {
-            permission.allowed
-        }
-    };
-    let control = wanted && controllable;
-    worker.control_tx.send_modify(|p| {
+            p.allowed
+        };
+        control = wanted && controllable;
         p.allowed = control;
         p.generation += 1;
+        ours = p.generation;
     });
     worker.emit(Event::Connected { peer, control }).await?;
     if control != allowed {
@@ -1180,8 +1242,10 @@ where
         }
     }
     // The helper has been told. The loop below writes only what the person
-    // changes later.
-    worker.control.borrow_and_update();
+    // changes later, which includes anything changed since control was set
+    // above: marking that seen too lost a tick made while the helper was
+    // being told, and the box stayed ticked on a screen that takes no input.
+    own_change_seen(&mut worker.control, ours);
     let events = worker.events.clone();
     let control_tx = worker.control_tx.clone();
     let read_input = async {
@@ -1272,6 +1336,8 @@ where
         Ok::<(), anyhow::Error>(())
     };
     let write_control = async {
+        // Until the desktop loop ends, which says nothing more about input.
+        let mut input_open = true;
         loop {
             tokio::select! {
                 changed = worker.control.changed() => {
@@ -1284,11 +1350,13 @@ where
                         // Ticked on this side, but the desktop takes no
                         // input, so the helper stays a viewer and the tick
                         // goes back off with the reason.
+                        let mut ours = 0;
                         control_tx.send_modify(|p| {
                             p.allowed = false;
                             p.generation += 1;
+                            ours = p.generation;
                         });
-                        worker.control.borrow_and_update();
+                        own_change_seen(&mut worker.control, ours);
                         let _ = events.send(Event::Control(false)).await;
                         let _ = events.send(Event::Status(NO_CONTROL.into())).await;
                         continue;
@@ -1329,6 +1397,18 @@ where
                 }
                 Some((machine, name)) = worker.pairing.recv() => {
                     wire::write(&mut send, &Message::Paired { machine, name }).await?;
+                }
+                // Only a helper that said it reads notices hears these: an
+                // older one ends the session on a message it does not know.
+                changed = told_rx.changed(), if notices && input_open => {
+                    if changed.is_err() {
+                        input_open = false;
+                        continue;
+                    }
+                    let notice = told_rx.borrow_and_update().clone();
+                    if let Some(notice) = notice {
+                        wire::write(&mut send, &Message::Notice(notice)).await?;
+                    }
                 }
                 changed = tools_rx.changed(), if tools => {
                     changed?;
@@ -1408,6 +1488,9 @@ pub(crate) struct Offer {
     pub(crate) control: bool,
     pub(crate) tools: bool,
     pub(crate) clipboard: bool,
+    /// The helper reads [`Message::Notice`], such as why its input is not
+    /// reaching the computer. An older one is never sent any.
+    pub(crate) notices: bool,
 }
 
 /// What the person reads when they let a helper see what they copy on a
@@ -1535,6 +1618,45 @@ impl ClipboardWatch {
     }
 }
 
+/// Whether the helper's input is reaching the desktop, said when that
+/// changes rather than for every event dropped meanwhile.
+struct InputWatch {
+    /// What the helper was last told while input fails.
+    failing: Option<HostNotice>,
+    told: watch::Sender<Option<HostNotice>>,
+}
+impl InputWatch {
+    fn new(told: watch::Sender<Option<HostNotice>>) -> Self {
+        Self {
+            failing: None,
+            told,
+        }
+    }
+    /// An event reached the desktop.
+    fn worked(&mut self) {
+        if self.failing.take().is_some() {
+            eprintln!("Input reaches this computer again");
+            self.told.send_replace(Some(HostNotice::InputBack));
+        }
+    }
+    /// An event could not reach the desktop and was dropped. Said once for
+    /// each run of failures, and again only if the reason changes.
+    fn failed(&mut self, error: &anyhow::Error) {
+        let notice = match error.downcast_ref::<InputUnavailable>() {
+            Some(why) => HostNotice::input_unavailable(why.trouble, &why.reason),
+            None => HostNotice::input_unavailable(InputTrouble::Other, &format!("{error:#}")),
+        };
+        if self.failing.as_ref() == Some(&notice) {
+            return;
+        }
+        eprintln!(
+            "The helper's input cannot reach this computer and is dropped until it can: {error:#}"
+        );
+        self.told.send_replace(Some(notice.clone()));
+        self.failing = Some(notice);
+    }
+}
+
 /// What the person reads when they allowed control but the desktop shares the
 /// screen alone.
 const NO_CONTROL: &str = "The helper can only watch: control was not allowed in the desktop's sharing prompt. To allow it, end the session and share again with Allow Remote Interaction switched on";
@@ -1563,6 +1685,7 @@ fn desktop_loop<F>(
     opened: oneshot::Sender<(bool, bool)>,
     changes: Changes,
     clipboard: Option<ClipboardLink>,
+    mut input_watch: InputWatch,
     cancel: CancellationToken,
 ) -> Result<()>
 where
@@ -1637,12 +1760,23 @@ where
             } else {
                 let current = *permission.borrow();
                 if current.allowed && current.generation == epoch {
-                    desktop.0.input(event)?;
-                    crate::stats::input();
-                    // Show what the input did as soon as it is drawn,
-                    // rather than at the next turn of the clock.
-                    capture_at = Instant::now();
-                    last_change = Instant::now();
+                    // Input that cannot reach the desktop, such as a Mac at
+                    // its lock screen, is dropped and the screen goes on
+                    // being shared. Ending the session here cut the helper
+                    // off on their first click after every reconnect, so
+                    // they could not even watch.
+                    match desktop.0.input(event) {
+                        Ok(()) => {
+                            input_watch.worked();
+                            crate::stats::input();
+                            // Show what the input did as soon as it is
+                            // drawn, rather than at the next turn of the
+                            // clock.
+                            capture_at = Instant::now();
+                            last_change = Instant::now();
+                        }
+                        Err(error) => input_watch.failed(&error),
+                    }
                 }
             }
             last_input = Instant::now();
@@ -2436,10 +2570,19 @@ async fn run_viewer(
             tiles: true,
             video: abilities.codecs(),
             clipboard: abilities.clipboard,
+            notices: abilities.notices,
         },
     )
     .await?;
-    let result = watch_session(worker, &connection, send, recv, ATTENDED_WAIT).await;
+    let result = watch_session(
+        worker,
+        &connection,
+        send,
+        recv,
+        ATTENDED_WAIT,
+        abilities.notices,
+    )
+    .await;
     drop(guard);
     if matches!(_endpoint_guard, Held::Own(_)) {
         endpoint.close().await;
@@ -2463,8 +2606,9 @@ pub(crate) async fn watch_session(
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
     waiting: &str,
+    notices: bool,
 ) -> Result<()> {
-    let result = watch(worker, connection, send, recv, waiting).await;
+    let result = watch(worker, connection, send, recv, waiting, notices).await;
     if result.is_err() && connection.close_reason().is_none() {
         // A stream can end a moment before the close that explains it, so
         // give the reason a moment to land rather than report the symptom.
@@ -2549,12 +2693,14 @@ fn closed_by_peer(connection: &Connection) -> bool {
     )
 }
 
+/// `notices` is whether this helper said it reads [`Message::Notice`].
 async fn watch(
     worker: &mut Worker,
     connection: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     waiting: &str,
+    notices: bool,
 ) -> Result<()> {
     worker.emit(Event::Status(waiting.into())).await?;
     let grant: Message = within(
@@ -2633,6 +2779,9 @@ async fn watch(
                 }
                 Message::Paired { machine, name } => {
                     events.send(Event::Paired { machine, name }).await?;
+                }
+                Message::Notice(notice) if notices => {
+                    events.send(Event::Notice(notice)).await?;
                 }
                 _ => bail!("Unexpected host message"),
             }
@@ -3208,6 +3357,7 @@ mod typing_tests {
                     opened_tx,
                     Arc::new(Mutex::new(Some(Vec::new()))),
                     None,
+                    InputWatch::new(watch::channel(None).0),
                     cancel,
                 )
             }
@@ -3238,6 +3388,111 @@ mod typing_tests {
                 pair[0].1,
                 pair[1].1
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use crate::{Button, Key};
+
+    #[test]
+    fn a_run_of_failures_is_told_once_and_its_end_once() {
+        let (told, mut heard) = watch::channel(None);
+        let mut watch = InputWatch::new(told);
+        let locked = anyhow::Error::new(InputUnavailable {
+            trouble: InputTrouble::LockScreen,
+            reason: "failed creating event source".into(),
+        });
+        // Working input says nothing.
+        watch.worked();
+        assert!(!heard.has_changed().unwrap());
+        watch.failed(&locked);
+        assert!(heard.has_changed().unwrap());
+        assert_eq!(
+            *heard.borrow_and_update(),
+            Some(HostNotice::InputUnavailable {
+                trouble: InputTrouble::LockScreen,
+                reason: "failed creating event source".into(),
+            })
+        );
+        // The same failure again, for every event dropped: nothing more.
+        for _ in 0..50 {
+            watch.failed(&locked);
+        }
+        assert!(!heard.has_changed().unwrap());
+        // A different reason is told.
+        watch.failed(&anyhow!("the portal session closed"));
+        assert_eq!(
+            *heard.borrow_and_update(),
+            Some(HostNotice::InputUnavailable {
+                trouble: InputTrouble::Other,
+                reason: "the portal session closed".into(),
+            })
+        );
+        watch.worked();
+        assert_eq!(*heard.borrow_and_update(), Some(HostNotice::InputBack));
+        watch.worked();
+        assert!(!heard.has_changed().unwrap());
+    }
+
+    #[test]
+    fn input_after_the_session_ended_says_why_it_ended() {
+        let (session, worker) = channels();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(worker.emit(Event::Finished(Err(anyhow!(
+                "That computer ended the session: no connection could be established"
+            )))))
+            .unwrap();
+        drop(worker);
+        let error = session
+            .input(Input::Key {
+                key: Key::Enter,
+                down: true,
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "That computer ended the session: no connection could be established"
+        );
+        // A move is no different once the session is over.
+        let error = session.input(Input::Move { x: 0.5, y: 0.5 }).unwrap_err();
+        assert!(!error.to_string().contains("full"), "{error}");
+    }
+
+    #[test]
+    fn input_after_a_session_that_ended_quietly_says_it_has_ended() {
+        let (session, worker) = channels();
+        drop(worker);
+        let error = session.input(Input::Release).unwrap_err().to_string();
+        assert_eq!(error, ENDED);
+    }
+
+    #[test]
+    fn a_full_queue_of_clicks_still_stops_the_session() {
+        let (session, _worker) = channels();
+        let click = Input::Button {
+            button: Button::Left,
+            down: true,
+        };
+        let mut result = Ok(());
+        for _ in 0..200 {
+            result = session.input(click.clone());
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(result.unwrap_err().to_string(), INPUT_FULL);
+        assert!(session.cancel.is_cancelled());
+        // Moves are dropped quietly when it is full.
+        let (session, _worker) = channels();
+        for _ in 0..200 {
+            session.input(Input::Move { x: 0.1, y: 0.1 }).unwrap();
         }
     }
 }

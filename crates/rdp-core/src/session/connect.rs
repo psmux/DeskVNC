@@ -73,10 +73,11 @@ pub async fn run_once(
         settings.requested_size = Some(opts.desktop_wanted);
     }
     // A redirection told us to present its `LoadBalanceInfo` as the routing
-    // token of the next Connection Request (MS-RDPBCGR 3.2.5.3.1). It is
-    // taken rather than borrowed: a token is presented once, to the host that
-    // issued it.
-    opts.routing_token = carry.routing_token.take();
+    // token of the next Connection Request (MS-RDPBCGR 3.2.5.3.1), and may
+    // have handed over credentials for an RDSTLS sign in (5.4.5.3). Both are
+    // taken rather than borrowed: they are presented once, to the host that
+    // issued them.
+    carry.prime(&mut opts);
 
     // MS-RDPBCGR 5.5 step 3: the cookie goes in the Client Info PDU of the
     // attempt after the one that received it. A stale one is treated as
@@ -116,6 +117,9 @@ pub async fn run_once(
         }
         Err(e) => return Err(e),
     };
+    // The cookie has done its job, and the run loop gets a copy of these
+    // options for the rest of the session.
+    opts.rdstls = None;
 
     remote_core::emit_state(events, SessionState::Connected).await?;
     // What `STABLE_UPTIME` is measured from: a connection that stayed up long

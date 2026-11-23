@@ -33,6 +33,81 @@ pub struct ClipboardRights {
     pub read: bool,
 }
 
+/// Why a host is not taking a helper's input right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputTrouble {
+    /// A Mac at its lock screen or its sign in screen, where the host could
+    /// not make an event source to type or click with.
+    LockScreen,
+    /// The person has not allowed the host to control the computer, such as
+    /// Accessibility on macOS.
+    Permission,
+    /// Anything else, said in the notice's own words. A kind added later is
+    /// read as this by a helper that does not know it.
+    #[serde(other)]
+    Other,
+}
+
+/// What a host tells a helper about the session, beyond screens and control.
+/// Sent only to a helper that declared `notices`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostNotice {
+    /// The helper's input is being dropped, and why. The session goes on and
+    /// the screen is still shared.
+    InputUnavailable {
+        trouble: InputTrouble,
+        /// The host's own words for it, at most [`MAX_NOTICE_REASON`] bytes.
+        reason: String,
+    },
+    /// Input reaches the computer again.
+    InputBack,
+}
+
+/// The longest reason a host puts in a notice, in bytes.
+pub const MAX_NOTICE_REASON: usize = 400;
+
+impl HostNotice {
+    /// A notice that input is not reaching the computer, with `reason` cut
+    /// to fit.
+    pub fn input_unavailable(trouble: InputTrouble, reason: &str) -> Self {
+        let mut end = reason.len().min(MAX_NOTICE_REASON);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self::InputUnavailable {
+            trouble,
+            reason: reason[..end].to_string(),
+        }
+    }
+    /// What the helper reads about it, or `None` once input works again and
+    /// whatever was shown should go.
+    pub fn text(&self) -> Option<String> {
+        match self {
+            Self::InputUnavailable {
+                trouble: InputTrouble::LockScreen,
+                ..
+            } => Some(LOCK_SCREEN.into()),
+            Self::InputUnavailable {
+                trouble: InputTrouble::Permission,
+                ..
+            } => Some(NO_PERMISSION.into()),
+            Self::InputUnavailable { reason, .. } => {
+                let reason: String = reason.chars().filter(|c| !c.is_control()).collect();
+                Some(format!(
+                    "That computer is not accepting input right now: {}",
+                    reason.trim()
+                ))
+            }
+            Self::InputBack => None,
+        }
+    }
+}
+/// What a helper reads while a Mac it is connected to sits at its lock
+/// screen or sign in screen.
+const LOCK_SCREEN: &str = "That Mac is at its lock screen or sign in screen, where DeskVNC Support cannot type or click. You can still see it. Someone at the Mac has to unlock it or sign in.";
+/// What a helper reads while the computer has not allowed control.
+const NO_PERMISSION: &str = "That computer has not allowed DeskVNC Support to type or click. You can still see it. Someone there has to allow it: on a Mac, in System Settings > Privacy & Security > Accessibility.";
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Invitation {
     pub version: u8,
@@ -168,6 +243,11 @@ pub enum Message {
         /// a message it does not know.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         clipboard: bool,
+        /// The helper reads [`Message::Notice`]. An older helper leaves it
+        /// out and is never sent one, since it ends the session on a message
+        /// it does not know.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        notices: bool,
     },
     Granted {
         control: bool,
@@ -226,6 +306,11 @@ pub enum Message {
         /// a message it does not know.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         clipboard: bool,
+        /// The helper reads [`Message::Notice`]. An older helper leaves it
+        /// out and is never sent one, since it ends the session on a message
+        /// it does not know.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        notices: bool,
     },
     /// Sent during an attended session when the person being helped chooses
     /// to let this helper connect any time. `machine` is the ID the helper
@@ -243,6 +328,10 @@ pub enum Message {
     /// The host changed what the helper may do with the clipboard. Sent only
     /// to a helper that declared `clipboard`.
     ClipboardRights(ClipboardRights),
+    /// The host tells the helper something about the session, such as why
+    /// its input is not reaching the computer. Sent only to a helper that
+    /// declared `notices`.
+    Notice(HostNotice),
 }
 pub async fn write<T: Serialize>(stream: &mut SendStream, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
@@ -360,6 +449,8 @@ pub struct Hello {
     pub screens: Screens,
     /// It reads and sends clipboard messages.
     pub clipboard: bool,
+    /// It reads [`Message::Notice`].
+    pub notices: bool,
 }
 /// The helper's name, what it can do, and how it takes screens.
 pub fn validate_hello(message: Message, invite: &Invitation) -> Result<Hello> {
@@ -373,6 +464,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<Hello> {
         tiles,
         video,
         clipboard,
+        notices,
     } = message
     {
         ensure!(
@@ -389,6 +481,7 @@ pub fn validate_hello(message: Message, invite: &Invitation) -> Result<Hello> {
             tools,
             screens: Screens::from_hello(jpeg, tiles, &video),
             clipboard,
+            notices,
         })
     } else {
         bail!("Expected session handshake")
@@ -459,6 +552,7 @@ mod tests {
             tiles: true,
             video: vec![H264.into()],
             clipboard: false,
+            notices: false,
         })
         .unwrap();
         assert!(matches!(
@@ -474,6 +568,7 @@ mod tests {
             tiles: true,
             video: vec![H264.into()],
             clipboard: false,
+            notices: false,
         })
         .unwrap();
         assert!(matches!(
@@ -508,6 +603,7 @@ mod tests {
             tiles: true,
             video: Vec::new(),
             clipboard: false,
+            notices: false,
         })
         .unwrap();
         assert_eq!(plain, String::from_utf8(old).unwrap());
@@ -567,6 +663,7 @@ mod tests {
             tiles: true,
             video: Vec::new(),
             clipboard: true,
+            notices: false,
         })
         .unwrap();
         let Message::Hello { clipboard, .. } = serde_json::from_slice(&hello).unwrap() else {
@@ -614,6 +711,7 @@ mod tests {
             tiles: true,
             video: Vec::new(),
             clipboard: true,
+            notices: false,
         })
         .unwrap();
         assert!(matches!(
@@ -672,6 +770,111 @@ mod tests {
         let worst =
             serde_json::to_vec(&Message::Clipboard("\u{0001}".repeat(MAX_CLIPBOARD))).unwrap();
         assert!(worst.len() <= MAX_CLIPBOARD_FRAME, "{}", worst.len());
+    }
+
+    #[test]
+    fn notices_round_trip_and_older_peers_are_unaffected() {
+        for message in [
+            Message::Notice(HostNotice::input_unavailable(
+                InputTrouble::LockScreen,
+                "no connection could be established: (failed creating event source)",
+            )),
+            Message::Notice(HostNotice::input_unavailable(InputTrouble::Permission, "")),
+            Message::Notice(HostNotice::input_unavailable(InputTrouble::Other, "gone")),
+            Message::Notice(HostNotice::InputBack),
+        ] {
+            let bytes = serde_json::to_vec(&message).unwrap();
+            let back: Message = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(serde_json::to_vec(&back).unwrap(), bytes);
+        }
+        // A kind of trouble added later reads as Other, with its words.
+        let later = br#"{"Notice":{"InputUnavailable":{"trouble":"Asleep","reason":"zzz"}}}"#;
+        let Message::Notice(notice) = serde_json::from_slice(later).unwrap() else {
+            panic!("not a notice");
+        };
+        assert_eq!(
+            notice,
+            HostNotice::InputUnavailable {
+                trouble: InputTrouble::Other,
+                reason: "zzz".into()
+            }
+        );
+        assert_eq!(
+            notice.text().unwrap(),
+            "That computer is not accepting input right now: zzz"
+        );
+        // A long reason is cut on a character boundary.
+        let long = "é".repeat(MAX_NOTICE_REASON);
+        let HostNotice::InputUnavailable { reason, .. } =
+            HostNotice::input_unavailable(InputTrouble::Other, &long)
+        else {
+            panic!("not unavailable");
+        };
+        assert!(reason.len() <= MAX_NOTICE_REASON && !reason.is_empty());
+        // Hellos and knocks from before notices say nothing about them, and
+        // one that asks for them writes nothing new when it does not.
+        let old = serde_json::to_vec(&before_video::Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+        })
+        .unwrap();
+        let Message::Hello { notices, .. } = serde_json::from_slice(&old).unwrap() else {
+            panic!("not a hello");
+        };
+        assert!(!notices);
+        let old = serde_json::to_vec(&before_video::Message::Knock {
+            version: 2,
+            name: "Helper".into(),
+            password: None,
+            tools: false,
+            jpeg: true,
+            tiles: true,
+        })
+        .unwrap();
+        let Message::Knock { notices, .. } = serde_json::from_slice(&old).unwrap() else {
+            panic!("not a knock");
+        };
+        assert!(!notices);
+        // A helper that asks for notices is still read by an older host.
+        let knock = serde_json::to_vec(&Message::Knock {
+            version: 2,
+            name: "Helper".into(),
+            password: None,
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: Vec::new(),
+            clipboard: false,
+            notices: true,
+        })
+        .unwrap();
+        assert!(String::from_utf8_lossy(&knock).contains("\"notices\":true"));
+        assert!(matches!(
+            serde_json::from_slice(&knock).unwrap(),
+            before_video::Message::Knock { tiles: true, .. }
+        ));
+        let hello = Message::Hello {
+            version: 1,
+            secret: [7; 32],
+            name: "Helper".into(),
+            tools: false,
+            jpeg: true,
+            tiles: true,
+            video: Vec::new(),
+            clipboard: false,
+            notices: true,
+        };
+        let invite = Invitation {
+            version: 1,
+            address: iroh::EndpointAddr::new(iroh::SecretKey::generate().public()),
+            secret: [7; 32],
+            expires: now() + 60,
+        };
+        assert!(validate_hello(hello, &invite).unwrap().notices);
     }
 
     #[test]

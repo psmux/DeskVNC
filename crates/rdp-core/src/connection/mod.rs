@@ -31,21 +31,23 @@
 //! | Phases | File |
 //! |---|---|
 //! | 1, the X.224 negotiation | [`negotiate`] |
-//! | 2, the TLS upgrade and CredSSP | [`crate::transport`], [`nla`] |
+//! | 2, the TLS upgrade and CredSSP or RDSTLS | [`crate::transport`], [`nla`], [`rdstls`] |
 //! | 3 and 4, the Basic Settings Exchange and Channel Connection | [`mcs`] |
-//! | 6 to 10, Client Info to the Font Map | [`activate`] |
+//! | 6 to 10, Client Info to the Font Map | [`activate`], [`autodetect`] |
 //!
 //! Phase 5, RDP Security Commencement, is skipped by construction: it exists
 //! only for standard RDP security, which this client never negotiates
 //! (PRDRDP/03 §2.6, D6).
 
 pub mod activate;
+pub mod autodetect;
 pub mod credentials;
 pub mod licensing;
 pub mod mcs;
 pub mod negotiate;
 pub mod nla;
 pub mod prompt;
+pub mod rdstls;
 pub mod trust;
 
 use remote_core::{Credentials, SessionEvent, SessionState};
@@ -154,6 +156,28 @@ pub async fn after_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     prompt: Option<Prompt<'_>>,
 ) -> Result<Connected> {
     let mut method = selected.method();
+
+    if selected == SecurityProtocol::Rdstls {
+        // Only offered when a redirection handed us credentials for it, so a
+        // server that selects it without them is answering a question we
+        // did not ask (MS-RDPBCGR 2.2.1.2.1).
+        let Some(handed) = opts.rdstls.as_ref() else {
+            return Err(RdpError::NegotiationInconsistent);
+        };
+        remote_core::emit_state(
+            events,
+            ConnectStage::Rdstls.session_state(selected.method()),
+        )
+        .await?;
+        rdstls::authenticate(framer, handed).await?;
+        // The Client Info PDU names the account the server handed the session
+        // to. No password goes in it: RDSTLS already proved who we are, and
+        // the cookie is not a password a server could check there. Only this
+        // attempt's copy changes; the profile keeps the user's own account.
+        creds.username = Some(handed.username.clone());
+        creds.domain = (!handed.domain.is_empty()).then(|| handed.domain.clone());
+        creds.password = None;
+    }
 
     if selected.wants_credssp() {
         // Ask for whatever CredSSP needs and does not have, before the state

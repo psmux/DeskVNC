@@ -153,6 +153,12 @@ export interface RdpSettings {
   sendMstshashCookie: boolean;
   allowAutoReconnect: boolean;
   desktopScaleFactor: number;
+  /** Ask the server for this screen's own scale (200 percent on a Retina
+   *  Mac) rather than `desktopScaleFactor`. The desktop is sized in physical
+   *  pixels, so without it Windows draws everything at half size there
+   *  (issue #60). Missing from a stored blob means on: no build ever let
+   *  anyone set the scale, so a stored 100 is the old default, not a choice. */
+  matchLocalScale: boolean;
 
   /** Keys this build did not recognise, kept so writing the blob back does
    *  not lose a newer build's settings. Never rendered. */
@@ -203,7 +209,7 @@ export function blankRdpSettings(): RdpSettings {
     codecs: blankCodecSet(),
     audio: "play-locally",
     monitors: "primary",
-    resolution: { mode: "window-at-connect" },
+    resolution: { mode: "follow-window" },
     keyboardLayout: 0,
     clientName: "",
     performance: blankPerformanceFlags(),
@@ -213,6 +219,7 @@ export function blankRdpSettings(): RdpSettings {
     sendMstshashCookie: false,
     allowAutoReconnect: true,
     desktopScaleFactor: 100,
+    matchLocalScale: true,
   };
 }
 
@@ -222,7 +229,7 @@ const KNOWN_KEYS: readonly string[] = [
   "serverName", "domain", "nla", "legacyTls", "colorDepth", "codecs", "audio",
   "monitors", "resolution", "dynamicResolution", "keyboardLayout", "clientName",
   "performance", "gateway", "autologon", "kdcProxyUrl", "sendMstshashCookie",
-  "allowAutoReconnect", "desktopScaleFactor",
+  "allowAutoReconnect", "desktopScaleFactor", "matchLocalScale",
 ];
 
 /**
@@ -302,9 +309,11 @@ function readResolution(v: unknown, legacyDynamic: unknown): RdpResolution {
       }
     }
   }
-  return legacyDynamic === true
-    ? { mode: "follow-window" }
-    : { mode: "window-at-connect" };
+  // Nothing stored follows the window, the same default `RdpResolution`
+  // has in Rust; an old profile that said "not dynamic" keeps saying so.
+  return legacyDynamic === false
+    ? { mode: "window-at-connect" }
+    : { mode: "follow-window" };
 }
 
 function readMonitors(v: unknown): MonitorPolicy {
@@ -372,6 +381,7 @@ export function parseRdpSettings(raw: string | null | undefined): RdpSettings | 
     sendMstshashCookie: bool(o.sendMstshashCookie, blank.sendMstshashCookie),
     allowAutoReconnect: bool(o.allowAutoReconnect, blank.allowAutoReconnect),
     desktopScaleFactor: num(o.desktopScaleFactor, 100),
+    matchLocalScale: bool(o.matchLocalScale, blank.matchLocalScale),
     ...(Object.keys(unknown).length > 0 ? { unknown } : {}),
   };
 }

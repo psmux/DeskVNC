@@ -30,6 +30,13 @@ interface AppState {
   seen: Set<string>;
   scanning: boolean;
   found: FoundComputer[];
+  /**
+   * True when the last scan could not run because Android 17 keeps DeskVNC
+   * off the local network (Nearby devices not allowed).
+   */
+  lanDenied: boolean;
+  /** Opens DeskVNC's page in Android settings. */
+  openAppSettings: () => void;
   tab: TabKey;
   setTab: (t: TabKey) => void;
   wizard: WizardState | null;
@@ -72,6 +79,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [seen, setSeen] = useState<Set<string>>(new Set());
   const [found, setFound] = useState<FoundComputer[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [lanDenied, setLanDenied] = useState(false);
   const [tab, setTabState] = useState<TabKey>("computers");
   const [wizard, setWizard] = useState<WizardState | null>(null);
   const [session, setSession] = useState<SessionRequest | null>(null);
@@ -105,6 +113,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (scanDone.current) return new Promise<void>((r) => setTimeout(r, 0));
     setScanning(true);
     setFound([]);
+    // Looking around the network is the moment Android 17's local network
+    // prompt makes sense to the person, so it is asked for here. Without it
+    // the scan would find nothing and say only that.
+    const lan = await api.localNetworkAsk().catch(() => "granted" as const);
+    setLanDenied(lan === "denied");
+    if (lan === "denied") {
+      setScanning(false);
+      return;
+    }
     const nextSeen = new Set<string>();
     await new Promise<void>((resolve) => {
       scanDone.current = resolve;
@@ -127,6 +144,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const openAppSettings = useCallback(() => {
+    void api.openAppSettings().catch(() => {});
+  }, []);
 
   const showToast = useCallback((text: string) => {
     setToast(text);
@@ -197,6 +218,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       seen,
       scanning,
       found,
+      lanDenied,
+      openAppSettings,
       tab,
       setTab: (t) => {
         haptic("select");
@@ -235,7 +258,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toast,
       showToast,
     }),
-    [hosts, loaded, thumbs, seen, scanning, found, tab, wizard, session, refresh, scan, saveHost, deleteHost, toggleFavorite, toast, showToast, sessionConnected, helpPrefill],
+    [hosts, loaded, thumbs, seen, scanning, found, lanDenied, openAppSettings, tab, wizard, session, refresh, scan, saveHost, deleteHost, toggleFavorite, toast, showToast, sessionConnected, helpPrefill],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

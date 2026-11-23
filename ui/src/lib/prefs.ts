@@ -86,6 +86,24 @@ export const PREF_HIDE_TOOLBAR = "hideToolbar";
 export const PREF_HIDE_AGENT_STATUS = "hideAgentStatus";
 
 /**
+ * Keep the agent activity strip to a single line, with a small chip per driven
+ * machine in place of the cards.
+ *
+ * Either way the strip keeps one height whether or not an agent is driving.
+ * That matters because the strip takes its height from the panes, and with
+ * "resize remote to fit" a pane that changed height resized the remote desktop
+ * between an agent's screenshot and its click (issue #52). This switch only
+ * picks which of the two fixed heights it keeps.
+ *
+ * ON by default, so read it with a fallback of `true`. The one line strip is
+ * about the height the old idle strip was, so it changes almost nothing for a
+ * person with agents turned on, and the cards are the opt in. Preferences
+ * shows it inverted, as "Show a card for each machine an agent drives". A
+ * value somebody already stored keeps meaning what they chose.
+ */
+export const PREF_COMPACT_AGENT_ROW = "compactAgentRow";
+
+/**
  * Fired on `window` when a boolean preference is written in THIS window.
  *
  * Preferences and the shell chrome share a window here, so a switch flipped in

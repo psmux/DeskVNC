@@ -21,16 +21,9 @@ import { useToasts } from "../state/ToastContext";
 import { hostProtocol, type ProtocolKind } from "../lib/types";
 import { inTauri, openSessionWindow, safeInvoke } from "../lib/tauri";
 import { parseConnectTarget, presetProtocol } from "../lib/address";
+import { devSessionId } from "../lib/devSession";
 import { classNames } from "../lib/util";
 import { IconMonitor, IconSearch, IconTerminal, IconX } from "./icons";
-
-/**
- * A session id for the browser-dev mock, where there is no shell to mint one.
- * Unique per pane, or two mock sessions would collide.
- */
-function devSessionId(): string {
-  return `dev-${Math.random().toString(36).slice(2, 10)}`;
-}
 
 function protocolIcon(protocol: ProtocolKind): ReactNode {
   return protocol === "ssh" ? <IconTerminal size={13} /> : <IconMonitor size={13} />;

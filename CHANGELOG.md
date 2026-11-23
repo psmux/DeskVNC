@@ -10,6 +10,106 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* RDP to Ubuntu with GNOME Remote Login (Settings, System, Remote Desktop,
+  Remote Login) now reaches the desktop after you sign in at the login
+  screen. GNOME hands the connection over to your own session with a
+  redirection that names no address, only a routing token and one time
+  credentials meant for RDSTLS, a sign in DeskVNC did not speak. It now
+  reconnects to the same computer, presents the token, and signs in with
+  RDSTLS. The one time credentials are used for that connection only and
+  never replace the ones saved with the host (#59).
+* Boundary, on a screen shared for viewing only (GNOME with Allow Remote
+  Interaction left off): ticking control just as the helper came in could
+  leave the box ticked with nothing said. The host marked the person's tick
+  as seen together with its own change to control a moment earlier. Only
+  its own change is marked seen now, so the tick goes back off with the
+  reason, as it does later in the session.
+* On a Retina Mac, a Remote Desktop session to Windows came up with every
+  word and icon at half size, and resizing the window did not change the
+  remote resolution. The desktop was asked for at the window's physical
+  pixel size with 100% scaling. The session now sends the screen's own
+  scale with it (200% on a Retina display), so Windows draws things the size
+  they are on the Mac, and a new host keeps the remote desktop matched to
+  the window as it is resized, the way Windows App does. Hosts with a
+  resolution already set keep it. A new host setting, "Match this screen's
+  scaling", turns the scale off for a host that should stay at 100%. When a
+  server does not change its resolution to match the window, the picture is
+  scaled to fit and a notice says so. VNC's "Remote resize" now asks for the
+  window's size in points on a Retina screen for the same reason (#60).
+* With "resize remote to fit" on, an agent's clicks could land off target.
+  The agent activity strip grew when an agent started driving and shrank
+  when it stopped, and a single pane gained and lost its header the same
+  way, so the remote desktop was resized between the agent's screenshot and
+  its click. While agents are turned on, the strip and the pane header now
+  keep one height whether or not an agent is driving. The strip is one line
+  by default, with a small chip per machine an agent drives. The cards are
+  still there behind a new preference, "Show a card for each machine an
+  agent drives", which keeps the strip taller at one fixed height (#52).
+* A TigerVNC server left on its defaults (`x0vncserver`, `Xvnc` or
+  `vncserver` with `SecurityTypes=TLSVnc,VncAuth`) could not be reached at
+  all. DeskVNC chose VeNCrypt, found only TLSVnc inside it, which it cannot
+  speak, and gave up. It now connects again with VncAuth, the way RealVNC's
+  viewer does. A server that offers nothing but TLSVnc gets a message naming
+  the SecurityTypes setting to change, and the phone no longer calls that a
+  failed sign in or a bad identity (#56).
+* When an Android phone cannot reach a computer, the error now also points
+  at the Nearby devices permission. Android 17 drops DeskVNC's connections
+  to the local network without it, and the connect just times out.
+* On Android 17 the phone app asked for the Nearby devices permission once,
+  at launch, and never again. When that prompt was missed or refused, every
+  computer on the same Wi-Fi sat on "Finding the computer" until it timed
+  out. The app now asks when it is needed: when Nearby looks around, and when
+  you connect to a computer on your network. When the permission is still
+  off, it says so straight away, with an Open settings button, instead of
+  waiting for a timeout (#56).
+
+* A Boundary session to a Mac at its sign in screen or lock screen ended on
+  the helper's first click, with "no connection could be established (failed
+  creating event source)", and again after every reconnect, so the helper
+  could not even watch. Input that cannot reach the computer is now dropped
+  and the screen goes on being shared. DeskVNC Support tries again every two
+  seconds, so control comes back by itself once someone at the Mac unlocks
+  it. On a Mac that cannot make an event source of its own, input now uses
+  the session's shared one instead.
+* At a Mac's sign in screen, DeskVNC Support showed the screen but every
+  click and key was dropped: macOS refused to let it reach the window server
+  before anyone signed in. Support now carries the marker macOS looks for,
+  as Apple's own screen sharing does, and the helper can click, open the
+  menus there and type into the password field.
+* On a Mac with no monitor attached, a helper who reached the sign in screen
+  after somebody signed out was cut off with "The selected display is no
+  longer connected". The display is now found when the helper arrives.
+* The viewer and the phone app say why typing and clicks are not landing,
+  such as a Mac at its lock screen, and take the message down when they land
+  again. DeskVNC Support tells only viewers that ask for it, so older viewers
+  are unaffected.
+* After a Boundary session had ended, the next key or click reported "Input
+  queue is full or disconnected", which hid why the session ended. It now
+  gives the session's own reason.
+
+## [0.36.5] (2026-11-20)
+
+0.36.4 was built but never published: Apple refused to notarize it until an
+updated developer agreement was signed. Its changes and those of 0.36.3, both
+listed below, are part of this release. Among them, the DeskVNC Support copy
+buttons put the invitation and the computer's ID on the clipboard again.
+
+### Fixed
+
+* A tampered credentials file could ask for so much memory and so many passes
+  that unlocking hung. Costs above 1 GiB, 64 passes or 64 lanes are now
+  refused as a malformed file. Everything DeskVNC writes is far below that.
+* A Boundary session could show an old screen after video. Once the screen
+  settled, the computer sent only the tiles video had drawn wrong, and when
+  those sat in opposite corners the viewer took them for a whole screen. The
+  next refresh, which comes every time an agent reads the screen after a
+  minute away, then painted the screen from before the video over the window
+  and the agent's mirror: a closed Launchpad or an earlier page came back in
+  blocks. The viewer now counts a screen as whole only when the tiles really
+  cover it.
+
 ## [0.36.4] (2026-11-16)
 
 0.36.3 was built but never published. Its changes, listed below under

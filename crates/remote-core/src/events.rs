@@ -234,6 +234,13 @@ pub enum ProtocolEvent {
     BoundaryRoute {
         direct: bool,
     },
+    /// Why a support session's computer is not taking this helper's typing
+    /// and clicks, in words to show, or `None` once it takes them again. The
+    /// screen is still shared meanwhile. A computer whose support app
+    /// predates this never says.
+    BoundaryInput {
+        trouble: Option<String>,
+    },
     Rdp(RdpEvent),
     Ssh(SshEvent),
 }

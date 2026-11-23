@@ -41,7 +41,23 @@ def outcome(case):
     raise ValueError(f"unknown check {check}")
 
 
+def check_token():
+    """The sense's hello is accepted only with the full shared secret."""
+    key = "k" * fastlane.MIN_KEY_LEN
+    want = [
+        (fastlane.token_ok(key, key), True),
+        (fastlane.token_ok(key[:-1] + "x", key), False),
+        (fastlane.token_ok(None, key), False),
+        (fastlane.token_ok("", ""), False),
+        (fastlane.token_ok("short", "short"), False),
+    ]
+    return sum(1 for got, ok in want if got != ok)
+
+
 def main():
+    if check_token():
+        print("FAIL token_ok accepts a token it should refuse")
+        sys.exit(1)
     cases = json.load(open(os.path.join(HERE, "cases.json"), encoding="utf-8"))["cases"]
     failed = 0
     for case in cases:

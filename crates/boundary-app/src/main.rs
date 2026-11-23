@@ -664,6 +664,13 @@ impl App {
                     // clipboard unasked: that would replace what the helper
                     // copied themselves.
                     Event::ClipboardText(text) => self.copied = Some(text),
+                    // On the helper's side: why what is typed and clicked
+                    // here is not reaching that computer, and when it does
+                    // again.
+                    Event::Notice(notice) => {
+                        self.status = notice.text().unwrap_or_else(|| INPUT_BACK.into());
+                        self.error = false;
+                    }
                     Event::Activity(line) => {
                         self.activity.push(line);
                         let excess = self.activity.len().saturating_sub(ACTIVITY_LINES);
@@ -1580,11 +1587,15 @@ fn clipboard_note(offered: bool, left_out: Option<&'static str>) -> Option<&'sta
 }
 const SHARE_AGAIN_HOVER: &str = "Ends this session and forgets the permission your desktop remembered, so it asks again. Your helper connects again with the new code.";
 const SHARE_AGAIN_STATUS: &str = "Sharing again. Give your helper the new code. When your desktop asks which screen to share, leave Allow Clipboard Access on";
+/// Said to a helper once its input reaches the other computer again.
+const INPUT_BACK: &str = "That computer is taking your typing and clicks again";
 /// What this copy of Support says it can do when it connects as a helper:
-/// take and give clipboard text, which the person there still has to allow.
+/// take and give clipboard text, which the person there still has to allow,
+/// and hear why its input is not reaching that computer.
 fn abilities() -> Abilities {
     Abilities {
         clipboard: true,
+        notices: true,
         ..Abilities::default()
     }
 }
