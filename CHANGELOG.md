@@ -10,6 +10,21 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* On Android 15 and later, with the phone held sideways, the status bar lay
+  over the session's connection badge, the toolbar pill and the keyboard
+  button, and a tap on their top edge went to the system. Android's web view
+  reports only the camera cutout as the safe area, so the app now measures
+  the status bar and the gesture bar itself and every screen keeps clear of
+  them.
+* Typing an address with a port, such as `10.0.2.2:5901`, into the phone's
+  quick connect could say "Nothing answered" while `vnc://` with the same
+  address connected. Before connecting the app checks what is listening, and
+  it gave the server only 200 ms to say hello; x11vnc can take half a second.
+  Quick connect and the nearby scan now wait longer for that first reply.
+* Updated the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594.
+
 ## [0.36.6] (2026-11-23)
 
 ### Added
