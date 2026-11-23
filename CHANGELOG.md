@@ -10,6 +10,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.6] (2026-11-23)
+
+### Added
+
+* The phone app has a round keyboard button at the bottom right of a session.
+  A tap brings up the keyboard and a second tap hides it, and after Android's
+  Back hid the keyboard one tap brings it back. Drag it anywhere; it settles
+  against the nearer side, keeps its place after you turn or fold the phone,
+  and moves up out of the way when the keyboard and key bar show. Settings,
+  Feel, "Keyboard button" hides it.
+
 ### Fixed
 
 * RDP to Ubuntu with GNOME Remote Login (Settings, System, Remote Desktop,
