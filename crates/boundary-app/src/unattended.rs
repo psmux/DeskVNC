@@ -74,6 +74,12 @@ pub struct Unattended {
     /// The person said no to the notice offering the copy at the sign in
     /// screen, or took that copy away themselves.
     login_notice_dismissed: bool,
+    /// Why the copy at the sign in screen should be set up again, if it
+    /// should: it runs from where the person can change it, or it is
+    /// another version than this app.
+    refresh: Option<crate::login::Refresh>,
+    /// The person said Not now to that, for as long as this app runs.
+    refresh_later: bool,
     /// Not listening for now, because another copy is: the one at the sign
     /// in or lock screen. Picked up again when it hands over.
     handed_over: bool,
@@ -109,6 +115,8 @@ impl Unattended {
             login: crate::login::enabled(),
             login_change: None,
             login_notice_dismissed: notice_dismissed(),
+            refresh: crate::login::refresh(),
+            refresh_later: false,
             handed_over: false,
             checked: std::time::Instant::now(),
             ctx: ctx.clone(),
@@ -119,6 +127,14 @@ impl Unattended {
         // points at where this copy is now.
         if this.autostart {
             let _ = autostart::set(true);
+        }
+        // Said in the log too, for whoever looks at why the sign in screen
+        // runs an older copy.
+        if let (Some(refresh), Ok(dir)) = (
+            this.refresh.as_ref(),
+            boundary_provision::platform::data_dir(),
+        ) {
+            crate::journal::note(&dir, "unattended.log", &refresh.log_line());
         }
         match Self::load() {
             Ok((path, key, access)) => {
@@ -484,6 +500,34 @@ impl Unattended {
     /// upgrade. Only the button asks for an administrator: Support never
     /// raises an administrator prompt on its own when it starts.
     pub fn login_notice(&mut self, ui: &mut egui::Ui) {
+        self.poll_login_change(ui.ctx());
+        // A copy at the sign in screen that runs from where the person can
+        // change it, or that an update left behind, is never left as it is
+        // without saying so.
+        if let Some(refresh) = self
+            .refresh
+            .clone()
+            .filter(|_| !self.refresh_later && self.login_change.is_none())
+        {
+            theme::card(ui, |ui| {
+                ui.label(egui::RichText::new(refresh.title()).strong());
+                theme::muted(ui, refresh.detail());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(refresh.button()).clicked() {
+                        self.set_login(true);
+                    }
+                    if ui.button("Not now").clicked() {
+                        self.refresh_later = true;
+                    }
+                });
+                // Asked from here, the answer is shown here too.
+                if self.error && !self.message.is_empty() {
+                    ui.colored_label(theme::pal(ui.ctx()).danger, &self.message);
+                }
+            });
+            ui.add_space(10.0);
+        }
         if !show_login_notice(
             crate::login::SUPPORTED,
             self.access.enabled,
@@ -765,38 +809,7 @@ impl Unattended {
 impl Unattended {
     /// Reachable before anyone signs in, after a restart for instance.
     fn login_setting(&mut self, ui: &mut egui::Ui) {
-        if let Some(change) = self.login_change.as_ref() {
-            match change.try_recv() {
-                Ok((on, Ok(()))) => {
-                    self.login = on;
-                    self.login_change = None;
-                    // Taken away on purpose: the notice would only ask again.
-                    if !on {
-                        self.dismiss_login_notice();
-                    }
-                    #[cfg(target_os = "linux")]
-                    let warning = on.then(crate::service::greeter_warning).flatten();
-                    #[cfg(not(target_os = "linux"))]
-                    let warning: Option<&str> = None;
-                    self.say(if let Some(warning) = warning {
-                        warning
-                    } else if on {
-                        "Paired helpers can now connect at the sign in screen too"
-                    } else {
-                        "Helpers can connect only once somebody signs in"
-                    });
-                }
-                Ok((_, Err(error))) => {
-                    self.login_change = None;
-                    self.fail(format!("{error:#}"));
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(250));
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.login_change = None,
-            }
-        }
+        self.poll_login_change(ui.ctx());
         let mut login = self.login;
         let changed = ui
             .add_enabled(
@@ -810,6 +823,45 @@ impl Unattended {
             .changed();
         if changed {
             self.set_login(login);
+        }
+    }
+    /// Take in the answer to setting the copy at the sign in screen up or
+    /// taking it away, from wherever it was asked for.
+    fn poll_login_change(&mut self, ctx: &egui::Context) {
+        if let Some(change) = self.login_change.as_ref() {
+            match change.try_recv() {
+                Ok((on, Ok(()))) => {
+                    self.login = on;
+                    self.login_change = None;
+                    // Taken away on purpose: the notice would only ask again.
+                    if !on {
+                        self.dismiss_login_notice();
+                    }
+                    #[cfg(target_os = "linux")]
+                    let warning = on.then(crate::service::greeter_warning).flatten();
+                    #[cfg(not(target_os = "linux"))]
+                    let warning: Option<&str> = None;
+                    let moved = on && self.refresh.is_some();
+                    self.refresh = crate::login::refresh();
+                    self.say(if let Some(warning) = warning {
+                        warning
+                    } else if moved {
+                        "The sign in screen now runs this version, from a copy only an administrator can change"
+                    } else if on {
+                        "Paired helpers can now connect at the sign in screen too"
+                    } else {
+                        "Helpers can connect only once somebody signs in"
+                    });
+                }
+                Ok((_, Err(error))) => {
+                    self.login_change = None;
+                    self.fail(format!("{error:#}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.login_change = None,
+            }
         }
     }
     /// Set the copy at the sign in screen up, or take it away, on a thread,

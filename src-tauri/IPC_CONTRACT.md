@@ -1329,13 +1329,13 @@ memory.
 
 ```jsonc
 {
-  "dir": "/Users/gj/.ssh",          // where it looked; also where Browse opens
+  "dir": "/Users/me/.ssh",          // where it looked; also where Browse opens
   "keys": [
     {
-      "path": "/Users/gj/.ssh/id_ed25519",
+      "path": "/Users/me/.ssh/id_ed25519",
       "name": "id_ed25519",
       "kind": "ed25519",            // "" when it cannot be named unlocked
-      "comment": "gj@laptop",       // the .pub sibling's trailing comment
+      "comment": "me@laptop",       // the .pub sibling's trailing comment
       "encrypted": false            // needs a passphrase to use
     }
   ]
@@ -1372,7 +1372,7 @@ matches nothing.
 ### `SshConnectOutcome`
 
 ```jsonc
-{ "status": "ready", "endpoint": "gj@box.local:22" }
+{ "status": "ready", "endpoint": "me@box.local:22" }
 { "status": "host-key-prompt", "host": "…", "port": 22,
   "keyType": "ssh-ed25519", "fingerprint": "SHA256:…" }
 { "status": "host-key-changed", "host": "…", "port": 22,
@@ -1412,8 +1412,8 @@ never log or replay them as something the server said.
 ### `TerminalState`
 
 ```jsonc
-{ "sessionId": "…", "type": "state", "state": "connecting", "endpoint": "gj@box:22" }
-{ "sessionId": "…", "type": "state", "state": "connected", "endpoint": "gj@box:22",
+{ "sessionId": "…", "type": "state", "state": "connecting", "endpoint": "me@box:22" }
+{ "sessionId": "…", "type": "state", "state": "connected", "endpoint": "me@box:22",
   "multiplexer": "tmux", "resumed": true }
 { "sessionId": "…", "type": "state", "state": "reconnecting", "attempt": 2,
   "delayMs": 500, "reason": "the connection stopped responding" }

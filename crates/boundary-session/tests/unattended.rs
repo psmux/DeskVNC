@@ -92,7 +92,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
             }
         };
         let mut helper =
-            boundary_session::viewer_as(ticket, "Godwin".into(), local(), Some(helper_key.clone()));
+            boundary_session::viewer_as(ticket, "Alex".into(), local(), Some(helper_key.clone()));
         let peer = loop {
             match host.events.recv().await {
                 Some(Event::Approval { answer, .. }) => {
@@ -109,7 +109,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
         );
         let mut access = Access::default();
         access.enabled = true;
-        access.trust(&peer, "Godwin", true).unwrap();
+        access.trust(&peer, "Alex", true).unwrap();
         access.save(&access_path).unwrap();
         let machine = unattended::machine_id(&machine_key);
         host.offer_pairing(machine.clone(), "Office PC".into())
@@ -147,7 +147,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
         // 3. The paired helper gets in with no password and sees the screen.
         let mut paired = unattended::connect_to(
             Ok(address.clone()),
-            "Godwin".into(),
+            "Alex".into(),
             None,
             helper_key.clone(),
             local(),
@@ -160,7 +160,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
                     session,
                     ..
                 }) => {
-                    assert_eq!(name, "Godwin");
+                    assert_eq!(name, "Alex");
                     assert!(control, "paired with control");
                     break session;
                 }
@@ -337,7 +337,7 @@ async fn a_helper_paired_in_person_comes_back_unattended_and_others_are_refused(
         access.save(&access_path).unwrap();
         let off = outcome(unattended::connect_to(
             Ok(address.clone()),
-            "Godwin".into(),
+            "Alex".into(),
             None,
             helper_key,
             local(),
@@ -648,7 +648,7 @@ async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
         let mut access = Access::default();
         access.enabled = true;
         access
-            .trust(&helper_key.public().to_string(), "Godwin", true)
+            .trust(&helper_key.public().to_string(), "Alex", true)
             .unwrap();
         access.save(&access_path).unwrap();
         let mut listener =
@@ -679,7 +679,7 @@ async fn a_paired_helper_reaches_a_machine_by_its_address_alone() {
         } else {
             format!("{ip}:{}", picked.port())
         };
-        let helper = unattended::connect(typed, "Godwin".into(), None, helper_key, local());
+        let helper = unattended::connect(typed, "Alex".into(), None, helper_key, local());
         assert_eq!(outcome(helper).await, Ok(true));
         listener.stop();
     })
@@ -771,7 +771,7 @@ async fn an_address_with_nothing_listening_says_so() {
     drop(free);
     let helper = unattended::connect(
         format!("127.0.0.1:{port}"),
-        "Godwin".into(),
+        "Alex".into(),
         None,
         helper_key,
         local(),

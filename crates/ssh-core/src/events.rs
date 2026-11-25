@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn a_resumed_session_says_so_and_names_its_multiplexer() {
         let json = serde_json::to_value(TerminalState::Connected {
-            endpoint: "gj@box:22".into(),
+            endpoint: "me@box:22".into(),
             multiplexer: Some(MultiplexerKind::Tmux),
             resumed: true,
         })
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn a_plain_shell_reports_a_null_multiplexer() {
         let json = serde_json::to_value(TerminalState::Connected {
-            endpoint: "gj@box:22".into(),
+            endpoint: "me@box:22".into(),
             multiplexer: None,
             resumed: false,
         })

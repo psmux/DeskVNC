@@ -33,7 +33,7 @@
 //! // tunnel alike, so trusting a machine once covers all three.
 //! let pins = Arc::new(Mutex::new(HostKeyStore::new()));
 //!
-//! let options = SshTermOptions::new(SshConfig::new("box.local", "gj"));
+//! let options = SshTermOptions::new(SshConfig::new("box.local", "me"));
 //! let (session, mut events) = SshSession::spawn(options, pins.clone());
 //!
 //! session.resize(120, 40).await?;

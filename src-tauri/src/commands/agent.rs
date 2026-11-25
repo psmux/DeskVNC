@@ -132,6 +132,7 @@ pub fn apply(app: &AppHandle, enabled: bool) {
         return;
     };
     let plane: Arc<AgentPlane> = state.agent.clone();
+    record_agents_off(app, !enabled);
     if !enabled {
         agent::stop(&plane);
         let _ = app.emit(
@@ -313,7 +314,18 @@ pub fn apply(app: &AppHandle, enabled: bool) {
                     "socket": path.display().to_string(),
                 }),
             );
-            wire_agents_in_background();
+            let setting = state
+                .store
+                .get_setting(agent::AGENT_AUTO_SETUP_KEY)
+                .unwrap_or_default();
+            let env = std::env::var(agent::NO_SETUP_ENV).ok();
+            if agent::auto_setup_enabled(setting.as_deref(), env.as_deref()) {
+                wire_agents_in_background();
+            } else {
+                tracing::info!(
+                    "connecting agents at launch is switched off; no agent config was touched"
+                );
+            }
         }
         Err(e) => {
             // Non fatal, and loud. The interactive product is unaffected by a
@@ -374,6 +386,42 @@ fn record_app_path(app: &AppHandle) {
     }
 }
 
+/// The file kept in the app's data folder while AI agents are turned off.
+/// Shared with `crates/dvv/src/launch.rs` (`AGENTS_OFF_FILE`); if one moves,
+/// move the other.
+const AGENTS_OFF_FILE: &str = "agents-off";
+
+/// Leave a note for `dvv` that agents are off, or take it away.
+///
+/// OpenCode, Claude Code and Codex start `dvv mcp` from their own config
+/// whether or not this app is running, and `dvv` opens the app when an agent
+/// asks for a machine. With the app closed there is no socket to ask whether
+/// agents are wanted, so a person who turned them off saw the app come back
+/// anyway (issue #72). `dvv` reads this file before it starts anything.
+fn record_agents_off(app: &AppHandle, off: bool) {
+    use tauri::Manager as _;
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let file = dir.join(AGENTS_OFF_FILE);
+    let done = if off {
+        std::fs::create_dir_all(&dir).and_then(|()| {
+            std::fs::write(
+                &file,
+                "AI agents are turned off in DeskVNCViewer, so dvv does not open it.\n",
+            )
+        })
+    } else {
+        match std::fs::remove_file(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(e) = done {
+        tracing::warn!(file = %file.display(), "could not record whether agents are off: {e}");
+    }
+}
+
 /// Read the setting at startup and apply it.
 pub fn install(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
@@ -396,6 +444,7 @@ pub fn install(app: &AppHandle) {
         // and `00 R40`: an ordinary install is unchanged by this feature
         // existing.
         tracing::debug!("the agent plane is off");
+        record_agents_off(app, true);
         return;
     }
     apply(app, true);
@@ -477,13 +526,28 @@ pub async fn agent_setup_agents() -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Take DeskVNC back out of every agent `dvv setup` wired, for a person who
+/// turned agents off and does not want their agents to keep it (issue #72).
+/// Runs `dvv setup --remove` and hands back what it printed.
+#[tauri::command]
+pub async fn agent_remove_from_agents() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| run_dvv(&["setup", "--remove"]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Run the bundled `dvv setup` and hand back what it printed.
+fn run_setup() -> Result<String, String> {
+    run_dvv(&["setup"])
+}
+
+/// Run the bundled `dvv` with `args` and hand back what it printed.
 ///
 /// Blocking: it waits on `dvv`, which in turn may wait on `claude mcp add`.
-fn run_setup() -> Result<String, String> {
+fn run_dvv(args: &[&str]) -> Result<String, String> {
     let dvv = agent::bundled_dvv().ok_or("this build has no dvv beside it")?;
     let mut command = std::process::Command::new(dvv);
-    command.arg("setup");
+    command.args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -493,10 +557,10 @@ fn run_setup() -> Result<String, String> {
     }
     let output = command
         .output()
-        .map_err(|e| format!("dvv setup could not run: {e}"))?;
+        .map_err(|e| format!("dvv {} could not run: {e}", args.join(" ")))?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
-    tracing::info!(ok = output.status.success(), "dvv setup ran");
+    tracing::info!(ok = output.status.success(), "dvv {} ran", args.join(" "));
     Ok(text.trim().to_string())
 }
 
@@ -505,8 +569,10 @@ fn run_setup() -> Result<String, String> {
 /// Run each time the plane comes up, so nobody has to press anything: an agent
 /// installed since the last launch is picked up, and one still pointing at the
 /// `dvv` of a previous version is pointed at this one. `dvv setup` leaves a
-/// config that already names this `dvv` untouched, so a launch with nothing to
-/// do changes no file. A build with no `dvv` beside it wires nothing.
+/// config that already names this `dvv` untouched, and a skill that is
+/// current unwritten, so a launch with nothing to do changes no file. A build
+/// with no `dvv` beside it wires nothing, and neither does a launch with
+/// "Connect agents automatically" off or `DVV_NO_SETUP=1` (issue #73).
 fn wire_agents_in_background() {
     if agent::bundled_dvv().is_none() {
         return;

@@ -87,6 +87,19 @@ closed.
 The plane is on unless somebody switches it off in the AI Agents panel, and
 off is remembered. It is reachable only by the user who started the app.
 
+With the plane off, `dvv` does not open DeskVNCViewer either: an agent that
+asks for a machine is told agents are turned off, and the app stays closed.
+The panel then offers "Remove from my agents", which runs
+`dvv setup --remove` and takes the MCP entries and skills back out of every
+agent, so they stop starting `dvv` at all. `dvv setup` puts them back.
+
+"Connect agents automatically", in the same panel, decides whether a launch
+runs `dvv setup`. It is on by default. Off, the plane still serves `dvv` and
+nothing is written into any agent's config at launch; "Connect now" and
+`dvv setup` in a terminal still work. `DVV_NO_SETUP=1` in the app's
+environment does the same as switching it off, for machines whose agent
+configs are managed by another tool.
+
 The same wiring from a terminal is `dvv setup`, or `dvv setup opencode` (or
 `pi`, `codex`, `claude`) for one agent. `dvv` sits beside the app: in
 `/Applications/DeskVNCViewer.app/Contents/MacOS/` on macOS (a plain
@@ -255,8 +268,11 @@ ends the set.
 
 `skills/deskvnc/SKILL.md` teaches the loop, both as MCP tools and as shell
 commands, and how to recover a machine without the user. It is compiled into
-`dvv`, and `dvv setup` writes it where each agent looks: `~/.claude/skills`,
-`~/.config/opencode/skills`, `~/.pi/agent/skills` and `~/.codex/skills`. The server's own `instructions`, sent on
+`dvv`, and `dvv setup` writes it where each agent looks: `~/.claude/skills`
+(or `$CLAUDE_CONFIG_DIR/skills`), `~/.config/opencode/skills`,
+`~/.pi/agent/skills` and `~/.codex/skills` (or `$CODEX_HOME/skills`, beside
+the `config.toml` there). A skill that is already current is not written
+again. The server's own `instructions`, sent on
 `initialize`, carry the four rules that matter most, so a client that passes
 those to its model already has the essentials without the skill.
 

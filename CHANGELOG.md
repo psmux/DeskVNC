@@ -10,6 +10,63 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* Turning AI agents off in DeskVNCViewer now also stops agents from opening
+  it. OpenCode, Claude Code and Codex start `dvv mcp` from their own settings
+  whether DeskVNC is running or not, and the first time an agent asked for a
+  machine `dvv` opened the app, even with agents switched off, so switching
+  them off looked like it did nothing (#72). The app now leaves a note in its
+  data folder while agents are off, and `dvv` reads it before it starts
+  anything; the agent is told agents are off. Starting an agent and listing
+  its tools never opened the app, and a test now covers every request an MCP
+  client sends at startup.
+* `dvv setup` writes the Claude Code skill into `$CLAUDE_CONFIG_DIR/skills`
+  when that is set, and the Codex entry and skill into `$CODEX_HOME`, which is
+  where those agents read them (#73).
+* `dvv setup` no longer rewrites a skill that has not changed, so a launch
+  with nothing to do really changes no file (#73).
+
+### Added
+
+* "Connect agents automatically" in the AI Agents panel. On by default; off,
+  a launch writes nothing into any agent's config while the plane still
+  serves `dvv`. `DVV_NO_SETUP=1` in the app's environment does the same (#73).
+* "Remove from my agents" in the AI Agents panel while agents are off, and
+  `dvv setup --remove [agent]` in a terminal, take out the MCP entries and
+  skills `dvv setup` added. Only entries that run a `dvv` are touched (#72).
+
+### Changed
+
+* The sign in screen copy of DeskVNC Support on macOS runs as root, and it
+  no longer follows links when it reads or writes in the person's data
+  folder. Its log, the unattended lock, the paired helpers and the machine
+  key are opened only when they are plain files belonging to that person,
+  reached without following a link on the way. It no longer makes the data
+  folder or a machine key there, files it made before are handed back to
+  the person, and the settings it reads are capped at a megabyte.
+* The same hardening on Windows, where the service starts the sign in screen
+  copy as SYSTEM. It now reaches the person's data folder from the root of
+  the drive one folder at a time, never through a symbolic link, a junction
+  or a mount point, and opens its log, the lock, the paired helpers and the
+  machine key only when each is a plain file with one name, belonging to the
+  person, SYSTEM or the Administrators group. It no longer makes the data
+  folder itself.
+* The sign in screen copy of DeskVNC Support on macOS now runs from a copy
+  only an administrator can change. Switching "Also before anyone signs in"
+  on copies the whole signed app to `/Library/Application Support/DeskVNC
+  Support/`, checks that the copy carries the app's own signature and that it
+  and every folder above it belong to root, and only then points the launch
+  agent at it. It runs with root's own home folder and is given the person's
+  home apart, so nothing it keeps lands in the person's home. Switching it
+  off removes the copy too. A Mac set up by an earlier version keeps running
+  the app in Applications until the app offers to move it, which it does the
+  first time it opens, and after an update the app offers to update the copy.
+  `sudo boundary --install-login-screen` and `--uninstall-login-screen` do the
+  same from a terminal.
+
+## [0.36.7] (2026-11-25)
+
 ### Added
 
 * DeskVNC Support on Linux can now be reached at the sign in screen, as the
@@ -43,7 +100,20 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   address connected. Before connecting the app checks what is listening, and
   it gave the server only 200 ms to say hello; x11vnc can take half a second.
   Quick connect and the nearby scan now wait longer for that first reply.
+* The phone's status bar icons were dark over the black session screen with
+  the light theme, and never changed when the phone switched between light
+  and dark mode. They now follow what is drawn under them: light over the
+  session, and matching the theme elsewhere. The same applies on iPhone.
 * Updated the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594.
+* Fast typing with Gboard on the phone could reach the computer with words
+  swapped round, such as "words. ok here" for "words here. ok". The app
+  emptied its hidden text field every 32 characters and cancelled Backspace
+  keys, so Gboard's idea of the caret fell out of step with the field, and
+  its next double space or suggestion landed at an old position. The field
+  now changes only by the keyboard while someone types.
+* Tapping a Gboard suggestion just after Enter rewrote the end of the line
+  already sent ("hello", Enter, "hero" gave "helro"). Such a rewrite is now
+  dropped and the new line starts clean.
 
 ## [0.36.6] (2026-11-23)
 

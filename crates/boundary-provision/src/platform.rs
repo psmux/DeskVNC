@@ -30,7 +30,11 @@ pub fn data_dir() -> Result<PathBuf> {
             .context("Cannot locate the user data directory")
     };
     Ok(match Platform::current()? {
-        Platform::MacOS => home()?.join("Library/Application Support/com.altrosyn.boundary"),
+        // The copy at the sign in screen runs with root's home and is given
+        // the person's.
+        Platform::MacOS => boundary_session::owned::person_home()
+            .context("Cannot locate the user data directory")?
+            .join("Library/Application Support/com.altrosyn.boundary"),
         Platform::Windows => {
             PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
                 .join("Boundary")
@@ -53,17 +57,12 @@ pub fn computer_name() -> String {
 /// the process however it ends.
 pub fn claim_unattended() -> Result<Option<std::fs::File>> {
     let dir = data_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("unattended.lock");
-    // On macOS the copy at the login window runs as root and may have made
-    // this file, which the person then cannot open for writing. A lock needs
-    // no writing.
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .or_else(|_| std::fs::File::open(&path))
+    // On macOS the copy at the login window runs as root in the person's
+    // folder, and on Windows as SYSTEM, so it makes nothing there and never follows a link to the
+    // lock. A lock needs no writing, so one an older version made as root
+    // opens too.
+    let file = boundary_session::owned::Folder::create(&dir)
+        .and_then(|folder| folder.lock("unattended.lock"))
         .context("Cannot open the unattended access lock")?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),

@@ -6,6 +6,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import java.util.Locale
 
@@ -30,11 +31,31 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     this.webView = webView
     webView.addJavascriptInterface(SafeAreaBridge(), "DeskVNCSafeArea")
+    webView.addJavascriptInterface(SystemBarsBridge(), "DeskVNCSystemBars")
     sendSafeArea()
   }
 
   inner class SafeAreaBridge {
     @JavascriptInterface fun read(): String = safeArea
+  }
+
+  // The colour of the status bar and navigation bar icons. enableEdgeToEdge
+  // picks it from the phone's dark mode, once, at start: dark icons on a
+  // phone in light mode, which left the clock and battery dark on the
+  // session's black stage, and on the dark theme's home screen when that
+  // theme was picked in Settings. The page knows what it draws under the
+  // bars, so it says (src/lib/systemBars.ts) and this applies it.
+  inner class SystemBarsBridge {
+    @JavascriptInterface fun set(icons: String) {
+      if (icons != "light" && icons != "dark") return
+      runOnUiThread {
+        // A "light" bar in Android's terms has a light backdrop, so dark icons.
+        val lightBackdrop = icons == "dark"
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.isAppearanceLightStatusBars = lightBackdrop
+        controller.isAppearanceLightNavigationBars = lightBackdrop
+      }
+    }
   }
 
   // Edge to edge, Android no longer shrinks the window for the soft

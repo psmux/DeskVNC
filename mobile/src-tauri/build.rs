@@ -27,6 +27,7 @@ pub const COMMANDS: &[&str] = &[
     "local_network_state",
     "local_network_ask",
     "app_settings_open",
+    "system_bars",
 ];
 
 fn main() {

@@ -12,7 +12,7 @@
   "target_kind": "offscreen stage in this process",
   "quality": "Auto",
   "started_unix_ms": 1792888298429,
-  "host": "Godwins-MacBook-Pro.local",
+  "host": "MacBook-Pro.local",
   "client_os": "macos aarch64",
   "load_1m": 19.31103515625,
   "cpus": 14,
