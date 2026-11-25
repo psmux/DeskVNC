@@ -218,7 +218,7 @@ mod imp {
                 return Err(refused(format!("{name} is not a plain file")));
             }
             if self.strict {
-                if u64::from(stat.st_nlink) != 1 {
+                if stat.st_nlink != 1 {
                     return Err(refused(format!("{name} has another name elsewhere")));
                 }
                 if stat.st_uid != self.owner && stat.st_uid != 0 {
