@@ -1,4 +1,5 @@
-#![forbid(unsafe_code)]
+// Denied everywhere but the Windows side of `owned`, which needs NtCreateFile.
+#![deny(unsafe_code)]
 
 pub mod direct;
 mod dns;

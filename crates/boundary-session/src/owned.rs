@@ -255,7 +255,10 @@ mod imp {
     }
 }
 
+// The one place in this crate that calls the system directly: Windows has
+// no safe binding that opens a file relative to a folder handle.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 mod imp {
     use super::{Open, plain_name};
     use std::ffi::OsStr;
