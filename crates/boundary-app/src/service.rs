@@ -165,6 +165,21 @@ mod imp {
         euid() == Some(0)
     }
 
+    /// A warning for the person who just switched the service on, when the
+    /// display manager is GDM with its sign in screen on Wayland.
+    pub fn greeter_warning() -> Option<&'static str> {
+        let manager = std::fs::read_link("/etc/systemd/system/display-manager.service").ok()?;
+        let name = manager.file_name()?.to_string_lossy().into_owned();
+        if !name.starts_with("gdm") {
+            return None;
+        }
+        let conf = ["/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"]
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        seat::gdm_on_wayland(&conf).then_some(seat::WAYLAND_GREETER_SETUP)
+    }
+
     /// Whether the service is set up.
     pub fn enabled() -> bool {
         Path::new(UNIT).exists()
@@ -288,6 +303,9 @@ mod imp {
             owner.name
         );
         println!("Its log: journalctl -u {UNIT_NAME}");
+        if let Some(warning) = greeter_warning() {
+            println!("{warning}.");
+        }
         Ok(())
     }
 

@@ -182,6 +182,22 @@ pub enum Plan {
 /// runs on Wayland.
 pub const WAYLAND_GREETER: &str = "The sign in screen on this computer runs on Wayland, which DeskVNC Support cannot show before somebody signs in. To reach it, the computer's administrator can switch the sign in screen to Xorg: set WaylandEnable=false in the [daemon] section of /etc/gdm3/custom.conf (/etc/gdm/custom.conf on some systems) and restart. Once somebody signs in, their own DeskVNC Support answers";
 
+/// Whether GDM's `custom.conf` leaves its sign in screen on Wayland, which
+/// it does unless `WaylandEnable=false` is set.
+pub fn gdm_on_wayland(custom_conf: &str) -> bool {
+    !custom_conf.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(k, v)| k.trim() == "WaylandEnable" && v.trim() == "false")
+    })
+}
+
+/// What the person who switches the service on is told when their display
+/// manager is GDM with its sign in screen on Wayland.
+pub const WAYLAND_GREETER_SETUP: &str = "Set up, but this computer's sign in screen runs on Wayland, which DeskVNC Support cannot show yet. Helpers who connect before anyone signs in are told so. To fix it, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
+
 /// What a helper is told when the sign in screen's X display cannot be
 /// opened.
 pub fn no_authority(display: &str) -> String {
@@ -505,6 +521,18 @@ mod tests {
         assert_eq!(plan(None, None, None), Plan::Idle);
         let tty = Session::parse("Id=5\nName=x\nUser=1000\nClass=user\nType=tty\n").unwrap();
         assert_eq!(plan(Some(&tty), None, None), Plan::Idle);
+    }
+
+    #[test]
+    fn tells_whether_gdm_keeps_its_sign_in_screen_on_wayland() {
+        let shipped = "[daemon]\n# Uncomment the line below to force the login screen to use Xorg\n#WaylandEnable=false\n";
+        assert!(gdm_on_wayland(shipped));
+        assert!(!gdm_on_wayland(
+            &shipped.replace("#WaylandEnable", "WaylandEnable")
+        ));
+        assert!(!gdm_on_wayland("[daemon]\nWaylandEnable = false\n"));
+        assert!(gdm_on_wayland("[daemon]\nWaylandEnable=true\n"));
+        assert!(gdm_on_wayland(""));
     }
 
     #[test]

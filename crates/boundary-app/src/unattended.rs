@@ -774,7 +774,13 @@ impl Unattended {
                     if !on {
                         self.dismiss_login_notice();
                     }
-                    self.say(if on {
+                    #[cfg(target_os = "linux")]
+                    let warning = on.then(crate::service::greeter_warning).flatten();
+                    #[cfg(not(target_os = "linux"))]
+                    let warning: Option<&str> = None;
+                    self.say(if let Some(warning) = warning {
+                        warning
+                    } else if on {
                         "Paired helpers can now connect at the sign in screen too"
                     } else {
                         "Helpers can connect only once somebody signs in"
