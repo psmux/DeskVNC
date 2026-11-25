@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.7] (2026-11-25)
+
 ### Added
 
 * DeskVNC Support on Linux can now be reached at the sign in screen, as the

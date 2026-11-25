@@ -1,7 +1,7 @@
 {
   "name": "deskvncviewer-ui",
   "private": true,
-  "version": "0.36.6",
+  "version": "0.36.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
