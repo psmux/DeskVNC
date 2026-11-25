@@ -175,6 +175,31 @@ WaylandEnable=false
 and restart. After you update DeskVNC Support from a newer tarball, run
 `--install-service` again so the service runs the new copy too.
 
+### Reaching a Mac at the sign in screen
+
+With unattended access on, the "Also before anyone signs in" switch in DeskVNC
+Support asks for an administrator once and sets up a launch agent that runs the
+app with no window at the sign in screen. From a terminal it is the same thing:
+
+```sh
+sudo "/Applications/DeskVNC Support.app/Contents/MacOS/boundary" --install-login-screen
+sudo "/Applications/DeskVNC Support.app/Contents/MacOS/boundary" --uninstall-login-screen
+```
+
+The launch agent runs as root, so it does not run the app you dragged to
+Applications, which your account can change. Switching it on copies the whole
+signed app to `/Library/Application Support/DeskVNC Support/`, where only an
+administrator can change it, checks that the copy carries the same signature,
+and writes `/Library/LaunchAgents/com.psmux.deskvnc.support.login.plist`
+pointing at it. It runs with root's own home folder and reads your machine ID,
+paired helpers and password from your data folder. Switching it off removes the
+launch agent and the copy.
+
+After you update DeskVNC Support, the app says the sign in screen still runs
+the older version and offers to update it, which asks for an administrator
+again. A Mac set up by 0.36.7 or earlier ran the app in Applications; the app
+offers to move it the first time it opens.
+
 ## Arch Linux
 
 The repository carries a PKGBUILD for `deskvncviewer-bin`, which repackages the

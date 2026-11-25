@@ -19,6 +19,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   reached without following a link on the way. It no longer makes the data
   folder or a machine key there, files it made before are handed back to
   the person, and the settings it reads are capped at a megabyte.
+* The sign in screen copy of DeskVNC Support on macOS now runs from a copy
+  only an administrator can change. Switching "Also before anyone signs in"
+  on copies the whole signed app to `/Library/Application Support/DeskVNC
+  Support/`, checks that the copy carries the app's own signature and that it
+  and every folder above it belong to root, and only then points the launch
+  agent at it. It runs with root's own home folder and is given the person's
+  home apart, so nothing it keeps lands in the person's home. Switching it
+  off removes the copy too. A Mac set up by an earlier version keeps running
+  the app in Applications until the app offers to move it, which it does the
+  first time it opens, and after an update the app offers to update the copy.
+  `sudo boundary --install-login-screen` and `--uninstall-login-screen` do the
+  same from a terminal.
 
 ## [0.36.7] (2026-11-25)
 

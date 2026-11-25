@@ -39,7 +39,7 @@ pub fn is_root() -> bool {
 pub fn person_home() -> Option<PathBuf> {
     [PERSON_HOME, "HOME"]
         .iter()
-        .filter_map(|name| std::env::var_os(name))
+        .filter_map(std::env::var_os)
         .map(PathBuf::from)
         .find(|home| home.is_absolute())
 }
