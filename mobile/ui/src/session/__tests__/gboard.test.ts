@@ -251,7 +251,7 @@ describe("a slow link", () => {
         }
       }
     };
-    const r = rig((el, send) => new HiddenField(el, (ops) => (send(ops), apply(ops))));
+    const r = rig(undefined, apply);
     const field: FakeInput = r.field;
     const g = new Gboard(field);
     g.type("helo<<llo");

@@ -231,10 +231,16 @@ export class FakeRemote {
   }
 }
 
-/** A field and a computer, wired together. */
-export function rig(make?: (el: () => FakeInput, send: (ops: FieldOp[]) => void) => HiddenField) {
+/**
+ * A field and a computer, wired together. `out`, when given, also gets
+ * every op, including a Backspace the session screen sends itself.
+ */
+export function rig(make?: (el: () => FakeInput, send: (ops: FieldOp[]) => void) => HiddenField, out?: (ops: FieldOp[]) => void) {
   const remote = new FakeRemote();
-  const field = new FakeInput(remote.apply, make);
+  const field = new FakeInput((ops) => {
+    remote.apply(ops);
+    out?.(ops);
+  }, make);
   field.open();
   return { field, remote };
 }
