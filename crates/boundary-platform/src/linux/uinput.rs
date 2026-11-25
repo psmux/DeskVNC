@@ -193,7 +193,10 @@ impl Uinput {
         // it opens the device is lost.
         std::thread::sleep(std::time::Duration::from_millis(500));
         let keymap = Keymap::configured();
-        eprintln!("Typing on the sign in screen as keyboard layout {}", keymap.name);
+        eprintln!(
+            "Typing on the sign in screen as keyboard layout {}",
+            keymap.name
+        );
         Ok(Self {
             dev,
             at: (SPAN / 2, SPAN / 2),

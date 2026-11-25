@@ -148,9 +148,9 @@ What it does:
   the machine ID back. Switch user, or lock the screen where the lock screen is
   the display manager's own (LightDM with light-locker), and the sign in screen
   is back on the screen, so the service answers until that session returns. A
-  lock screen drawn inside the session, as GNOME's is, is answered by the app
-  in that session. Another account's desktop is never shown through your
-  service.
+  lock screen drawn inside an X11 session, as GNOME's is, is answered by the
+  app in that session; on Wayland the service answers it, as below. Another
+  account's desktop is never shown through your service.
 
 What it writes down: `sign-in-screen.log` beside your machine ID in
 `~/.local/share/boundary/` says when it started, on which display, what the
@@ -165,12 +165,27 @@ A sign in screen on Wayland, GDM's default on Ubuntu, Fedora and Debian, shares
 itself with no program. There the service reads the picture straight from the
 graphics card's display planes and types and clicks through a virtual keyboard
 and pointer (uinput), both as root, and hands them to the copy running as you
-over a socket only you can open. This needs a graphics driver that scans out a
-plain, untiled buffer, as virtual machines and many simple drivers do; the
-pointer is not drawn in the picture. Where the buffer cannot be read the
-service says so in its log and tells a helper who connects, rather than showing
-a black screen. Switching GDM's own screen to Xorg then works everywhere, in
-`/etc/gdm3/custom.conf` (`/etc/gdm/custom.conf` on Fedora and Arch):
+over a socket only you can open. The same happens when a Wayland session's
+lock screen is up.
+
+* A virtual machine's screen is a plain buffer and is copied as it is. Intel
+  and AMD cards keep theirs tiled, often compressed, and the card untiles it
+  through Mesa's EGL and OpenGL ES (`libEGL.so.1`, `libGLESv2.so.2`, installed
+  with any desktop). The journal says which way it read the screen.
+* One screen is shown: the largest one lit. GDM shows its prompt on each, so
+  that is enough to sign in; a second monitor is not shown.
+* The pointer is drawn into the picture.
+* Text is typed through the keyboard layout the system is set to, from
+  `/etc/default/keyboard`, localed's `/etc/X11/xorg.conf.d/00-keyboard.conf`
+  or `/etc/vconsole.conf`, through xkbcommon. Only the first layout is used,
+  and a lock screen that someone switched to another layout of their own
+  still gets the system's.
+* NVIDIA's own driver is not supported yet.
+
+Where the buffer cannot be read the service says so in its log and tells a
+helper who connects, rather than showing a black screen. Switching GDM's own
+screen to Xorg then works everywhere, in `/etc/gdm3/custom.conf`
+(`/etc/gdm/custom.conf` on Fedora and Arch):
 
 ```ini
 [daemon]

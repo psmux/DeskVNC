@@ -62,7 +62,10 @@ fn from_shell(text: &str) -> Layout {
         let Some((key, value)) = line.trim().split_once('=') else {
             continue;
         };
-        let value = value.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        let value = value
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_string();
         match key.trim() {
             "XKBMODEL" => l.model = value,
             "XKBLAYOUT" => l.layout = value,
@@ -117,7 +120,7 @@ const KEY_RIGHTALT: u16 = 100;
 const ISO_LEVEL3_SHIFT: u32 = 0xfe03;
 
 #[repr(C)]
-struct RuleNames {
+pub(crate) struct RuleNames {
     rules: *const c_char,
     model: *const c_char,
     layout: *const c_char,
@@ -236,7 +239,12 @@ impl Keymap {
                         continue;
                     }
                     let syms = std::slice::from_raw_parts(syms, n as usize);
-                    if level == 0 && syms.contains(&ISO_LEVEL3_SHIFT) && level3_key.is_none() {
+                    // Right Alt when it is AltGr, as on most layouts; some
+                    // keymaps also have a key no keyboard has (<LVL3>).
+                    if level == 0
+                        && syms.contains(&ISO_LEVEL3_SHIFT)
+                        && (level3_key.is_none() || code == KEY_RIGHTALT)
+                    {
                         level3_key = Some(code);
                     }
                     let mut masks = [0u32; 16];
@@ -287,7 +295,10 @@ impl Keymap {
             if level3_key.is_none() && keys.values().any(|s| s.level3) {
                 level3_key = Some(KEY_RIGHTALT);
             }
-            ensure!(keys.contains_key(&'a') || keys.len() > 20, "An empty layout");
+            ensure!(
+                keys.contains_key(&'a') || keys.len() > 20,
+                "An empty layout"
+            );
             keys.entry('\n').or_insert(Stroke {
                 code: 28,
                 shift: false,
@@ -307,7 +318,10 @@ impl Keymap {
     }
 
     pub fn stroke(&self, c: char) -> Option<Stroke> {
-        self.keys.get(&c).copied().filter(|s| !s.level3 || self.level3_key.is_some())
+        self.keys
+            .get(&c)
+            .copied()
+            .filter(|s| !s.level3 || self.level3_key.is_some())
     }
 }
 

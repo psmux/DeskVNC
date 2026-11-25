@@ -172,6 +172,8 @@ const PRIME_HANDLE_TO_FD: libc::c_ulong = iowr(0x2d, size_of::<PrimeHandle>());
 const GEM_CLOSE: libc::c_ulong = iow(0x64, 0x09, size_of::<GemClose>());
 const DMA_BUF_SYNC: libc::c_ulong = iow(b'b' as u32, 0, size_of::<DmaBufSync>());
 const CAP_UNIVERSAL_PLANES: u64 = 2;
+/// Shows a plane's position and source properties; nothing is committed.
+const CAP_ATOMIC: u64 = 3;
 const OBJECT_PLANE: u32 = 0xeeee_eeee;
 const FB_MODIFIERS: u32 = 2;
 pub(crate) const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
@@ -271,6 +273,11 @@ impl Kms {
             };
             let mut cap = SetClientCap {
                 capability: CAP_UNIVERSAL_PLANES,
+                value: 1,
+            };
+            let _ = ioctl(&card, SET_CLIENT_CAP, &mut cap);
+            let mut cap = SetClientCap {
+                capability: CAP_ATOMIC,
                 value: 1,
             };
             let _ = ioctl(&card, SET_CLIENT_CAP, &mut cap);
@@ -398,7 +405,12 @@ impl Kms {
             let p = self.props(id);
             let int = |k: &str| p.get(k).map(|&v| v as i64);
             let fixed = |k: &str| p.get(k).map(|&v| (v >> 16) as u32);
-            let src = match (fixed("SRC_X"), fixed("SRC_Y"), fixed("SRC_W"), fixed("SRC_H")) {
+            let src = match (
+                fixed("SRC_X"),
+                fixed("SRC_Y"),
+                fixed("SRC_W"),
+                fixed("SRC_H"),
+            ) {
                 (Some(x), Some(y), Some(w), Some(h)) if w > 0 && h > 0 => {
                     Some(Region { x, y, w, h })
                 }
@@ -454,14 +466,19 @@ impl Kms {
                 .iter()
                 .find(|l| l.crtc_id == crtc && l.kind == PLANE_PRIMARY)
         };
-        // The largest lit screen with something on its primary plane; the
-        // first of equals, which is the first the driver lists.
-        let mut best: Option<(u64, Layer)> = None;
+        let pointer_on = |crtc: u32| {
+            layers
+                .iter()
+                .any(|l| l.crtc_id == crtc && l.kind == PLANE_CURSOR)
+        };
+        // The largest lit screen with something on its primary plane; of
+        // equals the one the pointer is on, else the first the driver lists.
+        let mut best: Option<((u64, bool), Layer)> = None;
         for &(crtc, w, h) in &crtcs {
             if let Some(&layer) = primary_on(crtc) {
-                let area = w as u64 * h as u64;
-                if best.as_ref().is_none_or(|(a, _)| area > *a) {
-                    best = Some((area, layer));
+                let rank = (w as u64 * h as u64, pointer_on(crtc));
+                if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+                    best = Some((rank, layer));
                 }
             }
         }
@@ -481,7 +498,9 @@ impl Kms {
                         biggest = Some((area, layer));
                     }
                 }
-                biggest.map(|(_, l)| l).ok_or_else(|| anyhow::Error::new(Asleep))?
+                biggest
+                    .map(|(_, l)| l)
+                    .ok_or_else(|| anyhow::Error::new(Asleep))?
             }
         };
         let cursor = layers
@@ -529,8 +548,18 @@ impl Kms {
                             ((v - plane) as i64 * src as i64 / crtc as i64) as i32
                         }
                     };
-                    let x = scale(cursor.at.0, primary.at.0, region_w(&primary), primary.size.0);
-                    let y = scale(cursor.at.1, primary.at.1, region_h(&primary), primary.size.1);
+                    let x = scale(
+                        cursor.at.0,
+                        primary.at.0,
+                        region_w(&primary),
+                        primary.size.0,
+                    );
+                    let y = scale(
+                        cursor.at.1,
+                        primary.at.1,
+                        region_h(&primary),
+                        primary.size.1,
+                    );
                     blend(&mut picture, &pixels, region.w, region.h, x, y);
                 }
                 self.close(&fb);
@@ -552,7 +581,10 @@ impl Kms {
 
     /// `region` of `fb` as RGBA, and how it was read.
     fn read(&mut self, fb: &FbCmd2, region: Region) -> Result<(Vec<u8>, String)> {
-        ensure!(fb.handles[0] != 0, "The kernel gave no buffer for the screen");
+        ensure!(
+            fb.handles[0] != 0,
+            "The kernel gave no buffer for the screen"
+        );
         let modifier = modifier(fb);
         let mappable = matches!(fb.pixel_format, XRGB8888 | ARGB8888);
         let plain_driver = PLAIN_DRIVERS.contains(&self.driver.as_str());

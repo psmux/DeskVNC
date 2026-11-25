@@ -522,7 +522,13 @@ impl Gpu {
             );
             (gl.glGenFramebuffers)(1, &mut fbo);
             (gl.glBindFramebuffer)(GL_FRAMEBUFFER, fbo);
-            (gl.glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            (gl.glFramebufferTexture2D)(
+                GL_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                tex,
+                0,
+            );
             self.canvas = Some((fbo, tex, w, h));
             ensure!(
                 (gl.glCheckFramebufferStatus)(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
@@ -535,7 +541,10 @@ impl Gpu {
     /// `region` of `buf` as RGBA, top row first, with the alpha the buffer
     /// has (opaque for an X format).
     pub fn read(&mut self, buf: &DmaBuf, region: Region) -> Result<Vec<u8>> {
-        ensure!(!buf.planes.is_empty() && buf.planes.len() <= 4, "Odd buffer");
+        ensure!(
+            !buf.planes.is_empty() && buf.planes.len() <= 4,
+            "Odd buffer"
+        );
         ensure!(
             region.w > 0
                 && region.h > 0
@@ -820,17 +829,7 @@ pub(crate) mod tests {
                     .collect(),
             }
         };
-        let got = gpu
-            .read(
-                &exported,
-                Region {
-                    x: 0,
-                    y: 0,
-                    w,
-                    h,
-                },
-            )
-            .unwrap();
+        let got = gpu.read(&exported, Region { x: 0, y: 0, w, h }).unwrap();
         assert!(got == want, "the picture came back changed");
         // And a region of it, as a screen's source rectangle crops.
         let r = Region {
