@@ -168,6 +168,9 @@ pub enum Plan {
         display: String,
         authority: PathBuf,
     },
+    /// The sign in screen runs on Wayland, which shares itself with no
+    /// program. Only root can read it, from the display hardware.
+    Wayland { session: String },
     /// The sign in screen is there but cannot be shown: say why to anyone
     /// who connects.
     Unavailable { session: String, reason: String },
@@ -229,9 +232,8 @@ pub fn plan(
         };
     }
     match session.kind {
-        Kind::Wayland => Plan::Unavailable {
+        Kind::Wayland => Plan::Wayland {
             session: session.id.clone(),
-            reason: WAYLAND_GREETER.into(),
         },
         Kind::X11 => match (display.or_else(|| session.display.clone()), authority) {
             (Some(display), Some(authority)) => Plan::Share {
@@ -503,10 +505,12 @@ mod tests {
             Plan::Unavailable { reason, .. } if reason.contains(":0")
         ));
         let wayland = Session::parse(GDM_WAYLAND_GREETER).unwrap();
-        assert!(matches!(
+        assert_eq!(
             plan(Some(&wayland), None, None),
-            Plan::Unavailable { reason, .. } if reason.contains("WaylandEnable=false")
-        ));
+            Plan::Wayland {
+                session: "c1".into()
+            }
+        );
         let user = Session::parse(USER_SESSION).unwrap();
         assert_eq!(
             plan(Some(&user), Some(":0".into()), Some("/x".into())),

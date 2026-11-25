@@ -38,6 +38,9 @@ const RUN_DIR: &str = "/run/deskvnc-support";
 /// Set for a host that cannot show the screen, with the reason a helper is
 /// given.
 pub const UNAVAILABLE: &str = "DESKVNC_SIGN_IN_SCREEN_UNAVAILABLE";
+/// Set for a host whose screen and input the service provides from the
+/// display hardware, with the socket to reach it on.
+pub const BROKERED: &str = "DESKVNC_SIGN_IN_SCREEN_BROKER";
 
 /// The systemd unit, running `program` for the account `uid` whose data
 /// folder is `data`.
@@ -92,6 +95,9 @@ fn describe(plan: &crate::seat::Plan) -> String {
             session, display, ..
         } => format!(
             "Sign in screen on X display {display} (session {session}): sharing it with paired helpers"
+        ),
+        Plan::Wayland { session } => format!(
+            "Sign in screen on Wayland (session {session}): sharing it with paired helpers, read from the display hardware"
         ),
         Plan::Unavailable { session, reason } => {
             format!("Sign in screen (session {session}) cannot be shared: {reason}")
@@ -345,7 +351,7 @@ mod imp {
         Ok(path)
     }
 
-    fn spawn(owner: &Account, data: &Path, plan: &Plan) -> Result<Child> {
+    fn spawn(owner: &Account, data: &Path, plan: &Plan, broker: Option<&Path>) -> Result<Child> {
         let exe = std::env::current_exe()?;
         let mut command = Command::new(exe);
         command
@@ -375,9 +381,49 @@ mod imp {
             Plan::Unavailable { reason, .. } => {
                 command.env(UNAVAILABLE, reason);
             }
+            Plan::Wayland { .. } => {
+                let socket = broker.context("No socket for the Wayland sign in screen")?;
+                command.env(BROKERED, socket);
+            }
             _ => bail!("Nothing to share"),
         }
         Ok(command.spawn()?)
+    }
+
+    /// A socket in the root owned folder that only `owner` may open, served
+    /// by a thread that reads the screen and makes input as root until
+    /// `stop` is set.
+    fn broker(
+        owner: &Account,
+        session: &str,
+        stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<PathBuf> {
+        let dir = Path::new(RUN_DIR);
+        std::fs::create_dir_all(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+        let path = dir.join(format!("{session}.sock"));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::os::unix::fs::chown(&path, Some(owner.uid), Some(owner.gid))?;
+        let stop = stop.clone();
+        std::thread::spawn(move || boundary_platform::kms_serve(listener, stop));
+        Ok(path)
+    }
+
+    /// A Wayland sign in screen is shared from the display hardware when
+    /// that can be read here, and otherwise explained.
+    fn resolve(plan: Plan) -> Plan {
+        match plan {
+            Plan::Wayland { session } => match boundary_platform::kms_probe() {
+                Ok(_) => Plan::Wayland { session },
+                Err(error) => Plan::Unavailable {
+                    session,
+                    reason: format!("{} ({error:#})", seat::WAYLAND_GREETER),
+                },
+            },
+            other => other,
+        }
     }
 
     /// Ask the host to stop, and make sure it has.
@@ -408,16 +454,32 @@ mod imp {
         ));
         let mut current = Plan::Idle;
         let mut child: Option<Child> = None;
+        // Stops the thread serving the current Wayland sign in screen.
+        let mut stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut started = Instant::now() - Duration::from_secs(60);
         loop {
-            let wanted = seat::active();
+            let found = seat::active();
+            // Probing the display hardware takes a moment, so only when
+            // the session changes.
+            let wanted = match (&found, &current) {
+                (Plan::Wayland { session }, Plan::Wayland { session: now })
+                | (Plan::Wayland { session }, Plan::Unavailable { session: now, .. })
+                    if session == now =>
+                {
+                    current.clone()
+                }
+                _ => resolve(found),
+            };
             let running = child
                 .as_mut()
                 .is_some_and(|c| matches!(c.try_wait(), Ok(None)));
             if wanted != current {
                 say(&describe(&wanted));
             }
-            let share = matches!(wanted, Plan::Share { .. } | Plan::Unavailable { .. });
+            let share = matches!(
+                wanted,
+                Plan::Share { .. } | Plan::Unavailable { .. } | Plan::Wayland { .. }
+            );
             // A host that ended on its own is started again, but not more
             // than every five seconds.
             let restart = share && !running && started.elapsed() > Duration::from_secs(5);
@@ -425,10 +487,24 @@ mod imp {
                 if let Some(old) = child.take() {
                     stop(old);
                 }
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = std::fs::remove_dir_all(RUN_DIR);
                 if share {
                     started = Instant::now();
-                    match spawn(&owner, data, &wanted) {
+                    stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let socket = match &wanted {
+                        Plan::Wayland { session } => match broker(&owner, session, &stop) {
+                            Ok(path) => Some(path),
+                            Err(error) => {
+                                say(&format!(
+                                    "Could not open the sign in screen's socket: {error:#}"
+                                ));
+                                None
+                            }
+                        },
+                        _ => None,
+                    };
+                    match spawn(&owner, data, &wanted, socket.as_deref()) {
                         Ok(c) => child = Some(c),
                         Err(error) => say(&format!("Could not start the host: {error:#}")),
                     }
