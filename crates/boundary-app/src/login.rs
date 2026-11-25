@@ -551,9 +551,12 @@ mod imp {
 
     /// Whether `requirement`, a running program's own, holds it to a
     /// certificate from Apple. An ad hoc signature gives only its own hash,
-    /// and a certificate of one's own gives no Apple anchor.
+    /// and a certificate of one's own gives no Apple anchor. A requirement
+    /// with a second way to meet it does not count either.
     pub(super) fn apple_anchored(requirement: &str) -> bool {
-        requirement.contains("anchor apple") && !requirement.contains("cdhash")
+        requirement.contains("anchor apple")
+            && !requirement.contains("cdhash")
+            && !requirement.contains(" or ")
     }
 
     /// Quoted for `sh`.
@@ -591,7 +594,7 @@ plist={plist}
 fail() {{ rm -rf "$stage"; echo "$1" >&2; exit 1; }}
 own={own}
 case "$own" in
-  *cdhash*) fail "DeskVNC Support is not signed through Apple, so the sign in screen copy was not set up" ;;
+  *cdhash*|*" or "*) fail "DeskVNC Support is not signed through Apple, so the sign in screen copy was not set up" ;;
   *"anchor apple"*) ;;
   *) fail "DeskVNC Support is not signed through Apple, so the sign in screen copy was not set up" ;;
 esac
@@ -667,6 +670,15 @@ mv -f "$plist.partial" "$plist"
             )
     }
 
+    /// Whether this running program meets `requirement`, as macOS checks it.
+    fn running_meets(requirement: &str) -> bool {
+        std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "-R", &format!("={requirement}")])
+            .arg(std::process::id().to_string())
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
     /// The script that sets the copy up for the person whose home is `home`.
     fn setup(home: &str) -> Result<String> {
         ensure!(
@@ -685,6 +697,10 @@ mv -f "$plist.partial" "$plist"
         ensure!(
             apple_anchored(&own),
             "This copy of DeskVNC Support is not signed through Apple, so it cannot run at the sign in screen"
+        );
+        ensure!(
+            running_meets(&team),
+            "This copy of DeskVNC Support is not signed by the DeskVNC team, so it cannot run at the sign in screen"
         );
         Ok(install_script(
             &bundle.to_string_lossy(),
@@ -972,6 +988,10 @@ mod tests {
         assert!(!apple_anchored(
             r#"cdhash H"8d2c7b5b4c5e0a3f1d6e9b2a7c4f0e1d3b5a6c7d" or anchor apple generic"#
         ));
+        // Ad hoc, given a requirement of its own that names the app.
+        assert!(!apple_anchored(
+            r#"identifier "com.psmux.deskvnc.support" or anchor apple generic"#
+        ));
         // A certificate of one's own.
         assert!(!apple_anchored(
             r#"identifier "com.psmux.deskvnc.support" and certificate root = H"0123456789abcdef0123456789abcdef01234567""#
@@ -994,6 +1014,7 @@ mod tests {
         let refusal = "DeskVNC Support is not signed through Apple";
         for own in [
             r#"cdhash H"8d2c7b5b4c5e0a3f1d6e9b2a7c4f0e1d3b5a6c7d""#,
+            r#"identifier "com.psmux.deskvnc.support" or anchor apple generic"#,
             r#"identifier "com.psmux.deskvnc.support" and certificate root = H"0123456789abcdef0123456789abcdef01234567""#,
         ] {
             let script = install_script(
