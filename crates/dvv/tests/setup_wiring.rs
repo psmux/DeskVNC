@@ -43,7 +43,10 @@ impl Sandbox {
             .env_clear()
             .env("HOME", self.home())
             .env("SHELL", "/bin/sh")
-            .env("PATH", format!("{}:/usr/bin:/bin", self.root.join("bin").display()))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
+            )
             .env("XDG_CONFIG_HOME", self.home().join(".config"));
         for (key, value) in env {
             command.env(key, value);
@@ -123,7 +126,10 @@ fn remove_takes_out_what_setup_wrote_and_nothing_else() {
     let sandbox = Sandbox::new("remove");
     let codex_home = sandbox.root.join("codex-home");
     let claude_dir = sandbox.root.join("claude-config");
-    let env: [(&str, &Path); 2] = [("CODEX_HOME", &codex_home), ("CLAUDE_CONFIG_DIR", &claude_dir)];
+    let env: [(&str, &Path); 2] = [
+        ("CODEX_HOME", &codex_home),
+        ("CLAUDE_CONFIG_DIR", &claude_dir),
+    ];
 
     let config_dir = sandbox.home().join(".config/opencode");
     std::fs::create_dir_all(&config_dir).unwrap();

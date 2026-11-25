@@ -105,8 +105,7 @@ pub fn app_data_dir() -> Option<std::path::PathBuf> {
         .filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(".local/share"))
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
         })?;
     Some(data.join(IDENTIFIER))
 }

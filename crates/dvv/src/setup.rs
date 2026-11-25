@@ -935,7 +935,9 @@ fn remove_opencode(home: &Path) -> Result<Vec<String>, String> {
 }
 
 fn remove_pi(home: &Path) -> Vec<String> {
-    let mut lines: Vec<String> = remove_skill(&home.join(".pi/agent/skills")).into_iter().collect();
+    let mut lines: Vec<String> = remove_skill(&home.join(".pi/agent/skills"))
+        .into_iter()
+        .collect();
     if lines.is_empty() {
         lines.push("no DeskVNC skill".to_string());
     }
@@ -1252,9 +1254,14 @@ mod tests {
             remove_json_entry(first).unwrap(),
             "{\n  // mine\n  \"mcp\": {\n    \"other\": { \"command\": [\"/x/other\"] }\n  }\n}\n"
         );
-        let last = "{ \"mcp\": { \"other\": {}, \"deskvnc\": { \"command\": [\"/a/dvv\", \"mcp\"] } } }";
-        assert_eq!(remove_json_entry(last).unwrap(), "{ \"mcp\": { \"other\": {} } }");
-        let only = "{\n  \"mcp\": {\n    \"deskvnc\": { \"command\": [\"/a/dvv\", \"mcp\"] }\n  }\n}\n";
+        let last =
+            "{ \"mcp\": { \"other\": {}, \"deskvnc\": { \"command\": [\"/a/dvv\", \"mcp\"] } } }";
+        assert_eq!(
+            remove_json_entry(last).unwrap(),
+            "{ \"mcp\": { \"other\": {} } }"
+        );
+        let only =
+            "{\n  \"mcp\": {\n    \"deskvnc\": { \"command\": [\"/a/dvv\", \"mcp\"] }\n  }\n}\n";
         let out = remove_json_entry(only).unwrap();
         assert_eq!(out, "{\n  \"mcp\": {\n  }\n}\n");
         assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());

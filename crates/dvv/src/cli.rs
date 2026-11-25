@@ -103,7 +103,14 @@ fn parse(argv: &[String]) -> Args {
                 .unwrap_or(false)
                 && !matches!(
                     name,
-                    "json" | "fake" | "stdio" | "http" | "discovered" | "perceive" | "wait" | "remove"
+                    "json"
+                        | "fake"
+                        | "stdio"
+                        | "http"
+                        | "discovered"
+                        | "perceive"
+                        | "wait"
+                        | "remove"
                 );
             if takes_value {
                 flags.insert(name.to_string(), argv[index + 1].clone());

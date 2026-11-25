@@ -38,8 +38,7 @@ async fn agents_turned_off_in_the_app_keep_dvv_from_opening_it() {
     std::fs::create_dir_all(&data).expect("the app's data folder");
     let started = scratch.join("app-was-started");
     let stub = scratch.join("stub-app");
-    std::fs::write(&stub, format!("#!/bin/sh\ntouch '{}'\n", started.display()))
-        .expect("the stub");
+    std::fs::write(&stub, format!("#!/bin/sh\ntouch '{}'\n", started.display())).expect("the stub");
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -61,7 +60,10 @@ async fn agents_turned_off_in_the_app_keep_dvv_from_opening_it() {
 
     let began = Instant::now();
     let hosts = client
-        .call("tools/call", json!({ "name": "dvv_hosts", "arguments": {} }))
+        .call(
+            "tools/call",
+            json!({ "name": "dvv_hosts", "arguments": {} }),
+        )
         .await;
     assert!(
         began.elapsed() < Duration::from_secs(10),

@@ -72,7 +72,12 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     assert!(tools["result"]["tools"].as_array().is_some(), "{tools}");
     // OpenCode, Claude Code and Codex also ask for prompts and resources, and
     // ping, at startup (issue #72). None of it may start the app.
-    for method in ["prompts/list", "resources/list", "resources/templates/list", "ping"] {
+    for method in [
+        "prompts/list",
+        "resources/list",
+        "resources/templates/list",
+        "ping",
+    ] {
         let _ = client.call(method, json!({})).await;
     }
     let limbs = client
