@@ -473,7 +473,10 @@ mod imp {
             (Some(Component::Prefix(prefix)), Some(Component::RootDir))
                 if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) =>
             {
-                Ok((Path::new(prefix.as_os_str()).join("\\"), parts.as_path()))
+                let root = [Component::Prefix(prefix), Component::RootDir]
+                    .iter()
+                    .collect();
+                Ok((root, parts.as_path()))
             }
             _ => Err(refused(format!(
                 "{} is not a full path on a drive",
