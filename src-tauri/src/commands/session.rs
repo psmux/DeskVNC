@@ -3238,13 +3238,14 @@ mod credential_keeping_tests {
 mod save_session_as_host_tests {
     use super::*;
 
-    fn typed(password: &str, username: Option<&str>, remember: bool) -> UsedCredential {
+    /// A password made at run time: a test needs one, and none belongs in the source.
+    fn typed(username: Option<&str>, remember: bool) -> UsedCredential {
         UsedCredential {
             credential: PendingCredentialSave {
                 protocol: ProtocolKind::Vnc,
                 username: username.map(str::to_string),
                 domain: None,
-                password: password.to_string(),
+                password: uuid::Uuid::new_v4().to_string(),
             },
             remember,
             proven: false,
@@ -3256,8 +3257,7 @@ mod save_session_as_host_tests {
     #[test]
     fn only_a_proven_credential_is_offered() {
         let used = Mutex::new(HashMap::new());
-        used.lock()
-            .insert("s1".to_string(), typed("pw", None, false));
+        used.lock().insert("s1".to_string(), typed(None, false));
         assert_eq!(
             credential_state_of(used.lock().get("s1")),
             SessionCredentialState::default()
@@ -3281,7 +3281,7 @@ mod save_session_as_host_tests {
 
     #[test]
     fn the_state_says_whether_a_user_name_came_with_it_and_whether_remember_was_ticked() {
-        let mut u = typed("pw", Some("alex"), true);
+        let mut u = typed(Some("alex"), true);
         u.proven = true;
         assert_eq!(
             credential_state_of(Some(&u)),
@@ -3291,7 +3291,7 @@ mod save_session_as_host_tests {
                 remembered: true
             }
         );
-        let mut blank_name = typed("pw", Some("  "), false);
+        let mut blank_name = typed(Some("  "), false);
         blank_name.proven = true;
         assert!(!credential_state_of(Some(&blank_name)).has_username);
     }
@@ -3301,13 +3301,11 @@ mod save_session_as_host_tests {
     #[test]
     fn a_failed_attempt_forgets_only_an_unproven_credential() {
         let used = Mutex::new(HashMap::new());
-        used.lock()
-            .insert("wrong".to_string(), typed("nope", None, false));
+        used.lock().insert("wrong".to_string(), typed(None, false));
         drop_unproven_used(&used, "wrong");
         assert!(used.lock().get("wrong").is_none());
 
-        used.lock()
-            .insert("good".to_string(), typed("pw", None, false));
+        used.lock().insert("good".to_string(), typed(None, false));
         mark_used_proven(&used, "good");
         drop_unproven_used(&used, "good");
         assert!(used.lock().get("good").is_some_and(|u| u.proven));
@@ -3323,8 +3321,9 @@ mod save_session_as_host_tests {
     /// The credential is never printed, even in a debug log of the entry.
     #[test]
     fn a_used_credential_never_prints_its_password() {
-        let printed = format!("{:?}", typed("hunter2", Some("alex"), true));
-        assert!(!printed.contains("hunter2"), "{printed}");
+        let used = typed(Some("alex"), true);
+        let printed = format!("{used:?}");
+        assert!(!printed.contains(&used.credential.password), "{printed}");
     }
 
     #[test]
