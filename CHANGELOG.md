@@ -23,6 +23,10 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   address connected. Before connecting the app checks what is listening, and
   it gave the server only 200 ms to say hello; x11vnc can take half a second.
   Quick connect and the nearby scan now wait longer for that first reply.
+* The phone's status bar icons were dark over the black session screen with
+  the light theme, and never changed when the phone switched between light
+  and dark mode. They now follow what is drawn under them: light over the
+  session, and matching the theme elsewhere. The same applies on iPhone.
 * Updated the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594.
 
 ## [0.36.6] (2026-11-23)
