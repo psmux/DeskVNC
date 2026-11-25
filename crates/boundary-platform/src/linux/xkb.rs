@@ -3,8 +3,9 @@
 //!
 //! The virtual keyboard sends key positions, and the compositor turns them
 //! into characters through its own layout. To type a helper's text right
-//! on, say, a German or French machine, the service reads the layout the
-//! system is set to (what GDM's screen starts with) and asks xkbcommon,
+//! on, say, a German or French machine, the service asks localed for the
+//! layout the system is set to, which is what GDM's screen starts with,
+//! and asks xkbcommon,
 //! loaded when first needed, which key and modifiers give each character.
 //! Without xkbcommon it types as a US keyboard would.
 
@@ -23,20 +24,33 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// What the system is set to, from the files localed and Debian's
-    /// keyboard-configuration keep; US where none says.
+    /// What the system is set to: localed's answer, which GDM uses, else
+    /// the files localed keeps, newest kind first, else Debian's
+    /// keyboard-configuration; US where none says. Ubuntu 26.04's localed
+    /// keeps the layout in vconsole.conf and leaves /etc/default/keyboard
+    /// as it was installed, so that file is the last asked.
     pub fn configured() -> Self {
         let read = |p: &str| std::fs::read_to_string(p).ok();
-        let found = read("/etc/default/keyboard")
-            .map(|t| from_shell(&t))
+        let found = std::process::Command::new("localectl")
+            .arg("status")
+            .env("LC_ALL", "C")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| from_localectl(&String::from_utf8_lossy(&o.stdout)))
             .filter(|l| !l.layout.is_empty())
+            .or_else(|| {
+                read("/etc/vconsole.conf")
+                    .map(|t| from_shell(&t))
+                    .filter(|l| !l.layout.is_empty())
+            })
             .or_else(|| {
                 read("/etc/X11/xorg.conf.d/00-keyboard.conf")
                     .map(|t| from_xorg(&t))
                     .filter(|l| !l.layout.is_empty())
             })
             .or_else(|| {
-                read("/etc/vconsole.conf")
+                read("/etc/default/keyboard")
                     .map(|t| from_shell(&t))
                     .filter(|l| !l.layout.is_empty())
             });
@@ -52,6 +66,25 @@ impl Layout {
         let first = |s: &str| s.split(',').next().unwrap_or("").trim().to_string();
         (first(&self.layout), first(&self.variant))
     }
+}
+
+/// `localectl status`, in the C locale.
+fn from_localectl(text: &str) -> Layout {
+    let mut l = Layout::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.trim().split_once(':') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        match key.trim() {
+            "X11 Model" => l.model = value,
+            "X11 Layout" => l.layout = value,
+            "X11 Variant" => l.variant = value,
+            "X11 Options" => l.options = value,
+            _ => {}
+        }
+    }
+    l
 }
 
 /// `XKBLAYOUT="de"` lines, as /etc/default/keyboard and vconsole.conf
@@ -339,6 +372,12 @@ mod tests {
         let l = from_xorg(xorg);
         assert_eq!((l.layout.as_str(), l.variant.as_str()), ("fr", "azerty"));
         assert_eq!(from_shell("KEYMAP=us\nXKBLAYOUT=gb\n").layout, "gb");
+        let localectl = "   System Locale: LANG=en_US.UTF-8\n       VC Keymap: (unset)\n      X11 Layout: de\n       X11 Model: pc105\n     X11 Variant: nodeadkeys\n";
+        let l = from_localectl(localectl);
+        assert_eq!(l.model, "pc105");
+        assert_eq!(l.first(), ("de".into(), "nodeadkeys".into()));
+        // Unset is a line with nothing to say.
+        assert!(from_localectl("   VC Keymap: (unset)\n").layout.is_empty());
     }
 
     #[test]
