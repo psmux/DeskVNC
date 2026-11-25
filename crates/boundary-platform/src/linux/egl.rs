@@ -805,17 +805,22 @@ pub(crate) mod tests {
             );
             (api.image.eglDestroyImageKHR)(gpu.display, image);
             (gl.glDeleteTextures)(1, &tex);
+            if fds[0] < 0 {
+                // A software renderer can say yes and hand back nothing.
+                eprintln!("skipped: {} exported no buffer", gpu.name);
+                return;
+            }
             eprintln!(
                 "exported {w}x{h} as {:?} with modifier {modifier:#x} in {planes} plane(s) on {}",
                 fourcc.to_le_bytes().map(|b| b as char),
                 gpu.name
             );
-            DmaBuf {
+            let buf = DmaBuf {
                 width: w,
                 height: h,
                 fourcc: fourcc as u32,
                 modifier: Some(modifier),
-                planes: (0..planes as usize)
+                planes: (0..planes.clamp(1, 4) as usize)
                     .map(|i| DmaPlane {
                         // A plane may share the first one's descriptor.
                         fd: OwnedFd::from_raw_fd(libc::dup(if fds[i] >= 0 {
@@ -827,7 +832,11 @@ pub(crate) mod tests {
                         pitch: strides[i] as u32,
                     })
                     .collect(),
+            };
+            for fd in fds.into_iter().filter(|&fd| fd >= 0) {
+                libc::close(fd);
             }
+            buf
         };
         let got = gpu.read(&exported, Region { x: 0, y: 0, w, h }).unwrap();
         assert!(got == want, "the picture came back changed");
