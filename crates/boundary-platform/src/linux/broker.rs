@@ -255,7 +255,20 @@ pub fn kms_serve(listener: UnixListener, stop: std::sync::Arc<std::sync::atomic:
             Ok((stream, _)) => {
                 let _ = stream.set_nonblocking(false);
                 std::thread::spawn(move || {
-                    if let Err(error) = answer(stream) {
+                    // The host going away, when somebody signs in, is how
+                    // this normally ends.
+                    let gone = |e: &anyhow::Error| {
+                        e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                            matches!(
+                                e.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                            )
+                        })
+                    };
+                    if let Err(error) = answer(stream)
+                        && !gone(&error)
+                    {
                         eprintln!("Sign in screen input or capture stopped: {error:#}");
                     }
                 });
