@@ -286,6 +286,9 @@ fn main() {
             // machine has, which is what the AI Agents panel's Set up button
             // runs.
             "agent_setup_agents",
+            // Taking that entry back out of every agent, offered once agents
+            // are turned off.
+            "agent_remove_from_agents",
         ]),
     ))
     .expect("failed to run tauri-build");

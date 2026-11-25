@@ -70,6 +70,11 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     assert!(init.get("result").is_some(), "{init}");
     let tools = client.call("tools/list", json!({})).await;
     assert!(tools["result"]["tools"].as_array().is_some(), "{tools}");
+    // OpenCode, Claude Code and Codex also ask for prompts and resources, and
+    // ping, at startup (issue #72). None of it may start the app.
+    for method in ["prompts/list", "resources/list", "resources/templates/list", "ping"] {
+        let _ = client.call(method, json!({})).await;
+    }
     let limbs = client
         .call(
             "tools/call",
@@ -80,7 +85,7 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     assert_eq!(
         plane::start_attempts(),
         0,
-        "initialize, tools/list or dvv_limbs tried to start DeskVNCViewer"
+        "what an MCP client sends at startup, or dvv_limbs, tried to start DeskVNCViewer"
     );
 
     // An agent asking for the saved machines needs the application.
@@ -111,6 +116,17 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     assert_eq!(plane::start_attempts(), 1);
 
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Refused before anything is spawned: the environment first, then a person
+/// turning AI agents off in the app.
+#[test]
+fn a_refusal_is_decided_before_anything_is_spawned() {
+    use plane::StartOutcome;
+    assert_eq!(plane::start_refused(false, false), None);
+    assert_eq!(plane::start_refused(true, false), Some(StartOutcome::NoStartEnv));
+    assert_eq!(plane::start_refused(false, true), Some(StartOutcome::AgentsOff));
+    assert_eq!(plane::start_refused(true, true), Some(StartOutcome::NoStartEnv));
 }
 
 /// The decision on its own, which is all macOS adds a path around.

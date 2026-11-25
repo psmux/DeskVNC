@@ -10,6 +10,32 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* Turning AI agents off in DeskVNCViewer now also stops agents from opening
+  it. OpenCode, Claude Code and Codex start `dvv mcp` from their own settings
+  whether DeskVNC is running or not, and the first time an agent asked for a
+  machine `dvv` opened the app, even with agents switched off, so switching
+  them off looked like it did nothing (#72). The app now leaves a note in its
+  data folder while agents are off, and `dvv` reads it before it starts
+  anything; the agent is told agents are off. Starting an agent and listing
+  its tools never opened the app, and a test now covers every request an MCP
+  client sends at startup.
+* `dvv setup` writes the Claude Code skill into `$CLAUDE_CONFIG_DIR/skills`
+  when that is set, and the Codex entry and skill into `$CODEX_HOME`, which is
+  where those agents read them (#73).
+* `dvv setup` no longer rewrites a skill that has not changed, so a launch
+  with nothing to do really changes no file (#73).
+
+### Added
+
+* "Connect agents automatically" in the AI Agents panel. On by default; off,
+  a launch writes nothing into any agent's config while the plane still
+  serves `dvv`. `DVV_NO_SETUP=1` in the app's environment does the same (#73).
+* "Remove from my agents" in the AI Agents panel while agents are off, and
+  `dvv setup --remove [agent]` in a terminal, take out the MCP entries and
+  skills `dvv setup` added. Only entries that run a `dvv` are touched (#72).
+
 ## [0.36.7] (2026-11-25)
 
 ### Added

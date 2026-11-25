@@ -23,7 +23,7 @@ describe("quoting a path so it survives being pasted", () => {
     // A person compares this against what `dvv doctor` printed. Quoting a path
     // that needs no quoting makes two identical paths look different.
     expect(shellQuote("/usr/local/bin/dvv")).toBe("/usr/local/bin/dvv");
-    expect(shellQuote("/Users/gj/.cargo/bin/dvv")).toBe("/Users/gj/.cargo/bin/dvv");
+    expect(shellQuote("/Users/me/.cargo/bin/dvv")).toBe("/Users/me/.cargo/bin/dvv");
   });
 
   it("quotes a path with a space in it", () => {
@@ -31,7 +31,7 @@ describe("quoting a path so it survives being pasted", () => {
   });
 
   it("closes and reopens around an apostrophe, which is the only way", () => {
-    expect(shellQuote("/Users/gj/o'brien/dvv")).toBe("'/Users/gj/o'\\''brien/dvv'");
+    expect(shellQuote("/Users/me/o'brien/dvv")).toBe("'/Users/me/o'\\''brien/dvv'");
   });
 
   it("uses double quotes for a Windows path, where single ones mean nothing", () => {
@@ -289,6 +289,19 @@ describe("what the button says afterwards", () => {
     expect(needsManualSetup("already")).toBe(false);
     for (const outcome of ["no-claude", "no-binary", "timed-out", "failed", "unsupported"] as const) {
       expect(needsManualSetup(outcome)).toBe(true);
+    }
+  });
+});
+
+describe("Connect agents automatically", () => {
+  it("is on unless a person switched it off, read the way the shell reads it", async () => {
+    const { AGENT_AUTO_SETUP_KEY, autoSetupOn } = await import("./agentSetup");
+    expect(AGENT_AUTO_SETUP_KEY).toBe("agent_auto_setup");
+    expect(autoSetupOn(null)).toBe(true);
+    expect(autoSetupOn("")).toBe(true);
+    expect(autoSetupOn("true")).toBe(true);
+    for (const off of ["false", "0", "no", "off", " OFF "]) {
+      expect(autoSetupOn(off)).toBe(false);
     }
   });
 });

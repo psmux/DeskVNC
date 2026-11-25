@@ -103,7 +103,7 @@ fn parse(argv: &[String]) -> Args {
                 .unwrap_or(false)
                 && !matches!(
                     name,
-                    "json" | "fake" | "stdio" | "http" | "discovered" | "perceive" | "wait"
+                    "json" | "fake" | "stdio" | "http" | "discovered" | "perceive" | "wait" | "remove"
                 );
             if takes_value {
                 flags.insert(name.to_string(), argv[index + 1].clone());
@@ -165,6 +165,7 @@ pub async fn run(argv: Vec<String>) -> i32 {
         "watch" => watch(&args).await,
         "stop" => stop(&args).await,
         "hold" => hold(&args).await,
+        "setup" if args.has("remove") => crate::setup::remove(args.at(0)),
         "setup" => crate::setup::run(args.at(0)),
         _ => match tool_call(&args) {
             Ok((tool, arguments)) => {
@@ -1195,6 +1196,9 @@ dvv, the agent plane for DeskVNCViewer.
   dvv setup [opencode|pi|codex|claude]
                                    wire dvv into the agents installed here,
                                    or into the one named
+  dvv setup --remove [opencode|pi|codex|claude]
+                                   take out what dvv setup added: the MCP
+                                   entries that run a dvv, and the skill
   dvv doctor                       what is wired, and the claude mcp add line
   dvv version
 

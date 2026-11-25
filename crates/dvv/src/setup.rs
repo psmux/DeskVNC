@@ -337,12 +337,65 @@ fn find_agent(name: &str) -> Option<PathBuf> {
     Some(found)
 }
 
+/// Write the skill, unless the file already holds exactly this text.
+///
+/// The app runs this at every launch, and rewriting a file that has not
+/// changed is still a change to someone who keeps their agents' files under
+/// a tool that reports drift (issue #73), and to anything watching mtimes.
 fn write_skill(dir: &Path) -> Result<String, String> {
     let dir = dir.join("deskvnc");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let file = dir.join("SKILL.md");
+    if std::fs::read(&file).is_ok_and(|current| current == SKILL.as_bytes()) {
+        return Ok(format!("skill at {} is current", file.display()));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     std::fs::write(&file, SKILL).map_err(|e| format!("{}: {e}", file.display()))?;
     Ok(format!("skill written to {}", file.display()))
+}
+
+/// Take out the skill `write_skill` put in `dir`, and its folder when that
+/// leaves it empty. A file of that name that is not ours is left.
+fn remove_skill(dir: &Path) -> Option<String> {
+    let folder = dir.join("deskvnc");
+    let file = folder.join("SKILL.md");
+    let text = std::fs::read_to_string(&file).ok()?;
+    if !text.contains("name: deskvnc") {
+        return Some(format!(
+            "{} is not the DeskVNC skill, so it was left alone",
+            file.display()
+        ));
+    }
+    if let Err(e) = std::fs::remove_file(&file) {
+        return Some(format!("could not remove {}: {e}", file.display()));
+    }
+    let _ = std::fs::remove_dir(&folder);
+    Some(format!("removed the skill at {}", file.display()))
+}
+
+/// A directory named by an environment variable, or `fallback` when the
+/// variable is unset or empty.
+fn dir_from(var: Option<std::ffi::OsString>, fallback: PathBuf) -> PathBuf {
+    var.filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(fallback)
+}
+
+/// Claude Code's config folder: `CLAUDE_CONFIG_DIR` when it is set, which is
+/// where Claude Code then reads skills from, and `~/.claude` otherwise.
+pub fn claude_dir(home: &Path, var: Option<std::ffi::OsString>) -> PathBuf {
+    dir_from(var, home.join(".claude"))
+}
+
+/// Codex's home: `CODEX_HOME` when it is set, `~/.codex` otherwise. Its
+/// `config.toml` and its `skills` both live there.
+pub fn codex_dir(home: &Path, var: Option<std::ffi::OsString>) -> PathBuf {
+    dir_from(var, home.join(".codex"))
+}
+
+/// OpenCode's global config folder: `$XDG_CONFIG_HOME/opencode`, or
+/// `~/.config/opencode`.
+fn opencode_dir(home: &Path) -> PathBuf {
+    dir_from(std::env::var_os("XDG_CONFIG_HOME"), home.join(".config")).join("opencode")
 }
 
 /// Keep the original before the first edit, never overwriting an older copy.
@@ -358,10 +411,7 @@ fn backup(file: &Path) -> Result<(), String> {
 }
 
 fn opencode(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
-    let dir = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"))
-        .join("opencode");
+    let dir = opencode_dir(home);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let entry = format!(
         r#""deskvnc": {{ "type": "local", "command": [{}, "mcp", "--stdio"], "enabled": true }}"#,
@@ -666,7 +716,7 @@ fn is_a_dvv(path: &Path) -> bool {
 }
 
 fn codex(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
-    let dir = home.join(".codex");
+    let dir = codex_dir(home, std::env::var_os("CODEX_HOME"));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let file = dir.join("config.toml");
     let text = std::fs::read_to_string(&file).unwrap_or_default();
@@ -680,7 +730,7 @@ fn codex(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
             }
             None => format!("{} already uses this dvv", file.display()),
         };
-        return Ok(vec![line, write_skill(&home.join(".codex/skills"))?]);
+        return Ok(vec![line, write_skill(&dir.join("skills"))?]);
     }
     if file.exists() {
         backup(&file)?;
@@ -694,7 +744,7 @@ fn codex(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
     std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
     Ok(vec![
         format!("added the deskvnc MCP server to {}", file.display()),
-        write_skill(&home.join(".codex/skills"))?,
+        write_skill(&dir.join("skills"))?,
     ])
 }
 
@@ -792,8 +842,302 @@ fn claude(home: &Path, exe: &Path) -> Result<Vec<String>, String> {
             lines.push("pointed deskvnc in Claude Code at this dvv".to_string());
         }
     }
-    lines.push(write_skill(&home.join(".claude/skills"))?);
+    lines.push(write_skill(
+        &claude_dir(home, std::env::var_os("CLAUDE_CONFIG_DIR")).join("skills"),
+    )?);
     Ok(lines)
+}
+
+/// `dvv setup --remove`: take out what `dvv setup` added, from one agent or
+/// from every one it knows.
+///
+/// For a person who turned AI agents off in DeskVNCViewer and does not want
+/// their agents to keep starting `dvv` (issue #72), and for anyone who wants
+/// the wiring gone. Only what this wrote is touched: an MCP entry named
+/// deskvnc whose command is a `dvv`, and a skill that is the DeskVNC skill.
+/// A wrapper somebody registered under that name is left, and said so. Each
+/// edited file keeps its original beside it, as setup does.
+pub fn remove(target: Option<&str>) -> i32 {
+    #[cfg(unix)]
+    adopt_login_path();
+    let Some(home) = home() else {
+        eprintln!("neither HOME nor USERPROFILE is set, so there is no agent config to find");
+        return 1;
+    };
+    let chosen: Vec<&str> = match target {
+        Some(name) if AGENTS.contains(&name) => vec![name],
+        Some(other) => {
+            eprintln!(
+                "{other:?} is not an agent dvv setup knows. It knows {}.",
+                AGENTS.join(", ")
+            );
+            return 2;
+        }
+        // Every one, installed or not: a config can outlive the agent.
+        None => AGENTS.to_vec(),
+    };
+    let mut failed = false;
+    for name in chosen {
+        let outcome = match name {
+            "opencode" => remove_opencode(&home),
+            "pi" => Ok(remove_pi(&home)),
+            "codex" => remove_codex(&home),
+            _ => remove_claude(&home),
+        };
+        match outcome {
+            Ok(lines) => {
+                println!("{name}:");
+                for line in lines {
+                    println!("  {line}");
+                }
+            }
+            Err(e) => {
+                failed = true;
+                println!("{name}: not changed: {e}");
+            }
+        }
+    }
+    println!();
+    println!("Restart an agent that was open so it lets go of DeskVNC. dvv setup puts it back.");
+    i32::from(failed)
+}
+
+fn remove_opencode(home: &Path) -> Result<Vec<String>, String> {
+    let dir = opencode_dir(home);
+    let mut lines = Vec::new();
+    for file in ["opencode.jsonc", "opencode.json"].map(|name| dir.join(name)) {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if !text.contains("\"deskvnc\"") {
+            continue;
+        }
+        match remove_json_entry(&text) {
+            Some(edited) => {
+                backup(&file)?;
+                std::fs::write(&file, edited).map_err(|e| format!("{}: {e}", file.display()))?;
+                lines.push(format!(
+                    "removed the deskvnc MCP server from {}",
+                    file.display()
+                ));
+            }
+            None => lines.push(format!(
+                "the deskvnc entry in {} does not run a dvv, so it was left alone",
+                file.display()
+            )),
+        }
+    }
+    if lines.is_empty() {
+        lines.push("no deskvnc MCP server in its config".to_string());
+    }
+    lines.extend(remove_skill(&dir.join("skills")));
+    Ok(lines)
+}
+
+fn remove_pi(home: &Path) -> Vec<String> {
+    let mut lines: Vec<String> = remove_skill(&home.join(".pi/agent/skills")).into_iter().collect();
+    if lines.is_empty() {
+        lines.push("no DeskVNC skill".to_string());
+    }
+    lines.push(
+        "Pi starts nothing by itself; the dvv on PATH is left, and does nothing until something runs it"
+            .to_string(),
+    );
+    lines
+}
+
+fn remove_codex(home: &Path) -> Result<Vec<String>, String> {
+    let dir = codex_dir(home, std::env::var_os("CODEX_HOME"));
+    let file = dir.join("config.toml");
+    let mut lines = Vec::new();
+    match std::fs::read_to_string(&file) {
+        Ok(text) if text.contains("[mcp_servers.deskvnc]") => match remove_toml_table(&text) {
+            Some(edited) => {
+                backup(&file)?;
+                std::fs::write(&file, edited).map_err(|e| format!("{}: {e}", file.display()))?;
+                lines.push(format!(
+                    "removed the deskvnc MCP server from {}",
+                    file.display()
+                ));
+            }
+            None => lines.push(format!(
+                "the deskvnc table in {} does not run a dvv, so it was left alone",
+                file.display()
+            )),
+        },
+        _ => lines.push("no deskvnc MCP server in its config".to_string()),
+    }
+    lines.extend(remove_skill(&dir.join("skills")));
+    Ok(lines)
+}
+
+fn remove_claude(home: &Path) -> Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    if let Some(claude) = find_agent("claude") {
+        let run = |args: &[&str]| {
+            std::process::Command::new(&claude)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|e| format!("could not run claude: {e}"))
+        };
+        let got = run(&["mcp", "get", "deskvnc"])?;
+        let described = String::from_utf8_lossy(&got.stdout).to_string();
+        if !got.status.success() {
+            lines.push("deskvnc is not registered with Claude Code".to_string());
+        } else if !described
+            .split_whitespace()
+            .any(|word| names_a_dvv(word.trim_matches(|c| c == '"' || c == '\'' || c == ',')))
+        {
+            lines.push(
+                "the deskvnc server in Claude Code does not run a dvv, so it was left alone"
+                    .to_string(),
+            );
+        } else {
+            let removed = run(&["mcp", "remove", "--scope", "user", "deskvnc"])?;
+            if removed.status.success() {
+                lines.push("removed deskvnc from Claude Code".to_string());
+            } else {
+                return Err(format!(
+                    "claude mcp remove failed: {}. It may be registered in another scope; claude mcp get deskvnc says which",
+                    String::from_utf8_lossy(&removed.stderr).trim()
+                ));
+            }
+        }
+    } else {
+        lines.push("Claude Code is not installed".to_string());
+    }
+    lines.extend(remove_skill(
+        &claude_dir(home, std::env::var_os("CLAUDE_CONFIG_DIR")).join("skills"),
+    ));
+    Ok(lines)
+}
+
+/// The end of the JSON value that starts at `start`, an object or array,
+/// skipping strings and comments: the index just past its closing bracket.
+fn value_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Take the `"deskvnc"` entry out of an OpenCode config, with the comma that
+/// joined it to its neighbour, by cutting text so comments and layout
+/// survive. `None` when there is no such entry, or its command is not a
+/// `dvv`.
+pub fn remove_json_entry(text: &str) -> Option<String> {
+    let key = text.find("\"deskvnc\"")?;
+    let colon = key + "\"deskvnc\"".len();
+    let open = colon + text[colon..].find('{')?;
+    if text[colon..open].trim() != ":" {
+        return None;
+    }
+    let end = value_end(text, open)?;
+    let body = &text[open..end];
+    let command = body.find("\"command\"")?;
+    let first = command + body[command..].find('[')?;
+    let quote = first + body[first..].find('"')?;
+    let rest = &body[quote + 1..];
+    let close = rest.find('"')?;
+    if !names_a_dvv(&rest[..close].replace("\\\\", "\\")) {
+        return None;
+    }
+    let after = &text[end..];
+    let trimmed = after.trim_start();
+    if let Some(stripped) = trimmed.strip_prefix(',') {
+        // Followed by another entry: take the comma after it and the space
+        // up to that entry.
+        let skip = after.len() - stripped.trim_start().len();
+        return Some(format!("{}{}", &text[..key], &text[end + skip..]));
+    }
+    let before = text[..key].trim_end();
+    if let Some(stripped) = before.strip_suffix(',') {
+        // The last entry: take the comma before it.
+        return Some(format!("{}{}", stripped, &text[end..]));
+    }
+    // The only entry: leave an empty object.
+    Some(format!("{}{}", before, &text[end..]))
+}
+
+/// Take the `[mcp_servers.deskvnc]` table, and any of its sub tables, out of
+/// a Codex config. `None` when its command is not a `dvv`.
+pub fn remove_toml_table(text: &str) -> Option<String> {
+    let header = "[mcp_servers.deskvnc]";
+    let table = text.find(header)?;
+    let mut end = table + header.len();
+    loop {
+        match text[end..].find("\n[") {
+            Some(offset) => {
+                let next = end + offset + 1;
+                if text[next..].starts_with("[mcp_servers.deskvnc.") {
+                    end = next + 1;
+                    continue;
+                }
+                end = next;
+                break;
+            }
+            None => {
+                end = text.len();
+                break;
+            }
+        }
+    }
+    let body = &text[table..end];
+    let command = body.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("command")?;
+        let value = rest.trim_start().strip_prefix('=')?.trim();
+        serde_json::from_str::<String>(value).ok()
+    })?;
+    if !names_a_dvv(&command) {
+        return None;
+    }
+    // At the end of the file, the blank line setup put before the table goes
+    // with it. Before another table, the blank line after it went instead.
+    let start = if end < text.len() {
+        table
+    } else {
+        text[..table]
+            .strip_suffix("\n\n")
+            .map_or(table, |kept| kept.len() + 1)
+    };
+    Some(format!("{}{}", &text[..start], &text[end..]))
 }
 
 #[cfg(test)]
@@ -879,5 +1223,69 @@ mod tests {
     fn an_empty_mcp_object_gets_no_trailing_comma() {
         let out = insert_mcp_entry("{ \"mcp\": {} }", ENTRY).unwrap();
         assert_eq!(out, "{ \"mcp\": {\n    \"deskvnc\": {}} }");
+    }
+
+    #[test]
+    fn claude_and_codex_follow_their_own_variables() {
+        let home = Path::new("/home/x");
+        assert_eq!(claude_dir(home, None), PathBuf::from("/home/x/.claude"));
+        assert_eq!(
+            claude_dir(home, Some("".into())),
+            PathBuf::from("/home/x/.claude"),
+            "empty counts as unset"
+        );
+        assert_eq!(
+            claude_dir(home, Some("/cfg/claude".into())),
+            PathBuf::from("/cfg/claude")
+        );
+        assert_eq!(codex_dir(home, None), PathBuf::from("/home/x/.codex"));
+        assert_eq!(
+            codex_dir(home, Some("/cfg/codex".into())),
+            PathBuf::from("/cfg/codex")
+        );
+    }
+
+    #[test]
+    fn an_opencode_entry_comes_out_with_its_comma_and_the_rest_stays() {
+        let first = "{\n  // mine\n  \"mcp\": {\n    \"deskvnc\": { \"type\": \"local\", \"command\": [\"/usr/bin/dvv\", \"mcp\", \"--stdio\"], \"enabled\": true },\n    \"other\": { \"command\": [\"/x/other\"] }\n  }\n}\n";
+        assert_eq!(
+            remove_json_entry(first).unwrap(),
+            "{\n  // mine\n  \"mcp\": {\n    \"other\": { \"command\": [\"/x/other\"] }\n  }\n}\n"
+        );
+        let last = "{ \"mcp\": { \"other\": {}, \"deskvnc\": { \"command\": [\"/a/dvv\", \"mcp\"] } } }";
+        assert_eq!(remove_json_entry(last).unwrap(), "{ \"mcp\": { \"other\": {} } }");
+        let only = "{\n  \"mcp\": {\n    \"deskvnc\": { \"command\": [\"/a/dvv\", \"mcp\"] }\n  }\n}\n";
+        let out = remove_json_entry(only).unwrap();
+        assert_eq!(out, "{\n  \"mcp\": {\n  }\n}\n");
+        assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
+    }
+
+    #[test]
+    fn what_dvv_setup_wrote_is_what_remove_takes_out() {
+        let entry = r#""deskvnc": { "type": "local", "command": ["C:\\Program Files\\DeskVNCViewer\\dvv.exe", "mcp", "--stdio"], "enabled": true }"#;
+        let original = "{\n  \"model\": \"x\",\n  \"mcp\": {\n    \"other\": {}\n  }\n}\n";
+        let wired = insert_mcp_entry(original, entry).unwrap();
+        let removed = remove_json_entry(&wired).unwrap();
+        assert_eq!(removed, original);
+    }
+
+    #[test]
+    fn a_wrapper_named_deskvnc_is_not_removed() {
+        let text = "{ \"mcp\": { \"deskvnc\": { \"command\": [\"/usr/local/bin/my-wrapper\"] } } }";
+        assert_eq!(remove_json_entry(text), None);
+        let toml = "[mcp_servers.deskvnc]\ncommand = \"/usr/local/bin/my-wrapper\"\n";
+        assert_eq!(remove_toml_table(toml), None);
+    }
+
+    #[test]
+    fn a_codex_table_comes_out_and_its_neighbours_stay() {
+        let text = "[model]\nname = \"x\"\n\n[mcp_servers.deskvnc]\ncommand = \"/usr/bin/dvv\"\nargs = [\"mcp\", \"--stdio\"]\n\n[mcp_servers.deskvnc.env]\nA = \"1\"\n\n[mcp_servers.other]\ncommand = \"/x\"\n";
+        assert_eq!(
+            remove_toml_table(text).unwrap(),
+            "[model]\nname = \"x\"\n\n[mcp_servers.other]\ncommand = \"/x\"\n"
+        );
+        let appended = "[model]\nname = \"x\"\n";
+        let wired = format!("{appended}\n[mcp_servers.deskvnc]\ncommand = \"/usr/bin/dvv\"\nargs = [\"mcp\", \"--stdio\"]\n");
+        assert_eq!(remove_toml_table(&wired).unwrap(), appended);
     }
 }

@@ -162,6 +162,7 @@
     "allow-agent-requests-unmute",
     "allow-agent-register-with-claude",
     "allow-agent-setup-agents",
+    "allow-agent-remove-from-agents",
 
     {
       "identifier": "opener:allow-open-url",

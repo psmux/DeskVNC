@@ -77,6 +77,28 @@ pub const PROTOCOL: &str = "dvvp.v1";
 /// headless build impossible to configure.
 pub const AGENT_PLANE_ENABLED_KEY: &str = "agent_plane_enabled";
 
+/// The store key for "Connect agents automatically" in the AI Agents panel
+/// (issue #73): whether a launch with the plane on runs `dvv setup` and writes
+/// into each installed agent's config and skills. On unless a person switched
+/// it off, read the same way as [`AGENT_PLANE_ENABLED_KEY`]. Off, the plane
+/// still serves `dvv`, and `dvv setup` and the Connect now button still work.
+pub const AGENT_AUTO_SETUP_KEY: &str = "agent_auto_setup";
+
+/// Set to `1` in the app's environment and no launch wires agents, whatever
+/// the setting says. For a machine whose agent configs are written by another
+/// tool, where the setting is one more thing that tool would have to manage.
+pub const NO_SETUP_ENV: &str = "DVV_NO_SETUP";
+
+/// Does this launch run `dvv setup`? The environment wins over the setting,
+/// and an unset setting means yes, as it always has.
+pub fn auto_setup_enabled(raw: Option<&str>, env: Option<&str>) -> bool {
+    let env_says_no = env.is_some_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0"
+    });
+    !env_says_no && plane_enabled(raw)
+}
+
 /// App-wide agent lifecycle broadcast (`emit`, every window), so a pane can
 /// show who is driving its machine without owning the socket.
 ///
@@ -1933,6 +1955,21 @@ mod tests {
         for off in ["false", "0", "no", "off", " OFF "] {
             assert!(!plane_enabled(Some(off)), "{off}");
         }
+    }
+
+    /// Issue #73: launch time wiring has its own switch, and an environment
+    /// variable that beats it.
+    #[test]
+    fn connecting_agents_at_launch_has_its_own_switch() {
+        assert_eq!(AGENT_AUTO_SETUP_KEY, "agent_auto_setup");
+        assert_eq!(NO_SETUP_ENV, "DVV_NO_SETUP");
+        assert!(auto_setup_enabled(None, None), "the default is on");
+        assert!(auto_setup_enabled(Some("true"), None));
+        assert!(!auto_setup_enabled(Some("false"), None));
+        assert!(!auto_setup_enabled(None, Some("1")));
+        assert!(!auto_setup_enabled(Some("true"), Some("1")), "the variable wins");
+        assert!(auto_setup_enabled(None, Some("0")));
+        assert!(auto_setup_enabled(None, Some("")));
     }
 
     /// The path `dvv doctor` prints. If this test fails, one of the two moved

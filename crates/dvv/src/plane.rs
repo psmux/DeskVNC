@@ -665,13 +665,26 @@ fn link() -> &'static Mutex<Option<Link>> {
 /// The sentence an agent gets when there is no socket at all.
 ///
 /// It names the path, because the first thing a person does is look for the
-/// file, and it names both reasons it can be missing, because "the app is not
-/// running" and "the plane is switched off" need different fixes.
+/// file, and it says what became of starting the app, because "the app is
+/// not installed where dvv looked", "agents are turned off" and "it started
+/// with its plane off" need different fixes.
 fn no_socket() -> ToolError {
-    ToolError::not_implemented(format!(
-        "there is no agent plane socket at {}, and starting DeskVNCViewer did not bring one up. Either DeskVNCViewer is not installed where dvv looked, or a person switched its agent plane off in the AI Agents panel, and only they can switch it back on. Nothing is saved and nothing is lost by this call failing. Tell the user which of the two it is; run `dvv doctor` for the path this build expects",
-        crate::cli::socket_path()
-    ))
+    let path = crate::cli::socket_path();
+    let message = match last_start() {
+        StartOutcome::AgentsOff => format!(
+            "DeskVNCViewer is not running and dvv did not open it, because AI agents are turned off in its AI Agents panel. Nothing is saved and nothing is lost by this call failing. Tell the user: they can turn agents back on in DeskVNCViewer, under AI Agents, or take DeskVNC out of this agent with `dvv setup --remove`. Do not retry until they do (no agent plane socket at {path})"
+        ),
+        StartOutcome::NoStartEnv => format!(
+            "DeskVNCViewer is not running, and {NO_START_ENV} is set, so dvv did not open it. Nothing is saved and nothing is lost by this call failing. Ask the user to open DeskVNCViewer (no agent plane socket at {path})"
+        ),
+        StartOutcome::NotFound => format!(
+            "DeskVNCViewer is not running and dvv could not find it to open it. Nothing is saved and nothing is lost by this call failing. Ask the user to open DeskVNCViewer; run `dvv doctor` for what this build expects (no agent plane socket at {path})"
+        ),
+        StartOutcome::None | StartOutcome::Started => format!(
+            "there is no agent plane socket at {path}, and starting DeskVNCViewer did not bring one up. Either DeskVNCViewer is not installed where dvv looked, or a person switched its agent plane off in the AI Agents panel, and only they can switch it back on. Nothing is saved and nothing is lost by this call failing. Tell the user which of the two it is; run `dvv doctor` for the path this build expects"
+        ),
+    };
+    ToolError::not_implemented(message)
 }
 
 /// Is there a socket to talk to?
@@ -757,6 +770,52 @@ fn start_disabled() -> bool {
     })
 }
 
+/// What became of this process trying to start DeskVNCViewer, for the
+/// sentence an agent is given when there is still no socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// Nothing was tried.
+    None,
+    /// [`NO_START_ENV`] is set.
+    NoStartEnv,
+    /// A person turned AI agents off in the app
+    /// ([`crate::launch::AGENTS_OFF_FILE`]).
+    AgentsOff,
+    /// No copy of the app was found to start.
+    NotFound,
+    /// It was started; whether its plane came up is another matter.
+    Started,
+}
+
+static LAST_START: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_last_start(outcome: StartOutcome) {
+    LAST_START.store(outcome as u8, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// What became of the last try to start DeskVNCViewer in this process.
+pub fn last_start() -> StartOutcome {
+    match LAST_START.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => StartOutcome::NoStartEnv,
+        2 => StartOutcome::AgentsOff,
+        3 => StartOutcome::NotFound,
+        4 => StartOutcome::Started,
+        _ => StartOutcome::None,
+    }
+}
+
+/// Is starting the app refused before anything is spawned? The environment
+/// first, then the person's own switch in the app.
+pub fn start_refused(no_start_env: bool, agents_off: bool) -> Option<StartOutcome> {
+    if no_start_env {
+        Some(StartOutcome::NoStartEnv)
+    } else if agents_off {
+        Some(StartOutcome::AgentsOff)
+    } else {
+        None
+    }
+}
+
 /// Is the plane there, starting DeskVNCViewer first when the call needs it?
 ///
 /// An agent should not need the person to open the app before asking for a
@@ -764,7 +823,8 @@ fn start_disabled() -> bool {
 /// when a call that needs the app ([`Need::Start`]) finds no socket, the app
 /// is started in the background, once per process, and this waits for its
 /// plane to come up. Nothing else starts it: not the process starting, not
-/// `initialize` or `tools/list`, not listing limbs.
+/// `initialize` or `tools/list`, not listing limbs. A person who turned AI
+/// agents off in the app has said no for every agent, and it is not started.
 fn reachable(need: Need) -> bool {
     let running = alive();
     static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -776,9 +836,15 @@ fn reachable(need: Need) -> bool {
         return false;
     }
     START_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    if start_disabled() || !crate::launch::start_app() {
+    if let Some(refused) = start_refused(start_disabled(), crate::launch::agents_turned_off()) {
+        set_last_start(refused);
         return false;
     }
+    if !crate::launch::start_app() {
+        set_last_start(StartOutcome::NotFound);
+        return false;
+    }
+    set_last_start(StartOutcome::Started);
     // A minute: the first start of a desktop app after login can take tens
     // of seconds, and an app that is quick returns as soon as it is up.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
