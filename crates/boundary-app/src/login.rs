@@ -6,7 +6,10 @@
 //! that runs at the sign in screen, as the same machine ID and with the same
 //! paired helpers and password, read from the person's own data folder.
 //!
-//! On macOS launchd starts it in the login window session, as root. On
+//! On macOS launchd starts it in the login window session, as root, from a
+//! copy of the whole app under /Library/Application Support that only an
+//! administrator can change, with root's own home folder as HOME and the
+//! person's home given apart. On
 //! Windows a service starts it in the console session, as SYSTEM, whenever
 //! nobody is signed in there, and while the session is locked, because the
 //! lock screen is out of a person's programs' sight too. On Linux a systemd
@@ -84,7 +87,16 @@ async fn serve() -> Result<()> {
         Ok(display) if cfg!(target_os = "linux") => {
             note(&dir, &format!("started on X display {display}"))
         }
-        _ => note(&dir, "started"),
+        _ => note(
+            &dir,
+            &format!(
+                "started, version {} from {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::current_exe()
+                    .map(|e| e.display().to_string())
+                    .unwrap_or_default()
+            ),
+        ),
     }
     // Whoever listens holds this. The app in the tray lets go of it when the
     // screen locks; with fast user switching it may still hold it behind the
@@ -288,21 +300,157 @@ pub fn set(on: bool) -> Result<()> {
     imp::set(on)
 }
 
+/// Why the copy at the sign in screen should be set up again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+// Only macOS finds a copy to refresh.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum Refresh {
+    /// It runs from a place others than an administrator can change, as
+    /// versions up to 0.36.7 set it up on macOS.
+    Move,
+    /// It is another version than this app.
+    Update { running: String },
+}
+
+impl Refresh {
+    pub fn title(&self) -> String {
+        match self {
+            Refresh::Move => "The sign in screen copy should move".into(),
+            Refresh::Update { running } => {
+                format!("The sign in screen still runs version {running}")
+            }
+        }
+    }
+    pub fn detail(&self) -> String {
+        match self {
+            Refresh::Move => "It runs from DeskVNC Support in Applications, which your account can change. Moving it to a copy only an administrator can change asks for an administrator once.".into(),
+            Refresh::Update { .. } => format!(
+                "This app is version {}. Updating that copy asks for an administrator once.",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+    pub fn button(&self) -> &'static str {
+        match self {
+            Refresh::Move => "Move it",
+            Refresh::Update { .. } => "Update it",
+        }
+    }
+    /// A line for `unattended.log`.
+    pub fn log_line(&self) -> String {
+        match self {
+            Refresh::Move => "the sign in screen copy runs from a place others than an administrator can change; offering to move it".into(),
+            Refresh::Update { running } => format!(
+                "the sign in screen copy is version {running}, this app {}; offering to update it",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+}
+
+/// Whether the copy at the sign in screen should be set up again, which
+/// switching it on does.
+pub fn refresh() -> Option<Refresh> {
+    #[cfg(target_os = "macos")]
+    return imp::refresh();
+    #[cfg(not(target_os = "macos"))]
+    return None;
+}
+
+#[cfg(target_os = "macos")]
+pub use imp::run_elevated;
+
 /// Whether this platform can run anything at the sign in screen.
 pub const SUPPORTED: bool = cfg!(any(target_os = "macos", windows, target_os = "linux"));
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use anyhow::{Context, Result, ensure};
+    use super::Refresh;
+    use anyhow::{Context, Result, bail, ensure};
+    use std::path::{Path, PathBuf};
 
     const LABEL: &str = "com.psmux.deskvnc.support.login";
+    /// The folder that holds the copy the sign in screen runs. launchd runs
+    /// that copy as root, so it lives where only an administrator can change
+    /// it, not in the app the person dragged to Applications, which belongs
+    /// to them.
+    pub(super) const ROOT_DIR: &str = "/Library/Application Support/DeskVNC Support";
+    /// The whole signed app, copied with its signature, its notarization
+    /// ticket and the section that lets it draw at the sign in screen, so
+    /// macOS knows it as the same app for Accessibility and Screen Recording.
+    pub(super) const ROOT_APP: &str =
+        "/Library/Application Support/DeskVNC Support/DeskVNC Support.app";
+    /// root's own home folder. The copy runs with it as HOME, so what
+    /// macOS's frameworks keep for a program lands there and not in the
+    /// person's home. The person's home is given in `PERSON_HOME` instead.
+    const ROOT_HOME: &str = "/var/root";
 
     fn plist() -> String {
         format!("/Library/LaunchAgents/{LABEL}.plist")
     }
     pub fn enabled() -> bool {
-        std::path::Path::new(&plist()).exists()
+        Path::new(&plist()).exists()
     }
+
+    /// One value from a property list file, as `plutil` prints it.
+    fn plist_value(file: &str, key: &str) -> Option<String> {
+        let output = std::process::Command::new("/usr/bin/plutil")
+            .args(["-extract", key, "raw", "-o", "-", file])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Whether `path` and every folder above it belong to root and nobody
+    /// else may write them, with no link on the way.
+    pub(super) fn root_only(path: &Path) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(path.is_absolute(), "{} is not a full path", path.display());
+        for step in path.ancestors() {
+            let meta = std::fs::symlink_metadata(step)
+                .with_context(|| format!("Cannot look at {}", step.display()))?;
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "{} is a link",
+                step.display()
+            );
+            ensure!(
+                meta.uid() == 0,
+                "{} does not belong to root",
+                step.display()
+            );
+            ensure!(
+                meta.mode() & 0o022 == 0,
+                "{} can be changed by others than root",
+                step.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the copy at the sign in screen should be set up again: it
+    /// runs from somewhere others than an administrator can change, which is
+    /// how 0.36 set it up, or it is another version than this app.
+    pub fn refresh() -> Option<Refresh> {
+        if !enabled() {
+            return None;
+        }
+        let program = plist_value(&plist(), "ProgramArguments.0")?;
+        let program = Path::new(&program);
+        if !program.starts_with(ROOT_APP) || root_only(program).is_err() {
+            return Some(Refresh::Move);
+        }
+        let running = plist_value(
+            &format!("{ROOT_APP}/Contents/Info.plist"),
+            "CFBundleShortVersionString",
+        )?;
+        (running != env!("CARGO_PKG_VERSION")).then_some(Refresh::Update { running })
+    }
+
     /// Run `script` as root, after macOS asks for an administrator.
     fn as_admin(script: &str) -> Result<()> {
         let output = std::process::Command::new("osascript")
@@ -330,25 +478,28 @@ mod imp {
         );
         Ok(())
     }
-    /// The launchd job that starts the host at the sign in screen.
+
+    /// The launchd job that starts the host at the sign in screen, running
+    /// `exe` in the root copy for the person whose home is `home`.
     ///
     /// Started again whenever it ends, not only after a failure, for as
     /// long as the program exists. At boot launchd can start it before the
     /// window server lets anyone in, and it ended within two seconds with a
     /// clean exit, so a job that restarted only after a failure left the
     /// computer out of reach until somebody signed in and out. Keeping it
-    /// alive on the program's path rather than always means an app moved
-    /// to the Trash without switching this off leaves a job that does
-    /// nothing, not one launchd tries to start every five seconds. macOS
-    /// unloads a LoginWindow agent when somebody signs in, and the host
-    /// steps aside before it takes the machine ID when somebody is signed
-    /// in, so this cannot push the app in the tray off the relay.
+    /// alive on the program's path rather than always means a copy that was
+    /// taken away leaves a job that does nothing, not one launchd tries to
+    /// start every five seconds. macOS unloads a LoginWindow agent when
+    /// somebody signs in, and the host steps aside before it takes the
+    /// machine ID when somebody is signed in, so this cannot push the app in
+    /// the tray off the relay.
     pub(super) fn launch_agent(exe: &str, home: &str) -> String {
         let escape = |s: &str| {
             s.replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
         };
+        let person = boundary_session::owned::PERSON_HOME;
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -357,7 +508,8 @@ mod imp {
 <key>AssociatedBundleIdentifiers</key><string>com.psmux.deskvnc.support</string>
 <key>LimitLoadToSessionType</key><string>LoginWindow</string>
 <key>ProgramArguments</key><array><string>{exe}</string><string>--login-screen</string></array>
-<key>EnvironmentVariables</key><dict><key>HOME</key><string>{home}</string></dict>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>{ROOT_HOME}</string><key>{person}</key><string>{home}</string></dict>
+<key>WorkingDirectory</key><string>/</string>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>PathState</key><dict><key>{exe}</key><true/></dict></dict>
 <key>ThrottleInterval</key><integer>5</integer>
@@ -368,27 +520,204 @@ mod imp {
             home = escape(home)
         )
     }
-    pub fn set(on: bool) -> Result<()> {
-        if !on {
-            return as_admin(&format!("rm -f '{}'", plist()));
-        }
+
+    /// Quoted for `sh`.
+    pub(super) fn quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+
+    /// The script that, run as root, copies the app at `source` to
+    /// [`ROOT_APP`] and points the launchd job at `exe_name` in that copy.
+    ///
+    /// The copy is checked against `requirement`, the code signature
+    /// requirement of the app that asked, before anything runs it, and the
+    /// job is written only once the copy and every folder above it belong to
+    /// root and nobody else can write them. It is made beside the old copy
+    /// and moved over it, so a copy that is half made never runs.
+    pub(super) fn install_script(
+        source: &str,
+        exe_name: &str,
+        requirement: &str,
+        home: &str,
+    ) -> String {
+        let exe = format!("{ROOT_APP}/Contents/MacOS/{exe_name}");
+        let plist = plist();
+        let body = launch_agent(&exe, home);
+        format!(
+            r#"set -e
+umask 022
+dir={dir}
+app={app}
+stage="$dir/.DeskVNC Support.app.partial"
+plist={plist}
+fail() {{ rm -rf "$stage"; echo "$1" >&2; exit 1; }}
+if [ -L "$dir" ] || {{ [ -e "$dir" ] && [ ! -d "$dir" ]; }}; then rm -f "$dir"; fi
+mkdir -p "$dir"
+chown root:wheel "$dir"
+chmod 755 "$dir"
+rm -rf "$stage"
+ditto --noqtn {source} "$stage"
+chown -R root:wheel "$stage"
+chmod -R go-w "$stage"
+/usr/bin/codesign --verify --deep --strict -R {requirement} "$stage" || fail "The copy for the sign in screen does not carry this app's signature, so it was not set up"
+rm -rf "$app"
+mv "$stage" "$app"
+for p in / /Library "/Library/Application Support" "$dir"; do
+  set -- $(stat -f '%u %p' "$p")
+  if [ -L "$p" ] || [ "$1" != 0 ] || [ $(( 0$2 & 022 )) -ne 0 ]; then fail "$p can be changed by others than an administrator, so the sign in screen copy was not set up"; fi
+done
+if [ -n "$(find "$app" \( ! -user root -o -perm -g+w -o -perm -o+w \) -print 2>/dev/null | head -1)" ]; then fail "The copy for the sign in screen can be changed by others than an administrator, so it was not set up"; fi
+[ -x {exe} ] || fail "The copy for the sign in screen has no program"
+cat > "$plist.partial" <<'DESKVNC_PLIST'
+{body}DESKVNC_PLIST
+chown root:wheel "$plist.partial"
+chmod 644 "$plist.partial"
+mv -f "$plist.partial" "$plist"
+"#,
+            dir = quote(ROOT_DIR),
+            app = quote(ROOT_APP),
+            plist = quote(&plist),
+            source = quote(source),
+            requirement = quote(&format!("={requirement}")),
+            exe = quote(&exe),
+        )
+    }
+
+    /// The script that, run as root, takes the job and the copy away.
+    pub(super) fn uninstall_script() -> String {
+        format!(
+            "rm -f {plist} && rm -rf {app} {stage} && {{ rmdir {dir} 2>/dev/null || true; }}",
+            plist = quote(&plist()),
+            app = quote(ROOT_APP),
+            stage = quote(&format!("{ROOT_DIR}/.DeskVNC Support.app.partial")),
+            dir = quote(ROOT_DIR),
+        )
+    }
+
+    /// The app bundle this program runs from.
+    fn own_bundle(exe: &Path) -> Result<PathBuf> {
+        let bundle = exe
+            .ancestors()
+            .nth(3)
+            .filter(|b| b.extension().is_some_and(|e| e == "app"))
+            .context("Open DeskVNC Support from its app to set this up")?;
+        Ok(bundle.to_path_buf())
+    }
+
+    /// The code signature requirement of this running program, as macOS
+    /// checked it when it started.
+    fn own_requirement() -> Result<String> {
+        let output = std::process::Command::new("/usr/bin/codesign")
+            .args(["-d", "-r-", &std::process::id().to_string()])
+            .output()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix("designated => "))
+            .map(str::to_owned)
+            .filter(|_| output.status.success())
+            .context(
+                "This copy of DeskVNC Support is not signed, so it cannot run at the sign in screen",
+            )
+    }
+
+    /// The script that sets the copy up for the person whose home is `home`.
+    fn setup(home: &str) -> Result<String> {
         ensure!(
             crate::install::translocated().is_none(),
             "Move DeskVNC Support to Applications first"
         );
         let exe = std::env::current_exe().context("This app cannot find itself")?;
-        let home = std::env::var("HOME").context("No home folder")?;
-        let body = launch_agent(&exe.to_string_lossy(), &home);
-        let staged = std::env::temp_dir().join(format!("{LABEL}.plist"));
-        std::fs::write(&staged, body)?;
-        let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-        let result = as_admin(&format!(
-            "install -o root -g wheel -m 644 {} {}",
-            quote(&staged.to_string_lossy()),
-            quote(&plist())
-        ));
-        let _ = std::fs::remove_file(&staged);
-        result
+        let bundle = own_bundle(&exe)?;
+        let name = exe
+            .file_name()
+            .context("This app cannot find itself")?
+            .to_string_lossy()
+            .into_owned();
+        Ok(install_script(
+            &bundle.to_string_lossy(),
+            &name,
+            &own_requirement()?,
+            home,
+        ))
+    }
+
+    pub fn set(on: bool) -> Result<()> {
+        if !on {
+            return as_admin(&uninstall_script());
+        }
+        let home = boundary_session::owned::person_home().context("No home folder")?;
+        as_admin(&setup(&home.to_string_lossy())?)
+    }
+
+    /// `--install-login-screen` or `--uninstall-login-screen`, run with
+    /// sudo from the account whose helpers should reach the sign in screen,
+    /// or `--login-screen-status`, run by anyone.
+    pub fn run_elevated(args: &[String]) -> Result<()> {
+        let install = match args.first().map(String::as_str) {
+            Some("--login-screen-status") => {
+                println!("{}", status());
+                return Ok(());
+            }
+            Some("--install-login-screen") => true,
+            Some("--uninstall-login-screen") => false,
+            _ => bail!("Nothing to do"),
+        };
+        let exe = std::env::current_exe()?;
+        ensure!(
+            boundary_session::owned::is_root(),
+            "This needs an administrator: run sudo {} {}",
+            exe.display(),
+            args[0]
+        );
+        let script = if install {
+            let user = std::env::var("SUDO_USER")
+                .ok()
+                .filter(|u| !u.is_empty() && u != "root")
+                .context(
+                    "Run this with sudo from the account whose helpers should reach the sign in screen",
+                )?;
+            setup(&home_of(&user)?)?
+        } else {
+            uninstall_script()
+        };
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .status()?;
+        ensure!(status.success(), "It was not set up");
+        if install {
+            println!("DeskVNC Support now runs at the sign in screen from {ROOT_APP}");
+        } else {
+            println!("DeskVNC Support no longer runs at the sign in screen");
+        }
+        Ok(())
+    }
+
+    /// What `--login-screen-status` prints: whether the copy at the sign in
+    /// screen is set up, what it runs, and whether it should be set up again.
+    fn status() -> String {
+        if !enabled() {
+            return "DeskVNC Support does not run at the sign in screen".into();
+        }
+        let program = plist_value(&plist(), "ProgramArguments.0").unwrap_or_default();
+        match refresh() {
+            Some(refresh) => format!("{}. It runs {program}", refresh.title()),
+            None => format!(
+                "DeskVNC Support runs at the sign in screen from {program}, version {}, a copy only an administrator can change",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+
+    /// The home folder of the account called `user`.
+    fn home_of(user: &str) -> Result<String> {
+        let output = std::process::Command::new("/usr/bin/dscl")
+            .args([".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"])
+            .output()?;
+        String::from_utf8_lossy(&output.stdout)
+            .split_once("NFSHomeDirectory:")
+            .map(|(_, home)| home.trim().to_owned())
+            .filter(|home| home.starts_with('/'))
+            .context("No home folder for that account")
     }
 }
 
@@ -530,7 +859,123 @@ mod imp {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::imp::launch_agent;
+    use super::imp::{ROOT_APP, install_script, launch_agent, root_only, uninstall_script};
+
+    #[test]
+    fn the_job_runs_the_root_copy_with_root_home() {
+        let exe = format!("{ROOT_APP}/Contents/MacOS/boundary");
+        let body = launch_agent(&exe, "/Users/someone");
+        // What launchd runs as root is the copy only root can change, not
+        // the app in Applications.
+        assert!(body.contains(&format!(
+            "<key>ProgramArguments</key><array><string>{exe}</string>"
+        )));
+        assert!(!body.contains("/Applications/"));
+        // root's own home, so nothing root keeps lands in the person's, and
+        // the person's home given apart.
+        assert!(body.contains("<key>HOME</key><string>/var/root</string>"));
+        assert!(body.contains(&format!(
+            "<key>{}</key><string>/Users/someone</string>",
+            boundary_session::owned::PERSON_HOME
+        )));
+        assert!(!body.contains("<key>HOME</key><string>/Users/someone</string>"));
+    }
+
+    fn sh_syntax(script: &str) {
+        let path = std::env::temp_dir().join(format!("login-script-{}.sh", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let checked = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg(&path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            checked.status.success(),
+            "{}\n{script}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+    }
+
+    #[test]
+    fn the_setup_checks_the_copy_before_writing_the_job() {
+        let requirement = r#"identifier "com.psmux.deskvnc.support" and anchor apple generic"#;
+        let script = install_script(
+            "/Applications/It's DeskVNC Support.app",
+            "boundary",
+            requirement,
+            "/Users/some one",
+        );
+        sh_syntax(&script);
+        // Copied whole, without quarantine, then given to root.
+        assert!(
+            script
+                .contains(r#"ditto --noqtn '/Applications/It'\''s DeskVNC Support.app' "$stage""#)
+        );
+        assert!(script.contains(r#"chown -R root:wheel "$stage""#));
+        // The copy must carry the signature of the app that asked.
+        assert!(script.contains(&format!(
+            r#"codesign --verify --deep --strict -R '={requirement}' "$stage""#
+        )));
+        // The job is written last, after every check.
+        let job = script.find(r#"cat > "$plist.partial""#).unwrap();
+        for check in [
+            "codesign --verify",
+            "stat -f '%u %p'",
+            "! -user root",
+            "[ -x ",
+        ] {
+            let at = script.find(check).unwrap_or_else(|| panic!("{check}"));
+            assert!(at < job, "{check} comes after the job is written");
+        }
+        assert!(script.starts_with("set -e\n"));
+        // The job as written lints.
+        let body = script
+            .split("<<'DESKVNC_PLIST'\n")
+            .nth(1)
+            .and_then(|rest| rest.split("DESKVNC_PLIST\n").next())
+            .unwrap();
+        assert!(body.contains(&format!("{ROOT_APP}/Contents/MacOS/boundary")));
+        assert!(body.contains("<string>/Users/some one</string>"));
+        let path = std::env::temp_dir().join(format!("login-job-{}.plist", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        let lint = std::process::Command::new("plutil")
+            .arg("-lint")
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        if let Ok(lint) = lint {
+            assert!(
+                lint.status.success(),
+                "{}",
+                String::from_utf8_lossy(&lint.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn switching_off_takes_the_copy_away() {
+        let script = uninstall_script();
+        sh_syntax(&script);
+        assert!(
+            script.contains("rm -f '/Library/LaunchAgents/com.psmux.deskvnc.support.login.plist'")
+        );
+        assert!(script.contains(&format!("rm -rf '{ROOT_APP}'")));
+    }
+
+    #[test]
+    fn only_root_owned_paths_count() {
+        use std::os::unix::fs::PermissionsExt;
+        // A system program and every folder above it belong to root.
+        assert!(root_only(std::path::Path::new("/usr/bin/true")).is_ok());
+        // A file anyone may write does not count, whoever made it.
+        let open = std::env::temp_dir().join(format!("root-only-{}", std::process::id()));
+        std::fs::write(&open, "").unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(root_only(&open).is_err());
+        let _ = std::fs::remove_file(&open);
+        assert!(root_only(std::path::Path::new("relative")).is_err());
+    }
 
     #[test]
     fn launch_agent_restarts_after_any_exit_and_lints() {

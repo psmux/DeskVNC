@@ -30,7 +30,11 @@ pub fn data_dir() -> Result<PathBuf> {
             .context("Cannot locate the user data directory")
     };
     Ok(match Platform::current()? {
-        Platform::MacOS => home()?.join("Library/Application Support/com.altrosyn.boundary"),
+        // The copy at the sign in screen runs with root's home and is given
+        // the person's.
+        Platform::MacOS => boundary_session::owned::person_home()
+            .context("Cannot locate the user data directory")?
+            .join("Library/Application Support/com.altrosyn.boundary"),
         Platform::Windows => {
             PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
                 .join("Boundary")
