@@ -35,7 +35,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   grew past 250 threads, hit the 256 open file limit and could not listen
   again. Now a name has at most one lookup running however often it is
   asked for, every caller shares its answer, answers are kept for a short
-  while, and the copy at the sign in screen waits longer each time before it
+  while, the fallback DNS client is shared the same way so it no longer
+  opens hundreds of sockets at once, and the copy at the sign in screen waits longer each time before it
   listens again, up to a minute.
 
 ### Added

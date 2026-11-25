@@ -4,22 +4,21 @@
 //!
 //! ```sh
 //! dns_outage <seconds>
+//! # From somewhere DNS works, knock on it by its machine ID. It should be
+//! # turned away as a helper nobody paired, which shows it can be reached.
+//! dns_outage helper <machine ID> <seconds>
 //! ```
 //!
-//! On Linux, make lookups hang the way a dead resolver does: drop this
-//! process's packets to port 53 and let glibc wait 30 s per try, twice.
-//!
-//! ```sh
-//! sudo groupadd dnsdrop
-//! sudo iptables -I OUTPUT -m owner --gid-owner dnsdrop -p udp --dport 53 -j DROP
-//! sudo iptables -I OUTPUT -m owner --gid-owner dnsdrop -p tcp --dport 53 -j DROP
-//! RES_OPTIONS="timeout:30 attempts:2" sudo -E -g dnsdrop dns_outage 600
-//! ```
-//!
-//! Deleting the two rules brings DNS back, and the listener should say it is
-//! listening and the relay is reachable.
-use boundary_session::HostOptions;
+//! On Linux, make lookups hang the way a dead resolver does: in a mount
+//! namespace, point `/etc/resolv.conf` at a local server that reads every
+//! query and never answers (`nameserver 127.0.0.2` with `options timeout:30
+//! attempts:2`, so glibc waits a minute a lookup, as a Mac did), and
+//! `/etc/nsswitch.conf` at `hosts: files dns` so systemd-resolved is not
+//! asked another way. Make that server forward queries to bring DNS back.
+//! Dropping port 53 with iptables does not do: a dropped packet fails the
+//! send at once rather than leaving the lookup waiting.
 use boundary_session::unattended::{self, Notice};
+use boundary_session::{Event, HostOptions};
 use std::time::{Duration, Instant};
 
 fn threads_and_files() -> (usize, usize) {
@@ -27,12 +26,48 @@ fn threads_and_files() -> (usize, usize) {
     (count("/proc/self/task"), count("/proc/self/fd"))
 }
 
+async fn helper(machine: String, seconds: u64) {
+    let mut session = unattended::connect(
+        machine,
+        "Outage test".into(),
+        None,
+        iroh::SecretKey::generate(),
+        HostOptions::default(),
+    );
+    let start = Instant::now();
+    let deadline = tokio::time::sleep(Duration::from_secs(seconds));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                println!("helper: no answer in {seconds}s");
+                return;
+            }
+            event = session.events.recv() => match event {
+                Some(Event::Status(text)) => {
+                    println!("helper {:>3}s: {text}", start.elapsed().as_secs())
+                }
+                Some(Event::Finished(result)) => {
+                    println!("helper {:>3}s: finished: {result:?}", start.elapsed().as_secs());
+                    return;
+                }
+                Some(_) => {}
+                None => return,
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let seconds: u64 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(300);
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("helper") {
+        let machine = args.get(2).cloned().unwrap_or_default();
+        let seconds = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
+        helper(machine, seconds).await;
+        return Ok(());
+    }
+    let seconds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(300);
     let dir = std::env::temp_dir().join(format!("dns-outage-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let access = dir.join("access.json");
@@ -65,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
                         wait = Duration::ZERO;
                     }
                     Notice::Status(text) => println!("{t:>4}s {text}"),
+                    Notice::Refused { name, reason, .. } => {
+                        println!("{t:>4}s turned away {name}: {reason}")
+                    }
                     Notice::Finished(result) => {
                         println!("{t:>4}s stopped listening: {result:?}");
                         finished = true;
