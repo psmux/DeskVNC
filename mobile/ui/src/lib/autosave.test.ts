@@ -15,7 +15,7 @@ const base: AutoSave = {
 describe("autoSaveName", () => {
   it("takes the Nearby name first", () => {
     expect(
-      autoSaveName({ ...base, foundName: "Spare room Mac", identifiedName: "spare-room" }, { desktopName: "Godwin's Mac", certName: null }),
+      autoSaveName({ ...base, foundName: "Spare room Mac", identifiedName: "spare-room" }, { desktopName: "Alex's Mac", certName: null }),
     ).toBe("Spare room Mac");
   });
 

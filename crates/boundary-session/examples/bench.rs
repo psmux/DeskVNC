@@ -417,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
                             let py = (y * (c.height - 1) as f32) as usize;
                             let i = (py * c.width as usize + px) * 4;
                             eprintln!("slow move {n} at {px},{py}: {:?}", &c.rgba[i..i + 4]);
-                            let _ = image::save_buffer("/private/tmp/claude-501/-Users-godwin-workspace-DeskVNC/1e3123ad-01eb-4793-b40b-e5a5170e601b/scratchpad/fv/slow.png", &c.rgba, c.width, c.height, image::ExtendedColorType::Rgba8);
+                            let _ = image::save_buffer("/tmp/fv/slow.png", &c.rgba, c.width, c.height, image::ExtendedColorType::Rgba8);
                         }
                     }
                 })
@@ -452,7 +452,7 @@ async fn main() -> anyhow::Result<()> {
                                 screen.video
                             );
                             let _ = image::save_buffer(
-                                "/private/tmp/claude-501/-Users-godwin-workspace-DeskVNC/1e3123ad-01eb-4793-b40b-e5a5170e601b/scratchpad/fv/miss.png",
+                                "/tmp/fv/miss.png",
                                 &c.rgba,
                                 c.width,
                                 c.height,

@@ -52,7 +52,7 @@ describe("promptStart", () => {
   });
 
   it("opens the first prompt from the hint, with Remember off", () => {
-    expect(promptStart("godwin", null)).toEqual({ username: "godwin", domain: "", save: false });
+    expect(promptStart("alex", null)).toEqual({ username: "alex", domain: "", save: false });
     expect(promptStart(null, undefined)).toEqual({ username: "", domain: "", save: false });
   });
 
@@ -76,7 +76,7 @@ describe("promptStart", () => {
   it("falls back to the hint when the last answer had no user name", () => {
     // A password only prompt (VNC Authentication) answers with no user name.
     const previous = { username: null, domain: null, save: true };
-    expect(promptStart("godwin", previous)).toEqual({ username: "godwin", domain: "", save: true });
-    expect(promptStart("godwin", { ...previous, username: "  " }).username).toBe("godwin");
+    expect(promptStart("alex", previous)).toEqual({ username: "alex", domain: "", save: true });
+    expect(promptStart("alex", { ...previous, username: "  " }).username).toBe("alex");
   });
 });

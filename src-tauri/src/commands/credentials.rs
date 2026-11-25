@@ -266,10 +266,10 @@ mod tests {
     #[test]
     fn a_vnc_user_name_from_the_editor_is_stored_beside_its_password() {
         let merged = merge_dialog_write(
-            sent(r#"{"vencryptUser":"godwin","vencryptPass":"secret"}"#),
+            sent(r#"{"vencryptUser":"alex","vencryptPass":"secret"}"#),
             StoredCredentials::default(),
         );
-        assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(merged.vencrypt_user.as_deref(), Some("alex"));
         assert_eq!(merged.vencrypt_pass.as_deref(), Some("secret"));
         assert_eq!(merged.vnc_password, None);
     }
@@ -281,8 +281,8 @@ mod tests {
             ssh_passphrase: Some("key".into()),
             ..Default::default()
         };
-        let merged = merge_dialog_write(sent(r#"{"vencryptUser":"godwin"}"#), existing);
-        assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
+        let merged = merge_dialog_write(sent(r#"{"vencryptUser":"alex"}"#), existing);
+        assert_eq!(merged.vencrypt_user.as_deref(), Some("alex"));
         assert_eq!(merged.vnc_password.as_deref(), Some("old"));
         assert_eq!(merged.ssh_passphrase.as_deref(), Some("key"));
     }
@@ -312,12 +312,12 @@ mod tests {
     #[test]
     fn a_password_typed_alone_keeps_the_saved_user_name() {
         let existing = StoredCredentials {
-            vencrypt_user: Some("godwin".into()),
+            vencrypt_user: Some("alex".into()),
             vencrypt_pass: Some("old".into()),
             ..Default::default()
         };
         let merged = merge_dialog_write(sent(r#"{"vencryptPass":"new"}"#), existing);
-        assert_eq!(merged.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(merged.vencrypt_user.as_deref(), Some("alex"));
         assert_eq!(merged.vencrypt_pass.as_deref(), Some("new"));
     }
 }

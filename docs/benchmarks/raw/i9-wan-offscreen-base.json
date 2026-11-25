@@ -6,7 +6,7 @@
   "target_kind": "stage window on the host",
   "quality": "Auto",
   "started_unix_ms": 1792862236692,
-  "host": "Godwins-MacBook-Pro.local",
+  "host": "MacBook-Pro.local",
   "client_os": "macos aarch64",
   "connect_secs": 0.745756875,
   "first_stage_secs": 1.1401067089999999,
