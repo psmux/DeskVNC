@@ -19,6 +19,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   reached without following a link on the way. It no longer makes the data
   folder or a machine key there, files it made before are handed back to
   the person, and the settings it reads are capped at a megabyte.
+* The same hardening on Windows, where the service starts the sign in screen
+  copy as SYSTEM. It now reaches the person's data folder from the root of
+  the drive one folder at a time, never through a symbolic link, a junction
+  or a mount point, and opens its log, the lock, the paired helpers and the
+  machine key only when each is a plain file with one name, belonging to the
+  person, SYSTEM or the Administrators group. It no longer makes the data
+  folder itself.
 
 ## [0.36.7] (2026-11-25)
 

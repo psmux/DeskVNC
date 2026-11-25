@@ -19,10 +19,11 @@
 //! not paired and has no password is turned away, and no helper's tools may
 //! run anything: they would run as the system.
 //!
-//! Run as root, it reads and writes the person's folder only through
-//! [`boundary_session::owned`]: the log, the lock, who may connect and the
-//! machine key. It never follows a link the person put there, makes no
-//! folder and no key, and hands back to the person any file root made.
+//! Run as root on macOS or as SYSTEM on Windows, it reads and writes the
+//! person's folder only through [`boundary_session::owned`]: the log, the
+//! lock, who may connect and the machine key. It never follows a link or
+//! junction the person put there and makes no folder and no key. On macOS
+//! it hands back to the person any file root made.
 
 use anyhow::{Context, Result};
 use boundary_session::unattended::{self, Access, Notice};
