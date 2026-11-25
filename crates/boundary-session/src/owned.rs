@@ -380,3 +380,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("owned-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        dir
+    }
+
+    /// A symbolic link to a file. Making one needs a right an administrator
+    /// or developer mode has; without it the caller skips that part.
+    fn file_link(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("skipped, cannot make a symbolic link here: {error}");
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn never_writes_through_a_link() {
+        let dir = scratch("link");
+        let other = dir.join("other");
+        std::fs::write(&other, "left alone\n").unwrap();
+        if !file_link(&other, &dir.join("data").join("log")) {
+            return;
+        }
+        let folder = Folder::open(&dir.join("data")).unwrap();
+        assert!(folder.append("log", "x", 64 * 1024).is_err());
+        assert!(folder.lock("log").is_err());
+        assert!(folder.read("log", READ_LIMIT).is_err());
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "left alone\n");
+        // A log past its limit starts again, and that never empties the
+        // file a link points to.
+        std::fs::write(&other, [b'a'; 100]).unwrap();
+        let _ = folder.append("log", "x", 10);
+        assert_eq!(std::fs::read(&other).unwrap(), [b'a'; 100]);
+        // A link to nothing is not made into a file either.
+        let made = dir.join("made");
+        assert!(file_link(&made, &dir.join("data").join("lock")));
+        assert!(folder.lock("lock").is_err());
+        assert!(folder.append("lock", "x", 64 * 1024).is_err());
+        assert!(!made.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_is_never_a_stream_or_a_path() {
+        let dir = scratch("stream");
+        let folder = Folder::open(&dir.join("data")).unwrap();
+        assert!(folder.append("log:hidden", "x", 64 * 1024).is_err());
+        assert!(folder.read("..\\other", 100).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn appends_reads_and_starts_again() {
+        let dir = scratch("plain");
+        let folder = Folder::open(&dir.join("data")).unwrap();
+        folder.append("log", "one", 7).unwrap();
+        folder.append("log", "two", 7).unwrap();
+        assert_eq!(folder.read("log", 100).unwrap(), b"one\ntwo\n");
+        folder.append("log", "three", 7).unwrap();
+        assert_eq!(folder.read("log", 100).unwrap(), b"three\n");
+        assert!(folder.read("log", 3).is_err());
+        assert_eq!(
+            folder.read("missing", 100).err().map(|e| e.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+        let lock = folder.lock("lock").unwrap();
+        assert!(lock.try_lock().is_ok());
+        // A second holder is turned away while the first holds it.
+        assert!(matches!(
+            folder.lock("lock").unwrap().try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
