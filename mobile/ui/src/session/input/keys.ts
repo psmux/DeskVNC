@@ -250,3 +250,98 @@ export class KeyboardField {
     return [...this.differ.onCompositionEnd(value), { type: "enter" }];
   }
 }
+
+// ------------------------------------------------------------ hidden field
+
+/** The parts of the hidden `<input>` the field reads and writes. */
+export interface FieldElement {
+  value: string;
+  setSelectionRange?(start: number, end: number): void;
+}
+
+/**
+ * The hidden `<input>` and its event handlers, apart from React so the same
+ * code runs in the app, in unit tests and in a plain test page. Each handler
+ * reads the element's value at the moment its event fires, hands the result
+ * to `send`, and returns whether the caller should cancel the event.
+ */
+export class HiddenField {
+  readonly field = new KeyboardField();
+
+  constructor(
+    private readonly el: () => FieldElement | null,
+    private readonly send: (ops: FieldOp[]) => void,
+  ) {}
+
+  /** The keyboard is about to show: start from an empty field. */
+  open(): void {
+    const el = this.el();
+    if (!el) return;
+    el.value = SENTINEL;
+    this.field.reset();
+    this.caretToEnd(el);
+  }
+
+  composing(): boolean {
+    return this.field.composing();
+  }
+
+  input(nativeComposing: boolean): void {
+    const el = this.el();
+    if (!el) return;
+    this.send(this.field.input(el.value, nativeComposing));
+    this.resetIfIdle();
+  }
+
+  compositionStart(): void {
+    this.field.compositionStart();
+  }
+
+  compositionEnd(): void {
+    const el = this.el();
+    if (!el) return;
+    this.send(this.field.compositionEnd(el.value));
+    this.resetIfIdle();
+  }
+
+  /** True when the key was the field's (an Enter) and the event should be cancelled. */
+  keyDown(e: FieldKey): boolean {
+    const el = this.el();
+    if (!el) return false;
+    const ops = this.field.keyDown(e, el.value);
+    if (!ops) return false;
+    this.send(ops);
+    return true;
+  }
+
+  keyUp(e: FieldKey): void {
+    this.field.keyUp(e);
+  }
+
+  /** True when the line break was sent and the event should be cancelled. */
+  beforeInput(inputType: string): boolean {
+    const el = this.el();
+    if (!el) return false;
+    const ops = this.field.beforeInput(inputType, el.value);
+    if (!ops) return false;
+    this.send(ops);
+    return true;
+  }
+
+  private resetIfIdle(): void {
+    const el = this.el();
+    if (!el || this.field.composing()) return;
+    if (el.value.length > 32 || el.value === "") {
+      el.value = SENTINEL;
+      this.field.reset();
+    }
+  }
+
+  private caretToEnd(el: FieldElement): void {
+    try {
+      el.setSelectionRange?.(el.value.length, el.value.length);
+    } catch {
+      // Some inputs refuse a selection; the caret position does not matter much.
+    }
+  }
+}
