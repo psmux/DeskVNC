@@ -20,6 +20,12 @@
 //! the host at the sign in screen grew past 250 threads and ran out of open
 //! files. So each name has at most one system lookup running, whoever asks;
 //! everyone asking for it shares that one, and its answer is kept a while.
+//!
+//! iroh's own client holds no thread, but each try opens sockets until it
+//! times out, and with every try of every name going to it during an outage
+//! the same host held more than 600 open files at moments. So the fallback
+//! is shared the same way, and a name it could not find is not asked about
+//! again for a few seconds.
 
 use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
 use std::{
@@ -35,10 +41,11 @@ use tokio::sync::watch;
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the addresses the system found for a name are used again.
 const KEEP_FOUND: Duration = Duration::from_secs(30);
-/// How long a name the system found nothing for is not asked about again.
+/// How long a name nothing was found for is not asked about again.
 const KEEP_MISSING: Duration = Duration::from_secs(10);
-/// The most names with a system lookup running at once. Past this a name
-/// goes straight to iroh's client, which holds no thread.
+/// The most names with a lookup running at once, in each kind. Past this a
+/// name the system is asked about goes straight to iroh's client, and one
+/// iroh's client is asked about fails at once.
 const MOST_RUNNING: usize = 16;
 type Boxed<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
@@ -68,6 +75,13 @@ pub(crate) async fn lookup(host: &str, wait: Duration) -> Vec<IpAddr> {
 
 static SYSTEM: LazyLock<Names> = LazyLock::new(|| Names::new(system_lookup));
 
+/// What iroh's client said, shared by everyone who asked: the records, or
+/// why there are none.
+type Answer<T> = Result<Arc<Vec<T>>, Arc<str>>;
+static FALLBACK_V4: LazyLock<Flights<Answer<Ipv4Addr>>> = LazyLock::new(Flights::default);
+static FALLBACK_V6: LazyLock<Flights<Answer<Ipv6Addr>>> = LazyLock::new(Flights::default);
+static FALLBACK_TXT: LazyLock<Flights<Answer<TxtRecordData>>> = LazyLock::new(Flights::default);
+
 /// The operating system's resolver. Blocks.
 fn system_lookup(host: &str) -> Vec<IpAddr> {
     (host, 0)
@@ -77,128 +91,245 @@ fn system_lookup(host: &str) -> Vec<IpAddr> {
 }
 
 /// What is known about one name.
-enum Slot {
-    /// A lookup is running on its own thread, since `since`.
+enum Slot<V> {
+    /// A lookup is running, since `since`.
     Running {
         since: Instant,
-        answer: watch::Receiver<Option<Arc<Vec<IpAddr>>>>,
+        answer: watch::Receiver<Option<V>>,
     },
-    /// The last lookup ended at `at`. Empty means it found nothing.
+    /// The last lookup ended at `at`, and its answer stands for `keep`.
     Done {
         at: Instant,
-        found: Arc<Vec<IpAddr>>,
+        keep: Duration,
+        value: V,
     },
 }
 
-/// Blocking lookups, at most one running for each name.
-#[derive(Clone)]
-pub(crate) struct Names {
-    lookup: fn(&str) -> Vec<IpAddr>,
-    slots: Arc<Mutex<HashMap<String, Slot>>>,
+/// Lookups of one kind, at most one running for each name.
+pub(crate) struct Flights<V> {
+    slots: Arc<Mutex<HashMap<String, Slot<V>>>>,
 }
-
-impl Names {
-    pub(crate) fn new(lookup: fn(&str) -> Vec<IpAddr>) -> Self {
+impl<V> Clone for Flights<V> {
+    fn clone(&self) -> Self {
         Self {
-            lookup,
+            slots: self.slots.clone(),
+        }
+    }
+}
+impl<V> Default for Flights<V> {
+    fn default() -> Self {
+        Self {
             slots: Arc::default(),
         }
     }
+}
 
-    /// The addresses for `host`, waiting at most `wait`. Joins a lookup
-    /// already running for it rather than starting another, and a caller
-    /// that stops waiting leaves that lookup to finish for the next one. A
-    /// lookup that has already run longer than `wait` is not waited on.
-    pub(crate) async fn get(&self, host: &str, wait: Duration) -> Vec<IpAddr> {
+/// Handed to a lookup that was started, for its answer.
+pub(crate) struct Finish<V> {
+    slots: Arc<Mutex<HashMap<String, Slot<V>>>>,
+    key: String,
+    keep: fn(&V) -> Duration,
+    tx: watch::Sender<Option<V>>,
+}
+impl<V: Clone> Finish<V> {
+    fn send(self, value: V) {
+        let keep = (self.keep)(&value);
+        {
+            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            if keep.is_zero() {
+                slots.remove(&self.key);
+            } else {
+                slots.insert(
+                    self.key,
+                    Slot::Done {
+                        at: Instant::now(),
+                        keep,
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
+        let _ = self.tx.send(Some(value));
+    }
+}
+
+/// What a caller found in the slots.
+enum Seen<V> {
+    Kept(V),
+    Join(Instant, watch::Receiver<Option<V>>),
+    Start,
+}
+
+impl<V: Clone + Send + Sync + 'static> Flights<V> {
+    /// The answer for `key`, waiting at most `wait`. Joins a lookup already
+    /// running for it rather than starting another, and a caller that stops
+    /// waiting leaves that lookup to finish for the next one. A lookup that
+    /// has already run longer than `wait` is not waited on. Otherwise
+    /// `start` is called to begin one, which hands its answer to the
+    /// [`Finish`] it is given; it says false when it could not begin. `keep`
+    /// says how long an answer stands; zero keeps none.
+    pub(crate) async fn get(
+        &self,
+        key: &str,
+        wait: Duration,
+        keep: fn(&V) -> Duration,
+        start: impl FnOnce(Finish<V>) -> bool,
+    ) -> Option<V> {
         let mut answer = {
             let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-            match slots.get(host) {
-                Some(Slot::Done { at, found }) => {
-                    let keep = if found.is_empty() {
-                        KEEP_MISSING
-                    } else {
-                        KEEP_FOUND
-                    };
-                    if at.elapsed() < keep {
-                        return found.to_vec();
-                    }
-                    self.start(&mut slots, host)
+            let seen = match slots.get(key) {
+                Some(Slot::Done { at, keep, value }) if at.elapsed() < *keep => {
+                    Seen::Kept(value.clone())
                 }
-                Some(Slot::Running { since, answer }) => {
+                // A lookup whose task went away, with the runtime it ran on,
+                // answers nobody and is started again.
+                Some(Slot::Running { since, answer }) if answer.has_changed().is_ok() => {
+                    Seen::Join(*since, answer.clone())
+                }
+                _ => Seen::Start,
+            };
+            match seen {
+                Seen::Kept(value) => return Some(value),
+                Seen::Join(since, answer) => {
                     if since.elapsed() >= wait {
-                        return Vec::new();
+                        return None;
                     }
-                    Some(answer.clone())
+                    answer
                 }
-                None => self.start(&mut slots, host),
+                Seen::Start => {
+                    // Answers past their time are of no use to anyone.
+                    slots.retain(|_, slot| match slot {
+                        Slot::Running { answer, .. } => answer.has_changed().is_ok(),
+                        Slot::Done { at, keep, .. } => at.elapsed() < *keep,
+                    });
+                    let running = slots
+                        .values()
+                        .filter(|slot| matches!(slot, Slot::Running { .. }))
+                        .count();
+                    if running >= MOST_RUNNING {
+                        return None;
+                    }
+                    let (tx, rx) = watch::channel(None);
+                    let finish = Finish {
+                        slots: self.slots.clone(),
+                        key: key.to_string(),
+                        keep,
+                        tx,
+                    };
+                    // The lookup cannot record its answer before this
+                    // returns: it needs the lock held here.
+                    if !start(finish) {
+                        return None;
+                    }
+                    slots.insert(
+                        key.to_string(),
+                        Slot::Running {
+                            since: Instant::now(),
+                            answer: rx.clone(),
+                        },
+                    );
+                    rx
+                }
             }
         };
-        let Some(answer_rx) = answer.as_mut() else {
-            return Vec::new();
-        };
-        match tokio::time::timeout(wait, answer_rx.wait_for(Option::is_some)).await {
-            Ok(Ok(found)) => found.as_deref().map(|f| f.to_vec()).unwrap_or_default(),
-            _ => Vec::new(),
+        match tokio::time::timeout(wait, answer.wait_for(Option::is_some)).await {
+            Ok(Ok(value)) => value.clone(),
+            _ => None,
         }
     }
 
     /// Drop the answers kept, after the network changed. A lookup still
-    /// running stays, so asking again joins it rather than adding a thread.
+    /// running stays, so asking again joins it rather than adding another.
     fn forget(&self) {
         self.slots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, slot| matches!(slot, Slot::Running { .. }));
     }
+}
 
-    /// Start a lookup for `host` on a thread of its own, unless too many
-    /// are running already.
-    fn start(
-        &self,
-        slots: &mut HashMap<String, Slot>,
-        host: &str,
-    ) -> Option<watch::Receiver<Option<Arc<Vec<IpAddr>>>>> {
-        // Answers past their time are of no use to anyone.
-        slots.retain(|_, slot| match slot {
-            Slot::Running { .. } => true,
-            Slot::Done { at, .. } => at.elapsed() < KEEP_FOUND,
-        });
-        let running = slots
-            .values()
-            .filter(|slot| matches!(slot, Slot::Running { .. }))
-            .count();
-        if running >= MOST_RUNNING {
-            return None;
+/// Blocking system lookups, each on a thread of its own, at most one running
+/// for each name.
+#[derive(Clone)]
+pub(crate) struct Names {
+    lookup: fn(&str) -> Vec<IpAddr>,
+    flights: Flights<Arc<Vec<IpAddr>>>,
+}
+
+impl Names {
+    pub(crate) fn new(lookup: fn(&str) -> Vec<IpAddr>) -> Self {
+        Self {
+            lookup,
+            flights: Flights::default(),
         }
-        let (tx, rx) = watch::channel(None);
-        let lookup = self.lookup;
-        let shared = self.slots.clone();
-        let name = host.to_string();
-        let started = std::thread::Builder::new()
-            .name("dns lookup".into())
-            .spawn(move || {
-                let found = Arc::new(lookup(&name));
-                shared.lock().unwrap_or_else(|e| e.into_inner()).insert(
-                    name,
-                    Slot::Done {
-                        at: Instant::now(),
-                        found: found.clone(),
-                    },
-                );
-                let _ = tx.send(Some(found));
-            });
-        if started.is_err() {
-            return None;
-        }
-        slots.insert(
-            host.to_string(),
-            Slot::Running {
-                since: Instant::now(),
-                answer: rx.clone(),
-            },
-        );
-        Some(rx)
     }
+
+    /// The addresses for `host`, or none if the system found none, did not
+    /// answer within `wait`, or is still on an earlier try that has taken
+    /// longer than that.
+    pub(crate) async fn get(&self, host: &str, wait: Duration) -> Vec<IpAddr> {
+        let lookup = self.lookup;
+        let name = host.to_string();
+        let start = move |finish: Finish<Arc<Vec<IpAddr>>>| {
+            std::thread::Builder::new()
+                .name("dns lookup".into())
+                .spawn(move || finish.send(Arc::new(lookup(&name))))
+                .is_ok()
+        };
+        self.flights
+            .get(host, wait, keep_found, start)
+            .await
+            .map(|found| found.to_vec())
+            .unwrap_or_default()
+    }
+
+    fn forget(&self) {
+        self.flights.forget();
+    }
+}
+
+fn keep_found(found: &Arc<Vec<IpAddr>>) -> Duration {
+    if found.is_empty() {
+        KEEP_MISSING
+    } else {
+        KEEP_FOUND
+    }
+}
+
+/// iroh's client keeps what it found itself, for as long as the records
+/// say, so only a failure is kept here.
+fn keep_answer<T>(answer: &Answer<T>) -> Duration {
+    match answer {
+        Ok(_) => Duration::ZERO,
+        Err(_) => KEEP_MISSING,
+    }
+}
+
+/// Ask iroh's client through `flights`, so one query runs for `host`
+/// however many callers want it.
+async fn shared<T: Clone + Send + Sync + 'static>(
+    flights: &Flights<Answer<T>>,
+    host: &str,
+    wait: Duration,
+    run: impl Future<Output = Answer<T>> + Send + 'static,
+) -> Result<Vec<T>, DnsError> {
+    let start = move |finish: Finish<Answer<T>>| {
+        tokio::spawn(async move { finish.send(run.await) });
+        true
+    };
+    match flights.get(host, wait, keep_answer::<T>, start).await {
+        Some(Ok(found)) => Ok(found.to_vec()),
+        Some(Err(why)) => Err(failed(&why)),
+        None => Err(failed("No answer in time")),
+    }
+}
+
+fn failed(why: &str) -> DnsError {
+    DnsError::from(n0_error::AnyError::from_string(why.to_string()))
+}
+
+fn why(error: DnsError) -> Arc<str> {
+    error.to_string().into()
 }
 
 impl Resolver for SystemFirst {
@@ -214,14 +345,19 @@ impl Resolver for SystemFirst {
                 })
                 .collect();
             if found.is_empty() {
-                found = fallback
-                    .lookup_ipv4(host, TIMEOUT)
-                    .await?
-                    .filter_map(|ip| match ip {
-                        IpAddr::V4(v4) => Some(v4),
-                        IpAddr::V6(_) => None,
-                    })
-                    .collect();
+                let name = host.clone();
+                let run = async move {
+                    let found = fallback.lookup_ipv4(name, TIMEOUT).await.map_err(why)?;
+                    Ok(Arc::new(
+                        found
+                            .filter_map(|ip| match ip {
+                                IpAddr::V4(v4) => Some(v4),
+                                IpAddr::V6(_) => None,
+                            })
+                            .collect(),
+                    ))
+                };
+                found = shared(&FALLBACK_V4, &host, TIMEOUT, run).await?;
             }
             Ok(Box::new(found.into_iter()) as BoxIter<Ipv4Addr>)
         })
@@ -238,14 +374,19 @@ impl Resolver for SystemFirst {
                 })
                 .collect();
             if found.is_empty() {
-                found = fallback
-                    .lookup_ipv6(host, TIMEOUT)
-                    .await?
-                    .filter_map(|ip| match ip {
-                        IpAddr::V6(v6) => Some(v6),
-                        IpAddr::V4(_) => None,
-                    })
-                    .collect();
+                let name = host.clone();
+                let run = async move {
+                    let found = fallback.lookup_ipv6(name, TIMEOUT).await.map_err(why)?;
+                    Ok(Arc::new(
+                        found
+                            .filter_map(|ip| match ip {
+                                IpAddr::V6(v6) => Some(v6),
+                                IpAddr::V4(_) => None,
+                            })
+                            .collect(),
+                    ))
+                };
+                found = shared(&FALLBACK_V6, &host, TIMEOUT, run).await?;
             }
             Ok(Box::new(found.into_iter()) as BoxIter<Ipv6Addr>)
         })
@@ -253,21 +394,33 @@ impl Resolver for SystemFirst {
     fn lookup_txt(&self, host: String) -> Boxed<Result<BoxIter<TxtRecordData>, DnsError>> {
         let fallback = self.fallback.clone();
         Box::pin(async move {
-            let found: Vec<TxtRecordData> = fallback.lookup_txt(host, TIMEOUT).await?.collect();
+            let name = host.clone();
+            let run = async move {
+                let found = fallback.lookup_txt(name, TIMEOUT).await.map_err(why)?;
+                Ok(Arc::new(found.collect()))
+            };
+            let found = shared(&FALLBACK_TXT, &host, TIMEOUT, run).await?;
             Ok(Box::new(found.into_iter()) as BoxIter<TxtRecordData>)
         })
     }
     fn clear_cache(&self) {
-        SYSTEM.forget();
+        forget_all();
         self.fallback.clear_cache();
     }
     fn reset(&self) -> Box<dyn Resolver> {
-        // The answers kept from the system go, and the fallback re-reads its
+        // The answers kept here go, and the fallback re-reads its
         // configuration on its own reset.
-        SYSTEM.forget();
+        forget_all();
         self.fallback.reset();
         Box::new(self.clone())
     }
+}
+
+fn forget_all() {
+    SYSTEM.forget();
+    FALLBACK_V4.forget();
+    FALLBACK_V6.forget();
+    FALLBACK_TXT.forget();
 }
 
 #[cfg(test)]
@@ -395,5 +548,63 @@ mod tests {
         names.forget();
         names.get("gone.example.com", Duration::from_secs(1)).await;
         assert_eq!(MISSING.load(Ordering::SeqCst), 2);
+    }
+
+    static ASKED: AtomicUsize = AtomicUsize::new(0);
+
+    /// iroh's client is shared the same way: one query for a name however
+    /// many callers want it, and a name it failed on is not asked about
+    /// again straight away.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_fallback_runs_one_query_a_name_and_keeps_a_failure() {
+        let flights: Flights<Answer<IpAddr>> = Flights::default();
+        let answer = Arc::new(tokio::sync::Notify::new());
+        for _ in 0..20 {
+            let mut tries = tokio::task::JoinSet::new();
+            for _ in 0..50 {
+                let flights = flights.clone();
+                let answer = answer.clone();
+                tries.spawn(async move {
+                    let run = async move {
+                        ASKED.fetch_add(1, Ordering::SeqCst);
+                        answer.notified().await;
+                        Err(Arc::<str>::from("timed out"))
+                    };
+                    shared(
+                        &flights,
+                        "relay.example.com",
+                        Duration::from_millis(20),
+                        run,
+                    )
+                    .await
+                });
+            }
+            for found in tries.join_all().await {
+                assert!(found.is_err());
+            }
+        }
+        assert_eq!(ASKED.load(Ordering::SeqCst), 1);
+        answer.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..10 {
+            let run = async {
+                ASKED.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(Vec::new()))
+            };
+            let found = shared(&flights, "relay.example.com", Duration::from_secs(1), run).await;
+            assert!(found.is_err());
+        }
+        assert_eq!(ASKED.load(Ordering::SeqCst), 1);
+        flights.forget();
+        let run = async {
+            ASKED.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))]))
+        };
+        let found = shared(&flights, "relay.example.com", Duration::from_secs(1), run).await;
+        assert_eq!(
+            found.unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))]
+        );
+        assert_eq!(ASKED.load(Ordering::SeqCst), 2);
     }
 }

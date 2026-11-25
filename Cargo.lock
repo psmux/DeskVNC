@@ -1119,6 +1119,7 @@ dependencies = [
  "image",
  "iroh",
  "mdns-sd",
+ "n0-error",
  "noq-proto",
  "openh264",
  "png",
