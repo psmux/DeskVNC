@@ -217,6 +217,11 @@ fn main() {
             "provide_credentials",
             "cancel_credentials",
             "pending_credential_request",
+            // "Add to saved hosts" on a tab: whether a session has a proven
+            // credential (a yes or no, never the secret), and turning the
+            // session into a saved host's.
+            "session_credential_state",
+            "bind_session_to_host",
             "open_session_window",
             "release_session_claim",
             "fullscreen_session",

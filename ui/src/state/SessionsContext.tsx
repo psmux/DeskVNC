@@ -65,6 +65,7 @@ export interface PreviewPayload {
 type SessionsEventPayload =
   | { type: "started"; sessionId: string; profileId: string | null; address: string; port: number }
   | { type: "state"; sessionId: string; state: string }
+  | { type: "host-adopted"; sessionId: string; profileId: string }
   | { type: "ended"; sessionId: string };
 
 /** Payload of `sessions://stats`, top-level camelCase, `stats` snake_case. */
@@ -220,6 +221,16 @@ export function SessionsProvider({ children }: { children: ReactNode }): ReactNo
           const cur = prev[ev.sessionId];
           if (!cur || typeof ev.state !== "string" || cur.state === ev.state) return prev;
           return { ...prev, [ev.sessionId]: { ...cur, state: ev.state } };
+        });
+        break;
+      case "host-adopted":
+        // The session became a saved host's while it ran: its activity now
+        // belongs on that host's tile rather than on the address's.
+        setSessions((prev) => {
+          const cur = prev[ev.sessionId];
+          if (!cur || typeof ev.profileId !== "string" || !ev.profileId) return prev;
+          if (cur.profileId === ev.profileId) return prev;
+          return { ...prev, [ev.sessionId]: { ...cur, profileId: ev.profileId } };
         });
         break;
       case "ended":

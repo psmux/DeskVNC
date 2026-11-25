@@ -333,6 +333,8 @@ Results stream as events; these commands do not return hosts.
 | `trust_certificate` | `invoke("trust_certificate", { sessionId, fingerprint, permanent })` | `void` |
 | `provide_credentials` | `invoke("provide_credentials", { sessionId, username, password, save })` | `void` |
 | `cancel_credentials` | `invoke("cancel_credentials", { sessionId })` | `void` |
+| `session_credential_state` | `invoke("session_credential_state", { sessionId })` | `SessionCredentialState`, see below |
+| `bind_session_to_host` | `invoke("bind_session_to_host", { sessionId, hostId, saveCredentials })` | `{ credentialsSaved: boolean }`, see below |
 | `fullscreen_session` | `invoke("fullscreen_session", { sessionId, fullscreen, monitorIndex? })` | `void` |
 | `list_active_sessions` | `invoke("list_active_sessions")` | `ActiveSession[]`, see below |
 
@@ -513,6 +515,42 @@ Accepts `{ sessionId, username?, domain?, password, save }`.
 **SECURITY INVARIANT: passwords only travel JS → Rust**, exactly as with
 `save_password`. Neither command returns anything, and there is still no
 `get_password`.
+
+### `session_credential_state` / `bind_session_to_host`
+
+"Add to saved hosts" on a tab whose session was opened without a saved host
+(quick connect, a typed address, Nearby, an agent opening by address).
+
+Whatever is typed at a session's prompt is also kept in memory
+(`AppState::used_credentials`, keyed by session id) whether or not `save` was
+ticked. It is marked proven at the same point a `save: true` intent would be
+written, dropped when its attempt fails before that, and dropped when the
+session ends. It is never written to disk unless `bind_session_to_host` asks.
+
+`session_credential_state({ sessionId })` returns, **camelCase**:
+
+```ts
+{ used: boolean; hasUsername: boolean; remembered: boolean }
+```
+
+`used` is true only for a credential the server accepted. `hasUsername` says
+whether a user name came with it, `remembered` whether "Remember" was ticked.
+All three are false for a session that never prompted. Never the secret.
+
+`bind_session_to_host({ sessionId, hostId, saveCredentials })` makes the
+session a session of `hostId` from now on. The webview saves the host first
+with `save_host`. The shell checks that the host's address and port are the
+session's (same normalisation as `find_host_by_address`) and rejects
+otherwise, then sets the session's profile id: thumbnails go to the host,
+opening the host finds this session rather than dialling another, and the
+next `connect_session` reads the host's settings and stored password. The live
+connection is not touched. With `saveCredentials: true` and a proven
+credential, that credential is merged into the host's stored credentials
+exactly as a remembered prompt answer is. Returns `{ credentialsSaved }`.
+Broadcasts `host-adopted` on `sessions://event`.
+
+Rejects with `"That saved host no longer exists."`, `"This session has already
+ended."` or `"That saved host is for a different address."`.
 
 ### `send_input` (raw binary body)
 
@@ -746,7 +784,7 @@ discriminator, top-level keys **camelCase**:
 | Payload | When |
 |---|---|
 | `{ type: "started", sessionId, profileId, address, port, protocol }` | `connect_session` registered the session (`profileId` is `null` for ad-hoc) |
-| `{ type: "host-adopted", sessionId, profileId, address, port, protocol }` | an ad-hoc session that asked to be remembered just gained a host profile; the Library re-reads its host list on it |
+| `{ type: "host-adopted", sessionId, profileId, address, port, protocol }` | an ad-hoc session just gained a host profile, because it asked to be remembered or through `bind_session_to_host`; the Library re-reads its host list on it, and the tab holding the session becomes that host's |
 | `{ type: "state", sessionId, state }` | every state change; `state` is **only the kebab-case tag** (`"connecting"`, `"connected"`, `"reconnecting"`, `"disconnected"`, …), never the full `SessionState` object |
 | `{ type: "ended", sessionId }` | the session task is fully gone and its registry entry removed |
 

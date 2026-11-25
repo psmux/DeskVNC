@@ -17,6 +17,8 @@ import { Pane } from "./components/Pane";
 import { SplitView } from "./components/SplitView";
 import { AgentRequests } from "./components/AgentRequests";
 import { AgentWall } from "./components/AgentWall";
+import { SaveTabHostDialog } from "./components/SaveTabHostDialog";
+import { saveTargetOf } from "./lib/saveTabHost";
 import { SupportOverlay } from "./components/SupportOverlay";
 import { ToastShelf } from "./components/primitives";
 import { panes } from "./lib/layout";
@@ -139,8 +141,15 @@ function MainShell(): ReactNode {
     moveFocus,
     cycleFocus,
     evenOut,
+    sessions,
   } = useTabs();
   const { driving } = useAgentActivity();
+
+  /** The session whose tab chose "Add to saved hosts", while its dialog is open. */
+  const [savingSessionId, setSavingSessionId] = useState<string | null>(null);
+  // Looked up every render, so a session that ends while the dialog is open
+  // takes the dialog with it rather than saving a machine nobody is on.
+  const savingSession = savingSessionId ? sessions[savingSessionId] ?? null : null;
 
   /**
    * Which tabs hold a machine an agent is driving.
@@ -420,8 +429,17 @@ function MainShell(): ReactNode {
             onCloseMany={closeMany}
             onSelectRelative={selectRelative}
             drivenTabIds={drivenTabIds}
+            canSaveHost={(tab) => saveTargetOf(tab.sessionId, sessions) !== null}
+            onSaveHost={(tabId) => {
+              const tab = summaries.find((t) => t.id === tabId);
+              const target = tab ? saveTargetOf(tab.sessionId, sessions) : null;
+              if (target) setSavingSessionId(target.id);
+            }}
           />
         </div>
+      ) : null}
+      {savingSession ? (
+        <SaveTabHostDialog session={savingSession} onClose={() => setSavingSessionId(null)} />
       ) : null}
 
       {/*

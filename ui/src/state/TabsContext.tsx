@@ -29,6 +29,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -36,7 +37,7 @@ import {
 } from "react";
 import type { SessionParams } from "../hooks/useSession";
 import type { SessionState } from "../lib/types";
-import { safeInvoke } from "../lib/tauri";
+import { safeInvoke, safeListen } from "../lib/tauri";
 import { serializeLayout } from "../lib/groupLayout";
 import { frontAfterClose } from "../lib/tabClose";
 import {
@@ -101,6 +102,8 @@ export interface TabSummary {
   state: SessionState;
   /** How many panes it is divided into. One means an ordinary tab. */
   paneCount: number;
+  /** The session in the focused pane, the one the tab is named after. */
+  sessionId: string | null;
 }
 
 /** Where a session should be put when it finishes connecting. */
@@ -145,6 +148,13 @@ interface TabsContextValue {
   closeActive: () => void;
   setTitle: (sessionId: string, title: string) => void;
   setState: (sessionId: string, state: SessionState) => void;
+  /**
+   * Make a session that was opened without a saved host a session of that
+   * host from now on: it reconnects with the host's settings and stored
+   * password, and the Library counts it as that host's. The connection itself
+   * is not touched. With `name`, the tab takes the saved name too.
+   */
+  bindHost: (sessionId: string, profileId: string, name?: string) => void;
 
   // ------------------------------------------------------------- panes
 
@@ -698,6 +708,44 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
     [patchSession],
   );
 
+  const bindHost = useCallback((id: string, profileId: string, name?: string): void => {
+    setSessions((prev) => {
+      const current = prev[id];
+      if (!current) return prev;
+      const title = name?.trim() || current.title;
+      if (current.params.profileId === profileId && current.title === title) return prev;
+      // A new params object, so everything that reads the profile id (the
+      // thumbnail, the per host settings, the next connect) sees it. The
+      // viewer is keyed by the session id, so it stays mounted, and its
+      // connect effect does not restart on a profile id alone.
+      const params = { ...current.params, profileId, name: name?.trim() || current.params.name };
+      return { ...prev, [id]: { ...current, params, title } };
+    });
+  }, []);
+
+  // The shell turns a session into a saved host by itself when the person
+  // ticks "Remember" at a prompt in a session that had none. The tab follows,
+  // so it does not go on offering to save a machine that already is.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void safeListen<{ type?: string; sessionId?: unknown; profileId?: unknown }>(
+      "sessions://event",
+      (ev) => {
+        if (cancelled || ev?.type !== "host-adopted") return;
+        if (typeof ev.sessionId !== "string" || typeof ev.profileId !== "string") return;
+        bindHost(ev.sessionId, ev.profileId);
+      },
+    ).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [bindHost]);
+
   /**
    * What the strip shows.
    *
@@ -719,6 +767,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
           title: session?.title ?? named[0] ?? "New pane",
           state: session?.state ?? CONNECTING,
           paneCount: list.length,
+          sessionId: focused?.sessionId ?? null,
         };
       }),
     [tabs, sessions],
@@ -747,6 +796,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
       closeActive,
       setTitle,
       setState,
+      bindHost,
       split,
       closePane,
       focusPane,
@@ -763,7 +813,7 @@ export function TabsProvider({ children }: { children: ReactNode }): ReactNode {
     }),
     [
       tabs, sessions, summaries, activeId, activeTab, open, close, select, selectSession,
-      has, selectRelative, selectIndex, closeActive, setTitle, setState, split, closePane,
+      has, selectRelative, selectIndex, closeActive, setTitle, setState, bindHost, split, closePane,
       focusPane, reportArea, moveFocus, cycleFocus, adopt, resize, evenOut, toggleZoom, arrange,
       openArranged, serializeActive, closeMany,
     ],

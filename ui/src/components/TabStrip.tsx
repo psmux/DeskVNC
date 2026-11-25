@@ -7,7 +7,8 @@
  *
  * The rest of the browser habits come along too. Right-clicking a tab offers
  * Close, Close other tabs, Close tabs to the left or right, and Close all
- * tabs. When the tabs no longer fit, arrows appear at both ends of the strip,
+ * tabs. A tab opened without a saved host (quick connect, a typed address)
+ * also offers Add to saved hosts. When the tabs no longer fit, arrows appear at both ends of the strip,
  * and an ordinary mouse wheel over it scrolls it sideways.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } from "react";
@@ -56,6 +57,8 @@ export function TabStrip({
   onCloseMany,
   onSelectRelative,
   drivenTabIds = NO_TABS_DRIVEN,
+  canSaveHost,
+  onSaveHost,
 }: {
   tabs: readonly TabSummary[];
   activeId: string | null;
@@ -72,6 +75,13 @@ export function TabStrip({
    * as it always has.
    */
   drivenTabIds?: ReadonlySet<string>;
+  /**
+   * Whether a tab's session was opened without a saved host and can become
+   * one. Only those tabs get "Add to saved hosts" in their menu.
+   */
+  canSaveHost?: (tab: TabSummary) => boolean;
+  /** "Add to saved hosts" was chosen on this tab. */
+  onSaveHost?: (tabId: string) => void;
 }): ReactNode {
   const activeRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -142,8 +152,14 @@ export function TabStrip({
     };
     // The library cannot close, so all it can offer is clearing the strip.
     if (id === null) return [item("Close all tabs", "all")];
+    const tab = tabs.find((t) => t.id === id);
+    const keep: MenuItem[] =
+      tab && onSaveHost && canSaveHost?.(tab)
+        ? [{ label: "Add to saved hosts", onSelect: () => onSaveHost(id) }]
+        : [];
     return [
-      item("Close tab", "this"),
+      ...keep,
+      item("Close tab", "this", keep.length > 0),
       item("Close other tabs", "others", true),
       item("Close tabs to the left", "left"),
       item("Close tabs to the right", "right"),

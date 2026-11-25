@@ -97,6 +97,47 @@ describe("the tab strip's right-click menu", () => {
     expect(menuItem("Close tabs to the left").disabled).toBe(false);
   });
 
+  it("offers Add to saved hosts only on a tab that has no saved host", () => {
+    const onSaveHost = vi.fn<(id: string) => void>();
+    act(() => {
+      root.render(
+        createElement(TabStrip, {
+          tabs: ["a", "b", "c", "d"].map(tab),
+          activeId: "b",
+          onSelect: () => {},
+          onClose: () => {},
+          onCloseMany,
+          onSelectRelative: () => {},
+          // "c" stands for a quick connect, the rest for saved hosts.
+          canSaveHost: (t: TabSummary) => t.id === "c",
+          onSaveHost,
+        }),
+      );
+    });
+
+    rightClick("c");
+    const labels = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+    expect(labels[0]).toBe("Add to saved hosts");
+    expect(labels.slice(1)).toEqual([
+      "Close tab",
+      "Close other tabs",
+      "Close tabs to the left",
+      "Close tabs to the right",
+      "Close all tabs",
+    ]);
+    act(() => menuItem("Add to saved hosts").click());
+    expect(onSaveHost).toHaveBeenCalledWith("c");
+    expect(onCloseMany).not.toHaveBeenCalled();
+
+    rightClick("b");
+    const saved = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+    expect(saved).not.toContain("Add to saved hosts");
+
+    rightClick("Library");
+    const library = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+    expect(library).toEqual(["Close all tabs"]);
+  });
+
   it("offers only Close all tabs on the library, which never closes", () => {
     rightClick("Library");
     const labels = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
