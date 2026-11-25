@@ -998,15 +998,22 @@ mod tests {
         ));
     }
 
-    /// Runs the start of `script` with no programs to call, so it can stop
-    /// at a check but never change anything.
+    /// Runs the start of `script` with no programs to call but `rm`, which
+    /// its refusal uses to clear a copy it has not made, so it can stop at a
+    /// check but never change anything.
     fn run_without_programs(script: &str) -> std::process::Output {
-        std::process::Command::new("/bin/sh")
+        let bin = std::env::temp_dir().join(format!("login-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&bin);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink("/bin/rm", bin.join("rm")).unwrap();
+        let ran = std::process::Command::new("/bin/sh")
             .args(["-c", script])
             .env_clear()
-            .env("PATH", "/nonexistent")
+            .env("PATH", &bin)
             .output()
-            .unwrap()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&bin);
+        ran
     }
 
     #[test]
