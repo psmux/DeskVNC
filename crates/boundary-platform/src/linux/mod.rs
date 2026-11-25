@@ -12,10 +12,12 @@ use boundary_session::Rect;
 use std::sync::Arc;
 
 pub(crate) mod broker;
+pub(crate) mod egl;
 pub(crate) mod kms;
 pub(crate) mod notify;
 pub(crate) mod portal;
 pub(crate) mod uinput;
+pub(crate) mod xkb;
 pub(crate) mod x11;
 
 /// One screen as the system gave it: RGBA at its own size, with what changed

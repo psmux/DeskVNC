@@ -163,7 +163,7 @@ pub(crate) fn decode(kind: u8, s: &mut impl Read) -> Result<Option<Input>> {
 /// that stays asleep is sent as black at its last size, so the helper's
 /// session goes on and their first move wakes it.
 fn picture(
-    kms: &Kms,
+    kms: &mut Kms,
     uinput: &mut Option<Uinput>,
     last: &mut Option<(u32, u32)>,
 ) -> Result<super::kms::Picture> {
@@ -194,7 +194,7 @@ fn picture(
 }
 
 fn answer(mut stream: UnixStream) -> Result<()> {
-    let kms = Kms::open();
+    let mut kms = Kms::open();
     let mut uinput = None;
     let mut last = None;
     loop {
@@ -204,7 +204,7 @@ fn answer(mut stream: UnixStream) -> Result<()> {
         }
         match decode(kind[0], &mut stream)? {
             None => match kms
-                .as_ref()
+                .as_mut()
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .and_then(|k| picture(k, &mut uinput, &mut last))
             {
@@ -236,14 +236,34 @@ fn answer(mut stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
-/// Whether the screen can be read here at all: a picture, or why not.
-/// A screen that is asleep counts: it can be read once it wakes.
-pub fn kms_probe() -> Result<(u32, u32)> {
-    match Kms::open()?.capture() {
-        Ok(picture) => Ok((picture.width, picture.height)),
-        Err(error) if error.is::<super::kms::Asleep>() => Ok((0, 0)),
+/// Whether the screen can be read here at all: how it is read, or why
+/// not. A screen that is asleep counts: it can be read once it wakes.
+pub fn kms_probe() -> Result<String> {
+    let mut kms = Kms::open()?;
+    match kms.capture() {
+        Ok(picture) => Ok(format!("{}x{}, {}", picture.width, picture.height, kms.how)),
+        Err(error) if error.is::<super::kms::Asleep>() => Ok("the screen is asleep".into()),
         Err(error) => Err(error),
     }
+}
+
+/// The screen as the service reads it, `count` times on one device as a
+/// session does, the last picture and how it was read, for checking a
+/// machine by hand.
+pub fn kms_frame(count: u32) -> Result<(Frame, String)> {
+    let mut kms = Kms::open()?;
+    let mut p = kms.capture()?;
+    for _ in 1..count {
+        p = kms.capture()?;
+    }
+    Ok((
+        Frame {
+            width: p.width,
+            height: p.height,
+            rgba: p.rgba,
+        },
+        kms.how.clone(),
+    ))
 }
 
 /// Serve hosts on `listener` until `stop` is set, one thread each.

@@ -431,7 +431,10 @@ mod imp {
     fn resolve(plan: Plan) -> Plan {
         match plan {
             Plan::Wayland { session } => match boundary_platform::kms_probe() {
-                Ok(_) => Plan::Wayland { session },
+                Ok(how) => {
+                    eprintln!("Reading the sign in screen from the graphics card: {how}");
+                    Plan::Wayland { session }
+                }
                 Err(error) => Plan::Unavailable {
                     session,
                     reason: format!("{} ({error:#})", seat::WAYLAND_GREETER),

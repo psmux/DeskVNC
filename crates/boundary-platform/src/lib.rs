@@ -12,7 +12,7 @@ mod dxgi;
 mod linux;
 mod retry;
 #[cfg(target_os = "linux")]
-pub use linux::broker::{kms_probe, kms_serve};
+pub use linux::broker::{kms_frame, kms_probe, kms_serve};
 #[cfg(target_os = "linux")]
 pub use linux::notify::{Notification, notify};
 

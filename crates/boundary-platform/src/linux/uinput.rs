@@ -2,9 +2,11 @@
 //!
 //! The Wayland sign in screen takes input from no program, only from input
 //! devices, so this makes one. The compositor sees it as a new mouse and
-//! keyboard, the way it sees QEMU's tablet. Text is typed as a US keyboard
-//! would type it; a character that layout has no key for is skipped.
+//! keyboard, the way it sees QEMU's tablet. Text is typed through the
+//! system's keyboard layout ([`super::xkb`]), US where that cannot be read;
+//! a character the layout has no key for is skipped.
 
+use super::xkb::{Keymap, Stroke};
 use anyhow::{Context, Result};
 use boundary_session::{Button, Input, Key};
 use std::fs::File;
@@ -88,7 +90,7 @@ pub(crate) fn key_for(c: char) -> Option<(u16, bool)> {
     }
 }
 
-fn named(key: Key) -> Option<(u16, bool)> {
+fn named(key: Key, keymap: &Keymap) -> Option<(u16, bool)> {
     Some(match key {
         Key::Enter => (28, false),
         Key::Tab => (15, false),
@@ -108,7 +110,13 @@ fn named(key: Key) -> Option<(u16, bool)> {
         Key::Alt => (56, false),
         Key::Meta => (125, false),
         Key::Space => (57, false),
-        Key::Letter(c) => return key_for(c.to_ascii_lowercase()),
+        Key::Letter(c) => {
+            let lower = c.to_lowercase().next().unwrap_or(c);
+            return keymap
+                .stroke(lower)
+                .filter(|s| !s.level3)
+                .map(|s| (s.code, s.shift));
+        }
     })
 }
 
@@ -118,6 +126,7 @@ pub(crate) struct Uinput {
     at: (i32, i32),
     /// Keys and buttons held down, let go of on release.
     held: Vec<u16>,
+    keymap: Keymap,
 }
 
 impl Uinput {
@@ -183,10 +192,13 @@ impl Uinput {
         // The compositor finds a new device through udev; input sent before
         // it opens the device is lost.
         std::thread::sleep(std::time::Duration::from_millis(500));
+        let keymap = Keymap::configured();
+        eprintln!("Typing on the sign in screen as keyboard layout {}", keymap.name);
         Ok(Self {
             dev,
             at: (SPAN / 2, SPAN / 2),
             held: Vec::new(),
+            keymap,
         })
     }
 
@@ -211,14 +223,23 @@ impl Uinput {
         self.emit(&[(EV_KEY, code, down as i32)])
     }
 
-    fn tap(&mut self, code: u16, shift: bool) -> Result<()> {
-        if shift {
-            self.key(KEY_LEFTSHIFT, true)?;
+    fn tap(&mut self, stroke: Stroke) -> Result<()> {
+        let mut mods = Vec::new();
+        if stroke.shift {
+            mods.push(KEY_LEFTSHIFT);
         }
-        self.key(code, true)?;
-        self.key(code, false)?;
-        if shift {
-            self.key(KEY_LEFTSHIFT, false)?;
+        if stroke.level3
+            && let Some(k) = self.keymap.level3_key
+        {
+            mods.push(k);
+        }
+        for &m in &mods {
+            self.key(m, true)?;
+        }
+        self.key(stroke.code, true)?;
+        self.key(stroke.code, false)?;
+        for &m in mods.iter().rev() {
+            self.key(m, false)?;
         }
         Ok(())
     }
@@ -238,15 +259,19 @@ impl Uinput {
                 },
                 down,
             ),
-            Input::Key { key, down } => match named(key) {
-                Some((code, true)) if down => self.tap(code, true),
+            Input::Key { key, down } => match named(key, &self.keymap) {
+                Some((code, true)) if down => self.tap(Stroke {
+                    code,
+                    shift: true,
+                    level3: false,
+                }),
                 Some((code, _)) => self.key(code, down),
                 None => Ok(()),
             },
             Input::Text(text) => {
                 for c in text.chars() {
-                    if let Some((code, shift)) = key_for(c) {
-                        self.tap(code, shift)?;
+                    if let Some(stroke) = self.keymap.stroke(c) {
+                        self.tap(stroke)?;
                         std::thread::sleep(std::time::Duration::from_millis(8));
                     }
                 }
