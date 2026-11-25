@@ -45,6 +45,18 @@ letter by letter. With a key bar modifier lit, characters go as key events
 with the modifier held, so Ctrl and C is a real Ctrl+C. Special keys from a
 hardware keyboard (iPad, Android tablets) go straight through as key events.
 
+The field has to hold what the keyboard thinks it holds. Gboard keeps its
+own idea of the caret and only hears about changes some calls later, more
+so while the main thread is busy drawing frames. So script does not write
+to the field while someone types: a Backspace key is applied to the field
+by the browser and the differ sends it, and the field starts over only when
+the keyboard opens or after two quiet seconds (past an Enter, or past 256
+characters). After an Enter the field keeps the old line, and a keyboard
+rewrite that reaches back into it (Gboard still offers suggestions for the
+last word) is dropped, since on the computer that word is on the line
+above. `HiddenField` in `input/keys.ts` holds the handlers;
+`__tests__/gboard.test.ts` replays Gboard as traced on an emulator.
+
 ## Keyboard button
 
 A round button floats at the bottom right (`ui/KeyButton.tsx`, math in

@@ -14,7 +14,7 @@ import { BUTTON } from "./input/packets";
 import {
   KEYSYM_BACKSPACE,
   KEYSYM_ENTER,
-  KeyboardField,
+  HiddenField,
   MODIFIERS,
   SENTINEL,
   afterKey,
@@ -161,6 +161,10 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // The hidden field that catches the phone keyboard. It sends through
+  // whatever applyTextOps is current, set further down.
+  const applyRef = useRef<(ops: FieldOp[]) => void>(() => {});
+  const hidden = useRef(new HiddenField(() => inputRef.current, (ops) => applyRef.current(ops)));
   const pointerRef = useRef<HTMLDivElement | null>(null);
   const haloRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,7 +178,6 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   modsRef.current = mods;
   const modeRef = useRef(mode);
   modeRef.current = mode;
-  const field = useRef(new KeyboardField());
   const anim = useRef<{ raf: number; kind: "none" | "momentum" | "zoom" | "edge"; vx: number; vy: number; from?: View; to?: View; t0?: number; last?: number; ex?: number; ey?: number }>({
     raf: 0,
     kind: "none",
@@ -407,8 +410,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
     const el = inputRef.current;
     if (!el) return;
     if (open) {
-      el.value = SENTINEL;
-      field.current.reset();
+      hidden.current.open();
       el.focus({ preventScroll: true });
       try {
         el.setSelectionRange(el.value.length, el.value.length);
@@ -679,30 +681,20 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
     [s.sendText, tapKey],
   );
 
-  const resetFieldIfIdle = (): void => {
-    const el = inputRef.current;
-    if (!el || field.current.composing()) return;
-    if (el.value.length > 32 || el.value === "") {
-      el.value = SENTINEL;
-      field.current.reset();
-    }
-  };
+  applyRef.current = applyTextOps;
 
   const onInput = (e: React.FormEvent<HTMLInputElement>): void => {
     const native = e.nativeEvent as InputEvent;
-    applyTextOps(field.current.input(e.currentTarget.value, native.isComposing === true));
-    resetFieldIfIdle();
+    hidden.current.input(native.isComposing === true);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     const ne = e.nativeEvent;
     // Enter first: while Gboard composes a word it comes flagged as composing.
-    const enter = field.current.keyDown(ne, e.currentTarget.value);
-    if (enter) {
-      e.preventDefault();
-      applyTextOps(enter);
-      return;
-    }
+    // Backspace is the field's too, so the field keeps what the keyboard sees.
+    const verdict = hidden.current.keyDown(ne);
+    if (verdict === "cancel") e.preventDefault();
+    if (verdict) return;
     if (ne.isComposing || ne.keyCode === 229 || e.key === "Unidentified" || e.key === "Process") return;
     const snd = s.sender.current;
     if (!snd) return;
@@ -723,7 +715,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   };
 
   const onKeyUp = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-    field.current.keyUp(e.nativeEvent);
+    hidden.current.keyUp(e.nativeEvent);
     if (e.key === "Control" || e.key === "Alt" || e.key === "Meta") {
       const ids = keyEventToIds(e.nativeEvent);
       if (ids) s.sender.current?.key(false, ids.keysym, ids.keycode);
@@ -736,14 +728,11 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
     const el = inputRef.current;
     if (!el) return;
     const onBeforeInput = (e: InputEvent): void => {
-      const ops = field.current.beforeInput(e.inputType, el.value);
-      if (!ops) return;
-      e.preventDefault();
-      applyTextOps(ops);
+      if (hidden.current.beforeInput(e.inputType)) e.preventDefault();
     };
     el.addEventListener("beforeinput", onBeforeInput);
     return () => el.removeEventListener("beforeinput", onBeforeInput);
-  }, [applyTextOps]);
+  }, []);
 
   const onKeyBar = useCallback(
     (p: KeyBarPress) => {
@@ -1034,11 +1023,10 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         onCompositionStart={() => {
-          field.current.compositionStart();
+          hidden.current.compositionStart();
         }}
-        onCompositionEnd={(e) => {
-          applyTextOps(field.current.compositionEnd(e.currentTarget.value));
-          resetFieldIfIdle();
+        onCompositionEnd={() => {
+          hidden.current.compositionEnd();
         }}
       />
 

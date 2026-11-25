@@ -28,6 +28,15 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   and dark mode. They now follow what is drawn under them: light over the
   session, and matching the theme elsewhere. The same applies on iPhone.
 * Updated the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594.
+* Fast typing with Gboard on the phone could reach the computer with words
+  swapped round, such as "words. ok here" for "words here. ok". The app
+  emptied its hidden text field every 32 characters and cancelled Backspace
+  keys, so Gboard's idea of the caret fell out of step with the field, and
+  its next double space or suggestion landed at an old position. The field
+  now changes only by the keyboard while someone types.
+* Tapping a Gboard suggestion just after Enter rewrote the end of the line
+  already sent ("hello", Enter, "hero" gave "helro"). Such a rewrite is now
+  dropped and the new line starts clean.
 
 ## [0.36.6] (2026-11-23)
 
