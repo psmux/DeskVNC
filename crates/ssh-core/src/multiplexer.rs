@@ -802,8 +802,8 @@ mod tests {
     #[test]
     fn an_echoed_command_line_is_not_mistaken_for_an_answer() {
         let c = cfg(MultiplexerKind::Auto);
-        let noisy = "C:\\Users\\gj>echo tmux:missing\ntmux:missing\n\
-                     C:\\Users\\gj>echo psmux:present\npsmux:present\nend";
+        let noisy = "C:\\Users\\me>echo tmux:missing\ntmux:missing\n\
+                     C:\\Users\\me>echo psmux:present\npsmux:present\nend";
         let d = c.read_probe(noisy).unwrap();
         assert_eq!(d.kind, Some(MultiplexerKind::Psmux));
         assert!(d.session_exists);

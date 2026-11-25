@@ -1671,7 +1671,7 @@ function KeyFileField({
   );
 }
 
-/** `id_ed25519 (ed25519, gj@laptop)`: the file name, then whatever else there
+/** `id_ed25519 (ed25519, me@laptop)`: the file name, then whatever else there
  *  is to tell two generated names apart. */
 function keyLabel(name: string, kind: string, comment: string | null): string {
   const extra = [kind, comment].filter((part) => part && part.length > 0);

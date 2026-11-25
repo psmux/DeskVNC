@@ -920,7 +920,7 @@ mod truncation_tests {
     #[test]
     fn ordinary_output_leaves_nothing_to_undo() {
         let mut t = ModeTracker::new();
-        t.feed(b"total 48\r\ndrwxr-xr-x  3 gj staff  96 Aug 25 14:40 .\r\n");
+        t.feed(b"total 48\r\ndrwxr-xr-x  3 me staff  96 Aug 25 14:40 .\r\n");
         assert!(t.is_clean());
         assert!(t.reset_sequence().is_empty());
     }
