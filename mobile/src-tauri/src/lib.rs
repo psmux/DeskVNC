@@ -149,6 +149,7 @@ pub fn run() {
             commands::localnet::local_network_state,
             commands::localnet::local_network_ask,
             commands::localnet::app_settings_open,
+            commands::bars::system_bars,
         ])
         .build(tauri::generate_context!())
         .expect("error while building DeskVNC");

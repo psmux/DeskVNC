@@ -2199,6 +2199,7 @@ dependencies = [
  "keyring-core",
  "limb-core",
  "ndk-context",
+ "objc2 0.6.5",
  "parking_lot 0.13.0",
  "rdp-core",
  "remote-core",

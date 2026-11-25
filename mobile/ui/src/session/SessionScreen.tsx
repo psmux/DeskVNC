@@ -57,6 +57,7 @@ import { Sheet as SessionSheet } from "./ui/Sheet";
 import { CertificateSheet } from "../components/sheets/CertificateSheet";
 import { CredentialSheet } from "../components/sheets/CredentialSheet";
 import { LAYER, useBack } from "../lib/back";
+import { holdDarkCover, sessionCoversDark } from "../lib/systemBars";
 import { sessionBackStep } from "./back";
 import { readPrefs, setPrefs, usePrefs } from "../lib/prefs";
 import { KeyButton } from "./ui/KeyButton";
@@ -126,6 +127,12 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   // lasts for this session only.
   const prefs = usePrefs();
   const s = useRemoteSession(api, target, readPrefs().quality);
+
+  // Light status and navigation bar icons over the black stage, whatever the
+  // theme. The connecting and error screens draw the theme's background, so
+  // the icons follow the theme there.
+  const darkStage = sessionCoversDark(s.phase);
+  useEffect(() => (darkStage ? holdDarkCover() : undefined), [darkStage]);
   const [mode, setModeState] = useState<TouchMode>(() => readPrefs().touchMode);
   const [sheet, setSheet] = useState<SheetKind>(null);
   const [toolbarOpen, setToolbarOpen] = useState(false);
