@@ -26,6 +26,17 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   where those agents read them (#73).
 * `dvv setup` no longer rewrites a skill that has not changed, so a launch
   with nothing to do really changes no file (#73).
+* DeskVNC Support no longer runs out of threads and open files during a DNS
+  outage. Each name lookup through the system resolver holds a thread until
+  the resolver answers, which on a Mac with a dead resolver took about a
+  minute, and the connection layer asked again every few hundred
+  milliseconds and gave up on each try after three seconds. The lookups it
+  gave up on kept their thread and socket, so the copy at the sign in screen
+  grew past 250 threads, hit the 256 open file limit and could not listen
+  again. Now a name has at most one lookup running however often it is
+  asked for, every caller shares its answer, answers are kept for a short
+  while, and the copy at the sign in screen waits longer each time before it
+  listens again, up to a minute.
 
 ### Added
 
