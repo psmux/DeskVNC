@@ -77,13 +77,14 @@ export function setPrefs(patch: Partial<Prefs>): void {
   listeners.forEach((fn) => fn());
 }
 
-function subscribe(fn: () => void): () => void {
+/** Call `fn` after every change to the settings. Returns the function that stops it. */
+export function subscribePrefs(fn: () => void): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
 
 export function usePrefs(): Prefs {
-  return useSyncExternalStore(subscribe, readPrefs, readPrefs);
+  return useSyncExternalStore(subscribePrefs, readPrefs, readPrefs);
 }
 
 /** `system` removes the attribute so the media query decides. */

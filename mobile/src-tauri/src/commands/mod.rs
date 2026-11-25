@@ -1,6 +1,7 @@
 //! The commands of `mobile/CONTRACT.md`, one module per area. Every command
 //! returns `Result<_, String>`, its error a sentence the UI can show.
 
+pub mod bars;
 pub(crate) mod body;
 pub mod hosts;
 pub mod localnet;

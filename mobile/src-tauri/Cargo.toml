@@ -54,6 +54,8 @@ keyring-core = "1"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["protected"] }
+# The status bar style override in commands/bars.rs.
+objc2 = "0.6"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "1"

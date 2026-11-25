@@ -103,3 +103,15 @@ the phone's own subnets), `session_connect` fails at once with
 The session then calls `local_network_ask` and dials again on a yes. The
 Nearby tab calls it before a scan. The Kotlin side is
 `gen/android/app/src/main/java/com/psmux/deskvnc/mobile/LocalNetworkPlugin.kt`.
+
+## Status bar icons (iOS)
+
+| Command | Args | Returns |
+|---|---|---|
+| `system_bars` | `icons: "light" \| "dark"` | nothing. Light icons for a dark backdrop, dark ones for a light backdrop. Does nothing on Android and desktop |
+
+The page picks the icons from what it draws under the bars
+(`ui/src/lib/systemBars.ts`): light over the session's black stage in any
+theme, otherwise whatever suits the theme. On Android it hands the answer to
+`window.DeskVNCSystemBars.set()`, which MainActivity adds, and that sets the
+navigation bar icons too.
