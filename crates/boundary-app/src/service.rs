@@ -455,7 +455,7 @@ mod imp {
         let mut current = Plan::Idle;
         let mut child: Option<Child> = None;
         // Stops the thread serving the current Wayland sign in screen.
-        let mut stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut halt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut started = Instant::now() - Duration::from_secs(60);
         loop {
             let found = seat::active();
@@ -487,13 +487,13 @@ mod imp {
                 if let Some(old) = child.take() {
                     stop(old);
                 }
-                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                halt.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = std::fs::remove_dir_all(RUN_DIR);
                 if share {
                     started = Instant::now();
-                    stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    halt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let socket = match &wanted {
-                        Plan::Wayland { session } => match broker(&owner, session, &stop) {
+                        Plan::Wayland { session } => match broker(&owner, session, &halt) {
                             Ok(path) => Some(path),
                             Err(error) => {
                                 say(&format!(
