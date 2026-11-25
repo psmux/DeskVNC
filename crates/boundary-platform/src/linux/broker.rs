@@ -237,9 +237,13 @@ fn answer(mut stream: UnixStream) -> Result<()> {
 }
 
 /// Whether the screen can be read here at all: a picture, or why not.
+/// A screen that is asleep counts: it can be read once it wakes.
 pub fn kms_probe() -> Result<(u32, u32)> {
-    let picture = Kms::open()?.capture()?;
-    Ok((picture.width, picture.height))
+    match Kms::open()?.capture() {
+        Ok(picture) => Ok((picture.width, picture.height)),
+        Err(error) if error.is::<super::kms::Asleep>() => Ok((0, 0)),
+        Err(error) => Err(error),
+    }
 }
 
 /// Serve hosts on `listener` until `stop` is set, one thread each.
