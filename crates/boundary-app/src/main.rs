@@ -10,6 +10,10 @@ mod journal;
 mod launcher;
 mod login;
 mod network;
+#[cfg(target_os = "linux")]
+mod seat;
+#[cfg(target_os = "linux")]
+mod service;
 mod theme;
 mod tray;
 mod unattended;
@@ -151,6 +155,33 @@ fn other_mode(args: &[String]) -> Option<i32> {
     };
     let result = if args.iter().any(|a| a == "--login-screen") {
         login::host()
+    } else if cfg!(target_os = "linux")
+        && let Some(at) = args.iter().position(|a| {
+            matches!(
+                a.as_str(),
+                "--service" | "--install-service" | "--uninstall-service"
+            )
+        })
+    {
+        // The system service that runs the host at the sign in screen, and
+        // setting it up or taking it away as root.
+        #[cfg(target_os = "linux")]
+        let result = if args[at] == "--service" {
+            match service::service_args(args) {
+                Some((uid, data)) => service::watch(uid, &data),
+                None => Err(anyhow::anyhow!(
+                    "Usage: deskvnc-support --service <account ID> <data folder>"
+                )),
+            }
+        } else {
+            service::run_elevated(&args[at..])
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = {
+            let _ = at;
+            Ok(())
+        };
+        result
     } else if cfg!(windows) && args.iter().any(|a| a == "--service") {
         #[cfg(windows)]
         let result = login::service();
@@ -218,7 +249,13 @@ fn information(args: &[String]) -> Option<String> {
 }
 /// The line about `--install` in the help, on Linux where it exists.
 const INSTALL_HELP: &str = if cfg!(target_os = "linux") {
-    "  --install      Add DeskVNC Support to your app menu, for you only\n"
+    "  --install      Add DeskVNC Support to your app menu, for you only\n\
+     \x20 --install-service\n\
+     \x20                Also run at the sign in screen, as a system service, so your\n\
+     \x20                paired helpers can reach this computer before anyone signs in.\n\
+     \x20                Asks for an administrator\n\
+     \x20 --uninstall-service\n\
+     \x20                Remove that service\n"
 } else {
     ""
 };

@@ -28,3 +28,8 @@ tray-icon = "0.26"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
+
+# The Linux sign in screen service: looking up the account it runs the host
+# as, and signalling that host.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

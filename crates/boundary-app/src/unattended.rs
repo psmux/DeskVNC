@@ -875,7 +875,27 @@ fn screen_locked() -> bool {
     use boundary_platform::system;
     system::console().is_some_and(|c| c.locked && Some(c.session) == system::own_session())
 }
-#[cfg(not(windows))]
+/// Whether this session is off the screen. On Linux the screen of a locked
+/// or switched away session shows the display manager's sign in screen, in
+/// a session of its own that the service answers for, so this app lets go of
+/// the machine ID until its own session is back on the screen.
+#[cfg(target_os = "linux")]
+fn screen_locked() -> bool {
+    let Some(id) = std::env::var("XDG_SESSION_ID").ok().filter(|id| {
+        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
+    }) else {
+        return false;
+    };
+    // What sd_session_is_active reads, without starting a process each
+    // second.
+    std::fs::read_to_string(format!("/run/systemd/sessions/{id}"))
+        .is_ok_and(|state| session_inactive(&state))
+}
+#[cfg(target_os = "linux")]
+fn session_inactive(state: &str) -> bool {
+    state.lines().any(|line| line.trim() == "ACTIVE=0")
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn screen_locked() -> bool {
     false
 }
@@ -968,6 +988,15 @@ mod tests {
             pair: false,
             answer: tokio::sync::oneshot::channel().0,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_off_the_screen_hands_over() {
+        let state = "# This is private data. Do not parse.\nUID=1000\nUSER=someone\nACTIVE=0\nSTATE=online\nTYPE=x11\nCLASS=user\n";
+        assert!(super::session_inactive(state));
+        assert!(!super::session_inactive(&state.replace("ACTIVE=0", "ACTIVE=1")));
+        assert!(!super::session_inactive(""));
     }
 
     #[test]

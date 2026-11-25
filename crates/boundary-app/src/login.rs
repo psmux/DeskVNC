@@ -9,9 +9,11 @@
 //! On macOS launchd starts it in the login window session, as root. On
 //! Windows a service starts it in the console session, as SYSTEM, whenever
 //! nobody is signed in there, and while the session is locked, because the
-//! lock screen is out of a person's programs' sight too. Either way it steps
-//! aside once somebody signs in or unlocks, and the app in the tray takes
-//! over the ID.
+//! lock screen is out of a person's programs' sight too. On Linux a systemd
+//! service starts it while the screen shows the display manager's sign in
+//! screen, as the person who set it up (see `service.rs`). Either way it
+//! steps aside once somebody signs in or unlocks, and the app in the tray
+//! takes over the ID.
 //!
 //! Nobody is at the sign in screen to approve a helper, so a helper who is
 //! not paired and has no password is turned away, and no helper's tools may
@@ -70,7 +72,14 @@ async fn serve() -> Result<()> {
     if signed_in() {
         return Ok(());
     }
-    note(&dir, "started");
+    // Linux only: the service says which display, or why there is none.
+    let unavailable = unavailable();
+    match std::env::var("DISPLAY") {
+        Ok(display) if cfg!(target_os = "linux") => {
+            note(&dir, &format!("started on X display {display}"))
+        }
+        _ => note(&dir, "started"),
+    }
     // Whoever listens holds this. The app in the tray lets go of it when the
     // screen locks; with fast user switching it may still hold it behind the
     // sign in screen. Two copies listening as one ID push each other off the
@@ -97,6 +106,19 @@ async fn serve() -> Result<()> {
         } else if listener.is_none() {
             // Created by the app when unattended access was switched on.
             let key = unattended::load_or_create_key(&dir.join("machine.key"))?;
+            if let Some(reason) = unavailable.clone() {
+                // Listen anyway, so a helper who connects is told why there
+                // is no picture instead of waiting on a computer that never
+                // answers.
+                note(&dir, &format!("cannot show the sign in screen: {reason}"));
+                listener = Some(unattended::listen_at_login(
+                    boundary_session::HostOptions::default(),
+                    key,
+                    access_path.clone(),
+                    move || Err(anyhow::anyhow!("{reason}")),
+                ));
+                continue;
+            }
             let display = boundary_platform::displays()
                 .ok()
                 .and_then(|all| all.first().map(|d| d.id));
@@ -159,6 +181,19 @@ async fn serve() -> Result<()> {
         }
         tokio::time::sleep(TICK).await;
     }
+}
+
+/// Why the Linux service could not give this host a screen, which every
+/// helper who connects is told.
+#[cfg(target_os = "linux")]
+fn unavailable() -> Option<String> {
+    std::env::var(crate::service::UNAVAILABLE)
+        .ok()
+        .filter(|r| !r.is_empty())
+}
+#[cfg(not(target_os = "linux"))]
+fn unavailable() -> Option<String> {
+    None
 }
 
 /// Whether somebody is signed in at the screen this host is on.
@@ -235,7 +270,7 @@ pub fn set(on: bool) -> Result<()> {
 }
 
 /// Whether this platform can run anything at the sign in screen.
-pub const SUPPORTED: bool = cfg!(any(target_os = "macos", windows));
+pub const SUPPORTED: bool = cfg!(any(target_os = "macos", windows, target_os = "linux"));
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -458,7 +493,12 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{install, uninstall};
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod imp {
+    pub use crate::service::{enabled, set};
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod imp {
     use anyhow::{Result, bail};
     pub fn enabled() -> bool {
