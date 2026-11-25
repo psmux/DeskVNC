@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the app_settings_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-app-settings-open",
+          "markdownDescription": "Enables the app_settings_open command without any pre-configured scope."
+        },
+        {
           "description": "Enables the boundary_resolve command without any pre-configured scope.",
           "type": "string",
           "const": "allow-boundary-resolve",
@@ -217,6 +223,18 @@
           "type": "string",
           "const": "allow-identify",
           "markdownDescription": "Enables the identify command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the local_network_ask command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-local-network-ask",
+          "markdownDescription": "Enables the local_network_ask command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the local_network_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-local-network-state",
+          "markdownDescription": "Enables the local_network_state command without any pre-configured scope."
         },
         {
           "description": "Enables the scan_start command without any pre-configured scope.",
@@ -297,6 +315,18 @@
           "markdownDescription": "Enables the session_trust command without any pre-configured scope."
         },
         {
+          "description": "Enables the system_bars command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-system-bars",
+          "markdownDescription": "Enables the system_bars command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the app_settings_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-app-settings-open",
+          "markdownDescription": "Denies the app_settings_open command without any pre-configured scope."
+        },
+        {
           "description": "Denies the boundary_resolve command without any pre-configured scope.",
           "type": "string",
           "const": "deny-boundary-resolve",
@@ -337,6 +367,18 @@
           "type": "string",
           "const": "deny-identify",
           "markdownDescription": "Denies the identify command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the local_network_ask command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-local-network-ask",
+          "markdownDescription": "Denies the local_network_ask command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the local_network_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-local-network-state",
+          "markdownDescription": "Denies the local_network_state command without any pre-configured scope."
         },
         {
           "description": "Denies the scan_start command without any pre-configured scope.",
@@ -415,6 +457,12 @@
           "type": "string",
           "const": "deny-session-trust",
           "markdownDescription": "Denies the session_trust command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the system_bars command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-system-bars",
+          "markdownDescription": "Denies the system_bars command without any pre-configured scope."
         },
         {
           "description": "No features are enabled by default, as we believe\nthe clipboard can be inherently dangerous and it is \napplication specific if read and/or write access is needed.\n\nClipboard interaction needs to be explicitly enabled.\n",
