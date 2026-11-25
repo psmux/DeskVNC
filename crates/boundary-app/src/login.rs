@@ -647,9 +647,14 @@ mv -f "$plist.partial" "$plist"
     }
 
     /// `--install-login-screen` or `--uninstall-login-screen`, run with
-    /// sudo from the account whose helpers should reach the sign in screen.
+    /// sudo from the account whose helpers should reach the sign in screen,
+    /// or `--login-screen-status`, run by anyone.
     pub fn run_elevated(args: &[String]) -> Result<()> {
         let install = match args.first().map(String::as_str) {
+            Some("--login-screen-status") => {
+                println!("{}", status());
+                return Ok(());
+            }
             Some("--install-login-screen") => true,
             Some("--uninstall-login-screen") => false,
             _ => bail!("Nothing to do"),
@@ -682,6 +687,22 @@ mv -f "$plist.partial" "$plist"
             println!("DeskVNC Support no longer runs at the sign in screen");
         }
         Ok(())
+    }
+
+    /// What `--login-screen-status` prints: whether the copy at the sign in
+    /// screen is set up, what it runs, and whether it should be set up again.
+    fn status() -> String {
+        if !enabled() {
+            return "DeskVNC Support does not run at the sign in screen".into();
+        }
+        let program = plist_value(&plist(), "ProgramArguments.0").unwrap_or_default();
+        match refresh() {
+            Some(refresh) => format!("{}. It runs {program}", refresh.title()),
+            None => format!(
+                "DeskVNC Support runs at the sign in screen from {program}, version {}, a copy only an administrator can change",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
     }
 
     /// The home folder of the account called `user`.

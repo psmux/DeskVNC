@@ -159,7 +159,7 @@ fn other_mode(args: &[String]) -> Option<i32> {
         && let Some(at) = args.iter().position(|a| {
             matches!(
                 a.as_str(),
-                "--install-login-screen" | "--uninstall-login-screen"
+                "--install-login-screen" | "--uninstall-login-screen" | "--login-screen-status"
             )
         })
     {
@@ -288,7 +288,9 @@ const INSTALL_HELP: &str = if cfg!(target_os = "linux") {
      \x20                can change, so your paired helpers can reach this computer\n\
      \x20                before anyone signs in. Run it with sudo\n\
      \x20 --uninstall-login-screen\n\
-     \x20                Remove that copy. Run it with sudo\n"
+     \x20                Remove that copy. Run it with sudo\n\
+     \x20 --login-screen-status\n\
+     \x20                Say whether it is set up and what it runs\n"
 } else {
     ""
 };
