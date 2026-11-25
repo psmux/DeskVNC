@@ -301,6 +301,8 @@ pub fn set(on: bool) -> Result<()> {
 
 /// Why the copy at the sign in screen should be set up again.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Only macOS finds a copy to refresh.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum Refresh {
     /// It runs from a place others than an administrator can change, as
     /// versions up to 0.36.7 set it up on macOS.
