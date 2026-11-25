@@ -684,10 +684,10 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     const ne = e.nativeEvent;
     // Enter first: while Gboard composes a word it comes flagged as composing.
-    if (hidden.current.keyDown(ne)) {
-      e.preventDefault();
-      return;
-    }
+    // Backspace is the field's too, so the field keeps what the keyboard sees.
+    const verdict = hidden.current.keyDown(ne);
+    if (verdict === "cancel") e.preventDefault();
+    if (verdict) return;
     if (ne.isComposing || ne.keyCode === 229 || e.key === "Unidentified" || e.key === "Process") return;
     const snd = s.sender.current;
     if (!snd) return;
