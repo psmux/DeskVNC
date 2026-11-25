@@ -417,7 +417,13 @@ async fn main() -> anyhow::Result<()> {
                             let py = (y * (c.height - 1) as f32) as usize;
                             let i = (py * c.width as usize + px) * 4;
                             eprintln!("slow move {n} at {px},{py}: {:?}", &c.rgba[i..i + 4]);
-                            let _ = image::save_buffer("/tmp/fv/slow.png", &c.rgba, c.width, c.height, image::ExtendedColorType::Rgba8);
+                            let _ = image::save_buffer(
+                                "/tmp/fv/slow.png",
+                                &c.rgba,
+                                c.width,
+                                c.height,
+                                image::ExtendedColorType::Rgba8,
+                            );
                         }
                     }
                 })
