@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn reads_x_servers_from_their_command_lines() {
         let lightdm = x_server(&argv(
-            "/usr/lib/xorg/Xorg :0 -seat seat0 -auth /var/run/lightdm/root/:0 -nolisten tcp vt7 -novtswitch",
+            "/usr/lib/xorg/Xorg -core :0 -seat seat0 -auth /var/run/lightdm/root/:0 -nolisten tcp vt7 -novtswitch",
         ))
         .unwrap();
         assert_eq!(lightdm.display.as_deref(), Some(":0"));
@@ -435,7 +435,13 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(sddm.auth, Some(PathBuf::from("/var/run/sddm/{0b3c}")));
-        assert_eq!(x_server(&argv("/usr/bin/Xwayland :0 -rootless")), None);
+        // A Wayland sign in screen's Xwayland shows none of it.
+        assert_eq!(
+            x_server(&argv(
+                "/usr/bin/Xwayland :1024 -rootless -noreset -accessx -core -auth /run/user/110/.mutter-Xwaylandauth.9XG7Y3 -listenfd 4"
+            )),
+            None
+        );
         assert_eq!(x_server(&argv("/usr/bin/bash -c X")), None);
         // GDM's greeter has no display in logind, so its server is found by
         // its virtual terminal.
