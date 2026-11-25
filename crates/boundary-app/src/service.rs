@@ -104,7 +104,7 @@ fn describe(plan: &crate::seat::Plan) -> String {
             "Sign in screen on X display {display} (session {session}): sharing it with paired helpers"
         ),
         Plan::Wayland { session } => format!(
-            "Sign in screen on Wayland (session {session}): sharing it with paired helpers, read from the display hardware"
+            "Sign in or lock screen on Wayland (session {session}): sharing it with paired helpers, read from the display hardware"
         ),
         Plan::Unavailable { session, reason } => {
             format!("Sign in screen (session {session}) cannot be shared: {reason}")

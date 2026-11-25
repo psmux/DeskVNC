@@ -46,6 +46,8 @@ pub struct Session {
     pub display: Option<String>,
     pub vt: Option<u32>,
     pub remote: bool,
+    /// The session's own lock screen is up (logind's LockedHint).
+    pub locked: bool,
 }
 
 impl Session {
@@ -72,6 +74,7 @@ impl Session {
                 .map(str::to_owned),
             vt: get("VTNr").parse().ok().filter(|&n| n > 0),
             remote: get("Remote") == "yes",
+            locked: get("LockedHint") == "yes",
         })
     }
 }
@@ -228,6 +231,11 @@ pub fn plan(
     if !session.greeter {
         return match session.kind {
             Kind::Other => Plan::Idle,
+            // A Wayland lock screen hides from the app in that session as
+            // the sign in screen does, and shows nothing more of it.
+            Kind::Wayland if session.locked => Plan::Wayland {
+                session: session.id.clone(),
+            },
             _ => Plan::StepAside {
                 session: session.id.clone(),
                 user: session.user.clone(),
@@ -291,6 +299,8 @@ pub fn active() -> Plan {
         "VTNr",
         "-p",
         "Remote",
+        "-p",
+        "LockedHint",
     ])
     .and_then(|t| Session::parse(&t));
     let (display, authority) = match &session {
@@ -521,6 +531,27 @@ mod tests {
                 session: "3".into(),
                 user: "someone".into()
             }
+        );
+        // A locked Wayland session is answered like the sign in screen; a
+        // locked X11 one by the app in it, which can see its lock screen.
+        let mut locked = Session::parse(&USER_SESSION.replace("x11", "wayland")).unwrap();
+        locked.locked = true;
+        assert_eq!(
+            plan(Some(&locked), None, None),
+            Plan::Wayland {
+                session: "3".into()
+            }
+        );
+        let mut locked_x = Session::parse(USER_SESSION).unwrap();
+        locked_x.locked = true;
+        assert!(matches!(
+            plan(Some(&locked_x), None, None),
+            Plan::StepAside { .. }
+        ));
+        assert!(
+            Session::parse(&format!("{USER_SESSION}LockedHint=yes\n"))
+                .unwrap()
+                .locked
         );
         let mut remote = lightdm.clone();
         remote.remote = true;

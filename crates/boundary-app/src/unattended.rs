@@ -898,9 +898,12 @@ fn screen_locked() -> bool {
     std::fs::read_to_string(format!("/run/systemd/sessions/{id}"))
         .is_ok_and(|state| session_inactive(&state))
 }
+/// Off the screen, or a Wayland session behind its lock screen, which this
+/// app cannot capture and the service answers for.
 #[cfg(target_os = "linux")]
 fn session_inactive(state: &str) -> bool {
-    state.lines().any(|line| line.trim() == "ACTIVE=0")
+    let has = |want: &str| state.lines().any(|line| line.trim() == want);
+    has("ACTIVE=0") || (has("TYPE=wayland") && has("LOCKED_HINT=1"))
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 fn screen_locked() -> bool {
@@ -1006,6 +1009,18 @@ mod tests {
             &state.replace("ACTIVE=0", "ACTIVE=1")
         ));
         assert!(!super::session_inactive(""));
+        let wayland = state
+            .replace("ACTIVE=0", "ACTIVE=1")
+            .replace("TYPE=x11", "TYPE=wayland");
+        assert!(!super::session_inactive(&wayland));
+        assert!(super::session_inactive(&format!(
+            "{wayland}LOCKED_HINT=1\n"
+        )));
+        // An X11 lock screen is this app's to show.
+        assert!(!super::session_inactive(&format!(
+            "{}LOCKED_HINT=1\n",
+            state.replace("ACTIVE=0", "ACTIVE=1")
+        )));
     }
 
     #[test]
