@@ -18,6 +18,11 @@
 //! Nobody is at the sign in screen to approve a helper, so a helper who is
 //! not paired and has no password is turned away, and no helper's tools may
 //! run anything: they would run as the system.
+//!
+//! Run as root, it reads and writes the person's folder only through
+//! [`boundary_session::owned`]: the log, the lock, who may connect and the
+//! machine key. It never follows a link the person put there, makes no
+//! folder and no key, and hands back to the person any file root made.
 
 use anyhow::{Context, Result};
 use boundary_session::unattended::{self, Access, Notice};
@@ -95,6 +100,7 @@ async fn serve() -> Result<()> {
     };
     let mut listener = None;
     let mut session = None;
+    let mut told_no_key = false;
     loop {
         if signed_in() {
             return Ok(());
@@ -104,8 +110,20 @@ async fn serve() -> Result<()> {
             listener = None;
             session = None;
         } else if listener.is_none() {
-            // Created by the app when unattended access was switched on.
-            let key = unattended::load_or_create_key(&dir.join("machine.key"))?;
+            // Made by the app when unattended access was switched on. This
+            // copy runs as root on macOS and makes nothing in the person's
+            // folder, so without one it waits for the app to make it.
+            let key = match unattended::load_key(&dir.join("machine.key")) {
+                Ok(key) => key,
+                Err(error) => {
+                    if !told_no_key {
+                        note(&dir, &format!("no machine ID to listen as: {error:#}"));
+                        told_no_key = true;
+                    }
+                    tokio::time::sleep(TICK).await;
+                    continue;
+                }
+            };
             if let Some(reason) = unavailable.clone() {
                 // Listen anyway, so a helper who connects is told why there
                 // is no picture instead of waiting on a computer that never
