@@ -43,8 +43,11 @@ import {
   AGENT_BOUNDARY_WHY,
   AGENT_CAN,
   AGENT_CANNOT,
+  AGENT_AUTO_SETUP_KEY,
   AGENT_REGISTER_COMMAND,
+  AGENT_REMOVE_COMMAND,
   HTTP_DEFAULT_URL,
+  autoSetupOn,
   binaryNote,
   doctorLine,
   httpAddLine,
@@ -335,9 +338,18 @@ function Register({ onFallback }: { onFallback: () => void }): ReactNode {
 function SetupAgents(): ReactNode {
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<string | null>(null);
+  // Null until the stored value is read, so the switch does not flash on.
+  const [auto, setAuto] = useState<boolean | null>(null);
   const alive = useRef(true);
-  useEffect(() => () => {
-    alive.current = false;
+  useEffect(() => {
+    void safeInvoke<string | null>("get_app_setting", { key: AGENT_AUTO_SETUP_KEY }, null).then(
+      (raw) => {
+        if (alive.current) setAuto(autoSetupOn(raw));
+      },
+    );
+    return () => {
+      alive.current = false;
+    };
   }, []);
 
   const run = useCallback((): void => {
@@ -349,14 +361,27 @@ function SetupAgents(): ReactNode {
     });
   }, []);
 
+  const toggleAuto = useCallback((): void => {
+    setAuto((was) => {
+      const next = !(was ?? true);
+      void safeInvoke(
+        "set_app_setting",
+        { key: AGENT_AUTO_SETUP_KEY, value: next ? "true" : "false" },
+        null,
+      );
+      return next;
+    });
+  }, []);
+
   return (
     <section className="rounded-lg border border-accent/40 bg-accent/10 p-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-primary">OpenCode, Pi, Claude Code and Codex</h3>
           <p className="mt-0.5 text-xs text-secondary">
-            Connected automatically each time DeskVNC starts. Installed a new agent just now? Connect it
-            without restarting.
+            {auto === false
+              ? "DeskVNC does not change their settings when it starts. Press Connect now to add it to them."
+              : "Connected automatically each time DeskVNC starts. Installed a new agent just now? Connect it without restarting."}
           </p>
         </div>
         <button
@@ -366,6 +391,92 @@ function SetupAgents(): ReactNode {
           onClick={run}
         >
           {busy ? "Connecting…" : "Connect now"}
+        </button>
+      </div>
+      {/*
+        Issue #73: a person whose agent configs are written by another tool
+        wants the plane without DeskVNC writing into those configs at every
+        launch. DVV_NO_SETUP=1 in the app's environment does the same.
+      */}
+      <label className="mt-3 flex items-start justify-between gap-6 border-t border-accent/20 pt-3">
+        <span>
+          <span className="block text-xs font-medium text-primary">Connect agents automatically</span>
+          <span className="block text-2xs text-tertiary">
+            Each time DeskVNC starts, add it to the agents installed here and point them at this
+            copy. Off, DeskVNC writes nothing into their settings. Agents you connected yourself
+            still work.
+          </span>
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={auto !== false}
+          aria-label="Connect agents automatically"
+          disabled={auto === null}
+          className={classNames(
+            "relative mt-0.5 box-border h-5 w-9 shrink-0 rounded-pill p-0 transition-colors",
+            auto !== false ? "bg-accent" : "bg-inset border border-subtle",
+          )}
+          onClick={toggleAuto}
+        >
+          <span
+            className={classNames(
+              "absolute left-0.5 top-1/2 h-4 w-4 -translate-y-1/2 rounded-full bg-white shadow transition-transform",
+              auto !== false ? "translate-x-4" : "translate-x-0",
+            )}
+          />
+        </button>
+      </label>
+      <div role="status" aria-live="polite" className="empty:hidden">
+        {report === null ? null : (
+          <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-inset px-2.5 py-2 text-xs text-secondary [overflow-wrap:anywhere]">
+            {report}
+          </pre>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * With agents off, the way to take DeskVNC out of the agents it was added
+ * to (issue #72).
+ *
+ * Turning agents off already stops an agent from opening DeskVNC, but the
+ * agents still list it and start `dvv` with every session. Someone who wants
+ * it gone from them should not have to find four config files.
+ */
+function RemoveFromAgents(): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<string | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => {
+    alive.current = false;
+  }, []);
+
+  const run = useCallback((): void => {
+    setBusy(true);
+    void safeInvoke<string | null>(AGENT_REMOVE_COMMAND, undefined, null).then((text) => {
+      if (!alive.current) return;
+      setBusy(false);
+      setReport(text ?? "This build cannot do that. Run dvv setup --remove in a terminal instead.");
+    });
+  }, []);
+
+  return (
+    <section className="rounded-md border border-subtle p-3">
+      <div className="flex items-start justify-between gap-4">
+        <p className="min-w-0 text-xs text-secondary">
+          While agents are off, DeskVNC does not open when an agent asks for it. Your agents may
+          still list DeskVNC in their settings. You can take it out of them too.
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          className={classNames("btn-secondary shrink-0", busy && "opacity-70")}
+          onClick={run}
+        >
+          {busy ? "Removing…" : "Remove from my agents"}
         </button>
       </div>
       <div role="status" aria-live="polite" className="empty:hidden">
@@ -576,7 +687,7 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
                 type="button"
                 className="btn-secondary shrink-0"
                 onClick={() => setPlaneEnabled(false)}
-                title="Close the socket and unlink it. Every agent loses its connection at once."
+                title="Close the socket and unlink it. Every agent loses its connection at once, and no agent can open DeskVNC until you turn this back on."
               >
                 Turn it off
               </button>
@@ -590,7 +701,8 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
             </p>
             <p className="text-sm text-secondary">
               It is off because it was switched off on this computer. While it is off there is no
-              socket, nothing is listening, and your agents cannot reach your machines.
+              socket, nothing is listening, your agents cannot reach your machines, and they do
+              not open DeskVNC when it is closed.
             </p>
             {plane.error ? (
               <p className="rounded-md border border-warning bg-warning-subtle px-3 py-2 text-xs text-warning">
@@ -611,11 +723,14 @@ export function AgentConnect({ onClose }: { onClose: () => void }): ReactNode {
               </span>
             </div>
             {/*
-              Deliberately no button and no commands here. Registering a server
+              No connect button and no commands here. Registering a server
               against a socket that does not exist teaches somebody that this
               feature does not work, and a button that cannot succeed is worse
               than no button. Both appear the moment the switch above takes.
+              Taking DeskVNC out of the agents is the one thing that works
+              with the plane off, so it is offered.
             */}
+            <RemoveFromAgents />
             <Limits />
           </>
         )}

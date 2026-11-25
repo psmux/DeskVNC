@@ -6,7 +6,8 @@
 //! only when an agent asks for something the app alone has: the saved
 //! machines (`dvv_hosts`) or a machine opened (`dvv_open`, `dvv_group_open`).
 //! Starting `dvv mcp`, `initialize`, `tools/list` and listing limbs never start
-//! it (`plane::Need`), and `DVV_NO_START=1` turns starting it off altogether.
+//! it (`plane::Need`), and `DVV_NO_START=1` turns starting it off altogether,
+//! as does a person turning AI agents off in the app ([`AGENTS_OFF_FILE`]).
 //!
 //! Where it looks, in order: the path the app recorded the last time it ran;
 //! beside this `dvv`, which is where every installer
@@ -85,17 +86,44 @@ pub fn find_app() -> Option<PathBuf> {
 /// that beats every guess below when two copies are installed.
 #[cfg(not(target_os = "macos"))]
 fn recorded() -> Option<PathBuf> {
-    const IDENTIFIER: &str = "com.deskvncviewer.desktop";
-    #[cfg(windows)]
-    let data = PathBuf::from(std::env::var_os("APPDATA")?);
-    #[cfg(not(windows))]
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
-        })?;
-    let text = std::fs::read_to_string(data.join(IDENTIFIER).join("app-path")).ok()?;
+    let text = std::fs::read_to_string(app_data_dir()?.join("app-path")).ok()?;
     Some(PathBuf::from(text.trim()))
+}
+
+/// The application's data folder, where Tauri's `app_data_dir` puts it on
+/// each platform. The app writes `app-path` and [`AGENTS_OFF_FILE`] here.
+pub fn app_data_dir() -> Option<std::path::PathBuf> {
+    const IDENTIFIER: &str = "com.deskvncviewer.desktop";
+    #[cfg(target_os = "macos")]
+    let data = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| std::path::PathBuf::from(home).join("Library/Application Support"))?;
+    #[cfg(windows)]
+    let data = std::path::PathBuf::from(std::env::var_os("APPDATA")?);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })?;
+    Some(data.join(IDENTIFIER))
+}
+
+/// The file DeskVNCViewer keeps in its data folder while a person has AI
+/// agents turned off in its AI Agents panel, and removes when they turn them
+/// back on. Shared with `src-tauri/src/commands/agent.rs`; if one moves, move
+/// the other.
+///
+/// It is how a person's "off" reaches a `dvv` that an agent started while the
+/// app is closed: there is no socket to ask then, and an agent's MCP server
+/// that opened the app anyway made turning agents off look like it did
+/// nothing (issue #72).
+pub const AGENTS_OFF_FILE: &str = "agents-off";
+
+/// Has a person turned AI agents off in DeskVNCViewer?
+pub fn agents_turned_off() -> bool {
+    app_data_dir().is_some_and(|dir| dir.join(AGENTS_OFF_FILE).exists())
 }
 
 #[cfg(not(target_os = "macos"))]

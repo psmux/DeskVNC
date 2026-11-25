@@ -16,8 +16,9 @@ You never need the user to open, reopen or reconnect a machine, or to open
 DeskVNCViewer: when it is closed, `dvv_hosts` and `dvv_open` start it
 minimised, once per `dvv` process. `dvv_limbs` and the other tools never start
 it, so an empty `dvv_limbs` can mean the app is closed: call `dvv_hosts` next.
-If `DVV_NO_START=1` is set they fail saying the app is not running, and only
-the user can open it. Do the rest yourself with the steps below.
+If `DVV_NO_START=1` is set, or the user turned AI agents off in DeskVNCViewer,
+they fail saying so, and only the user can change that. Tell them; do not
+retry. Do the rest yourself with the steps below.
 
 ## With the dvv_ tools (OpenCode, Claude Code, Codex and other MCP clients)
 
