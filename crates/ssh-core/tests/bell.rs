@@ -50,7 +50,7 @@ fn the_bel_that_terminates_an_osc_title_does_not_ring() {
         &mut tracker,
         &mut limiter,
         now,
-        b"\x1b]0;gj@box: ~/src/vncviewer\x07"
+        b"\x1b]0;me@box: ~/src/vncviewer\x07"
     ));
     // Ten prompts in a row, the way a session of short commands looks.
     for i in 0..10 {
@@ -59,7 +59,7 @@ fn the_bel_that_terminates_an_osc_title_does_not_ring() {
                 &mut tracker,
                 &mut limiter,
                 now + Duration::from_secs(i + 1),
-                b"\x1b]0;gj@box: ~\x07$ ls\r\n"
+                b"\x1b]0;me@box: ~\x07$ ls\r\n"
             ),
             "prompt {i} rang the bell"
         );
@@ -76,7 +76,7 @@ fn a_bel_after_an_osc_title_still_rings() {
         &mut tracker,
         &mut limiter,
         Instant::now(),
-        b"\x1b]0;gj@box\x07done\x07"
+        b"\x1b]0;me@box\x07done\x07"
     ));
 }
 
@@ -91,7 +91,7 @@ fn an_osc_split_across_reads_still_does_not_ring() {
         &mut tracker,
         &mut limiter,
         now,
-        b"\x1b]0;gj@box"
+        b"\x1b]0;me@box"
     ));
     assert!(!pump_chunk(&mut tracker, &mut limiter, now, b"\x07"));
 }
@@ -167,6 +167,6 @@ fn plain_output_never_rings() {
         &mut tracker,
         &mut limiter,
         Instant::now(),
-        b"total 48\r\ndrwxr-xr-x  3 gj staff  96 Aug 25 14:40 .\r\n"
+        b"total 48\r\ndrwxr-xr-x  3 me staff  96 Aug 25 14:40 .\r\n"
     ));
 }

@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn the_connect_request_reads_a_full_camelcase_payload() {
         let r: SshConnectRequest = serde_json::from_str(
-            r#"{ "host": "box.local", "port": 2222, "username": "gj",
+            r#"{ "host": "box.local", "port": 2222, "username": "me",
                  "auth": "agent", "cols": 120, "rows": 40,
                  "multiplexer": { "kind": "tmux", "sessionName": "work" },
                  "acceptHostKey": "SHA256:abc" }"#,
@@ -866,7 +866,7 @@ mod tests {
         };
 
         at("id_ed25519", &wrap(&unlocked));
-        at("id_ed25519.pub", "ssh-ed25519 AAAAC3Nz gj@laptop\n");
+        at("id_ed25519.pub", "ssh-ed25519 AAAAC3Nz me@laptop\n");
         at("work_key", &wrap(&locked));
         at("legacy_rsa", "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\nZm9v\n-----END RSA PRIVATE KEY-----\n");
         at(
@@ -875,7 +875,7 @@ mod tests {
         );
         // Everything the scan must ignore.
         at("known_hosts", "box.local ssh-ed25519 AAAAC3Nz\n");
-        at("config", "Host box\n  User gj\n");
+        at("config", "Host box\n  User me\n");
         at("notes.txt", "remember to rotate these\n");
 
         let found = scan_key_dir(dir.path());
@@ -888,7 +888,7 @@ mod tests {
         let by = |name: &str| found.iter().find(|k| k.name == name).unwrap();
         // The `.pub` sibling names the algorithm and the comment.
         assert_eq!(by("id_ed25519").kind, "ed25519");
-        assert_eq!(by("id_ed25519").comment.as_deref(), Some("gj@laptop"));
+        assert_eq!(by("id_ed25519").comment.as_deref(), Some("me@laptop"));
         assert!(!by("id_ed25519").encrypted);
         // No sibling, so no algorithm to show, but the cipher name is still
         // readable and says the key is locked.

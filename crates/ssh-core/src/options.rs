@@ -268,13 +268,13 @@ mod tests {
         let mut o = ConnectOptions::ssh("box.local", 22);
         o.ssh_mut().auth = SshAuthKind::Password;
         o.credentials = remote_core::credentials::Credentials {
-            username: Some("gj".into()),
+            username: Some("me".into()),
             password: Some("hunter2".into()),
             domain: None,
         };
 
         let built = SshTermOptions::from_connect_options(&o);
-        assert_eq!(built.ssh.username, "gj");
+        assert_eq!(built.ssh.username, "me");
         assert_eq!(built.ssh.port, 22);
         match &built.ssh.auth {
             ssh_transport::SshAuth::Password(p) => assert_eq!(p, "hunter2"),
@@ -293,7 +293,7 @@ mod tests {
         let mut o = ConnectOptions::ssh("box.local", 22);
         // Left at the default, which is Agent.
         o.credentials = remote_core::credentials::Credentials {
-            username: Some("gj".into()),
+            username: Some("me".into()),
             password: Some("hunter2".into()),
             domain: None,
         };
@@ -336,7 +336,7 @@ mod tests {
         let mut o = ConnectOptions::ssh("box.local", 22);
         o.ssh_mut().auth = SshAuthKind::Password;
         o.credentials = remote_core::credentials::Credentials {
-            username: Some("gj".into()),
+            username: Some("me".into()),
             password: Some("hunter2".into()),
             domain: None,
         };
@@ -359,16 +359,16 @@ mod tests {
 
         let mut o = ConnectOptions::ssh("box.local", 22);
         o.ssh_mut().auth = SshAuthKind::KeyFile;
-        o.ssh_mut().key_path = Some("/home/gj/.ssh/id_ed25519".into());
+        o.ssh_mut().key_path = Some("/home/me/.ssh/id_ed25519".into());
         o.credentials = remote_core::credentials::Credentials {
-            username: Some("gj".into()),
+            username: Some("me".into()),
             password: Some("pp".into()),
             domain: None,
         };
 
         match &SshTermOptions::from_connect_options(&o).ssh.auth {
             ssh_transport::SshAuth::KeyFile { path, passphrase } => {
-                assert_eq!(path.to_string_lossy(), "/home/gj/.ssh/id_ed25519");
+                assert_eq!(path.to_string_lossy(), "/home/me/.ssh/id_ed25519");
                 assert_eq!(passphrase.as_deref(), Some("pp"));
             }
             other => panic!("expected key-file auth, got {other:?}"),

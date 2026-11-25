@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(text, "clipboard text");
 
         let creds = command_name(&limb_core::ClientCommand::ProvideCredentials {
-            username: Some("gj".to_string()),
+            username: Some("me".to_string()),
             password: "hunter2".to_string(),
             save: false,
         });

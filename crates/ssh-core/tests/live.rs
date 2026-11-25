@@ -9,7 +9,7 @@
 //! DVV_LIVE_SSH=you@localhost cargo test -p ssh-core --test live -- --nocapture
 //!
 //! # against anything else
-//! DVV_LIVE_SSH=gj@box.local:22 cargo test -p ssh-core --test live -- --nocapture
+//! DVV_LIVE_SSH=me@box.local:22 cargo test -p ssh-core --test live -- --nocapture
 //! ```
 //!
 //! ## Rules, the same ones `vnc-core/tests/interop_live.rs` follows
