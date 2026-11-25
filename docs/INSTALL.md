@@ -161,11 +161,16 @@ itself logs each change of session to the journal:
 journalctl -u deskvnc-support-login
 ```
 
-A sign in screen on Wayland cannot be shared before somebody signs in. GDM uses
-Wayland by default on Ubuntu, Fedora and Debian. The service says so in its log
-and tells a helper who connects, rather than showing a black screen. To use it
-there, switch GDM's own screen to Xorg in `/etc/gdm3/custom.conf`
-(`/etc/gdm/custom.conf` on Fedora and Arch):
+A sign in screen on Wayland, GDM's default on Ubuntu, Fedora and Debian, shares
+itself with no program. There the service reads the picture straight from the
+graphics card's display planes and types and clicks through a virtual keyboard
+and pointer (uinput), both as root, and hands them to the copy running as you
+over a socket only you can open. This needs a graphics driver that scans out a
+plain, untiled buffer, as virtual machines and many simple drivers do; the
+pointer is not drawn in the picture. Where the buffer cannot be read the
+service says so in its log and tells a helper who connects, rather than showing
+a black screen. Switching GDM's own screen to Xorg then works everywhere, in
+`/etc/gdm3/custom.conf` (`/etc/gdm/custom.conf` on Fedora and Arch):
 
 ```ini
 [daemon]

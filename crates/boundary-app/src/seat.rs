@@ -199,7 +199,10 @@ pub fn gdm_on_wayland(custom_conf: &str) -> bool {
 
 /// What the person who switches the service on is told when their display
 /// manager is GDM with its sign in screen on Wayland.
-pub const WAYLAND_GREETER_SETUP: &str = "Set up, but this computer's sign in screen runs on Wayland, which DeskVNC Support cannot show yet. Helpers who connect before anyone signs in are told so. To fix it, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
+pub const WAYLAND_GREETER_SETUP: &str = "Set up, but this computer's sign in screen runs on Wayland, which DeskVNC Support cannot show here. Helpers who connect before anyone signs in are told so. To fix it, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
+/// The same, when the sign in screen is read from the display hardware
+/// instead, which most graphics drivers allow.
+pub const WAYLAND_GREETER_HARDWARE: &str = "Set up. This computer's sign in screen runs on Wayland, so it is read straight from the graphics card. If a helper is told it cannot be shown, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
 
 /// What a helper is told when the sign in screen's X display cannot be
 /// opened.

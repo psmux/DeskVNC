@@ -17,6 +17,13 @@
 //! a link that person could plant there. The network and the screen are
 //! handled by an ordinary account.
 //!
+//! A Wayland sign in screen, GDM's default, shares itself with no program.
+//! There the service reads the screen from the graphics card's display
+//! planes and makes a virtual keyboard and pointer, both as root, and hands
+//! them to the host over a socket that only the person may open (see
+//! `boundary_platform::kms_serve`). Where the card's buffer cannot be read
+//! that way, the host tells every helper why instead.
+//!
 //! Once somebody signs in the host stops, and that person's own DeskVNC
 //! Support takes the machine ID over, as on macOS and Windows. When their
 //! session is locked or switched away the screen shows the sign in screen
@@ -183,7 +190,15 @@ mod imp {
             .iter()
             .find_map(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default();
-        seat::gdm_on_wayland(&conf).then_some(seat::WAYLAND_GREETER_SETUP)
+        if !seat::gdm_on_wayland(&conf) {
+            return None;
+        }
+        // Only root can tell whether the graphics card hands its screen
+        // over; the app asks as the person.
+        Some(match root().then(boundary_platform::kms_probe) {
+            Some(Err(_)) => seat::WAYLAND_GREETER_SETUP,
+            _ => seat::WAYLAND_GREETER_HARDWARE,
+        })
     }
 
     /// Whether the service is set up.

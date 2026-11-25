@@ -22,10 +22,13 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   shares that screen with your paired helpers and the unattended password
   only, without tools or the clipboard, and runs as you rather than as root.
   Once somebody signs in it steps aside and their own app answers; switching
-  user brings it back. A sign in screen on Wayland, GDM's default, cannot be
-  shared yet: the service says so in its log and to any helper who connects,
-  with the setting that turns Wayland off there. `--uninstall-service` takes it
-  away again.
+  user brings it back. A sign in screen on Wayland, GDM's default, refuses
+  every screen sharing request, so there the service reads the screen from the
+  graphics card and makes a virtual keyboard and pointer as root, and hands
+  them to the copy running as you. Where the card's buffer cannot be read that
+  way, the service says so in its log and to any helper who connects, with the
+  setting that turns Wayland off there. `--uninstall-service` takes it away
+  again.
 
 ### Fixed
 
