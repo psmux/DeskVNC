@@ -384,6 +384,11 @@ mod imp {
     /// macOS's frameworks keep for a program lands there and not in the
     /// person's home. The person's home is given in `PERSON_HOME` instead.
     const ROOT_HOME: &str = "/var/root";
+    const BUNDLE_ID: &str = "com.psmux.deskvnc.support";
+    /// The Apple team that signs DeskVNC Support releases. The release
+    /// build gives it in `DESKVNC_TEAM_ID`, so a build from a checkout or a
+    /// fork has none and does not set up the sign in screen copy.
+    const TEAM: Option<&str> = option_env!("DESKVNC_TEAM_ID");
 
     fn plist() -> String {
         format!("/Library/LaunchAgents/{LABEL}.plist")
@@ -521,6 +526,36 @@ mod imp {
         )
     }
 
+    /// The requirement the copy for the sign in screen must meet besides
+    /// the app's own: signed through Apple by the project's team, as the app
+    /// DeskVNC Support. A copy signed ad hoc or by another team meets its
+    /// own requirement, so that alone does not tell it from this app.
+    pub(super) fn team_requirement(team: Option<&str>) -> Result<String> {
+        let team = team.map(str::trim).filter(|t| !t.is_empty()).context(
+            "This build of DeskVNC Support was not made by the DeskVNC release, so it cannot \
+             set up the copy for the sign in screen. Install DeskVNC Support from the DeskVNC \
+             releases, or build it with DESKVNC_TEAM_ID set to the Apple team that signs it.",
+        )?;
+        ensure!(
+            team.len() == 10
+                && team
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()),
+            "This build of DeskVNC Support was made with {team} as its Apple team, which is not \
+             a team ID, so it cannot set up the copy for the sign in screen"
+        );
+        Ok(format!(
+            r#"anchor apple generic and certificate leaf[subject.OU] = "{team}" and identifier "{BUNDLE_ID}""#
+        ))
+    }
+
+    /// Whether `requirement`, a running program's own, holds it to a
+    /// certificate from Apple. An ad hoc signature gives only its own hash,
+    /// and a certificate of one's own gives no Apple anchor.
+    pub(super) fn apple_anchored(requirement: &str) -> bool {
+        requirement.contains("anchor apple") && !requirement.contains("cdhash")
+    }
+
     /// Quoted for `sh`.
     pub(super) fn quote(s: &str) -> String {
         format!("'{}'", s.replace('\'', r"'\''"))
@@ -529,15 +564,18 @@ mod imp {
     /// The script that, run as root, copies the app at `source` to
     /// [`ROOT_APP`] and points the launchd job at `exe_name` in that copy.
     ///
-    /// The copy is checked against `requirement`, the code signature
-    /// requirement of the app that asked, before anything runs it, and the
-    /// job is written only once the copy and every folder above it belong to
+    /// The script stops before it changes anything unless `requirement`,
+    /// the code signature requirement of the app that asked, is anchored to
+    /// Apple. The copy is checked against that requirement and against
+    /// `team`, the one from [`team_requirement`], before anything runs it,
+    /// and the job is written only once the copy and every folder above it belong to
     /// root and nobody else can write them. It is made beside the old copy
     /// and moved over it, so a copy that is half made never runs.
     pub(super) fn install_script(
         source: &str,
         exe_name: &str,
         requirement: &str,
+        team: &str,
         home: &str,
     ) -> String {
         let exe = format!("{ROOT_APP}/Contents/MacOS/{exe_name}");
@@ -551,6 +589,12 @@ app={app}
 stage="$dir/.DeskVNC Support.app.partial"
 plist={plist}
 fail() {{ rm -rf "$stage"; echo "$1" >&2; exit 1; }}
+own={own}
+case "$own" in
+  *cdhash*) fail "DeskVNC Support is not signed through Apple, so the sign in screen copy was not set up" ;;
+  *"anchor apple"*) ;;
+  *) fail "DeskVNC Support is not signed through Apple, so the sign in screen copy was not set up" ;;
+esac
 if [ -L "$dir" ] || {{ [ -e "$dir" ] && [ ! -d "$dir" ]; }}; then rm -f "$dir"; fi
 mkdir -p "$dir"
 chown root:wheel "$dir"
@@ -560,6 +604,7 @@ ditto --noqtn {source} "$stage"
 chown -R root:wheel "$stage"
 chmod -R go-w "$stage"
 /usr/bin/codesign --verify --deep --strict -R {requirement} "$stage" || fail "The copy for the sign in screen does not carry this app's signature, so it was not set up"
+/usr/bin/codesign --verify --deep --strict -R {team} "$stage" || fail "The copy for the sign in screen is not signed by the DeskVNC team, so it was not set up"
 rm -rf "$app"
 mv "$stage" "$app"
 for p in / /Library "/Library/Application Support" "$dir"; do
@@ -578,7 +623,9 @@ mv -f "$plist.partial" "$plist"
             app = quote(ROOT_APP),
             plist = quote(&plist),
             source = quote(source),
+            own = quote(requirement),
             requirement = quote(&format!("={requirement}")),
+            team = quote(&format!("={team}")),
             exe = quote(&exe),
         )
     }
@@ -633,10 +680,17 @@ mv -f "$plist.partial" "$plist"
             .context("This app cannot find itself")?
             .to_string_lossy()
             .into_owned();
+        let team = team_requirement(TEAM)?;
+        let own = own_requirement()?;
+        ensure!(
+            apple_anchored(&own),
+            "This copy of DeskVNC Support is not signed through Apple, so it cannot run at the sign in screen"
+        );
         Ok(install_script(
             &bundle.to_string_lossy(),
             &name,
-            &own_requirement()?,
+            &own,
+            &team,
             home,
         ))
     }
@@ -859,7 +913,117 @@ mod imp {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::imp::{ROOT_APP, install_script, launch_agent, root_only, uninstall_script};
+    use super::imp::{
+        ROOT_APP, apple_anchored, install_script, launch_agent, root_only, team_requirement,
+        uninstall_script,
+    };
+
+    /// What `codesign -d -r-` gives for a Developer ID release.
+    const RELEASE: &str = r#"identifier "com.psmux.deskvnc.support" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = ABCDE12345"#;
+    const TEAM: &str = r#"anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345" and identifier "com.psmux.deskvnc.support""#;
+
+    #[test]
+    fn the_copy_must_come_from_the_release_team() {
+        assert_eq!(team_requirement(Some("ABCDE12345")).unwrap(), TEAM);
+        assert_eq!(team_requirement(Some(" ABCDE12345\n")).unwrap(), TEAM);
+        // A build without the team, from a checkout or a fork, says so.
+        for none in [None, Some(""), Some("  ")] {
+            let err = team_requirement(none).unwrap_err().to_string();
+            assert!(err.contains("not made by the DeskVNC release"), "{err}");
+            assert!(err.contains("DESKVNC_TEAM_ID"), "{err}");
+        }
+        // Only a team ID goes into the requirement, never more of it.
+        for odd in [
+            "abcde12345",
+            "ABCDE1234",
+            "ABCDE123456",
+            r#"ABCDE" or anchor apple"#,
+            "ABCDE 2345",
+        ] {
+            assert!(team_requirement(Some(odd)).is_err(), "{odd}");
+        }
+        // macOS reads it as a requirement.
+        let out = std::env::temp_dir().join(format!("team-req-{}", std::process::id()));
+        let compiled = std::process::Command::new("/usr/bin/csreq")
+            .arg(format!("-r={TEAM}"))
+            .arg("-b")
+            .arg(&out)
+            .output();
+        let _ = std::fs::remove_file(&out);
+        if let Ok(compiled) = compiled {
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_signature_through_apple_counts() {
+        assert!(apple_anchored(RELEASE));
+        assert!(apple_anchored(
+            r#"identifier "com.psmux.deskvnc.support" and anchor apple"#
+        ));
+        // Ad hoc: only the program's own hash.
+        assert!(!apple_anchored(
+            r#"cdhash H"8d2c7b5b4c5e0a3f1d6e9b2a7c4f0e1d3b5a6c7d""#
+        ));
+        assert!(!apple_anchored(
+            r#"cdhash H"8d2c7b5b4c5e0a3f1d6e9b2a7c4f0e1d3b5a6c7d" or anchor apple generic"#
+        ));
+        // A certificate of one's own.
+        assert!(!apple_anchored(
+            r#"identifier "com.psmux.deskvnc.support" and certificate root = H"0123456789abcdef0123456789abcdef01234567""#
+        ));
+    }
+
+    /// Runs the start of `script` with no programs to call, so it can stop
+    /// at a check but never change anything.
+    fn run_without_programs(script: &str) -> std::process::Output {
+        std::process::Command::new("/bin/sh")
+            .args(["-c", script])
+            .env_clear()
+            .env("PATH", "/nonexistent")
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_setup_stops_for_a_copy_not_signed_through_apple() {
+        let refusal = "DeskVNC Support is not signed through Apple";
+        for own in [
+            r#"cdhash H"8d2c7b5b4c5e0a3f1d6e9b2a7c4f0e1d3b5a6c7d""#,
+            r#"identifier "com.psmux.deskvnc.support" and certificate root = H"0123456789abcdef0123456789abcdef01234567""#,
+        ] {
+            let script = install_script(
+                "/Applications/DeskVNC Support.app",
+                "boundary",
+                own,
+                TEAM,
+                "/Users/someone",
+            );
+            sh_syntax(&script);
+            let ran = run_without_programs(&script);
+            assert_eq!(ran.status.code(), Some(1), "{own}");
+            let err = String::from_utf8_lossy(&ran.stderr);
+            assert!(err.contains(refusal), "{own}: {err}");
+            // It stopped before it made or copied anything.
+            assert!(!err.contains("not found"), "{own}: {err}");
+            let check = script.find(refusal).unwrap();
+            assert!(check < script.find("mkdir -p").unwrap());
+        }
+        // A release goes past that check, to the first program it calls.
+        let script = install_script(
+            "/Applications/DeskVNC Support.app",
+            "boundary",
+            RELEASE,
+            TEAM,
+            "/Users/someone",
+        );
+        let err = String::from_utf8_lossy(&run_without_programs(&script).stderr).into_owned();
+        assert!(!err.contains(refusal), "{err}");
+    }
 
     #[test]
     fn the_job_runs_the_root_copy_with_root_home() {
@@ -899,11 +1063,12 @@ mod tests {
 
     #[test]
     fn the_setup_checks_the_copy_before_writing_the_job() {
-        let requirement = r#"identifier "com.psmux.deskvnc.support" and anchor apple generic"#;
+        let requirement = RELEASE;
         let script = install_script(
             "/Applications/It's DeskVNC Support.app",
             "boundary",
             requirement,
+            TEAM,
             "/Users/some one",
         );
         sh_syntax(&script);
@@ -917,6 +1082,11 @@ mod tests {
         assert!(script.contains(&format!(
             r#"codesign --verify --deep --strict -R '={requirement}' "$stage""#
         )));
+        // And the signature of the release team.
+        let team = format!(r#"codesign --verify --deep --strict -R '={TEAM}' "$stage""#);
+        assert!(script.contains(&team));
+        assert!(script.find(&team).unwrap() < script.find(r#"mv "$stage" "$app""#).unwrap());
+        assert!(script.find(&team).unwrap() < script.find(r#"rm -rf "$app""#).unwrap());
         // The job is written last, after every check.
         let job = script.find(r#"cat > "$plist.partial""#).unwrap();
         for check in [

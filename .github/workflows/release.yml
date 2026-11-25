@@ -452,6 +452,10 @@ jobs:
           APPLE_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_TEAM_ID || '' }}
+          # Built into the program, which sets up the sign in screen copy only
+          # when that copy is signed by this team. Given whether or not the
+          # app is notarized, so a test build behaves as a release does.
+          DESKVNC_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # On a tag the app must be shippable or the build fails. Elsewhere a
           # degraded build is still useful, and fork PRs have no secrets at all.
           BOUNDARY_REQUIRE_SIGNING: ${{ (startsWith(github.ref, 'refs/tags/') && secrets.APPLE_CERTIFICATE != '') && '1' || '0' }}
