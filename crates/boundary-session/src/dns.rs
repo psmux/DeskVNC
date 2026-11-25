@@ -84,7 +84,10 @@ enum Slot {
         answer: watch::Receiver<Option<Arc<Vec<IpAddr>>>>,
     },
     /// The last lookup ended at `at`. Empty means it found nothing.
-    Done { at: Instant, found: Arc<Vec<IpAddr>> },
+    Done {
+        at: Instant,
+        found: Arc<Vec<IpAddr>>,
+    },
 }
 
 /// Blocking lookups, at most one running for each name.
@@ -125,7 +128,7 @@ impl Names {
                     if since.elapsed() >= wait {
                         return Vec::new();
                     }
-                    answer.clone()
+                    Some(answer.clone())
                 }
                 None => self.start(&mut slots, host),
             }
