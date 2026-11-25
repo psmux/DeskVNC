@@ -159,9 +159,44 @@ pub(crate) fn decode(kind: u8, s: &mut impl Read) -> Result<Option<Input>> {
 }
 
 /// Answer one host on `stream` until it goes away.
+/// A picture of the screen, waking it first when it is asleep. A screen
+/// that stays asleep is sent as black at its last size, so the helper's
+/// session goes on and their first move wakes it.
+fn picture(
+    kms: &Kms,
+    uinput: &mut Option<Uinput>,
+    last: &mut Option<(u32, u32)>,
+) -> Result<super::kms::Picture> {
+    for _ in 0..10 {
+        match kms.capture() {
+            Ok(p) => {
+                *last = Some((p.width, p.height));
+                return Ok(p);
+            }
+            Err(error) if error.is::<super::kms::Asleep>() => {
+                if uinput.is_none() {
+                    *uinput = Some(Uinput::new()?);
+                }
+                if let Some(u) = uinput.as_mut() {
+                    u.wake()?;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let (width, height) = last.context("The screen is asleep and did not wake")?;
+    Ok(super::kms::Picture {
+        width,
+        height,
+        rgba: [0, 0, 0, 255].repeat(width as usize * height as usize),
+    })
+}
+
 fn answer(mut stream: UnixStream) -> Result<()> {
     let kms = Kms::open();
     let mut uinput = None;
+    let mut last = None;
     loop {
         let mut kind = [0u8; 1];
         if stream.read_exact(&mut kind).is_err() {
@@ -171,7 +206,7 @@ fn answer(mut stream: UnixStream) -> Result<()> {
             None => match kms
                 .as_ref()
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
-                .and_then(|k| k.capture())
+                .and_then(|k| picture(k, &mut uinput, &mut last))
             {
                 Ok(p) => {
                     stream.write_all(&p.width.to_le_bytes())?;

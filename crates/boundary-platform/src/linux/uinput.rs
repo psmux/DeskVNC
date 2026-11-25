@@ -114,6 +114,8 @@ fn named(key: Key) -> Option<(u16, bool)> {
 
 pub(crate) struct Uinput {
     dev: File,
+    /// Where the pointer was last put, in the device's range.
+    at: (i32, i32),
     /// Keys and buttons held down, let go of on release.
     held: Vec<u16>,
 }
@@ -183,6 +185,7 @@ impl Uinput {
         std::thread::sleep(std::time::Duration::from_millis(500));
         Ok(Self {
             dev,
+            at: (SPAN / 2, SPAN / 2),
             held: Vec::new(),
         })
     }
@@ -224,7 +227,8 @@ impl Uinput {
         match input {
             Input::Move { x, y } => {
                 let at = |f: f32| (f.clamp(0.0, 1.0) * SPAN as f32).round() as i32;
-                self.emit(&[(EV_ABS, 0, at(x)), (EV_ABS, 1, at(y))])
+                self.at = (at(x), at(y));
+                self.emit(&[(EV_ABS, 0, self.at.0), (EV_ABS, 1, self.at.1)])
             }
             Input::Button { button, down } => self.key(
                 match button {
@@ -251,6 +255,15 @@ impl Uinput {
             Input::Scroll { lines } => self.emit(&[(EV_REL, REL_WHEEL, -lines)]),
             Input::Release => self.release(),
         }
+    }
+
+    /// Nudge the pointer and put it back, which wakes a blank screen
+    /// without typing or clicking anything.
+    pub fn wake(&mut self) -> Result<()> {
+        let (x, y) = self.at;
+        let nudge = if x < SPAN { x + 64 } else { x - 64 };
+        self.emit(&[(EV_ABS, 0, nudge), (EV_ABS, 1, y)])?;
+        self.emit(&[(EV_ABS, 0, x), (EV_ABS, 1, y)])
     }
 
     pub fn release(&mut self) -> Result<()> {

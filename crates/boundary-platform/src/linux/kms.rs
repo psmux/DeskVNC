@@ -101,6 +101,17 @@ fn ioctl<T>(fd: &File, request: libc::c_ulong, arg: &mut T) -> std::io::Result<(
     }
 }
 
+/// Nothing is scanned out: the screen is blank or asleep, as a sign in
+/// screen goes after a few idle minutes. Input wakes it.
+#[derive(Debug)]
+pub(crate) struct Asleep;
+impl std::fmt::Display for Asleep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The screen is asleep")
+    }
+}
+impl std::error::Error for Asleep {}
+
 /// One frame as the kernel scans it out.
 pub(crate) struct Picture {
     pub width: u32,
@@ -134,6 +145,9 @@ impl Kms {
             let kms = Self { card };
             match kms.capture() {
                 Ok(_) => return Ok(kms),
+                Err(error) if error.is::<Asleep>() && kms.planes().is_ok_and(|p| !p.is_empty()) => {
+                    return Ok(kms);
+                }
                 Err(error) => last = Some(error.context(path)),
             }
         }
@@ -180,7 +194,7 @@ impl Kms {
                 self.close(&fb);
             }
         }
-        best.context("Nothing is on the screen: it may be asleep")
+        best.ok_or_else(|| anyhow::Error::new(Asleep))
     }
 
     fn close(&self, fb: &FbCmd2) {
