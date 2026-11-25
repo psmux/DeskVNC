@@ -517,7 +517,7 @@ impl Kms {
         let result = self.read(&fb, region);
         self.close(&fb);
         let (mut rgba, how) = result?;
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         let mut picture = Picture {
@@ -768,7 +768,12 @@ fn route(modifier: Option<u64>, mappable: bool, plain_driver: bool) -> Vec<Way> 
 }
 
 fn bgra_to_rgba(src: &[u8], dst: &mut [u8]) {
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
     }
 }
