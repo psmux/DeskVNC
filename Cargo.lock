@@ -1129,6 +1129,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "vnc-discovery",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -423,3 +423,23 @@ export function registerTone(outcome: RegisterOutcome): "success" | "info" | "wa
 export function needsManualSetup(outcome: RegisterOutcome): boolean {
   return outcome !== "registered" && outcome !== "already";
 }
+
+/**
+ * The store key for "Connect agents automatically" (issue #73),
+ * `crate::agent::AGENT_AUTO_SETUP_KEY`. On unless a person switched it off.
+ * Off, a launch writes nothing into any agent's config; the plane still
+ * serves `dvv`, and Connect now still works.
+ */
+export const AGENT_AUTO_SETUP_KEY = "agent_auto_setup";
+
+/** The shell command that takes DeskVNC back out of every agent (issue #72). */
+export const AGENT_REMOVE_COMMAND = "agent_remove_from_agents";
+
+/**
+ * Read the stored value the way the shell does (`plane_enabled`): only an
+ * explicit off turns it off.
+ */
+export function autoSetupOn(raw: string | null | undefined): boolean {
+  const value = (raw ?? "").trim().toLowerCase();
+  return !["false", "0", "no", "off"].includes(value);
+}

@@ -340,6 +340,7 @@ pub fn run() {
             commands::agent::agent_requests_unmute,
             commands::agent::agent_register_with_claude,
             commands::agent::agent_setup_agents,
+            commands::agent::agent_remove_from_agents,
             // file transfer (SFTP sidecar)
             commands::files::files_probe,
             commands::files::files_connect,

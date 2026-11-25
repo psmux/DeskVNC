@@ -58,7 +58,7 @@ pub fn computer_name() -> String {
 pub fn claim_unattended() -> Result<Option<std::fs::File>> {
     let dir = data_dir()?;
     // On macOS the copy at the login window runs as root in the person's
-    // folder, so it makes nothing there and never follows a link to the
+    // folder, and on Windows as SYSTEM, so it makes nothing there and never follows a link to the
     // lock. A lock needs no writing, so one an older version made as root
     // opens too.
     let file = boundary_session::owned::Folder::create(&dir)

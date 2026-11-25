@@ -3,7 +3,7 @@
 //! could not get in is written down where whoever looks after it can find it.
 //!
 //! On macOS the copy at the sign in screen writes these as root in the
-//! person's own folder, so they are written through
+//! person's own folder, and on Windows as SYSTEM, so they are written through
 //! [`boundary_session::owned`], which never follows a link put there.
 
 use std::path::Path;

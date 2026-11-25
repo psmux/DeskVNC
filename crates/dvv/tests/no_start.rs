@@ -70,6 +70,16 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     assert!(init.get("result").is_some(), "{init}");
     let tools = client.call("tools/list", json!({})).await;
     assert!(tools["result"]["tools"].as_array().is_some(), "{tools}");
+    // OpenCode, Claude Code and Codex also ask for prompts and resources, and
+    // ping, at startup (issue #72). None of it may start the app.
+    for method in [
+        "prompts/list",
+        "resources/list",
+        "resources/templates/list",
+        "ping",
+    ] {
+        let _ = client.call(method, json!({})).await;
+    }
     let limbs = client
         .call(
             "tools/call",
@@ -80,7 +90,7 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     assert_eq!(
         plane::start_attempts(),
         0,
-        "initialize, tools/list or dvv_limbs tried to start DeskVNCViewer"
+        "what an MCP client sends at startup, or dvv_limbs, tried to start DeskVNCViewer"
     );
 
     // An agent asking for the saved machines needs the application.
