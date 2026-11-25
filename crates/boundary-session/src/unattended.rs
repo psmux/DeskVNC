@@ -321,6 +321,20 @@ where
     spawn_listener(options, key, access_path, true, desktop)
 }
 
+/// How long to wait before listening again after a listener stopped, given
+/// the wait before the last try (zero the first time). It doubles from two
+/// seconds to a minute, so a network that stays down is tried now and then
+/// rather than on every tick, and each try has ended before the next.
+pub fn relisten_wait(previous: Duration) -> Duration {
+    const FIRST: Duration = Duration::from_secs(2);
+    const MOST: Duration = Duration::from_secs(60);
+    if previous.is_zero() {
+        FIRST
+    } else {
+        (previous * 2).min(MOST)
+    }
+}
+
 fn spawn_listener<F>(
     options: HostOptions,
     key: SecretKey,
@@ -1177,6 +1191,17 @@ pub fn validate_machine_id(text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listening_again_backs_off_to_a_minute() {
+        let mut wait = Duration::ZERO;
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            wait = relisten_wait(wait);
+            waits.push(wait.as_secs());
+        }
+        assert_eq!(waits, [2, 4, 8, 16, 32, 60, 60, 60]);
+    }
 
     #[test]
     fn load_key_reads_what_was_made_and_never_makes_one() {
