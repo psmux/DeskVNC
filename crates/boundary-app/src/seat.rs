@@ -126,8 +126,7 @@ pub fn x_server(argv: &[String]) -> Option<Server> {
     while let Some(arg) = args.next() {
         if arg == "-auth" {
             server.auth = args.next().map(PathBuf::from);
-        } else if arg.starts_with(':') && arg[1..].chars().all(|c| c.is_ascii_digit() || c == '.')
-        {
+        } else if arg.starts_with(':') && arg[1..].chars().all(|c| c.is_ascii_digit() || c == '.') {
             server.display = Some(arg.clone());
         } else if let Some(n) = arg.strip_prefix("vt").and_then(|n| n.parse().ok()) {
             server.vt = Some(n);
@@ -193,7 +192,11 @@ pub fn no_authority(display: &str) -> String {
 
 /// Decide from the active session, with `display` and `authority` as found
 /// for it (both `None` when nothing was found).
-pub fn plan(session: Option<&Session>, display: Option<String>, authority: Option<PathBuf>) -> Plan {
+pub fn plan(
+    session: Option<&Session>,
+    display: Option<String>,
+    authority: Option<PathBuf>,
+) -> Plan {
     let Some(session) = session else {
         return Plan::Idle;
     };
@@ -287,7 +290,12 @@ fn find_display(session: &Session) -> (Option<String>, Option<PathBuf>) {
     let mut servers = Vec::new();
     for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let pid = entry.path();
-        if !entry.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
             continue;
         }
         if let Ok(cmdline) = std::fs::read(pid.join("cmdline")) {
@@ -304,8 +312,8 @@ fn find_display(session: &Session) -> (Option<String>, Option<PathBuf>) {
         if authority.is_some() {
             continue;
         }
-        let ours = std::fs::read_to_string(pid.join("cgroup"))
-            .is_ok_and(|c| in_session(&c, &session.id));
+        let ours =
+            std::fs::read_to_string(pid.join("cgroup")).is_ok_and(|c| in_session(&c, &session.id));
         if !ours {
             continue;
         }
@@ -341,7 +349,8 @@ mod tests {
         line.split(' ').map(str::to_owned).collect()
     }
 
-    const LIGHTDM_GREETER: &str = "Id=c2\nName=lightdm\nUser=118\nClass=greeter\nType=x11\nDisplay=:0\nVTNr=7\nRemote=no\n";
+    const LIGHTDM_GREETER: &str =
+        "Id=c2\nName=lightdm\nUser=118\nClass=greeter\nType=x11\nDisplay=:0\nVTNr=7\nRemote=no\n";
     const GDM_XORG_GREETER: &str =
         "Id=c1\nName=gdm\nUser=120\nClass=greeter\nType=x11\nDisplay=\nVTNr=1\nRemote=no\n";
     const GDM_WAYLAND_GREETER: &str =
@@ -365,14 +374,17 @@ mod tests {
         assert!(!Session::parse(USER_SESSION).unwrap().greeter);
         assert_eq!(Session::parse("ActiveSession=\n"), None);
         assert_eq!(
-            properties("ActiveSession=c1\n").get("ActiveSession").map(String::as_str),
+            properties("ActiveSession=c1\n")
+                .get("ActiveSession")
+                .map(String::as_str),
             Some("c1")
         );
     }
 
     #[test]
     fn reads_display_and_authority_from_a_process_environment() {
-        let environ = b"LANG=C\0DISPLAY=:0\0XAUTHORITY=/run/user/120/gdm/Xauthority\0HOME=/var/lib/gdm3\0";
+        let environ =
+            b"LANG=C\0DISPLAY=:0\0XAUTHORITY=/run/user/120/gdm/Xauthority\0HOME=/var/lib/gdm3\0";
         assert_eq!(
             environ_display(environ),
             (

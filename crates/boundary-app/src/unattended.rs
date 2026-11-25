@@ -881,9 +881,10 @@ fn screen_locked() -> bool {
 /// the machine ID until its own session is back on the screen.
 #[cfg(target_os = "linux")]
 fn screen_locked() -> bool {
-    let Some(id) = std::env::var("XDG_SESSION_ID").ok().filter(|id| {
-        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
-    }) else {
+    let Some(id) = std::env::var("XDG_SESSION_ID")
+        .ok()
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+    else {
         return false;
     };
     // What sd_session_is_active reads, without starting a process each
@@ -995,7 +996,9 @@ mod tests {
     fn a_session_off_the_screen_hands_over() {
         let state = "# This is private data. Do not parse.\nUID=1000\nUSER=someone\nACTIVE=0\nSTATE=online\nTYPE=x11\nCLASS=user\n";
         assert!(super::session_inactive(state));
-        assert!(!super::session_inactive(&state.replace("ACTIVE=0", "ACTIVE=1")));
+        assert!(!super::session_inactive(
+            &state.replace("ACTIVE=0", "ACTIVE=1")
+        ));
         assert!(!super::session_inactive(""));
     }
 

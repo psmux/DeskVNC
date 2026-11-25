@@ -90,7 +90,9 @@ fn describe(plan: &crate::seat::Plan) -> String {
     match plan {
         Plan::Share {
             session, display, ..
-        } => format!("Sign in screen on X display {display} (session {session}): sharing it with paired helpers"),
+        } => format!(
+            "Sign in screen on X display {display} (session {session}): sharing it with paired helpers"
+        ),
         Plan::Unavailable { session, reason } => {
             format!("Sign in screen (session {session}) cannot be shared: {reason}")
         }
@@ -99,6 +101,21 @@ fn describe(plan: &crate::seat::Plan) -> String {
         ),
         Plan::Idle => "No sign in screen on the screen now".into(),
     }
+}
+
+/// (uid, gid, name, home) from one `/etc/passwd` line, as `getent passwd`
+/// prints it.
+pub fn passwd_entry(line: &str) -> Option<(u32, u32, String, PathBuf)> {
+    let fields: Vec<&str> = line.trim_end().split(':').collect();
+    if fields.len() < 7 || fields[0].is_empty() {
+        return None;
+    }
+    Some((
+        fields[2].parse().ok()?,
+        fields[3].parse().ok()?,
+        fields[0].to_owned(),
+        PathBuf::from(fields[5]),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -123,31 +140,29 @@ mod imp {
     }
 
     fn account(uid: u32) -> Option<Account> {
-        // SAFETY: getpwuid_r writes into the buffers given, and the strings
-        // it points at live in `buf`, which outlives every read here.
-        unsafe {
-            let mut pwd: libc::passwd = std::mem::zeroed();
-            let mut buf = vec![0 as libc::c_char; 16 * 1024];
-            let mut out = std::ptr::null_mut();
-            let rc = libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut out);
-            if rc != 0 || out.is_null() {
-                return None;
-            }
-            let text = |p: *const libc::c_char| {
-                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-            };
-            Some(Account {
-                uid,
-                gid: pwd.pw_gid,
-                name: text(pwd.pw_name),
-                home: PathBuf::from(text(pwd.pw_dir)),
-            })
-        }
+        // getent asks NSS, so accounts from LDAP or systemd-homed count too.
+        let out = Command::new("getent")
+            .args(["passwd", &uid.to_string()])
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&out.stdout);
+        let entry = passwd_entry(line.lines().next()?)?;
+        (entry.0 == uid).then(|| Account {
+            uid,
+            gid: entry.1,
+            name: entry.2,
+            home: entry.3,
+        })
+    }
+
+    /// The effective account of this process: whoever owns `/proc/self`.
+    fn euid() -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self").ok().map(|m| m.uid())
     }
 
     fn root() -> bool {
-        // SAFETY: no arguments, cannot fail.
-        unsafe { libc::geteuid() == 0 }
+        euid() == Some(0)
     }
 
     /// Whether the service is set up.
@@ -165,8 +180,7 @@ mod imp {
                 std::env::var_os("APPIMAGE").is_none(),
                 "Use the DeskVNC Support tarball to set this up, not an AppImage"
             );
-            // SAFETY: no arguments, cannot fail.
-            let uid = unsafe { libc::getuid() };
+            let uid = euid().context("Cannot tell which account this is")?;
             ensure!(
                 uid != 0,
                 "Switch this on from the account whose DeskVNC Support helpers should reach, not as root"
@@ -193,7 +207,9 @@ mod imp {
             Some(0) => Ok(()),
             // pkexec: the dialog was dismissed, or the password refused.
             Some(126) | Some(127) => bail!("Cancelled"),
-            _ => bail!("Linux did not accept it. The service's journal may say why: journalctl -u {UNIT_NAME}"),
+            _ => bail!(
+                "Linux did not accept it. The service's journal may say why: journalctl -u {UNIT_NAME}"
+            ),
         }
     }
 
@@ -299,8 +315,8 @@ mod imp {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
         let path = dir.join(format!("{session}.xauth"));
         let _ = std::fs::remove_file(&path);
-        let key = std::fs::read(source)
-            .with_context(|| format!("Cannot read {}", source.display()))?;
+        let key =
+            std::fs::read(source).with_context(|| format!("Cannot read {}", source.display()))?;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -348,8 +364,9 @@ mod imp {
 
     /// Ask the host to stop, and make sure it has.
     fn stop(mut child: Child) {
-        // SAFETY: a plain signal to a process this one started.
-        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        let _ = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
         let until = Instant::now() + Duration::from_secs(3);
         while Instant::now() < until {
             if matches!(child.try_wait(), Ok(Some(_))) {
@@ -418,6 +435,16 @@ mod tests {
         assert!(body.contains("Restart=always\n"));
         assert!(body.contains("WantedBy=graphical.target\n"));
         assert!(body.contains("After=") && body.contains("display-manager.service"));
+    }
+
+    #[test]
+    fn reads_accounts_as_getent_prints_them() {
+        assert_eq!(
+            passwd_entry("someone:x:1000:1000:Some One,,,:/home/someone:/bin/bash\n"),
+            Some((1000, 1000, "someone".into(), PathBuf::from("/home/someone")))
+        );
+        assert_eq!(passwd_entry("broken:x:abc:1:::"), None);
+        assert_eq!(passwd_entry(""), None);
     }
 
     #[test]

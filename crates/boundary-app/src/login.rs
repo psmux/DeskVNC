@@ -148,9 +148,7 @@ async fn serve() -> Result<()> {
             while let Ok(notice) = l.notices.try_recv() {
                 match notice {
                     // Held until it ends; dropping it would end it.
-                    Notice::Ready { machine, .. } => {
-                        note(&dir, &format!("listening as {machine}"))
-                    }
+                    Notice::Ready { machine, .. } => note(&dir, &format!("listening as {machine}")),
                     Notice::Connected {
                         session: s, name, ..
                     } => {
