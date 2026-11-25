@@ -369,6 +369,8 @@ fn remove_skill(dir: &Path) -> Option<String> {
         return Some(format!("could not remove {}: {e}", file.display()));
     }
     let _ = std::fs::remove_dir(&folder);
+    // The skills folder too when setup made it and nothing else is in it.
+    let _ = std::fs::remove_dir(dir);
     Some(format!("removed the skill at {}", file.display()))
 }
 
