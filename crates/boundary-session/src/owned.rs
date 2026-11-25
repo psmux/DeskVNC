@@ -14,9 +14,35 @@
 //!
 //! Run as anyone else, the folder is opened as it is and a file still never
 //! through a link: a person gains nothing by fooling their own programs.
+//!
+//! The copy at the sign in screen runs with root's own home folder, so that
+//! what macOS's frameworks keep for it lands there and not in the person's
+//! home. The person's home folder is given in [`PERSON_HOME`] instead.
 
 use std::io::{self, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+
+/// Set for the copy at the sign in screen: the home folder of the person
+/// whose data folder it uses, when that is not its own `HOME`.
+pub const PERSON_HOME: &str = "DESKVNC_SUPPORT_PERSON_HOME";
+
+/// Whether this process runs as root.
+pub fn is_root() -> bool {
+    #[cfg(unix)]
+    return rustix::process::geteuid().is_root();
+    #[cfg(not(unix))]
+    return false;
+}
+
+/// The home folder of the person whose data this process uses: the one
+/// given in [`PERSON_HOME`], or else `HOME`. Only a full path counts.
+pub fn person_home() -> Option<PathBuf> {
+    [PERSON_HOME, "HOME"]
+        .iter()
+        .filter_map(|name| std::env::var_os(name))
+        .map(PathBuf::from)
+        .find(|home| home.is_absolute())
+}
 
 pub use imp::Folder;
 
@@ -127,8 +153,7 @@ mod imp {
         /// and is reached from it without following a link.
         pub fn open(dir: &Path) -> io::Result<Self> {
             if geteuid().is_root() {
-                let home = std::env::var_os("HOME")
-                    .map(std::path::PathBuf::from)
+                let home = super::person_home()
                     .ok_or_else(|| refused("There is no home folder".into()))?;
                 let inside = dir.strip_prefix(&home).map_err(|_| {
                     refused(format!(

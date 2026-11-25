@@ -155,6 +155,24 @@ fn other_mode(args: &[String]) -> Option<i32> {
     };
     let result = if args.iter().any(|a| a == "--login-screen") {
         login::host()
+    } else if cfg!(target_os = "macos")
+        && let Some(at) = args.iter().position(|a| {
+            matches!(
+                a.as_str(),
+                "--install-login-screen" | "--uninstall-login-screen"
+            )
+        })
+    {
+        // Setting the copy at the sign in screen up, or taking it away, with
+        // sudo instead of the app's checkbox.
+        #[cfg(target_os = "macos")]
+        let result = login::run_elevated(&args[at..]);
+        #[cfg(not(target_os = "macos"))]
+        let result = {
+            let _ = at;
+            Ok(())
+        };
+        result
     } else if cfg!(target_os = "linux")
         && let Some(at) = args.iter().position(|a| {
             matches!(
@@ -254,7 +272,8 @@ fn information(args: &[String]) -> Option<String> {
         _ => None,
     }
 }
-/// The line about `--install` in the help, on Linux where it exists.
+/// The lines about setting up the copy at the sign in screen, where they
+/// exist.
 const INSTALL_HELP: &str = if cfg!(target_os = "linux") {
     "  --install      Add DeskVNC Support to your app menu, for you only\n\
      \x20 --install-service\n\
@@ -263,6 +282,13 @@ const INSTALL_HELP: &str = if cfg!(target_os = "linux") {
      \x20                Asks for an administrator\n\
      \x20 --uninstall-service\n\
      \x20                Remove that service\n"
+} else if cfg!(target_os = "macos") {
+    "  --install-login-screen\n\
+     \x20                Also run at the sign in screen, from a copy only an administrator\n\
+     \x20                can change, so your paired helpers can reach this computer\n\
+     \x20                before anyone signs in. Run it with sudo\n\
+     \x20 --uninstall-login-screen\n\
+     \x20                Remove that copy. Run it with sudo\n"
 } else {
     ""
 };
@@ -1889,7 +1915,11 @@ mod tests {
             assert!(help.starts_with(&version), "{help}");
             assert!(help.contains("--version"));
             assert!(help.contains("--background"));
-            assert_eq!(help.contains("--install"), cfg!(target_os = "linux"));
+            assert_eq!(help.contains("--install "), cfg!(target_os = "linux"));
+            assert_eq!(
+                help.contains("--install-login-screen"),
+                cfg!(target_os = "macos")
+            );
         }
     }
 
