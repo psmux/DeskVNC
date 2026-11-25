@@ -10,6 +10,16 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Changed
+
+* The sign in screen copy of DeskVNC Support on macOS runs as root, and it
+  no longer follows links when it reads or writes in the person's data
+  folder. Its log, the unattended lock, the paired helpers and the machine
+  key are opened only when they are plain files belonging to that person,
+  reached without following a link on the way. It no longer makes the data
+  folder or a machine key there, files it made before are handed back to
+  the person, and the settings it reads are capped at a megabyte.
+
 ## [0.36.7] (2026-11-25)
 
 ### Added

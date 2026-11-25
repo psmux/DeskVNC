@@ -22,6 +22,11 @@ argon2.workspace = true
 # Publishes an unattended machine on the local network so a scan finds it.
 mdns-sd.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Opens files in a person's data folder without following links, for the
+# copy that runs as root at the sign in screen.
+rustix = { version = "1", features = ["fs", "process"] }
+
 [dev-dependencies]
 # Checks the record this crate publishes against the scan that reads it.
 vnc-discovery = { path = "../vnc-discovery" }

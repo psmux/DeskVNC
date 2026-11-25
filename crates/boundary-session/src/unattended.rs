@@ -61,6 +61,21 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     Ok(key)
 }
 
+/// Load a key [`load_or_create_key`] made, and never make one. For the copy
+/// at the sign in screen, which reads the person's machine key as root: it
+/// is never read through a link, and a missing key stays missing rather
+/// than being made by root in the person's folder.
+pub fn load_key(path: &Path) -> Result<SecretKey> {
+    let bytes = crate::owned::read(path, 4096)
+        .with_context(|| format!("Cannot read {}", path.display()))?;
+    let bytes: [u8; 32] = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| hex_decode(text.trim()))
+        .and_then(|b| b.try_into().ok())
+        .context("The identity file is damaged. Remove it to make a new identity")?;
+    Ok(SecretKey::from_bytes(&bytes))
+}
+
 /// The ID a helper connects to, for this key.
 pub fn machine_id(key: &SecretKey) -> String {
     key.public().to_string()
@@ -106,8 +121,10 @@ fn yes() -> bool {
 }
 impl Access {
     /// Read the access file. A missing file is no access at all.
+    /// Never through a link, and never a file past a megabyte: the copy at
+    /// the sign in screen reads it as root, from a folder the person owns.
     pub fn load(path: &Path) -> Result<Self> {
-        match std::fs::read(path) {
+        match crate::owned::read(path, crate::owned::READ_LIMIT) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).context("The unattended access settings are damaged")
             }
@@ -1160,6 +1177,27 @@ pub fn validate_machine_id(text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_key_reads_what_was_made_and_never_makes_one() {
+        let dir = std::env::temp_dir().join(format!("load-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("machine.key");
+        assert!(load_key(&path).is_err());
+        assert!(!path.exists());
+        let made = load_or_create_key(&path).unwrap();
+        assert_eq!(load_key(&path).unwrap().to_bytes(), made.to_bytes());
+        #[cfg(unix)]
+        {
+            let linked = dir.join("linked.key");
+            std::os::unix::fs::symlink(&path, &linked).unwrap();
+            assert!(load_key(&linked).is_err());
+        }
+        std::fs::write(&path, "not hex").unwrap();
+        assert!(load_key(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn helpers_saved_before_clipboard_never_read_it() {
