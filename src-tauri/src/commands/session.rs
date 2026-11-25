@@ -3256,7 +3256,8 @@ mod save_session_as_host_tests {
     #[test]
     fn only_a_proven_credential_is_offered() {
         let used = Mutex::new(HashMap::new());
-        used.lock().insert("s1".to_string(), typed("pw", None, false));
+        used.lock()
+            .insert("s1".to_string(), typed("pw", None, false));
         assert_eq!(
             credential_state_of(used.lock().get("s1")),
             SessionCredentialState::default()
@@ -3265,7 +3266,11 @@ mod save_session_as_host_tests {
         mark_used_proven(&used, "s1");
         assert_eq!(
             credential_state_of(used.lock().get("s1")),
-            SessionCredentialState { used: true, has_username: false, remembered: false }
+            SessionCredentialState {
+                used: true,
+                has_username: false,
+                remembered: false
+            }
         );
     }
 
@@ -3280,7 +3285,11 @@ mod save_session_as_host_tests {
         u.proven = true;
         assert_eq!(
             credential_state_of(Some(&u)),
-            SessionCredentialState { used: true, has_username: true, remembered: true }
+            SessionCredentialState {
+                used: true,
+                has_username: true,
+                remembered: true
+            }
         );
         let mut blank_name = typed("pw", Some("  "), false);
         blank_name.proven = true;
@@ -3292,11 +3301,13 @@ mod save_session_as_host_tests {
     #[test]
     fn a_failed_attempt_forgets_only_an_unproven_credential() {
         let used = Mutex::new(HashMap::new());
-        used.lock().insert("wrong".to_string(), typed("nope", None, false));
+        used.lock()
+            .insert("wrong".to_string(), typed("nope", None, false));
         drop_unproven_used(&used, "wrong");
         assert!(used.lock().get("wrong").is_none());
 
-        used.lock().insert("good".to_string(), typed("pw", None, false));
+        used.lock()
+            .insert("good".to_string(), typed("pw", None, false));
         mark_used_proven(&used, "good");
         drop_unproven_used(&used, "good");
         assert!(used.lock().get("good").is_some_and(|u| u.proven));
