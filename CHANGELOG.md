@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.8] (2026-11-26)
+
 ### Fixed
 
 * Turning AI agents off in DeskVNCViewer now also stops agents from opening
