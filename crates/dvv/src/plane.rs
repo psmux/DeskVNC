@@ -5276,6 +5276,16 @@ pub fn state_json(state: &SessionState) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// Refused before anything is spawned: the environment first, then a
+    /// person turning AI agents off in the app (issue #72).
+    #[test]
+    fn a_refusal_is_decided_before_anything_is_spawned() {
+        assert_eq!(start_refused(false, false), None);
+        assert_eq!(start_refused(true, false), Some(StartOutcome::NoStartEnv));
+        assert_eq!(start_refused(false, true), Some(StartOutcome::AgentsOff));
+        assert_eq!(start_refused(true, true), Some(StartOutcome::NoStartEnv));
+    }
+
     /// The typing fence's sentences, cut to the reason when part of a type
     /// went. Both are what `limb-core` really says, so a change to its words
     /// that would bring "send the same call again" back fails here.

@@ -118,17 +118,6 @@ async fn only_a_call_that_needs_the_app_starts_it() {
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
-/// Refused before anything is spawned: the environment first, then a person
-/// turning AI agents off in the app.
-#[test]
-fn a_refusal_is_decided_before_anything_is_spawned() {
-    use plane::StartOutcome;
-    assert_eq!(plane::start_refused(false, false), None);
-    assert_eq!(plane::start_refused(true, false), Some(StartOutcome::NoStartEnv));
-    assert_eq!(plane::start_refused(false, true), Some(StartOutcome::AgentsOff));
-    assert_eq!(plane::start_refused(true, true), Some(StartOutcome::NoStartEnv));
-}
-
 /// The decision on its own, which is all macOS adds a path around.
 #[test]
 fn the_decision() {

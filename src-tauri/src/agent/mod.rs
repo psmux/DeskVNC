@@ -1967,7 +1967,10 @@ mod tests {
         assert!(auto_setup_enabled(Some("true"), None));
         assert!(!auto_setup_enabled(Some("false"), None));
         assert!(!auto_setup_enabled(None, Some("1")));
-        assert!(!auto_setup_enabled(Some("true"), Some("1")), "the variable wins");
+        assert!(
+            !auto_setup_enabled(Some("true"), Some("1")),
+            "the variable wins"
+        );
         assert!(auto_setup_enabled(None, Some("0")));
         assert!(auto_setup_enabled(None, Some("")));
     }
