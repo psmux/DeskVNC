@@ -204,6 +204,13 @@ fn other_mode(args: &[String]) -> Option<i32> {
             println!("Installed {}", program.display());
             println!("Added {} to the app menu", entry.display());
             println!("The folder you unpacked it from can be deleted.");
+            #[cfg(target_os = "linux")]
+            if service::enabled() {
+                println!(
+                    "The sign in screen service still runs the copy it was set up with. To update it too, run: {} --install-service",
+                    program.display()
+                );
+            }
         })
     } else if args.iter().any(|a| a == "--uninstall-service") {
         #[cfg(windows)]

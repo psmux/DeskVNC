@@ -54,7 +54,7 @@ pub fn unit(program: &str, uid: u32, data: &Path) -> String {
     format!(
         "[Unit]\n\
          Description=DeskVNC Support at the sign in screen\n\
-         Documentation=https://github.com/psmux/DeskVNC/blob/main/docs/support-linux.md\n\
+         Documentation=https://github.com/psmux/DeskVNC/blob/main/docs/INSTALL.md\n\
          After=systemd-user-sessions.service systemd-logind.service display-manager.service network-online.target\n\
          Wants=network-online.target\n\
          \n\

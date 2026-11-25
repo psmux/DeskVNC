@@ -115,6 +115,66 @@ menu entry at that copy. It needs no administrator, and the folder you unpacked
 the tarball into can be deleted afterwards. Run it again from a newer tarball to
 update the installed copy.
 
+### Reaching a Linux computer at the sign in screen
+
+The app runs inside someone's session, so on its own it cannot be reached after
+a restart or once everybody has signed out. With unattended access on, the
+"Also before anyone signs in" switch in the app sets up a system service that
+covers the sign in screen. From a terminal it is the same thing:
+
+```sh
+./deskvnc-support --install-service     # asks for an administrator
+./deskvnc-support --uninstall-service   # takes it away again
+```
+
+Run it from your own account, not as root: the service answers for your machine
+ID, your paired helpers and your unattended password. `sudo ./deskvnc-support
+--install-service` works too, on a system with no pkexec.
+
+What it does:
+
+* Copies the program to `/usr/local/lib/deskvnc-support/` and writes the
+  systemd unit `deskvnc-support-login.service`, enabled at boot.
+* Watches which session logind shows on the screen (seat0). While that is the
+  display manager's sign in screen on Xorg (LightDM, GDM with Wayland off,
+  SDDM on X11), it runs the app with no window on that display. The X server's
+  key is found the way `x11vnc -auth guess` finds it, and a copy only you can
+  read goes in `/run/deskvnc-support/`. The copy at the sign in screen runs as
+  you, never as root.
+* At the sign in screen only paired helpers and the unattended password get
+  in, nobody's tools can run commands, and the clipboard is never shared.
+  This is the same rule as on macOS and Windows.
+* Once somebody signs in it stops, and the app in that person's session takes
+  the machine ID back. Switch user, or lock the screen where the lock screen is
+  the display manager's own (LightDM with light-locker), and the sign in screen
+  is back on the screen, so the service answers until that session returns. A
+  lock screen drawn inside the session, as GNOME's is, is answered by the app
+  in that session. Another account's desktop is never shown through your
+  service.
+
+What it writes down: `sign-in-screen.log` beside your machine ID in
+`~/.local/share/boundary/` says when it started, on which display, what the
+first picture looked like and who connected or was turned away. The service
+itself logs each change of session to the journal:
+
+```sh
+journalctl -u deskvnc-support-login
+```
+
+A sign in screen on Wayland cannot be shared before somebody signs in. GDM uses
+Wayland by default on Ubuntu, Fedora and Debian. The service says so in its log
+and tells a helper who connects, rather than showing a black screen. To use it
+there, switch GDM's own screen to Xorg in `/etc/gdm3/custom.conf`
+(`/etc/gdm/custom.conf` on Fedora and Arch):
+
+```ini
+[daemon]
+WaylandEnable=false
+```
+
+and restart. After you update DeskVNC Support from a newer tarball, run
+`--install-service` again so the service runs the new copy too.
+
 ## Arch Linux
 
 The repository carries a PKGBUILD for `deskvncviewer-bin`, which repackages the
