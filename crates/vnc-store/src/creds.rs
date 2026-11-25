@@ -788,10 +788,10 @@ mod tests {
         let store = file_store(dir.path());
         store.unlock("pw").unwrap();
 
-        let sent: StoredCredentials = serde_json::from_str(r#"{"vencryptUser":"godwin"}"#).unwrap();
+        let sent: StoredCredentials = serde_json::from_str(r#"{"vencryptUser":"alex"}"#).unwrap();
         store.save("mac", &sent).unwrap();
         let named = store.load("mac").unwrap().expect("saved");
-        assert_eq!(named.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(named.vencrypt_user.as_deref(), Some("alex"));
         assert!(!named.has_for(crate::ProtocolKind::Vnc));
 
         let paired = StoredCredentials {
@@ -803,7 +803,7 @@ mod tests {
         let reopened = file_store(dir.path());
         reopened.unlock("pw").unwrap();
         let got = reopened.load("mac").unwrap().expect("saved");
-        assert_eq!(got.vencrypt_user.as_deref(), Some("godwin"));
+        assert_eq!(got.vencrypt_user.as_deref(), Some("alex"));
         assert_eq!(got.vencrypt_pass.as_deref(), Some("secret"));
         assert!(got.has_for(crate::ProtocolKind::Vnc));
     }

@@ -543,7 +543,7 @@ mod tests {
     async fn a_saved_user_name_and_password_skip_the_apple_prompt() {
         let (tx, mut rx) = mpsc::channel(1);
         let mut o = opts();
-        o.credentials = Credentials::user_pass("godwin", "secret");
+        o.credentials = Credentials::user_pass("alex", "secret");
         let src = CredentialSource::interactive(&tx, 1, None, None);
         let got = src
             .obtain(
@@ -554,7 +554,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.username.as_deref(), Some("alex"));
         assert_eq!(got.password.as_deref(), Some("secret"));
         assert!(!src.prompted(), "no prompt should have been raised");
         assert!(rx.try_recv().is_err());
@@ -567,14 +567,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let mut o = opts();
         o.credentials = Credentials {
-            username: Some("godwin".into()),
+            username: Some("alex".into()),
             password: None,
             domain: None,
         };
         let src = CredentialSource::interactive(&tx, 1, None, None);
         tokio::spawn(async move {
             let ask = rx.recv().await.unwrap();
-            assert_eq!(ask.request.username_hint.as_deref(), Some("godwin"));
+            assert_eq!(ask.request.username_hint.as_deref(), Some("alex"));
             // The person only types the password; the name box is left as
             // the prompt filled it, which the shell sends back empty.
             ask.reply
@@ -594,7 +594,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.username.as_deref(), Some("alex"));
         assert_eq!(got.password.as_deref(), Some("typed"));
     }
 

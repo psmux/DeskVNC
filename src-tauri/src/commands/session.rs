@@ -2816,12 +2816,12 @@ mod stored_credentials_tests {
     fn a_vnc_host_connects_with_the_saved_user_name_and_password() {
         // What the host editor writes for a Mac on Apple Screen Sharing.
         let stored = StoredCredentials {
-            vencrypt_user: Some("godwin".into()),
+            vencrypt_user: Some("alex".into()),
             vencrypt_pass: Some("secret".into()),
             ..Default::default()
         };
         let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
-        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.username.as_deref(), Some("alex"));
         assert_eq!(got.password.as_deref(), Some("secret"));
         assert_eq!(got.domain, None);
     }
@@ -2832,22 +2832,22 @@ mod stored_credentials_tests {
         // the name typed later still reaches the driver beside it.
         let stored = StoredCredentials {
             vnc_password: Some("old".into()),
-            vencrypt_user: Some("godwin".into()),
+            vencrypt_user: Some("alex".into()),
             ..Default::default()
         };
         let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
-        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.username.as_deref(), Some("alex"));
         assert_eq!(got.password.as_deref(), Some("old"));
     }
 
     #[test]
     fn a_user_name_alone_is_passed_on_for_the_prompt_to_fill_in() {
         let stored = StoredCredentials {
-            vencrypt_user: Some("godwin".into()),
+            vencrypt_user: Some("alex".into()),
             ..Default::default()
         };
         let got = stored_credentials_for(ProtocolKind::Vnc, stored, None, false);
-        assert_eq!(got.username.as_deref(), Some("godwin"));
+        assert_eq!(got.username.as_deref(), Some("alex"));
         assert_eq!(got.password, None);
     }
 
@@ -3017,8 +3017,8 @@ mod credential_keeping_tests {
     #[test]
     fn the_last_typed_user_name_prefills_the_next_prompt() {
         let mut creds = vnc_core::Credentials::default();
-        prefill_typed_username(ProtocolKind::Vnc, &mut creds, Some("godwin".into()));
-        assert_eq!(creds.username.as_deref(), Some("godwin"));
+        prefill_typed_username(ProtocolKind::Vnc, &mut creds, Some("alex".into()));
+        assert_eq!(creds.username.as_deref(), Some("alex"));
         assert_eq!(creds.password, None);
 
         let mut creds = credentials_from_store(ProtocolKind::Rdp, stored(), None, false, false);

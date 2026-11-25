@@ -124,14 +124,14 @@ describe("the VNC user name through the host draft", () => {
   });
 
   it("saves what was typed and reopens without reading it back", () => {
-    const typed = { ...draftFromHost(mac), vncUser: "godwin", password: "secret" };
+    const typed = { ...draftFromHost(mac), vncUser: "alex", password: "secret" };
     expect(
       vncCredentialPayload(
         typed.vncUser,
         typed.password,
         vncTakesUsername(typed.securityPref, typed.osHint),
       ),
-    ).toEqual({ vencryptUser: "godwin", vencryptPass: "secret" });
+    ).toEqual({ vencryptUser: "alex", vencryptPass: "secret" });
 
     // Reopened after the save: the field is still there and still blank (no
     // secret or account crosses back into the webview), and since a
