@@ -147,7 +147,7 @@ mod imp {
             .ok()?;
         let line = String::from_utf8_lossy(&out.stdout);
         let entry = passwd_entry(line.lines().next()?)?;
-        (entry.0 == uid).then(|| Account {
+        (entry.0 == uid).then_some(Account {
             uid,
             gid: entry.1,
             name: entry.2,
