@@ -10,6 +10,23 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* DeskVNC Support on Linux can now be reached at the sign in screen, as the
+  macOS and Windows apps already could. Until now it only ran inside the
+  session of the person who installed it, so after a restart or a sign out
+  nobody could connect until somebody signed in again. The "Also before anyone
+  signs in" switch, or `deskvnc-support --install-service` in a terminal, sets
+  up a systemd service that follows the session on the screen. At the display
+  manager's sign in screen on Xorg (LightDM, SDDM, GDM with Wayland off) it
+  shares that screen with your paired helpers and the unattended password
+  only, without tools or the clipboard, and runs as you rather than as root.
+  Once somebody signs in it steps aside and their own app answers; switching
+  user brings it back. A sign in screen on Wayland, GDM's default, cannot be
+  shared yet: the service says so in its log and to any helper who connects,
+  with the setting that turns Wayland off there. `--uninstall-service` takes it
+  away again.
+
 ### Fixed
 
 * On Android 15 and later, with the phone held sideways, the status bar lay
