@@ -50,6 +50,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Changed
 
+* The sign in screen copy of DeskVNC Support on macOS is set up only from a
+  copy signed through Apple by the DeskVNC team. Before, the copy only had to
+  meet the signature requirement of the app that asked, which an app signed
+  ad hoc or by another team also meets for itself. The release build now
+  carries the team it is signed by, and the copy must meet that team's
+  requirement as well. The setup also stops before it changes anything when
+  the app that asked is not signed through Apple. A build made from source
+  without `DESKVNC_TEAM_ID` says it cannot set up the sign in screen copy.
 * The sign in screen copy of DeskVNC Support on macOS runs as root, and it
   no longer follows links when it reads or writes in the person's data
   folder. Its log, the unattended lock, the paired helpers and the machine

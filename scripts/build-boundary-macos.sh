@@ -14,6 +14,10 @@
 #   notarization  APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID (CI), else the
 #                 NOTARY_PROFILE keychain profile (local), else skipped
 #
+# DESKVNC_TEAM_ID is the Apple team that signs the app. It is built into the
+# program, which sets up the sign in screen copy only when that copy is signed
+# by this team; a build without it refuses to set that copy up.
+#
 # Set BOUNDARY_REQUIRE_SIGNING=1 to turn the degraded paths into failures, which
 # is what a release build does rather than shipping something unopenable.
 set -euo pipefail
@@ -30,6 +34,7 @@ case "$profile" in
 esac
 
 require="${BOUNDARY_REQUIRE_SIGNING:-0}"
+team="${DESKVNC_TEAM_ID:-}"
 version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 bundle="dist/DeskVNC Support.app"
 
@@ -58,6 +63,11 @@ for candidate in aarch64-apple-darwin x86_64-apple-darwin; do
         targets+=("$candidate")
     fi
 done
+
+if [ -z "$team" ]; then
+    fail_or_warn "DESKVNC_TEAM_ID is not set; this build will not set up the sign in screen copy"
+fi
+export DESKVNC_TEAM_ID="$team"
 
 slices=()
 if [ "${#targets[@]}" -gt 0 ]; then
@@ -117,6 +127,15 @@ else
     fail_or_warn "no signing identity found; falling back to an ad-hoc signature"
     codesign --force --sign - "$bundle"
     codesign --verify --strict "$bundle"
+fi
+
+# The program sets up the sign in screen copy only when it is signed by the
+# team built into it, so a release signed by any other team could not.
+if [ -n "$team" ]; then
+    team_req="anchor apple generic and certificate leaf[subject.OU] = \"$team\" and identifier \"com.psmux.deskvnc.support\""
+    if ! codesign --verify --deep --strict -R "=$team_req" "$bundle"; then
+        fail_or_warn "the app is not signed by the team in DESKVNC_TEAM_ID; it will not set up the sign in screen copy"
+    fi
 fi
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-deskvnc-notary}"

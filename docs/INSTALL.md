@@ -189,11 +189,15 @@ sudo "/Applications/DeskVNC Support.app/Contents/MacOS/boundary" --uninstall-log
 The launch agent runs as root, so it does not run the app you dragged to
 Applications, which your account can change. Switching it on copies the whole
 signed app to `/Library/Application Support/DeskVNC Support/`, where only an
-administrator can change it, checks that the copy carries the same signature,
-and writes `/Library/LaunchAgents/com.psmux.deskvnc.support.login.plist`
+administrator can change it, checks that the copy carries the same signature
+and is signed through Apple by the DeskVNC team, and writes `/Library/LaunchAgents/com.psmux.deskvnc.support.login.plist`
 pointing at it. It runs with root's own home folder and reads your machine ID,
 paired helpers and password from your data folder. Switching it off removes the
 launch agent and the copy.
+
+A build of DeskVNC Support made from source does not know the DeskVNC team and
+refuses to set this up. Build it with `DESKVNC_TEAM_ID` set to the Apple team
+that signs your build if you need the sign in screen copy from it.
 
 After you update DeskVNC Support, the app says the sign in screen still runs
 the older version and offers to update it, which asks for an administrator
