@@ -57,6 +57,10 @@ async fn a_client_on_an_earlier_revision_is_answered_and_then_served() {
         list["result"]["tools"].as_array().expect("an array").len(),
         dvv::mcp::TOOL_COUNT
     );
+    // The cache hints are 2026-07-28 fields. Codex 0.171 refuses a tools/list
+    // that carries them under an earlier revision and finds no tools (#87).
+    assert!(list["result"].get("ttlMs").is_none(), "{list}");
+    assert!(list["result"].get("cacheScope").is_none(), "{list}");
 
     // 3. A tool call, with no _meta anywhere, is the ordinary result.
     let limbs = client.tool("dvv_limbs", json!({})).await;

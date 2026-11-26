@@ -49,9 +49,10 @@ pub const TOOLS_TTL_MS: u64 = 3_600_000;
 
 /// The cache scope for `tools/list`.
 ///
-/// Shared, for the same reason: every attachment gets the same bytes, so there
-/// is nothing per client to keep apart.
-pub const TOOLS_CACHE_SCOPE: &str = "shared";
+/// Public, for the same reason: every attachment gets the same bytes, so there
+/// is nothing per authorization context to keep apart. The schema allows only
+/// "public" and "private".
+pub const TOOLS_CACHE_SCOPE: &str = "public";
 
 /// The selector trio, on every single limb tool.
 fn selector() -> Value {

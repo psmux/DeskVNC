@@ -70,6 +70,15 @@ const LOOK_QUIET_MS: u64 = 700;
 /// for the screen to settle.
 const LOOK_CHANGE_MS: u64 = 1_000;
 
+/// Whether a request says it speaks [`crate::MCP_PROTOCOL_VERSION`] in its
+/// `_meta`, under the specification's namespaced key or the short one.
+fn speaks_current_revision(request: &Request) -> bool {
+    ["io.modelcontextprotocol/protocolVersion", "protocolVersion"]
+        .iter()
+        .filter_map(|key| request.meta.get(*key).and_then(Value::as_str))
+        .any(|version| version == crate::MCP_PROTOCOL_VERSION)
+}
+
 /// The MCP adapter over one plane.
 pub struct Server {
     /// `None` before a grant exists. Every tool then answers `POLICY_DENIED`
@@ -138,7 +147,7 @@ impl Server {
         Some(match request.method.as_str() {
             "server/discover" => jsonrpc::reply(id, self.discover()),
             "initialize" => jsonrpc::reply(id, self.initialize(&request.params)),
-            "tools/list" => jsonrpc::reply(id, self.list()),
+            "tools/list" => jsonrpc::reply(id, self.list(request)),
             "tools/call" => {
                 let name = request.params["name"].as_str().unwrap_or_default();
                 let arguments = request
@@ -219,15 +228,20 @@ impl Server {
         })
     }
 
-    fn list(&self) -> Value {
-        json!({
-            "tools": manifest::tools(),
-            // The manifest is fixed at build time and identical for every
-            // attachment, so a client that honours these pays for tools/list
-            // once per process rather than once per turn.
-            "ttlMs": manifest::TOOLS_TTL_MS,
-            "cacheScope": manifest::TOOLS_CACHE_SCOPE,
-        })
+    fn list(&self, request: &Request) -> Value {
+        let mut list = json!({ "tools": manifest::tools() });
+        // The cache hints belong to the 2026-07-28 revision, which carries its
+        // version in every request's _meta. A client that opened with
+        // initialize speaks an earlier revision, where these fields do not
+        // exist, and some of them (Codex 0.171) refuse a tools/list that has
+        // them (#87). The manifest is fixed at build time and identical for
+        // every attachment, so a client that honours these pays for
+        // tools/list once per process rather than once per turn.
+        if speaks_current_revision(request) {
+            list["ttlMs"] = json!(manifest::TOOLS_TTL_MS);
+            list["cacheScope"] = json!(manifest::TOOLS_CACHE_SCOPE);
+        }
+        list
     }
 
     fn plane(&self) -> Result<&Arc<Plane>, ToolError> {

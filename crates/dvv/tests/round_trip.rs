@@ -33,7 +33,12 @@ async fn the_whole_conversation_works_over_a_pipe() {
     assert_eq!(discover["result"]["serverInfo"]["name"], "deskvnc");
 
     // 2. The manifest, with the cache headers `04 §4.1` takes for free.
-    let list = client.call("tools/list", json!({})).await;
+    let list = client
+        .call(
+            "tools/list",
+            json!({ "_meta": { "protocolVersion": dvv::MCP_PROTOCOL_VERSION } }),
+        )
+        .await;
     let tools = list["result"]["tools"].as_array().expect("an array");
     assert_eq!(
         tools.len(),
@@ -42,6 +47,11 @@ async fn the_whole_conversation_works_over_a_pipe() {
     );
     assert_eq!(list["result"]["ttlMs"], dvv::mcp::TOOLS_TTL_MS);
     assert_eq!(list["result"]["cacheScope"], dvv::mcp::TOOLS_CACHE_SCOPE);
+    // The schema allows "public" or "private" and nothing else (#87).
+    assert!(matches!(
+        list["result"]["cacheScope"].as_str(),
+        Some("public" | "private")
+    ));
     for tool in tools {
         let name = tool["name"].as_str().expect("a name");
         assert!(name.starts_with(dvv::TOOL_PREFIX), "{name}");

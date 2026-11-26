@@ -14,6 +14,12 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* Codex found none of DeskVNC's tools. `tools/list` carried the cache hints
+  `ttlMs` and `cacheScope`, which only the 2026-07-28 revision of MCP has, to
+  clients that opened with `initialize` on an earlier one, and its scope was
+  "shared" where the schema allows only "public" or "private". Codex 0.171
+  refused the whole answer. The hints now go only to clients on 2026-07-28,
+  with scope "public" (#87).
 * Turning AI agents off in DeskVNCViewer now also stops agents from opening
   it. OpenCode, Claude Code and Codex start `dvv mcp` from their own settings
   whether DeskVNC is running or not, and the first time an agent asked for a
