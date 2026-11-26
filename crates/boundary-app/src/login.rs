@@ -413,7 +413,7 @@ pub const SUPPORTED: bool = cfg!(any(target_os = "macos", windows, target_os = "
 #[cfg(target_os = "macos")]
 mod imp {
     use super::Refresh;
-    use anyhow::{bail, ensure, Context, Result};
+    use anyhow::{Context, Result, bail, ensure};
     use std::path::{Path, PathBuf};
 
     const LABEL: &str = "com.psmux.deskvnc.support.login";
@@ -840,7 +840,7 @@ mv -f "$plist.partial" "$plist"
 
 #[cfg(windows)]
 mod imp {
-    use anyhow::{ensure, Context, Result};
+    use anyhow::{Context, Result, ensure};
     use boundary_platform::system::SERVICE;
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
@@ -965,7 +965,7 @@ mod imp {
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod imp {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     pub fn enabled() -> bool {
         false
     }
@@ -977,8 +977,8 @@ mod imp {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::imp::{
-        apple_anchored, install_script, launch_agent, root_only, team_requirement,
-        uninstall_script, ROOT_APP,
+        ROOT_APP, apple_anchored, install_script, launch_agent, root_only, team_requirement,
+        uninstall_script,
     };
 
     /// What `codesign -d -r-` gives for a Developer ID release.
@@ -1151,8 +1151,10 @@ mod tests {
         );
         sh_syntax(&script);
         // Copied whole, without quarantine, then given to root.
-        assert!(script
-            .contains(r#"ditto --noqtn '/Applications/It'\''s DeskVNC Support.app' "$stage""#));
+        assert!(
+            script
+                .contains(r#"ditto --noqtn '/Applications/It'\''s DeskVNC Support.app' "$stage""#)
+        );
         assert!(script.contains(r#"chown -R root:wheel "$stage""#));
         // The copy must carry the signature of the app that asked.
         assert!(script.contains(&format!(
