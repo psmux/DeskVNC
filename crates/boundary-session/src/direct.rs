@@ -258,13 +258,17 @@ pub(crate) async fn resolve(target: Target) -> Result<EndpointAddr> {
         Target::Id(id) => return Ok(EndpointAddr::new(id)),
         Target::At { id, host, port } => (id, host, port),
     };
-    let addrs: Vec<SocketAddr> =
-        tokio::time::timeout(ASK_TIMEOUT, tokio::net::lookup_host((host.as_str(), port)))
-            .await
-            .map_err(|_| anyhow!("Looking up {host} took too long"))?
-            .with_context(|| format!("Cannot find {host}"))?
-            .collect();
-    ensure!(!addrs.is_empty(), "{host} has no address");
+    // Shared with every other lookup of the name, so a helper trying again
+    // while DNS is down adds no thread for each try.
+    let addrs: Vec<SocketAddr> = crate::dns::lookup(&host, ASK_TIMEOUT)
+        .await
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect();
+    ensure!(
+        !addrs.is_empty(),
+        "Cannot find {host}. Check the name, or connect by address or machine ID"
+    );
     let id = match id {
         Some(id) => id,
         None => ask(&host, &addrs).await?,

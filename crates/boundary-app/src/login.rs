@@ -114,6 +114,11 @@ async fn serve() -> Result<()> {
     let mut listener = None;
     let mut session = None;
     let mut told_no_key = false;
+    // After a listener stops, the next waits, longer each time it stops
+    // again before it was listening, so a network that stays down is not
+    // tried again every tick.
+    let mut wait = Duration::ZERO;
+    let mut listen_after = tokio::time::Instant::now();
     loop {
         if signed_in() {
             return Ok(());
@@ -122,7 +127,7 @@ async fn serve() -> Result<()> {
         if !enabled {
             listener = None;
             session = None;
-        } else if listener.is_none() {
+        } else if listener.is_none() && tokio::time::Instant::now() >= listen_after {
             // Made by the app when unattended access was switched on. This
             // copy runs as root on macOS and makes nothing in the person's
             // folder, so without one it waits for the app to make it.
@@ -179,7 +184,10 @@ async fn serve() -> Result<()> {
             while let Ok(notice) = l.notices.try_recv() {
                 match notice {
                     // Held until it ends; dropping it would end it.
-                    Notice::Ready { machine, .. } => note(&dir, &format!("listening as {machine}")),
+                    Notice::Ready { machine, .. } => {
+                        note(&dir, &format!("listening as {machine}"));
+                        wait = Duration::ZERO;
+                    }
                     Notice::Connected {
                         session: s, name, ..
                     } => {
@@ -206,9 +214,15 @@ async fn serve() -> Result<()> {
             }
         }
         if finished {
-            // Lost the network, most likely. Start again on the next tick.
+            // Lost the network, most likely. Start again after a while.
             listener = None;
             session = None;
+            wait = unattended::relisten_wait(wait);
+            listen_after = tokio::time::Instant::now() + wait;
+            note(
+                &dir,
+                &format!("listening again in {} seconds", wait.as_secs()),
+            );
         }
         tokio::time::sleep(TICK).await;
     }
