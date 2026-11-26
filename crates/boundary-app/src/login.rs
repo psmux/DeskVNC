@@ -155,6 +155,20 @@ async fn serve() -> Result<()> {
                 ));
                 continue;
             }
+            if let Some(socket) = brokered() {
+                // A Wayland sign in screen, read and driven by the service.
+                note(
+                    &dir,
+                    "sharing the Wayland sign in screen through the service",
+                );
+                listener = Some(unattended::listen_at_login(
+                    boundary_session::HostOptions::default(),
+                    key,
+                    access_path.clone(),
+                    move || open_brokered(&socket),
+                ));
+                continue;
+            }
             let display = boundary_platform::displays()
                 .ok()
                 .and_then(|all| all.first().map(|d| d.id));
@@ -239,6 +253,25 @@ fn unavailable() -> Option<String> {
 #[cfg(not(target_os = "linux"))]
 fn unavailable() -> Option<String> {
     None
+}
+/// The socket the Linux service serves a Wayland sign in screen on.
+#[cfg(target_os = "linux")]
+fn brokered() -> Option<String> {
+    std::env::var(crate::service::BROKERED)
+        .ok()
+        .filter(|r| !r.is_empty())
+}
+#[cfg(not(target_os = "linux"))]
+fn brokered() -> Option<String> {
+    None
+}
+#[cfg(target_os = "linux")]
+fn open_brokered(socket: &str) -> Result<Box<dyn boundary_session::Desktop>> {
+    boundary_platform::open_brokered(socket)
+}
+#[cfg(not(target_os = "linux"))]
+fn open_brokered(_: &str) -> Result<Box<dyn boundary_session::Desktop>> {
+    anyhow::bail!("Only on Linux")
 }
 
 /// Whether somebody is signed in at the screen this host is on.

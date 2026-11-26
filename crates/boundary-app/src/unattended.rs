@@ -947,12 +947,27 @@ fn screen_locked() -> bool {
     };
     // What sd_session_is_active reads, without starting a process each
     // second.
-    std::fs::read_to_string(format!("/run/systemd/sessions/{id}"))
-        .is_ok_and(|state| session_inactive(&state))
+    let Ok(state) = std::fs::read_to_string(format!("/run/systemd/sessions/{id}")) else {
+        return false;
+    };
+    let has = |want: &str| state.lines().any(|line| line.trim() == want);
+    if has("ACTIVE=0") {
+        return true;
+    }
+    // A Wayland session behind its lock screen, which this app cannot
+    // capture and the service answers for. logind keeps the lock out of
+    // that file, so this asks, but only for a Wayland session on the screen.
+    has("TYPE=wayland")
+        && std::process::Command::new("loginctl")
+            .args(["show-session", &id, "-p", "LockedHint"])
+            .output()
+            .is_ok_and(|o| locked_hint(&String::from_utf8_lossy(&o.stdout)))
 }
 #[cfg(target_os = "linux")]
-fn session_inactive(state: &str) -> bool {
-    state.lines().any(|line| line.trim() == "ACTIVE=0")
+fn locked_hint(properties: &str) -> bool {
+    properties
+        .lines()
+        .any(|line| line.trim() == "LockedHint=yes")
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 fn screen_locked() -> bool {
@@ -1052,12 +1067,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_session_off_the_screen_hands_over() {
-        let state = "# This is private data. Do not parse.\nUID=1000\nUSER=someone\nACTIVE=0\nSTATE=online\nTYPE=x11\nCLASS=user\n";
-        assert!(super::session_inactive(state));
-        assert!(!super::session_inactive(
-            &state.replace("ACTIVE=0", "ACTIVE=1")
-        ));
-        assert!(!super::session_inactive(""));
+        assert!(super::locked_hint("LockedHint=yes\n"));
+        assert!(!super::locked_hint("LockedHint=no\n"));
+        assert!(!super::locked_hint(""));
     }
 
     #[test]

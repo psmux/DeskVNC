@@ -57,6 +57,18 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 * "Remove from my agents" in the AI Agents panel while agents are off, and
   `dvv setup --remove [agent]` in a terminal, take out the MCP entries and
   skills `dvv setup` added. Only entries that run a `dvv` are touched (#72).
+* DeskVNC Support on Linux now shows and drives a sign in screen on Wayland,
+  GDM's default on Ubuntu, Fedora and Debian, and the lock screen of a Wayland
+  session. GNOME refuses every screen sharing request there, so the sign in
+  screen service reads the picture from the graphics card as root (the way
+  `ffmpeg -f kmsgrab` does) and types and clicks through a virtual keyboard
+  and pointer, and hands both to the copy running as you over a socket only
+  you can open. Intel and AMD cards keep the screen in a tiled layout; the card
+  itself untiles it through EGL and OpenGL ES, loaded only when needed, so
+  where Mesa's EGL is missing the service says why in its log and to the
+  helper as before. The pointer is drawn in, the largest lit screen is the one
+  shown, and text is typed through the keyboard layout the system is set to
+  (`/etc/default/keyboard` or localed's), not always as US (#77).
 
 ### Changed
 

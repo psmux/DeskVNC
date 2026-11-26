@@ -12,7 +12,16 @@ mod dxgi;
 mod linux;
 mod retry;
 #[cfg(target_os = "linux")]
+pub use linux::broker::{kms_frame, kms_probe, kms_serve};
+#[cfg(target_os = "linux")]
 pub use linux::notify::{Notification, notify};
+
+/// The Wayland sign in screen's screen and input, as the Linux service
+/// reads and drives them as root, reached over the socket at `path`.
+#[cfg(target_os = "linux")]
+pub fn open_brokered(path: &str) -> Result<Box<dyn Desktop>> {
+    Ok(Box::new(linux::broker::Brokered::connect(path)?))
+}
 /// A line to show beside Allow viewing and control where the desktop asks
 /// again before input is allowed, as GNOME on Wayland does with a switch
 /// that starts off. `None` where the answer in the app is enough.

@@ -46,6 +46,8 @@ pub struct Session {
     pub display: Option<String>,
     pub vt: Option<u32>,
     pub remote: bool,
+    /// The session's own lock screen is up (logind's LockedHint).
+    pub locked: bool,
 }
 
 impl Session {
@@ -72,6 +74,7 @@ impl Session {
                 .map(str::to_owned),
             vt: get("VTNr").parse().ok().filter(|&n| n > 0),
             remote: get("Remote") == "yes",
+            locked: get("LockedHint") == "yes",
         })
     }
 }
@@ -168,6 +171,9 @@ pub enum Plan {
         display: String,
         authority: PathBuf,
     },
+    /// The sign in screen runs on Wayland, which shares itself with no
+    /// program. Only root can read it, from the display hardware.
+    Wayland { session: String },
     /// The sign in screen is there but cannot be shown: say why to anyone
     /// who connects.
     Unavailable { session: String, reason: String },
@@ -196,7 +202,10 @@ pub fn gdm_on_wayland(custom_conf: &str) -> bool {
 
 /// What the person who switches the service on is told when their display
 /// manager is GDM with its sign in screen on Wayland.
-pub const WAYLAND_GREETER_SETUP: &str = "Set up, but this computer's sign in screen runs on Wayland, which DeskVNC Support cannot show yet. Helpers who connect before anyone signs in are told so. To fix it, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
+pub const WAYLAND_GREETER_SETUP: &str = "Set up, but this computer's sign in screen runs on Wayland, which DeskVNC Support cannot show here. Helpers who connect before anyone signs in are told so. To fix it, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
+/// The same, when the sign in screen is read from the display hardware
+/// instead, which most graphics drivers allow.
+pub const WAYLAND_GREETER_HARDWARE: &str = "Set up. This computer's sign in screen runs on Wayland, so it is read straight from the graphics card. If a helper is told it cannot be shown, set WaylandEnable=false in /etc/gdm3/custom.conf and restart";
 
 /// What a helper is told when the sign in screen's X display cannot be
 /// opened.
@@ -222,6 +231,11 @@ pub fn plan(
     if !session.greeter {
         return match session.kind {
             Kind::Other => Plan::Idle,
+            // A Wayland lock screen hides from the app in that session as
+            // the sign in screen does, and shows nothing more of it.
+            Kind::Wayland if session.locked => Plan::Wayland {
+                session: session.id.clone(),
+            },
             _ => Plan::StepAside {
                 session: session.id.clone(),
                 user: session.user.clone(),
@@ -229,9 +243,8 @@ pub fn plan(
         };
     }
     match session.kind {
-        Kind::Wayland => Plan::Unavailable {
+        Kind::Wayland => Plan::Wayland {
             session: session.id.clone(),
-            reason: WAYLAND_GREETER.into(),
         },
         Kind::X11 => match (display.or_else(|| session.display.clone()), authority) {
             (Some(display), Some(authority)) => Plan::Share {
@@ -286,6 +299,8 @@ pub fn active() -> Plan {
         "VTNr",
         "-p",
         "Remote",
+        "-p",
+        "LockedHint",
     ])
     .and_then(|t| Session::parse(&t));
     let (display, authority) = match &session {
@@ -503,10 +518,12 @@ mod tests {
             Plan::Unavailable { reason, .. } if reason.contains(":0")
         ));
         let wayland = Session::parse(GDM_WAYLAND_GREETER).unwrap();
-        assert!(matches!(
+        assert_eq!(
             plan(Some(&wayland), None, None),
-            Plan::Unavailable { reason, .. } if reason.contains("WaylandEnable=false")
-        ));
+            Plan::Wayland {
+                session: "c1".into()
+            }
+        );
         let user = Session::parse(USER_SESSION).unwrap();
         assert_eq!(
             plan(Some(&user), Some(":0".into()), Some("/x".into())),
@@ -514,6 +531,27 @@ mod tests {
                 session: "3".into(),
                 user: "someone".into()
             }
+        );
+        // A locked Wayland session is answered like the sign in screen; a
+        // locked X11 one by the app in it, which can see its lock screen.
+        let mut locked = Session::parse(&USER_SESSION.replace("x11", "wayland")).unwrap();
+        locked.locked = true;
+        assert_eq!(
+            plan(Some(&locked), None, None),
+            Plan::Wayland {
+                session: "3".into()
+            }
+        );
+        let mut locked_x = Session::parse(USER_SESSION).unwrap();
+        locked_x.locked = true;
+        assert!(matches!(
+            plan(Some(&locked_x), None, None),
+            Plan::StepAside { .. }
+        ));
+        assert!(
+            Session::parse(&format!("{USER_SESSION}LockedHint=yes\n"))
+                .unwrap()
+                .locked
         );
         let mut remote = lightdm.clone();
         remote.remote = true;
