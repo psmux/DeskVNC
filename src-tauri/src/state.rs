@@ -20,6 +20,16 @@ pub struct AppState {
     /// memory ONLY until that session proves them (for VNC, a security
     /// result of OK; otherwise `Connected`).
     pub pending_credentials: Arc<Mutex<HashMap<String, PendingCredentialSave>>>,
+    /// The credential each live session last signed in with, typed at its
+    /// prompt, keyed by session id, whether or not "Remember" was ticked.
+    ///
+    /// Memory only, for the life of the session. It exists so a session that
+    /// was opened without a saved host can be saved as one afterwards with
+    /// the password it is already using (`bind_session_to_host`). Only a
+    /// credential the server has accepted can ever be written from here: the
+    /// entry is marked proven at the same point `pending_credentials` would
+    /// be written, and an unproven one is dropped when its attempt fails.
+    pub used_credentials: Arc<Mutex<HashMap<String, UsedCredential>>>,
     /// The user name last typed at a credential prompt for each machine, kept
     /// for the life of the app whether or not that connection went on to
     /// work. An RDP domain rides along in the `DOMAIN\user` form the wire
@@ -198,6 +208,17 @@ impl PendingCredentialSave {
         }
         creds
     }
+}
+
+/// A credential a session signed in with, see [`AppState::used_credentials`].
+#[derive(Clone, Debug)]
+pub struct UsedCredential {
+    /// What was typed. `Debug` on this type never prints the password.
+    pub credential: PendingCredentialSave,
+    /// "Remember" was ticked when it was typed.
+    pub remember: bool,
+    /// The server accepted it. Nothing unproven is ever written.
+    pub proven: bool,
 }
 
 /// The protocols this build can speak, one driver each.
@@ -700,6 +721,7 @@ impl AppState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             discovery: Arc::new(DiscoveryState::default()),
             pending_credentials: Arc::new(Mutex::new(HashMap::new())),
+            used_credentials: Arc::new(Mutex::new(HashMap::new())),
             typed_usernames: Arc::new(Mutex::new(HashMap::new())),
             pending_prompts: Arc::new(Mutex::new(HashMap::new())),
             opening_windows: Arc::new(Mutex::new(HashMap::new())),

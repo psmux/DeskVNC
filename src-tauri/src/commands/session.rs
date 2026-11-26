@@ -29,7 +29,9 @@ use vnc_core::{
     RdpEvent, SessionEvent, SessionState,
 };
 
-use crate::state::{AppState, ExistingWindow, MachineKey, PendingCredentialSave, SessionEntry};
+use crate::state::{
+    AppState, ExistingWindow, MachineKey, PendingCredentialSave, SessionEntry, UsedCredential,
+};
 use crate::windows::validate_session_id;
 use crate::{framing, windows};
 
@@ -278,6 +280,25 @@ struct CredentialSaveCtx {
     pending: Arc<Mutex<HashMap<String, PendingCredentialSave>>>,
     /// Outstanding prompts, so a late-subscribing window can recover one.
     prompts: Arc<Mutex<HashMap<String, vnc_core::CredentialRequest>>>,
+    /// What each session signed in with, see `AppState::used_credentials`.
+    used: Arc<Mutex<HashMap<String, UsedCredential>>>,
+}
+
+/// The server accepted what this session typed at its prompt.
+fn mark_used_proven(used: &Mutex<HashMap<String, UsedCredential>>, session_id: &str) {
+    if let Some(entry) = used.lock().get_mut(session_id) {
+        entry.proven = true;
+    }
+}
+
+/// An attempt ended without the server accepting what was typed for it, so
+/// that credential is forgotten. One already accepted earlier in the session
+/// stays: the session did sign in with it.
+fn drop_unproven_used(used: &Mutex<HashMap<String, UsedCredential>>, session_id: &str) {
+    let mut used = used.lock();
+    if used.get(session_id).is_some_and(|u| !u.proven) {
+        used.remove(session_id);
+    }
 }
 
 /// Write a proven credential to the keychain and flip the profile's
@@ -555,6 +576,9 @@ fn persist_now(
     sessions: &Arc<Mutex<HashMap<String, SessionEntry>>>,
     session_id: &str,
 ) {
+    // Whatever was typed is now proven, remembered or not, so the session
+    // can be saved as a host with it later.
+    mark_used_proven(&ctx.used, session_id);
     let pending = ctx.pending.lock().remove(session_id);
     let (home, protocol) = {
         let sessions = sessions.lock();
@@ -610,6 +634,7 @@ fn settle_pending_credentials(
         SessionState::Disconnected { .. } => {
             // Never persist a password the server did not accept. Anything
             // still pending here was never proved.
+            drop_unproven_used(&ctx.used, session_id);
             let dropped = ctx.pending.lock().remove(session_id).is_some();
             if dropped {
                 tracing::debug!(session = %session_id, "dropped unsaved credentials (disconnected)");
@@ -979,6 +1004,9 @@ fn forward_events(
         // credential the user asked to remember but that never reached
         // `Connected` dies here, unwritten.
         creds_ctx.pending.lock().remove(&session_id);
+        // And what it signed in with goes too: it was only ever kept for
+        // saving this session as a host while it ran.
+        creds_ctx.used.lock().remove(&session_id);
         let entry = sessions.lock().remove(&session_id);
         // An attachment must not outlive the session it attached to: the id
         // would otherwise still read as agent driven in a pane, and a later
@@ -1533,6 +1561,7 @@ pub async fn connect_session(
             credentials: state.credentials.clone(),
             pending: state.pending_credentials.clone(),
             prompts: state.pending_prompts.clone(),
+            used: state.used_credentials.clone(),
         },
         id.clone(),
         window_label,
@@ -2150,6 +2179,23 @@ pub async fn provide_credentials(
 
     let domain = domain.filter(|d| !d.trim().is_empty());
 
+    // Kept, unproven, whatever the box says: if the server takes it, this is
+    // the credential "Add to saved hosts" can offer to keep. A failed attempt
+    // drops it, and so does the session ending.
+    state.used_credentials.lock().insert(
+        session_id.clone(),
+        UsedCredential {
+            credential: PendingCredentialSave {
+                protocol,
+                username: username.clone(),
+                domain: domain.clone(),
+                password: password.clone(),
+            },
+            remember: save,
+            proven: false,
+        },
+    );
+
     if save {
         state.pending_credentials.lock().insert(
             session_id.clone(),
@@ -2185,8 +2231,150 @@ pub async fn provide_credentials(
         .map_err(|_| "session is no longer running".to_string());
     if result.is_err() {
         state.pending_credentials.lock().remove(&session_id);
+        drop_unproven_used(&state.used_credentials, &session_id);
     }
     result
+}
+
+/// What [`session_credential_state`] tells the webview. Never the secret.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCredentialState {
+    /// The session signed in with a credential typed at its prompt, and the
+    /// server accepted it.
+    pub used: bool,
+    /// That credential has a user name as well as a password.
+    pub has_username: bool,
+    /// "Remember" was ticked when it was typed.
+    pub remembered: bool,
+}
+
+/// Only a proven credential counts: one the server has not accepted is never
+/// offered for saving, the same rule as "Remember".
+fn credential_state_of(used: Option<&UsedCredential>) -> SessionCredentialState {
+    match used.filter(|u| u.proven) {
+        Some(u) => SessionCredentialState {
+            used: true,
+            has_username: u
+                .credential
+                .username
+                .as_deref()
+                .is_some_and(|n| !n.trim().is_empty()),
+            remembered: u.remember,
+        },
+        None => SessionCredentialState::default(),
+    }
+}
+
+/// Whether this session signed in with a credential it could be saved with.
+///
+/// For "Add to saved hosts" on a tab, which offers "Also save the password
+/// used for this session" only when there is one.
+#[tauri::command]
+pub fn session_credential_state(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> SessionCredentialState {
+    credential_state_of(state.used_credentials.lock().get(&session_id))
+}
+
+/// Whether a saved host is the machine this session is connected to.
+///
+/// Binding a session to the wrong host would make its next reconnect dial
+/// somewhere else, with somebody else's password, so this is checked rather
+/// than trusted from the webview.
+fn host_matches_session(profile: &vnc_store::HostProfile, address: &str, port: u16) -> bool {
+    vnc_store::normalize_address(&profile.address) == vnc_store::normalize_address(address)
+        && profile.port == port
+}
+
+/// What [`bind_session_to_host`] did.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindSessionOutcome {
+    /// The credential was handed to the credential store. On a locked
+    /// encrypted file the store asks for the master password and writes it
+    /// after the unlock, as it does for every other save.
+    pub credentials_saved: bool,
+}
+
+/// Make a session that was opened without a saved host a session of
+/// `host_id` from now on.
+///
+/// The webview saves the host first (`save_host`), then calls this. The live
+/// connection is not touched. From here the session's thumbnail goes to the
+/// host, opening the host finds this session instead of dialling a second
+/// one, and the next connect reads the host's settings and stored password.
+/// With `save_credentials`, the credential the session signed in with is
+/// stored against the host, merged over whatever the host already had, but
+/// only if the server accepted it.
+///
+/// Broadcasts `host-adopted` on `sessions://event`, the same event a remembered
+/// password in an ad hoc session sends, so every window treats both alike.
+#[tauri::command]
+pub async fn bind_session_to_host(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    host_id: String,
+    save_credentials: bool,
+) -> Result<BindSessionOutcome, String> {
+    let store = state.store.clone();
+    let lookup = host_id.clone();
+    let profile = super::blocking(move || store.get_host(&lookup))
+        .await?
+        .ok_or_else(|| "That saved host no longer exists.".to_string())?;
+
+    let protocol = {
+        let mut sessions = state.sessions.lock();
+        let entry = sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| "This session has already ended.".to_string())?;
+        if !host_matches_session(&profile, &entry.address, entry.port) {
+            return Err("That saved host is for a different address.".to_string());
+        }
+        entry.profile_id = Some(profile.id.clone());
+        entry.protocol()
+    };
+
+    let credential = save_credentials
+        .then(|| {
+            state
+                .used_credentials
+                .lock()
+                .get(&session_id)
+                .filter(|u| u.proven)
+                .map(|u| u.credential.clone())
+        })
+        .flatten();
+    let credentials_saved = credential.is_some();
+    if let Some(credential) = credential {
+        let store = state.store.clone();
+        let credentials = state.credentials.clone();
+        let id = profile.id.clone();
+        super::blocking(move || {
+            write_credentials(&store, &credentials, &id, &credential);
+            Ok::<(), String>(())
+        })
+        .await?;
+    }
+
+    tracing::info!(
+        session = %session_id, profile = %profile.id, credentials_saved,
+        "saved a session as a host"
+    );
+    let _ = app.emit(
+        SESSIONS_EVENT,
+        serde_json::json!({
+            "type": "host-adopted",
+            "sessionId": session_id,
+            "profileId": profile.id,
+            "address": profile.address,
+            "port": profile.port,
+            "protocol": protocol,
+        }),
+    );
+    Ok(BindSessionOutcome { credentials_saved })
 }
 
 /// Fold a separate domain back into the user name for the wire.
@@ -3041,5 +3229,112 @@ mod credential_keeping_tests {
         let mut blank = vnc_core::Credentials::default();
         prefill_typed_username(ProtocolKind::Vnc, &mut blank, Some("  ".into()));
         assert_eq!(blank.username, None);
+    }
+}
+
+/// "Add to saved hosts" on a tab: what a session may be saved with, and which
+/// host it may be bound to.
+#[cfg(test)]
+mod save_session_as_host_tests {
+    use super::*;
+
+    /// A password made at run time: a test needs one, and none belongs in the source.
+    fn typed(username: Option<&str>, remember: bool) -> UsedCredential {
+        UsedCredential {
+            credential: PendingCredentialSave {
+                protocol: ProtocolKind::Vnc,
+                username: username.map(str::to_string),
+                domain: None,
+                password: uuid::Uuid::new_v4().to_string(),
+            },
+            remember,
+            proven: false,
+        }
+    }
+
+    /// A password the server has not accepted is never offered, exactly as
+    /// "Remember" never writes one.
+    #[test]
+    fn only_a_proven_credential_is_offered() {
+        let used = Mutex::new(HashMap::new());
+        used.lock().insert("s1".to_string(), typed(None, false));
+        assert_eq!(
+            credential_state_of(used.lock().get("s1")),
+            SessionCredentialState::default()
+        );
+
+        mark_used_proven(&used, "s1");
+        assert_eq!(
+            credential_state_of(used.lock().get("s1")),
+            SessionCredentialState {
+                used: true,
+                has_username: false,
+                remembered: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_prompt_has_nothing_to_offer() {
+        assert_eq!(credential_state_of(None), SessionCredentialState::default());
+    }
+
+    #[test]
+    fn the_state_says_whether_a_user_name_came_with_it_and_whether_remember_was_ticked() {
+        let mut u = typed(Some("alex"), true);
+        u.proven = true;
+        assert_eq!(
+            credential_state_of(Some(&u)),
+            SessionCredentialState {
+                used: true,
+                has_username: true,
+                remembered: true
+            }
+        );
+        let mut blank_name = typed(Some("  "), false);
+        blank_name.proven = true;
+        assert!(!credential_state_of(Some(&blank_name)).has_username);
+    }
+
+    /// A wrong password followed by the session failing is forgotten; one
+    /// the server already took earlier in the session is kept.
+    #[test]
+    fn a_failed_attempt_forgets_only_an_unproven_credential() {
+        let used = Mutex::new(HashMap::new());
+        used.lock().insert("wrong".to_string(), typed(None, false));
+        drop_unproven_used(&used, "wrong");
+        assert!(used.lock().get("wrong").is_none());
+
+        used.lock().insert("good".to_string(), typed(None, false));
+        mark_used_proven(&used, "good");
+        drop_unproven_used(&used, "good");
+        assert!(used.lock().get("good").is_some_and(|u| u.proven));
+    }
+
+    #[test]
+    fn marking_a_session_with_nothing_typed_is_harmless() {
+        let used: Mutex<HashMap<String, UsedCredential>> = Mutex::new(HashMap::new());
+        mark_used_proven(&used, "none");
+        assert!(used.lock().is_empty());
+    }
+
+    /// The credential is never printed, even in a debug log of the entry.
+    #[test]
+    fn a_used_credential_never_prints_its_password() {
+        let used = typed(Some("alex"), true);
+        let printed = format!("{used:?}");
+        assert!(!printed.contains(&used.credential.password), "{printed}");
+    }
+
+    #[test]
+    fn a_session_binds_only_to_a_host_for_its_own_address_and_port() {
+        let host = vnc_store::HostProfile {
+            address: "Studio.Example.".to_string(),
+            port: 5900,
+            ..Default::default()
+        };
+        assert!(host_matches_session(&host, "studio.example", 5900));
+        assert!(!host_matches_session(&host, "studio.example", 5901));
+        assert!(!host_matches_session(&host, "other.example", 5900));
     }
 }

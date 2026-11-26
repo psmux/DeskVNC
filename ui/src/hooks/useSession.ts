@@ -381,6 +381,15 @@ export function useSession(
   const availableRef = useRef(available);
   availableRef.current = available;
   const sessionIdRef = useRef<string>(params.sessionId ?? "");
+  /**
+   * The saved host to connect as, read when a connect starts rather than
+   * being a reason to start one. A session saved as a host while it is
+   * connected gains a profile id; the live connection carries on as it is,
+   * and the next connect (a reconnect) uses the host's settings and stored
+   * password. Before this a new id tore the connection down and dialled again.
+   */
+  const profileIdRef = useRef(params.profileId);
+  profileIdRef.current = params.profileId;
   const inputWarned = useRef(false);
   /** Set by `retryConnect({ reprompt: true })`; consumed by the next connect. */
   const repromptRef = useRef(false);
@@ -625,7 +634,7 @@ export function useSession(
         acceptSshHostKeyRef.current = null;
         const outcome = await invoke<SessionConnectOutcome>("connect_session", {
           sessionId: params.sessionId,
-          profileId: params.profileId,
+          profileId: profileIdRef.current,
           address: params.address,
           port: params.port,
           protocol: params.protocol,
@@ -744,7 +753,7 @@ export function useSession(
       void safeInvoke("disconnect_session", { sessionId: sessionIdRef.current }, null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.sessionId, params.profileId, params.address, params.port, connectNonce]);
+  }, [params.sessionId, params.address, params.port, connectNonce]);
 
   // ---------------------------------------------------------------- actions
 

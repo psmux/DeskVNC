@@ -116,6 +116,8 @@
     "allow-provide-credentials",
     "allow-pending-credential-request",
     "allow-cancel-credentials",
+    "allow-session-credential-state",
+    "allow-bind-session-to-host",
     "allow-open-session-window",
     "allow-release-session-claim",
     "allow-fullscreen-session",

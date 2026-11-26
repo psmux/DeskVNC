@@ -41,6 +41,16 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Added
 
+* Add to saved hosts, in the right click menu of a tab opened without a saved
+  host: quick connect, a typed address, a machine from Nearby or one an agent
+  opened by address. It asks for a name, starting from the desktop name the
+  server reported, and can also save the password the session signed in
+  with, kept in the credential store like every other saved password. The
+  host gets the session's protocol, address and port, and the tab becomes a
+  tab of that host without dropping the connection: it takes the saved name,
+  reconnects with the stored password, and its activity shows on the host's
+  tile. When a host is already saved for that address and port the dialog
+  says so and offers to open or update it instead of adding a second one.
 * "Connect agents automatically" in the AI Agents panel. On by default; off,
   a launch writes nothing into any agent's config while the plane still
   serves `dvv`. `DVV_NO_SETUP=1` in the app's environment does the same (#73).
