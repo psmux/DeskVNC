@@ -413,7 +413,7 @@ pub const SUPPORTED: bool = cfg!(any(target_os = "macos", windows, target_os = "
 #[cfg(target_os = "macos")]
 mod imp {
     use super::Refresh;
-    use anyhow::{Context, Result, bail, ensure};
+    use anyhow::{bail, ensure, Context, Result};
     use std::path::{Path, PathBuf};
 
     const LABEL: &str = "com.psmux.deskvnc.support.login";
@@ -840,7 +840,7 @@ mv -f "$plist.partial" "$plist"
 
 #[cfg(windows)]
 mod imp {
-    use anyhow::{Context, Result, ensure};
+    use anyhow::{ensure, Context, Result};
     use boundary_platform::system::SERVICE;
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
@@ -965,7 +965,7 @@ mod imp {
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod imp {
-    use anyhow::{Result, bail};
+    use anyhow::{bail, Result};
     pub fn enabled() -> bool {
         false
     }
@@ -977,8 +977,8 @@ mod imp {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::imp::{
-        ROOT_APP, apple_anchored, install_script, launch_agent, root_only, team_requirement,
-        uninstall_script,
+        apple_anchored, install_script, launch_agent, root_only, team_requirement,
+        uninstall_script, ROOT_APP,
     };
 
     /// What `codesign -d -r-` gives for a Developer ID release.
@@ -1121,7 +1121,10 @@ mod tests {
     }
 
     fn sh_syntax(script: &str) {
-        let path = std::env::temp_dir().join(format!("login-script-{}.sh", std::process::id()));
+        // Tests run in parallel, so each call gets its own file.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("login-script-{}-{n}.sh", std::process::id()));
         std::fs::write(&path, script).unwrap();
         let checked = std::process::Command::new("/bin/sh")
             .arg("-n")
@@ -1148,10 +1151,8 @@ mod tests {
         );
         sh_syntax(&script);
         // Copied whole, without quarantine, then given to root.
-        assert!(
-            script
-                .contains(r#"ditto --noqtn '/Applications/It'\''s DeskVNC Support.app' "$stage""#)
-        );
+        assert!(script
+            .contains(r#"ditto --noqtn '/Applications/It'\''s DeskVNC Support.app' "$stage""#));
         assert!(script.contains(r#"chown -R root:wheel "$stage""#));
         // The copy must carry the signature of the app that asked.
         assert!(script.contains(&format!(
