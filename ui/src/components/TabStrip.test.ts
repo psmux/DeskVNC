@@ -97,7 +97,7 @@ describe("the tab strip's right-click menu", () => {
     expect(menuItem("Close tabs to the left").disabled).toBe(false);
   });
 
-  it("offers Add to saved hosts only on a tab that has no saved host", () => {
+  it("offers the item its tab asks for: Add for an unsaved machine, Edit for a saved one", () => {
     const onSaveHost = vi.fn<(id: string) => void>();
     act(() => {
       root.render(
@@ -108,8 +108,10 @@ describe("the tab strip's right-click menu", () => {
           onClose: () => {},
           onCloseMany,
           onSelectRelative: () => {},
-          // "c" stands for a quick connect, the rest for saved hosts.
-          canSaveHost: (t: TabSummary) => t.id === "c",
+          // "c" stands for a quick connect, "b" for a saved host, "a" for a
+          // tab that offers neither (a Boundary session).
+          saveHostLabel: (t: TabSummary) =>
+            t.id === "c" ? "Add to saved hosts" : t.id === "a" ? null : "Edit saved host",
           onSaveHost,
         }),
       );
@@ -131,7 +133,14 @@ describe("the tab strip's right-click menu", () => {
 
     rightClick("b");
     const saved = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+    expect(saved[0]).toBe("Edit saved host");
     expect(saved).not.toContain("Add to saved hosts");
+    act(() => menuItem("Edit saved host").click());
+    expect(onSaveHost).toHaveBeenLastCalledWith("b");
+
+    rightClick("a");
+    const neither = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+    expect(neither[0]).toBe("Close tab");
 
     rightClick("Library");
     const library = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);

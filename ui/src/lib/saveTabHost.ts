@@ -5,6 +5,9 @@
  * by address: each one opens a session with no host behind it. Right clicking
  * that session's tab offers "Add to saved hosts", and the dialog it opens
  * turns the session into a saved host and the tab into a tab of that host.
+ * A tab of a machine that is already saved, by hand or by the automatic save,
+ * offers "Edit saved host": the same dialog, to name the host and keep the
+ * password this session used.
  *
  * The rules (which tab qualifies, what the dialog starts with, what gets
  * saved) live here, away from the plumbing, so they can be tested.
@@ -45,33 +48,54 @@ export function parseCredentialState(raw: unknown): SessionCredentialState {
 }
 
 /**
- * Whether a session can be offered as a new saved host.
+ * What a tab's right click menu offers for keeping its machine.
  *
- * A session that already belongs to a saved host has nothing to add. Boundary
- * is left out for the same reason the automatic save leaves it out: a paired
- * computer is already saved, and one reached through an invitation is one
- * time help, not a machine to keep.
+ * Boundary is left out for the same reason the automatic save leaves it out:
+ * a paired computer is already saved and has its own editor, and one reached
+ * through an invitation is one time help, not a machine to keep.
+ *
+ * "add": the session has no saved host behind it, so the person can make one.
+ * "edit": the session belongs to a saved host, and the person can name it and
+ * keep the password the session used. That host is often one the automatic
+ * save made, opened again from the Library or by an agent asking for it by
+ * name. The person never named it, so the tab still has to offer a way to.
+ *
+ * A session whose host is missing from the list (deleted, or the list not
+ * read yet) is offered "add", and the dialog finds the host by address if
+ * there is one.
  */
-export function canSaveAsHost(params: Pick<SessionParams, "profileId" | "address" | "protocol">): boolean {
-  return (
-    params.profileId === null &&
-    (params.address ?? "").trim() !== "" &&
-    canAutoSave(params.protocol)
-  );
+export type TabHostAction = { kind: "add" } | { kind: "edit"; host: HostProfile };
+
+export function tabHostAction(
+  params: Pick<SessionParams, "profileId" | "address" | "protocol">,
+  hosts: readonly HostProfile[],
+): TabHostAction | null {
+  if ((params.address ?? "").trim() === "" || !canAutoSave(params.protocol)) return null;
+  if (params.profileId === null) return { kind: "add" };
+  const host = hosts.find((h) => h.id === params.profileId);
+  return host ? { kind: "edit", host } : { kind: "add" };
+}
+
+/** The menu item's words for each action. */
+export function tabHostLabel(action: TabHostAction): string {
+  return action.kind === "add" ? "Add to saved hosts" : "Edit saved host";
 }
 
 /**
- * The session a tab's "Add to saved hosts" acts on: the one in its focused
- * pane, which is also the one the tab is named after. Null when the tab
- * offers nothing.
+ * The session a tab's menu item acts on, and what it offers: the session in
+ * its focused pane, which is also the one the tab is named after. Null when
+ * the tab offers nothing.
  */
-export function saveTargetOf<S extends { params: SessionParams }>(
+export function tabHostTargetOf<S extends { params: SessionParams }>(
   focusedSessionId: string | null,
   sessions: Readonly<Record<string, S>>,
-): S | null {
+  hosts: readonly HostProfile[],
+): { session: S; action: TabHostAction } | null {
   if (!focusedSessionId) return null;
   const session = sessions[focusedSessionId];
-  return session && canSaveAsHost(session.params) ? session : null;
+  if (!session) return null;
+  const action = tabHostAction(session.params, hosts);
+  return action ? { session, action } : null;
 }
 
 /**

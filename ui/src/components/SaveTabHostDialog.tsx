@@ -2,6 +2,11 @@
  * "Add to saved hosts", from the right-click menu of a tab whose session was
  * opened without one (quick connect, a typed address, Nearby, an agent).
  *
+ * The same dialog is "Edit saved host" on a tab whose session already has a
+ * host: often one the automatic save made and the person never named, opened
+ * again from the Library or by an agent. It renames that host and can keep
+ * the password the session signed in with, and points at the full editor.
+ *
  * Saving makes a host with the session's protocol, address and port and the
  * defaults the session connected with, and the tab becomes a tab of that
  * host: it keeps the saved name, reconnects with the host's settings and
@@ -41,9 +46,15 @@ import { Dialog } from "./primitives";
 
 export function SaveTabHostDialog({
   session,
+  host,
   onClose,
 }: {
   session: LiveSession;
+  /**
+   * The saved host this session already belongs to, for "Edit saved host".
+   * Null for "Add to saved hosts".
+   */
+  host: HostProfile | null;
   onClose: () => void;
 }): ReactNode {
   const { hosts, saveHost, refresh } = useHosts();
@@ -54,7 +65,8 @@ export function SaveTabHostDialog({
   const address = (params.address ?? "").trim();
   const sessionId = params.sessionId ?? session.id;
 
-  const [name, setName] = useState(() => suggestedName(session.title, address));
+  const editing = host !== null;
+  const [name, setName] = useState(() => host?.friendlyName ?? suggestedName(session.title, address));
   const [creds, setCreds] = useState<SessionCredentialState>(NO_CREDENTIALS);
   const [saveCreds, setSaveCreds] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -62,7 +74,7 @@ export function SaveTabHostDialog({
 
   // Worked out once, when the dialog opens: a host saved while it is open is
   // not the one the person was told about.
-  const existing = useMemo(() => existingHostFor(hosts, params), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const existing = useMemo(() => host ?? existingHostFor(hosts, params), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false;
@@ -142,7 +154,7 @@ export function SaveTabHostDialog({
   };
 
   return (
-    <Dialog title="Add to saved hosts" onClose={onClose} width={440}>
+    <Dialog title={editing ? "Edit saved host" : "Add to saved hosts"} onClose={onClose} width={440}>
       <form className="space-y-4" onSubmit={onSubmit}>
         <label className="block">
           <span className="mb-1 block text-xs font-medium text-secondary">Name</span>
@@ -160,7 +172,11 @@ export function SaveTabHostDialog({
           {protocolLabel(params.protocol)} at {address}, port {params.port}
         </p>
 
-        {existing ? (
+        {editing ? (
+          <p className="text-xs text-secondary">
+            This tab is a host in your Library. Change its name here, or open it for every setting.
+          </p>
+        ) : existing ? (
           <div className="rounded-md bg-inset p-3 text-sm text-primary" role="status">
             {existing.friendlyName} is already saved for this address and port.
             <span className="mt-0.5 block text-xs text-secondary">
@@ -196,7 +212,20 @@ export function SaveTabHostDialog({
           <button type="button" className="btn-secondary" onClick={onClose}>
             Cancel
           </button>
-          {existing ? (
+          {editing ? (
+            <>
+              <button type="button" className="btn-secondary" onClick={openExisting}>
+                All settings
+              </button>
+              <button
+                type="submit"
+                className="btn-primary disabled:opacity-40"
+                disabled={busy || name.trim() === ""}
+              >
+                Save
+              </button>
+            </>
+          ) : existing ? (
             <>
               <button type="button" className="btn-secondary" onClick={openExisting}>
                 Open saved host
