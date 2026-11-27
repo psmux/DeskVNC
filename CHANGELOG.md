@@ -10,6 +10,8 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+## [0.36.9] (2026-11-28)
+
 ### Added
 
 * The phone app can reach a VNC or RDP computer through an SSH tunnel, as the
