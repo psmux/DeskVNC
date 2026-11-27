@@ -40,7 +40,6 @@ import {
   panBy,
   placement,
   screenToFb,
-  toggleZoomAt,
   zoomAt,
   type Size,
   type View,
@@ -188,7 +187,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const recognizer = useMemo(
-    () => new GestureRecognizer(mode, { canDoubleTapZoom: () => isFit(view.current) }),
+    () => new GestureRecognizer(mode),
     // The recognizer lives for the screen; its mode is updated below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -521,13 +520,6 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
               runAnim();
             }
             break;
-          case "doubleTapZoom": {
-            const to = toggleZoomAt(view.current, st, f, a.x, a.y);
-            anim.current = { raf: 0, kind: "zoom", vx: 0, vy: 0, from: { ...view.current }, to, t0: performance.now() };
-            runAnim();
-            tick("soft");
-            break;
-          }
           case "keyboard":
             openKeyboard(document.activeElement !== inputRef.current);
             break;
@@ -991,7 +983,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
             <button type="button" className="dv-s-hint" onClick={() => setSidewaysHint(false)}>
               <IconRotate size={30} />
               <span>
-                Turn your phone sideways for a bigger picture, or double tap to zoom in
+                Turn your phone sideways for a bigger picture, or pinch to zoom in
               </span>
             </button>
           ) : null}

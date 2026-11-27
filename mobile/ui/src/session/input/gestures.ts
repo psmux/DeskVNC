@@ -9,14 +9,18 @@
  *
  * Trackpad mode:
  *   one finger drag      moves the pointer (relative, like a laptop trackpad)
- *   tap                  left click
+ *   tap                  left click at the pointer
+ *   double tap           double click at the pointer
  *   tap, then drag       hold the left button while dragging (select, move)
  *   two finger tap       right click
  *   two finger drag      scroll
  *   three finger tap     open the keyboard
  *
  * Direct touch mode:
- *   tap                  left click where the finger is
+ *   tap                  left click where the finger is, at once
+ *   double tap           double click where the first tap landed, so the
+ *                        remote sees both clicks on one spot however much
+ *                        the finger wandered between them
  *   long press           right click there, with a ring that fills first
  *   one finger drag      left button drag from where the finger went down
  *   two finger drag      scroll
@@ -26,9 +30,10 @@
  * Both modes:
  *   pinch                zoom around the fingers, sliding pans, and a
  *                        flick keeps the picture gliding when let go
- *   double tap           zoom in on that spot, while the whole desktop is
- *                        showing (once zoomed in, a double tap is a double
- *                        click, so the desktop still gets those)
+ *
+ * A double tap is always a double click. It used to zoom in while the whole
+ * desktop was showing, which left no way to double click an icon without
+ * pinching in first (issue #91). Pinch is the zoom gesture now, in both modes.
  */
 
 export type TouchMode = "trackpad" | "direct";
@@ -57,14 +62,8 @@ export type GestureAction =
   | { type: "zoom"; factor: number; x: number; y: number }
   | { type: "pan"; dx: number; dy: number }
   | { type: "panEnd"; vx: number; vy: number }
-  | { type: "doubleTapZoom"; x: number; y: number }
   | { type: "keyboard" }
   | { type: "ring"; state: "start" | "cancel" | "done"; x: number; y: number };
-
-export interface GestureContext {
-  /** True while the whole desktop is showing, so a double tap should zoom. */
-  canDoubleTapZoom(): boolean;
-}
 
 /** Finger travel below this is still a tap, in CSS pixels. */
 export const TAP_SLOP = 10;
@@ -72,7 +71,7 @@ export const TAP_SLOP = 10;
 export const TAP_MAX_MS = 300;
 /** How long a first tap waits for a second one. */
 export const DOUBLE_TAP_MS = 260;
-/** Second tap must land this close to the first. */
+/** Second tap must land this close to the first, in CSS pixels. */
 export const DOUBLE_TAP_DISTANCE = 44;
 /** The long press ring shows after this... */
 export const RING_DELAY_MS = 150;
@@ -135,22 +134,31 @@ const spread = (ts: Pt[]): number => (ts.length < 2 ? 0 : Math.hypot(ts[0].x - t
 
 export class GestureRecognizer {
   private state: State = { kind: "idle" };
+  /** Trackpad: a tap held back in case a drag or a second tap follows. */
   private pending: PendingTap | null = null;
+  /**
+   * Direct: the last tap, already clicked. A tap close to it in time and
+   * place clicks on the same spot, which makes the double (or triple) click.
+   */
+  private lastTap: PendingTap | null = null;
 
-  constructor(
-    public mode: TouchMode,
-    private readonly ctx: GestureContext,
-  ) {}
+  constructor(public mode: TouchMode) {}
 
   setMode(mode: TouchMode): void {
     this.mode = mode;
     this.state = { kind: "idle" };
     this.pending = null;
+    this.lastTap = null;
   }
 
   /** True when a timer should keep calling `tick`. */
   wantsTick(): boolean {
     return this.pending !== null || (this.state.kind === "one" && this.mode === "direct" && this.state.ring !== "fired");
+  }
+
+  /** A previous tap that a touch starting at `t`, `p` would follow. */
+  private follows(prev: PendingTap | null, t: number, p: { x: number; y: number }, window: number, distance: number): boolean {
+    return prev !== null && t - prev.t < window && Math.hypot(p.x - prev.x, p.y - prev.y) < distance;
   }
 
   feed(e: TouchInput): GestureAction[] {
@@ -166,11 +174,13 @@ export class GestureRecognizer {
       if (e.type === "start" && e.touches.length === 1) {
         const p = e.touches[0];
         const afterTap =
-          this.pending !== null && e.t - this.pending.t < DOUBLE_TAP_MS && Math.hypot(p.x - this.pending.x, p.y - this.pending.y) < DOUBLE_TAP_DISTANCE * 2;
+          this.follows(this.pending, e.t, p, DOUBLE_TAP_MS, DOUBLE_TAP_DISTANCE * 2) ||
+          (this.mode === "direct" && this.follows(this.lastTap, e.t, p, DOUBLE_TAP_MS, DOUBLE_TAP_DISTANCE * 2));
         if (!afterTap) this.flushPending(out);
         this.state = { kind: "one", id: p.id, t0: e.t, x0: p.x, y0: p.y, x: p.x, y: p.y, moved: false, dragging: false, afterTap, ring: "none" };
       } else if (e.touches.length >= 2) {
         this.flushPending(out);
+        this.lastTap = null;
         this.state = this.startMulti(e);
       }
       return out;
@@ -181,6 +191,7 @@ export class GestureRecognizer {
         // A second finger joined: whatever one finger was doing stops here.
         this.abort(out);
         this.flushPending(out);
+        this.lastTap = null;
         this.state = this.startMulti(e);
         return out;
       }
@@ -229,6 +240,7 @@ export class GestureRecognizer {
       }
       if (st.ring === "shown" && held >= LONG_PRESS_MS) {
         st.ring = "fired";
+        this.lastTap = null;
         out.push({ type: "ring", state: "done", x: st.x, y: st.y });
         out.push({ type: "click", button: "right", x: st.x, y: st.y });
       }
@@ -261,6 +273,7 @@ export class GestureRecognizer {
         }
       } else {
         this.pending = null;
+        this.lastTap = null;
         st.dragging = true;
         out.push({ type: "point", x: st.x0, y: st.y0 }, { type: "down", x: st.x0, y: st.y0 });
       }
@@ -284,6 +297,7 @@ export class GestureRecognizer {
     if (st.ring === "shown") out.push({ type: "ring", state: "cancel", x: st.x, y: st.y });
     if (st.moved || t - st.t0 > TAP_MAX_MS) {
       this.flushPending(out);
+      this.lastTap = null;
       // A slow hold in direct mode that never reached the long press is
       // still a deliberate touch: click it.
       if (!st.moved && this.mode === "direct") out.push({ type: "click", button: "left", x: st.x0, y: st.y0 });
@@ -293,27 +307,28 @@ export class GestureRecognizer {
   }
 
   private tap(x: number, y: number, t: number, out: GestureAction[]): void {
-    const direct = this.mode === "direct";
+    if (this.mode === "direct") {
+      // Click at once. A tap that follows the last one clicks where that one
+      // landed, so the remote counts a double click: every desktop wants the
+      // two clicks within a few pixels of each other, and a finger rarely
+      // comes down twice on the same pixel.
+      const prev = this.lastTap;
+      const again = prev !== null && t - prev.t < DOUBLE_TAP_MS + TAP_MAX_MS && Math.hypot(x - prev.x, y - prev.y) < DOUBLE_TAP_DISTANCE;
+      const at = again && prev ? prev : { x, y };
+      out.push({ type: "click", button: "left", x: at.x, y: at.y });
+      this.lastTap = { t, x: at.x, y: at.y };
+      return;
+    }
     const prev = this.pending;
     if (prev && t - prev.t < DOUBLE_TAP_MS + TAP_MAX_MS && Math.hypot(x - prev.x, y - prev.y) < DOUBLE_TAP_DISTANCE) {
+      // Trackpad: both clicks at the pointer, which did not move between them.
       this.pending = null;
-      if (this.ctx.canDoubleTapZoom()) {
-        out.push({ type: "doubleTapZoom", x: prev.x, y: prev.y });
-      } else if (direct) {
-        out.push({ type: "click", button: "left", x: prev.x, y: prev.y }, { type: "click", button: "left", x: prev.x, y: prev.y });
-      } else {
-        out.push({ type: "click", button: "left" }, { type: "click", button: "left" });
-      }
+      out.push({ type: "click", button: "left" }, { type: "click", button: "left" });
       return;
     }
     this.flushPending(out);
-    if (direct && !this.ctx.canDoubleTapZoom()) {
-      // Zoomed in: click at once, a second tap makes a double click by itself.
-      out.push({ type: "click", button: "left", x, y });
-      return;
-    }
-    // Wait a moment: a second tap may follow (double click or zoom), and in
-    // trackpad mode a tap followed by a drag must not click first.
+    // Wait a moment: a tap followed by a drag must hold the button, not
+    // click first.
     this.pending = { t, x, y };
   }
 

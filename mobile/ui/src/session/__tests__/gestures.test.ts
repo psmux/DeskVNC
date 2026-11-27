@@ -2,8 +2,14 @@ import { describe, expect, it } from "vitest";
 import { DOUBLE_TAP_MS, GestureRecognizer, LONG_PRESS_MS, type GestureAction, type Pt, type TouchInput, type TouchMode } from "../input/gestures";
 
 /** Drives a recognizer with a script of touches, ticking the clock as it goes. */
-function rig(mode: TouchMode, fit = false) {
-  const r = new GestureRecognizer(mode, { canDoubleTapZoom: () => fit });
+function rig(mode: TouchMode) {
+  // The recognizer used to take a context saying whether the whole desktop
+  // was showing, which is when a double tap zoomed instead of clicking. The
+  // second argument tells an old build "yes, it is", so the double click
+  // tests below fail there for the reason issue #91 reports. The current
+  // constructor ignores it.
+  const Recognizer = GestureRecognizer as unknown as new (m: TouchMode, ctx: unknown) => GestureRecognizer;
+  const r = new Recognizer(mode, { canDoubleTapZoom: () => true });
   let t = 1000;
   const out: GestureAction[] = [];
   const touches = new Map<number, Pt>();
@@ -54,7 +60,7 @@ describe("trackpad", () => {
     expect(g.out).toEqual([{ type: "click", button: "left" }]);
   });
 
-  it("two quick taps double click when zoomed in", () => {
+  it("two quick taps double click at the pointer, with the whole desktop showing (#91)", () => {
     const g = rig("trackpad").down(1, 50, 50).wait(60).up(1).wait(80).down(1, 52, 51).wait(60).up(1).wait(400);
     expect(g.out).toEqual([
       { type: "click", button: "left" },
@@ -109,16 +115,53 @@ describe("direct touch", () => {
     expect(g.out[1]).toMatchObject({ type: "ring", state: "cancel" });
   });
 
-  it("double tap zooms while the whole screen shows", () => {
-    const g = rig("direct", true).down(1, 120, 200).wait(50).up(1).wait(90).down(1, 124, 203).wait(50).up(1).wait(400);
-    expect(g.out).toEqual([{ type: "doubleTapZoom", x: 120, y: 200 }]);
+  it("double tap double clicks on the first tap's spot and never zooms (#91)", () => {
+    const g = rig("direct").down(1, 120, 200).wait(50).up(1);
+    // The first click goes at once; the desktop does not wait for us.
+    expect(g.out).toEqual([{ type: "click", button: "left", x: 120, y: 200 }]);
+    g.wait(90).down(1, 127, 205).wait(50).up(1).wait(400);
+    expect(g.out).toEqual([
+      { type: "click", button: "left", x: 120, y: 200 },
+      { type: "click", button: "left", x: 120, y: 200 },
+    ]);
   });
 
-  it("a single tap at full view still clicks, after the wait", () => {
-    const g = rig("direct", true).down(1, 120, 200).wait(50).up(1);
-    expect(g.out).toEqual([]);
-    g.wait(DOUBLE_TAP_MS + 20);
-    expect(g.out).toEqual([{ type: "click", button: "left", x: 120, y: 200 }]);
+  it("a third quick tap stays on the same spot, for a triple click", () => {
+    const g = rig("direct").down(1, 120, 200).wait(40).up(1).wait(80).down(1, 124, 198).wait(40).up(1).wait(80).down(1, 117, 203).wait(40).up(1);
+    expect(g.out).toEqual([
+      { type: "click", button: "left", x: 120, y: 200 },
+      { type: "click", button: "left", x: 120, y: 200 },
+      { type: "click", button: "left", x: 120, y: 200 },
+    ]);
+  });
+
+  it("two taps far apart are two clicks, each where it landed", () => {
+    const g = rig("direct").down(1, 40, 40).wait(40).up(1).wait(80).down(1, 300, 400).wait(40).up(1);
+    expect(g.out).toEqual([
+      { type: "click", button: "left", x: 40, y: 40 },
+      { type: "click", button: "left", x: 300, y: 400 },
+    ]);
+  });
+
+  it("a slow second tap is a fresh click where it landed", () => {
+    const g = rig("direct").down(1, 120, 200).wait(40).up(1).wait(900).down(1, 130, 206).wait(40).up(1);
+    expect(g.out).toEqual([
+      { type: "click", button: "left", x: 120, y: 200 },
+      { type: "click", button: "left", x: 130, y: 206 },
+    ]);
+  });
+
+  it("a drag between two taps does not join them into a double click", () => {
+    const g = rig("direct").down(1, 120, 200).wait(40).up(1).down(1, 120, 200).move(1, 180, 200).up(1).down(1, 182, 203).wait(40).up(1);
+    expect(g.out.filter((a) => a.type === "click")).toEqual([
+      { type: "click", button: "left", x: 120, y: 200 },
+      { type: "click", button: "left", x: 182, y: 203 },
+    ]);
+  });
+
+  it("the second tap of a double tap does not start a long press ring", () => {
+    const g = rig("direct").down(1, 90, 90).wait(40).up(1).wait(60).down(1, 92, 91).wait(250).up(1);
+    expect(g.types()).toEqual(["click", "click"]);
   });
 });
 
