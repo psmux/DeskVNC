@@ -74,6 +74,7 @@ function phone(held: LocalNetwork, answers: LocalNetwork[], unreachable = false)
     sessionInput: vi.fn(async () => {}),
     sessionSnapshot: vi.fn(async () => {}),
     hostsSetSecret: vi.fn(async () => {}),
+    hostsSetSshSecret: vi.fn(async () => {}),
   } as unknown as Api;
   return { api, calls, allow: () => (state = "granted") };
 }

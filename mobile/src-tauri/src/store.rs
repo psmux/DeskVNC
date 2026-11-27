@@ -230,7 +230,9 @@ impl HostStore {
             domain: draft.domain.filter(|d| !d.is_empty()),
             boundary_invitation: draft.boundary_invitation.filter(|i| !i.is_empty()),
             // Boundary finds its own way; a tunnel means nothing to it.
-            ssh_tunnel: draft.ssh_tunnel.filter(|_| draft.protocol != Protocol::Boundary),
+            ssh_tunnel: draft
+                .ssh_tunnel
+                .filter(|_| draft.protocol != Protocol::Boundary),
             has_ssh_secret: previous.as_ref().is_some_and(|p| p.has_ssh_secret),
         };
         match existing {
@@ -384,14 +386,20 @@ mod tests {
         edit.address = "localhost".into();
         edit.ssh_tunnel = Some(tunnel.clone());
         let saved = reopened.save(edit).unwrap();
-        assert!(saved.has_ssh_secret, "the vault flag is Rust's and survives a save");
+        assert!(
+            saved.has_ssh_secret,
+            "the vault flag is Rust's and survives a save"
+        );
         let json = serde_json::to_value(&saved).unwrap();
         assert_eq!(json["sshTunnel"]["host"], "gate.example.com");
         assert_eq!(json["hasSshSecret"], true);
 
         // An enabled tunnel without a user is refused with a reason.
         let mut no_user = draft("x");
-        no_user.ssh_tunnel = Some(TunnelSettings { user: String::new(), ..tunnel.clone() });
+        no_user.ssh_tunnel = Some(TunnelSettings {
+            user: String::new(),
+            ..tunnel.clone()
+        });
         assert!(reopened.save(no_user).is_err());
         // Boundary never keeps one.
         let mut boundary = draft("b");

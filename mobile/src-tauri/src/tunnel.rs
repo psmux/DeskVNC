@@ -196,7 +196,13 @@ impl KnownHosts {
         self.store.clone()
     }
 
-    pub fn trust(&self, host: &str, port: u16, key_type: &str, fingerprint: &str) -> Result<(), String> {
+    pub fn trust(
+        &self,
+        host: &str,
+        port: u16,
+        key_type: &str,
+        fingerprint: &str,
+    ) -> Result<(), String> {
         self.store
             .lock()
             .trust(host, port, key_type, fingerprint, crate::store::now_ms());
@@ -351,7 +357,11 @@ mod tests {
     #[test]
     fn password_auth_needs_the_saved_password() {
         let t = settings();
-        assert_eq!(t.ssh_config("192.0.2.10", &TunnelSecret::default()).unwrap_err(), NO_PASSWORD);
+        assert_eq!(
+            t.ssh_config("192.0.2.10", &TunnelSecret::default())
+                .unwrap_err(),
+            NO_PASSWORD
+        );
         let cfg = t
             .ssh_config(
                 "192.0.2.10",
@@ -371,7 +381,11 @@ mod tests {
         t.auth = TunnelAuth::Key;
         t.host = "gate.example.com".into();
         t.port = 2222;
-        assert_eq!(t.ssh_config("localhost", &TunnelSecret::default()).unwrap_err(), NO_KEY);
+        assert_eq!(
+            t.ssh_config("localhost", &TunnelSecret::default())
+                .unwrap_err(),
+            NO_KEY
+        );
         let cfg = t
             .ssh_config(
                 "localhost",
@@ -400,7 +414,9 @@ mod tests {
             passphrase: Some("pp".into()),
         };
         let printed = format!("{s:?}");
-        assert!(!printed.contains("hunter2") && !printed.contains("BEGIN") && !printed.contains("pp\""));
+        assert!(
+            !printed.contains("hunter2") && !printed.contains("BEGIN") && !printed.contains("pp\"")
+        );
     }
 
     #[test]
@@ -440,7 +456,11 @@ mod tests {
         impl Handler for Gate {
             type Error = russh::Error;
 
-            async fn auth_publickey(&mut self, _user: &str, key: VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
+            async fn auth_publickey(
+                &mut self,
+                _user: &str,
+                key: VerifiedPublicKey<'_>,
+            ) -> Result<Auth, Self::Error> {
                 Ok(if key.public_key.key_data() == self.allowed.key_data() {
                     Auth::Accept
                 } else {
@@ -448,8 +468,16 @@ mod tests {
                 })
             }
 
-            async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-                Ok(if user == "pi" && password == "pw" { Auth::Accept } else { Auth::reject() })
+            async fn auth_password(
+                &mut self,
+                user: &str,
+                password: &str,
+            ) -> Result<Auth, Self::Error> {
+                Ok(if user == "pi" && password == "pw" {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                })
             }
 
             async fn channel_open_direct_tcpip(
@@ -487,11 +515,15 @@ mod tests {
             let port = listener.local_addr().unwrap().port();
             tokio::spawn(async move {
                 loop {
-                    let Ok((socket, _)) = listener.accept().await else { return };
+                    let Ok((socket, _)) = listener.accept().await else {
+                        return;
+                    };
                     let config = config.clone();
                     let allowed = allowed.clone();
                     tokio::spawn(async move {
-                        if let Ok(running) = russh::server::run_stream(config, socket, Gate { allowed }).await {
+                        if let Ok(running) =
+                            russh::server::run_stream(config, socket, Gate { allowed }).await
+                        {
                             let _ = running.await;
                         }
                     });
@@ -541,7 +573,12 @@ mod tests {
         t.port = ssh_port;
         t.auth = TunnelAuth::Key;
         let secret = TunnelSecret {
-            key: Some(client_key.to_openssh(russh::keys::ssh_key::LineEnding::LF).unwrap().to_string()),
+            key: Some(
+                client_key
+                    .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+                    .unwrap()
+                    .to_string(),
+            ),
             ..Default::default()
         };
         // The VNC address as the SSH computer sees it.
@@ -550,12 +587,19 @@ mod tests {
         let Err(asked) = establish(cfg.clone(), &known, None).await else {
             panic!("an unknown key must be asked about first");
         };
-        let prompt: HostKeyPrompt = serde_json::from_str(asked.strip_prefix(HOST_KEY_PROMPT).expect(&asked)).unwrap();
+        let prompt: HostKeyPrompt =
+            serde_json::from_str(asked.strip_prefix(HOST_KEY_PROMPT).expect(&asked)).unwrap();
         assert_eq!(prompt.port, ssh_port);
         assert!(prompt.fingerprint.starts_with("SHA256:"));
 
-        let connector = establish(cfg.clone(), &known, Some(&prompt.fingerprint)).await.unwrap();
-        let mut stream = connector.0.connect("127.0.0.1", vnc_port, std::time::Duration::from_secs(10)).await.unwrap();
+        let connector = establish(cfg.clone(), &known, Some(&prompt.fingerprint))
+            .await
+            .unwrap();
+        let mut stream = connector
+            .0
+            .connect("127.0.0.1", vnc_port, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
         let mut greeting = [0u8; 12];
         stream.read_exact(&mut greeting).await.unwrap();
         assert_eq!(&greeting, b"RFB 003.008\n");
@@ -563,7 +607,10 @@ mod tests {
         let mut back = [0u8; 4];
         stream.read_exact(&mut back).await.unwrap();
         assert_eq!(&back, b"ping");
-        assert!(connector.0.describe().contains("ssh tunnel via pi@127.0.0.1"));
+        assert!(connector
+            .0
+            .describe()
+            .contains("ssh tunnel via pi@127.0.0.1"));
 
         // Pinned now: the next connect goes straight through.
         let reopened = KnownHosts::open(dir.path());
@@ -572,7 +619,9 @@ mod tests {
         // A different key at the same address is a hard stop, never a prompt.
         let other = tempfile::tempdir().unwrap();
         let tampered = KnownHosts::open(other.path());
-        tampered.trust("127.0.0.1", ssh_port, "ssh-ed25519", "SHA256:not-this-one").unwrap();
+        tampered
+            .trust("127.0.0.1", ssh_port, "ssh-ed25519", "SHA256:not-this-one")
+            .unwrap();
         let Err(refused) = establish(cfg, &tampered, None).await else {
             panic!("a changed key must not connect");
         };
@@ -593,14 +642,20 @@ mod tests {
         };
         let cfg = t.ssh_config("127.0.0.1", &good).unwrap();
         let asked = establish(cfg.clone(), &known, None).await.err().unwrap();
-        let prompt: HostKeyPrompt = serde_json::from_str(asked.strip_prefix(HOST_KEY_PROMPT).unwrap()).unwrap();
-        assert!(establish(cfg, &known, Some(&prompt.fingerprint)).await.is_ok());
+        let prompt: HostKeyPrompt =
+            serde_json::from_str(asked.strip_prefix(HOST_KEY_PROMPT).unwrap()).unwrap();
+        assert!(establish(cfg, &known, Some(&prompt.fingerprint))
+            .await
+            .is_ok());
 
         let bad = TunnelSecret {
             password: Some("nope".into()),
             ..Default::default()
         };
-        let err = establish(t.ssh_config("127.0.0.1", &bad).unwrap(), &known, None).await.err().unwrap();
+        let err = establish(t.ssh_config("127.0.0.1", &bad).unwrap(), &known, None)
+            .await
+            .err()
+            .unwrap();
         assert!(err.starts_with("The SSH tunnel did not open"), "{err}");
     }
 
@@ -608,11 +663,16 @@ mod tests {
     fn known_hosts_persist_and_forget() {
         let dir = tempfile::tempdir().unwrap();
         let known = KnownHosts::open(dir.path());
-        known.trust("Gate.example.com", 22, "ssh-ed25519", "SHA256:aa").unwrap();
+        known
+            .trust("Gate.example.com", 22, "ssh-ed25519", "SHA256:aa")
+            .unwrap();
         let reopened = KnownHosts::open(dir.path());
         use ssh_transport::{HostKeyDecision, HostKeyVerifier};
         let v = reopened.verifier();
-        assert_eq!(v.verify("gate.example.com", 22, "ssh-ed25519", "SHA256:aa"), HostKeyDecision::Trusted);
+        assert_eq!(
+            v.verify("gate.example.com", 22, "ssh-ed25519", "SHA256:aa"),
+            HostKeyDecision::Trusted
+        );
         assert!(matches!(
             v.verify("gate.example.com", 22, "ssh-ed25519", "SHA256:bb"),
             HostKeyDecision::Changed { .. }
@@ -620,7 +680,9 @@ mod tests {
         reopened.forget("gate.example.com", 22).unwrap();
         let again = KnownHosts::open(dir.path());
         assert!(matches!(
-            again.verifier().verify("gate.example.com", 22, "ssh-ed25519", "SHA256:bb"),
+            again
+                .verifier()
+                .verify("gate.example.com", 22, "ssh-ed25519", "SHA256:bb"),
             HostKeyDecision::Unknown { .. }
         ));
     }

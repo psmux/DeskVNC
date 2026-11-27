@@ -12,12 +12,12 @@ import { OsArt } from "../art/OsArt";
 import { PROTOCOL_HINT, PROTOCOL_TITLE, ProtocolIcon, ProtocolScene } from "../art/ProtocolArt";
 import { SceneKey, SceneSaved } from "../art/Scenes";
 import { Button, IconButton } from "../components/Button";
-import { Field, Toggle } from "../components/Field";
+import { Field, Segmented, Toggle } from "../components/Field";
 import { clipboardMessage, readClipboard } from "../lib/clipboard";
 import { LAYER, useBack } from "../lib/back";
 import { formatCode } from "../lib/code";
 import { haptic } from "../lib/haptics";
-import { boundaryKind, canContinue, newWizard, reduceWizard, STEPS, toDraft, type WizardState } from "../lib/wizard";
+import { boundaryKind, canContinue, newWizard, reduceWizard, STEPS, toDraft, tunnelSecret, type TunnelForm, type WizardState } from "../lib/wizard";
 import { useApp } from "../state/app";
 import { SWATCHES, swatch } from "../theme/palette";
 
@@ -74,6 +74,10 @@ export function AddComputer({ initial }: { initial: WizardState }) {
       if (withSecret && s.remember && (s.password || s.username)) {
         await api.hostsSetSecret(host.id, s.username.trim() || null, s.password || null);
       }
+      // The tunnel's own password or key, whichever button saved: without
+      // it the tunnel cannot open, so it is not part of "ask me later".
+      const tunnel = s.protocol === "boundary" ? null : tunnelSecret(s.tunnel);
+      if (tunnel) await api.hostsSetSshSecret(host.id, tunnel.password, tunnel.key, tunnel.passphrase);
       haptic("success");
       setSavedId(host.id);
       setDir(1);
@@ -245,7 +249,7 @@ function StepHow({ s, pick, paste }: { s: WizardState; pick: (p: Protocol) => vo
 
 function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.Dispatch<Parameters<typeof reduceWizard>[1]>; onEnter: () => void }) {
   const app = useApp();
-  const [more, setMore] = useState(s.portTouched && s.mode === "add");
+  const [more, setMore] = useState((s.portTouched && s.mode === "add") || s.tunnel.on);
   const [pasteProblem, setPasteProblem] = useState<string | null>(null);
   const pasteInto = async (type: "boundary" | "address") => {
     const { text, problem } = await pasted();
@@ -358,7 +362,95 @@ function StepWhere({ s, dispatch, onEnter }: { s: WizardState; dispatch: React.D
             onChange={(e) => dispatch({ type: "port", port: Number(e.target.value.replace(/\D/g, "")) || 0 })}
           />
           {s.protocol === "rdp" && <Field label="Domain, if your work uses one" placeholder="Leave empty if unsure" value={s.domain} autoCapitalize="none" onChange={(e) => dispatch({ type: "domain", text: e.target.value })} />}
+          <TunnelFields t={s.tunnel} address={s.address} patch={(patch) => dispatch({ type: "tunnel", patch })} />
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The SSH tunnel, as the desktop has per host (issue #91). The phone signs
+ * in to the SSH computer, and that computer opens the VNC or RDP connection
+ * from its side, so the address above is read there.
+ */
+function TunnelFields({ t, address, patch }: { t: TunnelForm; address: string; patch: (p: Partial<TunnelForm>) => void }) {
+  const [pasteProblem, setPasteProblem] = useState<string | null>(null);
+  const keep = t.saved ? "Saved on this phone. Leave empty to keep it." : undefined;
+  return (
+    <div className="flex flex-col gap-4 rounded-[10px] border border-line bg-surface p-4">
+      <div className="flex items-center gap-3">
+        <span className="flex h-11 w-11 items-center justify-center rounded-full bg-surface-2 text-ink-dim">
+          <IconLock />
+        </span>
+        <div className="flex-1">
+          <p className="font-semibold">Connect through SSH</p>
+          <p className="text-footnote text-ink-dim">For a computer you reach by signing in to an SSH server first.</p>
+        </div>
+        <Toggle on={t.on} onChange={(on) => patch({ on })} label="Connect through SSH" />
+      </div>
+      {t.on && (
+        <>
+          <Field
+            label="SSH computer"
+            placeholder={address.trim() || "gateway.example.com"}
+            hint="Leave empty when SSH runs on the computer itself. The address above is then reached from the SSH computer, so localhost means that computer."
+            value={t.host}
+            inputMode="url"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={(e) => patch({ host: e.target.value })}
+          />
+          <Field label="SSH port" inputMode="numeric" value={String(t.port)} onChange={(e) => patch({ port: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+          <Field label="SSH user name" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={t.user} onChange={(e) => patch({ user: e.target.value })} />
+          <Segmented
+            label="How to sign in to SSH"
+            value={t.auth}
+            onChange={(auth) => patch({ auth })}
+            options={[
+              { value: "password", label: "Password" },
+              { value: "key", label: "Private key" },
+            ]}
+          />
+          {t.auth === "password" ? (
+            <Field label="SSH password" type="password" autoComplete="off" hint={keep} value={t.password} onChange={(e) => patch({ password: e.target.value })} />
+          ) : (
+            <>
+              <div>
+                <label className="mb-1.5 block px-1 text-footnote font-medium text-ink-dim" htmlFor="dv-ssh-key">
+                  Private key
+                </label>
+                <textarea
+                  id="dv-ssh-key"
+                  rows={5}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className="w-full rounded-[10px] border border-line bg-surface-2 px-3.5 py-2.5 font-mono text-caption text-ink outline-none focus:border-accent"
+                  value={t.key}
+                  onChange={(e) => patch({ key: e.target.value })}
+                />
+                <div className="mt-1 flex items-center justify-between px-1">
+                  <p className="text-footnote text-ink-dim">{pasteProblem ?? keep ?? "Kept in the phone's keychain, never in a plain file."}</p>
+                  <button
+                    type="button"
+                    className="flex min-h-11 items-center gap-1.5 px-2 font-semibold text-accent"
+                    onClick={async () => {
+                      const { text, problem } = await pasted();
+                      setPasteProblem(problem ?? (text ? null : "There is nothing on this phone's clipboard to paste."));
+                      if (text) patch({ key: text });
+                    }}
+                  >
+                    <IconPaste size={20} /> Paste
+                  </button>
+                </div>
+              </div>
+              <Field label="Key passphrase, if it has one" type="password" autoComplete="off" value={t.passphrase} onChange={(e) => patch({ passphrase: e.target.value })} />
+            </>
+          )}
+        </>
       )}
     </div>
   );

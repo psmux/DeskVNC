@@ -185,7 +185,8 @@ mod tests {
 
     #[test]
     fn a_tunnel_secret_is_set_kept_replaced_and_forgotten() {
-        let s = apply_tunnel_secret(TunnelSecret::default(), Some("pw".into()), None, None).unwrap();
+        let s =
+            apply_tunnel_secret(TunnelSecret::default(), Some("pw".into()), None, None).unwrap();
         assert_eq!(s.password.as_deref(), Some("pw"));
         // null keeps what is there.
         let s = apply_tunnel_secret(s, None, None, None).unwrap();
@@ -193,7 +194,11 @@ mod tests {
         // A key replaces the password, trimmed of what pasting adds.
         let s = apply_tunnel_secret(s, None, Some("\n KEY \n".into()), Some("pp".into())).unwrap();
         assert_eq!(
-            (s.password.as_deref(), s.key.as_deref(), s.passphrase.as_deref()),
+            (
+                s.password.as_deref(),
+                s.key.as_deref(),
+                s.passphrase.as_deref()
+            ),
             (None, Some("KEY"), Some("pp"))
         );
         // A password replaces the key and its passphrase.
@@ -202,6 +207,12 @@ mod tests {
         // Empty strings forget.
         let s = apply_tunnel_secret(s, Some(String::new()), None, None).unwrap();
         assert_eq!(s, TunnelSecret::default());
-        assert!(apply_tunnel_secret(TunnelSecret::default(), None, Some("k".repeat(MAX_KEY + 1)), None).is_err());
+        assert!(apply_tunnel_secret(
+            TunnelSecret::default(),
+            None,
+            Some("k".repeat(MAX_KEY + 1)),
+            None
+        )
+        .is_err());
     }
 }

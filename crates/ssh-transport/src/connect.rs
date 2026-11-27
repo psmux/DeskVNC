@@ -366,7 +366,10 @@ pub fn load_key_file(
 /// reads: an OpenSSH container, an older PEM or PKCS#8 file, or a PuTTY
 /// `.ppk`. A phone has no key files of its own, so it keeps the key text in
 /// the platform vault and hands it over through this.
-pub fn load_key_bytes(bytes: &[u8], passphrase: Option<&str>) -> std::result::Result<PrivateKey, String> {
+pub fn load_key_bytes(
+    bytes: &[u8],
+    passphrase: Option<&str>,
+) -> std::result::Result<PrivateKey, String> {
     if crate::ppk::is_ppk(bytes) {
         return crate::ppk::load(bytes, passphrase).map_err(|e| e.to_string());
     }

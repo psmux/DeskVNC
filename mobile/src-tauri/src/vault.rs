@@ -60,6 +60,7 @@ pub trait SecretStore: Send + Sync {
 
 /// The vault account a host's tunnel secret is filed under. A host id never
 /// holds a dot (`store::validate_id`), so this cannot be another host's.
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
 pub fn tunnel_account(host_id: &str) -> String {
     format!("{host_id}.ssh")
 }
@@ -219,12 +220,23 @@ mod tests {
             ..Default::default()
         };
         store.save_tunnel("a", &t).unwrap();
-        store.save("a", &Secret { username: None, password: Some("pw".into()) }).unwrap();
+        store
+            .save(
+                "a",
+                &Secret {
+                    username: None,
+                    password: Some("pw".into()),
+                },
+            )
+            .unwrap();
         store.delete("a").unwrap();
         assert_eq!(store.load_tunnel("a").unwrap(), Some(t));
         store.delete_tunnel("a").unwrap();
         assert_eq!(store.load_tunnel("a").unwrap(), None);
         assert_eq!(tunnel_account("6f1c"), "6f1c.ssh");
-        assert!(crate::store::validate_id("6f1c.ssh").is_err(), "a tunnel account can never be a host id");
+        assert!(
+            crate::store::validate_id("6f1c.ssh").is_err(),
+            "a tunnel account can never be a host id"
+        );
     }
 }

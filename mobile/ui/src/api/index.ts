@@ -28,8 +28,8 @@ export function withDemo(inner: Api, demo: MockSessions = createMockSessions(() 
   const pick = (sessionId: string): Api => (demo.has(sessionId) ? (demo as unknown as Api) : inner);
   return {
     ...inner,
-    sessionConnect: (target, onFrame, onEvent) =>
-      target.kind === "demo" ? demo.sessionConnect(target, onFrame, onEvent) : inner.sessionConnect(target, onFrame, onEvent),
+    sessionConnect: (target, onFrame, onEvent, acceptSshHostKey) =>
+      target.kind === "demo" ? demo.sessionConnect(target, onFrame, onEvent) : inner.sessionConnect(target, onFrame, onEvent, acceptSshHostKey),
     sessionInput: (id, seq, body) => pick(id).sessionInput(id, seq, body),
     sessionText: (id, text) => pick(id).sessionText(id, text),
     sessionKeyCombo: (id, combo) => pick(id).sessionKeyCombo(id, combo),

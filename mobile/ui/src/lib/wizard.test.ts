@@ -7,6 +7,7 @@ import {
   reduceWizard,
   suggestName,
   toDraft,
+  tunnelSecret,
   wizardFromFound,
   wizardFromHost,
   type WizardAction,
@@ -134,5 +135,67 @@ describe("suggestName", () => {
   it("makes a readable name from a host name and none from an IP", () => {
     expect(suggestName("mums-laptop.local")).toBe("Mums laptop");
     expect(suggestName("192.0.2.4")).toBe("");
+  });
+});
+
+describe("the SSH tunnel (#91)", () => {
+  const vnc = () => run(newWizard("vnc"), { type: "address", text: "localhost" }, { type: "port", port: 5902 });
+  const KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
+
+  it("is off by default and a draft without one says so", () => {
+    expect(vnc().tunnel.on).toBe(false);
+    expect(toDraft(vnc()).sshTunnel).toBeNull();
+    expect(tunnelSecret(vnc().tunnel)).toBeNull();
+  });
+
+  it("needs a user name and a password or key before the step is left", () => {
+    let s = run(vnc(), { type: "tunnel", patch: { on: true } }, { type: "next" });
+    expect(s.step).toBe("where");
+    expect(s.error).toMatch(/user name/);
+    s = run(s, { type: "tunnel", patch: { user: "pi" } }, { type: "next" });
+    expect(s.error).toMatch(/password/);
+    s = run(s, { type: "tunnel", patch: { auth: "key", key: "not a key" } }, { type: "next" });
+    expect(s.error).toMatch(/private key/);
+    s = run(s, { type: "tunnel", patch: { key: KEY } }, { type: "next" });
+    expect(s.step).toBe("look");
+  });
+
+  it("saves the settings on the host and the key apart, for the vault", () => {
+    const s = run(vnc(), { type: "tunnel", patch: { on: true, host: " gate.example.com ", port: 2222, user: "pi", auth: "key", key: KEY, passphrase: "pp" } });
+    expect(toDraft(s).sshTunnel).toEqual({ enabled: true, host: "gate.example.com", port: 2222, user: "pi", auth: "key" });
+    expect(JSON.stringify(toDraft(s))).not.toContain("OPENSSH");
+    expect(tunnelSecret(s.tunnel)).toEqual({ password: null, key: KEY, passphrase: "pp" });
+    const pw = run(vnc(), { type: "tunnel", patch: { on: true, user: "pi", password: "pw" } });
+    expect(tunnelSecret(pw.tunnel)).toEqual({ password: "pw", key: null, passphrase: null });
+  });
+
+  it("editing keeps a saved secret unless a new one is typed, and switching off forgets it", () => {
+    const host: Host = {
+      id: "h2",
+      name: "Lab",
+      protocol: "vnc",
+      address: "localhost",
+      port: 5902,
+      username: null,
+      hasPassword: false,
+      os: "linux",
+      color: "teal",
+      favorite: false,
+      lastConnectedAt: null,
+      hasThumbnail: false,
+      sshTunnel: { enabled: true, host: "gate.example.com", port: 22, user: "pi", auth: "key" },
+      hasSshSecret: true,
+    };
+    const s = run(wizardFromHost(host), { type: "next" });
+    expect(s.step).toBe("look");
+    expect(tunnelSecret(s.tunnel)).toBeNull();
+    const off = run(wizardFromHost(host), { type: "tunnel", patch: { on: false } });
+    expect(toDraft(off).sshTunnel).toMatchObject({ enabled: false, host: "gate.example.com" });
+    expect(tunnelSecret(off.tunnel)).toEqual({ password: "", key: "", passphrase: "" });
+  });
+
+  it("is never part of a Boundary computer", () => {
+    const s = run(newWizard("boundary"), { type: "boundary", text: "boundary1:abc" }, { type: "tunnel", patch: { on: true, user: "pi" } });
+    expect(toDraft(s).sshTunnel).toBeNull();
   });
 });

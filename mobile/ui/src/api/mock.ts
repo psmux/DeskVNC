@@ -435,6 +435,7 @@ export function createMockApi(): Api {
         hasPassword: existing?.hasPassword ?? false,
         lastConnectedAt: existing?.lastConnectedAt ?? null,
         hasThumbnail: existing?.hasThumbnail ?? false,
+        hasSshSecret: existing?.hasSshSecret ?? false,
         ...draft,
         id: existing?.id ?? `h${Date.now().toString(36)}`,
       };
@@ -453,6 +454,15 @@ export function createMockApi(): Api {
       hosts = hosts.map((h) =>
         h.id === id ? { ...h, username: username ?? h.username, hasPassword: password ? true : password === "" ? false : h.hasPassword } : h,
       );
+      save();
+    },
+    async hostsSetSshSecret(id, password, key) {
+      await wait(100);
+      hosts = hosts.map((h) => {
+        if (h.id !== id) return h;
+        const has = password || key ? true : password === "" || key === "" ? false : h.hasSshSecret;
+        return { ...h, hasSshSecret: has };
+      });
       save();
     },
     async hostsThumbnail(id) {

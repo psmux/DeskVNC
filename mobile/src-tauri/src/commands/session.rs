@@ -155,7 +155,9 @@ pub async fn session_connect(
                 let lookup = host_id.clone();
                 let secret = super::blocking(move || secrets.load_tunnel(&lookup))
                     .await
-                    .map_err(|e| format!("The SSH tunnel's password or key could not be read: {e}"))?
+                    .map_err(|e| {
+                        format!("The SSH tunnel's password or key could not be read: {e}")
+                    })?
                     .unwrap_or_default();
                 tunnel = Some((settings, secret));
             }
@@ -1007,12 +1009,19 @@ mod tests {
         apply_tunnel(&mut vnc, remote_core::Connector(Arc::new(Nowhere)));
         assert!(vnc.connector.is_some());
         assert!(vnc.vnc_mut().allow_insecure);
-        assert_eq!((vnc.host.as_str(), vnc.port), ("localhost", 5902), "the far side resolves the address");
+        assert_eq!(
+            (vnc.host.as_str(), vnc.port),
+            ("localhost", 5902),
+            "the far side resolves the address"
+        );
 
         let mut rdp = options_for(Protocol::Rdp, "10.0.0.5", 0);
         apply_tunnel(&mut rdp, remote_core::Connector(Arc::new(Nowhere)));
         assert!(rdp.connector.is_some());
-        assert!(!matches!(rdp.protocol, remote_core::ProtocolOptions::Vnc(_)));
+        assert!(!matches!(
+            rdp.protocol,
+            remote_core::ProtocolOptions::Vnc(_)
+        ));
     }
 
     #[tokio::test]
