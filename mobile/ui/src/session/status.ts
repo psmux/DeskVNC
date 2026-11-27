@@ -41,7 +41,7 @@ export function stepWords(s: SessionState): string {
   return STEP_WORDS[stepOf(s)];
 }
 
-export type Level = "good" | "fair" | "poor";
+export type Level = "good" | "fair" | "poor" | "lost";
 
 /** Green, amber or red from round trip time and frame rate. */
 export function qualityLevel(stats: SessionStats | null): Level {
@@ -58,7 +58,18 @@ export const LEVEL_WORDS: Record<Level, string> = {
   good: "Good connection",
   fair: "A little slow",
   poor: "Slow connection",
+  lost: "Connection lost, trying again",
 };
+
+/**
+ * The connection badge in a session. While the link is down and the session
+ * is reconnecting, the last stats are from before the drop, so they would
+ * still say "Good connection" over a "Reconnecting" banner.
+ */
+export function badgeLevel(s: SessionState, stats: SessionStats | null): Level {
+  if (s.state === "reconnecting") return "lost";
+  return qualityLevel(stats);
+}
 
 /** How a Boundary session travels, in the words the connection sheet shows. */
 export function routeWords(route: BoundaryRoute): string {

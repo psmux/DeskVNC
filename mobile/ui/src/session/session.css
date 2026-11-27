@@ -347,7 +347,8 @@
   --lvl: var(--s-warn);
 }
 
-.dv-s-quality.level-poor {
+.dv-s-quality.level-poor,
+.dv-s-quality.level-lost {
   --lvl: var(--s-danger);
 }
 
@@ -378,7 +379,8 @@
 }
 
 .dv-s-quality.level-fair .bars i:nth-child(3),
-.dv-s-quality.level-poor .bars i:nth-child(n + 2) {
+.dv-s-quality.level-poor .bars i:nth-child(n + 2),
+.dv-s-quality.level-lost .bars i {
   background: rgba(255, 255, 255, 0.25);
 }
 
