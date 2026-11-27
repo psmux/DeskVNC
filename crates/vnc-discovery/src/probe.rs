@@ -163,7 +163,18 @@ pub async fn deep_probe(addr: SocketAddr) -> Result<Vec<u8>> {
 /// hosts that is a refused connect, which costs a rate limiter slot and about
 /// a millisecond, and no VNC result ever waits on it.
 pub async fn rdp_fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Option<RdpCaps> {
-    rdpnego::probe(addr, connect_timeout, rdpnego::SWEEP_PROTOCOLS, true).await
+    rdp_fingerprint_within(addr, connect_timeout, rdpnego::NEGO_READ_TIMEOUT).await
+}
+
+/// [`rdp_fingerprint`] with its own wait for the Connection Confirm, as
+/// [`fingerprint_within`] is for the RFB banner: one typed address can afford
+/// to wait as long as its connect may take.
+pub async fn rdp_fingerprint_within(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<RdpCaps> {
+    rdpnego::probe(addr, connect_timeout, read_timeout, rdpnego::SWEEP_PROTOCOLS, true).await
 }
 
 /// Deep probe an RDP host: everything [`rdp_fingerprint`] learns, plus whether
@@ -179,7 +190,13 @@ pub async fn rdp_fingerprint(addr: SocketAddr, connect_timeout: Duration) -> Opt
 /// with one flag changed.
 pub async fn rdp_deep_probe(addr: SocketAddr) -> Result<RdpCaps> {
     let connect_to = Duration::from_millis(1500);
-    let mut caps = rdpnego::probe(addr, connect_to, rdpnego::SWEEP_PROTOCOLS, true)
+    let mut caps = rdpnego::probe(
+        addr,
+        connect_to,
+        rdpnego::NEGO_READ_TIMEOUT,
+        rdpnego::SWEEP_PROTOCOLS,
+        true,
+    )
         .await
         .ok_or_else(|| Error::Probe {
             addr,
@@ -187,7 +204,14 @@ pub async fn rdp_deep_probe(addr: SocketAddr) -> Result<RdpCaps> {
         })?;
     // The certificate is already in hand from the first exchange, so the
     // second one asks only the question it exists to answer.
-    let ssl_only = rdpnego::probe(addr, connect_to, rdpnego::SSL_ONLY_PROTOCOLS, false).await;
+    let ssl_only = rdpnego::probe(
+        addr,
+        connect_to,
+        rdpnego::NEGO_READ_TIMEOUT,
+        rdpnego::SSL_ONLY_PROTOCOLS,
+        false,
+    )
+    .await;
     rdpnego::apply_ssl_only_answer(&mut caps, ssl_only.as_ref());
     Ok(caps)
 }

@@ -26,6 +26,14 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* Quick connect on the phone to `address:3389` said "Nothing answered" for an
+  RDP computer the desktop app found at once, an xrdp server and a Windows PC
+  alike, on the Android emulator's network and wherever the RDP server's
+  first reply takes more than 200 ms to come back. The RDP probe waited only
+  200 ms for the server's Connection Confirm, a wait that was raised to a
+  second for the VNC banner long ago and missed here. Quick connect now waits
+  as long for the RDP reply as for the connect, like the VNC and Boundary
+  probes, and the network scan waits a second, as it does for VNC.
 * The connection badge in a phone session kept its green "Good connection"
   bars while the link was down and the session was reconnecting, next to a
   "Reconnecting, hold on" banner, because it was coloured from the last

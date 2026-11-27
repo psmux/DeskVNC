@@ -64,8 +64,12 @@ pub const SSL_ONLY_PROTOCOLS: u32 = security_protocol::SSL;
 /// PDUs through the same decoder and must not inherit a 512 byte ceiling.
 pub const MAX_NEGO_READ: usize = 512;
 
-/// Read timeout for the confirm, matching `probe::BANNER_READ_TIMEOUT`.
-const NEGO_READ_TIMEOUT: Duration = Duration::from_millis(200);
+/// Read timeout for the confirm in a sweep, matching
+/// `probe::BANNER_READ_TIMEOUT`. Both were 200 ms; the banner wait went up to
+/// a second for slow greeters and this one was left behind, so an RDP server
+/// whose confirm took longer than 200 ms to come back (a phone on Wi-Fi, the
+/// Android emulator's network) was reported as nothing there.
+pub const NEGO_READ_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Budget for the certificate read that shares this connection. Separate from
 /// the negotiation timeout because a TLS flight is several records and arrives
@@ -190,6 +194,7 @@ pub fn apply_ssl_only_answer(caps: &mut RdpCaps, ssl_only: Option<&RdpCaps>) {
 pub async fn probe(
     addr: SocketAddr,
     connect_timeout: Duration,
+    read_timeout: Duration,
     requested_protocols: u32,
     read_certificate: bool,
 ) -> Option<RdpCaps> {
@@ -202,12 +207,12 @@ pub async fn probe(
         Ok(Ok(stream)) => stream,
         _ => return None,
     };
-    timeout(NEGO_READ_TIMEOUT, stream.write_all(&request))
+    timeout(read_timeout, stream.write_all(&request))
         .await
         .ok()?
         .ok()?;
 
-    let confirm = read_confirm(&mut stream).await?;
+    let confirm = read_confirm(&mut stream, read_timeout).await?;
     let mut caps = caps_from_confirm(&confirm);
 
     if read_certificate && (caps.tls || caps.nla) {
@@ -220,7 +225,10 @@ pub async fn probe(
 }
 
 /// Read until a whole Connection Confirm has arrived, or until the cap.
-async fn read_confirm(stream: &mut TcpStream) -> Option<X224ConnectionConfirm> {
+async fn read_confirm(
+    stream: &mut TcpStream,
+    read_timeout: Duration,
+) -> Option<X224ConnectionConfirm> {
     // Nineteen bytes is the whole answer, so this buffer never grows and
     // nothing is ever sized from a length the server sent.
     let mut buf = Vec::with_capacity(64);
@@ -234,7 +242,7 @@ async fn read_confirm(stream: &mut TcpStream) -> Option<X224ConnectionConfirm> {
         if buf.len() >= MAX_NEGO_READ {
             return None;
         }
-        let read = timeout(NEGO_READ_TIMEOUT, stream.read(&mut chunk))
+        let read = timeout(read_timeout, stream.read(&mut chunk))
             .await
             .ok()?
             .ok()?;
@@ -521,7 +529,7 @@ mod tests {
     #[test]
     fn the_server_kind_is_a_hint_from_the_certificate_only() {
         assert_eq!(classify(None), RdpServerKind::Unknown);
-        assert_eq!(classify(Some("DESKTOP-H21K47C")), RdpServerKind::Windows);
+        assert_eq!(classify(Some("DESKTOP-4F2A9QX")), RdpServerKind::Windows);
         assert_eq!(classify(Some("www.xrdp.org")), RdpServerKind::Other);
     }
 }
