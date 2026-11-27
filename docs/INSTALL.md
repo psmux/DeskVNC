@@ -6,6 +6,7 @@ Download the file for your platform from the
 | Platform | File |
 |---|---|
 | macOS 12 or newer, Apple Silicon or Intel | `DeskVNCViewer_<version>_universal.dmg` |
+| macOS 12 or newer, via Homebrew | see [Homebrew](#homebrew) |
 | Windows 10 or 11, x64 | `DeskVNCViewer_<version>_x64-setup.exe` |
 | Windows, for deployment tooling | `DeskVNCViewer_<version>_x64_en-US.msi` |
 | Debian, Ubuntu | `DeskVNCViewer_<version>_amd64.deb` |
@@ -52,6 +53,22 @@ On first use the app asks for two permissions:
   can still connect by typing an address.
 - **Accessibility**, only if you turn on global input capture, which lets
   system shortcuts reach the remote machine instead of your Mac.
+
+### Homebrew
+
+The macOS builds are also in a Homebrew tap:
+
+```sh
+brew tap psmux/deskvnc
+brew install --cask deskvncviewer    # the viewer
+brew install --cask deskvnc-support  # the Support app
+```
+
+Homebrew asks you to trust a third-party tap the first time, with
+`brew trust psmux/deskvnc`. The casks install the same signed and notarized
+builds as the DMG and the Support zip, and `brew upgrade` follows new releases.
+The tap lives at <https://github.com/psmux/homebrew-deskvnc>, and its casks are
+generated from each release's `SHA256SUMS.txt`.
 
 ## Windows
 
