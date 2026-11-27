@@ -192,7 +192,7 @@ async fn run(ip: IpAddr, port: u16, service: Service, timeout: Duration) -> Opti
             Some(host)
         }
         Service::Rdp => {
-            let caps = probe::rdp_fingerprint(addr, timeout).await?;
+            let caps = probe::rdp_fingerprint_within(addr, timeout, timeout).await?;
             let mut host = DiscoveredHost::new(ip, port, DiscoverySource::Manual, rdp_label(&caps));
             host.protocol = ProtocolKind::Rdp;
             host.rdp = Some(caps);
@@ -507,6 +507,45 @@ mod tests {
         let rows = identify("127.0.0.1", Some(port), Duration::from_millis(1500)).await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].protocol, ProtocolKind::Vnc);
+        assert_eq!(rows[0].port, port);
+    }
+
+    #[tokio::test]
+    async fn an_rdp_server_slow_to_confirm_is_still_found() {
+        // Quick connect to `host:3389` said "Nothing answered" on the phone
+        // for both xrdp and a Windows PC that the desktop found at once: the
+        // Connection Confirm came back after the probe's 200 ms read.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    // The VNC and Boundary probes of the first wave send
+                    // nothing, so only the RDP probe gets past this read.
+                    let mut request = [0u8; 19];
+                    let read =
+                        tokio::time::timeout(Duration::from_secs(3), sock.read_exact(&mut request))
+                            .await;
+                    if !matches!(read, Ok(Ok(_))) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(450)).await;
+                    // TPKT, X.224 Connection Confirm, RDP_NEG_RSP selecting
+                    // PROTOCOL_SSL.
+                    const CONFIRM: [u8; 19] = [
+                        0x03, 0x00, 0x00, 0x13, 0x0e, 0xd0, 0x00, 0x00, 0x12, 0x34, 0x00, 0x02,
+                        0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00,
+                    ];
+                    let _ = sock.write_all(&CONFIRM).await;
+                    let mut sink = [0u8; 512];
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), sock.read(&mut sink)).await;
+                });
+            }
+        });
+        let rows = identify("127.0.0.1", Some(port), Duration::from_millis(1500)).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].protocol, ProtocolKind::Rdp);
         assert_eq!(rows[0].port, port);
     }
 

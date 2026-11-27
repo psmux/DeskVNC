@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { friendlyError, isSignInRefusal, qualityLevel, routeWords, stepOf } from "../status";
+import { LEVEL_WORDS, badgeLevel, friendlyError, isSignInRefusal, qualityLevel, routeWords, stepOf } from "../status";
 import { wireQuality } from "../useRemoteSession";
 
 describe("status words", () => {
@@ -21,6 +21,15 @@ describe("status words", () => {
     expect(qualityLevel({ rtt_ms: 400, fps: 30, throughput_bps: 1 })).toBe("poor");
     expect(qualityLevel({ rtt_ms: 90, fps: 2, throughput_bps: 1 })).toBe("fair");
     expect(qualityLevel({ rtt_ms: 30, fps: 0, throughput_bps: 1 })).toBe("good");
+  });
+
+  it("never says good connection while the session is reconnecting", () => {
+    // The stats are the last ones from before the link dropped.
+    const before = { rtt_ms: 30, fps: 30, throughput_bps: 1 };
+    expect(badgeLevel({ state: "connected" }, before)).toBe("good");
+    const lost = badgeLevel({ state: "reconnecting", attempt: 1, next_retry_ms: 1000, reason: "link down" }, before);
+    expect(lost).not.toBe("good");
+    expect(LEVEL_WORDS[lost]).toBe("Connection lost, trying again");
   });
 
   it("explains errors in plain words", () => {

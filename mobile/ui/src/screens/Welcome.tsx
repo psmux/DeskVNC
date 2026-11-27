@@ -45,7 +45,7 @@ export function Welcome({ onDone }: { onDone: () => void }) {
     <motion.div className="pt-safe pb-safe pl-safe pr-safe fixed inset-0 z-50 flex flex-col bg-bg" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
       <div className="flex justify-end px-4 pt-3">
         {!last && (
-          <button type="button" className="min-h-11 rounded-full px-4 text-body text-ink-dim" onClick={onDone}>
+          <button type="button" className="min-h-12 rounded-full px-4 text-body text-ink-dim" onClick={onDone}>
             Skip
           </button>
         )}

@@ -26,6 +26,25 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ### Fixed
 
+* Quick connect on the phone to `address:3389` said "Nothing answered" for an
+  RDP computer the desktop app found at once, an xrdp server and a Windows PC
+  alike, on the Android emulator's network and wherever the RDP server's
+  first reply takes more than 200 ms to come back. The RDP probe waited only
+  200 ms for the server's Connection Confirm, a wait that was raised to a
+  second for the VNC banner long ago and missed here. Quick connect now waits
+  as long for the RDP reply as for the connect, like the VNC and Boundary
+  probes, and the network scan waits a second, as it does for VNC.
+* The connection badge in a phone session kept its green "Good connection"
+  bars while the link was down and the session was reconnecting, next to a
+  "Reconnecting, hold on" banner, because it was coloured from the last
+  stats taken before the drop. It now turns red and reads "Connection lost,
+  trying again" until the session is back.
+* The welcome pages on the phone covered the screen, but the computers list
+  and the tab bar under them stayed reachable by TalkBack, a hardware
+  keyboard and UI automation. They are now inert until the welcome pages are
+  skipped or finished, as they already were under the add computer wizard
+  and a session. Skip on the welcome pages is now a 48 dp target, the size
+  Android asks for.
 * A double tap on the phone zoomed in instead of double clicking, in direct
   touch mode as well as trackpad mode, whenever the whole remote screen was
   showing, so an icon or a file could not be opened without pinching in

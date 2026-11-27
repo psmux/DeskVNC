@@ -45,7 +45,7 @@ import {
   type View,
 } from "./input/viewport";
 import { haptic } from "./haptics";
-import { qualityLevel, stepOf, stepWords, LEVEL_WORDS } from "./status";
+import { badgeLevel, stepOf, stepWords, LEVEL_WORDS } from "./status";
 import { hasVideoDecoder, useRemoteSession } from "./useRemoteSession";
 import { Coach, coachSeen } from "./ui/Coach";
 import { ConnectingScreen, ErrorScreen, ReconnectCard } from "./ui/ConnectingScreen";
@@ -908,7 +908,7 @@ export function SessionScreen({ api, target, title, onExit, onConnected }: Sessi
   // ------------------------------------------------------------ render
 
   const name = title?.trim() || hostName || (target.kind === "saved" && s.desktopName) || targetName(target);
-  const level = qualityLevel(s.stats);
+  const level = badgeLevel(s.state, s.stats);
   const showDesktop = s.phase === "connected" || s.phase === "ended";
   const reconnecting = s.state.state === "reconnecting";
   const keyBarVisible = showDesktop && (keyboardOn || keysOn);
