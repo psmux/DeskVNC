@@ -30,7 +30,7 @@ function Shell() {
 
   return (
     <div className="flex h-full">
-      <div className="contents" inert={!!(app.wizard || app.session)}>
+      <div className="contents" inert={!!(app.wizard || app.session || welcome)}>
       <SideRail tab={app.tab} onTab={app.setTab} />
       <main className="@container pl-safe pr-safe relative h-full min-w-0 flex-1 tab:pl-0">
         <AnimatePresence mode="wait" initial={false}>
