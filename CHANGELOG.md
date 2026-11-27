@@ -45,6 +45,10 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   skipped or finished, as they already were under the add computer wizard
   and a session. Skip on the welcome pages is now a 48 dp target, the size
   Android asks for.
+* DeskVNC Support on macOS keeps its data in
+  `~/Library/Application Support/com.psmux.deskvnc.boundary`. A data folder
+  from an earlier build moves there the first time the app starts, so
+  pairings carry over.
 * A double tap on the phone zoomed in instead of double clicking, in direct
   touch mode as well as trackpad mode, whenever the whole remote screen was
   showing, so an icon or a file could not be opened without pinching in
