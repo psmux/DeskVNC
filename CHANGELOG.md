@@ -10,6 +10,19 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Fixed
+
+* A tab's right click menu had no way to save its machine once that machine
+  was in the Library. "Add to saved hosts" only showed on a session opened
+  with no saved host behind it, and the automatic save had already put most
+  machines there under the server's desktop name. Opening one again, from its
+  tile or by an agent asking for it by name, gave the tab that host, and the
+  menu offered only the close commands, so there was no way from the tab to
+  name it or keep the password it signed in with. Such a tab now offers "Edit
+  saved host", the same dialog, which renames the host, can store the password
+  the session used, and links to the full editor. A tab with no saved host
+  still offers "Add to saved hosts".
+
 ## [0.36.8] (2026-11-26)
 
 ### Fixed

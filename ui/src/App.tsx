@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { SettingsProvider, useSettings } from "./state/SettingsContext";
 import { ToastProvider } from "./state/ToastContext";
 import { CredentialUnlockHost } from "./components/CredentialUnlock";
-import { HostsProvider } from "./state/HostsContext";
+import { HostsProvider, useHosts } from "./state/HostsContext";
 import { DiscoveryProvider } from "./state/DiscoveryContext";
 import { SessionsProvider } from "./state/SessionsContext";
 import { AgentActivityProvider, useAgentActivity } from "./state/AgentActivityContext";
@@ -18,7 +18,7 @@ import { SplitView } from "./components/SplitView";
 import { AgentRequests } from "./components/AgentRequests";
 import { AgentWall } from "./components/AgentWall";
 import { SaveTabHostDialog } from "./components/SaveTabHostDialog";
-import { saveTargetOf } from "./lib/saveTabHost";
+import { tabHostLabel, tabHostTargetOf, type TabHostAction } from "./lib/saveTabHost";
 import { SupportOverlay } from "./components/SupportOverlay";
 import { ToastShelf } from "./components/primitives";
 import { panes } from "./lib/layout";
@@ -144,12 +144,18 @@ function MainShell(): ReactNode {
     sessions,
   } = useTabs();
   const { driving } = useAgentActivity();
+  const { hosts } = useHosts();
 
-  /** The session whose tab chose "Add to saved hosts", while its dialog is open. */
-  const [savingSessionId, setSavingSessionId] = useState<string | null>(null);
+  /**
+   * The session whose tab chose "Add to saved hosts" or "Edit saved host",
+   * and which of the two, while its dialog is open. The choice is fixed when
+   * the dialog opens: saving binds the session to a host, and the dialog must
+   * not turn into the other one under the person's hands.
+   */
+  const [saving, setSaving] = useState<{ sessionId: string; action: TabHostAction } | null>(null);
   // Looked up every render, so a session that ends while the dialog is open
   // takes the dialog with it rather than saving a machine nobody is on.
-  const savingSession = savingSessionId ? sessions[savingSessionId] ?? null : null;
+  const savingSession = saving ? sessions[saving.sessionId] ?? null : null;
 
   /**
    * Which tabs hold a machine an agent is driving.
@@ -429,17 +435,24 @@ function MainShell(): ReactNode {
             onCloseMany={closeMany}
             onSelectRelative={selectRelative}
             drivenTabIds={drivenTabIds}
-            canSaveHost={(tab) => saveTargetOf(tab.sessionId, sessions) !== null}
+            saveHostLabel={(tab) => {
+              const target = tabHostTargetOf(tab.sessionId, sessions, hosts);
+              return target ? tabHostLabel(target.action) : null;
+            }}
             onSaveHost={(tabId) => {
               const tab = summaries.find((t) => t.id === tabId);
-              const target = tab ? saveTargetOf(tab.sessionId, sessions) : null;
-              if (target) setSavingSessionId(target.id);
+              const target = tab ? tabHostTargetOf(tab.sessionId, sessions, hosts) : null;
+              if (target) setSaving({ sessionId: target.session.id, action: target.action });
             }}
           />
         </div>
       ) : null}
-      {savingSession ? (
-        <SaveTabHostDialog session={savingSession} onClose={() => setSavingSessionId(null)} />
+      {saving && savingSession ? (
+        <SaveTabHostDialog
+          session={savingSession}
+          host={saving.action.kind === "edit" ? saving.action.host : null}
+          onClose={() => setSaving(null)}
+        />
       ) : null}
 
       {/*

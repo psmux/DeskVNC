@@ -57,7 +57,7 @@ export function TabStrip({
   onCloseMany,
   onSelectRelative,
   drivenTabIds = NO_TABS_DRIVEN,
-  canSaveHost,
+  saveHostLabel,
   onSaveHost,
 }: {
   tabs: readonly TabSummary[];
@@ -76,11 +76,12 @@ export function TabStrip({
    */
   drivenTabIds?: ReadonlySet<string>;
   /**
-   * Whether a tab's session was opened without a saved host and can become
-   * one. Only those tabs get "Add to saved hosts" in their menu.
+   * The words of the tab menu's item for keeping its machine: "Add to saved
+   * hosts" for a session opened without a saved host, "Edit saved host" for
+   * one that has one. Null for a tab that offers neither.
    */
-  canSaveHost?: (tab: TabSummary) => boolean;
-  /** "Add to saved hosts" was chosen on this tab. */
+  saveHostLabel?: (tab: TabSummary) => string | null;
+  /** That item was chosen on this tab. */
   onSaveHost?: (tabId: string) => void;
 }): ReactNode {
   const activeRef = useRef<HTMLDivElement>(null);
@@ -153,10 +154,9 @@ export function TabStrip({
     // The library cannot close, so all it can offer is clearing the strip.
     if (id === null) return [item("Close all tabs", "all")];
     const tab = tabs.find((t) => t.id === id);
+    const keepLabel = tab && onSaveHost ? saveHostLabel?.(tab) ?? null : null;
     const keep: MenuItem[] =
-      tab && onSaveHost && canSaveHost?.(tab)
-        ? [{ label: "Add to saved hosts", onSelect: () => onSaveHost(id) }]
-        : [];
+      keepLabel && onSaveHost ? [{ label: keepLabel, onSelect: () => onSaveHost(id) }] : [];
     return [
       ...keep,
       item("Close tab", "this", keep.length > 0),

@@ -2,14 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { SessionParams } from "../hooks/useSession";
 import { blankHostProfile, type DiscoveredHost, type HostProfile } from "./types";
 import {
-  canSaveAsHost,
   credentialsLabel,
   existingHostFor,
   newHostForSession,
   parseCredentialState,
   saveCredentialsByDefault,
-  saveTargetOf,
   suggestedName,
+  tabHostAction,
+  tabHostLabel,
+  tabHostTargetOf,
   updatedHost,
 } from "./saveTabHost";
 
@@ -29,35 +30,54 @@ function saved(over: Partial<HostProfile>): HostProfile {
   return { ...blankHostProfile(), id: "h1", friendlyName: "Studio", address: "192.0.2.10", port: 5900, ...over };
 }
 
-describe("which tabs offer Add to saved hosts", () => {
-  it("offers it for a session opened by address", () => {
-    expect(canSaveAsHost(params())).toBe(true);
-    expect(canSaveAsHost(params({ protocol: "rdp", port: 3389 }))).toBe(true);
-    expect(canSaveAsHost(params({ protocol: "ssh", port: 22 }))).toBe(true);
+describe("what a tab's menu offers for keeping its machine", () => {
+  const ADD = { kind: "add" };
+
+  it("offers Add to saved hosts for a session opened by address", () => {
+    expect(tabHostAction(params(), [])).toEqual(ADD);
+    expect(tabHostAction(params({ protocol: "rdp", port: 3389 }), [])).toEqual(ADD);
+    expect(tabHostAction(params({ protocol: "ssh", port: 22 }), [])).toEqual(ADD);
+    expect(tabHostLabel({ kind: "add" })).toBe("Add to saved hosts");
   });
 
-  it("does not offer it for a session that already belongs to a saved host", () => {
-    expect(canSaveAsHost(params({ profileId: "h1" }))).toBe(false);
+  it("offers Edit saved host for a session of a saved host, auto saved or not", () => {
+    // The automatic save names a host after the server's desktop. Opening it
+    // again from the Library, or by an agent asking for it by name, gives the
+    // session that host's id. The tab used to offer nothing at all then.
+    const auto = saved({ id: "h1", friendlyName: "test desktop" });
+    const action = tabHostAction(params({ profileId: "h1" }), [auto]);
+    expect(action).toEqual({ kind: "edit", host: auto });
+    expect(tabHostLabel({ kind: "edit", host: auto })).toBe("Edit saved host");
+  });
+
+  it("offers Add when the session's host is not in the list, so the tab is never left with nothing", () => {
+    expect(tabHostAction(params({ profileId: "deleted" }), [saved({ id: "h1" })])).toEqual(ADD);
   });
 
   it("leaves Boundary out, as the automatic save does", () => {
-    expect(canSaveAsHost(params({ protocol: "boundary", address: "123456789", port: 0 }))).toBe(false);
+    const boundary = params({ protocol: "boundary", address: "123456789", port: 0 });
+    expect(tabHostAction(boundary, [])).toBeNull();
+    expect(tabHostAction({ ...boundary, profileId: "h1" }, [saved({ id: "h1", protocol: "boundary" })])).toBeNull();
   });
 
-  it("needs an address to save", () => {
-    expect(canSaveAsHost(params({ address: null }))).toBe(false);
-    expect(canSaveAsHost(params({ address: "  " }))).toBe(false);
+  it("needs an address", () => {
+    expect(tabHostAction(params({ address: null }), [])).toBeNull();
+    expect(tabHostAction(params({ address: "  " }), [])).toBeNull();
   });
 
-  it("acts on the focused pane's session, and only an unsaved one", () => {
+  it("acts on the focused pane's session, saved or not", () => {
+    const host = saved({ id: "h1" });
     const sessions = {
       a: { params: params({ sessionId: "a" }) },
       b: { params: params({ sessionId: "b", profileId: "h1" }) },
     };
-    expect(saveTargetOf("a", sessions)).toBe(sessions.a);
-    expect(saveTargetOf("b", sessions)).toBeNull();
-    expect(saveTargetOf(null, sessions)).toBeNull();
-    expect(saveTargetOf("gone", sessions)).toBeNull();
+    expect(tabHostTargetOf("a", sessions, [host])).toEqual({ session: sessions.a, action: ADD });
+    expect(tabHostTargetOf("b", sessions, [host])).toEqual({
+      session: sessions.b,
+      action: { kind: "edit", host },
+    });
+    expect(tabHostTargetOf(null, sessions, [host])).toBeNull();
+    expect(tabHostTargetOf("gone", sessions, [host])).toBeNull();
   });
 });
 
