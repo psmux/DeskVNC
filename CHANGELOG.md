@@ -10,8 +10,30 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 
 ## [Unreleased]
 
+### Added
+
+* The phone app can reach a VNC or RDP computer through an SSH tunnel, as the
+  desktop app has done per host for a long time (#91). Edit the computer,
+  open More options and switch on "Connect through SSH": the SSH computer
+  (empty means the computer itself), its port and user name, and a password
+  or a pasted private key with its passphrase. The password or key is kept in
+  the iOS Keychain or the Android Keystore, apart from the computer's own
+  sign in. The first connect shows the SSH computer's key fingerprint to
+  confirm, and a key that changes later stops the connect. The computer's
+  address is reached from the SSH computer, so `localhost` means that
+  machine, which is how a VNC server listening only on its own loopback is
+  reached.
+
 ### Fixed
 
+* A double tap on the phone zoomed in instead of double clicking, in direct
+  touch mode as well as trackpad mode, whenever the whole remote screen was
+  showing, so an icon or a file could not be opened without pinching in
+  first (#91). A double tap is now always a double click. In direct touch
+  the first tap clicks at once and the second lands on the same spot as the
+  first, so the computer counts a double click even when the finger comes
+  down a few pixels away; a third quick tap makes a triple click. In
+  trackpad mode both clicks go at the pointer. Pinch zooms, in both modes.
 * A tab's right click menu had no way to save its machine once that machine
   was in the Library. "Add to saved hosts" only showed on a session opened
   with no saved host behind it, and the automatic save had already put most

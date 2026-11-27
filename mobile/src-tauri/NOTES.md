@@ -96,6 +96,8 @@ Xcode project):
   `x-height`. The body length of a snapshot must be `width * height * 4`.
 * `hosts_set_secret`: a missing or null `username` or `password` leaves that
   value as it is, an empty string clears it.
+* `hosts_set_ssh_secret` follows the same rule for `password`, `key` and
+  `passphrase`.
 * `session_credentials` with both `username` and `password` missing cancels
   the prompt and abandons the attempt. `save` only applies to a saved host,
   and is written only after the server accepts the credential.
