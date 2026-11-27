@@ -29,6 +29,7 @@ use crate::keys::{self, KeyCombo};
 use crate::state::{AppState, Session, Sessions};
 use crate::store::{self, Host, HostDraft, Protocol};
 use crate::thumbs;
+use crate::tunnel::{TunnelSecret, TunnelSettings};
 use crate::vault::Secret;
 
 /// `ConnectTarget` in `contract.ts`.
@@ -95,12 +96,15 @@ pub async fn session_connect(
     on_frame: Channel<InvokeResponseBody>,
     on_event: Channel<Value>,
     never_relay: Option<bool>,
+    accept_ssh_host_key: Option<String>,
 ) -> Result<Connected, String> {
     // Never use relays lives in the phone's settings and comes with every
     // connect. Only Boundary reads it.
     if let Some(on) = never_relay {
         state.drivers.boundary.set_never_relay(on);
     }
+    // A saved computer's SSH tunnel, with its secret, when it has one on.
+    let mut tunnel: Option<(TunnelSettings, TunnelSecret)> = None;
     let (kind, mut options, host_id) = match target {
         ConnectTarget::Saved { host_id } => {
             let host = state
@@ -142,6 +146,21 @@ pub async fn session_connect(
                 password: secret.password,
                 domain: host.domain.clone(),
             };
+            if let Some(settings) = host
+                .ssh_tunnel
+                .clone()
+                .filter(|t| t.enabled && host.protocol != Protocol::Boundary)
+            {
+                let secrets = state.secrets.clone();
+                let lookup = host_id.clone();
+                let secret = super::blocking(move || secrets.load_tunnel(&lookup))
+                    .await
+                    .map_err(|e| {
+                        format!("The SSH tunnel's password or key could not be read: {e}")
+                    })?
+                    .unwrap_or_default();
+                tunnel = Some((settings, secret));
+            }
             (kind, options, Some(host_id))
         }
         ConnectTarget::Adhoc {
@@ -213,8 +232,24 @@ pub async fn session_connect(
     // and the connect would only time out. Say so now instead, so the UI can
     // ask for the permission. Boundary finds its own way, through a relay
     // when the direct path is closed.
-    if kind != ProtocolKind::Boundary {
+    // Through a tunnel the phone itself only dials the SSH computer; the
+    // VNC address may well be `localhost` on the far side.
+    if let Some((settings, _)) = &tunnel {
+        crate::localnet::check(&app, &settings.gateway(&options.host), settings.port).await?;
+    } else if kind != ProtocolKind::Boundary {
         crate::localnet::check(&app, &options.host, options.port).await?;
+    }
+
+    // Bring the tunnel up now, so an unknown SSH key or a refused sign in
+    // comes back from this call, before any session exists. The connector
+    // then serves every attempt, reconnects included.
+    if let Some((settings, secret)) = &tunnel {
+        let cfg = settings.ssh_config(&options.host, secret)?;
+        let connector =
+            crate::tunnel::establish(cfg, &state.known_hosts, accept_ssh_host_key.as_deref())
+                .await?;
+        tracing::info!("the session will run over the ssh tunnel");
+        apply_tunnel(&mut options, connector);
     }
 
     // Trust on first use pins, every scheme, as the desktop loads them.
@@ -278,6 +313,20 @@ pub async fn session_connect(
         kept_secret,
     });
     Ok(Connected { session_id: id })
+}
+
+/// Route a session through an established tunnel.
+///
+/// VNC only: the SSH layer already encrypts and authenticates the path, and
+/// the usual tunnelled setup is a loopback only server offering no security
+/// type at all, so the plain types are allowed, as on the desktop. RDP keeps
+/// its TLS and NLA inside the tunnel, because the SSH computer vouches for
+/// itself, not for the Windows machine behind it.
+fn apply_tunnel(options: &mut ConnectOptions, connector: remote_core::Connector) {
+    options.connector = Some(connector);
+    if let remote_core::ProtocolOptions::Vnc(vnc) = &mut options.protocol {
+        vnc.allow_insecure = true;
+    }
 }
 
 fn options_for(protocol: Protocol, address: &str, port: u16) -> ConnectOptions {
@@ -937,6 +986,42 @@ mod tests {
             5940
         );
         assert_eq!(options_for(Protocol::Vnc, "192.0.2.1", 0).host, "192.0.2.1");
+    }
+
+    struct Nowhere;
+    impl remote_core::StreamConnector for Nowhere {
+        fn connect(
+            &self,
+            _: &str,
+            _: u16,
+            _: Duration,
+        ) -> remote_core::transport::ConnectFuture<'_> {
+            Box::pin(async { Err(remote_core::transport::TransportError::Timeout) })
+        }
+    }
+
+    /// A tunnelled VNC session may take a server with no security type, as
+    /// on the desktop; RDP keeps its own TLS and NLA inside the tunnel.
+    #[test]
+    fn a_tunnel_carries_the_session_and_relaxes_only_vnc() {
+        let mut vnc = options_for(Protocol::Vnc, "localhost", 5902);
+        assert!(vnc.connector.is_none() && !vnc.vnc_mut().allow_insecure);
+        apply_tunnel(&mut vnc, remote_core::Connector(Arc::new(Nowhere)));
+        assert!(vnc.connector.is_some());
+        assert!(vnc.vnc_mut().allow_insecure);
+        assert_eq!(
+            (vnc.host.as_str(), vnc.port),
+            ("localhost", 5902),
+            "the far side resolves the address"
+        );
+
+        let mut rdp = options_for(Protocol::Rdp, "10.0.0.5", 0);
+        apply_tunnel(&mut rdp, remote_core::Connector(Arc::new(Nowhere)));
+        assert!(rdp.connector.is_some());
+        assert!(!matches!(
+            rdp.protocol,
+            remote_core::ProtocolOptions::Vnc(_)
+        ));
     }
 
     #[tokio::test]

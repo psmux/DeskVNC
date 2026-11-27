@@ -73,6 +73,7 @@ function fakeApi(script: Script) {
       });
       return { sessionId: id };
     }),
+    hostsSetSshSecret: vi.fn(async () => {}),
     hostsSetSecret: vi.fn((...args: unknown[]) => {
       calls.secret.push(args);
       calls.order.push("forget");

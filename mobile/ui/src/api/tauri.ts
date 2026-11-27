@@ -13,6 +13,8 @@ export const tauriApi: Api = {
   hostsDelete: (id) => invoke<void>("hosts_delete", { id }),
   hostsSetSecret: (id, username, password) =>
     invoke<void>("hosts_set_secret", { id, username: username ?? undefined, password: password ?? undefined }),
+  hostsSetSshSecret: (id, password, key, passphrase) =>
+    invoke<void>("hosts_set_ssh_secret", { id, password: password ?? undefined, key: key ?? undefined, passphrase: passphrase ?? undefined }),
   hostsThumbnail: (id) => invoke<string | null>("hosts_thumbnail", { id }),
 
   async scanStart(onEvent) {
@@ -25,7 +27,7 @@ export const tauriApi: Api = {
 
   boundaryResolve: (code) => invoke<{ invitation: string }>("boundary_resolve", { code }),
 
-  async sessionConnect(target: ConnectTarget, onFrame, onEvent) {
+  async sessionConnect(target: ConnectTarget, onFrame, onEvent, acceptSshHostKey) {
     const frames = new Channel<ArrayBuffer>();
     frames.onmessage = onFrame;
     const events = new Channel<SessionEvent>();
@@ -35,6 +37,7 @@ export const tauriApi: Api = {
       onFrame: frames,
       onEvent: events,
       neverRelay: readPrefs().neverRelay,
+      acceptSshHostKey,
     });
   },
   // Raw on iOS; on Android Tauri delivers it as a JSON array of numbers,

@@ -5,7 +5,7 @@
  * Steps: how (pick a way to connect), where (address, or code for Boundary),
  * look (name, artwork, colour), signin (optional), done.
  */
-import type { FoundComputer, Host, HostDraft, HostOs, Protocol } from "../api/contract";
+import type { FoundComputer, Host, HostDraft, HostOs, Protocol, SshTunnel } from "../api/contract";
 import { defaultPort, looksLikeLink, parsePhoneTarget } from "./address";
 import { isCompleteCode, isInvitation, codeDigits } from "./code";
 
@@ -33,8 +33,27 @@ export interface WizardState {
   password: string;
   remember: boolean;
   favorite: boolean;
+  /** VNC and RDP: the SSH tunnel, under More options on the address step. */
+  tunnel: TunnelForm;
   error: string | null;
 }
+
+/** The SSH tunnel fields. The secrets go to the vault on save, never into the host. */
+export interface TunnelForm {
+  on: boolean;
+  /** Empty means the computer's own address. */
+  host: string;
+  port: number;
+  user: string;
+  auth: SshTunnel["auth"];
+  password: string;
+  key: string;
+  passphrase: string;
+  /** A password or key is already in the vault, so leaving these empty keeps it. */
+  saved: boolean;
+}
+
+export const NO_TUNNEL: TunnelForm = { on: false, host: "", port: 22, user: "", auth: "password", password: "", key: "", passphrase: "", saved: false };
 
 export type WizardAction =
   | { type: "pick-protocol"; protocol: Protocol }
@@ -49,6 +68,7 @@ export type WizardAction =
   | { type: "username"; text: string }
   | { type: "password"; text: string }
   | { type: "remember"; on: boolean }
+  | { type: "tunnel"; patch: Partial<TunnelForm> }
   | { type: "next" }
   | { type: "back" }
   | { type: "saved"; id: string };
@@ -76,6 +96,7 @@ export function newWizard(protocol: Protocol | null = null): WizardState {
     password: "",
     remember: true,
     favorite: false,
+    tunnel: NO_TUNNEL,
     error: null,
   };
   return protocol ? withProtocol(base, protocol, true) : base;
@@ -109,6 +130,17 @@ export function wizardFromHost(host: Host): WizardState {
     username: host.username ?? "",
     remember: host.hasPassword,
     favorite: host.favorite,
+    tunnel: host.sshTunnel
+      ? {
+          ...NO_TUNNEL,
+          on: host.sshTunnel.enabled,
+          host: host.sshTunnel.host,
+          port: host.sshTunnel.port || 22,
+          user: host.sshTunnel.user,
+          auth: host.sshTunnel.auth === "key" ? "key" : "password",
+          saved: Boolean(host.hasSshSecret),
+        }
+      : NO_TUNNEL,
   };
 }
 
@@ -203,6 +235,8 @@ export function reduceWizard(s: WizardState, a: WizardAction): WizardState {
       return { ...s, password: a.text };
     case "remember":
       return { ...s, remember: a.on };
+    case "tunnel":
+      return { ...s, tunnel: { ...s.tunnel, ...a.patch }, error: null };
     case "next": {
       const check = canContinue(s);
       if (!check.ok) return { ...s, error: check.error };
@@ -253,7 +287,7 @@ export function canContinue(s: WizardState): { ok: true } | { ok: false; error: 
       if (!Number.isInteger(s.port) || s.port < 1 || s.port > 65535) {
         return { ok: false, error: "The port number must be between 1 and 65535" };
       }
-      return { ok: true };
+      return tunnelCheck(s.tunnel);
     }
     case "look":
       return s.name.trim() ? { ok: true } : { ok: false, error: "Give it a name you will recognise" };
@@ -261,6 +295,32 @@ export function canContinue(s: WizardState): { ok: true } | { ok: false; error: 
     case "done":
       return { ok: true };
   }
+}
+
+/** Whether the tunnel fields are complete, when the tunnel is on. */
+export function tunnelCheck(t: TunnelForm): { ok: true } | { ok: false; error: string } {
+  if (!t.on) return { ok: true };
+  if (!t.user.trim()) return { ok: false, error: "Type the user name for the SSH computer" };
+  if (!Number.isInteger(t.port) || t.port < 1 || t.port > 65535) return { ok: false, error: "The SSH port must be between 1 and 65535" };
+  const typed = t.auth === "key" ? t.key.trim() !== "" : t.password !== "";
+  if (!typed && !t.saved) {
+    return { ok: false, error: t.auth === "key" ? "Paste the private key for the SSH computer" : "Type the password for the SSH computer" };
+  }
+  if (t.auth === "key" && t.key.trim() !== "" && !/-----BEGIN [A-Z ]*PRIVATE KEY-----|PuTTY-User-Key-File-/.test(t.key)) {
+    return { ok: false, error: "That does not look like a private key. It starts with -----BEGIN OPENSSH PRIVATE KEY-----" };
+  }
+  return { ok: true };
+}
+
+/**
+ * What to send to the vault for the tunnel after a save, or null for
+ * nothing: a typed password or key is stored, and a tunnel switched off
+ * forgets what was stored for it.
+ */
+export function tunnelSecret(t: TunnelForm): { password: string | null; key: string | null; passphrase: string | null } | null {
+  if (!t.on) return t.saved ? { password: "", key: "", passphrase: "" } : null;
+  if (t.auth === "password") return t.password ? { password: t.password, key: null, passphrase: null } : null;
+  return t.key.trim() ? { password: null, key: t.key, passphrase: t.passphrase } : null;
 }
 
 /** What the Boundary field holds, so the screen knows whether to look a code up first. */
@@ -307,5 +367,9 @@ export function toDraft(s: WizardState, resolvedInvitation?: string): HostDraft 
     favorite: s.favorite,
     domain: protocol === "rdp" ? s.domain.trim() || null : null,
     boundaryInvitation,
+    sshTunnel:
+      protocol !== "boundary" && (s.tunnel.on || s.tunnel.saved || s.tunnel.user)
+        ? { enabled: s.tunnel.on, host: s.tunnel.host.trim(), port: s.tunnel.port, user: s.tunnel.user.trim(), auth: s.tunnel.auth }
+        : null,
   };
 }

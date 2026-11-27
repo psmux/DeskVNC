@@ -17,6 +17,7 @@ mod pins;
 mod state;
 mod store;
 mod thumbs;
+mod tunnel;
 mod vault;
 
 /// The desktop shell's frame and input codec, compiled into this crate from
@@ -85,6 +86,7 @@ fn install_boundary(state: &AppState) {
                 favorite: existing.as_ref().is_some_and(|h| h.favorite),
                 domain: None,
                 boundary_invitation: None,
+                ssh_tunnel: None,
             };
             if let Err(error) = hosts.save(draft) {
                 tracing::warn!(%error, "could not save a paired computer");
@@ -100,6 +102,7 @@ fn build_state(app: &tauri::App) -> Result<AppState, Box<dyn std::error::Error>>
         hosts: Arc::new(store::HostStore::open(&data_dir)?),
         secrets: vault::platform_store(),
         pins: pins::PinStore::open(&data_dir),
+        known_hosts: tunnel::KnownHosts::open(&data_dir),
         drivers: Drivers {
             vnc: Arc::new(vnc_core::VncDriver::new()),
             rdp: Arc::new(rdp_core::RdpDriver::new()),
@@ -130,6 +133,7 @@ pub fn run() {
             commands::hosts::hosts_save,
             commands::hosts::hosts_delete,
             commands::hosts::hosts_set_secret,
+            commands::hosts::hosts_set_ssh_secret,
             commands::hosts::hosts_thumbnail,
             commands::scan::scan_start,
             commands::scan::scan_stop,

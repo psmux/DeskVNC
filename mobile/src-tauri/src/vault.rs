@@ -13,12 +13,18 @@
 //!
 //! One vault entry per host, keyed by host id, holding a small JSON blob so a
 //! user name typed at a prompt can travel with the password it belongs to.
+//! A host that connects through an SSH tunnel has a second entry, keyed
+//! `<host id>.ssh`, for the tunnel's password or private key. It is separate
+//! so that saving the computer's own password, which replaces that entry
+//! whole, can never drop the tunnel's.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+use crate::tunnel::TunnelSecret;
 
 /// The service name every entry is filed under.
 #[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
@@ -47,12 +53,23 @@ pub trait SecretStore: Send + Sync {
     fn load(&self, host_id: &str) -> Result<Option<Secret>, String>;
     fn save(&self, host_id: &str, secret: &Secret) -> Result<(), String>;
     fn delete(&self, host_id: &str) -> Result<(), String>;
+    fn load_tunnel(&self, host_id: &str) -> Result<Option<TunnelSecret>, String>;
+    fn save_tunnel(&self, host_id: &str, secret: &TunnelSecret) -> Result<(), String>;
+    fn delete_tunnel(&self, host_id: &str) -> Result<(), String>;
+}
+
+/// The vault account a host's tunnel secret is filed under. A host id never
+/// holds a dot (`store::validate_id`), so this cannot be another host's.
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
+pub fn tunnel_account(host_id: &str) -> String {
+    format!("{host_id}.ssh")
 }
 
 /// Memory only. Used by the tests, and by a desktop build of this crate.
 #[derive(Default)]
 pub struct MemoryStore {
     map: Mutex<HashMap<String, Secret>>,
+    tunnels: Mutex<HashMap<String, TunnelSecret>>,
 }
 
 impl SecretStore for MemoryStore {
@@ -67,6 +84,17 @@ impl SecretStore for MemoryStore {
         self.map.lock().remove(host_id);
         Ok(())
     }
+    fn load_tunnel(&self, host_id: &str) -> Result<Option<TunnelSecret>, String> {
+        Ok(self.tunnels.lock().get(host_id).cloned())
+    }
+    fn save_tunnel(&self, host_id: &str, secret: &TunnelSecret) -> Result<(), String> {
+        self.tunnels.lock().insert(host_id.into(), secret.clone());
+        Ok(())
+    }
+    fn delete_tunnel(&self, host_id: &str) -> Result<(), String> {
+        self.tunnels.lock().remove(host_id);
+        Ok(())
+    }
 }
 
 /// The platform vault, through `keyring-core`'s default store.
@@ -78,12 +106,9 @@ impl VaultStore {
     fn entry(host_id: &str) -> Result<keyring_core::Entry, String> {
         keyring_core::Entry::new(SERVICE, host_id).map_err(|e| e.to_string())
     }
-}
 
-#[cfg(any(target_os = "ios", target_os = "android"))]
-impl SecretStore for VaultStore {
-    fn load(&self, host_id: &str) -> Result<Option<Secret>, String> {
-        match Self::entry(host_id)?.get_password() {
+    fn load_json<T: serde::de::DeserializeOwned>(account: &str) -> Result<Option<T>, String> {
+        match Self::entry(account)?.get_password() {
             Ok(json) => serde_json::from_str(&json)
                 .map(Some)
                 .map_err(|e| format!("a saved password could not be read: {e}")),
@@ -91,17 +116,41 @@ impl SecretStore for VaultStore {
             Err(e) => Err(e.to_string()),
         }
     }
-    fn save(&self, host_id: &str, secret: &Secret) -> Result<(), String> {
-        let json = serde_json::to_string(secret).map_err(|e| e.to_string())?;
-        Self::entry(host_id)?
+
+    fn save_json<T: Serialize>(account: &str, value: &T) -> Result<(), String> {
+        let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        Self::entry(account)?
             .set_password(&json)
             .map_err(|e| e.to_string())
     }
-    fn delete(&self, host_id: &str) -> Result<(), String> {
-        match Self::entry(host_id)?.delete_credential() {
+
+    fn delete_account(account: &str) -> Result<(), String> {
+        match Self::entry(account)?.delete_credential() {
             Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+impl SecretStore for VaultStore {
+    fn load(&self, host_id: &str) -> Result<Option<Secret>, String> {
+        Self::load_json(host_id)
+    }
+    fn save(&self, host_id: &str, secret: &Secret) -> Result<(), String> {
+        Self::save_json(host_id, secret)
+    }
+    fn delete(&self, host_id: &str) -> Result<(), String> {
+        Self::delete_account(host_id)
+    }
+    fn load_tunnel(&self, host_id: &str) -> Result<Option<TunnelSecret>, String> {
+        Self::load_json(&tunnel_account(host_id))
+    }
+    fn save_tunnel(&self, host_id: &str, secret: &TunnelSecret) -> Result<(), String> {
+        Self::save_json(&tunnel_account(host_id), secret)
+    }
+    fn delete_tunnel(&self, host_id: &str) -> Result<(), String> {
+        Self::delete_account(&tunnel_account(host_id))
     }
 }
 
@@ -159,5 +208,35 @@ mod tests {
         store.delete("a").unwrap();
         store.delete("a").unwrap();
         assert_eq!(store.load("a").unwrap(), None);
+    }
+
+    /// The tunnel's secret is its own entry: saving or forgetting the
+    /// computer's password leaves it alone.
+    #[test]
+    fn the_tunnel_secret_is_kept_apart_from_the_sign_in() {
+        let store = MemoryStore::default();
+        let t = TunnelSecret {
+            key: Some("KEY".into()),
+            ..Default::default()
+        };
+        store.save_tunnel("a", &t).unwrap();
+        store
+            .save(
+                "a",
+                &Secret {
+                    username: None,
+                    password: Some("pw".into()),
+                },
+            )
+            .unwrap();
+        store.delete("a").unwrap();
+        assert_eq!(store.load_tunnel("a").unwrap(), Some(t));
+        store.delete_tunnel("a").unwrap();
+        assert_eq!(store.load_tunnel("a").unwrap(), None);
+        assert_eq!(tunnel_account("6f1c"), "6f1c.ssh");
+        assert!(
+            crate::store::validate_id("6f1c.ssh").is_err(),
+            "a tunnel account can never be a host id"
+        );
     }
 }

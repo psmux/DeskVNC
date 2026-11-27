@@ -17,6 +17,7 @@ by the UI, and unknown optional fields are ignored by Rust.
 | `hosts_save` | `{ host: HostDraft }` | `Host` |
 | `hosts_delete` | `{ id }` | nothing |
 | `hosts_set_secret` | `{ id, username?, password? }` | nothing. Stored in the iOS Keychain or the Android Keystore, never in the hosts file |
+| `hosts_set_ssh_secret` | `{ id, password?, key?, passphrase? }` | nothing. The SSH tunnel's password, or its private key text and passphrase, in the same vault under its own entry. A new password and a new key replace each other |
 | `hosts_thumbnail` | `{ id }` | `string \| null`, a `data:image/jpeg;base64,...` URL, about 480 px wide |
 
 ## Discovery
@@ -44,7 +45,7 @@ that does not resolve, gives `[]`, not an error. It never authenticates.
 
 | Command | Args | Returns |
 |---|---|---|
-| `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent>, neverRelay?: boolean }` | `{ sessionId }`. `neverRelay` is the Never use relays setting: Boundary then uses no relay and no address directory |
+| `session_connect` | `{ target: ConnectTarget, onFrame: Channel<ArrayBuffer>, onEvent: Channel<SessionEvent>, neverRelay?: boolean, acceptSshHostKey?: string }` | `{ sessionId }`. `neverRelay` is the Never use relays setting: Boundary then uses no relay and no address directory. `acceptSshHostKey`: see SSH tunnel below |
 | `boundary_resolve` | `{ code }` | `{ invitation }`. Accepts `1234 5678 9012`, `123456789012` or a full `boundary1:` invitation |
 | `session_input` | binary body (raw, or on Android the JSON array of numbers Tauri makes of it), headers `x-session-id`, `x-input-seq` | nothing. Body format is the desktop `send_input` format |
 | `session_text` | `{ sessionId, text }` | nothing. Types a string, used by the phone keyboard |
@@ -56,6 +57,20 @@ that does not resolve, gives `[]`, not an error. It never authenticates.
 | `session_snapshot` | RGBA body (raw, or base64 text on Android), headers `x-session-id`, `x-width`, `x-height` | nothing. Saves the thumbnail for the host card |
 | `session_disconnect` | `{ sessionId }` | nothing |
 | `session_save_host` | `{ sessionId, host: HostDraft }` | `Host`. Saves the computer an `adhoc` session reached and makes the session that host's. Refused until the session reached `connected` |
+
+### SSH tunnel
+
+A VNC or RDP `Host` may carry `sshTunnel: { enabled, host, port, user, auth:
+"password" | "key" }` and Rust sets `hasSshSecret`. With `enabled`, a `saved`
+connect dials the SSH computer (`host`, or the computer's own address when
+empty) before any session exists, and the session then runs over a
+`direct-tcpip` channel, so the computer's address is resolved on the SSH
+computer. When that computer's key is not trusted yet, `session_connect`
+fails with `ssh-host-key-prompt:` followed by JSON `{ host, port, keyType,
+fingerprint }`; the UI asks, and a yes calls `session_connect` again with
+`acceptSshHostKey` set to that fingerprint, which is pinned in
+`ssh_known_hosts.json`. A key that changed fails with a plain error and is
+never promptable. `hosts_delete` forgets the tunnel's key.
 
 `session_save_host` is how a computer connected to with no saved entry is
 added to Your computers. A password typed at the sign in prompt with

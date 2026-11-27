@@ -91,7 +91,7 @@ export type CoachGesture =
   | "keyboard"
   | "dt-click"
   | "dt-right"
-  | "dt-zoom";
+  | "double";
 
 /** One animated gesture, the hand acting it out on a tiny screen. */
 export function GestureScene({ kind, pad = false }: { kind: CoachGesture; pad?: boolean }) {
@@ -198,10 +198,9 @@ export function GestureScene({ kind, pad = false }: { kind: CoachGesture; pad?: 
           <Hand x={34} y={27} scale={0.55} className="dv-a-hold" />
         </MiniScreen>
       );
-    case "dt-zoom":
+    case "double":
       return (
-        <MiniScreen>
-          <rect x="14" y="14" width="40" height="26" rx="3" fill="var(--s-accent)" opacity="0.35" className="dv-a-grow-late" style={{ transformOrigin: "34px 27px" }} />
+        <MiniScreen pad={pad}>
           <Ripple x={34} y={27} />
           <Ripple x={34} y={27} delay={260} />
           <Hand x={34} y={27} scale={0.55} className="dv-a-doubletap" />

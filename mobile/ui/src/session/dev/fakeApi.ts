@@ -273,6 +273,7 @@ export function makeFakeApi(params = new URLSearchParams(location.search)): Api 
     hostsSave: async (h) => ({ ...hosts[0], ...h, id: h.id ?? "new" }) as Host,
     hostsDelete: async () => {},
     hostsSetSecret: async () => {},
+    hostsSetSshSecret: async () => {},
     hostsThumbnail: async () => null,
     scanStart: async () => {},
     scanStop: async () => {},

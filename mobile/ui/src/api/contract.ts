@@ -23,9 +23,29 @@ export interface Host {
   domain?: string | null;
   /** Boundary only: the saved invitation for a computer that allows reconnects. */
   boundaryInvitation?: string | null;
+  /** VNC and RDP: reach the computer through an SSH tunnel. */
+  sshTunnel?: SshTunnel | null;
+  /** The tunnel's password or private key is in the phone's vault. Set by Rust. */
+  hasSshSecret?: boolean;
 }
 
-export type HostDraft = Omit<Host, "id" | "hasPassword" | "lastConnectedAt" | "hasThumbnail"> & {
+/**
+ * An SSH tunnel, as the desktop has per host. The phone dials the SSH
+ * computer and the SSH computer opens the VNC or RDP connection from its
+ * side, so the computer's address is read there: `localhost` means the SSH
+ * computer itself. The password or key never travels in this object; it goes
+ * to the vault with `hostsSetSshSecret`.
+ */
+export interface SshTunnel {
+  enabled: boolean;
+  /** The SSH computer. Empty means the computer's own address. */
+  host: string;
+  port: number;
+  user: string;
+  auth: "password" | "key";
+}
+
+export type HostDraft = Omit<Host, "id" | "hasPassword" | "lastConnectedAt" | "hasThumbnail" | "hasSshSecret"> & {
   id?: string;
 };
 
@@ -111,6 +131,32 @@ export type LocalNetwork = "granted" | "denied";
  * would drop the connection for want of that permission. The same sentence
  * as `REFUSED` in `src-tauri/src/localnet.rs`.
  */
+/**
+ * The first words of the error `session_connect` gives when a tunnel's SSH
+ * computer has a key this phone has not trusted yet. The rest is JSON. Same
+ * text as `HOST_KEY_PROMPT` in `src-tauri/src/tunnel.rs`.
+ */
+export const SSH_HOST_KEY_PROMPT = "ssh-host-key-prompt:";
+
+export interface SshHostKeyPrompt {
+  host: string;
+  port: number;
+  keyType: string;
+  fingerprint: string;
+}
+
+/** The prompt inside a `session_connect` error, or null for any other error. */
+export function parseSshHostKeyPrompt(message: string): SshHostKeyPrompt | null {
+  if (!message.startsWith(SSH_HOST_KEY_PROMPT)) return null;
+  try {
+    const p = JSON.parse(message.slice(SSH_HOST_KEY_PROMPT.length)) as Partial<SshHostKeyPrompt>;
+    if (typeof p.fingerprint !== "string" || typeof p.host !== "string" || typeof p.port !== "number") return null;
+    return { host: p.host, port: p.port, keyType: typeof p.keyType === "string" ? p.keyType : "", fingerprint: p.fingerprint };
+  } catch {
+    return null;
+  }
+}
+
 export const LOCAL_NETWORK_REFUSED =
   "Android is not letting DeskVNC reach the local network, so it cannot get to this computer. Allow Nearby devices for DeskVNC.";
 
@@ -119,6 +165,9 @@ export interface Api {
   hostsSave(host: HostDraft): Promise<Host>;
   hostsDelete(id: string): Promise<void>;
   hostsSetSecret(id: string, username: string | null, password: string | null): Promise<void>;
+  /** The tunnel's secret: a string sets it, null keeps it, "" forgets it.
+   *  A new password and a new key replace each other. */
+  hostsSetSshSecret(id: string, password: string | null, key: string | null, passphrase: string | null): Promise<void>;
   hostsThumbnail(id: string): Promise<string | null>;
 
   scanStart(onEvent: (e: ScanEvent) => void): Promise<void>;
@@ -128,10 +177,13 @@ export interface Api {
   identify(address: string, port: number | null): Promise<FoundComputer[]>;
 
   boundaryResolve(code: string): Promise<{ invitation: string }>;
+  /** `acceptSshHostKey`: the fingerprint the person said yes to after this
+   *  call failed with an SSH host key prompt (see `parseSshHostKeyPrompt`). */
   sessionConnect(
     target: ConnectTarget,
     onFrame: (msg: ArrayBuffer) => void,
     onEvent: (e: SessionEvent) => void,
+    acceptSshHostKey?: string,
   ): Promise<{ sessionId: string }>;
   /** Body in the desktop send_input layout. seq starts at 1 per session. */
   sessionInput(sessionId: string, seq: number, body: Uint8Array): Promise<void>;

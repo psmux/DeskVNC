@@ -74,6 +74,20 @@ describe("InputSender", () => {
     expect(sent.map((x) => x.seq)).toEqual([1, 2]);
   });
 
+  it("sends a click without waiting for the next frame, press and release in one body (#91)", async () => {
+    const { s, sent } = bench();
+    s.pointer(9, 9, BUTTON.left);
+    s.pointer(9, 9, 0);
+    await Promise.resolve();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body).toEqual([...encodePointer(9, 9, BUTTON.left), ...encodePointer(9, 9, 0)]);
+    // A second click a moment later goes as soon as it is made, too.
+    s.pointer(9, 9, BUTTON.left);
+    s.pointer(9, 9, 0);
+    await Promise.resolve();
+    expect(sent.map((x) => x.seq)).toEqual([1, 2]);
+  });
+
   it("keeps keys in order between moves", () => {
     const { s, sent, frame } = bench();
     s.pointer(1, 1, 0);

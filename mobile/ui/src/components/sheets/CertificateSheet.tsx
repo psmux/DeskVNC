@@ -32,9 +32,22 @@ export function isRawKey(scheme: string): boolean {
   return scheme === "ra2" || scheme === "apple-rsa";
 }
 
+/**
+ * The SSH computer a tunnel goes through (issue #91). Its key arrives before
+ * any session exists: `session_connect` fails with SSH_HOST_KEY_PROMPT and a
+ * yes dials again with the fingerprint, so the scheme only steers the words.
+ */
+export const SSH_SCHEME = "ssh";
+
 /** The label over `subject` in More details. */
 export function subjectLabel(scheme: string): string {
+  if (scheme === SSH_SCHEME) return "SSH computer";
   return isRawKey(scheme) ? "Kind of key" : "Name on its certificate";
+}
+
+/** How the fingerprint is shown: SSH's own `SHA256:` form as is, a hex one in pairs. */
+export function shownFingerprint(scheme: string, fp: string): string {
+  return scheme === SSH_SCHEME ? fp : formatFingerprint(fp);
 }
 
 interface Props {
@@ -48,17 +61,20 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
   const [details, setDetails] = useState(false);
   const change = prompt?.isChange ?? false;
   const name = hostName ?? "This computer";
+  const ssh = prompt?.scheme === SSH_SCHEME;
   return (
     <Sheet
       open={open}
       onClose={() => onAnswer(false)}
       dismissible={false}
       art={<SceneIdCard warn={change} />}
-      title={change ? `${name} looks different` : "First time connecting"}
+      title={change ? `${name} looks different` : ssh ? "First time through this SSH computer" : "First time connecting"}
       subtitle={
         change
           ? "Its security ID changed since last time. That happens after a reinstall, but it can also mean something is in the way. If you did not expect this, stop."
-          : "Your phone has not met this computer before. If it is the one you meant, say yes and you will not be asked again."
+          : ssh
+            ? "The tunnel to this computer goes through an SSH computer your phone has not met before. If it is the one you meant, say yes and you will not be asked again."
+            : "Your phone has not met this computer before. If it is the one you meant, say yes and you will not be asked again."
       }
     >
       <div className="flex flex-col gap-3">
@@ -74,7 +90,7 @@ export function CertificateSheet({ open, prompt, hostName, onAnswer }: Props) {
               </>
             ) : null}
             <p className="text-ink-dim">Fingerprint</p>
-            <p className="break-all font-mono text-caption leading-relaxed">{formatFingerprint(prompt.fingerprint)}</p>
+            <p className="break-all font-mono text-caption leading-relaxed">{shownFingerprint(prompt.scheme, prompt.fingerprint)}</p>
           </div>
         )}
         {change ? (

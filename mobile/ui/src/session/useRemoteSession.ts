@@ -17,6 +17,8 @@ import type {
   SessionState,
   SessionStats,
 } from "../api/contract";
+import { parseSshHostKeyPrompt } from "../api/contract";
+import { SSH_SCHEME } from "../components/sheets/CertificateSheet";
 import { MSG_CURSOR, MSG_FRAMEBUFFER, messageType, parseCursorMessage, parseFrameMessage } from "./render/frameProtocol";
 import { WebGLRenderer } from "./render/WebGLRenderer";
 import { InputSender, SendLane } from "./input/packets";
@@ -150,6 +152,9 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
   // Set once Android's local network prompt was shown for this screen, so a
   // yes dials again once and never loops. Try again clears it.
   const askedLan = useRef(false);
+  // The SSH computer's key the person said yes to, sent with the next
+  // attempt so Rust pins it and dials again (a tunnelled computer, #91).
+  const acceptedSshKey = useRef<string | null>(null);
 
   const go = useCallback((p: Phase) => {
     phaseRef.current = p;
@@ -322,7 +327,7 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
     };
 
     api
-      .sessionConnect(wire, onFrame, onEvent)
+      .sessionConnect(wire, onFrame, onEvent, acceptedSshKey.current ?? undefined)
       .then(({ sessionId: id }) => {
         if (cancelled) {
           void api.sessionDisconnect(id).catch(() => {});
@@ -357,6 +362,18 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
       .catch((err: unknown) => {
         if (cancelled) return;
         const message = typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
+        // The tunnel's SSH computer is new to this phone. Ask, the way a
+        // new VNC key is asked about; a yes dials again with its fingerprint.
+        const sshKey = parseSshHostKeyPrompt(message);
+        if (sshKey) {
+          setCert({
+            fingerprint: sshKey.fingerprint,
+            subject: `${sshKey.host}:${sshKey.port}${sshKey.keyType ? `, ${sshKey.keyType}` : ""}`,
+            isChange: false,
+            scheme: SSH_SCHEME,
+          });
+          return;
+        }
         // Android 17 would have dropped the connect (the computer is on this
         // network and DeskVNC may not use it), so Rust refused before dialing.
         // This is the moment to ask: the person just pressed Connect. A yes
@@ -500,7 +517,14 @@ export function useRemoteSession(api: Api, target: ConnectTarget, initialQuality
       const c = cert;
       const id = sid.current;
       setCert(null);
-      if (c && id) void api.sessionTrust(id, c.fingerprint, c.scheme, accept).catch(() => {});
+      if (c?.scheme === SSH_SCHEME) {
+        // No session exists yet: the tunnel comes up before one does.
+        if (accept) {
+          acceptedSshKey.current = c.fingerprint;
+          setAttempt((a) => a + 1);
+          return;
+        }
+      } else if (c && id) void api.sessionTrust(id, c.fingerprint, c.scheme, accept).catch(() => {});
       if (!accept) {
         exiting.current = true;
         setError("You chose not to trust this computer, so we did not connect.");

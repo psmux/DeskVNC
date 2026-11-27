@@ -1692,26 +1692,6 @@
   }
 }
 
-.dv-a-grow-late {
-  animation: dv-a-grow-late 2s ease-in-out infinite;
-  transform-box: fill-box !important;
-  transform-origin: center !important;
-}
-
-@keyframes dv-a-grow-late {
-  0%,
-  30% {
-    transform: scale(1);
-  }
-  50%,
-  85% {
-    transform: scale(1.4);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-
 .dv-a-kbd {
   animation: dv-a-kbd 1.6s ease-out infinite;
 }

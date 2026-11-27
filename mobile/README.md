@@ -15,8 +15,11 @@ the other way round.
   four digit groups, then one press to connect.
 * Drive the remote desktop by touch. Two modes: trackpad (a pointer you push
   around, like a laptop trackpad) and direct touch (tap where you want to
-  click). Pinch to zoom, two finger scroll, long press for right click, a key
-  bar with Ctrl, Alt, Win/Cmd, Esc, Tab, arrows and Ctrl+Alt+Del.
+  click). A double tap is a double click in both. Pinch to zoom, two finger
+  scroll, long press for right click, a key bar with Ctrl, Alt, Win/Cmd, Esc,
+  Tab, arrows and Ctrl+Alt+Del.
+* Reach a VNC or RDP computer through an SSH tunnel, with a password or a
+  pasted private key kept in the phone's vault.
 
 SSH terminals, file transfer and the agent plane stay desktop only for now.
 

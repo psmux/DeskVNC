@@ -11,6 +11,7 @@ const TIPS: Record<TouchMode, { g: CoachGesture; text: string }[]> = {
   trackpad: [
     { g: "tp-move", text: "Slide one finger to move the pointer" },
     { g: "tp-click", text: "Tap to click" },
+    { g: "double", text: "Tap twice to double click" },
     { g: "tp-right", text: "Tap with two fingers to right click" },
     { g: "tp-drag", text: "Tap, then slide to select or drag" },
     { g: "scroll", text: "Slide two fingers to scroll" },
@@ -18,10 +19,10 @@ const TIPS: Record<TouchMode, { g: CoachGesture; text: string }[]> = {
   ],
   direct: [
     { g: "dt-click", text: "Tap where you want to click" },
+    { g: "double", text: "Tap twice to double click" },
     { g: "dt-right", text: "Press and hold to right click" },
     { g: "scroll", text: "Slide two fingers to scroll" },
     { g: "pinch", text: "Pinch to zoom in and out" },
-    { g: "dt-zoom", text: "Double tap to zoom in on a spot" },
     { g: "keyboard", text: "Tap with three fingers for the keyboard" },
   ],
 };

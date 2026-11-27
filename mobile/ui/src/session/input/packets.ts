@@ -102,6 +102,7 @@ export class InputSender {
   private lastMove = -1;
   private lastMask = 0;
   private scheduled = false;
+  private soon = false;
   private seq = 1;
   /** Bodies sent whose promise has not settled. */
   private inFlight = 0;
@@ -120,10 +121,16 @@ export class InputSender {
   pointer(x: number, y: number, mask: number): void {
     const ev = encodePointer(x, y, mask);
     if (mask !== this.lastMask) {
-      // A button change is never replaced by a later move.
+      // A button change is never replaced by a later move, and it does not
+      // wait for the next frame either: on a busy phone a frame can take a
+      // few hundred milliseconds, and two taps that reach the computer that
+      // far apart are no longer a double click (#91). The press and release
+      // of one click are queued in the same task, so they still share a body.
       this.queue.push(ev);
       this.lastMask = mask;
       this.lastMove = -1;
+      this.kickSoon();
+      return;
     } else if (this.lastMove >= 0) {
       this.queue[this.lastMove] = ev;
     } else {
@@ -167,6 +174,16 @@ export class InputSender {
       if (this.inFlight === 0 && this.queue.length > 0) this.flush();
     };
     sent.then(settle, settle);
+  }
+
+  /** Flush at the end of this task rather than at the next frame. */
+  private kickSoon(): void {
+    if (this.soon) return;
+    this.soon = true;
+    queueMicrotask(() => {
+      this.soon = false;
+      if (this.queue.length > 0) this.flush();
+    });
   }
 
   private kick(): void {

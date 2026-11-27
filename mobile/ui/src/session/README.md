@@ -21,16 +21,17 @@ The remote desktop viewer of the phone app. `SessionScreen.tsx` exports
 
 ## Gestures
 
-Trackpad: slide one finger to move the pointer, tap to click, tap then slide
-to hold the button, two finger tap for a right click, two finger slide to
+Trackpad: slide one finger to move the pointer, tap to click, tap twice to
+double click, tap then slide to hold the button, two finger tap for a right click, two finger slide to
 scroll, three finger tap for the keyboard.
 
-Touch: tap where you want to click, press and hold for a right click (a ring
+Touch: tap where you want to click, tap twice to double click (the second
+click lands where the first did, so the desktop counts it), press and hold for a right click (a ring
 fills first), slide one finger to drag, two finger slide to scroll.
 
 Both: pinch to zoom around the fingers, with a glide when let go. A double
-tap zooms in on a spot while the whole desktop is showing; once zoomed in, a
-double tap is a double click so the desktop still gets those. When zoomed,
+tap is always a double click; it used to zoom in while the whole desktop was
+showing, which made icons impossible to open without pinching first. When zoomed,
 the view follows the pointer near the edges, and a drag that reaches an edge
 slides the picture along. "Show the whole screen" zooms back out.
 

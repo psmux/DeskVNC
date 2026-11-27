@@ -320,6 +320,20 @@ async fn authenticate_inner(ssh: &mut SshHandle, cfg: &SshConfig) -> Result<()> 
                     })?;
             authenticate_with_key(ssh, &cfg.username, Arc::new(key)).await?
         }
+        SshAuth::KeyData { key, passphrase } => {
+            let text = key.clone();
+            let passphrase = passphrase.clone();
+            let key = tokio::task::spawn_blocking(move || {
+                load_key_bytes(text.as_bytes(), passphrase.as_deref())
+            })
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?
+            .map_err(|reason| Error::Key {
+                path: "the saved key".into(),
+                reason,
+            })?;
+            authenticate_with_key(ssh, &cfg.username, Arc::new(key)).await?
+        }
         SshAuth::Agent => authenticate_with_agent(ssh, &cfg.username).await?,
     };
     if !ok {
@@ -345,14 +359,25 @@ pub fn load_key_file(
 ) -> std::result::Result<PrivateKey, String> {
     let path = expand_home(path);
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    if crate::ppk::is_ppk(&bytes) {
-        return crate::ppk::load(&bytes, passphrase).map_err(|e| e.to_string());
+    load_key_bytes(&bytes, passphrase)
+}
+
+/// Decode a private key held in memory, in any format [`load_key_file`]
+/// reads: an OpenSSH container, an older PEM or PKCS#8 file, or a PuTTY
+/// `.ppk`. A phone has no key files of its own, so it keeps the key text in
+/// the platform vault and hands it over through this.
+pub fn load_key_bytes(
+    bytes: &[u8],
+    passphrase: Option<&str>,
+) -> std::result::Result<PrivateKey, String> {
+    if crate::ppk::is_ppk(bytes) {
+        return crate::ppk::load(bytes, passphrase).map_err(|e| e.to_string());
     }
-    russh::keys::decode_secret_key(
-        &String::from_utf8(bytes).map_err(|_| "not a text key file".to_string())?,
-        passphrase,
-    )
-    .map_err(|e| e.to_string())
+    let text = std::str::from_utf8(bytes).map_err(|_| "not a text key file".to_string())?;
+    // A key pasted on a phone often arrives with Windows line ends or a
+    // stray blank line around it; the decoder wants neither.
+    let text = text.replace("\r\n", "\n");
+    russh::keys::decode_secret_key(text.trim(), passphrase).map_err(|e| e.to_string())
 }
 
 /// Turn a leading `~` into the home directory.
@@ -551,6 +576,22 @@ mod tests {
     /// Everything else is left exactly as written: an absolute path is
     /// already an answer, and `~user` is a lookup this deliberately does not
     /// guess at.
+    /// The phone hands over key text it kept in the vault, often pasted with
+    /// Windows line ends and blank lines around it. The key is made here
+    /// from a fixed seed, so no key material lives in the repository.
+    #[test]
+    fn key_text_from_memory_decodes_even_with_crlf_and_padding() {
+        use russh::keys::ssh_key::{private::Ed25519Keypair, LineEnding};
+        let original = PrivateKey::from(Ed25519Keypair::from_seed(&[7u8; 32]));
+        let text = original.to_openssh(LineEnding::CRLF).unwrap();
+        let padded = format!("\r\n  {}\r\n\r\n", text.as_str());
+        let loaded = load_key_bytes(padded.as_bytes(), None).unwrap();
+        assert_eq!(loaded.public_key(), original.public_key());
+
+        let err = load_key_bytes(b"not a key at all", None).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
     #[test]
     fn other_paths_are_left_alone() {
         for path in ["/etc/keys/id_rsa", "keys/id_rsa", "~someone/.ssh/id_rsa"] {

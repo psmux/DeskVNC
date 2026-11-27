@@ -213,6 +213,12 @@
           "markdownDescription": "Enables the hosts_set_secret command without any pre-configured scope."
         },
         {
+          "description": "Enables the hosts_set_ssh_secret command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-hosts-set-ssh-secret",
+          "markdownDescription": "Enables the hosts_set_ssh_secret command without any pre-configured scope."
+        },
+        {
           "description": "Enables the hosts_thumbnail command without any pre-configured scope.",
           "type": "string",
           "const": "allow-hosts-thumbnail",
@@ -355,6 +361,12 @@
           "type": "string",
           "const": "deny-hosts-set-secret",
           "markdownDescription": "Denies the hosts_set_secret command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the hosts_set_ssh_secret command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-hosts-set-ssh-secret",
+          "markdownDescription": "Denies the hosts_set_ssh_secret command without any pre-configured scope."
         },
         {
           "description": "Denies the hosts_thumbnail command without any pre-configured scope.",
