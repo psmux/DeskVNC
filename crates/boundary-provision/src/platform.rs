@@ -32,9 +32,12 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(match Platform::current()? {
         // The copy at the sign in screen runs with root's home and is given
         // the person's.
-        Platform::MacOS => boundary_session::owned::person_home()
-            .context("Cannot locate the user data directory")?
-            .join("Library/Application Support/com.altrosyn.boundary"),
+        Platform::MacOS => mac_data_dir(
+            &boundary_session::owned::person_home()
+                .context("Cannot locate the user data directory")?
+                .join("Library/Application Support"),
+            boundary_session::owned::is_root(),
+        ),
         Platform::Windows => {
             PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
                 .join("Boundary")
@@ -45,6 +48,57 @@ pub fn data_dir() -> Result<PathBuf> {
             .join("boundary"),
     })
 }
+/// The folder name the macOS data lives under.
+const MAC_DATA: &str = "com.psmux.deskvnc.boundary";
+
+/// The macOS data folder inside `support` (the person's Application
+/// Support). Early builds used a folder named after another bundle id
+/// ending in `.boundary`; the person's own process moves it here once. The
+/// copy at the sign in screen runs as root and never moves anything in the
+/// person's folder, so until the person's app has run it reads the old one.
+fn mac_data_dir(support: &Path, root: bool) -> PathBuf {
+    let current = support.join(MAC_DATA);
+    if current.exists() {
+        return current;
+    }
+    let Some(old) = legacy_mac_data_dir(support) else {
+        return current;
+    };
+    if root {
+        return old;
+    }
+    // If the move fails, keep using the old folder where it is.
+    if std::fs::rename(&old, &current).is_ok() {
+        current
+    } else {
+        old
+    }
+}
+
+/// An early build's data folder: `com.<one name>.boundary`, a real folder.
+fn legacy_mac_data_dir(support: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(support)
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let parts: Vec<&str> = name.split('.').collect();
+            name != MAC_DATA
+                && parts.len() == 3
+                && parts[0] == "com"
+                && parts[2] == "boundary"
+                && !parts[1].is_empty()
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect();
+    found.sort();
+    (found.len() == 1).then(|| found.remove(0))
+}
+
 /// What to call this computer when a helper saves it.
 pub fn computer_name() -> String {
     boundary_session::nearby::computer_name()
@@ -531,6 +585,40 @@ systemctl enable --now warp-svc
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mac_data_moves_an_early_folder_once() {
+        let support = tempfile::tempdir().unwrap();
+        let old = support.path().join("com.example.boundary");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("network.json"), "{}").unwrap();
+        std::fs::create_dir(support.path().join("com.example.other")).unwrap();
+        std::fs::write(support.path().join("com.stray.boundary"), "a file").unwrap();
+
+        // The copy at the sign in screen reads the old folder and moves nothing.
+        assert_eq!(mac_data_dir(support.path(), true), old);
+        assert!(old.exists());
+
+        let current = mac_data_dir(support.path(), false);
+        assert_eq!(current, support.path().join(MAC_DATA));
+        assert!(current.join("network.json").exists());
+        assert!(!old.exists());
+        assert_eq!(mac_data_dir(support.path(), true), current);
+    }
+    #[test]
+    fn mac_data_starts_fresh_without_an_early_folder() {
+        let support = tempfile::tempdir().unwrap();
+        assert_eq!(
+            mac_data_dir(support.path(), false),
+            support.path().join(MAC_DATA)
+        );
+        // Two candidates is a guess, so neither is taken.
+        std::fs::create_dir(support.path().join("com.one.boundary")).unwrap();
+        std::fs::create_dir(support.path().join("com.two.boundary")).unwrap();
+        assert_eq!(
+            mac_data_dir(support.path(), false),
+            support.path().join(MAC_DATA)
+        );
+    }
     #[test]
     fn providers_have_paths_on_every_target() {
         for os in [Platform::MacOS, Platform::Windows, Platform::Linux] {
