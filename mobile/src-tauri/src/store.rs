@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::tunnel::TunnelSettings;
+
 /// `Protocol` in `contract.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -74,6 +76,13 @@ pub struct Host {
     pub domain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary_invitation: Option<String>,
+    /// VNC and RDP: reach the computer through an SSH tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_tunnel: Option<TunnelSettings>,
+    /// The tunnel's password or key is in the vault. Rust owns this, like
+    /// `has_password`.
+    #[serde(default)]
+    pub has_ssh_secret: bool,
 }
 
 /// `HostDraft` in `contract.ts`: a host without the fields only Rust sets.
@@ -100,6 +109,8 @@ pub struct HostDraft {
     pub domain: Option<String>,
     #[serde(default)]
     pub boundary_invitation: Option<String>,
+    #[serde(default)]
+    pub ssh_tunnel: Option<TunnelSettings>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -218,6 +229,9 @@ impl HostStore {
             has_thumbnail: previous.as_ref().is_some_and(|p| p.has_thumbnail),
             domain: draft.domain.filter(|d| !d.is_empty()),
             boundary_invitation: draft.boundary_invitation.filter(|i| !i.is_empty()),
+            // Boundary finds its own way; a tunnel means nothing to it.
+            ssh_tunnel: draft.ssh_tunnel.filter(|_| draft.protocol != Protocol::Boundary),
+            has_ssh_secret: previous.as_ref().is_some_and(|p| p.has_ssh_secret),
         };
         match existing {
             Some(i) => hosts[i] = host.clone(),
@@ -297,6 +311,9 @@ fn validate(draft: &HostDraft) -> Result<(), StoreError> {
     {
         return Err(StoreError::Invalid("The invitation is too long".into()));
     }
+    if let Some(tunnel) = &draft.ssh_tunnel {
+        tunnel.validate().map_err(StoreError::Invalid)?;
+    }
     if draft.protocol != Protocol::Boundary && draft.address.trim().is_empty() {
         return Err(StoreError::Invalid("Enter the computer's address".into()));
     }
@@ -338,7 +355,50 @@ mod tests {
             favorite: false,
             domain: None,
             boundary_invitation: None,
+            ssh_tunnel: None,
         }
+    }
+
+    #[test]
+    fn a_tunnel_is_saved_with_the_host_and_its_secret_flag_survives_an_edit() {
+        use crate::tunnel::{TunnelAuth, TunnelSettings};
+        let dir = tempfile::tempdir().unwrap();
+        let store = HostStore::open(dir.path()).unwrap();
+        let tunnel = TunnelSettings {
+            enabled: true,
+            host: "gate.example.com".into(),
+            port: 2222,
+            user: "pi".into(),
+            auth: TunnelAuth::Key,
+        };
+        let mut d = draft("Lab");
+        d.address = "localhost".into();
+        d.ssh_tunnel = Some(tunnel.clone());
+        let host = store.save(d).unwrap();
+        assert_eq!(host.ssh_tunnel.as_ref(), Some(&tunnel));
+        store.update(&host.id, |h| h.has_ssh_secret = true).unwrap();
+
+        let reopened = HostStore::open(dir.path()).unwrap();
+        let mut edit = draft("Lab renamed");
+        edit.id = Some(host.id.clone());
+        edit.address = "localhost".into();
+        edit.ssh_tunnel = Some(tunnel.clone());
+        let saved = reopened.save(edit).unwrap();
+        assert!(saved.has_ssh_secret, "the vault flag is Rust's and survives a save");
+        let json = serde_json::to_value(&saved).unwrap();
+        assert_eq!(json["sshTunnel"]["host"], "gate.example.com");
+        assert_eq!(json["hasSshSecret"], true);
+
+        // An enabled tunnel without a user is refused with a reason.
+        let mut no_user = draft("x");
+        no_user.ssh_tunnel = Some(TunnelSettings { user: String::new(), ..tunnel.clone() });
+        assert!(reopened.save(no_user).is_err());
+        // Boundary never keeps one.
+        let mut boundary = draft("b");
+        boundary.protocol = Protocol::Boundary;
+        boundary.address = "a".repeat(64);
+        boundary.ssh_tunnel = Some(tunnel);
+        assert!(reopened.save(boundary).unwrap().ssh_tunnel.is_none());
     }
 
     #[test]

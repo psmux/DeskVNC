@@ -11,6 +11,7 @@
     "allow-hosts-save",
     "allow-hosts-delete",
     "allow-hosts-set-secret",
+    "allow-hosts-set-ssh-secret",
     "allow-hosts-thumbnail",
     "allow-scan-start",
     "allow-scan-stop",

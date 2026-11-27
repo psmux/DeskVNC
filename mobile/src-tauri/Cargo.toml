@@ -31,6 +31,8 @@ boundary-codes = { path = "../../crates/boundary-codes" }
 vnc-discovery = { path = "../../crates/vnc-discovery" }
 # Typing a string and pressing a chord, the same lowering the agent plane uses.
 limb-core = { path = "../../crates/limb-core" }
+# The SSH carrier the desktop tunnels VNC and RDP through (issue #91).
+ssh-transport = { path = "../../crates/ssh-transport" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -66,3 +68,6 @@ ndk-context = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# An SSH server inside the tunnel tests. Already in the build through
+# ssh-transport, so this adds no new code.
+russh = { workspace = true }

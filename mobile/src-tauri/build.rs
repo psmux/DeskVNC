@@ -8,6 +8,7 @@ pub const COMMANDS: &[&str] = &[
     "hosts_save",
     "hosts_delete",
     "hosts_set_secret",
+    "hosts_set_ssh_secret",
     "hosts_thumbnail",
     "scan_start",
     "scan_stop",

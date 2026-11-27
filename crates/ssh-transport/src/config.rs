@@ -90,6 +90,15 @@ pub enum SshAuth {
         #[serde(default)]
         passphrase: Option<String>,
     },
+    /// A private key held in memory rather than in a file: the phone app
+    /// keeps the pasted key text in the platform vault and has no file to
+    /// point at. Same formats and passphrase rule as `KeyFile`.
+    #[serde(rename_all = "camelCase")]
+    KeyData {
+        key: String,
+        #[serde(default)]
+        passphrase: Option<String>,
+    },
     /// ssh-agent (unix socket), Pageant or the Windows OpenSSH named pipe.
     Agent,
 }
@@ -99,7 +108,7 @@ impl SshAuth {
     pub fn label(&self) -> &'static str {
         match self {
             SshAuth::Password(_) => "password",
-            SshAuth::KeyFile { .. } => "key",
+            SshAuth::KeyFile { .. } | SshAuth::KeyData { .. } => "key",
             SshAuth::Agent => "agent",
         }
     }
@@ -113,6 +122,11 @@ impl std::fmt::Debug for SshAuth {
             SshAuth::KeyFile { path, passphrase } => f
                 .debug_struct("KeyFile")
                 .field("path", path)
+                .field("passphrase", &passphrase.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            SshAuth::KeyData { passphrase, .. } => f
+                .debug_struct("KeyData")
+                .field("key", &"<redacted>")
                 .field("passphrase", &passphrase.as_ref().map(|_| "<redacted>"))
                 .finish(),
             SshAuth::Agent => f.write_str("Agent"),
@@ -240,6 +254,15 @@ mod tests {
         )
         .unwrap();
         let rendered = format!("{key:?}");
+        assert!(!rendered.contains("pp"), "{rendered}");
+
+        let key: SshAuth = serde_json::from_str(
+            r#"{ "kind": "key-data", "value": { "key": "SECRETKEYTEXT", "passphrase": "pp" } }"#,
+        )
+        .unwrap();
+        assert_eq!(key.label(), "key");
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("SECRETKEYTEXT"), "{rendered}");
         assert!(!rendered.contains("pp"), "{rendered}");
     }
 

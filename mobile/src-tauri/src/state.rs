@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::pins::PinStore;
 use crate::store::HostStore;
+use crate::tunnel::KnownHosts;
 use crate::vault::{Secret, SecretStore};
 
 /// One live session.
@@ -83,6 +84,8 @@ pub struct AppState {
     pub hosts: Arc<HostStore>,
     pub secrets: Arc<dyn SecretStore>,
     pub pins: PinStore,
+    /// SSH host keys trusted for tunnels.
+    pub known_hosts: KnownHosts,
     pub drivers: Drivers,
     pub sessions: Sessions,
     pub scan: Mutex<Option<CancellationToken>>,
