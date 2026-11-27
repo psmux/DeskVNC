@@ -402,7 +402,7 @@ mod tests {
                 assert_eq!(key, "KEYTEXT");
                 assert_eq!(passphrase, None, "an empty passphrase means none");
             }
-            other => panic!("expected KeyData, got {other:?}"),
+            other => panic!("expected KeyData, got {}", other.label()),
         }
     }
 
