@@ -519,7 +519,10 @@ Accepts `{ sessionId, username?, domain?, password, save }`.
 ### `session_credential_state` / `bind_session_to_host`
 
 "Add to saved hosts" on a tab whose session was opened without a saved host
-(quick connect, a typed address, Nearby, an agent opening by address).
+(quick connect, a typed address, Nearby, an agent opening by address), and
+"Edit saved host" on a tab whose session already has one. The second calls
+`bind_session_to_host` with the host the session already belongs to, which
+the shell accepts, so the password the session signed in with can be kept.
 
 Whatever is typed at a session's prompt is also kept in memory
 (`AppState::used_credentials`, keyed by session id) whether or not `save` was
