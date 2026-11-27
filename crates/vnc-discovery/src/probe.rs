@@ -174,7 +174,14 @@ pub async fn rdp_fingerprint_within(
     connect_timeout: Duration,
     read_timeout: Duration,
 ) -> Option<RdpCaps> {
-    rdpnego::probe(addr, connect_timeout, read_timeout, rdpnego::SWEEP_PROTOCOLS, true).await
+    rdpnego::probe(
+        addr,
+        connect_timeout,
+        read_timeout,
+        rdpnego::SWEEP_PROTOCOLS,
+        true,
+    )
+    .await
 }
 
 /// Deep probe an RDP host: everything [`rdp_fingerprint`] learns, plus whether
@@ -197,11 +204,11 @@ pub async fn rdp_deep_probe(addr: SocketAddr) -> Result<RdpCaps> {
         rdpnego::SWEEP_PROTOCOLS,
         true,
     )
-        .await
-        .ok_or_else(|| Error::Probe {
-            addr,
-            reason: "not an RDP server, or it refused the negotiation".into(),
-        })?;
+    .await
+    .ok_or_else(|| Error::Probe {
+        addr,
+        reason: "not an RDP server, or it refused the negotiation".into(),
+    })?;
     // The certificate is already in hand from the first exchange, so the
     // second one asks only the question it exists to answer.
     let ssl_only = rdpnego::probe(
