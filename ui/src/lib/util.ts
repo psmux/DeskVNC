@@ -1,4 +1,5 @@
 /** Small shared utilities: color hashing, formatting, fuzzy matching, mnemonics. */
+import { formatRelative, t } from "../i18n";
 
 /** Deterministic pleasant hue from a host id, used for icon-placeholder tiles. */
 export function colorFromId(id: string): string {
@@ -12,18 +13,18 @@ export function colorFromId(id: string): string {
 }
 
 export function timeAgo(ts: number | null): string {
-  if (!ts) return "never";
+  if (!ts) return t("never");
   const s = Math.max(1, Math.floor(Date.now() / 1000 - ts));
-  if (s < 60) return "just now";
+  if (s < 60) return t("just now");
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return formatRelative(-m, "minute");
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return formatRelative(-h, "hour");
   const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
+  if (d < 30) return formatRelative(-d, "day");
   const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
+  if (mo < 12) return formatRelative(-mo, "month");
+  return formatRelative(-Math.floor(mo / 12), "year");
 }
 
 export function formatBps(bps: number): string {

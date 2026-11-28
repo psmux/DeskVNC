@@ -43,9 +43,10 @@ import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
-import { MAC_SESSION_OPTIONS, parseMacSessionPref, type MacSessionPref } from "../lib/macSession";
+import { macSessionOptions, parseMacSessionPref, type MacSessionPref } from "../lib/macSession";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { classNames } from "../lib/util";
+import { t, useT } from "../i18n";
 
 export interface HostDraft {
   id?: string;
@@ -245,17 +246,31 @@ const PROTOCOL_CAPS: Record<ProtocolKind, ProtocolCaps> = {
  * everybody knows; the agent is last because it is the one that needs
  * nothing typed and nothing chosen, so it is the one nobody goes looking for.
  */
-const SSH_AUTH_CHOICES: ReadonlyArray<readonly [SshAuthKind, string]> = [
-  ["password", "Password"],
-  ["key-file", "Key file"],
-  ["agent", "SSH agent"],
-];
+const SSH_AUTH_CHOICES: ReadonlyArray<SshAuthKind> = ["password", "key-file", "agent"];
 
-const SSH_AUTH_HINT: Record<SshAuthKind, string> = {
-  password: "The password for your account on that computer, kept in your system keychain.",
-  "key-file": "A private key on this computer. It is read when you connect and never leaves this machine.",
-  agent: "Uses your running ssh-agent, Pageant, or the Windows OpenSSH pipe. Stores nothing.",
-};
+/** The button text for an SSH auth choice, in the language in use. */
+function sshAuthLabel(kind: SshAuthKind): string {
+  switch (kind) {
+    case "password":
+      return t("Password");
+    case "key-file":
+      return t("Key file");
+    case "agent":
+      return t("SSH agent");
+  }
+}
+
+/** The hint under the SSH auth choice, in the language in use. */
+function sshAuthHint(kind: SshAuthKind): string {
+  switch (kind) {
+    case "password":
+      return t("The password for your account on that computer, kept in your system keychain.");
+    case "key-file":
+      return t("A private key on this computer. It is read when you connect and never leaves this machine.");
+    case "agent":
+      return t("Uses your running ssh-agent, Pageant, or the Windows OpenSSH pipe. Stores nothing.");
+  }
+}
 
 export function HostDialog({
   draft: initial,
@@ -270,6 +285,7 @@ export function HostDialog({
   onSave: (draft: HostDraft) => void;
   onClose: () => void;
 }): ReactNode {
+  const t = useT();
   const [d, setD] = useState<HostDraft>(initial);
   // Open Advanced when the dialog arrives with a MAC the user never typed, // discovery filled it in, and a value silently folded away is one the user
   // can neither check nor correct. An enabled SSH tunnel opens it too: it
@@ -384,7 +400,7 @@ export function HostDialog({
   };
 
   return (
-    <Dialog title={d.id ? "Edit Host" : "New Host"} onClose={onClose} width={540}>
+    <Dialog title={d.id ? t("Edit Host") : t("New Host")} onClose={onClose} width={540}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -395,10 +411,10 @@ export function HostDialog({
         {d.importNotes && d.importNotes.length > 0 ? (
           <div
             role="note"
-            aria-label="About this import"
+            aria-label={t("About this import")}
             className="rounded-md border border-warning bg-warning-subtle px-3 py-2 text-sm"
           >
-            <p className="font-medium text-warning">Imported from a Remote Desktop file</p>
+            <p className="font-medium text-warning">{t("Imported from a Remote Desktop file")}</p>
             <ul className="mt-1 list-disc space-y-0.5 pl-5 text-secondary">
               {d.importNotes.map((note) => (
                 <li key={note}>{sentence(note)}</li>
@@ -406,12 +422,12 @@ export function HostDialog({
             </ul>
           </div>
         ) : null}
-        <Field label="Friendly name" hint="How this computer appears in your library">
+        <Field label={t("Friendly name")} hint={t("How this computer appears in your library")}>
           <input
             data-autofocus
             className="field"
             value={d.friendlyName}
-            placeholder="Living Room Mac"
+            placeholder={t("Living Room Mac")}
             onChange={(e) => set({ friendlyName: e.target.value })}
           />
         </Field>
@@ -420,11 +436,11 @@ export function HostDialog({
           Above the address row, because it changes what the rest of the form
           means and a control that reorganises a form comes before the form.
         */}
-        <Field label="Connect using">
+        <Field label={t("Connect using")}>
           <div
             className="flex gap-1 rounded-md border border-subtle p-0.5"
             role="radiogroup"
-            aria-label="Connection protocol"
+            aria-label={t("Connection protocol")}
           >
             {HOST_PROTOCOLS.map((p) => (
               <button
@@ -448,18 +464,18 @@ export function HostDialog({
 
         <div className={isBoundary ? "grid grid-cols-1 gap-3" : "grid grid-cols-[1fr_120px] gap-3"}>
           <Field
-            label={isBoundary ? "Machine ID or address" : "Address"}
+            label={isBoundary ? t("Machine ID or address") : t("Address")}
             error={addressError}
             hint={
               isBoundary
-                ? "The ID is shown under Unattended access in DeskVNC Support on that computer. An address such as 192.168.1.42 or box:5940 works on a network that reaches it, and ID@address pins the computer. If you are not paired, the person there approves you, or you use the unattended password below."
+                ? t("The ID is shown under Unattended access in DeskVNC Support on that computer. An address such as 192.168.1.42 or box:5940 works on a network that reaches it, and ID@address pins the computer. If you are not paired, the person there approves you, or you use the unattended password below.")
                 : undefined
             }
           >
             <input
               className="field mono"
               value={d.address}
-              placeholder={isBoundary ? "Machine ID, or 192.168.1.42" : "192.168.1.42 or hostname"}
+              placeholder={isBoundary ? t("Machine ID, or 192.168.1.42") : t("192.168.1.42 or hostname")}
               spellCheck={false}
               onBlur={() => {
                 setTouched(true);
@@ -492,7 +508,7 @@ export function HostDialog({
             />
           </Field>
           {isBoundary ? null : (
-            <Field label="Port">
+            <Field label={t("Port")}>
               <input
                 className="field mono"
                 type="number"
@@ -522,11 +538,11 @@ export function HostDialog({
         */}
         {showVncUser ? (
           <Field
-            label="User name"
+            label={t("User name")}
             hint={
               d.hasPassword && !d.vncUser
-                ? "Leave blank to keep the saved one."
-                : "Leave blank to be asked when you connect"
+                ? t("Leave blank to keep the saved one.")
+                : t("Leave blank to be asked when you connect")
             }
           >
             <input
@@ -534,10 +550,10 @@ export function HostDialog({
               value={d.vncUser}
               placeholder={
                 d.hasPassword
-                  ? "(unchanged)"
+                  ? t("(unchanged)")
                   : d.osHint === "macos"
-                    ? "Your account on that Mac"
-                    : "Optional"
+                    ? t("Your account on that Mac")
+                    : t("Optional")
               }
               autoComplete="off"
               autoCapitalize="none"
@@ -551,17 +567,17 @@ export function HostDialog({
           caps.domain ? (
             <div className="grid grid-cols-2 gap-3">
               <Field
-                label="User name"
+                label={t("User name")}
                 hint={
                   d.hasPassword && !d.rdpUser
-                    ? "Leave blank to keep the saved one."
-                    : "The account to sign in with"
+                    ? t("Leave blank to keep the saved one.")
+                    : t("The account to sign in with")
                 }
               >
                 <input
                   className="field"
                   value={d.rdpUser}
-                  placeholder={d.hasPassword ? "(unchanged)" : "Administrator"}
+                  placeholder={d.hasPassword ? t("(unchanged)") : t("Administrator")}
                   autoComplete="off"
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -576,13 +592,13 @@ export function HostDialog({
                 to leave itself empty.
               */}
               <Field
-                label="Domain"
-                hint="Leave blank for a local account, or if your user name is already an email-style name like you@company.com."
+                label={t("Domain")}
+                hint={t("Leave blank for a local account, or if your user name is already an email-style name like you@company.com.")}
               >
                 <input
                   className="field"
                   value={d.rdpDomain}
-                  placeholder="Optional"
+                  placeholder={t("Optional")}
                   autoComplete="off"
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -593,17 +609,17 @@ export function HostDialog({
             </div>
           ) : (
             <Field
-              label="User name"
+              label={t("User name")}
               hint={
                 d.hasPassword && !d.sshUser
-                  ? "Leave blank to keep the saved one."
-                  : "Leave blank to sign in as the same user as this computer"
+                  ? t("Leave blank to keep the saved one.")
+                  : t("Leave blank to sign in as the same user as this computer")
               }
             >
               <input
                 className="field"
                 value={d.sshUser}
-                placeholder={d.hasPassword ? "(unchanged)" : "Same as this computer"}
+                placeholder={d.hasPassword ? t("(unchanged)") : t("Same as this computer")}
                 autoComplete="off"
                 autoCapitalize="none"
                 autoCorrect="off"
@@ -623,13 +639,13 @@ export function HostDialog({
           main form now, directly above the secret it decides the meaning of.
         */}
         {isSsh ? (
-          <Field label="Sign in with" hint={SSH_AUTH_HINT[ssh.auth]}>
+          <Field label={t("Sign in with")} hint={sshAuthHint(ssh.auth)}>
             <div
               className="flex gap-1 rounded-md border border-subtle p-0.5"
               role="radiogroup"
-              aria-label="SSH authentication"
+              aria-label={t("SSH authentication")}
             >
-              {SSH_AUTH_CHOICES.map(([kind, label]) => (
+              {SSH_AUTH_CHOICES.map((kind) => (
                 <button
                   key={kind}
                   type="button"
@@ -643,7 +659,7 @@ export function HostDialog({
                   )}
                   onClick={() => setSsh({ auth: kind })}
                 >
-                  {label}
+                  {sshAuthLabel(kind)}
                 </button>
               ))}
             </div>
@@ -667,24 +683,24 @@ export function HostDialog({
           <Field
             label={
               isSsh && ssh.auth === "key-file"
-                ? "Key passphrase"
+                ? t("Key passphrase")
                 : isBoundary
-                  ? "Unattended password"
-                  : "Password"
+                  ? t("Unattended password")
+                  : t("Password")
             }
             hint={
               d.hasPassword && !d.password
-                ? "A secret is saved in your system keychain. Leave blank to keep it."
+                ? t("A secret is saved in your system keychain. Leave blank to keep it.")
                 : isSsh && ssh.auth === "key-file"
-                  ? "Only needed if the key itself is protected. Stored in your system keychain, never in a file."
-                  : "Stored in your system keychain, never in a file"
+                  ? t("Only needed if the key itself is protected. Stored in your system keychain, never in a file.")
+                  : t("Stored in your system keychain, never in a file")
             }
           >
             <input
               className="field"
               type="password"
               value={d.password}
-              placeholder={d.hasPassword ? "••••••••  (unchanged)" : "Optional"}
+              placeholder={d.hasPassword ? t("••••••••  (unchanged)") : t("Optional")}
               autoComplete="off"
               onChange={(e) => set({ password: e.target.value })}
             />
@@ -692,12 +708,12 @@ export function HostDialog({
         )}
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Group">
+          <Field label={t("Group")}>
             <Select
               value={d.groupId ?? ""}
               onChange={(e) => set({ groupId: e.target.value || null })}
             >
-              <option value="">No group</option>
+              <option value="">{t("No group")}</option>
               {groups.map((g) => (
                 <option key={g.id} value={g.id}>
                   {g.name}
@@ -705,42 +721,42 @@ export function HostDialog({
               ))}
             </Select>
           </Field>
-          <Field label="Operating system">
+          <Field label={t("Operating system")}>
             <Select
               value={d.osHint}
               onChange={(e) => set({ osHint: e.target.value as OsHint })}
             >
-              <option value="unknown">Unknown</option>
-              <option value="macos">macOS</option>
-              <option value="windows">Windows</option>
-              <option value="linux">Linux</option>
-              <option value="qemu">QEMU / VM</option>
+              <option value="unknown">{t("Unknown")}</option>
+              <option value="macos">{t("macOS")}</option>
+              <option value="windows">{t("Windows")}</option>
+              <option value="linux">{t("Linux")}</option>
+              <option value="qemu">{t("QEMU / VM")}</option>
             </Select>
           </Field>
         </div>
 
         {tags.length > 0 ? (
-          <Field label="Tags">
+          <Field label={t("Tags")}>
             <div className="flex flex-wrap gap-1.5">
-              {tags.map((t) => {
-                const on = d.tagIds.includes(t.id);
+              {tags.map((tag) => {
+                const on = d.tagIds.includes(tag.id);
                 return (
                   <button
-                    key={t.id}
+                    key={tag.id}
                     type="button"
                     aria-pressed={on}
                     className={classNames(
                       "rounded-pill border px-2.5 py-1 text-xs",
                       on ? "border-transparent font-medium text-white" : "border-subtle text-secondary",
                     )}
-                    style={on ? { background: t.color } : undefined}
+                    style={on ? { background: tag.color } : undefined}
                     onClick={() =>
                       set({
-                        tagIds: on ? d.tagIds.filter((x) => x !== t.id) : [...d.tagIds, t.id],
+                        tagIds: on ? d.tagIds.filter((x) => x !== tag.id) : [...d.tagIds, tag.id],
                       })
                     }
                   >
-                    {t.name}
+                    {tag.name}
                   </button>
                 );
               })}
@@ -757,7 +773,7 @@ export function HostDialog({
             onClick={() => setAdvanced((a) => !a)}
           >
             {advanced ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-            Advanced
+            {t("Advanced")}
           </button>
           {advanced ? (
             <div className="space-y-4 border-t border-subtle p-3">
@@ -774,34 +790,34 @@ export function HostDialog({
                     {/* RFB security types are VNC's own negotiation; RDP's
                         equivalent is the Security disclosure below. */}
                     {caps.rfbSecurity ? (
-                      <Field label="Security type" hint="Auto negotiates the strongest supported">
+                      <Field label={t("Security type")} hint={t("Auto negotiates the strongest supported")}>
                         <Select
                           value={d.securityPref ?? "auto"}
                           onChange={(e) =>
                             set({ securityPref: e.target.value === "auto" ? null : e.target.value })
                           }
                         >
-                          <option value="auto">Auto</option>
-                          <option value="vencrypt-x509">VeNCrypt (TLS + X.509)</option>
-                          <option value="ra2">RSA-AES (RA2)</option>
-                          <option value="apple-srp-rsa">Apple Screen Sharing (encrypted)</option>
-                          <option value="apple-srp">Apple Screen Sharing (SRP)</option>
-                          <option value="apple-dh">Apple Screen Sharing (Diffie-Hellman)</option>
-                          <option value="vncauth">VNC password only</option>
-                          <option value="none">None</option>
+                          <option value="auto">{t("Auto")}</option>
+                          <option value="vencrypt-x509">{t("VeNCrypt (TLS + X.509)")}</option>
+                          <option value="ra2">{t("RSA-AES (RA2)")}</option>
+                          <option value="apple-srp-rsa">{t("Apple Screen Sharing (encrypted)")}</option>
+                          <option value="apple-srp">{t("Apple Screen Sharing (SRP)")}</option>
+                          <option value="apple-dh">{t("Apple Screen Sharing (Diffie-Hellman)")}</option>
+                          <option value="vncauth">{t("VNC password only")}</option>
+                          <option value="none">{t("None")}</option>
                         </Select>
                       </Field>
                     ) : null}
                     {caps.rfbSecurity ? (
                       <Field
-                        label="When someone is using the Mac"
-                        hint="macOS Screen Sharing only. Sharing their screen asks them to accept first."
+                        label={t("When someone is using the Mac")}
+                        hint={t("macOS Screen Sharing only. Sharing their screen asks them to accept first.")}
                       >
                         <Select
                           value={d.macSession}
                           onChange={(e) => set({ macSession: parseMacSessionPref(e.target.value) })}
                         >
-                          {MAC_SESSION_OPTIONS.map((o) => (
+                          {macSessionOptions().map((o) => (
                             <option key={o.value} value={o.value}>
                               {o.label}
                             </option>
@@ -810,21 +826,21 @@ export function HostDialog({
                       </Field>
                     ) : null}
                     <Field
-                      label="Quality"
+                      label={t("Quality")}
                       hint={
                         isRdp
-                          ? "Auto adapts to network conditions. Lower settings turn off wallpaper and effects on the remote desktop."
-                          : "Auto adapts to network conditions"
+                          ? t("Auto adapts to network conditions. Lower settings turn off wallpaper and effects on the remote desktop.")
+                          : t("Auto adapts to network conditions")
                       }
                     >
                       <Select
                         value={d.qualityPref}
                         onChange={(e) => set({ qualityPref: e.target.value as QualityPreset })}
                       >
-                        <option value="auto">Auto</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
+                        <option value="auto">{t("Auto")}</option>
+                        <option value="high">{t("High")}</option>
+                        <option value="medium">{t("Medium")}</option>
+                        <option value="low">{t("Low")}</option>
                         {/*
                           Black and White is a shader in this app, not a wire
                           setting, so the toolbar keeps offering it live for
@@ -833,51 +849,51 @@ export function HostDialog({
                           grey screen on every connect", which is not what
                           choosing a saved default is for.
                         */}
-                        {isRdp ? null : <option value="bw">Black &amp; White</option>}
+                        {isRdp ? null : <option value="bw">{t("Black & White")}</option>}
                       </Select>
                     </Field>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
-                    <Field label="Scaling" hint="How the remote screen fits the window">
+                    <Field label={t("Scaling")} hint={t("How the remote screen fits the window")}>
                       <Select
                         value={d.scalingMode}
                         onChange={(e) => set({ scalingMode: e.target.value as ScalingMode })}
                       >
-                        <option value="aspect-fit">Aspect fit</option>
-                        <option value="fit">Fit to window</option>
-                        <option value="actual">Actual size (1:1)</option>
-                        <option value="remote-resize">Remote resize</option>
+                        <option value="aspect-fit">{t("Aspect fit")}</option>
+                        <option value="fit">{t("Fit to window")}</option>
+                        <option value="actual">{t("Actual size (1:1)")}</option>
+                        <option value="remote-resize">{t("Remote resize")}</option>
                       </Select>
                     </Field>
-                    <Field label="Keyboard mode" hint="How keystrokes are translated">
+                    <Field label={t("Keyboard mode")} hint={t("How keystrokes are translated")}>
                       <Select
                         value={d.keyboardMode}
                         onChange={(e) => set({ keyboardMode: e.target.value })}
                       >
-                        <option value="auto">Auto</option>
+                        <option value="auto">{t("Auto")}</option>
                         {/* RDP has no concept of a keysym. */}
-                        {isRdp ? null : <option value="keysym">Keysym</option>}
-                        <option value="unicode">Unicode</option>
-                        <option value="scancode">Scancode</option>
+                        {isRdp ? null : <option value="keysym">{t("Keysym")}</option>}
+                        <option value="unicode">{t("Unicode")}</option>
+                        <option value="scancode">{t("Scancode")}</option>
                       </Select>
                     </Field>
                   </div>
                 </>
               ) : null}
               <Field
-                label="MAC address (for Wake-on-LAN)"
+                label={t("MAC address (for Wake-on-LAN)")}
                 hint={
                   d.macFromDiscovery
-                    ? "Filled in automatically, this is the address we saw when we found this machine on your network. Lets you wake it from the library."
-                    : "Filled in automatically when the machine was discovered on your network. Lets you wake this computer from the library."
+                    ? t("Filled in automatically, this is the address we saw when we found this machine on your network. Lets you wake it from the library.")
+                    : t("Filled in automatically when the machine was discovered on your network. Lets you wake this computer from the library.")
                 }
               >
                 <input
                   className="field mono"
                   value={d.wolMac ?? ""}
-                  placeholder="aa:bb:cc:dd:ee:ff"
+                  placeholder={t("aa:bb:cc:dd:ee:ff")}
                   spellCheck={false}
-                  aria-label="MAC address for Wake-on-LAN"
+                  aria-label={t("MAC address for Wake-on-LAN")}
                   onChange={(e) => set({ wolMac: e.target.value || null, macFromDiscovery: false })}
                 />
               </Field>
@@ -894,11 +910,11 @@ export function HostDialog({
                     onChange={(e) => set({ passthrough: e.target.checked })}
                   />
                   <span>
-                    Capture system shortcuts by default
+                    {t("Capture system shortcuts by default")}
                     <span className="block text-xs text-tertiary">
                       {isRdp
-                        ? "Sends shortcuts like Alt+Tab and the Windows key to the remote computer"
-                        : "Sends shortcuts like Cmd+Tab / Alt+Tab to the remote computer"}
+                        ? t("Sends shortcuts like Alt+Tab and the Windows key to the remote computer")
+                        : t("Sends shortcuts like Cmd+Tab / Alt+Tab to the remote computer")}
                     </span>
                   </span>
                 </label>
@@ -954,10 +970,10 @@ export function HostDialog({
 
         <div className="flex justify-end gap-2.5 pt-1">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button type="submit" className="btn-primary" disabled={!canSave}>
-            {d.id ? "Save Changes" : "Add Host"}
+            {d.id ? t("Save Changes") : t("Add Host")}
           </button>
         </div>
       </form>
@@ -979,30 +995,31 @@ function RdpOptionsSection({
   rdp: RdpSettings;
   onChange: (patch: Partial<RdpSettings>) => void;
 }): ReactNode {
+  const t = useT();
   const [codecs, setCodecs] = useState(false);
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Colour depth" hint="Auto follows the quality setting">
+        <Field label={t("Colour depth")} hint={t("Auto follows the quality setting")}>
           <Select
             value={rdp.colorDepth}
             onChange={(e) => onChange({ colorDepth: e.target.value as RdpSettings["colorDepth"] })}
           >
-            <option value="auto">Auto</option>
-            <option value="bpp32">32-bit</option>
-            <option value="bpp24">24-bit</option>
-            <option value="bpp16">16-bit</option>
-            <option value="bpp15">15-bit</option>
+            <option value="auto">{t("Auto")}</option>
+            <option value="bpp32">{t("32-bit")}</option>
+            <option value="bpp24">{t("24-bit")}</option>
+            <option value="bpp16">{t("16-bit")}</option>
+            <option value="bpp15">{t("15-bit")}</option>
           </Select>
         </Field>
-        <Field label="Sound">
+        <Field label={t("Sound")}>
           <Select
             value={rdp.audio}
             onChange={(e) => onChange({ audio: e.target.value as RdpSettings["audio"] })}
           >
-            <option value="play-locally">Play here</option>
-            <option value="leave-at-server">Play there</option>
-            <option value="off">Do not play</option>
+            <option value="play-locally">{t("Play here")}</option>
+            <option value="leave-at-server">{t("Play there")}</option>
+            <option value="off">{t("Do not play")}</option>
           </Select>
         </Field>
       </div>
@@ -1010,30 +1027,30 @@ function RdpOptionsSection({
       <Check
         checked={rdp.monitors === "all"}
         onChange={(on) => onChange({ monitors: on ? "all" : "primary" })}
-        label="Use all of my monitors"
-        hint="Makes the Displays menu list the remote monitors instead of just the one."
+        label={t("Use all of my monitors")}
+        hint={t("Makes the Displays menu list the remote monitors instead of just the one.")}
       />
       <ResolutionField value={rdp.resolution} onChange={(resolution) => onChange({ resolution })} />
       <Check
         checked={rdp.matchLocalScale}
         onChange={(matchLocalScale) => onChange({ matchLocalScale })}
-        label="Match this screen's scaling"
-        hint="Text and icons on the remote desktop come out the size they are here: 200% on a Retina display. Turn it off to always use 100%."
+        label={t("Match this screen's scaling")}
+        hint={t("Text and icons on the remote desktop come out the size they are here: 200% on a Retina display. Turn it off to always use 100%.")}
       />
       <Check
         checked={rdp.fullscreen}
         onChange={(fullscreen) => onChange({ fullscreen })}
-        label="Open full screen"
+        label={t("Open full screen")}
       />
       <Check
         checked={rdp.clipboard}
         onChange={(clipboard) => onChange({ clipboard })}
-        label="Share my clipboard"
+        label={t("Share my clipboard")}
       />
       <Check
         checked={rdp.consoleSession}
         onChange={(consoleSession) => onChange({ consoleSession })}
-        label="Connect to the console session"
+        label={t("Connect to the console session")}
       />
 
       <div className="rounded-md border border-subtle">
@@ -1044,13 +1061,14 @@ function RdpOptionsSection({
           onClick={() => setCodecs((v) => !v)}
         >
           {codecs ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-          Codecs
+          {t("Codecs")}
         </button>
         {codecs ? (
           <div className="space-y-3 border-t border-subtle p-3">
             <p className="text-xs text-tertiary">
-              Turn one of these off only to work around a server whose picture is
-              wrong. They all make the connection faster.
+              {t(
+                "Turn one of these off only to work around a server whose picture is wrong. They all make the connection faster.",
+              )}
             </p>
             {(
               [
@@ -1082,9 +1100,9 @@ const SESSION_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** `null` when the session name is fine to save. */
 function sessionNameError(name: string): string | null {
-  if (name.trim() === "") return "Required";
-  if (name.length > 64) return "64 characters or fewer";
-  if (!SESSION_NAME_RE.test(name)) return "Only letters, numbers, underscore and hyphen";
+  if (name.trim() === "") return t("Required");
+  if (name.length > 64) return t("64 characters or fewer");
+  if (!SESSION_NAME_RE.test(name)) return t("Only letters, numbers, underscore and hyphen");
   return null;
 }
 
@@ -1102,8 +1120,8 @@ const DISTRO_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
 function distroNameError(name: string): string | null {
   const trimmed = name.trim();
   if (trimmed === "") return null;
-  if (trimmed.length > 64) return "64 characters or fewer";
-  if (!DISTRO_NAME_RE.test(trimmed)) return "Only letters, numbers, dot, underscore and hyphen";
+  if (trimmed.length > 64) return t("64 characters or fewer");
+  if (!DISTRO_NAME_RE.test(trimmed)) return t("Only letters, numbers, dot, underscore and hyphen");
   return null;
 }
 
@@ -1151,6 +1169,7 @@ function SshOptionsSection({
   username: string;
   profileId: string | null;
 }): ReactNode {
+  const t = useT();
   // Touched on blur rather than checked from the first keystroke, the same
   // rule the address field uses: typing a fresh name a character at a time
   // must not flash red before the user has finished it.
@@ -1196,18 +1215,18 @@ function SshOptionsSection({
       <Check
         checked={ssh.wsl}
         onChange={(wsl) => onChange({ wsl })}
-        label="Connect inside WSL"
-        hint="On a Windows host, land inside the Windows Subsystem for Linux instead of PowerShell, and look for the multiplexer there instead of on Windows."
+        label={t("Connect inside WSL")}
+        hint={t("On a Windows host, land inside the Windows Subsystem for Linux instead of PowerShell, and look for the multiplexer there instead of on Windows.")}
       />
 
       {ssh.wsl ? (
         <Field
-          label="Distribution"
+          label={t("Distribution")}
           error={distroError}
           hint={
             distros !== null && distros.length === 0
-              ? "The list of installed distributions could not be read, so type a name instead. Leave blank for the default distribution."
-              : "Leave blank for the default distribution."
+              ? t("The list of installed distributions could not be read, so type a name instead. Leave blank for the default distribution.")
+              : t("Leave blank for the default distribution.")
           }
         >
           <div className="flex gap-2">
@@ -1216,7 +1235,7 @@ function SshOptionsSection({
                 value={ssh.wslDistro ?? ""}
                 onChange={(e) => onChange({ wslDistro: e.target.value || null })}
               >
-                <option value="">Default distribution</option>
+                <option value="">{t("Default distribution")}</option>
                 {distros.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -1227,7 +1246,7 @@ function SshOptionsSection({
               <input
                 className="field mono"
                 value={ssh.wslDistro ?? ""}
-                placeholder="Default distribution"
+                placeholder={t("Default distribution")}
                 maxLength={64}
                 spellCheck={false}
                 autoCapitalize="none"
@@ -1242,7 +1261,7 @@ function SshOptionsSection({
               disabled={detecting}
               onClick={() => void detectDistros()}
             >
-              {detecting ? "Detecting…" : "Detect"}
+              {detecting ? t("Detecting…") : t("Detect")}
             </button>
           </div>
         </Field>
@@ -1258,27 +1277,27 @@ function SshOptionsSection({
         to be the only option on a Windows box.
       */}
       <Field
-        label="Terminal multiplexer"
-        hint="Auto finds tmux or psmux on the remote machine, so your work survives a dropped connection. Without one, a disconnect ends your session."
+        label={t("Terminal multiplexer")}
+        hint={t("Auto finds tmux or psmux on the remote machine, so your work survives a dropped connection. Without one, a disconnect ends your session.")}
       >
         <Select
           value={ssh.multiplexer}
           onChange={(e) => onChange({ multiplexer: e.target.value as MultiplexerKind })}
         >
-          <option value="auto">Auto (recommended)</option>
-          <option value="psmux">psmux</option>
-          <option value="tmux">tmux</option>
-          <option value="screen">screen</option>
-          <option value="zellij">zellij</option>
-          <option value="none">None, always a plain shell</option>
-          <option value="custom">Custom command</option>
+          <option value="auto">{t("Auto (recommended)")}</option>
+          <option value="psmux">{t("psmux")}</option>
+          <option value="tmux">{t("tmux")}</option>
+          <option value="screen">{t("screen")}</option>
+          <option value="zellij">{t("zellij")}</option>
+          <option value="none">{t("None, always a plain shell")}</option>
+          <option value="custom">{t("Custom command")}</option>
         </Select>
       </Field>
 
       <Field
-        label="Session name"
+        label={t("Session name")}
         error={nameError}
-        hint="This is placed on the remote command line to attach or create the session, so only letters, numbers, underscore and hyphen are accepted, up to 64 characters."
+        hint={t("This is placed on the remote command line to attach or create the session, so only letters, numbers, underscore and hyphen are accepted, up to 64 characters.")}
       >
         <input
           className="field mono"
@@ -1294,13 +1313,13 @@ function SshOptionsSection({
 
       {ssh.multiplexer === "custom" ? (
         <Field
-          label="Custom command"
-          hint="Runs on the remote machine instead of attaching to tmux, psmux or another multiplexer. {session} is replaced with the session name above."
+          label={t("Custom command")}
+          hint={t("Runs on the remote machine instead of attaching to tmux, psmux or another multiplexer. {session} is replaced with the session name above.")}
         >
           <input
             className="field mono"
             value={ssh.customCommand ?? ""}
-            placeholder="tmux new -A -s {session}"
+            placeholder={t("tmux new -A -s {session}")}
             spellCheck={false}
             autoCapitalize="none"
             autoCorrect="off"
@@ -1310,13 +1329,13 @@ function SshOptionsSection({
       ) : null}
 
       <Field
-        label="Startup command"
-        hint="Runs once connected, instead of your login shell. Leave blank to sign in normally."
+        label={t("Startup command")}
+        hint={t("Runs once connected, instead of your login shell. Leave blank to sign in normally.")}
       >
         <input
           className="field mono"
           value={ssh.startupCommand ?? ""}
-          placeholder="Optional"
+          placeholder={t("Optional")}
           spellCheck={false}
           autoCapitalize="none"
           autoCorrect="off"
@@ -1334,13 +1353,13 @@ function SshOptionsSection({
         <Check
           checked={ssh.fallbackToShell}
           onChange={(fallbackToShell) => onChange({ fallbackToShell })}
-          label="Fall back to a plain shell"
-          hint="If the chosen multiplexer is not installed on the remote machine, connect with an ordinary shell instead of refusing to connect."
+          label={t("Fall back to a plain shell")}
+          hint={t("If the chosen multiplexer is not installed on the remote machine, connect with an ordinary shell instead of refusing to connect.")}
         />
       ) : null}
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Font size">
+        <Field label={t("Font size")}>
           <input
             className="field"
             type="number"
@@ -1350,7 +1369,7 @@ function SshOptionsSection({
             onChange={(e) => onChange({ fontSize: Number(e.target.value) || ssh.fontSize })}
           />
         </Field>
-        <Field label="Scrollback" hint="Lines kept for scrolling back">
+        <Field label={t("Scrollback")} hint={t("Lines kept for scrolling back")}>
           <input
             className="field"
             type="number"
@@ -1392,6 +1411,7 @@ function GatewaySection({
   password: string;
   onPassword: (password: string) => void;
 }): ReactNode {
+  const t = useT();
   const gw = rdp.gateway;
   const patch = (p: Partial<RdpGateway>) => {
     if (gw) onChange({ gateway: { ...gw, ...p } });
@@ -1401,17 +1421,17 @@ function GatewaySection({
       <Check
         checked={gw !== null}
         onChange={(on) => onChange({ gateway: on ? blankGateway() : null })}
-        label="Connect through an RD Gateway"
-        hint="For a computer that is only reachable through your organisation's Remote Desktop Gateway."
+        label={t("Connect through an RD Gateway")}
+        hint={t("For a computer that is only reachable through your organisation's Remote Desktop Gateway.")}
       />
       {gw ? (
         <>
           <div className="grid grid-cols-[1fr_7rem] gap-3">
-            <Field label="Gateway address" hint="The gateway's name, as on its certificate">
+            <Field label={t("Gateway address")} hint={t("The gateway's name, as on its certificate")}>
               <input
                 className="field"
                 value={gw.host}
-                placeholder="gateway.example.com"
+                placeholder={t("gateway.example.com")}
                 autoComplete="off"
                 autoCapitalize="none"
                 autoCorrect="off"
@@ -1419,7 +1439,7 @@ function GatewaySection({
                 onChange={(e) => patch({ host: e.target.value.trim() })}
               />
             </Field>
-            <Field label="Port">
+            <Field label={t("Port")}>
               <input
                 className="field"
                 inputMode="numeric"
@@ -1434,13 +1454,13 @@ function GatewaySection({
           </div>
           {gw.accessToken ? (
             <div className="flex items-center justify-between gap-3 text-sm text-secondary">
-              <span>Signs in to the gateway with the access token from the imported file.</span>
+              <span>{t("Signs in to the gateway with the access token from the imported file.")}</span>
               <button
                 type="button"
                 className="btn-secondary"
                 onClick={() => patch({ accessToken: null })}
               >
-                Remove token
+                {t("Remove token")}
               </button>
             </div>
           ) : (
@@ -1448,12 +1468,12 @@ function GatewaySection({
               <Check
                 checked={gw.separateCredentials}
                 onChange={(separateCredentials) => patch({ separateCredentials })}
-                label="Use a different account for the gateway"
-                hint="Off signs in to the gateway with the same account as the computer."
+                label={t("Use a different account for the gateway")}
+                hint={t("Off signs in to the gateway with the same account as the computer.")}
               />
               {gw.separateCredentials ? (
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Gateway user name" hint="DOMAIN\user or user@domain">
+                  <Field label={t("Gateway user name")} hint={t("DOMAIN\\user or user@domain")}>
                     <input
                       className="field"
                       value={gw.username ?? ""}
@@ -1465,8 +1485,8 @@ function GatewaySection({
                     />
                   </Field>
                   <Field
-                    label="Gateway password"
-                    hint="Saved in your keychain. Leave blank to keep the saved one."
+                    label={t("Gateway password")}
+                    hint={t("Saved in your keychain. Leave blank to keep the saved one.")}
                   >
                     <input
                       className="field"
@@ -1480,13 +1500,13 @@ function GatewaySection({
               ) : null}
             </>
           )}
-          <Field label="Gateway connection" hint="Automatic suits current Windows gateways">
+          <Field label={t("Gateway connection")} hint={t("Automatic suits current Windows gateways")}>
             <Select
               value={gw.transport}
               onChange={(e) => patch({ transport: e.target.value as RdpGateway["transport"] })}
             >
-              <option value="auto">Automatic (WebSocket, then HTTP)</option>
-              <option value="http">HTTP only</option>
+              <option value="auto">{t("Automatic (WebSocket, then HTTP)")}</option>
+              <option value="http">{t("HTTP only")}</option>
             </Select>
           </Field>
         </>
@@ -1506,6 +1526,7 @@ function SecuritySection({
   onToggle: () => void;
   onChange: (patch: Partial<RdpSettings>) => void;
 }): ReactNode {
+  const t = useT();
   return (
     <div className="rounded-md border border-subtle">
       <button
@@ -1515,22 +1536,22 @@ function SecuritySection({
         onClick={onToggle}
       >
         {open ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-        Security
+        {t("Security")}
       </button>
       {open ? (
         <div className="space-y-4 border-t border-subtle p-3">
           <Check
             checked={rdp.nla === "allow-fallback"}
             onChange={(on) => onChange({ nla: on ? "allow-fallback" : "required" })}
-            label="Allow connecting without network level authentication"
-            hint="Some older or misconfigured servers refuse network level authentication. Without it your password is sent to a computer whose identity has not been checked yet."
+            label={t("Allow connecting without network level authentication")}
+            hint={t("Some older or misconfigured servers refuse network level authentication. Without it your password is sent to a computer whose identity has not been checked yet.")}
           />
           <div>
             <Check
               checked={rdp.legacyTls}
               onChange={(legacyTls) => onChange({ legacyTls })}
-              label="Allow legacy TLS (1.0 and 1.1)"
-              hint="For Windows 7 and Server 2008 R2 era computers that were never updated. Those machines offer only TLS 1.0 or 1.1, which this app normally refuses. Leave this off unless a connection has already failed for that reason."
+              label={t("Allow legacy TLS (1.0 and 1.1)")}
+              hint={t("For Windows 7 and Server 2008 R2 era computers that were never updated. Those machines offer only TLS 1.0 or 1.1, which this app normally refuses. Leave this off unless a connection has already failed for that reason.")}
             />
             {/*
               Shown only while the box is ticked, in the same danger colour
@@ -1548,14 +1569,9 @@ function SecuritySection({
             */}
             {rdp.legacyTls ? (
               <p className="mt-2 text-xs text-danger" role="status">
-                TLS 1.0 and 1.1 are old and weak. Someone who can sit between you
-                and this computer has a better chance of reading or changing the
-                traffic than they would over TLS 1.2. What still protects you is
-                the certificate this app pinned the first time you connected,
-                which is checked on every connection whichever version is used,
-                and network level authentication, which proves the computer is
-                the one you signed in to before your password is sent. Turn this
-                on for one computer at a time, not as a habit.
+                {t(
+                  "TLS 1.0 and 1.1 are old and weak. Someone who can sit between you and this computer has a better chance of reading or changing the traffic than they would over TLS 1.2. What still protects you is the certificate this app pinned the first time you connected, which is checked on every connection whichever version is used, and network level authentication, which proves the computer is the one you signed in to before your password is sent. Turn this on for one computer at a time, not as a habit.",
+                )}
               </p>
             ) : null}
           </div>
@@ -1590,6 +1606,7 @@ function KeyFileField({
   value: string | null;
   onChange: (path: string | null) => void;
 }): ReactNode {
+  const t = useT();
   const [found, setFound] = useState<LocalKeys>({ dir: "", keys: [] });
   // Sticky once the user has gone off-list: cancelling the file dialog, or
   // typing a path by hand, must not bounce the field back to the list and
@@ -1626,13 +1643,13 @@ function KeyFileField({
 
   return (
     <Field
-      label="Private key"
+      label={t("Private key")}
       hint={
         chosen?.encrypted
-          ? "This key is protected by a passphrase. Put the passphrase in the box below and it is kept in your system keychain."
+          ? t("This key is protected by a passphrase. Put the passphrase in the box below and it is kept in your system keychain.")
           : found.keys.length === 0
-            ? "An OpenSSH or PuTTY (.ppk) private key on this computer."
-            : "Keys found in your .ssh folder, or browse for one somewhere else."
+            ? t("An OpenSSH or PuTTY (.ppk) private key on this computer.")
+            : t("Keys found in your .ssh folder, or browse for one somewhere else.")
       }
     >
       <div className="space-y-2">
@@ -1651,16 +1668,16 @@ function KeyFileField({
                 onChange(picked || null);
               }}
             >
-              <option value="">Choose a key...</option>
+              <option value="">{t("Choose a key...")}</option>
               {found.keys.map((k) => (
                 <option key={k.path} value={k.path}>
                   {keyLabel(k.name, k.kind, k.comment)}
                 </option>
               ))}
-              <option value={BROWSE}>Another file...</option>
+              <option value={BROWSE}>{t("Another file...")}</option>
             </Select>
             <button type="button" className="btn-secondary shrink-0" onClick={() => void browse()}>
-              Browse...
+              {t("Browse...")}
             </button>
           </div>
         ) : null}
@@ -1669,11 +1686,11 @@ function KeyFileField({
             <input
               className="field mono"
               value={path}
-              placeholder="~/.ssh/id_ed25519"
+              placeholder={t("~/.ssh/id_ed25519")}
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
-              aria-label="Private key path"
+              aria-label={t("Private key path")}
               onChange={(e) => {
                 setManual(true);
                 onChange(e.target.value || null);
@@ -1685,7 +1702,7 @@ function KeyFileField({
                 className="btn-secondary shrink-0"
                 onClick={() => void browse()}
               >
-                Browse...
+                {t("Browse...")}
               </button>
             )}
           </div>
@@ -1746,8 +1763,9 @@ function SshTunnelSection({
   onChange: (tunnel: SshTunnelSettings) => void;
   onPassphrase: (passphrase: string) => void;
 }): ReactNode {
-  const t = tunnel ?? blankSshTunnel();
-  const patch = (p: Partial<SshTunnelSettings>): void => onChange({ ...t, ...p });
+  const t = useT();
+  const tun = tunnel ?? blankSshTunnel();
+  const patch = (p: Partial<SshTunnelSettings>): void => onChange({ ...tun, ...p });
 
   return (
     <div className="space-y-4 rounded-md border border-subtle p-3">
@@ -1755,77 +1773,78 @@ function SshTunnelSection({
         <input
           type="checkbox"
           className="mt-0.5 accent-(--accent)"
-          checked={t.enabled}
+          checked={tun.enabled}
           onChange={(e) => patch({ enabled: e.target.checked })}
         />
         <span>
-          Tunnel over SSH
+          {t("Tunnel over SSH")}
           <span className="block text-xs text-tertiary">
-            Runs the connection through an SSH login, so it works for servers that
-            only listen on the remote computer&apos;s own loopback, and is encrypted end to end
+            {t(
+              "Runs the connection through an SSH login, so it works for servers that only listen on the remote computer's own loopback, and is encrypted end to end",
+            )}
           </span>
         </span>
       </label>
-      {t.enabled ? (
+      {tun.enabled ? (
         <>
           <div className="grid grid-cols-[1fr_120px] gap-3">
-            <Field label="SSH host" hint="Leave blank to SSH to the address above">
+            <Field label={t("SSH host")} hint={t("Leave blank to SSH to the address above")}>
               <input
                 className="field mono"
-                value={t.host}
-                placeholder="Same as the address above"
+                value={tun.host}
+                placeholder={t("Same as the address above")}
                 spellCheck={false}
                 onChange={(e) => patch({ host: e.target.value })}
               />
             </Field>
-            <Field label="SSH port">
+            <Field label={t("SSH port")}>
               <input
                 className="field mono"
                 type="number"
                 min={1}
                 max={65535}
-                value={t.port}
+                value={tun.port}
                 onChange={(e) => patch({ port: parseInt(e.target.value, 10) || 22 })}
               />
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="User" hint="Leave blank to use your local username">
+            <Field label={t("User")} hint={t("Leave blank to use your local username")}>
               <input
                 className="field mono"
-                value={t.user}
-                placeholder="Same as this computer"
+                value={tun.user}
+                placeholder={t("Same as this computer")}
                 spellCheck={false}
                 autoComplete="off"
                 onChange={(e) => patch({ user: e.target.value })}
               />
             </Field>
-            <Field label="Authentication" hint="Secrets stay in your keychain / agent">
+            <Field label={t("Authentication")} hint={t("Secrets stay in your keychain / agent")}>
               <Select
-                value={t.auth}
+                value={tun.auth}
                 onChange={(e) =>
                   patch({ auth: e.target.value as SshTunnelSettings["auth"] })
                 }
               >
-                <option value="stored">Saved passphrase (or agent)</option>
-                <option value="agent">SSH agent</option>
-                <option value="key-file">Private key file</option>
+                <option value="stored">{t("Saved passphrase (or agent)")}</option>
+                <option value="agent">{t("SSH agent")}</option>
+                <option value="key-file">{t("Private key file")}</option>
               </Select>
             </Field>
           </div>
-          {t.auth === "key-file" ? (
-            <KeyFileField value={t.keyPath} onChange={(keyPath) => patch({ keyPath })} />
+          {tun.auth === "key-file" ? (
+            <KeyFileField value={tun.keyPath} onChange={(keyPath) => patch({ keyPath })} />
           ) : null}
-          {t.auth !== "agent" ? (
+          {tun.auth !== "agent" ? (
             <Field
-              label={t.auth === "key-file" ? "Key passphrase" : "SSH password"}
-              hint="Stored in your system keychain, shared with the Files panel. Leave blank to keep what is already saved."
+              label={tun.auth === "key-file" ? t("Key passphrase") : t("SSH password")}
+              hint={t("Stored in your system keychain, shared with the Files panel. Leave blank to keep what is already saved.")}
             >
               <input
                 className="field"
                 type="password"
                 value={passphrase}
-                placeholder="Optional"
+                placeholder={t("Optional")}
                 autoComplete="off"
                 onChange={(e) => onPassphrase(e.target.value)}
               />
@@ -1852,6 +1871,7 @@ function ResolutionField({
   value: RdpResolution;
   onChange: (v: RdpResolution) => void;
 }): ReactNode {
+  const t = useT();
   const listed =
     value.mode === "fixed" &&
     RDP_FIXED_SIZES.some(([w, h]) => w === value.width && h === value.height);
@@ -1887,29 +1907,29 @@ function ResolutionField({
 
   return (
     <Field
-      label="Resolution"
+      label={t("Resolution")}
       hint={
         value.mode === "follow-window"
-          ? "The remote desktop resizes as you resize this window. Windows rearranges its icons each time."
+          ? t("The remote desktop resizes as you resize this window. Windows rearranges its icons each time.")
           : value.mode === "window-at-connect"
-            ? "The remote desktop is sized to this window when you connect, then left alone."
-            : "The remote desktop is always this size. This window scales it to fit."
+            ? t("The remote desktop is sized to this window when you connect, then left alone.")
+            : t("The remote desktop is always this size. This window scales it to fit.")
       }
     >
       <Select value={selected} onChange={(e) => pick(e.target.value)}>
-        <option value="window-at-connect">Match this window when connecting</option>
-        <option value="follow-window">Match this window, and keep matching</option>
+        <option value="window-at-connect">{t("Match this window when connecting")}</option>
+        <option value="follow-window">{t("Match this window, and keep matching")}</option>
         {RDP_FIXED_SIZES.map(([w, h]) => (
           <option key={`${w}x${h}`} value={`${w}x${h}`}>
             {w} x {h}
           </option>
         ))}
-        <option value="custom">Custom...</option>
+        <option value="custom">{t("Custom...")}</option>
       </Select>
       {custom && value.mode === "fixed" ? (
         <div className="mt-2 grid grid-cols-2 gap-3">
-          {dim(value.width, (width) => onChange({ ...value, width }), "Width in pixels")}
-          {dim(value.height, (height) => onChange({ ...value, height }), "Height in pixels")}
+          {dim(value.width, (width) => onChange({ ...value, width }), t("Width in pixels"))}
+          {dim(value.height, (height) => onChange({ ...value, height }), t("Height in pixels"))}
         </div>
       ) : null}
     </Field>

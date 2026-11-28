@@ -11,6 +11,7 @@ import {
 import { useToasts, type Toast } from "../state/ToastContext";
 import { usePaneVisible } from "./Pane";
 import { classNames } from "../lib/util";
+import { useT } from "../i18n";
 import { IconCheck, IconAlert, IconX, IconChevronDown } from "./icons";
 
 // ------------------------------------------------------------------- select
@@ -53,14 +54,15 @@ export function ToastShelf(): ReactNode {
       role="status"
       aria-live="polite"
     >
-      {toasts.map((t) => (
-        <ToastCard key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
+      {toasts.map((toast) => (
+        <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}
     </div>
   );
 }
 
 function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }): ReactNode {
+  const t = useT();
   const color =
     toast.kind === "success"
       ? "text-success"
@@ -95,7 +97,7 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       ) : null}
       <button
         type="button"
-        aria-label="Dismiss notification"
+        aria-label={t("Dismiss notification")}
         className="shrink-0 text-tertiary hover:text-primary"
         onClick={onDismiss}
       >
@@ -258,6 +260,7 @@ export function Dialog({
   danger?: boolean;
   initialFocusSelector?: string;
 }): ReactNode {
+  const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   // A dialog outside the focused pane must neither take the focus nor answer
   // the keyboard. Both effects below listen outside this subtree, so neither
@@ -334,7 +337,7 @@ export function Dialog({
           </h2>
           <button
             type="button"
-            aria-label="Close dialog"
+            aria-label={t("Close dialog")}
             className="rounded-sm p-1 text-tertiary hover:text-primary"
             onClick={onClose}
           >

@@ -10,6 +10,7 @@
  * password and the unlock writes them. A save that fails for any other
  * reason is shown to the person, never dropped.
  */
+import { t } from "../i18n";
 import { mustInvoke, safeInvoke } from "./tauri";
 
 export type CredentialBackend = "OsKeychain" | "EncryptedFile" | "Locked";
@@ -61,15 +62,15 @@ export async function saveCredentials(
 
 /** One plain sentence about where passwords are kept, for Preferences. */
 export function describeCredentialStore(status: CredentialStatus | null): string {
-  if (!status) return "Passwords are stored in your operating system keychain, never in plain text.";
+  if (!status) return t("Passwords are stored in your operating system keychain, never in plain text.");
   switch (status.backend) {
     case "OsKeychain":
-      return "Passwords are stored in your operating system keychain.";
+      return t("Passwords are stored in your operating system keychain.");
     case "EncryptedFile":
-      return "This computer has no usable keychain, so passwords are stored in an encrypted file protected by your master password. It is unlocked for now.";
+      return t("This computer has no usable keychain, so passwords are stored in an encrypted file protected by your master password. It is unlocked for now.");
     case "Locked":
       return status.vaultExists
-        ? "This computer has no usable keychain, so passwords are stored in an encrypted file protected by your master password. Unlock it to use and save passwords."
-        : "This computer has no usable keychain. Choose a master password to keep saved passwords in an encrypted file instead.";
+        ? t("This computer has no usable keychain, so passwords are stored in an encrypted file protected by your master password. Unlock it to use and save passwords.")
+        : t("This computer has no usable keychain. Choose a master password to keep saved passwords in an encrypted file instead.");
   }
 }

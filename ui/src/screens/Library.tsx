@@ -91,6 +91,7 @@ import {
   EDIT_HOST_EVENT,
   type EditHostRequest,
 } from "../lib/editHost";
+import { tn, useLanguage, useT } from "../i18n";
 
 interface CtxMenuState {
   x: number;
@@ -142,6 +143,10 @@ export function Library({
   /** Is the library the pane on screen, or is a session tab in front of it? */
   const inFront = activeTabId === null;
   const { push } = useToasts();
+  const t = useT();
+  // The palette's actions are memoised, so they have to be rebuilt when the
+  // language changes as well as when what they act on does.
+  const language = useLanguage();
 
   const [selection, setSelection] = useState<SidebarSelection>({ kind: "all" });
   const [search, setSearch] = useState("");
@@ -201,7 +206,7 @@ export function Library({
         // pane, not merely the right tab.
         if (background) return;
         if (outcome.target === "tab") selectSession(outcome.sessionId);
-        push("info", `${label} is already open, brought it to the front`);
+        push("info", t("{name} is already open, brought it to the front", { name: label }));
         return;
       }
       if (outcome.target === "tab" && outcome.params) {
@@ -218,7 +223,7 @@ export function Library({
       }
       onConnected?.(outcome.sessionId);
     },
-    [tabbed, selectSession, openTab, hasTab, push],
+    [tabbed, selectSession, openTab, hasTab, push, t],
   );
 
   const connectHost = useCallback(
@@ -389,7 +394,7 @@ export function Library({
         (h) => h.groupId === group.id || (h.groupId !== null && childIds.includes(h.groupId)),
       );
       if (inGroup.length === 0) {
-        push("info", `${group.name} has no hosts in it yet`);
+        push("info", t("{group} has no hosts in it yet", { group: group.name }));
         return;
       }
 
@@ -409,7 +414,7 @@ export function Library({
         if (missing > 0 || added > 0) {
           push(
             "info",
-            `${group.name} has changed since its layout was saved; opened what still matches`,
+            t("{group} has changed since its layout was saved; opened what still matches", { group: group.name }),
           );
         }
       } else {
@@ -461,7 +466,7 @@ export function Library({
         });
       }
     },
-    [groups, hosts, openArranged, openTab, adopt, push],
+    [groups, hosts, openArranged, openTab, adopt, push, t],
   );
 
   /**
@@ -475,40 +480,40 @@ export function Library({
     (group: HostGroup): void => {
       const serialized = serializeActive();
       if (!serialized) {
-        push("info", "Open a group as a grid first, then save how you arranged it");
+        push("info", t("Open a group as a grid first, then save how you arranged it"));
         return;
       }
       saveGroupLayout(group.id, serialized);
-      push("success", `Saved this arrangement to ${group.name}`);
+      push("success", t("Saved this arrangement to {group}", { group: group.name }));
     },
-    [serializeActive, push],
+    [serializeActive, push, t],
   );
 
   const groupMenuItems = useCallback(
     (group: HostGroup): MenuItem[] => {
       const items: MenuItem[] = [
         {
-          label: hasSavedLayout(group.id) ? "Open as grid (saved layout)" : "Open as grid",
+          label: hasSavedLayout(group.id) ? t("Open as grid (saved layout)") : t("Open as grid"),
           onSelect: () => openGroupAsGrid(group),
         },
       ];
       // Only worth offering with a session in front: with the library showing
       // there is no arrangement to save.
       if (activeTabId !== null) {
-        items.push({ label: "Save this layout to group", onSelect: () => saveLayoutToGroup(group) });
+        items.push({ label: t("Save this layout to group"), onSelect: () => saveLayoutToGroup(group) });
       }
       if (hasSavedLayout(group.id)) {
         items.push({
-          label: "Forget saved layout",
+          label: t("Forget saved layout"),
           onSelect: () => {
             forgetGroupLayout(group.id);
-            push("info", `${group.name} will open as a plain grid from now on`);
+            push("info", t("{group} will open as a plain grid from now on", { group: group.name }));
           },
         });
       }
       return items;
     },
-    [openGroupAsGrid, saveLayoutToGroup, activeTabId, push],
+    [openGroupAsGrid, saveLayoutToGroup, activeTabId, push, t],
   );
 
   /** Most recent first, no duplicates, oldest dropped past the cap. */
@@ -574,16 +579,16 @@ export function Library({
     if (activeTagIds.size > 0) {
       list = list.filter((h) =>
         tagMode === "and"
-          ? [...activeTagIds].every((t) => h.tags.includes(t))
-          : [...activeTagIds].some((t) => h.tags.includes(t)),
+          ? [...activeTagIds].every((id) => h.tags.includes(id))
+          : [...activeTagIds].some((id) => h.tags.includes(id)),
       );
     }
     if (search.trim()) {
-      const tagNames = new Map(tags.map((t) => [t.id, t.name] as const));
+      const tagNames = new Map(tags.map((tag) => [tag.id, tag.name] as const));
       list = list.filter((h) =>
         fuzzyMatch(
           search,
-          `${h.friendlyName} ${h.address} ${h.tags.map((t) => tagNames.get(t) ?? "").join(" ")}`,
+          `${h.friendlyName} ${h.address} ${h.tags.map((id) => tagNames.get(id) ?? "").join(" ")}`,
         ),
       );
     }
@@ -648,13 +653,13 @@ export function Library({
   /** Id lookup: a Cmd+A selection turns every `hosts.find` into a full scan. */
   const hostById = useMemo(() => new Map(hosts.map((h) => [h.id, h] as const)), [hosts]);
   const hostName = useCallback(
-    (id: string): string => hostById.get(id)?.friendlyName ?? "host",
-    [hostById],
+    (id: string): string => hostById.get(id)?.friendlyName ?? t("host"),
+    [hostById, t],
   );
 
   /** "3 hosts" / "Studio", for toasts about a dropped selection. */
   const describe = useCallback(
-    (ids: string[]): string => (ids.length === 1 ? hostName(ids[0]) : `${ids.length} hosts`),
+    (ids: string[]): string => (ids.length === 1 ? hostName(ids[0]) : tn(ids.length, "{count} host", "{count} hosts")),
     [hostName],
   );
 
@@ -687,23 +692,28 @@ export function Library({
       // nothing is the very bug this change exists to fix, and it is no more
       // acceptable on the way back than on the way there.
       const reportUndo = (run: () => Promise<void>) => (): void => {
-        void run().catch((err: unknown) => push("danger", `Could not undo: ${String(err)}`));
+        void run().catch((err: unknown) => push("danger", t("Could not undo: {error}", { error: String(err) })));
       };
 
       if (target.kind === "ungroup") {
         // Nothing to do for hosts that are not in a group anyway.
         const grouped = ids.filter((id) => previousGroup.get(id) !== null);
         if (grouped.length === 0) {
-          push("info", `${describe(ids)} ${ids.length === 1 ? "is" : "are"} not in a group`);
+          push(
+            "info",
+            ids.length === 1
+              ? t("{name} is not in a group", { name: describe(ids) })
+              : t("{hosts} are not in a group", { hosts: describe(ids) }),
+          );
           return;
         }
         void setHostsGroup(grouped, null).then(
           () =>
-            push("success", `Removed ${describe(grouped)} from their group`, {
-              label: "Undo",
+            push("success", t("Removed {hosts} from their group", { hosts: describe(grouped) }), {
+              label: t("Undo"),
               run: reportUndo(undoGroups),
             }),
-          (err: unknown) => push("danger", `Could not move those hosts: ${String(err)}`),
+          (err: unknown) => push("danger", t("Could not move those hosts: {error}", { error: String(err) })),
         );
         return;
       }
@@ -714,39 +724,39 @@ export function Library({
         const moving = ids.filter((id) => previousGroup.get(id) !== target.id);
         // Silence here would be indistinguishable from a drop that missed.
         if (moving.length === 0) {
-          push("info", `${describe(ids)} already in ${group.name}`);
+          push("info", t("{hosts} already in {group}", { hosts: describe(ids), group: group.name }));
           return;
         }
         void setHostsGroup(moving, target.id).then(
           () =>
-            push("success", `Moved ${describe(moving)} to ${group.name}`, {
-              label: "Undo",
+            push("success", t("Moved {hosts} to {group}", { hosts: describe(moving), group: group.name }), {
+              label: t("Undo"),
               run: reportUndo(undoGroups),
             }),
-          (err: unknown) => push("danger", `Could not move those hosts: ${String(err)}`),
+          (err: unknown) => push("danger", t("Could not move those hosts: {error}", { error: String(err) })),
         );
         return;
       }
 
-      const tag = tags.find((t) => t.id === target.id);
+      const tag = tags.find((x) => x.id === target.id);
       if (!tag) return;
       // Hosts that already carry the tag are left out of the Undo, or undoing
       // would strip a tag the user had put there earlier by hand.
       const tagging = ids.filter((id) => !(hostById.get(id)?.tags ?? []).includes(target.id));
       if (tagging.length === 0) {
-        push("info", `${describe(ids)} already tagged ${tag.name}`);
+        push("info", t("{hosts} already tagged {tag}", { hosts: describe(ids), tag: tag.name }));
         return;
       }
       void addTagToHosts(tagging, target.id).then(
         () =>
-          push("success", `Tagged ${describe(tagging)} with ${tag.name}`, {
-            label: "Undo",
+          push("success", t("Tagged {hosts} with {tag}", { hosts: describe(tagging), tag: tag.name }), {
+            label: t("Undo"),
             run: reportUndo(() => removeTagFromHosts(tagging, target.id)),
           }),
-        (err: unknown) => push("danger", `Could not tag those hosts: ${String(err)}`),
+        (err: unknown) => push("danger", t("Could not tag those hosts: {error}", { error: String(err) })),
       );
     },
-    [hostById, groups, tags, setHostsGroup, addTagToHosts, removeTagFromHosts, describe, push],
+    [hostById, groups, tags, setHostsGroup, addTagToHosts, removeTagFromHosts, describe, push, t],
   );
 
   const {
@@ -826,9 +836,9 @@ export function Library({
     try {
       setHostDialog(draftFromRdpImport(await importRdpFile(path)));
     } catch (err: unknown) {
-      push("danger", `Could not import that Remote Desktop file: ${String(err)}`);
+      push("danger", t("Could not import that Remote Desktop file: {error}", { error: String(err) }));
     }
-  }, [push]);
+  }, [push, t]);
 
   /** The MAC discovery is currently reporting for this endpoint, if any. */
   const discoveredMacFor = useCallback(
@@ -1001,13 +1011,18 @@ export function Library({
       if (credentialError) {
         push(
           "danger",
-          `${draft.id ? "Host updated" : `Added ${draft.friendlyName}`}, but its password was not saved: ${String(credentialError)}`,
+          draft.id
+            ? t("Host updated, but its password was not saved: {error}", { error: String(credentialError) })
+            : t("Added {name}, but its password was not saved: {error}", {
+                name: draft.friendlyName,
+                error: String(credentialError),
+              }),
         );
       } else {
-        push("success", draft.id ? "Host updated" : `Added ${draft.friendlyName}`);
+        push("success", draft.id ? t("Host updated") : t("Added {name}", { name: draft.friendlyName }));
       }
     },
-    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push],
+    [saveHost, savePassword, saveSshPassphrase, saveRdpCredentials, setHostTags, refresh, push, t],
   );
 
   const paletteActions = useMemo((): PaletteAction[] => {
@@ -1015,29 +1030,29 @@ export function Library({
       // Sessions open in tabs are reachable from here as well as from the
       // strip, so a library with a long list of machines still has one keyboard
       // route back to the one you were working in.
-      ...summaries.map((t, i) => ({
-        id: `go-to-tab-${t.id}`,
-        label: `Go to ${t.title}`,
+      ...summaries.map((tab, i) => ({
+        id: `go-to-tab-${tab.id}`,
+        label: t("Go to {name}", { name: tab.title }),
         hint: i < 8 ? `${modKeyLabel}${i + 2}` : "",
-        run: () => selectTab(t.id),
+        run: () => selectTab(tab.id),
       })),
-      { id: "new-host", label: "New host…", hint: "", run: () => setHostDialog(draftFromHost(null)) },
-      { id: "import-rdp", label: "Import Remote Desktop file…", hint: "", run: () => void importRdp() },
-      { id: "quick-connect", label: "Connect to an address…", hint: `${modKeyLabel}T`, run: focusQuickConnect },
+      { id: "new-host", label: t("New host…"), hint: "", run: () => setHostDialog(draftFromHost(null)) },
+      { id: "import-rdp", label: t("Import Remote Desktop file…"), hint: "", run: () => void importRdp() },
+      { id: "quick-connect", label: t("Connect to an address…"), hint: `${modKeyLabel}T`, run: focusQuickConnect },
       scan.running
-        ? { id: "stop-scan", label: "Stop scan", hint: "", run: () => void stopScan() }
-        : { id: "scan", label: "Scan network", hint: "", run: () => void startScan() },
+        ? { id: "stop-scan", label: t("Stop scan"), hint: "", run: () => void stopScan() }
+        : { id: "scan", label: t("Scan network"), hint: "", run: () => void startScan() },
       {
         id: "toggle-view",
-        label: settings.libraryView === "grid" ? "Switch to list view" : "Switch to grid view",
+        label: settings.libraryView === "grid" ? t("Switch to list view") : t("Switch to grid view"),
         run: () => update({ libraryView: settings.libraryView === "grid" ? "list" : "grid" }),
       },
-      { id: "preferences", label: "Open Preferences", run: onOpenPreferences },
-      { id: "refresh", label: "Refresh library", run: () => void refresh() },
-      { id: "help", label: "Help & keyboard shortcuts", run: onOpenAbout },
-      { id: "about", label: "About DeskVNCViewer", run: onOpenAbout },
+      { id: "preferences", label: t("Open Preferences"), run: onOpenPreferences },
+      { id: "refresh", label: t("Refresh library"), run: () => void refresh() },
+      { id: "help", label: t("Help & keyboard shortcuts"), run: onOpenAbout },
+      { id: "about", label: t("About DeskVNCViewer"), run: onOpenAbout },
     ];
-  }, [summaries, selectTab, settings.libraryView, update, scan.running, startScan, stopScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, importRdp]);
+  }, [summaries, selectTab, settings.libraryView, update, scan.running, startScan, stopScan, focusQuickConnect, onOpenPreferences, onOpenAbout, refresh, importRdp, t, language]);
 
   // Onboarding hand-off: open the add dialog pre-filled from a discovered host
   useEffect(() => {
@@ -1134,21 +1149,21 @@ export function Library({
       const grouped = ids.filter((id) => hosts.find((h) => h.id === id)?.groupId);
       return [
         {
-          label: `Remove ${ids.length} hosts from their group`,
+          label: t("Remove {count} hosts from their group", { count: ids.length }),
           disabled: grouped.length === 0,
           onSelect: () => dropOnTarget(ids, { kind: "ungroup" }),
         },
         ...groups.map((g) => ({
-          label: `Move to ${g.name}`,
+          label: t("Move to {group}", { group: g.name }),
           onSelect: () => dropOnTarget(ids, { kind: "group", id: g.id }),
         })),
-        ...tags.map((t) => ({
-          label: `Tag with ${t.name}`,
-          separatorAbove: t.id === tags[0]?.id,
-          onSelect: () => dropOnTarget(ids, { kind: "tag", id: t.id }),
+        ...tags.map((tag) => ({
+          label: t("Tag with {tag}", { tag: tag.name }),
+          separatorAbove: tag.id === tags[0]?.id,
+          onSelect: () => dropOnTarget(ids, { kind: "tag", id: tag.id }),
         })),
         {
-          label: `Delete ${ids.length} hosts…`,
+          label: t("Delete {count} hosts…", { count: ids.length }),
           danger: true,
           separatorAbove: true,
           onSelect: () => {
@@ -1166,13 +1181,13 @@ export function Library({
               // entry, the history rows and the thumbnail, and none of those
               // are recoverable from here. Say so rather than promise more
               // than the button delivers.
-              push("info", `Deleted ${doomed.length} hosts. Saved passwords are gone.`, {
-                label: "Undo",
+              push("info", t("Deleted {count} hosts. Saved passwords are gone.", { count: doomed.length }), {
+                label: t("Undo"),
                 run: () => {
                   void (async () => {
                     for (const h of doomed) await saveHost({ ...h });
                   })().catch((err: unknown) =>
-                    push("danger", `Could not restore those hosts: ${String(err)}`),
+                    push("danger", t("Could not restore those hosts: {error}", { error: String(err) })),
                   );
                 },
               });
@@ -1181,51 +1196,51 @@ export function Library({
         },
       ];
     },
-    [hostById, groups, tags, dropOnTarget, deleteHost, saveHost, clearSelection, push],
+    [hostById, groups, tags, dropOnTarget, deleteHost, saveHost, clearSelection, push, t],
   );
 
   const menuItemsFor = useCallback(
     (host: HostProfile): MenuItem[] => [
-      { label: "Connect", onSelect: () => connectHost(host) },
+      { label: t("Connect"), onSelect: () => connectHost(host) },
       ...(allowMultiple
         ? [
             {
-              label: tabbed ? "Connect in new tab" : "Connect in new window",
+              label: tabbed ? t("Connect in new tab") : t("Connect in new window"),
               onSelect: () => connectHost(host, true),
             },
           ]
         : []),
       {
-        label: "Edit…",
+        label: t("Edit…"),
         onSelect: () => editHost(host),
       },
       {
-        label: host.favorite ? "Remove from Favorites" : "Add to Favorites",
+        label: host.favorite ? t("Remove from Favorites") : t("Add to Favorites"),
         onSelect: () => void saveHost({ ...host, favorite: !host.favorite }),
       },
       {
-        label: "Duplicate",
+        label: t("Duplicate"),
         onSelect: () =>
           void saveHost({
             ...host,
             id: undefined,
-            friendlyName: `${host.friendlyName} copy`,
+            friendlyName: t("{name} copy", { name: host.friendlyName }),
             hasPassword: false,
           }),
       },
       {
-        label: "Wake (Wake-on-LAN)",
+        label: t("Wake (Wake-on-LAN)"),
         disabled: !host.wolMac,
         onSelect: () => {
           void wakeHost(host.id);
-          push("info", `Magic packet sent to ${host.friendlyName}`);
+          push("info", t("Magic packet sent to {name}", { name: host.friendlyName }));
         },
       },
       {
         // Thumbnails are captured by the SESSION window (capture_thumbnail
         // takes a raw RGBA body, not a host id), so from here we can only
         // re-read what the store already has.
-        label: "Reload thumbnail",
+        label: t("Reload thumbnail"),
         onSelect: () => refreshThumbnail(host.id),
       },
       {
@@ -1233,30 +1248,30 @@ export function Library({
         // clicked through, so without this a legitimately rebuilt machine, // new TLS certificate or new RA2 key, would be permanently
         // unreachable. Forgetting returns it to first-contact state, where the
         // usual "Trust this computer" prompt applies.
-        label: "Forget saved key…",
+        label: t("Forget saved key…"),
         onSelect: () => {
           void forgetCertificate(host.address, host.port).then(() =>
             push(
               "info",
-              `Forgot the saved key for ${host.friendlyName}. You will be asked to verify it on the next connection.`,
+              t("Forgot the saved key for {name}. You will be asked to verify it on the next connection.", { name: host.friendlyName }),
             ),
           );
         },
       },
       {
-        label: "Delete…",
+        label: t("Delete…"),
         danger: true,
         separatorAbove: true,
         onSelect: () => {
           void deleteHost(host.id);
-          push("info", `Deleted ${host.friendlyName}`, {
-            label: "Undo",
+          push("info", t("Deleted {name}", { name: host.friendlyName }), {
+            label: t("Undo"),
             run: () => void saveHost({ ...host }),
           });
         },
       },
     ],
-    [allowMultiple, tabbed, connectHost, editHost, saveHost, deleteHost, wakeHost, refreshThumbnail, push],
+    [allowMultiple, tabbed, connectHost, editHost, saveHost, deleteHost, wakeHost, refreshThumbnail, push, t],
   );
 
   // ------------------------------------------------------------ render
@@ -1274,8 +1289,8 @@ export function Library({
           <input
             ref={searchRef}
             className="field !pl-8"
-            placeholder={`Search or press ${modKeyLabel}K`}
-            aria-label="Search hosts"
+            placeholder={t("Search or press {shortcut}", { shortcut: `${modKeyLabel}K` })}
+            aria-label={t("Search hosts")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => {
@@ -1284,24 +1299,24 @@ export function Library({
           />
         </div>
         <label className="flex shrink-0 items-center gap-1.5 text-xs text-secondary">
-          Sort
+          {t("Sort")}
           <Select
             wrapperClassName="!inline-block"
             className="!w-auto !py-1 text-xs"
-            aria-label="Sort hosts"
+            aria-label={t("Sort hosts")}
             value={settings.sortKey}
             onChange={(e) => update({ sortKey: e.target.value as SortKey })}
           >
-            <option value="name">Name</option>
-            <option value="last-connected">Last connected</option>
-            <option value="frequency">Most used</option>
-            <option value="group">Group</option>
+            <option value="name">{t("Name")}</option>
+            <option value="last-connected">{t("Last connected")}</option>
+            <option value="frequency">{t("Most used")}</option>
+            <option value="group">{t("Group")}</option>
           </Select>
         </label>
-        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label="View mode">
+        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label={t("View mode")}>
           <button
             type="button"
-            aria-label="Grid view"
+            aria-label={t("Grid view")}
             aria-pressed={settings.libraryView === "grid"}
             className={classNames("p-1.5", settings.libraryView === "grid" ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ libraryView: "grid" })}
@@ -1310,7 +1325,7 @@ export function Library({
           </button>
           <button
             type="button"
-            aria-label="List view"
+            aria-label={t("List view")}
             aria-pressed={settings.libraryView === "list"}
             className={classNames("p-1.5", settings.libraryView === "list" ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ libraryView: "list" })}
@@ -1321,11 +1336,11 @@ export function Library({
         {/* The same preference as Connections > "Show sessions as tabs", within
             reach of the moment it matters: about to connect. It decides where
             the NEXT session goes, so sessions already running stay put. */}
-        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label="Where sessions open">
+        <div className="flex overflow-hidden rounded-sm border border-subtle" role="group" aria-label={t("Where sessions open")}>
           <button
             type="button"
-            aria-label="Open sessions in their own windows"
-            title="Open each session in its own window"
+            aria-label={t("Open sessions in their own windows")}
+            title={t("Open each session in its own window")}
             aria-pressed={!tabbed}
             className={classNames("p-1.5", !tabbed ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ windowMode: "windows" })}
@@ -1334,8 +1349,8 @@ export function Library({
           </button>
           <button
             type="button"
-            aria-label="Open sessions as tabs in this window"
-            title="Open sessions as tabs in this window"
+            aria-label={t("Open sessions as tabs in this window")}
+            title={t("Open sessions as tabs in this window")}
             aria-pressed={tabbed}
             className={classNames("p-1.5", tabbed ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset")}
             onClick={() => update({ windowMode: "tabs" })}
@@ -1346,8 +1361,8 @@ export function Library({
         <button
           type="button"
           aria-pressed={livePreviews}
-          aria-label="Live previews"
-          title="Live previews, tiles with an active session show a live picture instead of the saved thumbnail"
+          aria-label={t("Live previews")}
+          title={t("Live previews, tiles with an active session show a live picture instead of the saved thumbnail")}
           className={classNames(
             "overflow-hidden rounded-sm border border-subtle p-1.5",
             livePreviews ? "bg-accent text-accent-fg" : "text-secondary hover:bg-inset",
@@ -1362,27 +1377,27 @@ export function Library({
           listNetworks={listNetworks}
           onScan={(target) =>
             startScan(target).catch((err: unknown) => {
-              push("danger", `Could not scan: ${err instanceof Error ? err.message : String(err)}`);
+              push("danger", t("Could not scan: {error}", { error: err instanceof Error ? err.message : String(err) }));
             })
           }
         />
         <button
           type="button"
           className="btn-secondary"
-          title="Import a Remote Desktop (.rdp) file"
+          title={t("Import a Remote Desktop (.rdp) file")}
           onClick={() => void importRdp()}
         >
-          Import .rdp
+          {t("Import .rdp")}
         </button>
         <button type="button" className="btn-primary" onClick={() => setHostDialog(draftFromHost(null))}>
-          <IconPlus size={14} /> New Host
+          <IconPlus size={14} /> {t("New Host")}
         </button>
         {/* Routed through the same event the native menu's About item emits,
             so one listener (App.tsx) owns opening the dialog everywhere. */}
         <button
           type="button"
-          aria-label="About and help"
-          title="About and help"
+          aria-label={t("About and help")}
+          title={t("About and help")}
           className="overflow-hidden rounded-sm border border-subtle p-1.5 text-secondary hover:bg-inset"
           onClick={() => void emit("menu://action", { id: "menu:about" })}
         >
@@ -1439,7 +1454,7 @@ export function Library({
           // starts on a heading or on the empty-state copy would otherwise
           // drag a text highlight along with the rectangle.
           className="min-w-0 flex-1 select-none overflow-y-auto p-4"
-          aria-label="Hosts"
+          aria-label={t("Hosts")}
         >
           {loading ? (
             <div className={gridClass} style={gridCap(8, settings.compact)}>
@@ -1450,19 +1465,19 @@ export function Library({
           ) : nothingSaved && unsavedDiscovered.length === 0 ? (
             <EmptyState
               icon={<IconMonitor size={56} />}
-              title="Let's find your computers"
-              body="DeskVNCViewer can discover computers on your local network automatically, or you can add one by address."
-              primary={{ label: "Find computers on my network", onClick: () => void startScan() }}
-              secondary={{ label: "Add a computer manually", onClick: () => setHostDialog(draftFromHost(null)) }}
+              title={t("Let's find your computers")}
+              body={t("DeskVNCViewer can discover computers on your local network automatically, or you can add one by address.")}
+              primary={{ label: t("Find computers on my network"), onClick: () => void startScan() }}
+              secondary={{ label: t("Add a computer manually"), onClick: () => setHostDialog(draftFromHost(null)) }}
             />
           ) : (
             <>
               {selection.kind !== "nearby" ? (
                 visibleHosts.length === 0 && search.trim() ? (
                   <EmptyState
-                    title={`No computers match “${search.trim()}”`}
+                    title={t("No computers match “{search}”", { search: search.trim() })}
                     primary={{
-                      label: `Add “${search.trim()}” as a new host`,
+                      label: t("Add “{search}” as a new host", { search: search.trim() }),
                       onClick: () =>
                         setHostDialog(draftFromHost(null, { address: search.trim(), friendlyName: search.trim() })),
                     }}
@@ -1502,9 +1517,9 @@ export function Library({
               ) : null}
 
               {showNearbyBand ? (
-                <section className="mt-6" aria-label="Nearby, not yet saved">
+                <section className="mt-6" aria-label={t("Nearby, not yet saved")}>
                   <h2 className="mb-3 text-2xs font-semibold uppercase tracking-wider text-tertiary">
-                    Nearby, not yet saved
+                    {t("Nearby, not yet saved")}
                   </h2>
                   <div className={gridClass} style={gridCap(unsavedDiscovered.length, settings.compact)}>
                     {unsavedDiscovered.map((d) => (
@@ -1523,10 +1538,10 @@ export function Library({
               ) : selection.kind === "nearby" && unsavedDiscovered.length === 0 ? (
                 <EmptyState
                   icon={<IconZap size={48} />}
-                  title="Nothing discovered yet"
-                  body="Some computers don't advertise themselves on the network. You can actively scan this subnet, or add a computer by address."
-                  primary={{ label: "Scan this network", onClick: () => void startScan() }}
-                  secondary={{ label: "Add manually", onClick: () => setHostDialog(draftFromHost(null)) }}
+                  title={t("Nothing discovered yet")}
+                  body={t("Some computers don't advertise themselves on the network. You can actively scan this subnet, or add a computer by address.")}
+                  primary={{ label: t("Scan this network"), onClick: () => void startScan() }}
+                  secondary={{ label: t("Add manually"), onClick: () => setHostDialog(draftFromHost(null)) }}
                 />
               ) : null}
             </>
@@ -1571,7 +1586,7 @@ export function Library({
           style={{ left: drag.x + 14, top: drag.y + 14 }}
         >
           <IconMonitor size={13} className="text-tertiary" />
-          {drag.ids.length === 1 ? hostName(drag.ids[0]) : `${drag.ids.length} hosts`}
+          {drag.ids.length === 1 ? hostName(drag.ids[0]) : tn(drag.ids.length, "{count} host", "{count} hosts")}
         </div>
       ) : null}
       {ctxMenu ? (
@@ -1617,12 +1632,24 @@ export function Library({
           onSubmit={(name, color) => {
             const kind = namePrompt;
             const created = kind === "group" ? saveGroup({ name }) : saveTag({ name, color });
+            // Whole sentences per kind: "group" and "tag" are not words that
+            // can be slotted into another language's sentence.
             // A failure here used to be invisible: the dialog closed, nothing
             // appeared in the sidebar, and the only trace was a console
             // warning nobody sees in a packaged app.
             void created.then(
-              () => push("success", `Created the ${kind} ${name}`),
-              (err: unknown) => push("danger", `Could not create the ${kind}: ${String(err)}`),
+              () =>
+                push(
+                  "success",
+                  kind === "group" ? t("Created the group {name}", { name }) : t("Created the tag {name}", { name }),
+                ),
+              (err: unknown) =>
+                push(
+                  "danger",
+                  kind === "group"
+                    ? t("Could not create the group: {error}", { error: String(err) })
+                    : t("Could not create the tag: {error}", { error: String(err) }),
+                ),
             );
             setNamePrompt(null);
           }}
@@ -1662,6 +1689,7 @@ function SelectionBar({
   onAddTag: (tagId: string) => void;
   onClear: () => void;
 }): ReactNode {
+  const t = useT();
   return (
     <div
       className="fade-in absolute bottom-4 right-4 z-30 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-md border border-strong bg-raised/95 px-3 py-2 text-sm shadow-(--shadow-pop) backdrop-blur-sm"
@@ -1670,17 +1698,17 @@ function SelectionBar({
           have a screen reader re-read every control each time the count
           changed, which during a marquee is constantly. */}
       <span className="font-medium text-primary" role="status">
-        {count} hosts selected
+        {tn(count, "{count} host selected", "{count} hosts selected")}
       </span>
       <span className="hidden text-xs text-tertiary lg:inline">
-        Drag onto a group or tag in the sidebar, or:
+        {t("Drag onto a group or tag in the sidebar, or:")}
       </span>
       <label className="flex items-center gap-1.5 text-xs text-secondary">
-        Group
+        {t("Group")}
         <Select
           wrapperClassName="!inline-block"
           className="!w-auto !py-1 text-xs"
-          aria-label="Move selected hosts to a group"
+          aria-label={t("Move selected hosts to a group")}
           value=""
           onChange={(e) => {
             const v = e.target.value;
@@ -1688,21 +1716,21 @@ function SelectionBar({
             e.target.value = "";
           }}
         >
-          <option value="">Move to…</option>
+          <option value="">{t("Move to…")}</option>
           {groups.map((g) => (
             <option key={g.id} value={g.id}>
               {g.name}
             </option>
           ))}
-          <option value="__none__">No group</option>
+          <option value="__none__">{t("No group")}</option>
         </Select>
       </label>
       <label className="flex items-center gap-1.5 text-xs text-secondary">
-        Tag
+        {t("Tag")}
         <Select
           wrapperClassName="!inline-block"
           className="!w-auto !py-1 text-xs"
-          aria-label="Add a tag to the selected hosts"
+          aria-label={t("Add a tag to the selected hosts")}
           value=""
           onChange={(e) => {
             const v = e.target.value;
@@ -1710,16 +1738,16 @@ function SelectionBar({
             e.target.value = "";
           }}
         >
-          <option value="">Add tag…</option>
-          {tags.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
+          <option value="">{t("Add tag…")}</option>
+          {tags.map((tag) => (
+            <option key={tag.id} value={tag.id}>
+              {tag.name}
             </option>
           ))}
         </Select>
       </label>
       <button type="button" className="btn-secondary ml-auto !py-1 !text-xs" onClick={onClear}>
-        Clear selection
+        {t("Clear selection")}
       </button>
     </div>
   );
@@ -1746,18 +1774,19 @@ function HostListView({
   showProtocol?: boolean;
 }): ReactNode {
   const { forKey } = useSessions();
+  const t = useT();
   return (
     <div className="select-none overflow-x-auto rounded-md border border-subtle bg-surface">
       <table className="w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-subtle text-left text-xs text-tertiary">
-            <th className="px-3 py-2 font-medium">Name</th>
-            <th className="px-3 py-2 font-medium">Address</th>
-            <th className="px-3 py-2 font-medium">Group</th>
-            <th className="px-3 py-2 font-medium">Tags</th>
-            {showProtocol ? <th className="px-3 py-2 font-medium">Protocol</th> : null}
-            <th className="px-3 py-2 font-medium">OS</th>
-            <th className="px-3 py-2 font-medium">Last connected</th>
+            <th className="px-3 py-2 font-medium">{t("Name")}</th>
+            <th className="px-3 py-2 font-medium">{t("Address")}</th>
+            <th className="px-3 py-2 font-medium">{t("Group")}</th>
+            <th className="px-3 py-2 font-medium">{t("Tags")}</th>
+            {showProtocol ? <th className="px-3 py-2 font-medium">{t("Protocol")}</th> : null}
+            <th className="px-3 py-2 font-medium">{t("OS")}</th>
+            <th className="px-3 py-2 font-medium">{t("Last connected")}</th>
           </tr>
         </thead>
         <tbody>
@@ -1782,7 +1811,7 @@ function HostListView({
                   <span
                     className={classNames("h-2 w-2 rounded-full", h.online ? "bg-success" : "bg-tertiary/60")}
                     role="img"
-                    aria-label={h.online ? "Online" : "Offline or unknown"}
+                    aria-label={h.online ? t("Online") : t("Offline or unknown")}
                   />
                   <span className="font-medium text-primary">{h.friendlyName}</span>
                 </span>
@@ -1797,14 +1826,14 @@ function HostListView({
               <td className="px-3 py-2">
                 <span className="flex gap-1">
                   {h.tags.map((tid) => {
-                    const t = tags.find((x) => x.id === tid);
-                    return t ? (
+                    const tag = tags.find((x) => x.id === tid);
+                    return tag ? (
                       <span
                         key={tid}
                         className="rounded-pill px-1.5 py-px text-2xs font-medium text-white"
-                        style={{ background: t.color }}
+                        style={{ background: tag.color }}
                       >
-                        {t.name}
+                        {tag.name}
                       </span>
                     ) : null;
                   })}
@@ -1852,8 +1881,9 @@ function NamePromptDialog({
 }): ReactNode {
   const [name, setName] = useState("");
   const [color, setColor] = useState(TAG_COLORS[3]);
+  const t = useT();
   return (
-    <Dialog title={kind === "group" ? "New Group" : "New Tag"} onClose={onClose} width={400}>
+    <Dialog title={kind === "group" ? t("New Group") : t("New Tag")} onClose={onClose} width={400}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -1864,20 +1894,20 @@ function NamePromptDialog({
         <input
           data-autofocus
           className="field"
-          placeholder={kind === "group" ? "Office" : "prod"}
-          aria-label={`${kind} name`}
+          placeholder={kind === "group" ? t("Office") : t("prod")}
+          aria-label={kind === "group" ? t("Group name") : t("Tag name")}
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
         {kind === "tag" ? (
-          <div className="flex gap-2" role="radiogroup" aria-label="Tag color">
+          <div className="flex gap-2" role="radiogroup" aria-label={t("Tag color")}>
             {TAG_COLORS.map((c) => (
               <button
                 key={c}
                 type="button"
                 role="radio"
                 aria-checked={color === c}
-                aria-label={`Color ${c}`}
+                aria-label={t("Color {color}", { color: c })}
                 className={classNames(
                   "h-6 w-6 rounded-full border-2",
                   color === c ? "border-primary" : "border-transparent",
@@ -1890,10 +1920,10 @@ function NamePromptDialog({
         ) : null}
         <div className="flex justify-end gap-2.5">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button type="submit" className="btn-primary" disabled={!name.trim()}>
-            Create
+            {t("Create")}
           </button>
         </div>
       </form>

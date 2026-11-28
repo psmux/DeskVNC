@@ -26,6 +26,7 @@ import { inTauri, safeListen } from "./lib/tauri";
 import { syncSessionMenu } from "./lib/menuSync";
 import { PREF_HIDE_TOOLBAR, readBoolPref, writeBoolPref } from "./lib/prefs";
 import { installContextMenuSuppressor } from "./lib/contextMenu";
+import { useT } from "./i18n";
 
 /**
  * Tell the native menu that nothing is connected in the window in front.
@@ -117,6 +118,7 @@ export default function App(): ReactNode {
 }
 
 function MainShell(): ReactNode {
+  const t = useT();
   const { settings } = useSettings();
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -168,8 +170,8 @@ function MainShell(): ReactNode {
     () =>
       new Set(
         tabs
-          .filter((t) => panes(t.root).some((p) => p.sessionId !== null && driving(p.sessionId)))
-          .map((t) => t.id),
+          .filter((tab) => panes(tab.root).some((p) => p.sessionId !== null && driving(p.sessionId)))
+          .map((tab) => tab.id),
       ),
     [tabs, driving],
   );
@@ -395,7 +397,7 @@ function MainShell(): ReactNode {
   // session had a window of its own. In a split that is the focused pane's
   // machine, which is what the strip is labelled with too.
   useEffect(() => {
-    const summary = summaries.find((t) => t.id === activeId);
+    const summary = summaries.find((s) => s.id === activeId);
     document.title = summary ? summary.title : "DeskVNCViewer";
   }, [summaries, activeId]);
 
@@ -440,7 +442,7 @@ function MainShell(): ReactNode {
               return target ? tabHostLabel(target.action) : null;
             }}
             onSaveHost={(tabId) => {
-              const tab = summaries.find((t) => t.id === tabId);
+              const tab = summaries.find((s) => s.id === tabId);
               const target = tab ? tabHostTargetOf(tab.sessionId, sessions, hosts) : null;
               if (target) setSaving({ sessionId: target.session.id, action: target.action });
             }}
@@ -463,7 +465,7 @@ function MainShell(): ReactNode {
         another, without its connection noticing. See that file's header.
       */}
       <div className="relative min-h-0 flex-1">
-        <Pane visible={libraryInFront} id={tabPanelId(null)} label="Library">
+        <Pane visible={libraryInFront} id={tabPanelId(null)} label={t("Library")}>
           <Library
             onOpenPreferences={() => setPrefsOpen(true)}
             onOpenAbout={() => setAboutOpen(true)}

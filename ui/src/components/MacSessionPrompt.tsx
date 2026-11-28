@@ -12,7 +12,8 @@
  */
 import { useEffect, useRef, type ReactNode } from "react";
 import { Dialog } from "./primitives";
-import { macChoiceTitle, macUserLabel, macWaitingText } from "../lib/macSession";
+import { macChoiceTitle, macShareText, macWaitingText } from "../lib/macSession";
+import { useT } from "../i18n";
 
 export function MacSessionChoice({
   consoleUser,
@@ -27,25 +28,22 @@ export function MacSessionChoice({
   onChoose: (share: boolean) => void;
   onCancel: () => void;
 }): ReactNode {
-  const who = macUserLabel(consoleUser);
+  const t = useT();
   return (
     <Dialog title={macChoiceTitle(consoleUser)} onClose={onCancel} width={460}>
       <div className="space-y-3 text-sm text-secondary">
         {canShare ? (
-          <p className="break-words">
-            You can ask {who} to share their screen. A request comes up on the Mac, and you see
-            their screen once they accept it.
-          </p>
+          <p className="break-words">{macShareText(consoleUser)}</p>
         ) : null}
         {canSeparate ? (
-          <p>Or log in to a separate session of your own, which leaves their screen alone.</p>
+          <p>{t("Or log in to a separate session of your own, which leaves their screen alone.")}</p>
         ) : (
-          <p>This Mac cannot give you a separate session right now.</p>
+          <p>{t("This Mac cannot give you a separate session right now.")}</p>
         )}
       </div>
       <div className="mt-5 flex flex-wrap justify-end gap-2.5">
         <button type="button" className="btn-secondary" onClick={onCancel}>
-          Cancel
+          {t("Cancel")}
         </button>
         {canSeparate ? (
           <button
@@ -53,12 +51,12 @@ export function MacSessionChoice({
             className={canShare ? "btn-secondary" : "btn-primary"}
             onClick={() => onChoose(false)}
           >
-            Log in separately
+            {t("Log in separately")}
           </button>
         ) : null}
         {canShare ? (
           <button type="button" className="btn-primary" data-autofocus onClick={() => onChoose(true)}>
-            Ask to share screen
+            {t("Ask to share screen")}
           </button>
         ) : null}
       </div>
@@ -73,6 +71,7 @@ export function MacSessionWaiting({
   consoleUser: string;
   onCancel: () => void;
 }): ReactNode {
+  const t = useT();
   const panelRef = useRef<HTMLDivElement>(null);
   // Off the canvas, so Enter and Escape stay with this panel and the remote
   // keyboard hook leaves them alone.
@@ -85,7 +84,7 @@ export function MacSessionWaiting({
       <div
         ref={panelRef}
         role="dialog"
-        aria-label="Waiting for the person at the Mac"
+        aria-label={t("Waiting for the person at the Mac")}
         onKeyDown={(e) => {
           if (e.key === "Escape") onCancel();
         }}
@@ -98,11 +97,11 @@ export function MacSessionWaiting({
           {macWaitingText(consoleUser)}
         </p>
         <p className="mt-1 text-xs text-secondary">
-          DeskVNC waits up to three minutes for an answer. The Mac may give up sooner.
+          {t("DeskVNC waits up to three minutes for an answer. The Mac may give up sooner.")}
         </p>
         <div className="mt-4 flex justify-end">
           <button type="button" className="btn-secondary" onClick={onCancel}>
-            Cancel request
+            {t("Cancel request")}
           </button>
         </div>
       </div>

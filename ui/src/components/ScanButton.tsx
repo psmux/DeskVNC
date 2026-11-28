@@ -19,12 +19,12 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ScanNetwork, ScanProgress, ScanTarget } from "../lib/types";
 import {
-  KIND_LABEL,
   formatAddresses,
   formatCidr,
   hostCount,
   judgeCidrs,
   judgeRange,
+  kindLabel,
   parseCidr,
   rangeProblem,
   readLastPick,
@@ -36,6 +36,7 @@ import {
 import { classNames } from "../lib/util";
 import { IconCheck, IconChevronDown, IconStop, IconZap } from "./icons";
 import { Dialog } from "./primitives";
+import { formatNumber, useT } from "../i18n";
 
 export interface ScanButtonProps {
   scan: ScanProgress;
@@ -57,6 +58,7 @@ interface Pending {
 }
 
 export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonProps): ReactNode {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [networks, setNetworks] = useState<ScanNetwork[] | null>(null);
   const [lastPick, setLastPick] = useState<LastPick | null>(() => readLastPick());
@@ -175,7 +177,10 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
     lastPick && networks && !networks.some((n) => samePick(lastPick, n)) ? lastPick : null;
 
   const stopping = scan.running && scan.stopping === true;
-  const progress = scan.total > 0 ? `${scan.done.toLocaleString("en-US")} of ${scan.total.toLocaleString("en-US")}` : "";
+  const progress =
+    scan.total > 0
+      ? t("{done} of {total}", { done: formatNumber(scan.done), total: formatNumber(scan.total) })
+      : "";
 
   const onMainKey = (e: KeyboardEvent<HTMLButtonElement>): void => {
     if (e.key === "Escape" && scan.running) {
@@ -212,19 +217,19 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
         ) : null}
         {scan.running ? <IconStop size={14} /> : <IconZap size={14} />}
         {!scan.running
-          ? "Scan network"
+          ? t("Scan network")
           : stopping
-            ? "Stopping…"
+            ? t("Stopping…")
             : progress
-              ? `Stop scan ${progress}`
-              : "Stop scan"}
+              ? t("Stop scan {progress}", { progress })
+              : t("Stop scan")}
       </button>
       <button
         ref={arrowRef}
         type="button"
-        aria-label="Choose a network to scan"
+        aria-label={t("Choose a network to scan")}
         // The tooltip would sit on top of the menu it opens.
-        title={open ? undefined : "Choose a network to scan"}
+        title={open ? undefined : t("Choose a network to scan")}
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={scan.running}
@@ -247,15 +252,15 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
         <div
           ref={menuRef}
           role="menu"
-          aria-label="Networks to scan"
+          aria-label={t("Networks to scan")}
           className="fade-in absolute right-0 top-full z-50 mt-1 max-h-[70vh] w-80 overflow-y-auto rounded-md border border-subtle bg-raised p-1 shadow-(--shadow-pop)"
           onPointerDown={(e) => e.stopPropagation()}
           onKeyDown={onMenuKey}
         >
           {networks === null ? (
-            <div className="px-2.5 py-1.5 text-sm text-tertiary">Looking for networks…</div>
+            <div className="px-2.5 py-1.5 text-sm text-tertiary">{t("Looking for networks…")}</div>
           ) : networks.length === 0 ? (
-            <div className="px-2.5 py-1.5 text-sm text-tertiary">No other networks found</div>
+            <div className="px-2.5 py-1.5 text-sm text-tertiary">{t("No other networks found")}</div>
           ) : (
             networks.map((n, i) => {
               const last = samePick(lastPick, n);
@@ -281,7 +286,7 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
                   >
                     <span className="flex items-center gap-2">
                       <span className="w-3.5 shrink-0 text-accent">
-                        {last ? <IconCheck size={14} aria-label="Last scanned" /> : null}
+                        {last ? <IconCheck size={14} aria-label={t("Last scanned")} /> : null}
                       </span>
                       <span className="min-w-0 flex-1 truncate">{n.name}</span>
                       <span
@@ -290,14 +295,14 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
                           n.kind === "virtual" ? "border border-subtle text-tertiary" : "bg-inset text-secondary",
                         )}
                       >
-                        {KIND_LABEL[n.kind]}
+                        {kindLabel(n.kind)}
                       </span>
                     </span>
                     <span className="mt-0.5 flex gap-2 pl-5.5 text-xs text-secondary tabular-nums">
                       <span className="truncate">{n.range}</span>
                       <span className="ml-auto shrink-0">
                         {n.verdict === "too-large"
-                          ? "too large to scan whole"
+                          ? t("too large to scan whole")
                           : formatAddresses(n.addresses)}
                       </span>
                     </span>
@@ -320,9 +325,9 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
               }}
             >
               <span className="w-3.5 shrink-0 text-accent">
-                <IconCheck size={14} aria-label="Last scanned" />
+                <IconCheck size={14} aria-label={t("Last scanned")} />
               </span>
-              <span className="flex-1 truncate">Scan {typedLast.range} again</span>
+              <span className="flex-1 truncate">{t("Scan {range} again", { range: typedLast.range })}</span>
             </button>
           ) : null}
           <button
@@ -336,7 +341,7 @@ export function ScanButton({ scan, onScan, onStop, listNetworks }: ScanButtonPro
             }}
           >
             <span className="w-3.5 shrink-0" />
-            Scan an address range…
+            {t("Scan an address range…")}
           </button>
         </div>
       ) : null}
@@ -378,21 +383,27 @@ function ConfirmDialog({
   onClose: () => void;
   onConfirm: () => void;
 }): ReactNode {
+  const t = useT();
+  const values = {
+    range: pending.pick.range,
+    network: pending.pick.name,
+    addresses: formatAddresses(pending.addresses),
+    duration: roughDuration(pending.addresses),
+  };
   return (
-    <Dialog title="Scan a large range?" onClose={onClose} width={420} initialFocusSelector="[data-confirm]">
+    <Dialog title={t("Scan a large range?")} onClose={onClose} width={420} initialFocusSelector="[data-confirm]">
       <div className="space-y-3">
         <p className="text-sm text-secondary">
-          {pending.pick.range}
-          {pending.pick.name === TYPED_RANGE ? "" : ` on ${pending.pick.name}`} has{" "}
-          {formatAddresses(pending.addresses)}. The scan
-          stays polite, so it takes {roughDuration(pending.addresses)}.
+          {pending.pick.name === TYPED_RANGE
+            ? t("{range} has {addresses}. The scan stays polite, so it takes {duration}.", values)
+            : t("{range} on {network} has {addresses}. The scan stays polite, so it takes {duration}.", values)}
         </p>
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button type="button" className="btn-primary" data-confirm onClick={onConfirm}>
-            Scan {formatAddresses(pending.addresses)}
+            {t("Scan {addresses}", { addresses: formatAddresses(pending.addresses) })}
           </button>
         </div>
       </div>
@@ -409,6 +420,7 @@ function RangeDialog({
   onClose: () => void;
   onScan: (pick: LastPick, allowLarge: boolean) => void;
 }): ReactNode {
+  const t = useT();
   const [text, setText] = useState(initial);
   const [touched, setTouched] = useState(false);
   const parsed = parseCidr(text);
@@ -424,7 +436,7 @@ function RangeDialog({
   };
 
   return (
-    <Dialog title="Scan an address range" onClose={onClose} width={420} initialFocusSelector="input">
+    <Dialog title={t("Scan an address range")} onClose={onClose} width={420} initialFocusSelector="input">
       <form
         className="space-y-3"
         onSubmit={(e) => {
@@ -433,7 +445,7 @@ function RangeDialog({
         }}
       >
         <label className="block space-y-1.5">
-          <span className="text-sm text-secondary">Address or range</span>
+          <span className="text-sm text-secondary">{t("Address or range")}</span>
           <input
             className="field font-mono"
             value={text}
@@ -454,16 +466,20 @@ function RangeDialog({
             ? problem
             : parsed && !problem
               ? large
-                ? `${shown} has ${formatAddresses(addresses)}, which takes ${roughDuration(addresses)}.`
-                : `${shown}, ${formatAddresses(addresses)}.`
-              : "Private ranges only, up to a /16."}
+                ? t("{range} has {addresses}, which takes {duration}.", {
+                    range: shown,
+                    addresses: formatAddresses(addresses),
+                    duration: roughDuration(addresses),
+                  })
+                : t("{range}, {addresses}.", { range: shown, addresses: formatAddresses(addresses) })
+              : t("Private ranges only, up to a /16.")}
         </p>
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Cancel
+            {t("Cancel")}
           </button>
           <button type="submit" className="btn-primary">
-            {large ? `Scan ${formatAddresses(addresses)}` : "Scan"}
+            {large ? t("Scan {addresses}", { addresses: formatAddresses(addresses) }) : t("Scan")}
           </button>
         </div>
       </form>

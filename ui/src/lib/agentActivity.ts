@@ -27,6 +27,8 @@
  * component cannot mistake it for a string we wrote.
  */
 
+import { t, tn } from "../i18n";
+
 // ---------------------------------------------------------------- contracts
 
 /**
@@ -889,10 +891,14 @@ const agentWord = (n: number): string => (n === 1 ? "1 agent" : `${n} agents`);
  */
 export function planeStatusLine(plane: PlaneView): string {
   if (!plane.on) return "";
-  if (plane.agents === 0) return "No agent connected";
-  if (plane.driving === 0) return `${agentWord(plane.agents)} connected, none driving`;
-  const of = plane.sessions > 0 ? ` of ${plane.sessions}` : "";
-  return `${agentWord(plane.agents)} driving ${plane.driving}${of}`;
+  if (plane.agents === 0) return t("No agent connected");
+  if (plane.driving === 0) {
+    return tn(plane.agents, "{count} agent connected, none driving", "{count} agents connected, none driving");
+  }
+  const values = { driving: plane.driving, sessions: plane.sessions };
+  return plane.sessions > 0
+    ? tn(plane.agents, "{count} agent driving {driving} of {sessions}", "{count} agents driving {driving} of {sessions}", values)
+    : tn(plane.agents, "{count} agent driving {driving}", "{count} agents driving {driving}", values);
 }
 
 /** The same thing at length, for the tooltip and the screen reader. */

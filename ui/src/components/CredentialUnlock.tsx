@@ -20,6 +20,7 @@ import {
   type CredentialStatus,
 } from "../lib/credentialStore";
 import { useToasts } from "../state/ToastContext";
+import { t, tn, useT } from "../i18n";
 
 /** A window event Preferences dispatches to open the dialog on request. */
 export const OPEN_CREDENTIAL_UNLOCK = "deskvnc:open-credential-unlock";
@@ -42,6 +43,7 @@ export function CredentialUnlockDialog({
   onUnlock: (masterPassword: string) => Promise<void>;
   onClose: () => void;
 }): ReactNode {
+  const t = useT();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -65,23 +67,25 @@ export function CredentialUnlockDialog({
     } catch (err) {
       setError(
         /master password/i.test(String(err))
-          ? "That master password is not the one this file was locked with."
-          : `Could not unlock the password file: ${String(err)}`,
+          ? t("That master password is not the one this file was locked with.")
+          : t("Could not unlock the password file: {error}", { error: String(err) }),
       );
       setBusy(false);
     }
   };
 
   const waitingLine =
-    waiting === 1
-      ? "One password you asked to remember is waiting for this."
-      : waiting > 1
-        ? `${waiting} passwords you asked to remember are waiting for this.`
-        : null;
+    waiting > 0
+      ? tn(
+          waiting,
+          "One password you asked to remember is waiting for this.",
+          "{count} passwords you asked to remember are waiting for this.",
+        )
+      : null;
 
   return (
     <Dialog
-      title={creating ? "Choose a master password" : "Unlock saved passwords"}
+      title={creating ? t("Choose a master password") : t("Unlock saved passwords")}
       onClose={onClose}
       width={460}
     >
@@ -92,14 +96,16 @@ export function CredentialUnlockDialog({
           </span>
           <p className="text-sm text-primary" data-testid="unlock-explainer">
             {creating
-              ? "This computer has no keychain DeskVNC can use, so saved passwords are kept in an encrypted file instead. Choose a master password for it. You will be asked for it once each time DeskVNC starts."
-              : "Saved passwords on this computer are kept in an encrypted file. Enter its master password to use them."}
+              ? t(
+                  "This computer has no keychain DeskVNC can use, so saved passwords are kept in an encrypted file instead. Choose a master password for it. You will be asked for it once each time DeskVNC starts.",
+                )
+              : t("Saved passwords on this computer are kept in an encrypted file. Enter its master password to use them.")}
             {waitingLine ? <span className="mt-1 block text-xs text-secondary">{waitingLine}</span> : null}
           </p>
         </div>
 
         <label className="block">
-          <span className="mb-1 block text-xs font-medium text-secondary">Master password</span>
+          <span className="mb-1 block text-xs font-medium text-secondary">{t("Master password")}</span>
           <input
             data-autofocus
             className="field"
@@ -112,12 +118,14 @@ export function CredentialUnlockDialog({
           />
         </label>
         {tooShort ? (
-          <p className="text-xs text-tertiary">Use at least {MIN_MASTER_PASSWORD} characters.</p>
+          <p className="text-xs text-tertiary">
+            {t("Use at least {count} characters.", { count: MIN_MASTER_PASSWORD })}
+          </p>
         ) : null}
 
         {creating ? (
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-secondary">Type it again</span>
+            <span className="mb-1 block text-xs font-medium text-secondary">{t("Type it again")}</span>
             <input
               className="field"
               type="password"
@@ -129,7 +137,7 @@ export function CredentialUnlockDialog({
             />
           </label>
         ) : null}
-        {mismatch ? <p className="text-xs text-danger">The two passwords differ.</p> : null}
+        {mismatch ? <p className="text-xs text-danger">{t("The two passwords differ.")}</p> : null}
 
         {error ? (
           <p className="rounded-md bg-danger-subtle p-2.5 text-xs text-primary" role="alert">
@@ -139,10 +147,10 @@ export function CredentialUnlockDialog({
 
         <div className="flex justify-end gap-2.5 pt-1">
           <button type="button" className="btn-secondary" onClick={onClose}>
-            Not now
+            {t("Not now")}
           </button>
           <button type="submit" className="btn-primary disabled:opacity-40" disabled={!ready}>
-            {creating ? "Create" : "Unlock"}
+            {creating ? t("Create") : t("Unlock")}
           </button>
         </div>
       </form>
@@ -180,8 +188,8 @@ export function CredentialUnlockHost(): ReactNode {
         void show();
         return;
       }
-      push("warning", "A password is waiting to be saved until you unlock saved passwords.", {
-        label: "Unlock",
+      push("warning", t("A password is waiting to be saved until you unlock saved passwords."), {
+        label: t("Unlock"),
         run: () => void show(),
       });
     });
@@ -208,8 +216,8 @@ export function CredentialUnlockHost(): ReactNode {
         push(
           "success",
           written.length > 0
-            ? "Saved passwords are unlocked and the waiting password is saved."
-            : "Saved passwords are unlocked.",
+            ? t("Saved passwords are unlocked and the waiting password is saved.")
+            : t("Saved passwords are unlocked."),
         );
       }}
       onClose={() => {

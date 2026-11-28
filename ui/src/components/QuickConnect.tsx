@@ -22,6 +22,7 @@ import { discoveredEndpoint, formatTarget, parseConnectTarget, presetProtocol } 
 import { classNames, fuzzyMatch, modKeyLabel } from "../lib/util";
 import { IconArrowRight, IconClock, IconMonitor, IconZap } from "./icons";
 import { findSavedHost, sameAddress } from "../lib/autoSave";
+import { useLanguage, useT } from "../i18n";
 
 /**
  * The protocol the chip flips to on a click, wrapping through `PROTOCOLS` in
@@ -76,6 +77,9 @@ export function QuickConnect({
   /** The "Save computers I connect to" preference, for the hint beside the field. */
   autoSave?: boolean;
 }): ReactNode {
+  const t = useT();
+  // The suggestion rows are built in a memo; their words follow the language.
+  const language = useLanguage();
   const [value, setValue] = useState("");
   const [open, setOpen] = useState(false);
   /**
@@ -163,8 +167,8 @@ export function QuickConnect({
           ? {
               key: "typed",
               kind: "host",
-              label: `Connect to ${savedMatch.friendlyName}`,
-              sub: "saved host",
+              label: t("Connect to {name}", { name: savedMatch.friendlyName }),
+              sub: t("saved host"),
               protocol: hostProtocol(savedMatch),
               run: () => {
                 onConnectHost(savedMatch);
@@ -176,13 +180,13 @@ export function QuickConnect({
           : {
               key: "typed",
               kind: "address",
-              label: `Connect to ${typedLabel}`,
+              label: t("Connect to {name}", { name: typedLabel }),
               // Silent on a protocol's OWN default port (5900 for VNC, 3389
               // for RDP, 22 for SSH); named otherwise, which is the thing
               // worth reading there. `resolved === "rdp" ? "" : port === 5900`
               // used to special-case VNC's default by number, which read an
               // SSH target on its own default port 22 as "an odd port".
-              sub: port === DEFAULT_PORT[resolved] ? "" : `port ${port}`,
+              sub: port === DEFAULT_PORT[resolved] ? "" : t("port {port}", { port: String(port) }),
               protocol: resolved,
               run: () => {
                 onConnectAddress(resolved, address, port);
@@ -262,7 +266,7 @@ export function QuickConnect({
         key: `recent-${r}`,
         kind: "recent",
         label: r,
-        sub: "recent",
+        sub: t("recent"),
         protocol: kind,
         run: () => {
           onConnectAddress(kind, p.target.address, p.target.port);
@@ -275,7 +279,7 @@ export function QuickConnect({
     }
 
     return out;
-  }, [trimmed, parsed, resolved, savedMatch, hosts, discovered, recents, onConnectHost, onConnectAddress, onRemember]);
+  }, [trimmed, parsed, resolved, savedMatch, hosts, discovered, recents, onConnectHost, onConnectAddress, onRemember, t, language]);
 
   useEffect(() => {
     setSelected(-1);
@@ -336,8 +340,12 @@ export function QuickConnect({
         <input
           ref={inputRef}
           className="field mono !pl-8"
-          placeholder={`Connect to an address, e.g. 192.168.1.20:1 or rdp://frontdesk  (${modKeyLabel}T)`}
-          aria-label="Address to connect to"
+          placeholder={t("Connect to an address, e.g. {example1} or {example2}  ({shortcut})", {
+            example1: "192.168.1.20:1",
+            example2: "rdp://frontdesk",
+            shortcut: `${modKeyLabel}T`,
+          })}
+          aria-label={t("Address to connect to")}
           spellCheck={false}
           autoComplete="off"
           role="combobox"
@@ -359,7 +367,7 @@ export function QuickConnect({
             ref={listRef}
             id="quick-connect-list"
             role="listbox"
-            aria-label="Connection suggestions"
+            aria-label={t("Connection suggestions")}
             className="fade-in absolute left-0 right-0 top-full z-30 mt-1 max-h-80 overflow-y-auto rounded-md border border-subtle bg-raised p-1.5 shadow-(--shadow-pop)"
           >
             {suggestions.map((s, i) => (
@@ -431,8 +439,13 @@ export function QuickConnect({
         )}
         title={
           savedMatch
-            ? `${savedMatch.friendlyName} is saved as ${protocolLabel(resolved)}`
-            : `Click to connect with ${protocolName(nextProtocol(resolved))} instead`
+            ? t("{name} is saved as {protocol}", {
+                name: savedMatch.friendlyName,
+                protocol: protocolLabel(resolved),
+              })
+            : t("Click to connect with {protocol} instead", {
+                protocol: t(protocolName(nextProtocol(resolved))),
+              })
         }
         aria-hidden={!chipShown}
         tabIndex={chipShown ? undefined : -1}
@@ -448,7 +461,7 @@ export function QuickConnect({
         disabled={trimmed === ""}
         onClick={connectTyped}
       >
-        Connect
+        {t("Connect")}
       </button>
       {invalid ? (
         <span
@@ -459,7 +472,7 @@ export function QuickConnect({
         </span>
       ) : (
         <span className="truncate text-xs text-tertiary">
-          {autoSave ? "Saves to your Library once it connects" : "Connects without saving anything"}
+          {autoSave ? t("Saves to your Library once it connects") : t("Connects without saving anything")}
         </span>
       )}
     </div>

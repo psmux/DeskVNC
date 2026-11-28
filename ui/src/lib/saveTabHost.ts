@@ -15,6 +15,7 @@
 import type { SessionParams } from "../hooks/useSession";
 import { autoSaveProfile, canAutoSave, findSavedHost, sameAddress } from "./autoSave";
 import type { DiscoveredHost, HostProfile } from "./types";
+import { t } from "../i18n";
 
 /**
  * What the shell says about the credentials a session used, from
@@ -78,7 +79,7 @@ export function tabHostAction(
 
 /** The menu item's words for each action. */
 export function tabHostLabel(action: TabHostAction): string {
-  return action.kind === "add" ? "Add to saved hosts" : "Edit saved host";
+  return action.kind === "add" ? t("Add to saved hosts") : t("Edit saved host");
 }
 
 /**
@@ -133,8 +134,8 @@ export function saveCredentialsByDefault(creds: SessionCredentialState): boolean
 /** The checkbox's words, which say exactly what will be kept. */
 export function credentialsLabel(creds: SessionCredentialState): string {
   return creds.hasUsername
-    ? "Also save the user name and password used for this session"
-    : "Also save the password used for this session";
+    ? t("Also save the user name and password used for this session")
+    : t("Also save the password used for this session");
 }
 
 /**

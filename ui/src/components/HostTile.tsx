@@ -14,6 +14,7 @@ import { classNames, colorFromId, formatBps } from "../lib/util";
 import { useHosts } from "../state/HostsContext";
 import { useSessions, type TileActivity } from "../state/SessionsContext";
 import { IconBoundary, IconKey, IconMonitor, IconZap, IconEdit, IconLock, IconAlert, IconPlus } from "./icons";
+import { t, useT } from "../i18n";
 
 /**
  * The OS badge.
@@ -34,7 +35,7 @@ export function osLabel(os: OsHint | null): string {
     case "qemu":
       return "QEMU";
     default:
-      return "Remote";
+      return t("Remote");
   }
 }
 
@@ -66,8 +67,9 @@ export function ProtocolBadge({ protocol }: { protocol: string }): ReactNode {
 }
 
 function OnlineDot({ online }: { online: boolean | null | undefined }): ReactNode {
+  const t = useT();
   const cls = online ? "bg-success" : "bg-tertiary/60";
-  const label = online ? "Online" : online === false ? "Unreachable" : "Status unknown";
+  const label = online ? t("Online") : online === false ? t("Unreachable") : t("Status unknown");
   return <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${cls}`} role="img" aria-label={label} />;
 }
 
@@ -168,6 +170,7 @@ function BandwidthStrip({
   bandwidth: BandwidthInfo;
   className?: string;
 }): ReactNode {
+  const t = useT();
   return (
     <div
       className={classNames(
@@ -177,7 +180,10 @@ function BandwidthStrip({
       )}
       // NOT a live region: these values tick every second, and a role="status"
       // would have a screen reader announce each tick.
-      aria-label={`Bandwidth: down ${formatBps(bandwidth.rx)}, up ${formatBps(bandwidth.tx)}`}
+      aria-label={t("Bandwidth: down {down}, up {up}", {
+        down: formatBps(bandwidth.rx),
+        up: formatBps(bandwidth.tx),
+      })}
     >
       {/* tabular figures: the values change every second and must not jitter */}
       <div className="flex min-w-0 items-center gap-2 text-2xs font-medium text-white/90 [font-variant-numeric:tabular-nums]">
@@ -205,10 +211,11 @@ function BandwidthStrip({
 
 /** Small "this picture is live" marker for tiles showing a preview stream. */
 function LiveBadge(): ReactNode {
+  const t = useT();
   return (
     <span className="pointer-events-none absolute right-1.5 top-1.5 flex items-center gap-1 rounded-pill bg-black/55 px-1.5 py-0.5 text-2xs font-semibold tracking-wide text-white/90">
       <span className="h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" aria-hidden="true" />
-      LIVE
+      {t("LIVE")}
     </span>
   );
 }
@@ -239,6 +246,7 @@ export function HostTile({
    *  {@link ProtocolBadge} for why it is all-or-nothing. */
   showProtocol?: boolean;
 }): ReactNode {
+  const t = useT();
   const { thumbnailUrl, requestThumbnail } = useHosts();
   const { forKey, livePreviews } = useSessions();
   const [hover, setHover] = useState(false);
@@ -264,7 +272,11 @@ export function HostTile({
       data-host-id={host.id}
       role="button"
       tabIndex={0}
-      aria-label={`${host.friendlyName}, ${osLabel(host.osHint)}, ${host.address}. Press Enter to connect.`}
+      aria-label={t("{name}, {os}, {address}. Press Enter to connect.", {
+        name: host.friendlyName,
+        os: osLabel(host.osHint),
+        address: host.address,
+      })}
       className={classNames(
         "group relative cursor-default select-none overflow-hidden rounded-md border bg-surface text-left outline-none",
         "transition-[transform,box-shadow,border-color] duration-120 motion-reduce:transition-none",
@@ -319,15 +331,15 @@ export function HostTile({
             "group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100",
           )}
         >
-          <QuickAction label={`Connect to ${host.friendlyName}`} onClick={onConnect}>
-            <IconZap size={14} /> Connect
+          <QuickAction label={t("Connect to {name}", { name: host.friendlyName })} onClick={onConnect}>
+            <IconZap size={14} /> {t("Connect")}
           </QuickAction>
-          <QuickAction label={`Edit ${host.friendlyName}`} onClick={onEdit}>
-            <IconEdit size={14} /> Edit
+          <QuickAction label={t("Edit {name}", { name: host.friendlyName })} onClick={onEdit}>
+            <IconEdit size={14} /> {t("Edit")}
           </QuickAction>
           {host.wolMac ? (
-            <QuickAction label={`Wake ${host.friendlyName}`} onClick={onWake}>
-              <IconZap size={14} /> Wake
+            <QuickAction label={t("Wake {name}", { name: host.friendlyName })} onClick={onWake}>
+              <IconZap size={14} /> {t("Wake")}
             </QuickAction>
           ) : null}
         </div>
@@ -343,7 +355,7 @@ export function HostTile({
             {host.friendlyName}
           </span>
           {host.hasPassword ? (
-            <span className="shrink-0 text-tertiary" role="img" aria-label="Password saved">
+            <span className="shrink-0 text-tertiary" role="img" aria-label={t("Password saved")}>
               <IconKey size={14} />
             </span>
           ) : null}
@@ -423,6 +435,7 @@ export function DiscoveredTile({
    */
   thumb?: string | null;
 }): ReactNode {
+  const t = useT();
   const { thumbnailUrl, requestThumbnail } = useHosts();
   const { forKey, livePreviews } = useSessions();
   const key = discoveredThumbKey(host.address, host.port);
@@ -447,12 +460,12 @@ export function DiscoveredTile({
   const proven = isWindowsNameSource(host.nameSource);
   const via = nameSourceLabel(host.nameSource);
   const osTitle = proven
-    ? `Windows, name resolved via ${via}, which only a Windows machine answers`
+    ? t("Windows, name resolved via {source}, which only a Windows machine answers", { source: via ?? "" })
     : os === "unknown"
-      ? "Operating system not identified"
+      ? t("Operating system not identified")
       // Protocol neutral, and more accurate than it was: the inference has
       // always used NetBIOS and RDP certificates as well as the RFB banner.
-      : `${osLabel(os)}, inferred from what it answers on the network`;
+      : t("{os}, inferred from what it answers on the network", { os: osLabel(os) });
 
   // The MAC is not tile furniture: it is unreadable at a glance and only
   // matters at the moment you save the host (it becomes the Wake-on-LAN
@@ -461,17 +474,17 @@ export function DiscoveredTile({
   const mac = hostMac(host);
   const address = addressLabel(host);
   const addressTitle = mac
-    ? `${address}\nMAC ${mac}, saved as the Wake-on-LAN address when you add this host`
+    ? `${address}\n${t("MAC {mac}, saved as the Wake-on-LAN address when you add this host", { mac })}`
     : address;
 
   const secIcon =
     host.security === "unencrypted" ? (
       <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-warning">
-        <IconAlert size={13} className="shrink-0" /> {host.securityHint ?? "Unencrypted"}
+        <IconAlert size={13} className="shrink-0" /> {host.securityHint ?? t("Unencrypted")}
       </span>
     ) : (
       <span className="flex shrink-0 items-center gap-1 whitespace-nowrap text-secondary">
-        <IconLock size={13} className="shrink-0" /> {host.securityHint ?? "Encrypted"}
+        <IconLock size={13} className="shrink-0" /> {host.securityHint ?? t("Encrypted")}
       </span>
     );
   return (
@@ -522,7 +535,7 @@ export function DiscoveredTile({
           <span
             className="mono min-w-0 flex-1 truncate text-secondary"
             title={addressTitle}
-            aria-label={mac ? `${address}, MAC address ${mac}` : address}
+            aria-label={mac ? t("{address}, MAC address {mac}", { address, mac }) : address}
           >
             {address}
           </span>
@@ -537,14 +550,14 @@ export function DiscoveredTile({
             className="btn-secondary min-w-0 flex-1 justify-center !px-2.5 !py-1 !text-xs"
             onClick={onAdd}
           >
-            <IconPlus size={13} className="shrink-0" /> Add host
+            <IconPlus size={13} className="shrink-0" /> {t("Add host")}
           </button>
           <button
             type="button"
             className="btn-secondary shrink-0 !px-2.5 !py-1 !text-xs"
             onClick={onConnect}
           >
-            <IconZap size={13} className="shrink-0" /> Connect
+            <IconZap size={13} className="shrink-0" /> {t("Connect")}
           </button>
         </div>
       </div>
