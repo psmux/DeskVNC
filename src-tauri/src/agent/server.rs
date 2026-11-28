@@ -460,6 +460,20 @@ fn hello(ctx: &Ctx, peer: &mut Peer, params: &Value) -> Result<Value, RpcError> 
     }))
 }
 
+/// Whether a saved host will connect without asking: its own password, or a
+/// saved credential it names that fits its protocol and holds a secret.
+fn credential_stored(
+    host: &vnc_store::HostProfile,
+    shared: &[vnc_store::CredentialProfile],
+) -> bool {
+    host.has_password
+        || host.credential_id.as_deref().is_some_and(|id| {
+            shared.iter().any(|c| {
+                c.id == id && c.has_secret && host.protocol_kind().is_some_and(|k| c.fits(k))
+            })
+        })
+}
+
 /// Saved machines. **Never a secret.**
 ///
 /// There is no password field and there never will be. What an agent gets is
@@ -469,10 +483,17 @@ async fn hosts_list(ctx: &Ctx) -> Result<Value, RpcError> {
     let store = ctx.store.clone();
     // Every storage call is synchronous SQLite, so it hops off the socket task
     // exactly as every Tauri command does.
-    let hosts = tokio::task::spawn_blocking(move || store.list_hosts())
-        .await
-        .map_err(|e| RpcError::new(-32603, format!("the host library lookup panicked: {e}")))?
-        .map_err(|e| RpcError::new(-32603, format!("the host library could not be read: {e}")))?;
+    let (hosts, shared) = tokio::task::spawn_blocking(move || {
+        let hosts = store.list_hosts()?;
+        // Saved credentials, for the one boolean below. Their names, user
+        // names and key paths are not sent: an agent needs to know whether a
+        // connect will pause, not which account it signs in as.
+        let shared = store.list_credentials().unwrap_or_default();
+        Ok::<_, vnc_store::Error>((hosts, shared))
+    })
+    .await
+    .map_err(|e| RpcError::new(-32603, format!("the host library lookup panicked: {e}")))?
+    .map_err(|e| RpcError::new(-32603, format!("the host library could not be read: {e}")))?;
     let saved: std::collections::HashSet<String> = hosts
         .iter()
         .map(|host| vnc_store::normalize_address(&host.address))
@@ -486,7 +507,7 @@ async fn hosts_list(ctx: &Ctx) -> Result<Value, RpcError> {
                 "address": host.address,
                 "port": host.port,
                 "protocol": host.protocol,
-                "credentialStored": host.has_password,
+                "credentialStored": credential_stored(&host, &shared),
                 "discovered": false,
             })
         })
@@ -2850,6 +2871,70 @@ mod tests {
             disk,
             _dir: dir,
         }
+    }
+
+    /// A host that signs in with a saved credential reads as one that will
+    /// not pause, and the listing carries nothing of the credential: no
+    /// name, no user name, no key path and of course no secret.
+    #[tokio::test]
+    async fn the_host_list_counts_a_saved_credential_and_shows_none_of_it() {
+        let fx = fixture();
+        let cred = vnc_store::CredentialProfile {
+            name: "cred-name-sentinel".into(),
+            username: Some("cred-user-sentinel".into()),
+            key_path: Some("/cred/key/sentinel".into()),
+            has_secret: true,
+            ..Default::default()
+        };
+        fx.ctx.store.save_credential(&cred).unwrap();
+        let linked = vnc_store::HostProfile {
+            friendly_name: "Linked".into(),
+            address: "192.0.2.10".into(),
+            port: 3389,
+            protocol: "rdp".into(),
+            credential_id: Some(cred.id.clone()),
+            ..Default::default()
+        };
+        let mismatched = vnc_store::HostProfile {
+            friendly_name: "Boundary".into(),
+            address: "192.0.2.11".into(),
+            protocol: "boundary".into(),
+            credential_id: Some(cred.id.clone()),
+            ..Default::default()
+        };
+        fx.ctx.store.save_host(&linked).unwrap();
+        fx.ctx.store.save_host(&mismatched).unwrap();
+
+        let Ok(listed) = hosts_list(&fx.ctx).await else {
+            panic!("hosts.list failed");
+        };
+        let text = listed.to_string();
+        for sentinel in [
+            "cred-name-sentinel",
+            "cred-user-sentinel",
+            "/cred/key/sentinel",
+            &cred.id,
+        ] {
+            assert!(
+                !text.contains(sentinel),
+                "hosts.list leaked {sentinel}: {text}"
+            );
+        }
+        let stored = |label: &str| {
+            listed["hosts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|h| h["label"] == label)
+                .unwrap()["credentialStored"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(stored("Linked"));
+        assert!(
+            !stored("Boundary"),
+            "a credential that does not fit counts for nothing"
+        );
     }
 
     /// A sidecar with a map behind it instead of a machine.

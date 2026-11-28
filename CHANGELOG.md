@@ -36,6 +36,21 @@ to stored data and to the IPC contract between the Rust core and the frontend.
 * A Mac whose screen changes hands during a shared session (a login, a lock,
   a user switch) is asked for the whole picture again, so the view does not
   freeze.
+* Saved credentials (#98). Save a user name and password, or an SSH key file
+  with its passphrase, once under a name, and pick it in the host editor's
+  new Credential list for as many hosts as use it. A host points at the saved
+  credential rather than holding a copy, so changing the password in one
+  place changes it for every host on their next connect. Only credentials
+  that work for the host's protocol are offered: a password for VNC, Remote
+  Desktop and SSH, a key for SSH. "Enter for this host only" keeps the old
+  per host user name and password. Saved credentials are listed under
+  Preferences, Security, where they can be added, edited and deleted, and
+  "New saved credential" in the host editor makes one without leaving it.
+  Passwords and passphrases are kept in the system keychain (or the encrypted
+  file where there is none), like a host's own. Deleting one names every host
+  that uses it and offers to keep a copy on each of them, or to let them ask
+  for a password on the next connect. Existing hosts keep their own
+  credentials and are not changed by the upgrade.
 
 ### Changed
 

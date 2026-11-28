@@ -605,6 +605,7 @@ mod tests {
             ssh_user: None,
             ssh_password: None,
             rdg_password: None,
+            secret: None,
         }
     }
 

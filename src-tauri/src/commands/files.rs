@@ -965,13 +965,19 @@ async fn agent_sidecar(app: &AppHandle, session_id: &str) -> Result<Arc<FilesEnt
                         .profile_id
                         .as_deref()
                         .and_then(|id| app_state.store.get_host(id).ok().flatten())
-                        .and_then(|host| host.ssh_settings),
+                        .and_then(|host| {
+                            vnc_store::effective_ssh_settings(&app_state.store, &host)
+                        }),
                 ),
                 // The saved SSH host carries both halves: the port it listens on
                 // and the credential recorded against it. Taking the port without
                 // the profile would authenticate the wrong machine's password at
                 // the right door.
-                (false, Some(ssh)) => (ssh.port, Some(ssh.id), ssh.ssh_settings),
+                (false, Some(ssh)) => (
+                    ssh.port,
+                    Some(ssh.id.clone()),
+                    vnc_store::effective_ssh_settings(&app_state.store, &ssh),
+                ),
                 (false, None) => (AGENT_SSH_PORT, entry.profile_id.clone(), None),
             };
         (
@@ -1093,8 +1099,13 @@ async fn stored_ssh_user(app: &AppHandle, profile_id: Option<&str>) -> Option<St
     let profile_id = profile_id?;
     let state = app.try_state::<crate::state::AppState>()?;
     let credentials = state.credentials.clone();
+    let store = state.store.clone();
     let lookup = profile_id.to_string();
-    match super::blocking(move || credentials.load(&lookup)).await {
+    match super::blocking(move || {
+        vnc_store::resolve_host_credentials(&store, &credentials, &lookup)
+    })
+    .await
+    {
         Ok(Some(stored)) => stored.ssh_user.filter(|user| !user.trim().is_empty()),
         _ => None,
     }
@@ -1224,8 +1235,13 @@ async fn stored_ssh_secret(app: &AppHandle, profile_id: Option<&str>) -> Option<
     let profile_id = profile_id?;
     let state = app.try_state::<crate::state::AppState>()?;
     let credentials = state.credentials.clone();
+    let store = state.store.clone();
     let lookup = profile_id.to_string();
-    match super::blocking(move || credentials.load(&lookup)).await {
+    match super::blocking(move || {
+        vnc_store::resolve_host_credentials(&store, &credentials, &lookup)
+    })
+    .await
+    {
         Ok(Some(stored)) => stored.ssh_passphrase,
         Ok(None) => None,
         Err(e) => {

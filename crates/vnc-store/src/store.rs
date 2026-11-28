@@ -7,7 +7,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use remote_core::ProtocolKind;
 
-use crate::{now_ts, CertPin, Error, Group, HistoryEntry, HostProfile, Result, Tag};
+use crate::{
+    now_ts, CertPin, CredentialProfile, Error, Group, HistoryEntry, HostProfile, Result, Tag,
+};
 
 /// Numbered migrations, applied in order. `PRAGMA user_version` records how
 /// many have run; future schema changes append a new entry here.
@@ -140,6 +142,33 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE hosts ADD COLUMN mac_session TEXT;
     "#,
+    // v6, saved credentials a host can point at instead of holding its own
+    // (issue #98). One row per credential, with nothing secret in it: the
+    // password or key passphrase lives in the keychain under
+    // `credential:<id>`, exactly as a host's lives under its own id, and
+    // `has_secret` is only a flag, like `hosts.has_password`.
+    //
+    // `hosts.credential_id` is nullable with no default, so every existing
+    // row reads as "keeps its own credential", which is what it was. There is
+    // no REFERENCES clause on purpose: a dangling id has to stay a readable,
+    // editable host (it falls back to its own entry) rather than a row that
+    // makes a later delete fail, and `Store::delete_credential` unlinks every
+    // host in the same transaction anyway. A build older than this one never
+    // writes the column in its upsert, so editing a host there keeps the link.
+    r#"
+    CREATE TABLE credentials (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      kind       TEXT NOT NULL,          -- password | ssh-key
+      username   TEXT,
+      domain     TEXT,
+      key_path   TEXT,
+      has_secret INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER, updated_at INTEGER
+    );
+    ALTER TABLE hosts ADD COLUMN credential_id TEXT;
+    CREATE INDEX idx_hosts_credential ON hosts(credential_id);
+    "#,
 ];
 
 /// The canonical form of a host address, for deciding whether two spellings
@@ -268,9 +297,10 @@ impl Store {
                 security_pref, quality_pref, color_depth, scaling_mode, keyboard_mode,
                 passthrough, view_only, ssh_tunnel, wol_mac, wol_broadcast, network_id,
                 cert_pin, has_password, thumbnail_at, last_connected, connect_count,
-                created_at, updated_at, protocol, rdp_settings, ssh_settings, mac_session
+                created_at, updated_at, protocol, rdp_settings, ssh_settings, mac_session,
+                credential_id
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                       ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+                       ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)
              ON CONFLICT(id) DO UPDATE SET
                 friendly_name=excluded.friendly_name, address=excluded.address,
                 port=excluded.port, group_id=excluded.group_id, os_hint=excluded.os_hint,
@@ -284,7 +314,8 @@ impl Store {
                 thumbnail_at=excluded.thumbnail_at, last_connected=excluded.last_connected,
                 connect_count=excluded.connect_count, updated_at=excluded.updated_at,
                 protocol=excluded.protocol, rdp_settings=excluded.rdp_settings,
-                ssh_settings=excluded.ssh_settings, mac_session=excluded.mac_session",
+                ssh_settings=excluded.ssh_settings, mac_session=excluded.mac_session,
+                credential_id=excluded.credential_id",
             params![
                 profile.id,
                 profile.friendly_name,
@@ -319,6 +350,7 @@ impl Store {
                 profile.rdp_settings,
                 profile.ssh_settings,
                 profile.mac_session,
+                profile.credential_id.as_deref().filter(|id| !id.is_empty()),
             ],
         )?;
         tx.execute("DELETE FROM host_tags WHERE host_id = ?1", [&profile.id])?;
@@ -462,6 +494,105 @@ impl Store {
             params![now, id],
         )?;
         Ok(())
+    }
+
+    // ---- saved credentials ----------------------------------------------
+
+    /// Every saved credential, by name. Nothing secret: the password or
+    /// passphrase is in the keychain, `has_secret` only says one is there.
+    pub fn list_credentials(&self) -> Result<Vec<CredentialProfile>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT * FROM credentials ORDER BY name COLLATE NOCASE, id")?;
+        let rows = stmt
+            .query_map([], credential_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_credential(&self, id: &str) -> Result<Option<CredentialProfile>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM credentials WHERE id = ?1",
+                [id],
+                credential_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Upserts a saved credential. `created_at` is kept on update.
+    pub fn save_credential(&self, c: &CredentialProfile) -> Result<()> {
+        if c.name.trim().is_empty() {
+            return Err(Error::InvalidData("a saved credential needs a name".into()));
+        }
+        if c.credential_kind().is_none() {
+            return Err(Error::InvalidData(format!(
+                "unknown credential kind: {}",
+                c.kind
+            )));
+        }
+        let now = now_ts();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO credentials (id, name, kind, username, domain, key_path, has_secret,
+                                      created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, kind=excluded.kind, username=excluded.username,
+                domain=excluded.domain, key_path=excluded.key_path,
+                has_secret=excluded.has_secret, updated_at=excluded.updated_at",
+            params![
+                c.id,
+                c.name.trim(),
+                c.kind,
+                c.username,
+                c.domain,
+                c.key_path,
+                c.has_secret as i64,
+                if c.created_at > 0 { c.created_at } else { now },
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The hosts that sign in with this credential, as `(id, friendly name)`
+    /// by name, so a delete can say which machines it affects.
+    pub fn hosts_using_credential(&self, id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, friendly_name FROM hosts WHERE credential_id = ?1
+             ORDER BY friendly_name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Deletes a saved credential and unlinks every host that used it, in one
+    /// transaction, returning the ids of those hosts. The keychain secret is
+    /// the caller's to remove (see [`crate::delete_credential_profile`]).
+    pub fn delete_credential(&self, id: &str) -> Result<Vec<String>> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let unlinked = {
+            let mut stmt =
+                tx.prepare("SELECT id FROM hosts WHERE credential_id = ?1 ORDER BY id")?;
+            let rows = stmt
+                .query_map([id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let now = now_ts();
+        tx.execute(
+            "UPDATE hosts SET credential_id = NULL, updated_at = ?1 WHERE credential_id = ?2",
+            params![now, id],
+        )?;
+        tx.execute("DELETE FROM credentials WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(unlinked)
     }
 
     // ---- groups / tags -------------------------------------------------
@@ -908,6 +1039,21 @@ fn host_from_row(row: &Row<'_>) -> rusqlite::Result<HostProfile> {
         rdp_settings: row.get("rdp_settings")?,
         ssh_settings: row.get("ssh_settings")?,
         mac_session: row.get("mac_session")?,
+        credential_id: row.get("credential_id")?,
+    })
+}
+
+fn credential_from_row(row: &Row<'_>) -> rusqlite::Result<CredentialProfile> {
+    Ok(CredentialProfile {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        kind: row.get("kind")?,
+        username: row.get("username")?,
+        domain: row.get("domain")?,
+        key_path: row.get("key_path")?,
+        has_secret: row.get::<_, Option<i64>>("has_secret")?.unwrap_or(0) != 0,
+        created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
+        updated_at: row.get::<_, Option<i64>>("updated_at")?.unwrap_or(0),
     })
 }
 
@@ -965,6 +1111,7 @@ mod tests {
                 "history",
                 "settings",
                 "cert_pins",
+                "credentials",
             ] {
                 let n: i64 = conn
                     .query_row(
@@ -983,6 +1130,7 @@ mod tests {
                 ("hosts", "rdp_settings"),
                 ("hosts", "ssh_settings"),
                 ("hosts", "mac_session"),
+                ("hosts", "credential_id"),
                 ("history", "protocol"),
             ] {
                 let found: i64 = conn
@@ -1676,7 +1824,7 @@ mod tests {
         );
         // Bump deliberately when a migration is added, so that adding one
         // is a decision recorded here rather than a silent schema drift.
-        assert_eq!(MIGRATIONS.len(), 5);
+        assert_eq!(MIGRATIONS.len(), 6);
 
         let got = store
             .get_host("host-uuid-1")
@@ -1786,9 +1934,22 @@ mod tests {
                     ssh_user: None,
                     ssh_password: None,
                     rdg_password: None,
+                    secret: None,
                 },
             )
             .unwrap();
+        // A saved credential's secret goes the same way, never into its row.
+        crate::save_credential_profile(
+            &store,
+            &creds,
+            &crate::CredentialProfile {
+                name: "Shared".into(),
+                username: Some("shared-user".into()),
+                ..Default::default()
+            },
+            Some("shared-credential-secret-sentinel"),
+        )
+        .unwrap();
 
         store.checkpoint().unwrap();
         let mut blob = Vec::new();
@@ -1817,5 +1978,82 @@ mod tests {
             .windows(b"CORP.EXAMPLE".len())
             .any(|w| w == b"CORP.EXAMPLE"));
         let _ = secret;
+        let needle = b"shared-credential-secret-sentinel";
+        assert!(!blob.windows(needle.len()).any(|w| w == needle));
+        assert!(
+            blob.windows(b"shared-user".len())
+                .any(|w| w == b"shared-user"),
+            "the shared credential's row is in the file searched"
+        );
+    }
+
+    /// A database written by 0.36 is at `user_version = 4`. Opening it adds
+    /// the saved credentials table and leaves every host keeping its own
+    /// credential, which is what each of them did. Hosts written then are
+    /// still listed, editable and linkable afterwards.
+    #[test]
+    fn migrating_a_v4_database_keeps_every_host_on_its_own_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("deskvnc.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            for sql in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO hosts (id, friendly_name, address, port, has_password, protocol,
+                                    ssh_settings, created_at, updated_at)
+                 VALUES ('ssh-1', 'Build box', 'build.example.com', 22, 1, 'ssh',
+                         '{\"v\":1,\"auth\":\"password\"}', 1000, 1001)",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4i64).unwrap();
+        }
+
+        let store = Store::open(Some(dir.path().to_path_buf())).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .lock()
+                .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap() as usize,
+            MIGRATIONS.len()
+        );
+        let got = store.get_host("ssh-1").unwrap().unwrap();
+        assert_eq!(
+            got.credential_id, None,
+            "every old host keeps its own credential"
+        );
+        assert_eq!(got.created_at, 1000);
+        assert!(got.has_password);
+        assert!(got.ssh_settings.is_some());
+        assert!(store.list_credentials().unwrap().is_empty());
+
+        // And it can be pointed at a saved credential now.
+        let cred = crate::CredentialProfile {
+            name: "Build".into(),
+            ..Default::default()
+        };
+        store.save_credential(&cred).unwrap();
+        let mut linked = got.clone();
+        linked.credential_id = Some(cred.id.clone());
+        store.save_host(&linked).unwrap();
+        assert_eq!(
+            store.get_host("ssh-1").unwrap().unwrap().credential_id,
+            Some(cred.id.clone())
+        );
+        assert_eq!(
+            store.hosts_using_credential(&cred.id).unwrap(),
+            vec![("ssh-1".to_string(), "Build box".to_string())]
+        );
+
+        // An empty id from a webview is "no credential", not a dangling link.
+        linked.credential_id = Some(String::new());
+        store.save_host(&linked).unwrap();
+        assert_eq!(
+            store.get_host("ssh-1").unwrap().unwrap().credential_id,
+            None
+        );
     }
 }

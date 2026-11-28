@@ -47,6 +47,8 @@ export const TRANSLATED = [
   "components/SaveTabHostDialog.tsx",
   "components/MacSessionPrompt.tsx",
   "lib/macSession.ts",
+  "components/SavedCredentials.tsx",
+  "lib/savedCredentials.ts",
 ];
 
 /**

@@ -937,6 +937,7 @@ export function Library({
         // applying its own defaults.
         rdpSettings: draft.protocol === "rdp" ? serializeRdpSettings(draft.rdp) : null,
         sshSettings: draft.protocol === "ssh" ? serializeSshSettings(draft.ssh) : null,
+        credentialId: draft.credentialId,
       });
       const id = saved?.id ?? draft.id;
       let credentialError: unknown = null;
@@ -944,9 +945,13 @@ export function Library({
         // The host is saved by now. A password that could not be stored is
         // said out loud: it used to vanish and come back as a prompt.
         try {
-        // An RDP password belongs with its user name and domain, which are
-        // three fields of one credential rather than a password on its own.
-        if (draft.protocol === "rdp") {
+        // A host on a saved credential signs in with that one; the editor
+        // hid its own boxes, so there is nothing of its own to write.
+        if (draft.credentialId) {
+          // nothing
+        } else if (draft.protocol === "rdp") {
+          // An RDP password belongs with its user name and domain, which are
+          // three fields of one credential rather than a password on its own.
           await saveRdpCredentials(id, {
             user: draft.rdpUser,
             domain: draft.rdpDomain,

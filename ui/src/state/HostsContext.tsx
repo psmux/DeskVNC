@@ -11,6 +11,7 @@ import {
 import { blankHostProfile, type HostGroup, type HostProfile, type HostTag } from "../lib/types";
 import { inTauri, mustInvoke, safeInvoke, safeListen } from "../lib/tauri";
 import { saveCredentials } from "../lib/credentialStore";
+import { listSavedCredentials, type SavedCredential } from "../lib/savedCredentials";
 import { CREDENTIALS_UNLOCKED } from "../components/CredentialUnlock";
 import {
   MOCK_GROUPS,
@@ -48,6 +49,8 @@ interface HostsContextValue {
   hosts: HostProfile[];
   groups: HostGroup[];
   tags: HostTag[];
+  /** Saved credentials hosts can sign in with. Never a secret. */
+  savedCredentials: SavedCredential[];
   loading: boolean;
   refresh: () => Promise<void>;
   saveHost: (host: Partial<HostProfile> & { id?: string }) => Promise<HostProfile | null>;
@@ -107,6 +110,7 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
   const [hosts, setHosts] = useState<HostProfile[]>([]);
   const [groups, setGroups] = useState<HostGroup[]>([]);
   const [tags, setTags] = useState<HostTag[]>([]);
+  const [savedCredentials, setSavedCredentials] = useState<SavedCredential[]>([]);
   const [loading, setLoading] = useState(true);
   /**
    * Tile images live in React state, NOT a ref: a ref plus a bump counter left
@@ -225,11 +229,13 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
       setLoading(false);
       return;
     }
-    const [h, g, t] = await Promise.all([
+    const [h, g, t, c] = await Promise.all([
       safeInvoke<HostProfile[]>("list_hosts", undefined, []),
       safeInvoke<HostGroup[]>("list_groups", undefined, []),
       safeInvoke<HostTag[]>("list_tags", undefined, []),
+      listSavedCredentials(),
     ]);
+    setSavedCredentials(Array.isArray(c) ? c : []);
     setHosts(Array.isArray(h) ? h : []);
     setGroups(Array.isArray(g) ? g : []);
     setTags(Array.isArray(t) ? t : []);
@@ -601,13 +607,13 @@ export function HostsProvider({ children }: { children: ReactNode }): ReactNode 
 
   const value = useMemo(
     () => ({
-      hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
+      hosts, groups, tags, savedCredentials, loading, refresh, saveHost, deleteHost, saveGroup,
       deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
       removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,
     }),
     [
-      hosts, groups, tags, loading, refresh, saveHost, deleteHost, saveGroup,
+      hosts, groups, tags, savedCredentials, loading, refresh, saveHost, deleteHost, saveGroup,
       deleteGroup, saveTag, deleteTag, setHostTags, setHostsGroup, addTagToHosts,
       removeTagFromHosts, savePassword, saveSshPassphrase, saveRdpCredentials, deletePassword,
       wakeHost, thumbnailUrl, requestThumbnail, refreshThumbnail,

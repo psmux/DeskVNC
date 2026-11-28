@@ -384,7 +384,18 @@ fn write_credentials(
     // here is cosmetic, the secret itself is already stored.
     match store.get_host(profile_id) {
         Ok(Some(mut profile)) => {
-            if !profile.has_password {
+            // A host that signed in with a saved credential and was then
+            // given something else at the prompt keeps what it was given:
+            // it is unlinked, or the saved credential would be written over
+            // the typed one again on the next connect. The saved credential
+            // itself is left alone, because other hosts may still be right
+            // with it (issue #98).
+            let unlink = unlink_after_typed_save(&profile);
+            if unlink {
+                tracing::info!(profile = %profile_id, "a typed credential replaces the saved one this host used");
+                profile.credential_id = None;
+            }
+            if !profile.has_password || unlink {
                 profile.has_password = true;
                 if let Err(e) = store.save_host(&profile) {
                     tracing::warn!(profile = %profile_id, "failed to set has_password: {e}");
@@ -397,6 +408,16 @@ fn write_credentials(
         Err(e) => tracing::warn!(profile = %profile_id, "could not load profile: {e}"),
     }
     tracing::info!(profile = %profile_id, "saved credentials after a successful connect");
+}
+
+/// Whether a proven save typed at a prompt has to unlink the host from the
+/// saved credential it named. Any link at all: the save is what the person
+/// typed for this host, and the link would hide it.
+fn unlink_after_typed_save(profile: &vnc_store::HostProfile) -> bool {
+    profile
+        .credential_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty())
 }
 
 /// Where a proven credential belongs.
@@ -1351,6 +1372,14 @@ pub async fn connect_session(
             .map_err(|e| format!("This computer's terminal settings could not be read: {e}"))?
             .unwrap_or_default();
             *options.ssh_mut() = settings.options;
+            // A saved SSH key credential brings its key file with it.
+            if let Some(profile) = &profile {
+                match vnc_store::linked_credential(&state.store, profile) {
+                    Ok(Some(cred)) => cred.apply_ssh_options(options.ssh_mut()),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("could not read the saved credential: {e}"),
+                }
+            }
         }
         ProtocolKind::Rdp => {
             // A blob that will not parse FAILS the connect. Substituting
@@ -1422,8 +1451,16 @@ pub async fn connect_session(
             tracing::info!(profile = %pid, "ignoring the stored password for this attempt");
         }
         let credentials = state.credentials.clone();
+        let store = state.store.clone();
         let lookup = pid.clone();
-        match super::blocking(move || credentials.load(&lookup)).await {
+        // The host's own entry, with the saved credential it names (if any)
+        // written over it, so a change to a shared password reaches every
+        // host that uses it (issue #98).
+        match super::blocking(move || {
+            vnc_store::resolve_host_credentials(&store, &credentials, &lookup)
+        })
+        .await
+        {
             Ok(Some(stored)) => {
                 // The profile's configured domain wins over the stored one:
                 // the blob is where a domain typed at a prompt lands, the
@@ -3196,6 +3233,19 @@ mod credential_keeping_tests {
             &SessionState::Connected,
             Some("tls"),
         ));
+    }
+
+    /// A password typed at the prompt for a host on a saved credential is
+    /// kept on that host, which then stops following the saved one, or the
+    /// next connect would send the saved one again (issue #98).
+    #[test]
+    fn a_typed_save_unlinks_a_host_from_its_saved_credential() {
+        let mut host = vnc_store::HostProfile::default();
+        assert!(!unlink_after_typed_save(&host));
+        host.credential_id = Some(String::new());
+        assert!(!unlink_after_typed_save(&host));
+        host.credential_id = Some("cred-1".into());
+        assert!(unlink_after_typed_save(&host));
     }
 
     fn stored() -> vnc_store::StoredCredentials {
