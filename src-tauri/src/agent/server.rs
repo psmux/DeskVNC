@@ -2905,7 +2905,9 @@ mod tests {
         fx.ctx.store.save_host(&linked).unwrap();
         fx.ctx.store.save_host(&mismatched).unwrap();
 
-        let listed = hosts_list(&fx.ctx).await.unwrap();
+        let Ok(listed) = hosts_list(&fx.ctx).await else {
+            panic!("hosts.list failed");
+        };
         let text = listed.to_string();
         for sentinel in [
             "cred-name-sentinel",
