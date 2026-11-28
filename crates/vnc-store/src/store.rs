@@ -1676,7 +1676,7 @@ mod tests {
         );
         // Bump deliberately when a migration is added, so that adding one
         // is a decision recorded here rather than a silent schema drift.
-        assert_eq!(MIGRATIONS.len(), 4);
+        assert_eq!(MIGRATIONS.len(), 5);
 
         let got = store
             .get_host("host-uuid-1")
@@ -1695,6 +1695,7 @@ mod tests {
         assert_eq!(got.cert_pin.as_deref(), Some("ab12"));
         assert!(got.ssh_tunnel.is_some());
 
+        assert_eq!(got.mac_session, None, "an old row asks, as it always did");
         assert_eq!(got.protocol, "vnc", "every pre-RDP row was a VNC profile");
         assert_eq!(got.protocol_kind(), Some(ProtocolKind::Vnc));
         assert!(
