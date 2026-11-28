@@ -90,6 +90,21 @@ pub struct HostProfile {
     /// predating this field would fail every save with "invalid args".
     #[serde(default)]
     pub ssh_settings: Option<String>,
+
+    /// The saved credential this host signs in with, a
+    /// [`crate::CredentialProfile`] id, or `None` for a host that keeps its
+    /// own user name and password (the only kind there was before 0.37).
+    ///
+    /// A reference, never a copy: changing the saved credential changes every
+    /// host that names it. An id that names nothing (the credential was
+    /// deleted by a build that did not unlink it, or the row was restored
+    /// from an older backup) resolves to the host's own entry, so the host
+    /// falls back to asking rather than breaking.
+    ///
+    /// `#[serde(default)]` for the same reason as the blobs above: a webview
+    /// that predates the field still saves.
+    #[serde(default)]
+    pub credential_id: Option<String>,
 }
 
 impl HostProfile {
@@ -148,6 +163,7 @@ impl Default for HostProfile {
             protocol: vnc_protocol(),
             rdp_settings: None,
             ssh_settings: None,
+            credential_id: None,
         }
     }
 }
@@ -297,6 +313,14 @@ pub struct StoredCredentials {
     /// gateway's address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rdg_password: Option<String>,
+
+    /// The secret of a saved credential (a [`crate::CredentialProfile`]):
+    /// its password, or the passphrase of its key. Set only on the entry
+    /// keyed `credential:<id>`, never on a host's own entry, so a host blob
+    /// that somehow carries one ignores it. A build that predates saved
+    /// credentials ignores the field, which is what an unknown field does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 impl StoredCredentials {
@@ -429,6 +453,7 @@ impl zeroize::Zeroize for StoredCredentials {
             &mut self.ssh_user,
             &mut self.ssh_password,
             &mut self.rdg_password,
+            &mut self.secret,
         ] {
             if let Some(value) = field.as_mut() {
                 value.zeroize();
@@ -460,6 +485,9 @@ impl std::fmt::Debug for StoredCredentials {
             .field("rdp_domain", &redact(&self.rdp_domain))
             .field("rdp_password", &redact(&self.rdp_password))
             .field("rdg_password", &redact(&self.rdg_password))
+            .field("ssh_user", &redact(&self.ssh_user))
+            .field("ssh_password", &redact(&self.ssh_password))
+            .field("secret", &redact(&self.secret))
             .finish()
     }
 }
@@ -552,6 +580,7 @@ mod tests {
             ssh_user: None,
             ssh_password: None,
             rdg_password: None,
+            secret: None,
         };
         let rendered = format!("{creds:?}");
         for i in 1..=7 {
@@ -664,6 +693,7 @@ mod tests {
             ssh_user: None,
             ssh_password: None,
             rdg_password: None,
+            secret: None,
         };
         creds.zeroize();
         assert_eq!(
@@ -693,6 +723,7 @@ mod tests {
             ssh_user: None,
             ssh_password: None,
             rdg_password: None,
+            secret: None,
         };
         let len = serde_json::to_string(&creds).unwrap().len();
         assert!(

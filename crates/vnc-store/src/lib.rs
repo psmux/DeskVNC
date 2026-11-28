@@ -23,6 +23,7 @@
 // enforced by the compiler rather than by review.
 #![forbid(unsafe_code)]
 
+mod credprofile;
 mod creds;
 mod error;
 pub(crate) mod models;
@@ -32,6 +33,10 @@ mod ssh;
 mod store;
 mod thumbs;
 
+pub use credprofile::{
+    delete_credential_profile, linked_credential, resolve_host_credentials, save_credential_profile,
+    CredentialKind, CredentialProfile, CREDENTIAL_ACCOUNT_PREFIX,
+};
 pub use creds::{
     CredentialBackend, CredentialStore, LockedSaveListener, KEYRING_SERVICE, MAX_CREDENTIAL_BLOB,
 };
