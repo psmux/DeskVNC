@@ -3184,6 +3184,19 @@ mod credential_keeping_tests {
         ));
     }
 
+    /// A password typed at the prompt for a host on a saved credential is
+    /// kept on that host, which then stops following the saved one, or the
+    /// next connect would send the saved one again (issue #98).
+    #[test]
+    fn a_typed_save_unlinks_a_host_from_its_saved_credential() {
+        let mut host = vnc_store::HostProfile::default();
+        assert!(!unlink_after_typed_save(&host));
+        host.credential_id = Some(String::new());
+        assert!(!unlink_after_typed_save(&host));
+        host.credential_id = Some("cred-1".into());
+        assert!(unlink_after_typed_save(&host));
+    }
+
     fn stored() -> vnc_store::StoredCredentials {
         let mut s = vnc_store::StoredCredentials::default();
         s.set_vnc_credential(Some("mac-user"), "mac-pass");

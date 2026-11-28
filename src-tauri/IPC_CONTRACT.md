@@ -87,7 +87,14 @@ const url = buf.byteLength ? URL.createObjectURL(new Blob([buf], { type: "image/
 `passthrough`, `viewOnly`, `sshTunnel`, `wolMac`, `wolBroadcast`, `networkId`,
 `certPin`, `hasPassword`, `thumbnailAt`, `lastConnected`, `connectCount`,
 `tags` (tag ids joined from `host_tags`), `createdAt`, `updatedAt`,
-`protocol`, `rdpSettings`, `sshSettings`.
+`protocol`, `rdpSettings`, `sshSettings`, `credentialId`.
+
+`credentialId` names the saved credential the host signs in with (see
+[Saved credentials](#saved-credentials-commandscredentialsrs)), or is `null`
+for a host that keeps its own. It carries `#[serde(default)]` like the blobs,
+and an empty string is stored as `null`. An id that names nothing, or a
+credential that does not fit the host's protocol, resolves to the host's own
+entry, so such a host still lists, edits and connects (it asks).
 
 `protocol` is `"vnc"` (the default), `"rdp"` or `"ssh"`. It is text rather than an
 enum so a protocol a future build adds is a row and not a schema change, and
@@ -273,6 +280,53 @@ no `get_password` command. Stored credentials are loaded inside
 `StoredCredentials` is also the at-rest keychain/vault JSON. It keeps
 snake_case `serde(alias = …)`es on every field so blobs written before the
 camelCase switch still deserialize.
+
+`save_password` and `delete_password` refuse a `hostId` that starts with
+`credential:`, the account prefix saved credentials use, so a host write can
+never erase a saved credential's secret.
+
+### Saved credentials, `commands/credentials.rs`
+
+| Command | JS call | Returns |
+|---|---|---|
+| `list_saved_credentials` | `invoke("list_saved_credentials")` | `SavedCredential[]`, by name |
+| `save_saved_credential` | `invoke("save_saved_credential", { credential, secret? })` | `SavedCredential` as stored |
+| `delete_saved_credential` | `invoke("delete_saved_credential", { credentialId, keepOnHosts })` | `string[]`: ids of the hosts that were unlinked |
+
+`SavedCredential` is `vnc_store::CredentialProfile`:
+`{ id, name, kind, username?, domain?, keyPath?, hasSecret, createdAt, updatedAt }`.
+`kind` is `"password"` (fits VNC, RDP and SSH) or `"ssh-key"` (SSH only);
+`domain` is read by RDP only and `keyPath` by `ssh-key` only. Nothing in it is
+secret: the password or key passphrase is `secret`, sent JS to Rust only, and
+kept in the same credential store a host's password is in, under the account
+`credential:<id>`. `hasSecret` only says it is there. An absent or empty
+`secret` keeps the stored one, except when `kind` changed, where the old
+secret is forgotten (a password is not a passphrase). A locked encrypted
+file parks the secret as `save_password` does and the call fails with the
+locked message after the row is saved.
+
+Every connect path resolves a host through `vnc_store::resolve_host_credentials`:
+the host's own entry, with the saved credential written over the fields its
+protocol reads (VNC `vncPassword` and the `vencrypt*` pair, RDP `rdp*`, SSH
+`sshUser`, `sshPassword` and `sshPassphrase`). Fields the protocol does not
+read stay the host's, so an RD Gateway password and a VNC host's SSH tunnel
+passphrase are untouched. An `ssh-key` credential also sets the SSH auth kind
+to key file and its `keyPath`, in the terminal and in the Files sidecar.
+
+When a linked host's sign in fails and the person types something else at
+the prompt with "remember" ticked, the typed credential is saved on that host
+and the host is unlinked; the saved credential and its other hosts are left
+alone.
+
+`delete_saved_credential` unlinks every host that used the credential in one
+transaction and removes its secret. With `keepOnHosts`, each of those hosts
+first gets its own copy (and, for a key, the key file in its SSH settings),
+so it keeps connecting; a copy that cannot be written (the store is locked)
+fails the call before anything is deleted. Without it, those hosts ask on
+their next connect.
+
+The agent plane's `hosts.list` counts a saved credential with a secret in
+`credentialStored` and sends nothing else about it.
 
 ---
 
