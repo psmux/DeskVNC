@@ -1967,7 +1967,8 @@ mod tests {
         let needle = b"shared-credential-secret-sentinel";
         assert!(!blob.windows(needle.len()).any(|w| w == needle));
         assert!(
-            blob.windows(b"shared-user".len()).any(|w| w == b"shared-user"),
+            blob.windows(b"shared-user".len())
+                .any(|w| w == b"shared-user"),
             "the shared credential's row is in the file searched"
         );
     }
@@ -2036,6 +2037,9 @@ mod tests {
         // An empty id from a webview is "no credential", not a dangling link.
         linked.credential_id = Some(String::new());
         store.save_host(&linked).unwrap();
-        assert_eq!(store.get_host("ssh-1").unwrap().unwrap().credential_id, None);
+        assert_eq!(
+            store.get_host("ssh-1").unwrap().unwrap().credential_id,
+            None
+        );
     }
 }

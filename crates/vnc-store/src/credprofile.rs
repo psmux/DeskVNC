@@ -211,6 +211,27 @@ pub fn linked_credential(store: &Store, host: &HostProfile) -> Result<Option<Cre
     }
 }
 
+/// An SSH host's `ssh_settings` blob as its connect should read it: with the
+/// key file of the saved credential it names, when it names one. For a
+/// caller that passes the blob on rather than parsing it (the Files
+/// sidecar). A blob that does not parse is returned as it is, so the caller
+/// reports that the way it always has.
+pub fn effective_ssh_settings(store: &Store, host: &HostProfile) -> Option<String> {
+    let cred = match linked_credential(store, host) {
+        Ok(Some(cred)) => cred,
+        _ => return host.ssh_settings.clone(),
+    };
+    let Ok(parsed) = SshSettings::parse(host.ssh_settings.as_deref()) else {
+        return host.ssh_settings.clone();
+    };
+    let mut settings = parsed.unwrap_or_default();
+    cred.apply_ssh_options(&mut settings.options);
+    settings
+        .to_json()
+        .ok()
+        .or_else(|| host.ssh_settings.clone())
+}
+
 /// The credential a connect for `host_id` should use: the host's own entry,
 /// with the saved credential it names written over the fields its protocol
 /// reads. This is the one function every connect path asks, so a host linked
@@ -396,7 +417,10 @@ mod tests {
         let listed = store.list_credentials().unwrap();
         assert_eq!(listed, vec![saved.clone()]);
         let json = serde_json::to_string(&listed).unwrap();
-        assert!(!json.contains("hunter2"), "the row never carries the secret: {json}");
+        assert!(
+            !json.contains("hunter2"),
+            "the row never carries the secret: {json}"
+        );
         let blob = creds
             .load(&CredentialProfile::secret_account(&saved.id))
             .unwrap()
@@ -469,24 +493,35 @@ mod tests {
             store.save_host(h).unwrap();
         }
 
-        let got = resolve_host_credentials(&store, &creds, &rdp.id).unwrap().unwrap();
+        let got = resolve_host_credentials(&store, &creds, &rdp.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.rdp_user.as_deref(), Some("admin"));
         assert_eq!(got.rdp_domain.as_deref(), Some("CORP"));
         assert_eq!(got.rdp_password.as_deref(), Some("old"));
 
         save_credential_profile(&store, &creds, &cred, Some("new")).unwrap();
 
-        let rdp_now = resolve_host_credentials(&store, &creds, &rdp.id).unwrap().unwrap();
+        let rdp_now = resolve_host_credentials(&store, &creds, &rdp.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(rdp_now.rdp_password.as_deref(), Some("new"));
-        let ssh_now = resolve_host_credentials(&store, &creds, &ssh.id).unwrap().unwrap();
+        let ssh_now = resolve_host_credentials(&store, &creds, &ssh.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(ssh_now.ssh_user.as_deref(), Some("admin"));
         assert_eq!(ssh_now.ssh_password.as_deref(), Some("new"));
-        let vnc_now = resolve_host_credentials(&store, &creds, &vnc.id).unwrap().unwrap();
+        let vnc_now = resolve_host_credentials(&store, &creds, &vnc.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(vnc_now.vencrypt_user.as_deref(), Some("admin"));
         assert_eq!(vnc_now.vencrypt_pass.as_deref(), Some("new"));
         assert_eq!(vnc_now.vnc_password.as_deref(), Some("new"));
         for c in [&rdp_now, &ssh_now, &vnc_now] {
-            assert!(c.secret.is_none(), "the raw secret slot never leaves resolution");
+            assert!(
+                c.secret.is_none(),
+                "the raw secret slot never leaves resolution"
+            );
         }
     }
 
@@ -499,7 +534,9 @@ mod tests {
         let mut mine = StoredCredentials::default();
         mine.set_vnc_credential(None, "mine");
         creds.save(&own.id, &mine).unwrap();
-        let got = resolve_host_credentials(&store, &creds, &own.id).unwrap().unwrap();
+        let got = resolve_host_credentials(&store, &creds, &own.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.vnc_password.as_deref(), Some("mine"));
         assert!(got.vencrypt_user.is_none());
     }
@@ -529,7 +566,9 @@ mod tests {
         own.rdg_password = Some("gateway".into());
         creds.save(&rdp.id, &own).unwrap();
 
-        let got = resolve_host_credentials(&store, &creds, &rdp.id).unwrap().unwrap();
+        let got = resolve_host_credentials(&store, &creds, &rdp.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.rdp_user.as_deref(), Some("bob"));
         assert_eq!(got.rdp_domain, None, "a stale domain does not survive");
         assert_eq!(got.rdp_password.as_deref(), Some("shared"));
@@ -556,7 +595,9 @@ mod tests {
         ssh.credential_id = Some(key.id.clone());
         store.save_host(&ssh).unwrap();
 
-        let got = resolve_host_credentials(&store, &creds, &ssh.id).unwrap().unwrap();
+        let got = resolve_host_credentials(&store, &creds, &ssh.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(got.ssh_user.as_deref(), Some("ops"));
         assert_eq!(got.ssh_passphrase.as_deref(), Some("pass"));
 
@@ -590,7 +631,9 @@ mod tests {
         let mut vnc = host("Switched", ProtocolKind::Vnc);
         vnc.credential_id = Some(key.id.clone());
         store.save_host(&vnc).unwrap();
-        assert!(resolve_host_credentials(&store, &creds, &vnc.id).unwrap().is_none());
+        assert!(resolve_host_credentials(&store, &creds, &vnc.id)
+            .unwrap()
+            .is_none());
     }
 
     /// A host whose credential is gone (a row restored from a backup, or a
@@ -602,9 +645,16 @@ mod tests {
         let mut h = host("Orphan", ProtocolKind::Rdp);
         h.credential_id = Some("no-such-credential".into());
         store.save_host(&h).unwrap();
-        assert!(resolve_host_credentials(&store, &creds, &h.id).unwrap().is_none());
+        assert!(resolve_host_credentials(&store, &creds, &h.id)
+            .unwrap()
+            .is_none());
         assert_eq!(
-            store.get_host(&h.id).unwrap().unwrap().credential_id.as_deref(),
+            store
+                .get_host(&h.id)
+                .unwrap()
+                .unwrap()
+                .credential_id
+                .as_deref(),
             Some("no-such-credential"),
             "listing and editing it still works"
         );
@@ -633,7 +683,9 @@ mod tests {
             .unwrap()
             .is_none());
         // Nothing to sign in with now: the next connect asks.
-        assert!(resolve_host_credentials(&store, &creds, &a.id).unwrap().is_none());
+        assert!(resolve_host_credentials(&store, &creds, &a.id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -693,7 +745,12 @@ mod tests {
         assert!(delete_credential_profile(&store, &creds, &cred.id, true).is_err());
         assert!(store.get_credential(&cred.id).unwrap().is_some());
         assert_eq!(
-            store.get_host(&a.id).unwrap().unwrap().credential_id.as_deref(),
+            store
+                .get_host(&a.id)
+                .unwrap()
+                .unwrap()
+                .credential_id
+                .as_deref(),
             Some(cred.id.as_str())
         );
     }

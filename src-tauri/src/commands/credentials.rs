@@ -30,6 +30,7 @@ pub async fn save_password(
     host_id: String,
     creds: StoredCredentials,
 ) -> Result<(), String> {
+    refuse_saved_credential_account(&host_id)?;
     let credentials = state.credentials.clone();
     let store = state.store.clone();
     super::blocking(move || {
@@ -53,6 +54,16 @@ pub async fn save_password(
         Ok::<(), vnc_store::Error>(())
     })
     .await
+}
+
+/// A saved credential's secret is written only by `save_saved_credential`.
+/// The host commands merge a host shaped blob, which has no `secret`, so a
+/// host id spelt like a saved credential's account would erase it.
+fn refuse_saved_credential_account(host_id: &str) -> Result<(), String> {
+    if host_id.starts_with(vnc_store::CREDENTIAL_ACCOUNT_PREFIX) {
+        return Err("that is a saved credential, not a host".into());
+    }
+    Ok(())
 }
 
 /// A password of any kind. An SSH key passphrase alone does not count: the
@@ -141,6 +152,9 @@ fn merge_dialog_write(creds: StoredCredentials, existing: StoredCredentials) -> 
         ssh_user: creds.ssh_user.or(existing.ssh_user),
         ssh_password: creds.ssh_password.or(existing.ssh_password),
         rdg_password: creds.rdg_password.or(existing.rdg_password),
+        // Only a saved credential's own entry has one, and this writes a
+        // host's: whatever the webview sent here is dropped.
+        secret: None,
     }
 }
 
@@ -174,6 +188,7 @@ pub async fn has_password(
 
 #[tauri::command]
 pub async fn delete_password(state: State<'_, AppState>, host_id: String) -> Result<(), String> {
+    refuse_saved_credential_account(&host_id)?;
     let credentials = state.credentials.clone();
     let store = state.store.clone();
     super::blocking(move || {
@@ -253,6 +268,52 @@ pub async fn unlock_credentials(
     .await
 }
 
+// ---- saved credentials (issue #98) -----------------------------------------
+
+/// Every saved credential. Names, user names, domains and key paths only;
+/// the password or passphrase never leaves Rust, `hasSecret` says it is there.
+#[tauri::command]
+pub async fn list_saved_credentials(
+    state: State<'_, AppState>,
+) -> Result<Vec<vnc_store::CredentialProfile>, String> {
+    let store = state.store.clone();
+    super::blocking(move || store.list_credentials()).await
+}
+
+/// Create or update a saved credential. `secret` is the password or key
+/// passphrase; absent or empty keeps the stored one. Every host that names
+/// the credential uses the new values on its next connect.
+#[tauri::command]
+pub async fn save_saved_credential(
+    state: State<'_, AppState>,
+    credential: vnc_store::CredentialProfile,
+    secret: Option<String>,
+) -> Result<vnc_store::CredentialProfile, String> {
+    let store = state.store.clone();
+    let credentials = state.credentials.clone();
+    super::blocking(move || {
+        vnc_store::save_credential_profile(&store, &credentials, &credential, secret.as_deref())
+    })
+    .await
+}
+
+/// Delete a saved credential. Every host that used it is unlinked; with
+/// `keepOnHosts` each first gets its own copy, so it still connects without
+/// asking. Returns the ids of the hosts that were unlinked.
+#[tauri::command]
+pub async fn delete_saved_credential(
+    state: State<'_, AppState>,
+    credential_id: String,
+    keep_on_hosts: bool,
+) -> Result<Vec<String>, String> {
+    let store = state.store.clone();
+    let credentials = state.credentials.clone();
+    super::blocking(move || {
+        vnc_store::delete_credential_profile(&store, &credentials, &credential_id, keep_on_hosts)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +322,17 @@ mod tests {
     /// `ui/src/lib/hostDraft.ts` sends it over IPC.
     fn sent(json: &str) -> StoredCredentials {
         serde_json::from_str(json).expect("the IPC shape parses")
+    }
+
+    #[test]
+    fn a_host_write_never_reaches_a_saved_credential() {
+        assert!(refuse_saved_credential_account("credential:abc").is_err());
+        assert!(refuse_saved_credential_account("8f14e45f-ceea-4f6a-9fa1-2b3c4d5e6f70").is_ok());
+        let merged = merge_dialog_write(
+            sent(r#"{"vncPassword":"p","secret":"smuggled"}"#),
+            StoredCredentials::default(),
+        );
+        assert_eq!(merged.secret, None);
     }
 
     #[test]
