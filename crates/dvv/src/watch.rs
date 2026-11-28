@@ -193,6 +193,7 @@ pub fn command_name(command: &limb_core::ClientCommand) -> String {
         C::TrustCertificate { .. } => "trust certificate".to_string(),
         C::ProvideCredentials { .. } => "provide credentials".to_string(),
         C::CancelCredentials => "cancel credentials".to_string(),
+        C::ChooseMacSession { .. } => "choose mac session".to_string(),
         C::ReconnectNow => "reconnect now".to_string(),
         C::Disconnect => "disconnect".to_string(),
         C::TerminalInput(bytes) => format!("terminal input({} bytes)", bytes.len()),

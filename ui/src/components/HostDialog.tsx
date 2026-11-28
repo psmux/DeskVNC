@@ -43,6 +43,7 @@ import { MOCK_LOCAL_KEYS, useMockData } from "../lib/mock";
 import { portOnProtocolChange, portWasTouched, vncTakesUsername } from "../lib/hostDraft";
 import { parseConnectTarget } from "../lib/address";
 import { Dialog, Select } from "./primitives";
+import { MAC_SESSION_OPTIONS, parseMacSessionPref, type MacSessionPref } from "../lib/macSession";
 import { IconChevronDown, IconChevronRight } from "./icons";
 import { classNames } from "../lib/util";
 import { t, useT } from "../i18n";
@@ -59,6 +60,8 @@ export interface HostDraft {
   password: string;
   hasPassword: boolean;
   securityPref: string | null;
+  /** macOS Screen Sharing: which session to take when someone is at the Mac. */
+  macSession: MacSessionPref;
   qualityPref: QualityPreset;
   scalingMode: ScalingMode;
   keyboardMode: string;
@@ -149,6 +152,7 @@ export function draftFromHost(h: HostProfile | null, prefill?: Partial<HostDraft
     password: "",
     hasPassword: h?.hasPassword ?? false,
     securityPref: h?.securityPref ?? null,
+    macSession: parseMacSessionPref(h?.macSession),
     qualityPref: h?.qualityPref ?? "auto",
     scalingMode: h?.scalingMode ?? "aspect-fit",
     keyboardMode: h?.keyboardMode ?? "auto",
@@ -293,6 +297,9 @@ export function HostDialog({
       // An import with notes: the settings the notes talk about are in here.
       Boolean(initial.importNotes?.length) ||
       Boolean(initial.sshTunnel?.enabled) ||
+      // A Mac session default other than asking changes what a connection
+      // does to the person at that Mac.
+      (initial.protocol === "vnc" && initial.macSession !== "ask") ||
       securityIsOn(initial),
   );
   // The Security disclosure opens by itself when either of its switches is
@@ -798,6 +805,23 @@ export function HostDialog({
                           <option value="apple-dh">{t("Apple Screen Sharing (Diffie-Hellman)")}</option>
                           <option value="vncauth">{t("VNC password only")}</option>
                           <option value="none">{t("None")}</option>
+                        </Select>
+                      </Field>
+                    ) : null}
+                    {caps.rfbSecurity ? (
+                      <Field
+                        label="When someone is using the Mac"
+                        hint="macOS Screen Sharing only. Sharing their screen asks them to accept first."
+                      >
+                        <Select
+                          value={d.macSession}
+                          onChange={(e) => set({ macSession: parseMacSessionPref(e.target.value) })}
+                        >
+                          {MAC_SESSION_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
                         </Select>
                       </Field>
                     ) : null}

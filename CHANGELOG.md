@@ -25,6 +25,23 @@ to stored data and to the IPC contract between the Rust core and the frontend.
   more file. Chinese characters use PingFang SC on macOS, Microsoft YaHei on
   Windows and Noto Sans CJK SC (or Source Han Sans, or WenQuanYi) on Linux.
 
+* Connecting to a Mac that someone else is logged in to now offers the same
+  choice as Apple's Screen Sharing: ask that person for permission to share
+  their screen, or log in to a separate session of your own. While the Mac
+  waits for them to accept, the window says so and offers to cancel the
+  request, and the connect timeout does not cut the wait short. If they
+  decline, or the request times out, the window says that too and does not
+  keep dialling them. Each computer in the library can remember the answer,
+  under Advanced, "When someone is using the Mac" (issue #95).
+* A Mac whose screen changes hands during a shared session (a login, a lock,
+  a user switch) is asked for the whole picture again, so the view does not
+  freeze.
+
+### Changed
+
+* The phone app keeps taking a separate session on such a Mac, as before,
+  until it has a way to show the choice.
+
 ## [0.36.9] (2026-11-28)
 
 ### Added

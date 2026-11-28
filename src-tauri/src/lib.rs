@@ -331,6 +331,7 @@ pub fn run() {
             commands::session::forget_certificate,
             commands::session::provide_credentials,
             commands::session::cancel_credentials,
+            commands::session::choose_mac_session,
             commands::session::session_credential_state,
             commands::session::bind_session_to_host,
             commands::session::pending_credential_request,

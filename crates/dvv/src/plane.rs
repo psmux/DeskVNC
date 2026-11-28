@@ -2804,12 +2804,13 @@ fn encode_command(command: &ClientCommand) -> Option<serde_json::Value> {
         ClientCommand::ResizeTerminal { cols, rows } => {
             json!({ "kind": "resize-terminal", "cols": cols, "rows": rows })
         }
-        // The three a person owns and an agent must never send (D7), plus the
+        // The four a person owns and an agent must never send (D7), plus the
         // two that are the shell's own lifecycle rather than an intent. None
         // of them is reachable from the lowering, and none of them gets an arm
         // that could later be filled in by accident.
         ClientCommand::ProvideCredentials { .. }
         | ClientCommand::CancelCredentials
+        | ClientCommand::ChooseMacSession { .. }
         | ClientCommand::TrustCertificate { .. }
         | ClientCommand::ReconnectNow
         | ClientCommand::Disconnect => return None,

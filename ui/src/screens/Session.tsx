@@ -22,6 +22,7 @@ import { useLivePreview } from "../hooks/useLivePreview";
 import { SessionStatusDetails, SessionToolbar } from "../components/SessionToolbar";
 import { CertPrompt } from "../components/CertPrompt";
 import { CredentialPrompt } from "../components/CredentialPrompt";
+import { MacSessionChoice, MacSessionWaiting } from "../components/MacSessionPrompt";
 import { SshHostKeyPrompt } from "../components/SshHostKeyPrompt";
 import { DropOverlay, FilePanel } from "../components/FilePanel";
 import { SshTerminal } from "../components/SshTerminal";
@@ -2341,6 +2342,27 @@ function SessionView({
             onSubmit={session.submitCredentials}
             onCancel={session.dismissCredentialPrompt}
           />
+        </div>
+      ) : null}
+
+      {/*
+        A Mac with someone at its screen. Above the connecting overlay for
+        the same reason as the credential prompt.
+      */}
+      {session.macSession?.phase === "choose" ? (
+        <div className="relative z-50">
+          <MacSessionChoice
+            consoleUser={session.macSession.consoleUser}
+            canShare={session.macSession.canShare}
+            canSeparate={session.macSession.canSeparate}
+            onChoose={session.chooseMacSession}
+            onCancel={session.cancelMacSession}
+          />
+        </div>
+      ) : null}
+      {session.macSession?.phase === "waiting" && st.state !== "connected" && st.state !== "disconnected" ? (
+        <div className="absolute inset-0 z-50">
+          <MacSessionWaiting consoleUser={session.macSession.consoleUser} onCancel={session.cancelMacSession} />
         </div>
       ) : null}
 

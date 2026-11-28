@@ -399,11 +399,28 @@ async fn establish_once(
     } else {
         proto::write_client_init(&mut stream, shared).await?;
     }
-    let server_init = with_timeout(
+    let mut server_init = with_timeout(
         options.connect_timeout,
         proto::read_server_init(&mut stream),
     )
     .await?;
+
+    // A Mac that answers the native ClientInit can pack flags into the name
+    // field, one of which says it offers a choice of session before the
+    // encrypted session starts. A Mac whose console belongs to the account
+    // that logged in sends a plain name and no choice.
+    if apple_key.is_some() {
+        if let Some(ext) = crate::apple::select::parse_extended_name(&server_init.name_bytes) {
+            tracing::info!(
+                flags = format_args!("{:#x}", ext.flags),
+                "the Mac sent an extended ServerInit"
+            );
+            server_init.name = ext.name.clone();
+            if ext.offers_session_select() {
+                choose_mac_session(&mut stream, &ext, options, events, creds).await?;
+            }
+        }
+    }
 
     // macOS Screen Sharing after an SRP login: the cleartext prelude, the
     // first rekey, and from then on the AES record layer.
@@ -443,6 +460,220 @@ async fn establish_once(
     );
 
     Ok((stream, negotiated, security, server_init, rekey))
+}
+
+// ---------------------------------------------------------------------------
+// macOS session choice
+// ---------------------------------------------------------------------------
+
+/// How long the person at a Mac has to answer the request to share their
+/// screen. The connect timeout does not apply while they decide; this is
+/// only a backstop for a Mac that never answers at all.
+pub(crate) const MAC_PERMISSION_PATIENCE: Duration = Duration::from_secs(180);
+
+/// The refusal a viewer sees when the person at the Mac said no, or the Mac
+/// gave up waiting for them. A Mac does not tell those two apart.
+pub(crate) fn mac_share_refused(user: &str) -> String {
+    format!(
+        "{user} did not accept the request to share their screen, or it timed out. \
+         Connect again to ask once more, or choose a separate session."
+    )
+}
+
+/// The refusal when this viewer stopped waiting.
+pub(crate) fn mac_share_unanswered(user: &str) -> String {
+    format!(
+        "{user} did not answer the request to share their screen. Connect again to ask \
+         once more, or choose a separate session."
+    )
+}
+
+fn mac_session_event(event: crate::types::MacSessionEvent) -> SessionEvent {
+    SessionEvent::Protocol(crate::types::ProtocolEvent::MacSession(event))
+}
+
+/// Run the Mac's session choice: read what it offers, take the viewer's
+/// answer (from the connect options or by asking), send the command, and
+/// wait for the Mac to grant it.
+///
+/// Waiting on the person at the Mac is not bounded by the connect timeout;
+/// the viewer cancels it by disconnecting, which closes the connection.
+async fn choose_mac_session(
+    stream: &mut BoxedStream,
+    ext: &crate::apple::select::ExtendedServerInit,
+    options: &ConnectOptions,
+    events: &mpsc::Sender<SessionEvent>,
+    creds: &CredentialSource<'_>,
+) -> Result<()> {
+    use crate::apple::select::{self, command, Verdict, Wanted};
+    use crate::types::{MacSessionChoice, MacSessionEvent};
+
+    let info = with_timeout(options.connect_timeout, select::read_session_info(stream)).await?;
+    let can_separate = !ext.no_virtual_display() && info.allows(command::VIRTUAL_DISPLAY);
+    let can_share = info.allows(command::CONNECT_CONSOLE) || info.allows(command::REQUEST_CONSOLE);
+    tracing::info!(
+        version = info.version,
+        allowed = format_args!("{:#x}", info.allowed),
+        console_in_use = info.console_in_use(),
+        can_share,
+        can_separate,
+        "the Mac offers a choice of session"
+    );
+    if !can_share && !can_separate {
+        return Err(VncError::AccessDenied(
+            "The Mac offered no session this login may use.".into(),
+        ));
+    }
+
+    let pref = options
+        .vnc_options()
+        .map(|v| v.mac_session)
+        .unwrap_or_default();
+    let wanted = if !info.console_in_use() {
+        // Nobody is logged in at the Mac, so there is nobody to ask and its
+        // own screen shows the login window. A separate session only when
+        // the host is set to one.
+        if (pref == MacSessionChoice::Separate || !can_share) && can_separate {
+            Wanted::Separate
+        } else {
+            Wanted::Console
+        }
+    } else {
+        match pref {
+            MacSessionChoice::Share if can_share => Wanted::Console,
+            MacSessionChoice::Separate if can_separate => Wanted::Separate,
+            _ => match creds
+                .ask_session(&info.console_user, can_share, can_separate)
+                .await?
+            {
+                Some(true) if can_share => Wanted::Console,
+                Some(false) if can_separate => Wanted::Separate,
+                Some(_) => {
+                    return Err(VncError::AccessDenied(
+                        "The Mac does not offer the session that was chosen.".into(),
+                    ))
+                }
+                // Nobody to ask (a headless caller): the separate session,
+                // which does not interrupt the person at the Mac.
+                None if can_separate => Wanted::Separate,
+                None => Wanted::Console,
+            },
+        }
+    };
+
+    let cmd = select::command_for(wanted, &info);
+    tracing::info!(command = cmd, ?wanted, "answering the Mac's session choice");
+    crate::security::write_all(stream, &select::session_command(cmd, &info.console_user)).await?;
+
+    let asks_person = wanted == Wanted::Console && info.console_in_use();
+    let user = info.console_user.clone();
+    if asks_person {
+        emit(
+            events,
+            mac_session_event(MacSessionEvent::Waiting {
+                console_user: user.clone(),
+            }),
+        )
+        .await?;
+    }
+    let patience = if asks_person {
+        MAC_PERMISSION_PATIENCE
+    } else {
+        options.connect_timeout
+    };
+    let deadline = tokio::time::Instant::now() + patience;
+    let mut said_waiting = asks_person;
+    loop {
+        let status =
+            match tokio::time::timeout_at(deadline, select::read_session_result(stream)).await {
+                Err(_) if asks_person => {
+                    return Err(VncError::AccessDenied(mac_share_unanswered(&user)))
+                }
+                Err(_) => return Err(VncError::Timeout),
+                // A Mac that closes the connection while its user decides has
+                // been refused: reconnecting would only ask them again.
+                Ok(Err(VncError::ConnectionClosed | VncError::Io(_))) if asks_person => {
+                    return Err(VncError::AccessDenied(mac_share_refused(&user)))
+                }
+                Ok(r) => r?,
+            };
+        match select::verdict(status) {
+            Verdict::Granted => {
+                tracing::info!(status, "the Mac granted the session");
+                emit(events, mac_session_event(MacSessionEvent::Granted)).await?;
+                return Ok(());
+            }
+            Verdict::Pending => {
+                tracing::info!(status, "the Mac is waiting on the person at its screen");
+                if !said_waiting {
+                    said_waiting = true;
+                    emit(
+                        events,
+                        mac_session_event(MacSessionEvent::Waiting {
+                            console_user: user.clone(),
+                        }),
+                    )
+                    .await?;
+                }
+            }
+            Verdict::Refused(code) => {
+                tracing::info!(status = code, "the Mac refused the session");
+                return Err(VncError::AccessDenied(match wanted {
+                    Wanted::Console if info.console_in_use() => mac_share_refused(&user),
+                    Wanted::Console => "The Mac did not let this login use its screen.".into(),
+                    Wanted::Separate => {
+                        "The Mac did not give this login a separate session.".into()
+                    }
+                }));
+            }
+        }
+    }
+}
+
+/// Answer one [`SessionAsk`](crate::security::SessionAsk) by asking the user
+/// which session to take, the way [`serve_credential_ask`] asks for a
+/// password.
+async fn serve_session_ask(
+    ask: crate::security::SessionAsk,
+    events: &mpsc::Sender<SessionEvent>,
+    commands: &mut mpsc::Receiver<ClientCommand>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let crate::security::SessionAsk {
+        console_user,
+        can_share,
+        can_separate,
+        reply,
+    } = ask;
+    tracing::info!(
+        can_share,
+        can_separate,
+        "asking the user which Mac session to take"
+    );
+    emit(
+        events,
+        mac_session_event(crate::types::MacSessionEvent::Choose {
+            console_user,
+            can_share,
+            can_separate,
+        }),
+    )
+    .await?;
+    let answer = loop {
+        let cmd = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            cmd = commands.recv() => cmd,
+        };
+        match cmd {
+            None => break None,
+            Some(ClientCommand::ChooseMacSession { share }) => break Some(share),
+            Some(ClientCommand::CancelCredentials) | Some(ClientCommand::Disconnect) => break None,
+            Some(_) => continue,
+        }
+    };
+    let _ = reply.send(answer);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -597,13 +828,15 @@ async fn establish_interactive(
         // One in-flight question at a time; the handshake is linear.
         let (ask_tx, mut ask_rx) = mpsc::channel::<CredentialAsk>(1);
         let (trust_tx, mut trust_rx) = mpsc::channel::<TrustAsk>(1);
+        let (session_tx, mut session_rx) = mpsc::channel::<crate::security::SessionAsk>(1);
         let source = CredentialSource::interactive(
             &ask_tx,
             attempt,
             last_error.clone(),
             username_hint.clone(),
         )
-        .with_trust_prompt(&trust_tx);
+        .with_trust_prompt(&trust_tx)
+        .with_session_prompt(&session_tx);
 
         let result = {
             let attempt_fut = establish(options, settings, events, &source);
@@ -621,9 +854,25 @@ async fn establish_interactive(
                     Some(ask) = trust_rx.recv() => {
                         serve_trust_ask(ask, events, commands, cancel).await?;
                     }
+                    Some(ask) = session_rx.recv() => {
+                        serve_session_ask(ask, events, commands, cancel).await?;
+                    }
                 }
             }
         };
+
+        // The session the user picked holds for the reconnects of this
+        // session, so a dropped link does not ask again. The person at the
+        // Mac is still asked on every connection to their screen.
+        if let Some(share) = source.session_choice() {
+            if let crate::types::ProtocolOptions::Vnc(v) = &mut options.protocol {
+                v.mac_session = if share {
+                    crate::types::MacSessionChoice::Share
+                } else {
+                    crate::types::MacSessionChoice::Separate
+                };
+            }
+        }
 
         // A key the user trusted in this attempt is pinned for the rest of the
         // session, so the retry after a mistyped password, and any automatic
